@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { acceptedTimestamps, loadSlurFilter } from "./support/accepted-tid";
 import test from "node:test";
 import { generateSpaceKey } from "@/atproto/space-signature";
 import { AtprotoClient } from "@/atproto/xrpc";
@@ -114,6 +115,7 @@ test("DM read budget: 100 participants, 20,000 total messages, latest-100 read i
     // in the same relative time slot, so the true latest 100 spans all 100
     // halves instead of one participant's own tail.
     const base = Date.now() - PARTICIPANTS * MESSAGES_PER_HALF - 1_000;
+    const stamps = acceptedTimestamps(tidNow, await loadSlurFilter(PINNED_CHECKOUT), base, PARTICIPANTS * MESSAGES_PER_HALF);
     const messageStarted = performance.now();
     let totalWritten = 0;
     await mapLimited(participants.map((owner, participantIndex) => ({ owner, participantIndex })), 16, async ({ owner, participantIndex }) => {
@@ -122,7 +124,7 @@ test("DM read budget: 100 participants, 20,000 total messages, latest-100 read i
       for (let batchStart = 0; batchStart < MESSAGES_PER_HALF; batchStart += APPLY_WRITES_BATCH) {
         const writes = Array.from({ length: Math.min(APPLY_WRITES_BATCH, MESSAGES_PER_HALF - batchStart) }, (_unused, offset) => {
           const sequence = batchStart + offset;
-          const timestamp = base + sequence * PARTICIPANTS + participantIndex;
+          const timestamp = stamps[sequence * PARTICIPANTS + participantIndex]!;
           const rkey = tidNow(timestamp, 0);
           return {
             $type: "com.atproto.space.applyWrites#create", collection: "org.slack.dm.message", rkey,
