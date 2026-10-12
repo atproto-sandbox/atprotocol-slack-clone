@@ -170,6 +170,8 @@ export function getDb(): Kysely<SlackDb> {
       notified_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS space_notification_lookup ON space_notification(space_uri, id);
+    CREATE INDEX IF NOT EXISTS space_notification_age ON space_notification(notified_at);
+    CREATE INDEX IF NOT EXISTS space_collection_cursor_repo ON space_collection_cursor(space_uri, repo_did);
   `);
   rawDatabase.exec("BEGIN IMMEDIATE");
   try {

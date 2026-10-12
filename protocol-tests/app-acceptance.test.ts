@@ -252,7 +252,8 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
       $type: "org.slack.channel.message", text: "admin host message", createdAt: new Date().toISOString(),
     });
     await new Promise((resolve) => setTimeout(resolve, 2));
-    const latestMessageRkey = tidNow();
+    const latestMessageMs = Date.now();
+    const latestMessageRkey = tidNow(latestMessageMs);
     const latestMessageValue = {
       $type: "org.slack.channel.message", text: "latest second PDS message", createdAt: new Date().toISOString(),
     };
@@ -262,7 +263,7 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     const listedMessages = await readSpaceRecords(memberSession as never, messageSpace, member.did, "org.slack.channel.message", 100);
     assert.equal(listedMessages.find((record) => record.rkey === latestMessageRkey)?.uri, latestMessageUri,
       "the listRecords helper constructs a canonical URI because listRecords does not include one");
-    const interopReplyRkey = tidNow(Date.now() - 100);
+    const interopReplyRkey = tidNow(latestMessageMs - 100);
     await writeRecord(sessionClient(memberSession as never), messageSpace, member.did, "org.slack.channel.message", interopReplyRkey, {
       $type: "org.slack.channel.message", text: "reply to PDS returned URI", createdAt: new Date().toISOString(), parent: latestMessageUri,
     });

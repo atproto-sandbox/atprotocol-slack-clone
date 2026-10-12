@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { closeDb, getRawDb } from "@/lib/db";
 import { XrpcError } from "@/atproto/xrpc";
-import { getActorOperation, isTransientOperationError, listJournaledWorkspaces, listRecoverableOperations, listStalledOperations, persistPendingIfWorkspaceLockOwned, runJournaledOperation, withWorkspaceLock } from "./journal";
+import { getActorOperation, isTransientOperationError, listJournaledWorkspaces, listRecoverableOperations, listStalledOperations, discardEmptyOperationIfWorkspaceLockOwned, persistPendingIfWorkspaceLockOwned, runJournaledOperation, withWorkspaceLock } from "./journal";
 import type { OperatorActor } from "./security";
 
 test("journal retry skips completed steps and reuses the same operation", async () => {
@@ -232,6 +232,71 @@ test("pending journal state is persisted only by the current workspace lock owne
         .get(workspace, actor, lostId) as { state: string };
       assert.equal(row.state, "running", "a stale runner cannot change state after another runner may own the lock");
     }), /Workspace operation lock was lost/);
+  } finally {
+    closeDb();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("discarding an empty operation keeps the catalog entry another operation needs, and refuses without the lock or with progress", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "slack-discard-test-"));
+  process.env.DATABASE_PATH = join(directory, "discard.db");
+  process.env.AUTH_ENCRYPTION_KEY = "66".repeat(32);
+  process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_slack_admin";
+  process.env.APP_URL = "http://127.0.0.1:3000";
+  const workspace = "did:plc:owner";
+  const sharedUri = "at://did:plc:owner/space/org.slack.workspace/shared";
+  const loneUri = "at://did:plc:owner/space/org.slack.workspace/lone";
+  const raw = getRawDb();
+  const now = Math.floor(Date.now() / 1000);
+  const insert = (workspaceUri: string, operationId: string, state: string, steps: string[]) => {
+    raw.prepare(`INSERT INTO operation (workspace,workspace_uri,actor,operation_id,request_hash,request_json,state,steps_json,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?)`).run(workspace, workspaceUri, workspace, operationId, `hash-${operationId}`, "{}", state, JSON.stringify(steps), now, now);
+    raw.prepare("INSERT OR IGNORE INTO operation_workspace_catalog (workspace, workspace_uri) VALUES (?, ?)").run(workspace, workspaceUri);
+  };
+  const exists = (operationId: string) => raw.prepare("SELECT 1 FROM operation WHERE operation_id=?").get(operationId) !== undefined;
+  const catalogHas = (workspaceUri: string) => raw.prepare("SELECT 1 FROM operation_workspace_catalog WHERE workspace_uri=?").get(workspaceUri) !== undefined;
+  try {
+    await withWorkspaceLock(workspace, async (lock) => {
+      const discard = (workspaceUri: string, operationId: string) => discardEmptyOperationIfWorkspaceLockOwned({
+        workspace, workspaceUri, actor: workspace, operationId, lock, reason: "authorizationRequired",
+      });
+
+      // #given a completed operation and an empty pending one on the same workspace
+      insert(sharedUri, "2222222222222", "completed", ["workspace-space"]);
+      insert(sharedUri, "2222222222223", "pending", []);
+      // #when the empty one is discarded
+      // #then the row goes, but the catalog entry the completed operation needs stays, and the discard is audited
+      assert.equal(discard(sharedUri, "2222222222223"), true);
+      assert.equal(exists("2222222222223"), false);
+      assert.equal(exists("2222222222222"), true, "the completed operation is untouched");
+      assert.equal(catalogHas(sharedUri), true, "the catalog entry is kept while any operation references it");
+      const audit = raw.prepare("SELECT event FROM audit_event WHERE operation_id=?").all("2222222222223") as Array<{ event: string }>;
+      assert.deepEqual(audit.map((entry) => entry.event), ["operationDiscarded"]);
+
+      // #given an empty operation that is the only one on its workspace
+      insert(loneUri, "2222222222224", "running", []);
+      // #then discarding it removes the catalog entry too
+      assert.equal(discard(loneUri, "2222222222224"), true);
+      assert.equal(catalogHas(loneUri), false);
+
+      // #given an operation that made progress, or one already completed
+      insert(loneUri, "2222222222225", "pending", ["workspace-space"]);
+      insert(loneUri, "2222222222226", "completed", []);
+      // #then neither can be discarded
+      assert.equal(discard(loneUri, "2222222222225"), false, "progress is never discarded");
+      assert.equal(discard(loneUri, "2222222222226"), false, "a completed operation is never discarded");
+      assert.equal(exists("2222222222225") && exists("2222222222226"), true);
+
+      // #given an empty operation and a runner that lost the workspace lock
+      insert(loneUri, "2222222222227", "running", []);
+      raw.prepare("DELETE FROM workspace_lock WHERE workspace=? AND token=?").run(workspace, lock.token);
+      // #then it cannot delete anything
+      assert.equal(discard(loneUri, "2222222222227"), false);
+      assert.equal(exists("2222222222227"), true, "a stale runner cannot delete a row after losing the lock");
+    }).catch((error: unknown) => {
+      assert.match(String(error), /Workspace operation lock was lost/);
+    });
   } finally {
     closeDb();
     rmSync(directory, { recursive: true, force: true });

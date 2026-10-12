@@ -142,18 +142,37 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
     assert.equal(webSession.httpOnly, true);
     assert.equal(cookies.some(({ name }) => name.startsWith("spaces_oauth_")), false, "OAuth state-binding cookie is cleared after callback");
 
-    const permissionResponse = page.waitForResponse((response) => response.url().includes("/api/oauth/permission"));
-    await page.getByRole("button", { name: /Authorize workspace setup/ }).click();
+    // First-time creation: one click. The server answers that permission is required, the app
+    // sends the user to the PDS consent screen on its own, and creation resumes after approval.
+    assert.equal(await page.getByRole("button", { name: /Authorize workspace setup/ }).count(), 0, "there is no separate manual authorization step");
+    await page.getByLabel("Workspace name").fill("Browser Acceptance Workspace");
+    const firstAttempt = page.waitForResponse((response) => response.url().includes("/api/workspaces/bootstrap"));
+    const workspaceForm = page.locator("form").filter({ has: page.getByLabel("Workspace name") });
+    await workspaceForm.getByRole("button", { name: "Create workspace", exact: true }).click();
+    const firstResponse = await firstAttempt;
+    assert.equal(firstResponse.status(), 403, "creating before approving the permission is refused");
+    const refusal = await firstResponse.json() as { error: string; code: string; action: string };
+    assert.equal(refusal.code, "authorization_required", "the refusal is typed, not a raw scope string");
+    assert.equal(refusal.action, "workspaceAuthority");
+    assert.match(refusal.error, /needs your permission/);
+    await page.waitForURL(/\/oauth\/authorize\?/, { timeout: 30_000 });
+
+    // Decline on the consent screen. Returning without the permission must explain itself (no redirect
+    // loop), keep the typed name, and leave the user able to try again.
+    await signInIfPrompted(page);
+    await page.getByRole("button", { name: "Deny access", exact: true }).click();
+    await page.getByText(/Permission was not granted/).waitFor({ state: "visible", timeout: 30_000 });
+    assert.equal(await page.getByLabel("Workspace name").inputValue(), "Browser Acceptance Workspace", "the typed name is kept");
+
+    // Trying again asks for permission again instead of stranding the user.
+    const permissionRetry = page.waitForResponse((response) => response.url().includes("/api/oauth/permission"));
+    await workspaceForm.getByRole("button", { name: "Create workspace", exact: true }).click();
+    assert.equal((await permissionRetry).status(), 200, "a retry after declining can start a new permission request");
     await page.waitForURL(/\/oauth\/authorize\?/, { timeout: 30_000 });
     await signInIfPrompted(page);
     await page.getByRole("button", { name: "Authorize", exact: true }).waitFor({ state: "visible" });
     await page.getByRole("button", { name: "Authorize", exact: true }).click();
     await page.waitForURL(appUrl.origin, { timeout: 30_000 });
-    assert.equal((await permissionResponse).status(), 200, "permission reauthorization starts successfully");
-
-    await page.getByLabel("Workspace name").fill("Browser Acceptance Workspace");
-    const workspaceForm = page.locator("form").filter({ has: page.getByLabel("Workspace name") });
-    await workspaceForm.getByRole("button", { name: "Create workspace", exact: true }).click();
     await page.getByRole("heading", { name: "Browser Acceptance Workspace", exact: true }).waitFor({ state: "visible", timeout: 30_000 });
     await page.getByText("Grant operator controls to sync private-channel requests.", { exact: false }).waitFor({ state: "visible", timeout: 30_000 }).catch(async (error: unknown) => {
       const state = await page.evaluate(async () => await fetch("/api/workspaces").then((response) => response.json()));

@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { permissionScopeFor, WORKSPACE_DISCOVERY_SCOPE, workspaceAuthorityScopes } from "./permission-sets";
+import {
+  DM_BROWSER_SCOPES, memberSpaceScope, operatorMethodScope, permissionScopeFor,
+  SLACK_SPACE_TYPES, WORKSPACE_DISCOVERY_SCOPE, workspaceAuthorityScopes,
+} from "./permission-sets";
 
 const serviceRef = "did:web:slack.example#atproto_slack_admin";
 
@@ -62,4 +65,50 @@ test("channel write scopes reject injected keys and preserve the exact valid sco
   assert.deepEqual(permissionScopeFor("channelWrite", {
     workspaceDid: "did:plc:owner", skey: "general",
   }), ["space:org.slack.channel?authority=did:plc:owner&skey=general&collection=org.slack.channel.message&collection=org.slack.channel.reaction&action=create&action=update&action=delete"]);
+});
+
+test("DM_BROWSER_SCOPES is the exact browser-session grant (M3)", () => {
+  assert.deepEqual(DM_BROWSER_SCOPES, [
+    "atproto",
+    "space:org.slack.dm.inbox?authority=*&collection=org.slack.dm.request&action=create&action=update&action=delete",
+    "space:org.slack.dm.inbox?authority=self&action=read&manage=create&manage=update",
+    "space:org.slack.dm.inbox?authority=*&action=read",
+    "space:org.slack.dm.conversation?authority=self&collection=org.slack.dm.header&collection=org.slack.dm.message&collection=org.slack.dm.reaction&action=create&action=update&action=delete&manage=create&manage=update&manage=delete",
+    "space:org.slack.dm.conversation?authority=*&action=read",
+  ]);
+});
+
+test("memberSpaceScope refuses to mint a scope for either DM space type", () => {
+  for (const spaceType of [SLACK_SPACE_TYPES.dmInbox, SLACK_SPACE_TYPES.dmConversation]) {
+    assert.throws(() => memberSpaceScope({
+      spaceType, authorityDid: "did:plc:owner", skey: "self", action: "read",
+    }), /DM space types are never granted/);
+  }
+});
+
+test("no server-side scope builder ever grants an org.slack.dm scope", () => {
+  const serviceRef = "did:web:slack.example#atproto_slack_admin";
+  const nonDmScopes = [
+    ...workspaceAuthorityScopes(),
+    WORKSPACE_DISCOVERY_SCOPE,
+    ...permissionScopeFor("workspaceRead", { workspaceDid: "did:plc:owner" }),
+    ...permissionScopeFor("channelRead", { workspaceDid: "did:plc:owner", skey: "general" }),
+    ...permissionScopeFor("acceptanceWrite", { workspaceDid: "did:plc:owner" }),
+    ...permissionScopeFor("requestJoin", { workspaceDid: "did:plc:owner" }),
+    ...permissionScopeFor("joinWorkspace", { workspaceDid: "did:plc:owner", workspaceSkey: "acme" }),
+    ...permissionScopeFor("channelWrite", { workspaceDid: "did:plc:owner", skey: "general" }),
+    ...permissionScopeFor("channelAccess", { workspaceDid: "did:plc:owner", skey: "general" }),
+    ...permissionScopeFor("operatorAdmin", { workspaceDid: "did:plc:owner", serviceRef }),
+    ...permissionScopeFor("operatorLeave", { workspaceDid: "did:plc:owner", workspaceSkey: "acme", serviceRef }),
+    ...permissionScopeFor("workspaceAuthority", { workspaceDid: "did:plc:owner" }),
+    operatorMethodScope("org.slack.operator.execute", serviceRef),
+    "atproto",
+  ];
+  assert.ok(nonDmScopes.length > 0);
+  for (const scope of nonDmScopes) assert.ok(!scope.includes("org.slack.dm"), scope);
+});
+
+test("the server's login scope (src/auth/oauth.ts default + WORKSPACE_DISCOVERY_SCOPE) carries no DM scope", () => {
+  const loginScope = ["atproto", WORKSPACE_DISCOVERY_SCOPE];
+  for (const scope of loginScope) assert.ok(!scope.includes("org.slack.dm"), scope);
 });

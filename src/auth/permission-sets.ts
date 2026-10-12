@@ -7,6 +7,8 @@ export const SLACK_SPACE_TYPES = {
   workspace: "org.slack.workspace",
   inbox: "org.slack.inbox",
   channel: "org.slack.channel",
+  dmInbox: "org.slack.dm.inbox",
+  dmConversation: "org.slack.dm.conversation",
 } as const;
 
 export const SLACK_COLLECTIONS = {
@@ -20,12 +22,41 @@ export const SLACK_COLLECTIONS = {
   message: "org.slack.channel.message",
   reaction: "org.slack.channel.reaction",
   channelRoster: "org.slack.channel.roster",
+  dmRequest: "org.slack.dm.request",
+  dmHeader: "org.slack.dm.header",
+  dmMessage: "org.slack.dm.message",
+  dmReaction: "org.slack.dm.reaction",
 } as const;
 
 // listSpaces needs read_self across authorities before an invited user knows
 // which workspace authority to request a narrower read scope from.
 export const WORKSPACE_DISCOVERY_SCOPE =
   `space:${SLACK_SPACE_TYPES.workspace}?authority=*&collection=${SLACK_COLLECTIONS.acceptance}&action=read_self`;
+
+// The DM permission set requested by a browser-held OAuth session (M3). The
+// server's own OAuth session never requests these: DM tokens live only in the
+// browser (IndexedDB), never on this server, per docs/plans/direct-messages.md
+// section 3.4. Grammar (manage=, authority=*, collection=) verified against
+// ../atproto-spaces-phase0/packages/oauth/oauth-scopes/src/scopes/space-permission.ts.
+export const DM_BROWSER_SCOPES: readonly string[] = [
+  "atproto",
+  // Send, re-put (backoff retry), and withdraw a request into any recipient's
+  // inbox. Collection-restricted so the same grant cannot write anything else.
+  `space:${SLACK_SPACE_TYPES.dmInbox}?authority=*&collection=${SLACK_COLLECTIONS.dmRequest}&action=create&action=update&action=delete`,
+  // The user's own inbox: create it, read it and its member list, switch its
+  // request policy (updateSpace), and manage its allowlist (putMember/removeMember).
+  `space:${SLACK_SPACE_TYPES.dmInbox}?authority=self&action=read&manage=create&manage=update`,
+  // Asking any inbox for a credential, so a sender can tell "no inbox" (SpaceNotFound) from "inbox exists" (UserNotAuthorized:
+  // the member list is the real read gate) before a putRecord that the PDS accepts either way.
+  `space:${SLACK_SPACE_TYPES.dmInbox}?authority=*&action=read`,
+  // The user's own conversation halves: create, write every DM record type,
+  // manage membership, and delete the half outright.
+  `space:${SLACK_SPACE_TYPES.dmConversation}?authority=self&collection=${SLACK_COLLECTIONS.dmHeader}&collection=${SLACK_COLLECTIONS.dmMessage}&collection=${SLACK_COLLECTIONS.dmReaction}&action=create&action=update&action=delete&manage=create&manage=update&manage=delete`,
+  // Any participant's half, read only: getDelegationToken for a half this
+  // session does not own, and listSpaces(type=conversation) across authorities
+  // (an unfiltered listing needs a wildcard grant). `read` implies `read_self`.
+  `space:${SLACK_SPACE_TYPES.dmConversation}?authority=*&action=read`,
+] as const;
 
 export type SpaceAction = "read" | "read_self" | "create" | "update" | "delete";
 
@@ -37,6 +68,9 @@ export function memberSpaceScope(options: {
   collection?: string;
   additionalActions?: readonly SpaceAction[];
 }): string {
+  if (options.spaceType === SLACK_SPACE_TYPES.dmInbox || options.spaceType === SLACK_SPACE_TYPES.dmConversation) {
+    throw new Error("DM space types are never granted through the server's member scope builder.");
+  }
   if (!isSkey(options.skey)) throw new Error("Invalid space key.");
   const params = [
     `authority=${options.authorityDid}`,

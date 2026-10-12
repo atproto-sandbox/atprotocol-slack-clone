@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { AtprotoClient } from "./xrpc";
-import { assertBoundedRecordPage, listBoundedMembers, listBoundedRecords, listBoundedRepos } from "./record-pages";
+import { assertBoundedRecordPage, listBoundedMembers, listBoundedRecords, listBoundedRepos, listBoundedSpaces } from "./record-pages";
 
 test("bounded repo lookahead distinguishes an exact limit from actual overflow", async () => {
   const exact = fakeClient([
@@ -46,6 +46,35 @@ test("bounded repo scan rejects oversized pages and empty nonterminal pages", as
     { repos: [{ did: "did:plc:a" }] },
   ]);
   await assert.rejects(listBoundedRepos(repeatedDid.client, { space: "space", maxRepos: 2 }), /duplicate repo DID/);
+});
+
+test("bounded space lookahead distinguishes an exact limit from actual overflow", async () => {
+  const owner = "did:plc:a";
+  const uri = (skey: string) => `at://${owner}/space/org.slack.dm.conversation/${skey}`;
+  const exact = fakeClient([
+    { spaces: [{ uri: uri("2222222222221") }, { uri: uri("2222222222222") }], cursor: "page-two" },
+    { spaces: [] },
+  ]);
+  const exactResult = await listBoundedSpaces(exact.client, { type: "org.slack.dm.conversation", maxSpaces: 2 });
+  assert.equal(exactResult.spaces.length, 2);
+  assert.equal(exactResult.truncated, false);
+
+  const overflow = fakeClient([
+    { spaces: [{ uri: uri("2222222222221") }, { uri: uri("2222222222222") }], cursor: "page-two" },
+    { spaces: [{ uri: uri("2222222222223") }] },
+  ]);
+  const overflowResult = await listBoundedSpaces(overflow.client, { type: "org.slack.dm.conversation", maxSpaces: 2 });
+  assert.equal(overflowResult.spaces.length, 2);
+  assert.equal(overflowResult.truncated, true);
+
+  const malformed = fakeClient([{ spaces: [{ uri: "not-a-space-uri" }] }]);
+  await assert.rejects(listBoundedSpaces(malformed.client, { maxSpaces: 2 }), /malformed space URI/);
+
+  const repeated = fakeClient([
+    { spaces: [{ uri: uri("2222222222221") }], cursor: "next" },
+    { spaces: [{ uri: uri("2222222222221") }] },
+  ]);
+  await assert.rejects(listBoundedSpaces(repeated.client, { maxSpaces: 2 }), /duplicate space URI/);
 });
 
 test("record page validation rejects malformed rows, repeated cursors, and empty continuations", () => {

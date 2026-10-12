@@ -5,7 +5,7 @@ const nextConfig: NextConfig = {
   serverExternalPackages: ["better-sqlite3"],
   outputFileTracingRoot: process.cwd(),
   async headers() {
-    return [securityHeaderRule];
+    return [securityHeaderRule()];
   },
 };
 

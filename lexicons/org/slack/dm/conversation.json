@@ -1,0 +1,13 @@
+{
+  "lexicon": 1,
+  "id": "org.slack.dm.conversation",
+  "defs": {
+    "main": {
+      "type": "space",
+      "key": "tid",
+      "name": "DM conversation half",
+      "collections": ["org.slack.dm.header", "org.slack.dm.message", "org.slack.dm.reaction"],
+      "description": "One participant's half of a conversation; only the owner writes to it."
+    }
+  }
+}

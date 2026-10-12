@@ -1,0 +1,19 @@
+{
+  "lexicon": 1,
+  "id": "org.slack.dm.header",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "literal:self",
+      "record": {
+        "type": "object",
+        "required": ["convKey", "participants", "createdAt"],
+        "properties": {
+          "convKey": { "type": "string", "format": "tid" },
+          "participants": { "type": "array", "items": { "type": "string", "format": "did" }, "minLength": 2, "maxLength": 100 },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

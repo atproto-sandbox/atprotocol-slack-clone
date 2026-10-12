@@ -4,6 +4,14 @@ const WORKSPACE_URI = /^at:\/\/(did:[^/]+)\/space\/org\.slack\.workspace\/[A-Za-
 const CHANNEL_URI = /^at:\/\/(did:[^/]+)\/space\/org\.slack\.channel\/[A-Za-z0-9._~:-]{1,128}$/;
 const RELATED_SPACE_URI = /^at:\/\/(did:[^/]+)\/space\/(?:org\.slack\.channel|org\.slack\.inbox)\/[A-Za-z0-9._~:-]{1,128}$/;
 
+/**
+ * The next channel read re-fetches this repo instead of waiting out the freshness window. The empty revision matches
+ * no real one, so a read already in flight cannot write its older snapshot back over this mark.
+ */
+export function markRepoStale(space: string, repo: string): void {
+  getRawDb().prepare("UPDATE space_collection_cursor SET checked_at=0, rev='' WHERE space_uri=? AND repo_did=?").run(space, repo);
+}
+
 export function purgeSpaceCache(account: string, space: string): void {
   purgeWhere(account, "space_uri = ?", [space]);
 }

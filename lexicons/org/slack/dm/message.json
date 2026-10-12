@@ -1,0 +1,19 @@
+{
+  "lexicon": 1,
+  "id": "org.slack.dm.message",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["text", "createdAt"],
+        "properties": {
+          "text": { "type": "string", "maxLength": 40000, "maxGraphemes": 10000 },
+          "createdAt": { "type": "string", "format": "datetime" },
+          "parent": { "type": "string", "format": "at-uri" }
+        }
+      }
+    }
+  }
+}

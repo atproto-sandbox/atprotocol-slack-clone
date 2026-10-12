@@ -11,7 +11,7 @@ import { mintSpaceCredential } from "@/atproto/space-credential";
 import { parseSpaceRecordUri, tidNow } from "@/protocol/keys";
 import { validateSpaceRecord } from "@/protocol/records";
 import { requireCurrentChannelCredential, requireReadableChannel } from "@/workspaces/channels";
-import { purgeDeniedPermissionCache, purgeSpaceCache } from "@/workspaces/cache";
+import { markRepoStale, purgeDeniedPermissionCache, purgeSpaceCache } from "@/workspaces/cache";
 import { readRequestJson } from "@/lib/bounded-json";
 import { rejectCrossOriginMutation } from "@/lib/same-origin-mutation";
 
@@ -55,6 +55,7 @@ export async function POST(request: NextRequest) {
       const result = await client.procedure<CreateRecord.InputSchema, CreateRecord.OutputSchema>("com.atproto.space.createRecord", {
         space, repo: session.did, collection: "org.slack.channel.message", rkey, record,
       });
+      markRepoStale(space, session.did);
       return NextResponse.json({ uri: result.uri, cid: result.cid }, { status: 201 });
     }
 
@@ -66,6 +67,7 @@ export async function POST(request: NextRequest) {
         await client.procedure<DeleteRecord.InputSchema, unknown>("com.atproto.space.deleteRecord", {
           space, repo: session.did, collection: "org.slack.channel.message", rkey: target.rkey,
         });
+        markRepoStale(space, session.did);
         return NextResponse.json({ deleted: true });
       }
       if (typeof body.text !== "string") return NextResponse.json({ error: "Message text is required." }, { status: 400 });
@@ -87,6 +89,7 @@ export async function POST(request: NextRequest) {
       const result = await client.procedure<PutRecord.InputSchema, PutRecord.OutputSchema>("com.atproto.space.putRecord", {
         space, repo: session.did, collection: "org.slack.channel.message", rkey: target.rkey, record,
       });
+      markRepoStale(space, session.did);
       return NextResponse.json({ uri: result.uri, cid: result.cid });
     }
     return NextResponse.json({ error: "Unsupported message action." }, { status: 400 });

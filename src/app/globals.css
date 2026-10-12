@@ -250,6 +250,7 @@ a { color: inherit; text-decoration: none; }
 .permission-box p { min-height: 0; }
 .message-list { display: flex; flex-direction: column; gap: 10px; margin-top: 15px; }
 .message-card { padding: 15px 17px; border: 1px solid #ece9f1; border-radius: 9px; background: #fff; }
+.message-card.reply-card { margin-left: 28px; border-left: 3px solid #d6cfe8; }
 .message-meta { display: flex; align-items: center; justify-content: space-between; gap: 10px; color: #777184; font-size: 10px; }
 .message-meta time { color: #a19dab; font-size: 9px; }
 .message-card p { margin: 10px 0; color: #3f3b4a; font-size: 13px; line-height: 1.65; overflow-wrap: anywhere; white-space: pre-wrap; }

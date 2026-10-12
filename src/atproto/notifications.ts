@@ -3,6 +3,7 @@ import { resolvePds } from "@/atproto/identity";
 import type { SpaceCredential } from "@/atproto/space-credential";
 import { getConfig } from "@/lib/config";
 import { getRawDb } from "@/lib/db";
+import { parseSpaceUri } from "@/protocol/keys";
 
 const RENEW_BEFORE_MS = 60 * 60 * 1000;
 
@@ -29,7 +30,7 @@ export async function registerSpaceNotifications(credential: SpaceCredential, sp
 }
 
 export function parseSpaceAuthority(space: string): string {
-  const match = /^at:\/\/(did:[^/]+)\/space\/[A-Za-z0-9.-]+\/[A-Za-z0-9._~:-]+$/.exec(space);
-  if (!match) throw new Error("Invalid permissioned space URI.");
-  return match[1];
+  const parsed = parseSpaceUri(space);
+  if (!parsed) throw new Error("Invalid permissioned space URI.");
+  return parsed.authorityDid;
 }

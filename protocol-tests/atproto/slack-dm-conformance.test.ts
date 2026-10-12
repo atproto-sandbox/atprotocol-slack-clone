@@ -33,6 +33,7 @@ const CONVERSATION_TYPE = 'org.slack.dm.conversation' as NsidString
 const REQUEST = 'org.slack.dm.request' as NsidString
 const HEADER = 'org.slack.dm.header' as NsidString
 const MESSAGE = 'org.slack.dm.message' as NsidString
+const REACTION = 'org.slack.dm.reaction' as NsidString
 const { defs } = com.atproto.simplespace
 const READ_ONLY = { read: true, write: false }
 const WRITE_ONLY = { read: false, write: true }
@@ -495,4 +496,222 @@ describe('atproto Slack direct-message protocol conformance', () => {
       await network.close()
     }
   }, 15 * 60 * 1000)
+
+  it('grants and withholds exactly what DM_BROWSER_SCOPES (src/auth/permission-sets.ts, M3) says it does', async () => {
+    const network = await TestNetworkNoAppView.create({ extraPdses: 1, lexiconAuthority: true })
+    try {
+      const lexiconAgent = network.pds.getAgent()
+      const lexiconSession = await lexiconAgent.com.atproto.server.createSession({ identifier: 'lex-authority.test', password: 'hunter2' })
+      for (const [id, collections] of [[INBOX_TYPE, [REQUEST]], [CONVERSATION_TYPE, [HEADER, MESSAGE, REACTION]]] as const) {
+        await lexiconAgent.com.atproto.repo.createRecord(
+          {
+            repo: network.lexiconAuthority!.did,
+            collection: 'com.atproto.lexicon.schema',
+            rkey: id,
+            record: { lexicon: 1, id, defs: { main: { type: 'space', key: 'any', name: id, collections } } },
+          },
+          { headers: { authorization: `Bearer ${lexiconSession.data.accessJwt}` } },
+        )
+      }
+
+      const spaces = new SpaceClient(network)
+      const pds1 = network.pds
+      const pds2 = network.extraPdses[0]
+      const alice = await spaces.createActor('alice', pds1)
+      const bob = await spaces.createActor('bob', pds2, 'test2')
+      const convKey = '3kdmscopetst1'
+
+      const bobInbox = `at://${bob.did}/space/${INBOX_TYPE}/self`
+      const bobHalf = `at://${bob.did}/space/${CONVERSATION_TYPE}/${convKey}`
+      for (const [type, skey, writePolicy] of [[INBOX_TYPE, 'self', defs.publicPolicy.build({})], [CONVERSATION_TYPE, convKey, defs.memberListPolicy.build({})]] as const) {
+        await bob.client.call(com.atproto.simplespace.createSpace, {
+          type, skey, readPolicy: defs.memberListPolicy.build({}), writePolicy, appAccess: defs.open.build({}),
+        }, { headers: bob.headers })
+      }
+      await bob.client.call(com.atproto.simplespace.putMember, { space: bobHalf as never, did: alice.did, ...READ_ONLY }, { headers: bob.headers })
+      await spaces.write(bob, bobHalf as never, { collection: MESSAGE, record: { $type: MESSAGE, text: 'from bob', createdAt: new Date().toISOString() } })
+
+      // Browser key: private half never leaves WebCrypto (same shape as the OAuth-client test above).
+      const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify'])
+      const { kty, crv, x, y } = await crypto.subtle.exportKey('jwk', pair.publicKey)
+      const jwk = { kty: kty!, crv: crv!, x: x!, y: y! }
+      const b64u = (bytes: ArrayBuffer | Uint8Array | string) => Buffer.from(typeof bytes === 'string' ? bytes : new Uint8Array(bytes)).toString('base64url')
+      const proof = async (htm: string, url: string, token?: string, nonce?: string) => {
+        const target = new URL(url)
+        const header = b64u(JSON.stringify({ alg: 'ES256', typ: 'dpop+jwt', jwk }))
+        const payload = b64u(JSON.stringify({
+          jti: randomUUID(),
+          htm,
+          htu: `${target.origin}${target.pathname}`,
+          iat: Math.floor(Date.now() / 1000),
+          ...(token ? { ath: b64u(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token))) } : {}),
+          ...(nonce ? { nonce } : {}),
+        }))
+        const signature = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, pair.privateKey, new TextEncoder().encode(`${header}.${payload}`))
+        return `${header}.${payload}.${b64u(signature)}`
+      }
+
+      const oauth = pds1.ctx.oauthProvider!
+      const clientId = 'https://slack.example/dm-client-metadata.json'
+      const metadata = {
+        client_id: clientId,
+        client_name: 'Slack DM browser scope conformance client',
+        redirect_uris: ['https://slack.example/dm/callback'],
+        response_types: ['code'],
+        grant_types: ['authorization_code'],
+        scope: 'atproto',
+        application_type: 'web',
+        token_endpoint_auth_method: 'none',
+        dpop_bound_access_tokens: true,
+      }
+      const client = new Client(clientId as never, metadata as never, undefined, { isFirstParty: false, isTrusted: false })
+      const account = (await oauth.accountManager.getAccount(alice.did)).account
+      const issue = async (scope: string) => oauth.tokenManager.createToken(
+        client,
+        { method: 'none' },
+        { ipAddress: '127.0.0.1', port: 443 },
+        account,
+        null,
+        {
+          client_id: clientId,
+          redirect_uri: 'https://slack.example/dm/callback',
+          response_type: 'code',
+          scope,
+          dpop_jkt: await calculateJwkThumbprint(jwk, 'sha256'),
+        },
+        await generateCode(),
+      )
+
+      // Copied verbatim from DM_BROWSER_SCOPES in src/auth/permission-sets.ts (M3).
+      // That file cannot be imported here (this test runs inside the pinned PDS
+      // checkout), so the strings are transcribed and must be kept in sync by hand.
+      const DM_BROWSER_SCOPES = [
+        'atproto',
+        `space:${INBOX_TYPE}?authority=*&collection=${REQUEST}&action=create&action=update&action=delete`,
+        `space:${INBOX_TYPE}?authority=self&action=read&manage=create&manage=update`,
+        `space:${INBOX_TYPE}?authority=*&action=read`,
+        `space:${CONVERSATION_TYPE}?authority=self&collection=${HEADER}&collection=${MESSAGE}&collection=${REACTION}&action=create&action=update&action=delete&manage=create&manage=update&manage=delete`,
+        `space:${CONVERSATION_TYPE}?authority=*&action=read`,
+      ]
+      const dmToken = await issue(DM_BROWSER_SCOPES.join(' '))
+
+      let nonce: string | undefined
+      const callAsOAuth = async (accessToken: string, nsid: string, body?: unknown, params?: Record<string, string>) => {
+        const method = params ? 'GET' : 'POST'
+        const url = new URL(`/xrpc/${nsid}`, pds1.url)
+        for (const [name, value] of Object.entries(params ?? {})) url.searchParams.set(name, value)
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const response = await fetch(url, {
+            method,
+            headers: {
+              authorization: `DPoP ${accessToken}`,
+              dpop: await proof(method, url.toString(), accessToken, nonce),
+              ...(body ? { 'content-type': 'application/json' } : {}),
+            },
+            ...(body ? { body: JSON.stringify(body) } : {}),
+          })
+          nonce = response.headers.get('DPoP-Nonce') ?? nonce
+          if (response.status === 401 && nonce && attempt === 0) continue
+          if (!response.ok) throw new Error(`${nsid} failed (${response.status}): ${await response.text()}`)
+          const text = await response.text()
+          return text ? (JSON.parse(text) as Record<string, unknown>) : undefined
+        }
+        throw new Error(`${nsid} exhausted DPoP nonce retry`)
+      }
+
+      // --- capabilities DM_BROWSER_SCOPES grants ---
+
+      // create its own inbox
+      const aliceInbox = `at://${alice.did}/space/${INBOX_TYPE}/self`
+      const createdInbox = await callAsOAuth(dmToken.access_token, 'com.atproto.simplespace.createSpace', {
+        type: INBOX_TYPE, skey: 'self', readPolicy: defs.memberListPolicy.build({}), writePolicy: defs.memberListPolicy.build({}), appAccess: defs.open.build({}),
+      })
+      expect(createdInbox!.uri).toBe(aliceInbox)
+
+      // updateSpace its inbox policy
+      await callAsOAuth(dmToken.access_token, 'com.atproto.simplespace.updateSpace', { space: aliceInbox, writePolicy: defs.publicPolicy.build({}) })
+
+      // putMember / removeMember on its own inbox
+      await callAsOAuth(dmToken.access_token, 'com.atproto.simplespace.putMember', { space: aliceInbox, did: bob.did, ...WRITE_ONLY })
+      await callAsOAuth(dmToken.access_token, 'com.atproto.simplespace.removeMember', { space: aliceInbox, did: bob.did })
+
+      // create its own half
+      const aliceHalf = `at://${alice.did}/space/${CONVERSATION_TYPE}/${convKey}`
+      const createdHalf = await callAsOAuth(dmToken.access_token, 'com.atproto.simplespace.createSpace', {
+        type: CONVERSATION_TYPE, skey: convKey, readPolicy: defs.memberListPolicy.build({}), writePolicy: defs.memberListPolicy.build({}), appAccess: defs.open.build({}),
+      })
+      expect(createdHalf!.uri).toBe(aliceHalf)
+
+      // putMember / removeMember on its own half
+      await callAsOAuth(dmToken.access_token, 'com.atproto.simplespace.putMember', { space: aliceHalf, did: bob.did, ...READ_ONLY })
+      await callAsOAuth(dmToken.access_token, 'com.atproto.simplespace.removeMember', { space: aliceHalf, did: bob.did })
+
+      // write header, message and reaction records in its own half
+      await callAsOAuth(dmToken.access_token, 'com.atproto.space.createRecord', {
+        space: aliceHalf, repo: alice.did, collection: HEADER, rkey: 'self',
+        record: { $type: HEADER, convKey, participants: [alice.did, bob.did].sort(), createdAt: new Date().toISOString() },
+      })
+      const messageWrite = await callAsOAuth(dmToken.access_token, 'com.atproto.space.createRecord', {
+        space: aliceHalf, repo: alice.did, collection: MESSAGE,
+        record: { $type: MESSAGE, text: 'hello from the browser scope conformance test', createdAt: new Date().toISOString() },
+      })
+      await callAsOAuth(dmToken.access_token, 'com.atproto.space.createRecord', {
+        space: aliceHalf, repo: alice.did, collection: REACTION,
+        record: { $type: REACTION, subject: messageWrite!.uri, emoji: '👍', createdAt: new Date().toISOString() },
+      })
+
+      // deleteSpace its own half
+      await callAsOAuth(dmToken.access_token, 'com.atproto.simplespace.deleteSpace', { space: aliceHalf })
+
+      // write a request into another user's inbox (collection-restricted, wildcard authority)
+      await callAsOAuth(dmToken.access_token, 'com.atproto.space.putRecord', {
+        space: bobInbox, repo: alice.did, collection: REQUEST, rkey: convKey,
+        record: { $type: REQUEST, convKey, participants: [alice.did, bob.did].sort(), createdAt: new Date().toISOString() },
+      })
+      const bobReadsInbox = await credentialAt(spaces, bob, bobInbox as never, pds2)
+      expect(await settledWriters(spaces, bobReadsInbox, pds2, bobInbox, (dids) => dids.includes(alice.did))).toContain(alice.did)
+
+      // get a delegation token for another user's half, and read through it end to end
+      const delegation = await callAsOAuth(dmToken.access_token, 'com.atproto.space.getDelegationToken', undefined, { space: bobHalf })
+      const exchangeUrl = new URL('/xrpc/com.atproto.space.getSpaceCredential', pds2.url).toString()
+      const exchange = await fetch(exchangeUrl, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${delegation!.token as string}`,
+          dpop: await proof('POST', exchangeUrl),
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ space: bobHalf }),
+      })
+      expect(exchange.status).toBe(200)
+      const { credential } = (await exchange.json()) as { credential: string }
+      const readUrl = new URL('/xrpc/com.atproto.space.listRecords', pds2.url)
+      readUrl.searchParams.set('space', bobHalf)
+      readUrl.searchParams.set('repo', bob.did)
+      readUrl.searchParams.set('collection', MESSAGE)
+      const read = await fetch(readUrl, {
+        headers: { authorization: `DPoP ${credential}`, dpop: await proof('GET', readUrl.toString(), credential) },
+      })
+      expect(read.status).toBe(200)
+      expect(((await read.json()) as { records: Array<{ value: { text: string } }> }).records.map((record) => record.value.text)).toEqual(['from bob'])
+
+      // --- capabilities DM_BROWSER_SCOPES withholds ---
+
+      // cannot putMember on another user's half
+      await expect(callAsOAuth(dmToken.access_token, 'com.atproto.simplespace.putMember', { space: bobHalf, did: alice.did, ...WRITE_ONLY }))
+        .rejects.toThrow()
+
+      // cannot write a message record into another user's inbox (only the request collection is granted there)
+      await expect(callAsOAuth(dmToken.access_token, 'com.atproto.space.createRecord', {
+        space: bobInbox, repo: alice.did, collection: MESSAGE, record: { $type: MESSAGE, text: 'not a request', createdAt: new Date().toISOString() },
+      })).rejects.toThrow()
+
+      // cannot create a space of a non-DM type
+      await expect(callAsOAuth(dmToken.access_token, 'com.atproto.simplespace.createSpace', {
+        type: 'org.slack.channel', skey: 'general', readPolicy: defs.memberListPolicy.build({}), writePolicy: defs.memberListPolicy.build({}), appAccess: defs.open.build({}),
+      })).rejects.toThrow()
+    } finally {
+      await network.close()
+    }
+  })
 })

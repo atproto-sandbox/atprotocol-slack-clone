@@ -70,6 +70,7 @@ Feature: Membership, privacy, and archive lifecycle
       When another request body uses the same operationId
       Then the operator reports a conflict
 
+    @slow
     Scenario: Recover after every injected mutation failure
       Given an admin operation can fail after each PDS write
       When a failure is injected and the operator restarts

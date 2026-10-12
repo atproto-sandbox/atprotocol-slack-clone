@@ -9,7 +9,7 @@ import { resolvePds } from "@/atproto/identity";
 import { parseSpaceRecordUri, reactionRecordKey } from "@/protocol/keys";
 import { validateSpaceRecord } from "@/protocol/records";
 import { requireCurrentChannelCredential, requireReadableChannel } from "@/workspaces/channels";
-import { purgeDeniedPermissionCache, purgeSpaceCache } from "@/workspaces/cache";
+import { markRepoStale, purgeDeniedPermissionCache, purgeSpaceCache } from "@/workspaces/cache";
 import { readRequestJson } from "@/lib/bounded-json";
 import { rejectCrossOriginMutation } from "@/lib/same-origin-mutation";
 
@@ -46,6 +46,7 @@ export async function POST(request: NextRequest) {
       } catch (error) {
         if (!isMissingXrpcResource(error)) throw error;
       }
+      markRepoStale(space, session.did);
       return NextResponse.json({ active: false });
     }
     try {
@@ -65,6 +66,7 @@ export async function POST(request: NextRequest) {
     await client.procedure<PutRecord.InputSchema, PutRecord.OutputSchema>("com.atproto.space.putRecord", {
       space, repo: session.did, collection: "org.slack.channel.reaction", rkey, record,
     });
+    markRepoStale(space, session.did);
     return NextResponse.json({ active: true, rkey });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unable to update the reaction.";

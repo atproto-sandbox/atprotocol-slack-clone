@@ -1,10 +1,16 @@
-import { createHash, randomBytes } from "node:crypto";
-import type { JoseKey } from "@atproto/jwk-jose";
+import { sha256 } from "@noble/hashes/sha2";
+import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils";
 
 const SIGNING_ALGORITHM = "ES256";
 
+export type DpopKey = {
+  readonly bareJwk: Record<string, unknown> | undefined;
+  readonly algorithms: readonly string[];
+  createJwt(header: Record<string, unknown>, payload: Record<string, unknown>): Promise<string>;
+};
+
 export async function createSpaceDpopProof(
-  key: JoseKey,
+  key: DpopKey,
   options: { htm: string; htu: string; credential?: string },
 ): Promise<string> {
   const jwk = key.bareJwk;
@@ -17,15 +23,25 @@ export async function createSpaceDpopProof(
     jwk,
   };
   const payload = {
-    jti: randomBytes(16).toString("hex"),
+    jti: bytesToHex(randomBytes(16)),
     htm: options.htm,
     htu: normalizeHtu(options.htu),
     ...(options.credential
-      ? { ath: createHash("sha256").update(options.credential).digest("base64url") }
+      ? { ath: base64UrlEncode(sha256(utf8ToBytes(options.credential))) }
       : {}),
     iat: Math.floor(Date.now() / 1000),
   };
   return key.createJwt(header, payload);
+}
+
+function randomBytes(length: number): Uint8Array {
+  return crypto.getRandomValues(new Uint8Array(length));
+}
+
+function base64UrlEncode(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
 function normalizeHtu(value: string): string {

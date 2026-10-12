@@ -19,6 +19,18 @@
       "writePolicy": "member-list",
       "appAccess": "open",
       "collections": ["org.slack.joinRequest", "org.slack.joinDecision"]
+    },
+    "org.slack.dm.inbox": {
+      "readPolicy": "member-list",
+      "writePolicy": "owner-configured",
+      "appAccess": "open",
+      "collections": ["org.slack.dm.request"]
+    },
+    "org.slack.dm.conversation": {
+      "readPolicy": "member-list",
+      "writePolicy": "member-list",
+      "appAccess": "open",
+      "collections": ["org.slack.dm.header", "org.slack.dm.message", "org.slack.dm.reaction"]
     }
   }
 }

@@ -1,0 +1,19 @@
+{
+  "lexicon": 1,
+  "id": "org.slack.dm.reaction",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": ["subject", "emoji", "createdAt"],
+        "properties": {
+          "subject": { "type": "string", "format": "at-uri" },
+          "emoji": { "type": "string", "minLength": 1, "maxLength": 32 },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

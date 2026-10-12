@@ -1,12 +1,25 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import Link from "next/link";
+import { captureInviteLink, clearAccountScopedState, INVITE_LINK_KEY } from "./client-api";
 
 export function LoginForm() {
   const [handle, setHandle] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [invited, setInvited] = useState(false);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      clearAccountScopedState(sessionStorage, [INVITE_LINK_KEY]);
+      if (captureInviteLink(window.location.search, sessionStorage)) {
+        setInvited(true);
+        window.history.replaceState(null, "", window.location.pathname);
+      }
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -43,6 +56,7 @@ export function LoginForm() {
           <div className="eyebrow"><span className="eyebrow-line" /> WORK, IN YOUR OWN SPACE</div>
           <h1>Good work happens<br /><em>together.</em></h1>
           <p className="welcome-description">A calmer place for your team’s conversations. Your workspace, your data, your people.</p>
+          {invited && <p className="status-note" role="status">You&rsquo;ve been invited to a workspace. Sign in with your account to join it.</p>}
           <form className="signin-form" onSubmit={submit}>
             <label htmlFor="handle">Your AT Protocol handle</label>
             <div className="handle-input"><span>@</span><input id="handle" autoComplete="username" placeholder="you.bsky.social" value={handle} onChange={(event) => setHandle(event.target.value)} required /></div>

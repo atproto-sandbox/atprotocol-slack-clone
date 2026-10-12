@@ -168,6 +168,41 @@ export function persistPendingIfWorkspaceLockOwned(input: {
   }
 }
 
+/**
+ * Removes an operation that completed no steps and is waiting on the user (for example an OAuth
+ * permission approval), so nothing stale is left for recovery or stalled-operation alerts. The
+ * workspace catalog entry goes too when no other operation references it. A retry starts fresh.
+ */
+export function discardEmptyOperationIfWorkspaceLockOwned(input: {
+  workspace: string;
+  workspaceUri: string;
+  actor: string;
+  operationId: string;
+  lock: WorkspaceLock;
+  reason: string;
+}): boolean {
+  const raw = getRawDb();
+  try {
+    return raw.transaction(() => {
+      refreshWorkspaceLock(input.workspace, input.lock.token);
+      const removed = raw.prepare(`DELETE FROM operation
+        WHERE workspace = ? AND actor = ? AND operation_id = ? AND steps_json = '[]' AND state IN ('running', 'pending')`)
+        .run(input.workspace, input.actor, input.operationId);
+      if (removed.changes !== 1) return false;
+      raw.prepare(`DELETE FROM operation_workspace_catalog
+        WHERE workspace = ? AND workspace_uri = ?
+        AND NOT EXISTS (SELECT 1 FROM operation WHERE workspace = ? AND workspace_uri = ?)`)
+        .run(input.workspace, input.workspaceUri, input.workspace, input.workspaceUri);
+      raw.prepare("INSERT INTO audit_event (workspace, actor, operation_id, event, details_json, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+        .run(input.workspace, input.actor, input.operationId, "operationDiscarded", canonicalJson({ reason: input.reason }), unixNow());
+      return true;
+    })();
+  } catch {
+    // A runner that lost its token must not delete the new owner's journal row.
+    return false;
+  }
+}
+
 async function retryTransient<T>(action: () => Promise<T>): Promise<T> {
   for (let attempt = 0; ; attempt += 1) {
     try {

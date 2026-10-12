@@ -1,6 +1,6 @@
 # Direct messages — implementation plan
 
-Status: **approved 2026-09-26; M0 passed 2026-09-26 (with the design adjustments in §6 M0 results); M1 next**.
+Status: **implemented 2026-09-28 (M0–M6 complete; see §6 "M6 results" for the independence proof, verification evidence, and deviations, and `PROGRESS.md` for exact command results).**
 Protocol baseline: proposal 0016 draft, pinned PDS `787a730f` (see `docs/protocol/atproto-spaces-pin.md`).
 
 ## 1. Goal and the constraint that drives everything
@@ -153,6 +153,15 @@ Exit: all pass, or the plan is revised.
 **M5 — UI.** Sidebar DM list, requests folder, request-policy settings panel, conversation view, and SSE fan-out (content-free). Playwright: two browsers on two PDSes complete a DM round trip, then one side revokes and the other loses access after credential expiry.
 
 **M6 — Independence proof.** The independent reader renders identical DM state from lexicons only. A "server off" test runs the full DM flow with the Next server's DB deleted and its notify endpoint down (only the static client is served) and must pass. Update `SPEC.md`, `ARCHITECTURE.md`, and `CODE-MAP.md`.
+
+**M6 results (2026-09-28): passed.** `src/reader/independent-dm.ts` renders a conversation (messages, reactions, per-half status) from the published `org.slack.dm.*` lexicons alone, sharing only the protocol layer with `src/dm/dm-client.ts` (`src/protocol/*`, `src/atproto/xrpc.ts`, `record-pages.ts`, `space-credential-core.ts`) and implementing its own full-history merge instead of reusing `src/dm/merge.ts`. `protocol-tests/dm-acceptance.test.ts` asserts `DmClient.readConversation` and `readIndependentDmConversation` return identical message URIs/texts, reactions, and half statuses at six checkpoints across the 1:1 flow (missing, ok with edits/reactions, ok after delete/unreact, revoked after leave, deleted after delete-everything) and the 3-person group flow (ok). Two ESLint `no-restricted-imports` rules enforce the independence boundaries statically: `src/reader/**` cannot import `src/dm/**`, and `src/app/api/**` cannot import `src/dm/**`; both were proven to fire (temporarily added a forbidden import, confirmed lint failed, removed it) and both pass on the real tree. The existing `protocol-tests/dm-acceptance.test.ts` "server off" run (no Next server process started at all, `DATABASE_PATH` pointed at an asserted-never-created directory) already covered every listed flow (enable, all three policy modes, start, request discovery, accept, send, edit, delete, react, read, leave, delete-everything, re-notify) before this milestone; no gap was found, so it was only extended with the parity assertions above. Exact command results are in `PROGRESS.md`.
+
+Deviations from this plan, carried forward from M2–M5 and confirmed still accurate at M6:
+- `DmConfig` (`src/dm/browser-session.ts`) carries `{ appUrl, plcUrl, scope, serviceRef, loopback }`, passed from the server (`src/app/page.tsx`) rather than being reconstructed client-side; no new environment variable was needed (`.env.example` unchanged).
+- `SpaceCredentialError` (`src/atproto/space-credential-core.ts`) gained `404` (`SpaceNotFound`) and `410` (`SpaceDeleted`) status codes, beyond the `401`/`403` the channel code originally used, so `readConversation`'s per-half status (`missing`/`deleted`/`revoked`) can be derived from one credential-mint failure instead of a separate probe.
+- The empty-allowlist-vs-"nobody" ambiguity (an inbox with a `memberListPolicy` and zero members can't be told apart from one deliberately closed) is handled by keeping dormant (`write:false`) member entries instead of removing them on `setRequestMode("nobody")`, and the M5 settings UI always re-applies the user's selected mode after any allow/disallow edit so the stored PDS state never drifts from what the user chose.
+- A well-known-only handle resolver (`wellKnownHandleResolver` in `src/dm/browser-session.ts`) was added solely to satisfy `BrowserOAuthClient`'s required `handleResolver` option; `connectDms`/`restoreDmSession` always sign in with a DID already known from the server session, so this resolver's `resolve()` is never actually exercised in the app's own flow, and it deliberately avoids any third-party AppView relay (only the handle's own `https://<handle>/.well-known/atproto-did`).
+- `pnpm test:browser` runs with `--test-concurrency=1` because both Playwright specs (`oauth-callback.spec.ts`, `dm.spec.ts`) start their own real `next start` server subprocess on its own port; running them concurrently is unnecessary contention, not a correctness requirement.
 
 ## 7. Decisions (resolved 2026-09-26)
 

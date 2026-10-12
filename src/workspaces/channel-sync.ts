@@ -12,7 +12,7 @@ import { mintSpaceCredential, type SpaceCredential } from "@/atproto/space-crede
 import { AtprotoClient } from "@/atproto/xrpc";
 import { getRawDb } from "@/lib/db";
 import { mapLimited } from "@/lib/map-limited";
-import { spaceRecordUri } from "@/protocol/keys";
+import { channelUri, parseSpaceUri, spaceRecordUri } from "@/protocol/keys";
 import { validateSpaceRecord } from "@/protocol/records";
 import { ChannelUnavailableError, requireReadableChannel } from "./channels";
 import { purgeSpaceCache, purgeWorkspaceCache } from "./cache";
@@ -28,9 +28,9 @@ export async function readChannelPage(session: OAuthSession, workspace: string, 
   try {
     readable = await requireReadableChannel(session, workspace, skey);
   } catch (error) {
-    const match = /^at:\/\/(did:[^/]+)\/space\/org\.slack\.workspace\/[A-Za-z0-9._~:-]{1,128}$/.exec(workspace);
-    if (match && skey) {
-      const space = `at://${match[1]}/space/org.slack.channel/${skey}`;
+    const parsed = parseSpaceUri(workspace);
+    if (parsed?.type === "org.slack.workspace" && skey) {
+      const space = channelUri(parsed.authorityDid, skey);
       if (denied(error)) purgeWorkspaceCache(session.did, workspace);
       else if (error instanceof ChannelUnavailableError && error.visibility === "archived") purgeSpaceCache(session.did, space);
     }

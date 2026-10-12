@@ -1,0 +1,13 @@
+{
+  "lexicon": 1,
+  "id": "org.slack.dm.inbox",
+  "defs": {
+    "main": {
+      "type": "space",
+      "key": "literal:self",
+      "name": "DM inbox",
+      "collections": ["org.slack.dm.request"],
+      "description": "A personal DM request inbox that its owner reads and configures the write policy for."
+    }
+  }
+}

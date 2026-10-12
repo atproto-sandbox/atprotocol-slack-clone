@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { closeDb, getRawDb } from "@/lib/db";
-import { purgeCachesForUnlistedWorkspaces, purgeDeniedPermissionCache, purgeWorkspaceCache, registerWorkspaceChannel } from "./cache";
+import { markRepoStale, purgeCachesForUnlistedWorkspaces, purgeDeniedPermissionCache, purgeWorkspaceCache, registerWorkspaceChannel } from "./cache";
 
 test("workspace cache revocation keeps other workspaces under the same authority", () => {
   const directory = mkdtempSync(join(tmpdir(), "slack-workspace-cache-test-"));
@@ -69,6 +69,41 @@ test("workspace cache revocation keeps other workspaces under the same authority
     assert.equal(purgeDeniedPermissionCache(account, workspaceA, workspaceA, { status: 403 }), true);
     assert.equal(counts("channel_record_cache", channelA), 0, "a denied workspace credential purges its associated channel cache");
     assert.equal(purgeDeniedPermissionCache(account, workspaceA, workspaceA, { status: 404 }), false);
+  } finally {
+    closeDb();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("markRepoStale resets every account's cursor for one repo in one space and leaves everything else alone", () => {
+  // #given cursors for two accounts on the same repo, plus another repo and another space
+  const directory = mkdtempSync(join(tmpdir(), "slack-mark-stale-test-"));
+  process.env.DATABASE_PATH = join(directory, "stale.db");
+  process.env.AUTH_ENCRYPTION_KEY = "34".repeat(32);
+  process.env.APP_URL = "http://127.0.0.1:3000";
+  process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_slack_admin";
+  const space = "at://did:plc:owner/space/org.slack.channel/alpha";
+  const otherSpace = "at://did:plc:owner/space/org.slack.channel/beta";
+  const raw = getRawDb();
+  const seed = (account: string, spaceUri: string, repo: string, collection: string) => raw.prepare(`INSERT INTO space_collection_cursor
+    (account_did,space_uri,repo_did,collection,rev,next_cursor,finished,checked_at) VALUES (?,?,?,?,?,?,?,?)`)
+    .run(account, spaceUri, repo, collection, "rev-1", null, 1, 1_000);
+  try {
+    seed("did:plc:reader-a", space, "did:plc:author", "org.slack.channel.message");
+    seed("did:plc:reader-a", space, "did:plc:author", "org.slack.channel.reaction");
+    seed("did:plc:reader-b", space, "did:plc:author", "org.slack.channel.message");
+    seed("did:plc:reader-a", space, "did:plc:someone-else", "org.slack.channel.message");
+    seed("did:plc:reader-a", otherSpace, "did:plc:author", "org.slack.channel.message");
+
+    // #when
+    markRepoStale(space, "did:plc:author");
+
+    // #then
+    const rows = raw.prepare("SELECT account_did, space_uri, repo_did, collection, rev, checked_at FROM space_collection_cursor").all() as Array<{ space_uri: string; repo_did: string; rev: string; checked_at: number }>;
+    const stale = rows.filter((row) => row.checked_at === 0);
+    assert.equal(stale.length, 3, "both collections for both accounts");
+    assert.ok(stale.every((row) => row.rev === "" && row.space_uri === space && row.repo_did === "did:plc:author"));
+    assert.equal(rows.filter((row) => row.rev === "rev-1").length, 2, "the other repo and the other space are untouched");
   } finally {
     closeDb();
     rmSync(directory, { recursive: true, force: true });

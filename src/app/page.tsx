@@ -1,4 +1,5 @@
 import { getSession } from "@/auth/session";
+import { DM_BROWSER_SCOPES } from "@/auth/permission-sets";
 import { getConfig } from "@/lib/config";
 import { headers } from "next/headers";
 import Link from "next/link";
@@ -9,7 +10,14 @@ import { redirect } from "next/navigation";
 export const dynamic = "force-dynamic";
 
 export default async function HomePage() {
-  const { appUrl } = getConfig();
+  const { appUrl, plcDirectoryUrl, operatorServiceRef } = getConfig();
+  const dmConfig = {
+    appUrl: appUrl.origin,
+    plcUrl: plcDirectoryUrl.toString(),
+    scope: DM_BROWSER_SCOPES.join(" "),
+    serviceRef: operatorServiceRef,
+    loopback: appUrl.protocol === "http:",
+  };
   const requestHost = (await headers()).get("host");
   if (appUrl.protocol === "http:" && requestHost && requestHost.toLowerCase() !== appUrl.host.toLowerCase()) {
     redirect(appUrl.origin);
@@ -33,6 +41,6 @@ export default async function HomePage() {
       </main>
     );
   }
-  if (session) return <WorkspaceManager did={session.did} />;
+  if (session) return <WorkspaceManager did={session.did} dmConfig={dmConfig} />;
   return <LoginForm />;
 }

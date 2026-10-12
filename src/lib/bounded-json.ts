@@ -40,6 +40,17 @@ export async function readUpstreamJson<T = unknown>(response: Response, limitByt
   }
 }
 
+export async function readUpstreamText(response: Response, limitBytes: number): Promise<string | null> {
+  const bytes = await readBoundedBytes(response.body, response.headers.get("content-length"), limitBytes, async () => {
+    await response.body?.cancel().catch(() => undefined);
+  }, () => new UpstreamResponseTooLargeError(limitBytes));
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
 async function readBoundedBytes(
   stream: ReadableStream<Uint8Array> | null,
   contentLength: string | null,

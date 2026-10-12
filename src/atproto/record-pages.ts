@@ -1,10 +1,12 @@
 import type * as ListRecords from "@/lexicons/api/types/com/atproto/space/listRecords";
 import type * as ListMembers from "@/lexicons/api/types/com/atproto/simplespace/listMembers";
 import type * as ListRepos from "@/lexicons/api/types/com/atproto/space/listRepos";
+import type * as ListSpaces from "@/lexicons/api/types/com/atproto/space/listSpaces";
 import type { AtprotoClient } from "./xrpc";
 
 const MAX_SCAN_PAGES = 128;
 const MAX_REPO_SCAN_PAGES = 512;
+const MAX_SPACE_PAGE = 100; // com.atproto.space.listSpaces caps `limit` at 100, unlike the 500 shared by listRepos/listMembers/listRecords.
 
 export type BoundedRecords = {
   records: Array<{ rkey: string; value: Record<string, unknown> }>;
@@ -18,6 +20,11 @@ export type BoundedMembers = {
 
 export type BoundedRepos = {
   repos: ListRepos.Repo[];
+  truncated: boolean;
+};
+
+export type BoundedSpaces = {
+  spaces: ListSpaces.SpaceView[];
   truncated: boolean;
 };
 
@@ -101,6 +108,65 @@ export async function listBoundedRepos(
     truncated = lookahead.repos.length > 0;
   }
   return { repos, truncated };
+}
+
+function assertSpacePage(page: unknown, limit: number): asserts page is ListSpaces.OutputSchema {
+  if (typeof page !== "object" || page === null) throw new Error("PDS space page is malformed.");
+  const candidate = page as { spaces?: unknown; cursor?: unknown };
+  if (!Array.isArray(candidate.spaces) || candidate.spaces.length > limit) throw new Error("PDS space page exceeded the requested limit.");
+  if (candidate.spaces.some((space) => typeof space !== "object" || space === null || Array.isArray(space) ||
+    typeof space.uri !== "string" || !/^at:\/\/did:[a-z0-9]+:[A-Za-z0-9._:%-]+\/space\/[A-Za-z0-9.-]+\/[A-Za-z0-9._~:-]{1,128}$/.test(space.uri))) {
+    throw new Error("PDS space page contains a malformed space URI.");
+  }
+  if (candidate.cursor !== undefined && (typeof candidate.cursor !== "string" || candidate.cursor.length === 0)) {
+    throw new Error("PDS space pagination returned an invalid cursor.");
+  }
+  if (candidate.spaces.length === 0 && candidate.cursor) throw new Error("PDS space pagination returned an empty nonterminal page.");
+}
+
+export async function listBoundedSpaces(
+  client: AtprotoClient,
+  input: { type?: string; did?: string; maxSpaces: number },
+): Promise<BoundedSpaces> {
+  if (!Number.isSafeInteger(input.maxSpaces) || input.maxSpaces < 1) throw new RangeError("Space scan limit must be a positive safe integer.");
+  const spaces: ListSpaces.SpaceView[] = [];
+  const seenCursors = new Set<string>();
+  const seenUris = new Set<string>();
+  let pages = 0;
+  let cursor: string | undefined;
+  do {
+    const requestedCursor = cursor;
+    const limit = Math.min(MAX_SPACE_PAGE, input.maxSpaces - spaces.length);
+    if (++pages > MAX_SCAN_PAGES) throw new Error("PDS space pagination exceeded the bounded page limit.");
+    const page = await client.query<ListSpaces.OutputSchema>("com.atproto.space.listSpaces", {
+      type: input.type, did: input.did, limit, cursor,
+    });
+    assertSpacePage(page, limit);
+    for (const space of page.spaces) {
+      if (seenUris.has(space.uri)) throw new Error("PDS space pagination returned a duplicate space URI.");
+      seenUris.add(space.uri);
+    }
+    spaces.push(...page.spaces);
+    cursor = page.cursor;
+    if (cursor) {
+      if (cursor === requestedCursor || seenCursors.has(cursor)) throw new Error("PDS space pagination did not advance.");
+      if (page.spaces.length === 0) throw new Error("PDS space pagination returned an empty nonterminal page.");
+      seenCursors.add(cursor);
+    }
+  } while (cursor && spaces.length < input.maxSpaces);
+
+  let truncated = false;
+  if (cursor) {
+    if (++pages > MAX_SCAN_PAGES) throw new Error("PDS space pagination exceeded the bounded page limit.");
+    const lookahead = await client.query<ListSpaces.OutputSchema>("com.atproto.space.listSpaces", {
+      type: input.type, did: input.did, limit: 1, cursor,
+    });
+    assertSpacePage(lookahead, 1);
+    if (lookahead.spaces.some((space) => seenUris.has(space.uri))) throw new Error("PDS space pagination returned a duplicate space URI.");
+    if (lookahead.cursor && (lookahead.cursor === cursor || seenCursors.has(lookahead.cursor))) throw new Error("PDS space pagination did not advance.");
+    truncated = lookahead.spaces.length > 0;
+  }
+  return { spaces, truncated };
 }
 
 function assertMemberPage(page: unknown, limit: number): asserts page is ListMembers.OutputSchema {

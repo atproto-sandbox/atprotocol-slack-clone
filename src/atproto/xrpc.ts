@@ -61,6 +61,11 @@ export class XrpcError extends Error {
   }
 }
 
+/** The PDS rejected the call because the session's OAuth grant does not cover it (HTTP 403, `ScopeMissingError`). */
+export function isScopeMissingError(error: unknown): boolean {
+  return error instanceof XrpcError && error.status === 403 && error.code === "ScopeMissingError";
+}
+
 export function isMissingXrpcResource(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;
   if ("status" in error && error.status === 404) return true;

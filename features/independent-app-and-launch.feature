@@ -22,6 +22,7 @@ Feature: Independent app conformance and launch limits
 
   Rule: The supported envelope is measured before launch
 
+    @slow
     Scenario: Meet the workspace size envelope
       Given a workspace has 200 members, 100 channels, and 20000 messages per channel
       When an admin inbox and a channel are synchronized

@@ -2,10 +2,15 @@ import type { OAuthSession } from "@atproto/oauth-client-node";
 import { getRawDb } from "@/lib/db";
 import { canonicalJson, requestDigest, stableHash, subjectKey, channelUri, workspaceUri, inboxUri } from "@/protocol/keys";
 import { ensureMemberListSpace, putAuthorityRecord } from "@/atproto/space-ops";
-import { listRecoverableOperations, persistPendingIfWorkspaceLockOwned, withWorkspaceLock, type WorkspaceLock } from "@/operator/journal";
+import { isScopeMissingError } from "@/atproto/xrpc";
+import { discardEmptyOperationIfWorkspaceLockOwned, listRecoverableOperations, persistPendingIfWorkspaceLockOwned, withWorkspaceLock, type WorkspaceLock } from "@/operator/journal";
 import { assertAdminMutationsEnabled } from "@/operator/mutations-paused";
 
-export type BootstrapResult = { operationId: string; workspace: string; channel: string; state: string; completedSteps: string[]; error?: string };
+export type BootstrapResult = {
+  operationId: string; workspace: string; channel: string; state: string; completedSteps: string[]; error?: string;
+  /** Setup is waiting on the user to approve the workspace-authority permission, not on a retry. */
+  authorizationRequired?: true;
+};
 
 export async function bootstrapWorkspace(session: OAuthSession, input: { name: string; operationId: string }): Promise<BootstrapResult> {
   assertAdminMutationsEnabled();
@@ -60,6 +65,9 @@ async function bootstrapWorkspaceLocked(session: OAuthSession, input: { name: st
     if (existing.state === "completed") {
       return { operationId: input.operationId, workspace, channel, state: existing.state, completedSteps: JSON.parse(existing.steps_json) as string[] };
     }
+    // Resuming: mark it running again so a failure at the first remaining step is recorded as pending.
+    raw.prepare("UPDATE operation SET state = 'running', error = NULL, updated_at = ? WHERE workspace = ? AND actor = ? AND operation_id = ? AND state = 'pending'")
+      .run(now, session.did, session.did, input.operationId);
   }
 
   const completed = existing ? JSON.parse(existing.steps_json) as string[] : [];
@@ -111,6 +119,13 @@ async function bootstrapWorkspaceLocked(session: OAuthSession, input: { name: st
     return { operationId: input.operationId, workspace, channel, state: "completed", completedSteps: completed };
   } catch (error) {
     const message = error instanceof Error ? error.message.slice(0, 300) : "WorkspaceSetupFailed";
+    const authorizationRequired = isScopeMissingError(error);
+    // Waiting on the user's approval with nothing done yet: leave no journal row to recover or alert on.
+    if (authorizationRequired && completed.length === 0 && discardEmptyOperationIfWorkspaceLockOwned({
+      workspace: session.did, workspaceUri: workspace, actor: session.did, operationId: input.operationId, lock, reason: "authorizationRequired",
+    })) {
+      return { operationId: input.operationId, workspace, channel, state: "pending", completedSteps: completed, error: message, authorizationRequired: true };
+    }
     const persisted = persistPendingIfWorkspaceLockOwned({
       workspace: session.did,
       actor: session.did,
@@ -118,10 +133,13 @@ async function bootstrapWorkspaceLocked(session: OAuthSession, input: { name: st
       requestHash,
       lock,
       completedSteps: completed,
-      error: message,
+      error,
     });
     if (!persisted) throw error;
-    return { operationId: input.operationId, workspace, channel, state: "pending", completedSteps: completed, error: message };
+    return {
+      operationId: input.operationId, workspace, channel, state: "pending", completedSteps: completed, error: message,
+      ...(authorizationRequired ? { authorizationRequired: true as const } : {}),
+    };
   }
 }
 
