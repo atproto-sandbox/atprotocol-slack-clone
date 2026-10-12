@@ -55,7 +55,7 @@ describe('atproto Slack authority OAuth protocol conformance', () => {
       const authority = await spaces.createActor('alice', network.pds)
       const member = await spaces.createActor('bob', network.extraPdses[0], 'test2')
       const space = await spaces.createSpace(authority, {
-        type: 'org.slack.workspace' as NsidString,
+        spaceType: 'org.slack.workspace' as NsidString,
         skey: 'workspace',
       })
 

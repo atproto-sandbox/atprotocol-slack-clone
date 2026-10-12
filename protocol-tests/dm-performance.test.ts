@@ -94,7 +94,7 @@ test("DM read budget: 100 participants, 20,000 total messages, latest-100 read i
       const client = rawClientFor(owner);
       const half = `at://${owner.did}/space/org.slack.dm.conversation/${convKey}`;
       await client.procedure("com.atproto.simplespace.createSpace", {
-        type: "org.slack.dm.conversation", skey: convKey,
+        spaceType: "org.slack.dm.conversation", skey: convKey,
         readPolicy: { $type: "com.atproto.simplespace.defs#memberListPolicy" },
         writePolicy: { $type: "com.atproto.simplespace.defs#memberListPolicy" },
         appAccess: { $type: "com.atproto.simplespace.defs#open" },

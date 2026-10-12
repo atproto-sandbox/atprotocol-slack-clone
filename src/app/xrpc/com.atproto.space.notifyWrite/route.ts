@@ -18,7 +18,7 @@ export async function POST(request: NextRequest) {
     const now = Math.floor(Date.now() / 1000);
     const db = getRawDb();
     db.prepare("INSERT INTO space_notification (space_uri,repo_did,rev,notified_at) VALUES (?,?,?,?)")
-      .run(notification.space, notification.repo, notification.rev, now);
+      .run(notification.space, notification.repo, notification.repoRev, now);
     markRepoStale(notification.space, notification.repo);
     db.prepare("DELETE FROM space_notification WHERE notified_at < ?").run(now - 7 * 24 * 60 * 60);
     return NextResponse.json({}, { headers: { "cache-control": "no-store" } });

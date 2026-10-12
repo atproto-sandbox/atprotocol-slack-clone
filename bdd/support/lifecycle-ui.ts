@@ -397,7 +397,7 @@ export async function breakChannelSpace(world: AppWorld, owner: Actor, channel: 
 /** Lifts the fault: the authority creates the channel space again, with the policies the app uses. */
 export async function repairChannelSpace(world: AppWorld, owner: Actor, channel: ChannelRef): Promise<void> {
   const result = await world.pdsPost(owner, "com.atproto.simplespace.createSpace", {
-    type: "org.slack.channel", skey: channel.skey, readPolicy: MEMBER_LIST_POLICY, writePolicy: MEMBER_LIST_POLICY, appAccess: OPEN_APP_ACCESS,
+    spaceType: "org.slack.channel", skey: channel.skey, readPolicy: MEMBER_LIST_POLICY, writePolicy: MEMBER_LIST_POLICY, appAccess: OPEN_APP_ACCESS,
   });
   assert.equal(result.status, 200, JSON.stringify(result.body));
 }

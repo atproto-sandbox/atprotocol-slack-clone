@@ -34,6 +34,7 @@ import * as ComAtprotoSpaceListRecords from './types/com/atproto/space/listRecor
 import * as ComAtprotoSpaceListRepoOps from './types/com/atproto/space/listRepoOps.js'
 import * as ComAtprotoSpaceListRepos from './types/com/atproto/space/listRepos.js'
 import * as ComAtprotoSpaceListSpaces from './types/com/atproto/space/listSpaces.js'
+import * as ComAtprotoSpaceNotifyCredentialRevoked from './types/com/atproto/space/notifyCredentialRevoked.js'
 import * as ComAtprotoSpaceNotifySpaceDeleted from './types/com/atproto/space/notifySpaceDeleted.js'
 import * as ComAtprotoSpaceNotifyWrite from './types/com/atproto/space/notifyWrite.js'
 import * as ComAtprotoSpacePutRecord from './types/com/atproto/space/putRecord.js'
@@ -68,6 +69,7 @@ export * as ComAtprotoSpaceListRecords from './types/com/atproto/space/listRecor
 export * as ComAtprotoSpaceListRepoOps from './types/com/atproto/space/listRepoOps.js'
 export * as ComAtprotoSpaceListRepos from './types/com/atproto/space/listRepos.js'
 export * as ComAtprotoSpaceListSpaces from './types/com/atproto/space/listSpaces.js'
+export * as ComAtprotoSpaceNotifyCredentialRevoked from './types/com/atproto/space/notifyCredentialRevoked.js'
 export * as ComAtprotoSpaceNotifySpaceDeleted from './types/com/atproto/space/notifySpaceDeleted.js'
 export * as ComAtprotoSpaceNotifyWrite from './types/com/atproto/space/notifyWrite.js'
 export * as ComAtprotoSpacePutRecord from './types/com/atproto/space/putRecord.js'
@@ -396,6 +398,18 @@ export class ComAtprotoSpaceNS {
     )
   }
 
+  notifyCredentialRevoked(
+    data?: ComAtprotoSpaceNotifyCredentialRevoked.InputSchema,
+    opts?: ComAtprotoSpaceNotifyCredentialRevoked.CallOptions,
+  ): Promise<ComAtprotoSpaceNotifyCredentialRevoked.Response> {
+    return this._client.call(
+      'com.atproto.space.notifyCredentialRevoked',
+      opts?.qp,
+      data,
+      opts,
+    )
+  }
+
   notifySpaceDeleted(
     data?: ComAtprotoSpaceNotifySpaceDeleted.InputSchema,
     opts?: ComAtprotoSpaceNotifySpaceDeleted.CallOptions,
@@ -412,12 +426,11 @@ export class ComAtprotoSpaceNS {
     data?: ComAtprotoSpaceNotifyWrite.InputSchema,
     opts?: ComAtprotoSpaceNotifyWrite.CallOptions,
   ): Promise<ComAtprotoSpaceNotifyWrite.Response> {
-    return this._client.call(
-      'com.atproto.space.notifyWrite',
-      opts?.qp,
-      data,
-      opts,
-    )
+    return this._client
+      .call('com.atproto.space.notifyWrite', opts?.qp, data, opts)
+      .catch((e) => {
+        throw ComAtprotoSpaceNotifyWrite.toKnownErr(e)
+      })
   }
 
   putRecord(

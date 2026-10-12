@@ -28,7 +28,7 @@ export async function ensureMemberListSpace(
   try {
     const result = await client.procedure<CreateSpace.InputSchema, CreateSpace.OutputSchema>(
       "com.atproto.simplespace.createSpace",
-      { type, skey, readPolicy: MEMBER_LIST, writePolicy: MEMBER_LIST, appAccess: OPEN },
+      { spaceType: type, skey, readPolicy: MEMBER_LIST, writePolicy: MEMBER_LIST, appAccess: OPEN },
     );
     return result.uri;
   } catch (error) {

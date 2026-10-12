@@ -25,7 +25,7 @@ export interface InputSchema {
 }
 
 export interface OutputSchema {
-  /** A signed JWT space credential, bound through its cnf.jkt claim to the key that signed the request's DPoP proof. */
+  /** A signed JWT space credential. */
   credential: string
 }
 

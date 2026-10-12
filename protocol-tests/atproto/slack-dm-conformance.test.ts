@@ -104,13 +104,13 @@ describe('atproto Slack direct-message protocol conformance', () => {
       const convKey = '3kdmconvkey22'
       const participants = [alice, bob]
 
-      const aliceHalf = await spaces.createSpace(alice, { type: CONVERSATION_TYPE, skey: convKey })
+      const aliceHalf = await spaces.createSpace(alice, { spaceType: CONVERSATION_TYPE, skey: convKey })
       await spaces.putMember(alice, aliceHalf, bob, READ_ONLY)
       const bobHalf = `at://${bob.did}/space/${CONVERSATION_TYPE}/${convKey}` as const
       await bob.client.call(
         com.atproto.simplespace.createSpace,
         {
-          type: CONVERSATION_TYPE,
+          spaceType: CONVERSATION_TYPE,
           skey: convKey,
           readPolicy: defs.memberListPolicy.build({}),
           writePolicy: defs.memberListPolicy.build({}),
@@ -167,7 +167,7 @@ describe('atproto Slack direct-message protocol conformance', () => {
       // Cross-app recovery: a user's own PDS lists the halves they wrote to.
       const ownHalves = await alice.client.call(
         com.atproto.space.listSpaces,
-        { type: CONVERSATION_TYPE },
+        { spaceType: CONVERSATION_TYPE },
         { headers: alice.headers },
       )
       expect(ownHalves.spaces.map((space) => space.uri)).toEqual([aliceHalf])
@@ -208,7 +208,7 @@ describe('atproto Slack direct-message protocol conformance', () => {
 
       // "Everyone": owner-only reads, public writes.
       const inbox = await spaces.createSpace(bob, {
-        type: INBOX_TYPE, skey: 'self', writePolicy: defs.publicPolicy.build({}),
+        spaceType: INBOX_TYPE, skey: 'self', writePolicy: defs.publicPolicy.build({}),
       })
       await spaces.put(carol, inbox, { collection: REQUEST, rkey: '3kdmcarol2222', record: request('3kdmcarol2222') })
       const bobInbox = await spaces.credentialFor(bob, inbox)
@@ -291,7 +291,7 @@ describe('atproto Slack direct-message protocol conformance', () => {
       const bobHalf = `at://${bob.did}/space/${CONVERSATION_TYPE}/${convKey}`
       for (const [type, skey, writePolicy] of [[INBOX_TYPE, 'self', defs.publicPolicy.build({})], [CONVERSATION_TYPE, convKey, defs.memberListPolicy.build({})]] as const) {
         await bob.client.call(com.atproto.simplespace.createSpace, {
-          type, skey, readPolicy: defs.memberListPolicy.build({}), writePolicy, appAccess: defs.open.build({}),
+          spaceType: type, skey, readPolicy: defs.memberListPolicy.build({}), writePolicy, appAccess: defs.open.build({}),
         }, { headers: bob.headers })
       }
       await bob.client.call(com.atproto.simplespace.putMember, { space: bobHalf as never, did: alice.did, ...READ_ONLY }, { headers: bob.headers })
@@ -394,7 +394,7 @@ describe('atproto Slack direct-message protocol conformance', () => {
 
       // Own half: manage=create / manage=update from the browser session.
       await callAsOAuth(dmToken.access_token, 'com.atproto.simplespace.createSpace', {
-        type: CONVERSATION_TYPE, skey: convKey,
+        spaceType: CONVERSATION_TYPE, skey: convKey,
         readPolicy: defs.memberListPolicy.build({}), writePolicy: defs.memberListPolicy.build({}), appAccess: defs.open.build({}),
       })
       const aliceHalf = `at://${alice.did}/space/${CONVERSATION_TYPE}/${convKey}`
@@ -454,7 +454,7 @@ describe('atproto Slack direct-message protocol conformance', () => {
       const halves = await Promise.all(participants.map(async (owner) => {
         const half = `at://${owner.did}/space/${CONVERSATION_TYPE}/${convKey}` as const
         await owner.client.call(com.atproto.simplespace.createSpace, {
-          type: CONVERSATION_TYPE, skey: convKey,
+          spaceType: CONVERSATION_TYPE, skey: convKey,
           readPolicy: defs.memberListPolicy.build({}), writePolicy: defs.memberListPolicy.build({}), appAccess: defs.open.build({}),
         }, { headers: owner.headers })
         for (const member of participants) {
@@ -525,7 +525,7 @@ describe('atproto Slack direct-message protocol conformance', () => {
       const bobHalf = `at://${bob.did}/space/${CONVERSATION_TYPE}/${convKey}`
       for (const [type, skey, writePolicy] of [[INBOX_TYPE, 'self', defs.publicPolicy.build({})], [CONVERSATION_TYPE, convKey, defs.memberListPolicy.build({})]] as const) {
         await bob.client.call(com.atproto.simplespace.createSpace, {
-          type, skey, readPolicy: defs.memberListPolicy.build({}), writePolicy, appAccess: defs.open.build({}),
+          spaceType: type, skey, readPolicy: defs.memberListPolicy.build({}), writePolicy, appAccess: defs.open.build({}),
         }, { headers: bob.headers })
       }
       await bob.client.call(com.atproto.simplespace.putMember, { space: bobHalf as never, did: alice.did, ...READ_ONLY }, { headers: bob.headers })
@@ -624,7 +624,7 @@ describe('atproto Slack direct-message protocol conformance', () => {
       // create its own inbox
       const aliceInbox = `at://${alice.did}/space/${INBOX_TYPE}/self`
       const createdInbox = await callAsOAuth(dmToken.access_token, 'com.atproto.simplespace.createSpace', {
-        type: INBOX_TYPE, skey: 'self', readPolicy: defs.memberListPolicy.build({}), writePolicy: defs.memberListPolicy.build({}), appAccess: defs.open.build({}),
+        spaceType: INBOX_TYPE, skey: 'self', readPolicy: defs.memberListPolicy.build({}), writePolicy: defs.memberListPolicy.build({}), appAccess: defs.open.build({}),
       })
       expect(createdInbox!.uri).toBe(aliceInbox)
 
@@ -638,7 +638,7 @@ describe('atproto Slack direct-message protocol conformance', () => {
       // create its own half
       const aliceHalf = `at://${alice.did}/space/${CONVERSATION_TYPE}/${convKey}`
       const createdHalf = await callAsOAuth(dmToken.access_token, 'com.atproto.simplespace.createSpace', {
-        type: CONVERSATION_TYPE, skey: convKey, readPolicy: defs.memberListPolicy.build({}), writePolicy: defs.memberListPolicy.build({}), appAccess: defs.open.build({}),
+        spaceType: CONVERSATION_TYPE, skey: convKey, readPolicy: defs.memberListPolicy.build({}), writePolicy: defs.memberListPolicy.build({}), appAccess: defs.open.build({}),
       })
       expect(createdHalf!.uri).toBe(aliceHalf)
 
@@ -708,7 +708,7 @@ describe('atproto Slack direct-message protocol conformance', () => {
 
       // cannot create a space of a non-DM type
       await expect(callAsOAuth(dmToken.access_token, 'com.atproto.simplespace.createSpace', {
-        type: 'org.slack.channel', skey: 'general', readPolicy: defs.memberListPolicy.build({}), writePolicy: defs.memberListPolicy.build({}), appAccess: defs.open.build({}),
+        spaceType: 'org.slack.channel', skey: 'general', readPolicy: defs.memberListPolicy.build({}), writePolicy: defs.memberListPolicy.build({}), appAccess: defs.open.build({}),
       })).rejects.toThrow()
     } finally {
       await network.close()

@@ -5,7 +5,9 @@ import { parseWriteNotification } from "./write-notification";
 const valid = {
   space: "at://did:plc:authority/space/org.slack.workspace/team",
   repo: "did:plc:member",
-  rev: "3kabcdefghij2",
+  repoRev: "3kabcdefghij2",
+  spaceRev: "3kabcdefghij3",
+  prevSpaceRev: "3kabcdefghij2",
   hash: { $bytes: "q83vEjRWeJCrze8SNFZ4kKvN7xI0VniQq83vEjRWeJA" },
 };
 
@@ -14,7 +16,7 @@ test("parseWriteNotification accepts the body the PDS sends, with hash as lexico
   const parsed = parseWriteNotification(valid);
 
   // #then
-  assert.deepEqual(parsed, { space: valid.space, repo: valid.repo, rev: valid.rev });
+  assert.deepEqual(parsed, { space: valid.space, repo: valid.repo, repoRev: valid.repoRev });
 });
 
 test("parseWriteNotification rejects a hash that is not a bytes object", () => {
@@ -24,12 +26,24 @@ test("parseWriteNotification rejects a hash that is not a bytes object", () => {
   assert.equal(parseWriteNotification({ ...valid, hash: null }), null);
 });
 
-test("parseWriteNotification rejects unexpected fields, a bad repo DID, and a missing or oversized rev", () => {
+test("parseWriteNotification accepts the repo host's body without the forwarded space revisions", () => {
+  const fromRepoHost = { space: valid.space, repo: valid.repo, repoRev: valid.repoRev, hash: valid.hash };
+  assert.deepEqual(parseWriteNotification(fromRepoHost), { space: valid.space, repo: valid.repo, repoRev: valid.repoRev });
+});
+
+test("parseWriteNotification rejects the old rev field and non-TID revisions", () => {
+  const { repoRev, ...withoutRepoRev } = valid;
+  assert.equal(parseWriteNotification({ ...withoutRepoRev, rev: repoRev }), null);
+  assert.equal(parseWriteNotification({ ...valid, spaceRev: "not-a-tid" }), null);
+  assert.equal(parseWriteNotification({ ...valid, prevSpaceRev: "x".repeat(129) }), null);
+});
+
+test("parseWriteNotification rejects unexpected fields, a bad repo DID, and a missing or malformed repoRev", () => {
   assert.equal(parseWriteNotification({ ...valid, extra: 1 }), null);
   assert.equal(parseWriteNotification({ ...valid, repo: "not-a-did" }), null);
   assert.equal(parseWriteNotification({ ...valid, space: "not-a-space" }), null);
-  assert.equal(parseWriteNotification({ ...valid, rev: "" }), null);
-  assert.equal(parseWriteNotification({ ...valid, rev: "x".repeat(129) }), null);
+  assert.equal(parseWriteNotification({ ...valid, repoRev: "" }), null);
+  assert.equal(parseWriteNotification({ ...valid, repoRev: "x".repeat(129) }), null);
   assert.equal(parseWriteNotification([valid]), null);
   assert.equal(parseWriteNotification(null), null);
 });

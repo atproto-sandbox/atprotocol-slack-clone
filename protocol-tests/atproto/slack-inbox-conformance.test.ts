@@ -44,7 +44,7 @@ describe('atproto Slack inbox protocol conformance', () => {
       )
 
       const workspace = await spaces.createSpace(authority, {
-        type: WORKSPACE_TYPE,
+        spaceType: WORKSPACE_TYPE,
         skey: 'workspace',
         members: [admin, requester, ordinary],
       })
@@ -73,7 +73,7 @@ describe('atproto Slack inbox protocol conformance', () => {
       // own PDS after the acceptance record is written.
       const discovered = await requester.client.call(
         com.atproto.space.listSpaces,
-        { type: WORKSPACE_TYPE, did: authority.did },
+        { spaceType: WORKSPACE_TYPE, did: authority.did },
         { headers: requester.headers },
       )
       expect(discovered.spaces.map((space) => space.uri)).toContain(workspace)
@@ -94,7 +94,7 @@ describe('atproto Slack inbox protocol conformance', () => {
       })
 
       const privateChannel = await spaces.createSpace(authority, {
-        type: CHANNEL_TYPE,
+        spaceType: CHANNEL_TYPE,
         skey: 'secret',
         members: [admin, requester],
       })
@@ -112,7 +112,7 @@ describe('atproto Slack inbox protocol conformance', () => {
       ).rejects.toMatchObject({ error: 'UserNotAuthorized' })
 
       const inbox = await spaces.createSpace(authority, {
-        type: INBOX_TYPE,
+        spaceType: INBOX_TYPE,
         skey: 'inbox',
         members: [admin],
       })
@@ -244,7 +244,7 @@ describe('atproto Slack inbox protocol conformance', () => {
       const admin = await spaces.createActor('bob', network.pds)
       const requester = await spaces.createActor('carol', network.extraPdses[0], 'test2')
       const inbox = await spaces.createSpace(authority, {
-        type: INBOX_TYPE,
+        spaceType: INBOX_TYPE,
         skey: 'inbox',
         members: [admin],
       })
@@ -308,7 +308,7 @@ describe('atproto Slack inbox protocol conformance', () => {
       const authority = await spaces.createActor('alice', network.pds)
       const member = await spaces.createActor('bob', network.extraPdses[0], 'test2')
       const inbox = await spaces.createSpace(authority, {
-        type: INBOX_TYPE,
+        spaceType: INBOX_TYPE,
         skey: 'inbox',
         members: [member],
       })

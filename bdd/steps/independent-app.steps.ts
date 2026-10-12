@@ -577,7 +577,7 @@ async function runProtocolReconcile(world: AppWorld): Promise<ChildRun> {
 const PAUSED_MESSAGE = "Workspace admin mutations are paused.";
 
 async function pdsSnapshot(world: AppWorld, owner: Actor): Promise<unknown> {
-  const channels = await world.pdsGet<{ spaces: Array<{ uri: string }> }>(owner, "com.atproto.space.listSpaces", { type: "org.slack.channel", limit: "100" });
+  const channels = await world.pdsGet<{ spaces: Array<{ uri: string }> }>(owner, "com.atproto.space.listSpaces", { spaceType: "org.slack.channel", limit: "100" });
   const spaces = [world.workspaceUri, inboxUri(owner.did, workspaceSkeyOf(world)), ...channels.body.spaces.map((space) => space.uri)].sort();
   const memberLists: Record<string, string[]> = {};
   for (const space of spaces) {

@@ -295,7 +295,7 @@ export class DmpProbe {
     const space = dmInboxUri(inboxOwner.did);
     const credential = await this.mint(space);
     const scan = await listBoundedRepos(credential.client(inboxOwner.pdsUrl), { space, maxRepos: 1_000 });
-    return scan.repos.map((repo) => ({ did: repo.did, rev: repo.rev }));
+    return scan.repos.map((repo) => ({ did: repo.did, rev: repo.repoRev }));
   }
 
   /** A record collection as the half owner's PDS serves it to a credential holder for `space`. */
@@ -311,7 +311,7 @@ export type DmpMessageRecord = { rkey: string; text: string };
 
 /** The conversation keys of the halves an account owns, from its own PDS. */
 export async function dmpOwnConvKeys(world: AppWorld, owner: FixtureAccount): Promise<string[]> {
-  const listed = await world.pdsGet<{ spaces?: Array<{ uri: string }> }>(owner, "com.atproto.space.listSpaces", { type: "org.slack.dm.conversation", limit: "100" });
+  const listed = await world.pdsGet<{ spaces?: Array<{ uri: string }> }>(owner, "com.atproto.space.listSpaces", { spaceType: "org.slack.dm.conversation", limit: "100" });
   if (listed.status !== 200) throw new Error(`listSpaces for ${owner.handle}: ${JSON.stringify(listed.body)}`);
   return (listed.body.spaces ?? []).flatMap((space) => {
     const parsed = parseDmConversationUri(space.uri);
@@ -349,7 +349,7 @@ export async function dmpWriteHostileHalf(world: AppWorld, half: DmpHostileHalf)
   const space = dmConversationUri(half.owner.did, half.convKey);
   const memberList = { $type: "com.atproto.simplespace.defs#memberListPolicy" };
   const steps: Array<[string, unknown]> = [
-    ["com.atproto.simplespace.createSpace", { type: "org.slack.dm.conversation", skey: half.convKey, readPolicy: memberList, writePolicy: memberList, appAccess: { $type: "com.atproto.simplespace.defs#open" } }],
+    ["com.atproto.simplespace.createSpace", { spaceType: "org.slack.dm.conversation", skey: half.convKey, readPolicy: memberList, writePolicy: memberList, appAccess: { $type: "com.atproto.simplespace.defs#open" } }],
     ...half.readers.map((reader): [string, unknown] => ["com.atproto.simplespace.putMember", { space, did: reader.did, read: true, write: false }]),
     ["com.atproto.space.putRecord", { space, repo: half.owner.did, collection: "org.slack.dm.header", rkey: "self", record: { $type: "org.slack.dm.header", ...half.header, createdAt: new Date().toISOString() } }],
   ];

@@ -20,13 +20,16 @@ export type QueryParams = {
   space: string
   /** Maximum number of repos to return. */
   limit?: number
+  /** Return repos updated after this space revision (exclusive). Use a previous response's cursor or a previously processed spaceRev. */
   cursor?: string
 }
 export type InputSchema = undefined
 
 export interface OutputSchema {
-  cursor?: string
+  /** Returned in ascending spaceRev order. A repo may reappear if updated while paginating. */
   repos: Repo[]
+  /** Pass this cursor on the next request. Omitted when no repos are returned. */
+  cursor?: string
 }
 
 export interface CallOptions {
@@ -59,9 +62,11 @@ export interface Repo {
   /** The DID of a repo that holds data in the space. */
   did: string
   /** The repo's current revision (TID), as last reported to the authority. May lag the repo host, which is the source of truth. */
-  rev: string
+  repoRev: string
   /** The repo's current commit hash (sha256 of the LtHash state), as last reported to the authority. */
   hash: Uint8Array
+  /** The space revision at which this repo was last updated. */
+  spaceRev: string
 }
 
 const hashRepo = 'repo'

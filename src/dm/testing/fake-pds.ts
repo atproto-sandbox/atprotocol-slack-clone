@@ -33,7 +33,7 @@ type FakeSpace = {
   readPolicy: Policy;
   writePolicy: Policy;
   members: Map<string, { read: boolean; write: boolean }>;
-  trackedWriters: Set<string>;
+  trackedWriters: Map<string, { repoRev: string; spaceRev: string }>;
   deleted: boolean;
   repos: Map<string, Map<string, Map<string, { value: Record<string, unknown>; cid: string }>>>;
 };
@@ -58,6 +58,7 @@ export class FakeDmNetwork {
   private readonly credentials = new Map<string, { space: string; grantedDid: string; expiresAt: number }>();
   private tokenCounter = 0;
   private cidCounter = 0;
+  private revCounter = 0;
 
   now = (): number => this.virtualNow;
 
@@ -192,7 +193,7 @@ export class FakeDmNetwork {
 
   private createSpace(params: Record<string, unknown>, auth: FakeAuth): { uri: string } {
     const ownerDid = this.requireSelf(auth);
-    const type = String(params.type);
+    const type = String(params.spaceType);
     const skey = String(params.skey);
     const uri = `at://${ownerDid}/space/${type}/${skey}`;
     if (this.spaces.has(uri)) throw new FakeXrpcError(400, "SpaceAlreadyExists", "Space already exists");
@@ -200,7 +201,7 @@ export class FakeDmNetwork {
       type, skey, ownerDid,
       readPolicy: policyKind(params.readPolicy),
       writePolicy: policyKind(params.writePolicy),
-      members: new Map(), trackedWriters: new Set(), deleted: false, repos: new Map(),
+      members: new Map(), trackedWriters: new Map(), deleted: false, repos: new Map(),
     });
     return { uri };
   }
@@ -262,7 +263,7 @@ export class FakeDmNetwork {
     const did = this.requireSelf(auth);
     const all = [...this.spaces.values()]
       .filter((space) => space.ownerDid === did && !space.deleted)
-      .filter((space) => params.type === undefined || space.type === params.type)
+      .filter((space) => params.spaceType === undefined || space.type === params.spaceType)
       .filter((space) => params.did === undefined || space.ownerDid === params.did)
       .map((space) => ({ uri: `at://${space.ownerDid}/space/${space.type}/${space.skey}` }));
     return paginate(all, params, (space) => space.uri, "spaces");
@@ -285,7 +286,7 @@ export class FakeDmNetwork {
     repoCollections.set(collection, records);
     const cid = `cid-${this.cidCounter++}`;
     records.set(rkey, { value: record, cid });
-    if (this.currentlyAuthorizedWriter(space, repo)) space.trackedWriters.add(repo);
+    if (this.currentlyAuthorizedWriter(space, repo)) space.trackedWriters.set(repo, { repoRev: this.nextRev(), spaceRev: this.nextRev() });
     return { uri: `${spaceUri(space)}/${repo}/${collection}/${rkey}`, cid };
   }
 
@@ -331,14 +332,24 @@ export class FakeDmNetwork {
   private listRepos(params: Record<string, unknown>, auth: FakeAuth) {
     this.requireCredential(params, auth);
     const space = this.requireSpace(params.space);
-    const repos = [...space.trackedWriters].sort().map((did) => ({ did, rev: "fake-rev", hash: new Uint8Array(32) }));
-    return paginate(repos, params, (repo) => repo.did, "repos");
+    const limit = typeof params.limit === "number" ? params.limit : Number(params.limit ?? 100) || 100;
+    const after = typeof params.cursor === "string" ? params.cursor : "";
+    const updated = [...space.trackedWriters]
+      .map(([did, revs]) => ({ did, ...revs, hash: new Uint8Array(32) }))
+      .filter((repo) => repo.spaceRev > after)
+      .sort((left, right) => left.spaceRev.localeCompare(right.spaceRev));
+    const repos = updated.slice(0, limit);
+    return { repos, ...(repos.length > 0 ? { cursor: repos[repos.length - 1]!.spaceRev } : {}) };
   }
 
   private registerNotify(params: Record<string, unknown>, auth: FakeAuth): { expiresAt: string } {
     this.requireCredential(params, auth);
     this.requireSpace(params.space);
     return { expiresAt: new Date(this.now() + CREDENTIAL_LIFETIME_MS).toISOString() };
+  }
+
+  private nextRev(): string {
+    return fakeTid(++this.revCounter);
   }
 
   private repoCollections(space: FakeSpace, repo: string): Map<string, Map<string, { value: Record<string, unknown>; cid: string }>> {
@@ -375,6 +386,19 @@ function paginate<T>(all: T[], params: Record<string, unknown>, key: (item: T) =
   const page = all.slice(startIndex, startIndex + limit);
   const nextIndex = startIndex + page.length;
   return { [field]: page, ...(nextIndex < all.length ? { cursor: key(page[page.length - 1]!) } : {}) };
+}
+
+const TID_ALPHABET = "234567abcdefghijklmnopqrstuvwxyz";
+
+/** A 13-character TID whose lexical order follows `counter`. */
+function fakeTid(counter: number): string {
+  let rest = counter;
+  let tid = "";
+  for (let i = 0; i < 13; i++) {
+    tid = TID_ALPHABET[rest % 32]! + tid;
+    rest = Math.floor(rest / 32);
+  }
+  return tid;
 }
 
 function encodeSegment(value: unknown): string {

@@ -20,7 +20,7 @@ export type QueryParams = {}
 
 export interface InputSchema {
   /** The NSID of the space type, describing the modality of the space (e.g. app.bsky.group, app.bsky.personal). */
-  type: string
+  spaceType: string
   /** The space key. Used to differentiate multiple spaces of the same type under the same owner. Same syntax requirements as a record key. If not provided, one will be auto-generated (TID). */
   skey?: string
   readPolicy:

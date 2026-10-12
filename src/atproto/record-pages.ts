@@ -64,6 +64,17 @@ function assertRepoPage(page: unknown, limit: number): asserts page is ListRepos
     typeof repo.did !== "string" || !/^did:[a-z0-9]+:[A-Za-z0-9._:%-]+$/.test(repo.did))) {
     throw new Error("PDS repo page contains a malformed repo DID.");
   }
+  if (candidate.repos.some((repo) => typeof repo.repoRev !== "string" || typeof repo.spaceRev !== "string" || repo.spaceRev.length === 0)) {
+    throw new Error("PDS repo page contains a repo without repoRev and spaceRev.");
+  }
+  for (let i = 1; i < candidate.repos.length; i++) {
+    if (candidate.repos[i - 1].spaceRev > candidate.repos[i].spaceRev) throw new Error("PDS repo page is not in ascending spaceRev order.");
+  }
+}
+
+/** A repo updated while paginating reappears at a later spaceRev; the writer set keeps its latest entry. */
+function latestPerRepo(entries: ListRepos.Repo[]): ListRepos.Repo[] {
+  return [...new Map(entries.map((repo) => [repo.did, repo])).values()];
 }
 
 export async function listBoundedRepos(
@@ -71,22 +82,17 @@ export async function listBoundedRepos(
   input: { space: string; maxRepos: number },
 ): Promise<BoundedRepos> {
   if (!Number.isSafeInteger(input.maxRepos) || input.maxRepos < 1) throw new RangeError("Repo scan limit must be a positive safe integer.");
-  const repos: ListRepos.Repo[] = [];
+  const entries: ListRepos.Repo[] = [];
   const seenCursors = new Set<string>();
-  const seenDids = new Set<string>();
   let pages = 0;
   let cursor: string | undefined;
   do {
     const requestedCursor = cursor;
-    const limit = Math.min(500, input.maxRepos - repos.length);
+    const limit = Math.min(500, input.maxRepos - entries.length);
     if (++pages > MAX_REPO_SCAN_PAGES) throw new Error("PDS repo pagination exceeded the bounded page limit.");
     const page = await client.query<ListRepos.OutputSchema>("com.atproto.space.listRepos", { space: input.space, limit, cursor });
     assertRepoPage(page, limit);
-    for (const repo of page.repos) {
-      if (seenDids.has(repo.did)) throw new Error("PDS repo pagination returned a duplicate repo DID.");
-      seenDids.add(repo.did);
-    }
-    repos.push(...page.repos);
+    entries.push(...page.repos);
     if (page.cursor !== undefined && (typeof page.cursor !== "string" || page.cursor.length === 0)) throw new Error("PDS repo pagination returned an invalid cursor.");
     cursor = page.cursor;
     if (cursor) {
@@ -94,20 +100,19 @@ export async function listBoundedRepos(
       if (page.repos.length === 0) throw new Error("PDS repo pagination returned an empty nonterminal page.");
       seenCursors.add(cursor);
     }
-  } while (cursor && repos.length < input.maxRepos);
+  } while (cursor && entries.length < input.maxRepos);
 
   let truncated = false;
   if (cursor) {
     if (++pages > MAX_REPO_SCAN_PAGES) throw new Error("PDS repo pagination exceeded the bounded page limit.");
     const lookahead = await client.query<ListRepos.OutputSchema>("com.atproto.space.listRepos", { space: input.space, limit: 1, cursor });
     assertRepoPage(lookahead, 1);
-    if (lookahead.repos.some((repo) => seenDids.has(repo.did))) throw new Error("PDS repo pagination returned a duplicate repo DID.");
     if (lookahead.cursor !== undefined && (typeof lookahead.cursor !== "string" || lookahead.cursor.length === 0)) throw new Error("PDS repo pagination returned an invalid cursor.");
     if (lookahead.repos.length === 0 && lookahead.cursor) throw new Error("PDS repo pagination returned an empty nonterminal page.");
     if (lookahead.cursor && (lookahead.cursor === cursor || seenCursors.has(lookahead.cursor))) throw new Error("PDS repo pagination did not advance.");
     truncated = lookahead.repos.length > 0;
   }
-  return { repos, truncated };
+  return { repos: latestPerRepo(entries), truncated };
 }
 
 function assertSpacePage(page: unknown, limit: number): asserts page is ListSpaces.OutputSchema {
@@ -126,7 +131,7 @@ function assertSpacePage(page: unknown, limit: number): asserts page is ListSpac
 
 export async function listBoundedSpaces(
   client: AtprotoClient,
-  input: { type?: string; did?: string; maxSpaces: number },
+  input: { spaceType?: string; did?: string; maxSpaces: number },
 ): Promise<BoundedSpaces> {
   if (!Number.isSafeInteger(input.maxSpaces) || input.maxSpaces < 1) throw new RangeError("Space scan limit must be a positive safe integer.");
   const spaces: ListSpaces.SpaceView[] = [];
@@ -139,7 +144,7 @@ export async function listBoundedSpaces(
     const limit = Math.min(MAX_SPACE_PAGE, input.maxSpaces - spaces.length);
     if (++pages > MAX_SCAN_PAGES) throw new Error("PDS space pagination exceeded the bounded page limit.");
     const page = await client.query<ListSpaces.OutputSchema>("com.atproto.space.listSpaces", {
-      type: input.type, did: input.did, limit, cursor,
+      spaceType: input.spaceType, did: input.did, limit, cursor,
     });
     assertSpacePage(page, limit);
     for (const space of page.spaces) {
@@ -159,7 +164,7 @@ export async function listBoundedSpaces(
   if (cursor) {
     if (++pages > MAX_SCAN_PAGES) throw new Error("PDS space pagination exceeded the bounded page limit.");
     const lookahead = await client.query<ListSpaces.OutputSchema>("com.atproto.space.listSpaces", {
-      type: input.type, did: input.did, limit: 1, cursor,
+      spaceType: input.spaceType, did: input.did, limit: 1, cursor,
     });
     assertSpacePage(lookahead, 1);
     if (lookahead.spaces.some((space) => seenUris.has(space.uri))) throw new Error("PDS space pagination returned a duplicate space URI.");

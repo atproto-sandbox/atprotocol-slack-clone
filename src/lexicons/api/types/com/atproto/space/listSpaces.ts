@@ -16,8 +16,8 @@ const is$typed = _is$typed,
 const id = 'com.atproto.space.listSpaces'
 
 export type QueryParams = {
-  /** Filter to spaces of this type. */
-  type?: string
+  /** Filter to spaces of this space type. */
+  spaceType?: string
   /** Filter to spaces under this authority DID. */
   did?: string
   /** The number of spaces to return. */

@@ -47,7 +47,7 @@ export type IndependentChannelPage = {
  * does not import the primary app's database, sync cache, or web-session layer.
  */
 export async function listIndependentWorkspaces(session: OAuthSession): Promise<IndependentWorkspace[]> {
-  const spaces = await listBoundedSpaces(sessionClient(session), { type: "org.slack.workspace", maxSpaces: MAX_DISCOVERABLE_WORKSPACES });
+  const spaces = await listBoundedSpaces(sessionClient(session), { spaceType: "org.slack.workspace", maxSpaces: MAX_DISCOVERABLE_WORKSPACES });
   const summaries = await mapLimited(spaces, 8, async (uri) => {
     try { return await readIndependentWorkspace(session, uri); }
     catch (error) {

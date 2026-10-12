@@ -125,9 +125,9 @@ export const schemaDict = {
           encoding: 'application/json',
           schema: {
             type: 'object',
-            required: ['type', 'readPolicy', 'writePolicy', 'appAccess'],
+            required: ['spaceType', 'readPolicy', 'writePolicy', 'appAccess'],
             properties: {
-              type: {
+              spaceType: {
                 type: 'string',
                 format: 'nsid',
                 description:
@@ -1229,7 +1229,7 @@ export const schemaDict = {
       main: {
         type: 'procedure',
         description:
-          "Exchange a delegation token for a space credential. Called on the space authority, with the delegation token as the request's authorization token and a DPoP proof signed by the key to bind the credential to. The resulting space credential reads repos across the space. Requires a delegation token and DPoP proof, plus a client attestation when the space gates on app identity.",
+          "Exchange a delegation token for a space credential. Called on the space authority, with the delegation token as the request's authorization token and an HTTP message signature over Authorization made by the key to bind the credential to. The resulting space credential reads repos across the space. Requires a delegation token and HTTP message signature, plus a client attestation when the space gates on app identity.",
         input: {
           encoding: 'application/json',
           schema: {
@@ -1257,8 +1257,7 @@ export const schemaDict = {
             properties: {
               credential: {
                 type: 'string',
-                description:
-                  "A signed JWT space credential, bound through its cnf.jkt claim to the key that signed the request's DPoP proof.",
+                description: 'A signed JWT space credential.',
               },
             },
           },
@@ -1619,7 +1618,7 @@ export const schemaDict = {
       main: {
         type: 'query',
         description:
-          "List the known repos that hold data in a space (the writer set), with each repo's current rev and commit hash. Served by the space host. This is the sync boundary, not an access-control list: it enumerates only writers, never readers. The set is what the authority claims from write notifications and is not itself authoritative; a repo's host is the source of truth.",
+          "List the known repos that hold data in a space (the writer set), with each repo's current repoRev and commit hash. Served by the space host. This is the sync boundary, not an access-control list: it enumerates only writers, never readers. The set is what the authority claims from write notifications and is not itself authoritative; a repo's host is the source of truth.",
         parameters: {
           type: 'params',
           required: ['space'],
@@ -1638,6 +1637,8 @@ export const schemaDict = {
             },
             cursor: {
               type: 'string',
+              description:
+                "Return repos updated after this space revision (exclusive). Use a previous response's cursor or a previously processed spaceRev.",
             },
           },
         },
@@ -1647,15 +1648,19 @@ export const schemaDict = {
             type: 'object',
             required: ['repos'],
             properties: {
-              cursor: {
-                type: 'string',
-              },
               repos: {
                 type: 'array',
                 items: {
                   type: 'ref',
                   ref: 'lex:com.atproto.space.listRepos#repo',
                 },
+                description:
+                  'Returned in ascending spaceRev order. A repo may reappear if updated while paginating.',
+              },
+              cursor: {
+                type: 'string',
+                description:
+                  'Pass this cursor on the next request. Omitted when no repos are returned.',
               },
             },
           },
@@ -1668,14 +1673,14 @@ export const schemaDict = {
       },
       repo: {
         type: 'object',
-        required: ['did', 'rev', 'hash'],
+        required: ['did', 'repoRev', 'hash', 'spaceRev'],
         properties: {
           did: {
             type: 'string',
             format: 'did',
             description: 'The DID of a repo that holds data in the space.',
           },
-          rev: {
+          repoRev: {
             type: 'string',
             description:
               "The repo's current revision (TID), as last reported to the authority. May lag the repo host, which is the source of truth.",
@@ -1685,6 +1690,12 @@ export const schemaDict = {
             type: 'bytes',
             description:
               "The repo's current commit hash (sha256 of the LtHash state), as last reported to the authority.",
+          },
+          spaceRev: {
+            type: 'string',
+            format: 'tid',
+            description:
+              'The space revision at which this repo was last updated.',
           },
         },
       },
@@ -1701,10 +1712,10 @@ export const schemaDict = {
         parameters: {
           type: 'params',
           properties: {
-            type: {
+            spaceType: {
               type: 'string',
               format: 'nsid',
-              description: 'Filter to spaces of this type.',
+              description: 'Filter to spaces of this space type.',
             },
             did: {
               type: 'string',
@@ -1756,6 +1767,41 @@ export const schemaDict = {
       },
     },
   },
+  ComAtprotoSpaceNotifyCredentialRevoked: {
+    lexicon: 1,
+    id: 'com.atproto.space.notifyCredentialRevoked',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          'Notify a repo host that the space authority has revoked one or more credentials. Authenticated with service auth from the space authority, addressed to the repo DID.',
+        input: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['space', 'credentials'],
+            properties: {
+              space: {
+                type: 'string',
+                format: 'space-ref',
+                description: 'Reference to the space.',
+              },
+              credentials: {
+                type: 'array',
+                minLength: 1,
+                maxLength: 100,
+                description: 'The jti of the revoked credentials.',
+                items: {
+                  type: 'string',
+                  minLength: 1,
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
   ComAtprotoSpaceNotifySpaceDeleted: {
     lexicon: 1,
     id: 'com.atproto.space.notifySpaceDeleted',
@@ -1788,12 +1834,12 @@ export const schemaDict = {
       main: {
         type: 'procedure',
         description:
-          'Notify that a repo in a space has advanced to a new revision. Sent by a repo host to the space host, and forwarded to registered syncers. Best-effort. Authenticated with service auth.',
+          'Notify that a repo in a space has advanced. Repo hosts reliably deliver their latest state to the space host, which sequences updates and forwards them to registered syncers with reasonable-effort delivery. Authenticated with service auth.',
         input: {
           encoding: 'application/json',
           schema: {
             type: 'object',
-            required: ['space', 'repo', 'rev', 'hash'],
+            required: ['space', 'repo', 'repoRev', 'hash'],
             properties: {
               space: {
                 type: 'string',
@@ -1805,9 +1851,9 @@ export const schemaDict = {
                 format: 'did',
                 description: 'The DID of the account whose repo advanced.',
               },
-              rev: {
+              repoRev: {
                 type: 'string',
-                description: 'The revision of the write.',
+                description: 'The repo revision after the write.',
                 format: 'tid',
               },
               hash: {
@@ -1815,9 +1861,30 @@ export const schemaDict = {
                 description:
                   "The repo's current commit hash (sha256 of the LtHash state) after the write. Lets the space host maintain each repo's hash for listRepos.",
               },
+              spaceRev: {
+                type: 'string',
+                format: 'tid',
+                description:
+                  'The space revision assigned by the space host. Present only on notifications forwarded to syncers.',
+              },
+              prevSpaceRev: {
+                type: 'string',
+                format: 'tid',
+                description:
+                  'The previous space revision. Omitted on the first update in a space. A gap indicates missed notifications; recover using listRepos with cursor.',
+              },
             },
           },
         },
+        errors: [
+          {
+            name: 'SpaceNotFound',
+          },
+          {
+            name: 'FutureRev',
+            description: 'The repo revision exceeds the permitted clock skew.',
+          },
+        ],
       },
     },
   },
@@ -2314,6 +2381,8 @@ export const ids = {
   ComAtprotoSpaceListRepoOps: 'com.atproto.space.listRepoOps',
   ComAtprotoSpaceListRepos: 'com.atproto.space.listRepos',
   ComAtprotoSpaceListSpaces: 'com.atproto.space.listSpaces',
+  ComAtprotoSpaceNotifyCredentialRevoked:
+    'com.atproto.space.notifyCredentialRevoked',
   ComAtprotoSpaceNotifySpaceDeleted: 'com.atproto.space.notifySpaceDeleted',
   ComAtprotoSpaceNotifyWrite: 'com.atproto.space.notifyWrite',
   ComAtprotoSpacePutRecord: 'com.atproto.space.putRecord',

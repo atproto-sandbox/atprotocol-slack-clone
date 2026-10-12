@@ -54,7 +54,7 @@ export async function discoverWorkspaces(session: OAuthSession): Promise<Workspa
 }
 
 export async function discoverWorkspaceState(session: OAuthSession): Promise<WorkspaceDiscovery> {
-  const spaces = await listBoundedSpaces(sessionClient(session), { type: "org.slack.workspace", maxSpaces: MAX_DISCOVERABLE_WORKSPACES });
+  const spaces = await listBoundedSpaces(sessionClient(session), { spaceType: "org.slack.workspace", maxSpaces: MAX_DISCOVERABLE_WORKSPACES });
   const results = await mapLimited(spaces, 8, async (uri) => {
     try {
       const summary = await readWorkspaceSummary(session, uri);

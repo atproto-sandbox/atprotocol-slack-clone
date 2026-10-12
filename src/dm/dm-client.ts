@@ -103,7 +103,7 @@ export class DmClient {
   async enableDms(mode: DmRequestMode, allowlist: readonly string[] = []): Promise<void> {
     try {
       await this.deps.memberClient.procedure("com.atproto.simplespace.createSpace", {
-        type: "org.slack.dm.inbox", skey: DM_INBOX_SKEY,
+        spaceType: "org.slack.dm.inbox", skey: DM_INBOX_SKEY,
         readPolicy: { $type: "com.atproto.simplespace.defs#memberListPolicy" },
         writePolicy: { $type: policyType(writePolicyForMode(mode)) },
         appAccess: { $type: "com.atproto.simplespace.defs#open" },
@@ -228,7 +228,7 @@ export class DmClient {
   }
 
   async listConversations(): Promise<DmConversationSummary[]> {
-    const halves = await listBoundedSpaces(this.deps.memberClient, { type: "org.slack.dm.conversation", maxSpaces: MAX_OWN_CONVERSATIONS });
+    const halves = await listBoundedSpaces(this.deps.memberClient, { spaceType: "org.slack.dm.conversation", maxSpaces: MAX_OWN_CONVERSATIONS });
     if (halves.truncated) throw new Error("Own DM conversation count exceeds the bounded scan limit.");
     const own = await mapLimited(halves.spaces, FANOUT, async (space): Promise<DmConversationSummary | null> => {
       const parsed = parseDmConversationUri(space.uri);
@@ -435,7 +435,7 @@ export class DmClient {
   // --- Re-notify (§3.3 step 7) ---
 
   async renotifyPending(): Promise<void> {
-    const halves = await listBoundedSpaces(this.deps.memberClient, { type: "org.slack.dm.conversation", maxSpaces: MAX_OWN_CONVERSATIONS });
+    const halves = await listBoundedSpaces(this.deps.memberClient, { spaceType: "org.slack.dm.conversation", maxSpaces: MAX_OWN_CONVERSATIONS });
     if (halves.truncated) throw new Error("Own DM conversation count exceeds the bounded scan limit.");
     await mapLimited(halves.spaces, FANOUT, async (space) => {
       const header = await this.getValidatedOwnHeader(space.uri);
@@ -510,7 +510,7 @@ export class DmClient {
   private async createHalf(convKey: string): Promise<void> {
     try {
       await this.deps.memberClient.procedure("com.atproto.simplespace.createSpace", {
-        type: "org.slack.dm.conversation", skey: convKey,
+        spaceType: "org.slack.dm.conversation", skey: convKey,
         readPolicy: { $type: "com.atproto.simplespace.defs#memberListPolicy" },
         writePolicy: { $type: "com.atproto.simplespace.defs#memberListPolicy" },
         appAccess: { $type: "com.atproto.simplespace.defs#open" },
@@ -572,7 +572,7 @@ export class DmClient {
   }
 
   private async findExistingHalf(participants: readonly string[]): Promise<string | null> {
-    const halves = await listBoundedSpaces(this.deps.memberClient, { type: "org.slack.dm.conversation", maxSpaces: MAX_OWN_CONVERSATIONS });
+    const halves = await listBoundedSpaces(this.deps.memberClient, { spaceType: "org.slack.dm.conversation", maxSpaces: MAX_OWN_CONVERSATIONS });
     if (halves.truncated) throw new Error("Own DM conversation count exceeds the bounded scan limit.");
     for (const space of halves.spaces) {
       const header = await this.getValidatedOwnHeader(space.uri);
@@ -594,7 +594,7 @@ export class DmClient {
   }
 
   private async ownConversationKeys(): Promise<Set<string>> {
-    const halves = await listBoundedSpaces(this.deps.memberClient, { type: "org.slack.dm.conversation", maxSpaces: MAX_OWN_CONVERSATIONS });
+    const halves = await listBoundedSpaces(this.deps.memberClient, { spaceType: "org.slack.dm.conversation", maxSpaces: MAX_OWN_CONVERSATIONS });
     if (halves.truncated) throw new Error("Own DM conversation count exceeds the bounded scan limit.");
     return new Set(halves.spaces.flatMap((space) => {
       const parsed = parseDmConversationUri(space.uri);

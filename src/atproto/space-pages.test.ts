@@ -8,7 +8,7 @@ test("workspace discovery bounds its pages and distinguishes exact limits from o
     { spaces: [{ uri: "space:a" }, { uri: "space:b" }], cursor: "next" },
     { spaces: [] },
   ]);
-  assert.deepEqual(await listBoundedSpaces(exact.client, { type: "org.slack.workspace", maxSpaces: 2 }), ["space:a", "space:b"]);
+  assert.deepEqual(await listBoundedSpaces(exact.client, { spaceType: "org.slack.workspace", maxSpaces: 2 }), ["space:a", "space:b"]);
   assert.deepEqual(exact.calls.map(({ limit, cursor }) => ({ limit, cursor })), [
     { limit: 2, cursor: undefined },
     { limit: 1, cursor: "next" },
@@ -18,10 +18,10 @@ test("workspace discovery bounds its pages and distinguishes exact limits from o
     { spaces: [{ uri: "space:a" }, { uri: "space:b" }], cursor: "next" },
     { spaces: [{ uri: "space:c" }] },
   ]);
-  await assert.rejects(listBoundedSpaces(overflow.client, { type: "org.slack.workspace", maxSpaces: 2 }), /exceeds the 2-space discovery limit/);
+  await assert.rejects(listBoundedSpaces(overflow.client, { spaceType: "org.slack.workspace", maxSpaces: 2 }), /exceeds the 2-space discovery limit/);
 
   const advancingEmpty = fakeClient(Array.from({ length: 128 }, (_, index) => ({ spaces: [], cursor: `next-${index}` })));
-  await assert.rejects(listBoundedSpaces(advancingEmpty.client, { type: "org.slack.workspace", maxSpaces: 2 }), /bounded page limit/);
+  await assert.rejects(listBoundedSpaces(advancingEmpty.client, { spaceType: "org.slack.workspace", maxSpaces: 2 }), /bounded page limit/);
   assert.equal(advancingEmpty.calls.length, 128);
 });
 
