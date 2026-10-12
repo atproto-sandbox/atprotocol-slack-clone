@@ -219,7 +219,7 @@ Then("the old credential works only until its signed expiration", async function
   assert.deepEqual(await profile(workspaceCredential), { records: 1 }, "removal does not revoke a credential that was already issued");
 
   assert.deepEqual(
-    await profile(withExtendedExpiry(workspaceCredential, 365 * 24 * 60 * 60)),
+    await profile(withExtendedExpiry(workspaceCredential, 600)),
     { refused: { status: 401, code: "BadJwtSignature" } },
     "stretching the signed expiry breaks the signature, so the expiry the authority signed is the only limit",
   );
