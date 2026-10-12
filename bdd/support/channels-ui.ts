@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { JoseKey } from "@atproto/jwk-jose";
+import { generateSpaceKey } from "@/atproto/space-signature";
 import { expect, type Locator } from "@playwright/test";
 import { mintSpaceCredentialWith, SpaceCredentialError, type SpaceCredential } from "@/atproto/space-credential-core";
 import { AtprotoClient } from "@/atproto/xrpc";
@@ -84,7 +84,7 @@ export async function requestChannelCredential(world: AppWorld, as: Actor, space
       memberClient,
       resolvePds: async (did) => pdsOf(world, did),
       fetchEndpoint: (request) => fetch(request),
-      generateKey: () => JoseKey.generate(["ES256"]),
+      generateKey: generateSpaceKey,
     }, space);
     return { granted: true, credential };
   } catch (error) {

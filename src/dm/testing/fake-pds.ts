@@ -1,4 +1,6 @@
-import type { DpopKey } from "@/atproto/dpop";
+import { verifySignature } from "@atproto/crypto";
+import { fromBase64 } from "@atproto/lex-data";
+import { generateSpaceKey } from "@/atproto/space-signature";
 import { AtprotoClient } from "@/atproto/xrpc";
 
 /**
@@ -38,7 +40,12 @@ type FakeSpace = {
   repos: Map<string, Map<string, Map<string, { value: Record<string, unknown>; cid: string }>>>;
 };
 
-type FakeAuth = { kind: "self"; did: string } | { kind: "delegation"; token: string } | { kind: "credential"; token: string } | { kind: "none" };
+type FakeAuth =
+  | { kind: "self"; did: string }
+  | { kind: "delegation"; token: string; keyId: string }
+  | { kind: "credential"; token: string; audience: string }
+  | { kind: "none" }
+  | { kind: "rejected"; error: FakeXrpcError };
 
 const CREDENTIAL_LIFETIME_MS = 2 * 60 * 60 * 1000;
 
@@ -55,7 +62,7 @@ export class FakeDmNetwork {
   private readonly accounts = new Map<string, string>();
   private readonly spaces = new Map<string, FakeSpace>();
   private readonly delegations = new Map<string, { space: string; granteeDid: string }>();
-  private readonly credentials = new Map<string, { space: string; grantedDid: string; expiresAt: number }>();
+  private readonly credentials = new Map<string, { space: string; grantedDid: string; keyId: string; expiresAt: number }>();
   private tokenCounter = 0;
   private cidCounter = 0;
   private revCounter = 0;
@@ -92,25 +99,32 @@ export class FakeDmNetwork {
     const url = new URL(request.url);
     const path = `${url.pathname}${url.search}`;
     const body = request.method === "GET" || request.method === "HEAD" ? undefined : await request.text();
-    return this.respond(path, { method: request.method, body }, this.authFromHeader(request.headers.get("authorization")));
+    return this.respond(path, { method: request.method, body }, await this.authFromRequest(request.headers));
   };
 
-  generateKey = async (): Promise<DpopKey> => {
-    const id = `fake-key-${this.tokenCounter++}`;
-    return {
-      bareJwk: { kty: "EC", crv: "P-256", x: id, y: id },
-      algorithms: ["ES256"],
-      createJwt: async (header, payload) => `${encodeSegment(header)}.${encodeSegment(payload)}.fake-signature`,
-    };
-  };
+  generateKey = generateSpaceKey;
 
-  private authFromHeader(header: string | null): FakeAuth {
-    if (!header) return { kind: "none" };
-    const [scheme, token] = header.split(" ");
-    if (!token) return { kind: "none" };
-    if (scheme === "Bearer") return { kind: "delegation", token };
-    if (scheme === "DPoP") return { kind: "credential", token };
-    return { kind: "none" };
+  /**
+   * Authenticates a cross-host request the way the pinned PDS does: a `Bearer`
+   * delegation token needs a signature naming its own `keyid`; an
+   * `Atproto-Space` credential needs the audience header and a signature by the
+   * key the credential was bound to when it was minted.
+   */
+  private async authFromRequest(headers: Headers): Promise<FakeAuth> {
+    const authorization = headers.get("authorization");
+    const [scheme, token] = authorization?.split(" ") ?? [];
+    if (!authorization || !scheme || !token) return { kind: "none" };
+    if (scheme === "Bearer") {
+      const keyId = /^\("authorization"\);keyid="(did:key:[^"]+)"$/.exec(signatureInput(headers) ?? "")?.[1];
+      if (!keyId || !(await signatureVerifies(headers, authorization, undefined, keyId))) return rejected("BadSpaceSignature", "invalid HTTP message signature");
+      return { kind: "delegation", token, keyId };
+    }
+    if (scheme !== "Atproto-Space") return { kind: "none" };
+    const audience = headers.get("atproto-space-audience");
+    const credential = this.credentials.get(token);
+    if (!audience || signatureInput(headers) !== '("authorization" "atproto-space-audience")' || !credential) return rejected("BadSpaceSignature", "invalid HTTP message signature");
+    if (!(await signatureVerifies(headers, authorization, audience, credential.keyId))) return rejected("BadSpaceSignature", "invalid HTTP message signature");
+    return { kind: "credential", token, audience };
   }
 
   private async respond(path: string, init: { method?: string; body?: unknown }, auth: FakeAuth): Promise<Response> {
@@ -119,15 +133,12 @@ export class FakeDmNetwork {
     const params: Record<string, unknown> = {};
     for (const [key, value] of url.searchParams.entries()) params[key] = value;
     if (typeof init.body === "string" && init.body.length > 0) Object.assign(params, JSON.parse(init.body));
+    if (auth.kind === "rejected") return errorResponse(auth.error);
     try {
       const body = this.handle(method, params, auth);
       return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
     } catch (error) {
-      if (error instanceof FakeXrpcError) {
-        return new Response(JSON.stringify({ error: error.code, message: error.message }), {
-          status: error.status, headers: { "content-type": "application/json" },
-        });
-      }
+      if (error instanceof FakeXrpcError) return errorResponse(error);
       throw error;
     }
   }
@@ -187,7 +198,7 @@ export class FakeDmNetwork {
       space.members.get(delegation.granteeDid)?.read === true;
     if (!authorized) throw new FakeXrpcError(400, "UserNotAuthorized", "User not authorized for this space");
     const token = `credential-${this.tokenCounter++}`;
-    this.credentials.set(token, { space: delegation.space, grantedDid: delegation.granteeDid, expiresAt: this.now() + CREDENTIAL_LIFETIME_MS });
+    this.credentials.set(token, { space: delegation.space, grantedDid: delegation.granteeDid, keyId: auth.keyId, expiresAt: this.now() + CREDENTIAL_LIFETIME_MS });
     return { credential: token };
   }
 
@@ -304,6 +315,8 @@ export class FakeDmNetwork {
     const credential = this.credentials.get(auth.token);
     if (!credential || credential.space !== params.space) throw new FakeXrpcError(403, "UserNotAuthorized", "credential does not authorize this space");
     if (credential.expiresAt <= this.now()) throw new FakeXrpcError(401, "ExpiredToken", "space credential expired");
+    const audience = typeof params.repo === "string" ? params.repo : this.requireSpace(params.space).ownerDid;
+    if (auth.audience !== audience) throw new FakeXrpcError(401, "BadSpaceAudience", "space audience does not match the request");
     return credential.grantedDid;
   }
 
@@ -401,9 +414,30 @@ function fakeTid(counter: number): string {
   return tid;
 }
 
-function encodeSegment(value: unknown): string {
-  const bytes = new TextEncoder().encode(JSON.stringify(value));
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+function errorResponse(error: FakeXrpcError): Response {
+  return new Response(JSON.stringify({ error: error.code, message: error.message }), {
+    status: error.status, headers: { "content-type": "application/json" },
+  });
+}
+
+function rejected(code: string, message: string): FakeAuth {
+  return { kind: "rejected", error: new FakeXrpcError(401, code, message) };
+}
+
+function signatureInput(headers: Headers): string | undefined {
+  return /^atproto-space=(.+)$/.exec(headers.get("signature-input") ?? "")?.[1];
+}
+
+async function signatureVerifies(headers: Headers, authorization: string, audience: string | undefined, keyId: string): Promise<boolean> {
+  const encoded = /^atproto-space=:([A-Za-z0-9+/=]+):$/.exec(headers.get("signature") ?? "")?.[1];
+  if (!encoded) return false;
+  const lines = [`"authorization": ${authorization.trim()}`];
+  if (audience !== undefined) lines.push(`"atproto-space-audience": ${audience.trim()}`);
+  lines.push(`"@signature-params": ${signatureInput(headers)}`);
+  try {
+    const signature = fromBase64(encoded);
+    return signature.length === 64 && await verifySignature(keyId, new TextEncoder().encode(lines.join("\n")), signature, { allowMalleableSig: true });
+  } catch {
+    return false;
+  }
 }

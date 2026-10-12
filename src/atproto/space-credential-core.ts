@@ -1,7 +1,7 @@
 import type * as GetDelegationToken from "@/lexicons/api/types/com/atproto/space/getDelegationToken";
 import { readUpstreamJson } from "@/lib/bounded-json";
 import { parseSpaceUri } from "@/protocol/keys";
-import { createSpaceDpopProof, type DpopKey } from "./dpop";
+import { createSpaceSigHeaders, type SpaceKey } from "./space-signature";
 import { AtprotoClient } from "./xrpc";
 
 const CREDENTIAL_LIFETIME_MS = 2 * 60 * 60 * 1000;
@@ -11,7 +11,7 @@ export type SpaceCredentialDeps = {
   memberClient: AtprotoClient;
   resolvePds(did: string): Promise<string>;
   fetchEndpoint(request: Request): Promise<Response>;
-  generateKey(): Promise<DpopKey>;
+  generateKey(): Promise<SpaceKey>;
 };
 
 export class SpaceCredentialError extends Error {
@@ -27,7 +27,7 @@ export class SpaceCredential {
   constructor(
     readonly space: string,
     readonly token: string,
-    readonly key: DpopKey,
+    readonly key: SpaceKey,
     private readonly fetchEndpoint: (request: Request) => Promise<Response>,
     expiresAt = Date.now() + CREDENTIAL_LIFETIME_MS,
   ) {
@@ -35,24 +35,29 @@ export class SpaceCredential {
   }
 
   client(service: string | URL): AtprotoClient {
-    const token = this.token;
+    const authorization = `Atproto-Space ${this.token}`;
     const key = this.key;
+    const authorityDid = parseSpaceUri(this.space)?.authorityDid;
+    if (!authorityDid) throw new Error("Invalid permissioned space URI.");
     const fetchEndpoint = this.fetchEndpoint;
     const base = service instanceof URL ? service : new URL(service);
     return new AtprotoClient(async (path, init) => {
       const request = new Request(new URL(path, base), { ...init, redirect: "error" });
-      request.headers.set("authorization", `DPoP ${token}`);
-      request.headers.set(
-        "dpop",
-        await createSpaceDpopProof(key, {
-          htm: request.method,
-          htu: request.url,
-          credential: token,
-        }),
-      );
+      const audience = await requestedRepo(request) ?? authorityDid;
+      for (const [name, value] of Object.entries(await createSpaceSigHeaders(key, { authorization, audience }))) {
+        request.headers.set(name, value);
+      }
       return fetchEndpoint(request);
     });
   }
+}
+
+/** A request for one repo is addressed to that repo's host; a space-wide request, to the space authority. */
+async function requestedRepo(request: Request): Promise<string | undefined> {
+  if (request.method === "GET") return new URL(request.url).searchParams.get("repo") ?? undefined;
+  const body = await request.clone().text();
+  const repo: unknown = body ? (JSON.parse(body) as { repo?: unknown }).repo : undefined;
+  return typeof repo === "string" ? repo : undefined;
 }
 
 export async function mintSpaceCredentialWith(deps: SpaceCredentialDeps, space: string): Promise<SpaceCredential> {
@@ -78,7 +83,7 @@ export async function exchangeSpaceCredential(input: {
   authorityPds: string;
   delegationToken: string;
   space: string;
-  key: DpopKey;
+  key: SpaceKey;
   fetchEndpoint: (request: Request) => Promise<Response>;
 }): Promise<string> {
   const endpoint = new URL(GET_SPACE_CREDENTIAL, input.authorityPds);
@@ -87,15 +92,11 @@ export async function exchangeSpaceCredential(input: {
     redirect: "error",
     headers: {
       accept: "application/json",
-      authorization: `Bearer ${input.delegationToken}`,
       "content-type": "application/json",
+      ...await createSpaceSigHeaders(input.key, { authorization: `Bearer ${input.delegationToken}` }),
     },
     body: JSON.stringify({ space: input.space }),
   });
-  request.headers.set(
-    "dpop",
-    await createSpaceDpopProof(input.key, { htm: "POST", htu: endpoint.toString() }),
-  );
   const response = await input.fetchEndpoint(request);
   const body = await readUpstreamJson<{ credential?: unknown; message?: unknown; error?: unknown }>(response, 64 * 1024);
   if (!response.ok || typeof body?.credential !== "string" || body.credential.length === 0) {

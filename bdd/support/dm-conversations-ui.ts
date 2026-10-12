@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { JoseKey } from "@atproto/jwk-jose";
+import { generateSpaceKey } from "@/atproto/space-signature";
 import type { Locator } from "@playwright/test";
 import { mintSpaceCredentialWith, SpaceCredentialError } from "@/atproto/space-credential-core";
 import { AtprotoClient } from "@/atproto/xrpc";
@@ -176,7 +176,7 @@ function dmcDeps(world: AppWorld, account: FixtureAccount): DmDeps {
     }),
     resolvePds: (did) => resolvePds(did, { plcUrl: world.fixture.plcUrl, loopback: true }),
     fetchEndpoint: (request) => fetch(request),
-    generateKey: () => JoseKey.generate(["ES256"]),
+    generateKey: generateSpaceKey,
     store: {
       get: async (key) => values.get(key) ?? null,
       set: async (key, value) => { values.set(key, value); },

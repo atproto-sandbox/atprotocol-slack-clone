@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { JoseKey } from "@atproto/jwk-jose";
+import { generateSpaceKey } from "@/atproto/space-signature";
 import type { Locator } from "@playwright/test";
 import Database from "better-sqlite3";
 import { inviteLinkFor } from "@/app/ui/client-api";
@@ -120,7 +120,7 @@ export async function mintAs(world: AppWorld, actor: Actor, space: string): Prom
     }),
     resolvePds: async (did) => accountFor(world, did).pdsUrl,
     fetchEndpoint: (request) => fetch(request),
-    generateKey: () => JoseKey.generate(["ES256"]),
+    generateKey: generateSpaceKey,
   }, space);
 }
 
@@ -146,7 +146,7 @@ export async function grantedCredential(world: AppWorld, actor: Actor, space: st
   return outcome.granted;
 }
 
-export type CredentialClaims = { iss: string; sub: string; iat: number; exp: number; cnf?: { jkt?: string } };
+export type CredentialClaims = { iss: string; sub: string; iat: number; exp: number; cnf?: { kid?: string } };
 
 export function claimsOf(token: string): CredentialClaims {
   const payload = token.split(".")[1];
@@ -161,7 +161,7 @@ export function withExtendedExpiry(credential: SpaceCredential, extraSeconds: nu
   return new SpaceCredential(credential.space, `${header}.${payload}.${signature}`, credential.key, (request) => fetch(request));
 }
 
-/** The credential's header and claims re-signed by its authority with a new `exp`, keeping its jti and DPoP binding: a genuinely expired (or not yet expired) copy that verifies. */
+/** The credential's header and claims re-signed by its authority with a new `exp`, keeping its jti and key binding: a genuinely expired (or not yet expired) copy that verifies. */
 export async function withSignedExpiry(world: AppWorld, credential: SpaceCredential, exp: number): Promise<SpaceCredential> {
   const authority = accountFor(world, claimsOf(credential.token).iss);
   const token = await world.fixture.resignSpaceCredential(authority.host, credential.token, { exp });

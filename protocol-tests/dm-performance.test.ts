@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
-import { JoseKey } from "@atproto/jwk-jose";
+import { generateSpaceKey } from "@/atproto/space-signature";
 import { AtprotoClient } from "@/atproto/xrpc";
 import { DmClient, type DmDeps, type DmStore } from "@/dm/dm-client";
 import { tidNow } from "@/protocol/keys";
@@ -72,7 +72,7 @@ test("DM read budget: 100 participants, 20,000 total messages, latest-100 read i
         return url;
       },
       fetchEndpoint: (request) => fetch(request),
-      generateKey: () => JoseKey.generate(["ES256"]),
+      generateKey: generateSpaceKey,
       store: createStore(),
     });
 

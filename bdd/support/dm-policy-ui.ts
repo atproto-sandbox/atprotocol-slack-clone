@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createDecipheriv } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { JoseKey } from "@atproto/jwk-jose";
+import { generateSpaceKey } from "@/atproto/space-signature";
 import type { Frame, Locator, Page, Response as PlaywrightResponse } from "@playwright/test";
 import Database from "better-sqlite3";
 import { listBoundedRecords, listBoundedRepos } from "@/atproto/record-pages";
@@ -270,7 +270,7 @@ export class DmpProbe {
       }),
       resolvePds: async (did) => this.pdsOf(did),
       fetchEndpoint: (request) => fetch(request),
-      generateKey: () => JoseKey.generate(["ES256"]),
+      generateKey: generateSpaceKey,
     };
   }
 

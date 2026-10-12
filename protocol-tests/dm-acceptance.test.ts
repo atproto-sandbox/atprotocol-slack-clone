@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
-import { JoseKey } from "@atproto/jwk-jose";
+import { generateSpaceKey } from "@/atproto/space-signature";
 import { AtprotoClient } from "@/atproto/xrpc";
 import { DmClient, type DmConversationPage, type DmDeps, type DmStore } from "@/dm/dm-client";
 import { readIndependentDmConversation } from "@/reader/independent-dm";
@@ -81,7 +81,7 @@ test("DM acceptance: 1:1, group, dropped-notification recovery, all with the ser
         return url;
       },
       fetchEndpoint: (request) => fetch(request),
-      generateKey: () => JoseKey.generate(["ES256"]),
+      generateKey: generateSpaceKey,
       store: createStore(),
       ...(now ? { now } : {}),
     });

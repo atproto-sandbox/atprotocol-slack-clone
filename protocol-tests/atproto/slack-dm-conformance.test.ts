@@ -2,9 +2,10 @@ import { randomUUID } from 'node:crypto'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { formatDidKey, type Keypair, P256Keypair } from '@atproto/crypto'
 import { TestNetworkNoAppView, type TestPds } from '@atproto/dev-env'
+import { createSpaceSigHeaders } from '@atproto/space'
 import { calculateJwkThumbprint } from 'jose'
-import { JoseKey } from '@atproto/oauth-provider/provider'
 import type { NsidString } from '@atproto/syntax'
 import { Client } from '../../../oauth/oauth-provider/src/client/client.js'
 import { generateCode } from '../../../oauth/oauth-provider/src/request/code.js'
@@ -57,15 +58,26 @@ const credentialAt = async (
   space: `at://${string}`,
   ownerPds: TestPds,
 ): Promise<SpaceCredential> => {
-  const key = await JoseKey.generate(['ES256'])
+  const key = await P256Keypair.create()
   const token = await spaces.delegationTokenFor(actor, space as never)
-  const proof = await spaces.credentialExchangeProof(key, ownerPds)
   const res = await ownerPds.getClient().call(
     com.atproto.space.getSpaceCredential,
     { space: space as never },
-    { headers: { authorization: `Bearer ${token}`, dpop: proof } },
+    { headers: await createSpaceSigHeaders(key, { authorization: `Bearer ${token}` }) },
   )
   return new SpaceCredential(res.credential, key)
+}
+
+/** A browser-style space signing key: the private half never leaves WebCrypto. */
+const webCryptoSpaceKey = async (): Promise<Keypair> => {
+  const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify'])
+  expect(pair.privateKey.extractable).toBe(false)
+  const did = formatDidKey('ES256', new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey)))
+  return {
+    jwtAlg: 'ES256',
+    did: () => did,
+    sign: async (msg) => new Uint8Array(await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, pair.privateKey, msg)),
+  }
 }
 
 const writerDids = async (credential: SpaceCredential, ownerPds: TestPds, space: string) => {
@@ -263,7 +275,7 @@ describe('atproto Slack direct-message protocol conformance', () => {
     }
   })
 
-  it('lets a browser-style public OAuth client with a non-extractable WebCrypto DPoP key run the DM flow', async () => {
+  it('lets a browser-style public OAuth client with non-extractable WebCrypto keys run the DM flow', async () => {
     const network = await TestNetworkNoAppView.create({ extraPdses: 1, lexiconAuthority: true })
     try {
       const lexiconAgent = network.pds.getAgent()
@@ -299,6 +311,7 @@ describe('atproto Slack direct-message protocol conformance', () => {
 
       // Browser key: private half never leaves WebCrypto.
       const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify'])
+      const spaceKey = await webCryptoSpaceKey()
       expect(pair.privateKey.extractable).toBe(false)
       const { kty, crv, x, y } = await crypto.subtle.exportKey('jwk', pair.publicKey)
       const jwk = { kty: kty!, crv: crv!, x: x!, y: y! }
@@ -404,14 +417,13 @@ describe('atproto Slack direct-message protocol conformance', () => {
         record: { $type: MESSAGE, text: 'from alice browser', createdAt: new Date().toISOString() },
       })
 
-      // (e) Delegation token from the browser session, exchanged at bob's host with a WebCrypto proof.
+      // (e) Delegation token from the browser session, exchanged at bob's host with a WebCrypto message signature.
       const delegation = await callAsOAuth(dmToken.access_token, 'com.atproto.space.getDelegationToken', undefined, { space: bobHalf })
       const exchangeUrl = new URL('/xrpc/com.atproto.space.getSpaceCredential', pds2.url).toString()
       const exchange = await fetch(exchangeUrl, {
         method: 'POST',
         headers: {
-          authorization: `Bearer ${delegation!.token as string}`,
-          dpop: await proof('POST', exchangeUrl),
+          ...(await createSpaceSigHeaders(spaceKey, { authorization: `Bearer ${delegation!.token as string}` })),
           'content-type': 'application/json',
         },
         body: JSON.stringify({ space: bobHalf }),
@@ -423,7 +435,7 @@ describe('atproto Slack direct-message protocol conformance', () => {
       readUrl.searchParams.set('repo', bob.did)
       readUrl.searchParams.set('collection', MESSAGE)
       const read = await fetch(readUrl, {
-        headers: { authorization: `DPoP ${credential}`, dpop: await proof('GET', readUrl.toString(), credential) },
+        headers: await createSpaceSigHeaders(spaceKey, { authorization: `Atproto-Space ${credential}`, audience: bob.did }),
       })
       expect(read.status).toBe(200)
       expect(((await read.json()) as { records: Array<{ value: { text: string } }> }).records.map((record) => record.value.text)).toEqual(['from bob'])
@@ -533,6 +545,7 @@ describe('atproto Slack direct-message protocol conformance', () => {
 
       // Browser key: private half never leaves WebCrypto (same shape as the OAuth-client test above).
       const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify'])
+      const spaceKey = await webCryptoSpaceKey()
       const { kty, crv, x, y } = await crypto.subtle.exportKey('jwk', pair.publicKey)
       const jwk = { kty: kty!, crv: crv!, x: x!, y: y! }
       const b64u = (bytes: ArrayBuffer | Uint8Array | string) => Buffer.from(typeof bytes === 'string' ? bytes : new Uint8Array(bytes)).toString('base64url')
@@ -677,8 +690,7 @@ describe('atproto Slack direct-message protocol conformance', () => {
       const exchange = await fetch(exchangeUrl, {
         method: 'POST',
         headers: {
-          authorization: `Bearer ${delegation!.token as string}`,
-          dpop: await proof('POST', exchangeUrl),
+          ...(await createSpaceSigHeaders(spaceKey, { authorization: `Bearer ${delegation!.token as string}` })),
           'content-type': 'application/json',
         },
         body: JSON.stringify({ space: bobHalf }),
@@ -690,7 +702,7 @@ describe('atproto Slack direct-message protocol conformance', () => {
       readUrl.searchParams.set('repo', bob.did)
       readUrl.searchParams.set('collection', MESSAGE)
       const read = await fetch(readUrl, {
-        headers: { authorization: `DPoP ${credential}`, dpop: await proof('GET', readUrl.toString(), credential) },
+        headers: await createSpaceSigHeaders(spaceKey, { authorization: `Atproto-Space ${credential}`, audience: bob.did }),
       })
       expect(read.status).toBe(200)
       expect(((await read.json()) as { records: Array<{ value: { text: string } }> }).records.map((record) => record.value.text)).toEqual(['from bob'])

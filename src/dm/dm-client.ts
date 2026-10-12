@@ -1,6 +1,6 @@
-import type { DpopKey } from "@/atproto/dpop";
 import { listBoundedMembers, listBoundedRecords, listBoundedRepos, listBoundedSpaces, assertBoundedRecordPage } from "@/atproto/record-pages";
 import { mintSpaceCredentialWith, SpaceCredential, SpaceCredentialError } from "@/atproto/space-credential-core";
+import type { SpaceKey } from "@/atproto/space-signature";
 import type { AtprotoClient } from "@/atproto/xrpc";
 import { mapLimited } from "@/lib/map-limited";
 import {
@@ -45,7 +45,7 @@ export type DmDeps = {
   memberClient: AtprotoClient;
   resolvePds(did: string): Promise<string>;
   fetchEndpoint(request: Request): Promise<Response>;
-  generateKey(): Promise<DpopKey>;
+  generateKey(): Promise<SpaceKey>;
   store: DmStore;
   now?: () => number;
   limits?: { maxInboxScan?: number; maxRequestsPerWriter?: number };

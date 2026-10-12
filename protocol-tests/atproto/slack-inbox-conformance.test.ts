@@ -2,8 +2,8 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { TestNetworkNoAppView } from '@atproto/dev-env'
-import { createSpaceToken, dpopJktForKey, parseSpaceToken } from '@atproto/space'
-import type { NsidString } from '@atproto/syntax'
+import { createSpaceToken, parseSpaceToken } from '@atproto/space'
+import type { DidString, NsidString } from '@atproto/syntax'
 import { com } from '../../src/lexicons/index.js'
 import { SpaceClient, SpaceCredential } from '../_space.js'
 
@@ -345,7 +345,7 @@ describe('atproto Slack inbox protocol conformance', () => {
         {
           iss: authority.did,
           sub: inbox,
-          dpopJkt: await dpopJktForKey(shortKey),
+          keyId: shortKey.did() as DidString,
           expiresInSec: 10,
         },
         await authority.pds.ctx.actorStore.keypair(authority.did),

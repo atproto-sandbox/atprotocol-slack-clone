@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { JoseKey } from "@atproto/jwk-jose";
+import { generateSpaceKey } from "@/atproto/space-signature";
 import type { Locator, Page, Response as PlaywrightResponse } from "@playwright/test";
 import { inviteLinkFor, type InboxRequest } from "@/app/ui/client-api";
 import { mintSpaceCredentialWith, SpaceCredentialError, type SpaceCredential } from "@/atproto/space-credential-core";
@@ -57,7 +57,7 @@ export async function mintCredential(world: AppWorld, as: Actor, space: string):
       return url;
     },
     fetchEndpoint: (request) => fetch(request),
-    generateKey: () => JoseKey.generate(["ES256"]),
+    generateKey: generateSpaceKey,
   }, space);
 }
 

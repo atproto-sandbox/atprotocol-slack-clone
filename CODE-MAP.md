@@ -41,7 +41,7 @@ Two independent-app proofs exist side by side: `src/reader/independent.ts` (chan
         ▼
  getDelegationToken @ caller's own PDS  ──token──▶  getSpaceCredential @ half owner's PDS
         │
-        │ 2. DPoP-bound space credential (≤ 2h)
+        │ 2. key-bound space credential (≤ 2h)
         ▼
  for each participant's conversation half (fan-out 8, src/lib/map-limited.ts):
    - read header, validate convKey + participant set match (validateDmHeaderMatchesRequest)
@@ -85,7 +85,8 @@ src/
   atproto/                Low-level protocol clients, shared by server channel code and the
                            isomorphic DM engine.
     xrpc.ts                  Minimal XRPC client (query/procedure) over an injected fetch handler.
-    dpop.ts                  DPoP proof creation (WebCrypto-based; isomorphic).
+    space-signature.ts       SpaceKey (WebCrypto P-256 did:key) and HTTP message signatures for
+                              space requests (isomorphic).
     space-credential-core.ts Isomorphic space-credential mint/exchange (SpaceCredential,
                               SpaceCredentialError, mintSpaceCredentialWith).
     space-credential.ts      Thin server adapter over space-credential-core.ts (Node session,
