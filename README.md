@@ -22,7 +22,7 @@ Next.js 16 (App Router) with SQLite for session state, caches and the operator j
 
 You need Node 22.17 (`.nvmrc`) and pnpm 11 (`corepack pnpm`). The local stack runs two in-memory PDS hosts, a PLC directory and this app, all from a pinned atproto checkout.
 
-1. Check out and build the pinned atproto revision next to this repo as `atproto-spaces-phase0`, and apply `protocol-tests/atproto/strict-credential-expiry.patch`. The steps are in [`docs/protocol/atproto-spaces-pin.md`](docs/protocol/atproto-spaces-pin.md).
+1. Check out and build the pinned atproto revision next to this repo as `atproto-spaces-phase1`, and apply `protocol-tests/atproto/strict-credential-expiry.patch`. The steps are in [`docs/protocol/atproto-spaces-pin.md`](docs/protocol/atproto-spaces-pin.md).
 2. Install and build:
 
    ```sh
@@ -33,7 +33,7 @@ You need Node 22.17 (`.nvmrc`) and pnpm 11 (`corepack pnpm`). The local stack ru
 3. Start the playground:
 
    ```sh
-   ATPROTO_PINNED_CHECKOUT=../atproto-spaces-phase0 corepack pnpm playground
+   ATPROTO_PINNED_CHECKOUT=../atproto-spaces-phase1 corepack pnpm playground
    ```
 
    It prints a local URL and four ready-made accounts, all with the password `playground-pass`. Type the account's DID (not the handle) into the sign-in box. Everything lives in memory and disappears when you stop it.
