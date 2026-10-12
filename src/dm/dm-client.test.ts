@@ -487,3 +487,16 @@ test("an expired credential is never reused", async () => {
   await alice.watch([inbox], "did:web:app.test");
   assert.equal(exchanges.count(), 2);
 });
+
+test("two concurrent callers over an expired credential mint exactly one replacement", async () => {
+  const { network, client } = harness();
+  const exchanges = countingExchanges(network);
+  const alice = client("did:plc:alice", "pds1", { fetchEndpoint: exchanges.fetchEndpoint });
+  await alice.enableDms("everyone");
+  const inbox = dmInboxUri("did:plc:alice");
+
+  await alice.watch([inbox], "did:web:app.test");
+  network.advanceClock(SPACE_CREDENTIAL_LIFETIME_MS);
+  await Promise.all([alice.watch([inbox], "did:web:app.test"), alice.watch([inbox], "did:web:app.test")]);
+  assert.equal(exchanges.count(), 2);
+});

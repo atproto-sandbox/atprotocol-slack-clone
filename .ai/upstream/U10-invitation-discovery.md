@@ -1,5 +1,7 @@
 # Let a user discover the spaces they have been added to
 
+Status against `5b95b2f2`: Unchanged. `listSpaces` still returns only spaces the user holds a repo in (the `type` filter is now `spaceType`); there is still no membership lookup.
+
 ## Summary
 A member's PDS tracks only the spaces its user has *written to*, and the authority's member list is host-internal and readable only by the owner. So an account that has been added to a space has no protocol-level way to learn the space exists. Applications must deliver the space URI out of band.
 

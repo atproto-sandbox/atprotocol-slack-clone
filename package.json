@@ -30,7 +30,6 @@
     "@atproto/crypto": "0.5.5",
     "@atproto/identity": "0.5.13",
     "@atproto/jwk-jose": "0.2.4",
-    "@atproto/jwk-webcrypto": "0.3.4",
     "@atproto/lex-client": "0.3.6",
     "@atproto/lex-data": "0.1.7",
     "@atproto/lex-schema": "0.2.7",

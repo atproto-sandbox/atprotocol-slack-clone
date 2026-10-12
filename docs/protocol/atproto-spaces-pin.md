@@ -1,22 +1,22 @@
 # atproto Spaces Protocol Pin and Conformance
 
 Status: pinned PDS API/policy and strict-expiry conformance pass with the checked-in verifier patch; the unmodified upstream base still fails the PRD cutoff  
-Verified: 2026-09-25
+Verified: 2026-10-09 (re-based from `787a730f`, which was verified 2026-09-25)
 
 ## Pinned source
 
 | Component | Pin |
 |---|---|
 | Proposal 0016 | `bluesky-social/proposals` `main` at `119fa6b63476d30c2516846c714319046e0422f3` |
-| PDS implementation | `bluesky-social/atproto` `permissioned-data`, PR [#5187](https://github.com/bluesky-social/atproto/pull/5187), commit `787a730fcd22ed7791e2636beb509a943017ba1c` |
+| PDS implementation | `bluesky-social/atproto` `permissioned-data`, PR [#5187](https://github.com/bluesky-social/atproto/pull/5187), commit `5b95b2f2723a2882824fbb0b819fd6aad884ef20` (previously `787a730f`) |
 | `@atproto/pds` | `0.5.32` |
 | `@atproto/oauth-scopes` | `0.5.11` |
 | `@atproto/oauth-provider` | `0.22.6` |
 | `@atproto/space` | `0.0.1` |
 | PDS development environment | Same pinned monorepo commit; `@atproto/dev-env` multi-PDS fixture |
-| Strict credential-expiry overlay | [`protocol-tests/atproto/strict-credential-expiry.patch`](../../protocol-tests/atproto/strict-credential-expiry.patch), SHA-256 `d394f0b15519900c04e5fa6392cd8f9c7b66505297e2695d41029ebdfb64d883` |
+| Strict credential-expiry overlay | [`protocol-tests/atproto/strict-credential-expiry.patch`](../../protocol-tests/atproto/strict-credential-expiry.patch), SHA-256 `e9cfae5beb29d01c494087abf79eaf58fd48312956422c91ff29a405977aae3f` |
 
-The proposal describes itself as a proposal, and PR #5187 is still marked Draft as of this verification. The unmodified `787a730f` source allows five seconds of expiry skew. The checked-in overlay makes space credentials expire at `exp` while retaining skew for delegation tokens, client attestations, and DPoP proofs. This is a local protocol fork requirement: any deployment must use this overlay or a compatible upstream revision and rerun conformance. Treat protocol drift as a release blocker.
+The proposal describes itself as a proposal, and PR #5187 (branch `permissioned-data`) is still marked Draft as of this verification. The unmodified `5b95b2f2` source still allows five seconds of expiry skew for credentials. The checked-in overlay changes `verifySpaceToken` in `packages/space/src/credential.ts` so a space credential is rejected at `exp` (zero skew) while delegation tokens and client attestations keep the five-second allowance, and it replaces the skew test in `packages/space/tests/credential.test.ts` with an at-`exp` rejection test plus a delegation-skew test. Space requests are signed with HTTP message signatures, not DPoP, so the overlay no longer mentions DPoP proofs. This is a local protocol fork requirement: any deployment must use this overlay or a compatible upstream revision and rerun conformance. Treat protocol drift as a release blocker.
 
 The pinned PDS validates only lexicons in its built-in schema map; publishing third-party `org.slack.*` schemas does not make them dynamically available to record validation in this revision. App writes therefore leave the optional PDS `validate` parameter unset and run `validateSpaceRecord` locally before every write. Every reader validates author, schema, key, and cross-record references and ignores invalid records. Do not set `validate: true` on app-owned records unless the PDS revision adds dynamic third-party schema resolution.
 
@@ -24,16 +24,16 @@ The pinned PDS also rejects record keys matching its explicit-slur filter. A con
 
 ## Reproduce the PDS conformance run
 
-Use Node 24 as selected by the pinned checkout's `.nvmrc` (the local proof also ran on Node 22.17.0) and pnpm 11.11.0. In a disposable clone:
+Use Node 24 as selected by the pinned checkout's `.nvmrc` (the local proof also ran on Node 22.17.0) and pnpm 11.11.0. In a disposable clone (the app's checkout name for it is `atproto-spaces-phase1`):
 
 ```sh
-git clone --filter=blob:none --no-checkout https://github.com/bluesky-social/atproto.git atproto-spaces-phase0
-git -C atproto-spaces-phase0 fetch --depth=1 origin 787a730fcd22ed7791e2636beb509a943017ba1c
-git -C atproto-spaces-phase0 checkout --detach 787a730fcd22ed7791e2636beb509a943017ba1c
-cd atproto-spaces-phase0
+git clone --filter=blob:none --no-checkout https://github.com/bluesky-social/atproto.git atproto-spaces-phase1
+git -C atproto-spaces-phase1 fetch --depth=1 origin 5b95b2f2723a2882824fbb0b819fd6aad884ef20
+git -C atproto-spaces-phase1 checkout --detach 5b95b2f2723a2882824fbb0b819fd6aad884ef20
+cd atproto-spaces-phase1
 shasum -a 256 /path/to/atproto-slack-clone/protocol-tests/atproto/strict-credential-expiry.patch
 git apply /path/to/atproto-slack-clone/protocol-tests/atproto/strict-credential-expiry.patch
-corepack pnpm@11.11.0 install --frozen-lockfile --filter @atproto/pds... --filter @atproto/dev-env...
+PUPPETEER_SKIP_DOWNLOAD=1 corepack pnpm@11.11.0 install --frozen-lockfile --filter @atproto/pds... --filter @atproto/dev-env...
 corepack pnpm@11.11.0 build:tooling
 corepack pnpm@11.11.0 --filter @atproto/space build
 corepack pnpm@11.11.0 --filter @atproto/pds... --filter @atproto/dev-env... build
@@ -52,7 +52,24 @@ NODE_OPTIONS=--experimental-vm-modules corepack pnpm@11.11.0 --filter @atproto/p
   tests/space/slack-dm-conformance.test.ts
 ```
 
-The patched verification passed 101 `@atproto/space` tests and six PDS suites with 108 tests passing and one upstream `todo`. It exercised independent accounts on up to three in-memory PDS hosts; the custom expiry test rejects at `exp + 2s` on both PDS hosts. The custom tests and exact source patch are retained in this checkout; see [protocol test instructions](../../protocol-tests/atproto/README.md).
+Build notes for `5b95b2f2`: the install needs `PUPPETEER_SKIP_DOWNLOAD=1` (shown above) and `npm_config_enable_pre_post_scripts=true` for the `build:tooling` and package builds; `oauth-provider-ui` needs its Lingui catalogs compiled once with `pnpm --filter @atproto/oauth-provider-ui i18n:compile` under Node 26 (the codegen uses `import.meta.main`) before the Node 22 build.
+
+The verification recorded on `787a730f` passed 101 `@atproto/space` tests and six PDS suites with 108 tests passing and one upstream `todo`; the figures for `5b95b2f2` are in `PROGRESS.md`. It exercised independent accounts on up to three in-memory PDS hosts; the custom expiry test rejects at `exp + 2s` on both PDS hosts. The custom tests and exact source patch are retained in this checkout; see [protocol test instructions](../../protocol-tests/atproto/README.md).
+
+## What changed since `787a730f`
+
+Old pin `787a730f` (verified 2026-09-25); the drift to `5b95b2f2` is 22 upstream commits from 2026-09-28 to 2026-10-01. The plan and review are in `.ai/plans/protocol-drift-5b95b2f.md`.
+
+| Upstream change | This app |
+|---|---|
+| `type` renamed `spaceType` on `createSpace` and the `listSpaces` filter | Used everywhere |
+| `listRepos` returns `repoRev` and `spaceRev` (was `rev`); cursor is a space revision; ascending order; a repo may reappear | Used: `listBoundedRepos` keeps the latest entry per DID and counts distinct DIDs. Not used: resuming a scan from a stored `spaceRev` |
+| `notifyWrite` body carries `repoRev`; forwarded copies add `spaceRev` and `prevSpaceRev`; errors `SpaceNotFound`, `FutureRev` | `repoRev` used. Not used: `prevSpaceRev` gap detection and `listRepos` recovery by `spaceRev` (follow-up) |
+| HTTP message signatures replace DPoP for space requests (`signature-input`, `signature`, `atproto-space-audience`; credential scheme `Atproto-Space`; claim `cnf.kid`) | Used; the audience is the repo DID for a request naming one repo, else the space authority |
+| Credential lifetime 600 s default, 3600 s ceiling (was 7200 s); `jti` on every token | Used: renewal opens at one sixth of the lifetime before expiry |
+| Credential revocation endpoint and `notifyCredentialRevoked` | Not used (follow-up); membership removal still relies on credential expiry |
+| Space host resolved from a `#atproto_space_host` service entry, falling back to the PDS | Not used: the app resolves the PDS only |
+| Strict-expiry patch no longer applied; upstream still allows 5 s skew | Patch re-based; see the overlay description above |
 
 ## API and authorization mapping
 
@@ -62,9 +79,9 @@ The patched verification passed 101 `@atproto/space` tests and six PDS suites wi
 | Set/remove membership | `com.atproto.simplespace.putMember` replaces both `read` and `write`; `removeMember` deletes the member. Both require the space authority DID and `manage=update`. |
 | Read membership state | `com.atproto.simplespace.listMembers` requires the owner session with `action=read_self`. A space credential and non-owner member cannot call it. The authority is implicitly admitted for reads and credentials but is not listed as a member. |
 | Discover spaces | `com.atproto.space.listSpaces` discovers spaces present in the caller's own repo. The invitee's `org.slack.acceptance` record supplies that index entry; it is not a membership check. |
-| Mint a read credential | The account PDS issues `com.atproto.space.getDelegationToken`; the space authority exchanges it through `com.atproto.space.getSpaceCredential`. `readPolicy` controls issuance. Space credentials are DPoP-bound and valid for 7,200 seconds by default. |
+| Mint a read credential | The account PDS issues `com.atproto.space.getDelegationToken`; the space authority exchanges it through `com.atproto.space.getSpaceCredential`. `readPolicy` controls issuance. Space credentials are bound to a P-256 `did:key` by an HTTP message signature (no DPoP), carry `cnf.kid` and a `jti`, and are valid for 600 seconds by default with a 3,600 second ceiling. |
 | Write records | `com.atproto.space.createRecord`, `putRecord`, and `deleteRecord` address the author's own repo. OAuth scope checks distinguish create from update and match the target collection. Writes and read credentials are separate protocol permissions. |
-| Synchronize writers | `com.atproto.space.notifyWrite` updates the authority's writer set; `com.atproto.space.listRepos` enumerates that set, not readers or all members. App-level notifications can be missed while `listRepos` still recovers the writer. If the writer's PDS-to-authority notification itself is dropped, the writer is absent from `listRepos`; owner-only `listMembers` enumerates inbox `write=true` candidates, and an admin's valid inbox credential can read a candidate repo directly. |
+| Synchronize writers | `com.atproto.space.notifyWrite` (body `repoRev`, `hash`) updates the authority's writer set; `com.atproto.space.listRepos` enumerates that set, not readers or all members, returning `repoRev` and `spaceRev` per repo in ascending `spaceRev` order. A repo updated while paginating reappears at a later `spaceRev`; `cursor` means "updated after this space revision". App-level notifications can be missed while `listRepos` still recovers the writer. If the writer's PDS-to-authority notification itself is dropped, the writer is absent from `listRepos`; owner-only `listMembers` enumerates inbox `write=true` candidates, and an admin's valid inbox credential can read a candidate repo directly. |
 
 ## Slack split-policy conformance
 
@@ -72,7 +89,7 @@ The retained multi-PDS inbox test creates an `org.slack.inbox` with member-list 
 
 The conformance test also drops the requester's PDS-to-authority DID notification. `listRepos` then omits the requester, while authority `listMembers` still reports `write=true`; the admin credential can directly read that repo. This proves the recovery API must query owner-authorized membership candidates instead of claiming that a writer-set-only sweep recovers every dropped notification.
 
-Membership removal prevents a fresh space credential. A default credential claims `exp - iat = 7200`. The unmodified pinned verifier uses `CLOCK_SKEW_SEC = 5` and accepts a credential after its `exp`. The checked-in overlay applies zero expiry skew only to space credentials; delegation tokens, client attestations, and DPoP proofs retain their five-second clock allowance. Unit tests prove the credential is rejected at `exp` and delegation skew remains accepted; the two-PDS conformance test proves a short-lived credential is rejected at `exp + 2s` on both hosts. Neither expiry nor removal can erase copies already downloaded.
+Membership removal prevents a fresh space credential. A default credential claims `exp - iat = 600`; the ceiling is 3600. The unmodified pinned verifier uses `CLOCK_SKEW_SEC = 5` and accepts a credential after its `exp`. The checked-in overlay applies zero expiry skew only to space credentials; delegation tokens and client attestations retain their five-second clock allowance. Unit tests prove the credential is rejected at `exp` and delegation skew remains accepted; the two-PDS conformance test proves a short-lived credential is rejected at `exp + 2s` on both hosts. Neither expiry nor removal can erase copies already downloaded.
 
 ## Direct-message conformance (DM plan M0)
 
@@ -88,13 +105,13 @@ Verified 2026-09-26 on the pinned commit plus overlay, Node 22.17.0. `slack-dm-c
 | Removing an allowlisted writer | The writer's later puts succeed on their PDS; they stay in `listRepos`, and the owner can still read their records | Same: allowlist enforcement for tracked writers is client-side |
 | Switch back to `public` | A previously ignored writer is tracked after their next write | Confirmed |
 | OAuth scopes (public client, `token_endpoint_auth_method: none`) | `space:org.slack.dm.inbox?authority=*&collection=org.slack.dm.request&action=create` allows request writes into another user's inbox and rejects other collections. `manage=create/update` on own conversation type allows `createSpace`/`putMember`. `authority=*&action=read` allows delegation tokens. A plain `atproto` token does none of these | Confirmed |
-| Browser DPoP | A non-extractable WebCrypto P-256 key signs access-token proofs, the credential exchange at another host, and credential-bound reads | Confirmed |
+| Browser signing key | A non-extractable WebCrypto P-256 key signs OAuth access-token proofs (DPoP, unchanged for OAuth) and, as a `did:key`, the HTTP message signatures on the credential exchange at another host and on credential-bound reads | Confirmed |
 | `removeMember` | Blocks new credentials for the revoker's half only | Confirmed |
 | 100 participants | 100 halves × 99 members: setup 27.5 s (100 `createSpace`, 9,900 `putMember`, 100 writes). One reader minted 100 credentials and read 100 halves in 1.2 s at concurrency 8. `listMembers` returns 99 | Confirmed on the fixture (rate limits disabled; not a production result) |
 
 ## OAuth scope proof
 
-The custom authority test uses a real PDS OAuth `TokenManager` to sign a DPoP-bound OAuth access token. The token calls the real `putMember` and authority record-write handlers successfully with `manage=update` plus the exact `org.slack.admin` collection actions. A correctly signed authority token with only `action=read` is denied the membership mutation. The same scoped session calls the real `com.atproto.server.getServiceAuth` endpoint with an RPC scope and receives a service JWT whose `iss`, service-reference `aud`, and `lxm` match the operator contract.
+The custom authority test uses a real PDS OAuth `TokenManager` to sign a DPoP-bound OAuth access token (OAuth keeps DPoP; only space requests moved to HTTP message signatures). The token calls the real `putMember` and authority record-write handlers successfully with `manage=update` plus the exact `org.slack.admin` collection actions. A correctly signed authority token with only `action=read` is denied the membership mutation. The same scoped session calls the real `com.atproto.server.getServiceAuth` endpoint with an RPC scope and receives a service JWT whose `iss`, service-reference `aud`, and `lxm` match the operator contract.
 
 This test uses a synthetic granted OAuth scope to reach the PDS verifier and handlers. It does not automate the browser authorization/consent interaction; production consent must still present the narrow scopes listed below.
 

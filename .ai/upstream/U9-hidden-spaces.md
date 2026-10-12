@@ -1,5 +1,7 @@
 # Optional: let a space hide its existence from non-members
 
+Status against `5b95b2f2`: Not affected. `getSpaceCredential` still distinguishes `SpaceNotFound` from `UserNotAuthorized`.
+
 ## Summary
 A non-member can tell whether a space exists, because the credential exchange returns different errors for a space that does not exist, one that exists, and one that was deleted.
 

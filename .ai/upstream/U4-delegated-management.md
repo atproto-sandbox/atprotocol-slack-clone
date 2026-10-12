@@ -1,5 +1,7 @@
 # Let a space owner delegate space management to other accounts
 
+Status against `5b95b2f2`: Not affected. `simplespace` management still requires auth as the space owner (`NotSpaceOwner`).
+
 ## Summary
 Only the space owner can call `putMember`, `removeMember` and `updateSpace`. A team space owned by a dedicated account can therefore be administered only by whoever holds that account's OAuth session. There is no way to give another account the authority to manage members without giving it the owner's session.
 

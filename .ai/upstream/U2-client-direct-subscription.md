@@ -1,5 +1,7 @@
 # Let clients subscribe to space changes directly, without a relay service
 
+Status against `5b95b2f2`: Not affected. `registerNotify` still takes a service identifier; `notifyWrite` gained `spaceRev` and `prevSpaceRev`, which makes a gap detectable but does not give a browser a delivery endpoint.
+
 ## Summary
 The only real-time mechanism, `registerNotify`, delivers `notifyWrite` to a *service endpoint*. A browser-only application therefore has to relay through a server, and that server learns which spaces each user follows.
 

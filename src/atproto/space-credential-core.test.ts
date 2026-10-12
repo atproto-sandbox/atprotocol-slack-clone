@@ -59,6 +59,18 @@ test("a request for one repo is addressed to that repo's host, not the space aut
   assert.equal(requests.at(-1)!.headers.get("atproto-space-audience"), READER);
 });
 
+test("a non-DID repo query falls back to the space authority audience", async () => {
+  const { credential, requests } = await capture();
+  await credential.client("https://fake-pds.test/pds2").query("com.atproto.space.listRecords", { space: SPACE, repo: "not-a-did", collection: "org.slack.dm.request" }).catch(() => undefined);
+  assert.equal(requests.at(-1)!.headers.get("atproto-space-audience"), OWNER);
+});
+
+test("a POST body naming a repo does not change the audience", async () => {
+  const { credential, requests } = await capture();
+  await credential.client("https://fake-pds.test/pds2").procedure("com.atproto.space.putRecord", { space: SPACE, repo: READER, collection: "org.slack.dm.request", rkey: "x", record: {} }).catch(() => undefined);
+  assert.equal(requests.at(-1)!.headers.get("atproto-space-audience"), OWNER);
+});
+
 test("the credential lifetime is ten minutes, well under the one-hour protocol ceiling, and renewal opens inside it", () => {
   assert.equal(SPACE_CREDENTIAL_LIFETIME_MS, 600_000);
   assert.ok(SPACE_CREDENTIAL_RENEW_BEFORE_MS > 0 && SPACE_CREDENTIAL_RENEW_BEFORE_MS < SPACE_CREDENTIAL_LIFETIME_MS);

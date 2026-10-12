@@ -1,5 +1,7 @@
 # Let a space authority evict a writer from the tracked writer set
 
+Status against `5b95b2f2`: Still open. `simplespace.removeMember` only deletes the `simplespace_member` row; nothing removes a tracked writer, and `listRepos` (now keyed by `spaceRev`) keeps returning evicted writers. The only change is that a repo can reappear at a later `spaceRev`.
+
 ## Summary
 Tightening a space's write policy, or removing a member's write access, stops *new* strangers from being tracked but leaves already-tracked writers in `listRepos` permanently. There is no call that removes them.
 

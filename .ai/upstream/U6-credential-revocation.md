@@ -1,27 +1,27 @@
-# Space credentials: strict expiry, per-space lifetime, and revocation
+# Space credentials: expire exactly at `exp`
+
+Status against `5b95b2f2`: revocation, a shorter default and a lifetime ceiling now exist upstream. Only item 1 below remains.
 
 ## Summary
-A space credential carries no holder identity and is valid until it expires (default 2 hours), so removing a member cannot revoke a credential already issued. In the pinned implementation a credential is also accepted for a few seconds after `exp`.
+In the pinned implementation a space credential is still accepted for about five seconds after `exp`, because the verifier applies the general clock-skew allowance to every token type. Our requirement that access ends at expiry forces a local patch.
+
+## Resolved upstream (for the record)
+- Default lifetime is now 600 seconds with a 3600 second ceiling (was 7200 seconds), so the window in which a removed member keeps reading is at most an hour and ten minutes by default.
+- `com.atproto.space.notifyCredentialRevoked` lets the space authority tell a repo host that specific credentials (by `jti`) are revoked, so a removed member's credentials can be cut off before `exp`.
+- Credentials are bound to a key with an HTTP message signature instead of DPoP.
 
 ## Problem
-- After `removeMember`, the removed member can keep reading until their credential expires. For a private channel or a DM the owner cannot shorten that window.
-- The credential deliberately does not name its holder (the user's DID is spent at mint time), so hosts have nothing to check a removal against.
-- On `787a730f` the verifier allows about five seconds of clock skew after `exp`. Our requirement that access ends at expiry forced us to carry a local patch. That behavior should be a stated normative choice, not an implementation detail.
+- `verifySpaceToken` rejects a token only when `now - CLOCK_SKEW_SEC >= exp`, with `CLOCK_SKEW_SEC = 5`, for credentials as well as delegation tokens and client attestations.
+- A credential is the read-access lease for third-party repos. With revocation available the five-second tail is small, but it is still not stated as a normative choice, and an application that relies on `exp` as a hard cutoff (we do, in tests and docs) cannot get it from an unmodified host.
 
 ## Proposed change
-1. State that a credential MUST be rejected at or after `exp` (skew tolerance applies to delegation tokens, client attestations and DPoP proofs only).
-2. Add a per-space credential lifetime to the space configuration, bounded by the protocol (for example 5 minutes to 2 hours), so owners of sensitive spaces can choose shorter windows.
-3. Optional, larger change: a membership epoch. The authority increments an integer in the space configuration whenever a read grant is removed, credentials carry it as a claim, and repo hosts compare it to the authority's current value (learned from `notifyWrite`-style pushes or a cached `getSpaceEpoch`) and reject older credentials after a grace period.
+State that a credential MUST be rejected at or after `exp`, with skew tolerance applying to delegation tokens and client attestations only. Our overlay is a three-line change in `packages/space/src/credential.ts`.
 
 ## Alternatives considered
-- Very short lifetimes only (item 2). Simple, but costs one credential exchange per interval.
-- Holder identifiers in credentials. Stronger, but it weakens the property that credentials do not identify the reader.
+- Leave the skew and document it. Acceptable, but then lifetime arithmetic in clients must add five seconds of slack and tests cannot assert an exact cutoff.
 
 ## Compatibility
-Item 1 tightens behavior; items 2 and 3 are additive.
-
-## Open questions
-- Item 3 adds a dependency between repo hosts and the authority. Is the cost acceptable, given that "any repo host can verify without contacting the authority" is a current design goal?
+Tightens behavior for credentials only.
 
 ## Internal references (remove before filing)
 `protocol-tests/atproto/strict-credential-expiry.patch`, `docs/protocol/atproto-spaces-pin.md`, `SPEC.md` (credential expiry invariant).

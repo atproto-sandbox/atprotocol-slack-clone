@@ -1,5 +1,7 @@
 # Validate third-party space records, and document the record-key filter
 
+Status against `5b95b2f2`: Not affected. No lexicon or validation change touches third-party schemas or the record-key filter.
+
 ## Summary
 The PDS validates only lexicons in its built-in schema map, so records for third-party space types are stored unchecked. Separately, its record-key filter rejects some randomly generated keys.
 

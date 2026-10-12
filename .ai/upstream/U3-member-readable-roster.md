@@ -1,5 +1,7 @@
 # Optional: let members list who else is in a space
 
+Status against `5b95b2f2`: Not affected. `simplespace.listMembers` is still owner-only OAuth and not readable with a space credential.
+
 ## Summary
 `listMembers` must be called on the authority's PDS with OAuth and a read grant, and the lexicon states that a space credential is not sufficient, so members hosted on other PDSes cannot enumerate the list. Applications that need a roster (any team or group product) must duplicate membership as records and keep them in sync with the authority's member list.
 

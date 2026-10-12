@@ -4,7 +4,7 @@ A Slack-style team workspace built directly on atproto permissioned data ("space
 
 There is no app database of record. Each workspace, channel and conversation lives in spaces on the members' own PDSes, and the member lists on those PDSes decide who can read. The app is a client plus a small operator service that makes journaled, resumable membership changes.
 
-> **Status: alpha.** It targets proposal 0016 and the draft PDS implementation (PR [#5187](https://github.com/bluesky-social/atproto/pull/5187), commit `787a730f`), which is not a released protocol. Expect it to break when the protocol moves. Nothing here has been deployed or load-tested beyond local fixtures.
+> **Status: alpha.** It targets proposal 0016 and the draft PDS implementation (PR [#5187](https://github.com/bluesky-social/atproto/pull/5187), commit `5b95b2f2`), which is not a released protocol. Expect it to break when the protocol moves. Nothing here has been deployed or load-tested beyond local fixtures.
 
 ## What it does
 

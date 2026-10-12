@@ -1,6 +1,6 @@
 {
   "proposal": "0016",
-  "pdsCommit": "787a730fcd22ed7791e2636beb509a943017ba1c",
+  "pdsCommit": "5b95b2f2723a2882824fbb0b819fd6aad884ef20",
   "types": {
     "org.slack.workspace": {
       "readPolicy": "member-list",

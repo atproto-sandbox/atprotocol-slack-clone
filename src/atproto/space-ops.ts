@@ -9,7 +9,6 @@ import type * as ListRecords from "@/lexicons/api/types/com/atproto/space/listRe
 import { resolvePds } from "./identity";
 import { sessionClient, serviceClient } from "./client";
 import { mintSpaceCredential } from "./space-credential";
-import { registerSpaceNotifications } from "./notifications";
 import { validateSpaceRecord } from "@/protocol/records";
 import { assertBoundedRecordPage, listBoundedMembers } from "./record-pages";
 import { spaceRecordUri } from "@/protocol/keys";
@@ -119,12 +118,6 @@ export async function putMemberRecord(
     { space, repo: session.did, collection, rkey, record },
   );
   return result.uri;
-}
-
-export async function credentialClientForMember(session: OAuthSession, space: string) {
-  const credential = await mintSpaceCredential(session, space);
-  await registerSpaceNotifications(credential, space);
-  return credential.client(await resolvePds(session.did));
 }
 
 export async function publicServiceClientForDid(did: string) {

@@ -1,5 +1,7 @@
 # Add batch membership calls to `simplespace`
 
+Status against `5b95b2f2`: Not affected. `putMember` and `removeMember` still take one DID per call.
+
 ## Summary
 `putMember` and `removeMember` change one member per call. Group and team products change hundreds of memberships at once, and each change is a separate authenticated request.
 

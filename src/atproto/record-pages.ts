@@ -72,47 +72,52 @@ function assertRepoPage(page: unknown, limit: number): asserts page is ListRepos
   }
 }
 
-/** A repo updated while paginating reappears at a later spaceRev; the writer set keeps its latest entry. */
-function latestPerRepo(entries: ListRepos.Repo[]): ListRepos.Repo[] {
-  return [...new Map(entries.map((repo) => [repo.did, repo])).values()];
+function assertRepoCursor(page: ListRepos.OutputSchema, requested: string | undefined, seenCursors: ReadonlySet<string>): void {
+  if (page.cursor !== undefined && (typeof page.cursor !== "string" || page.cursor.length === 0)) throw new Error("PDS repo pagination returned an invalid cursor.");
+  if (!page.cursor) return;
+  if (page.cursor === requested || seenCursors.has(page.cursor)) throw new Error("PDS repo pagination did not advance.");
+  if (page.repos.length === 0) throw new Error("PDS repo pagination returned an empty nonterminal page.");
 }
 
+/**
+ * Pages are ordered by spaceRev, so a repo updated while paginating reappears at a later
+ * spaceRev. The latest entry wins, and only distinct DIDs count toward the bound and the
+ * truncation flag.
+ */
 export async function listBoundedRepos(
   client: AtprotoClient,
   input: { space: string; maxRepos: number },
 ): Promise<BoundedRepos> {
   if (!Number.isSafeInteger(input.maxRepos) || input.maxRepos < 1) throw new RangeError("Repo scan limit must be a positive safe integer.");
-  const entries: ListRepos.Repo[] = [];
+  const collected = new Map<string, ListRepos.Repo>();
   const seenCursors = new Set<string>();
   let pages = 0;
   let cursor: string | undefined;
-  do {
-    const requestedCursor = cursor;
-    const limit = Math.min(500, input.maxRepos - entries.length);
+  const fetchPage = async (limit: number): Promise<ListRepos.OutputSchema> => {
     if (++pages > MAX_REPO_SCAN_PAGES) throw new Error("PDS repo pagination exceeded the bounded page limit.");
+    const requested = cursor;
     const page = await client.query<ListRepos.OutputSchema>("com.atproto.space.listRepos", { space: input.space, limit, cursor });
     assertRepoPage(page, limit);
-    entries.push(...page.repos);
-    if (page.cursor !== undefined && (typeof page.cursor !== "string" || page.cursor.length === 0)) throw new Error("PDS repo pagination returned an invalid cursor.");
+    assertRepoCursor(page, requested, seenCursors);
     cursor = page.cursor;
-    if (cursor) {
-      if (cursor === requestedCursor || seenCursors.has(cursor)) throw new Error("PDS repo pagination did not advance.");
-      if (page.repos.length === 0) throw new Error("PDS repo pagination returned an empty nonterminal page.");
-      seenCursors.add(cursor);
-    }
-  } while (cursor && entries.length < input.maxRepos);
+    if (cursor) seenCursors.add(cursor);
+    return page;
+  };
+
+  do {
+    const page = await fetchPage(Math.min(500, input.maxRepos - collected.size));
+    for (const repo of page.repos) collected.set(repo.did, repo);
+  } while (cursor && collected.size < input.maxRepos);
 
   let truncated = false;
-  if (cursor) {
-    if (++pages > MAX_REPO_SCAN_PAGES) throw new Error("PDS repo pagination exceeded the bounded page limit.");
-    const lookahead = await client.query<ListRepos.OutputSchema>("com.atproto.space.listRepos", { space: input.space, limit: 1, cursor });
-    assertRepoPage(lookahead, 1);
-    if (lookahead.cursor !== undefined && (typeof lookahead.cursor !== "string" || lookahead.cursor.length === 0)) throw new Error("PDS repo pagination returned an invalid cursor.");
-    if (lookahead.repos.length === 0 && lookahead.cursor) throw new Error("PDS repo pagination returned an empty nonterminal page.");
-    if (lookahead.cursor && (lookahead.cursor === cursor || seenCursors.has(lookahead.cursor))) throw new Error("PDS repo pagination did not advance.");
-    truncated = lookahead.repos.length > 0;
+  while (cursor && !truncated) {
+    const page = await fetchPage(1);
+    for (const repo of page.repos) {
+      if (collected.has(repo.did)) collected.set(repo.did, repo);
+      else truncated = true;
+    }
   }
-  return { repos: latestPerRepo(entries), truncated };
+  return { repos: [...collected.values()], truncated };
 }
 
 function assertSpacePage(page: unknown, limit: number): asserts page is ListSpaces.OutputSchema {

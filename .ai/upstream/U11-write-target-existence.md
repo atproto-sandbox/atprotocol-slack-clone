@@ -1,5 +1,7 @@
 # Tell a writer whether the space they wrote into exists
 
+Status against `5b95b2f2`: Still open. `putRecord` declares `SpaceNotFound` but the handler never checks the space host: it stores the record locally, and `spaceNotifications.notify` swallows a non-retryable `SpaceNotFound` from the authority with a log line. The writer still gets HTTP 200.
+
 ## Summary
 `com.atproto.space.putRecord` into a space hosted on another account succeeds whether or not that space exists: the record is stored in the writer's own repo and the authority host's `SpaceNotFound` is never reported back. A sender cannot tell "delivered" from "wrote into nothing", and the only workaround needs a read-level grant the sender should not need.
 

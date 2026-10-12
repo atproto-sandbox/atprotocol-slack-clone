@@ -66,15 +66,45 @@ test("a repo updated while paginating reappears and the writer set keeps its lat
   assert.deepEqual(reappearing.calls.map(({ cursor }) => cursor), [undefined, "3"]);
 });
 
-test("bounded repo scan counts reappearing entries toward the total bound", async () => {
+test("reappearing repos count once toward the bound and do not cause false truncation", async () => {
   const noisy = fakeClient([
     { repos: [repo("a", "2"), repo("b", "3")], cursor: "3" },
-    { repos: [repo("a", "4"), repo("b", "5")], cursor: "5" },
+    { repos: [repo("a", "4")], cursor: "4" },
+    { repos: [repo("b", "5")], cursor: "5" },
     { repos: [repo("a", "6")] },
   ]);
-  const result = await listBoundedRepos(noisy.client, { space: "space", maxRepos: 4 });
+  const result = await listBoundedRepos(noisy.client, { space: "space", maxRepos: 2 });
+  assert.deepEqual(result.repos.map(({ did, spaceRev }) => [did, spaceRev]), [["did:plc:a", "6"], ["did:plc:b", "5"]]);
+  assert.equal(result.truncated, false);
+});
+
+test("a lookahead entry for an already collected repo does not truncate, a later new repo does", async () => {
+  const lookahead = fakeClient([
+    { repos: [repo("a", "2"), repo("b", "3")], cursor: "3" },
+    { repos: [repo("a", "4")], cursor: "4" },
+    { repos: [repo("c", "5")] },
+  ]);
+  const result = await listBoundedRepos(lookahead.client, { space: "space", maxRepos: 2 });
+  assert.deepEqual(result.repos.map(({ did, spaceRev }) => [did, spaceRev]), [["did:plc:a", "4"], ["did:plc:b", "3"]]);
+  assert.equal(result.truncated, true);
+});
+
+test("more distinct repos than the bound truncates", async () => {
+  const overflow = fakeClient([
+    { repos: [repo("a", "2"), repo("b", "3")], cursor: "3" },
+    { repos: [repo("c", "4")] },
+  ]);
+  const result = await listBoundedRepos(overflow.client, { space: "space", maxRepos: 2 });
   assert.equal(result.repos.length, 2);
   assert.equal(result.truncated, true);
+});
+
+test("the repo scan page cap still applies when every page repeats a known repo", async () => {
+  const pages = Array.from({ length: 600 }, (_, i) => ({ repos: [repo("a", String(i).padStart(4, "0"))], cursor: `c${i}` }));
+  await assert.rejects(
+    listBoundedRepos(fakeClient(pages).client, { space: "space", maxRepos: 2 }),
+    /exceeded the bounded page limit/,
+  );
 });
 
 test("bounded space lookahead distinguishes an exact limit from actual overflow", async () => {

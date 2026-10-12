@@ -89,3 +89,18 @@ Failures are root-caused, not worked around. If a step proves the new protocol b
 - **Signature byte-compat.** One wrong space or newline in the signature base fails every request. Mitigated by vectors generated from the upstream implementation and by running the real PDS in P4.
 - **Credential churn.** A 600 s lifetime raises mint rates (the DM read fans out to up to 100 halves). Measure with `pnpm test:performance` after P3; if the DM budget regresses, treat it as a finding.
 - **Moving target.** The PR is a draft and may move again during this work; the plan pins `5b95b2f2` and does not chase newer commits.
+
+## Review outcomes
+
+Fixed after an independent reviewer and critic:
+
+- `listBoundedRepos` counted a reappearing repo (updated at a later `spaceRev`) toward `maxRepos` and could report false truncation. The bound and the truncation flag now count distinct DIDs, the latest entry wins, and the lookahead keeps scanning past known DIDs within the page cap.
+- `DmClient.credentialFor` could mint twice when two callers awaited the same expired entry. After the await it re-reads the cache and uses a fresher entry another caller already installed.
+- `requestedRepo` in `space-credential-core.ts` parsed a POST body for a `repo` that no credential POST carries. Only the GET `repo` query now selects the audience, and it must be a DID.
+- Deleted the dead `credentialClientForMember` export and removed the unused `@atproto/jwk-webcrypto` dependency (`@atproto/jwk-jose` stays for the OAuth tests).
+
+Deliberately not changed:
+
+- Credential `expiresAt` is estimated from mint time: the lexicon gives clients no lifetime choice, and the 100 s renewal window absorbs the round trip.
+- `readConversation` holds the credentials it minted for the duration of one read: the DM read budget is 5 s against a 100 s margin.
+- Long server scans hold one 600 s credential; that is fine unless a single scan exceeds about 500 s.

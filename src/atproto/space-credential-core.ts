@@ -1,6 +1,6 @@
 import type * as GetDelegationToken from "@/lexicons/api/types/com/atproto/space/getDelegationToken";
 import { readUpstreamJson } from "@/lib/bounded-json";
-import { parseSpaceUri } from "@/protocol/keys";
+import { isDid, parseSpaceUri } from "@/protocol/keys";
 import { createSpaceSigHeaders, type SpaceKey } from "./space-signature";
 import { AtprotoClient } from "./xrpc";
 
@@ -47,7 +47,7 @@ export class SpaceCredential {
     const base = service instanceof URL ? service : new URL(service);
     return new AtprotoClient(async (path, init) => {
       const request = new Request(new URL(path, base), { ...init, redirect: "error" });
-      const audience = await requestedRepo(request) ?? authorityDid;
+      const audience = requestedRepo(request) ?? authorityDid;
       for (const [name, value] of Object.entries(await createSpaceSigHeaders(key, { authorization, audience }))) {
         request.headers.set(name, value);
       }
@@ -57,11 +57,9 @@ export class SpaceCredential {
 }
 
 /** A request for one repo is addressed to that repo's host; a space-wide request, to the space authority. */
-async function requestedRepo(request: Request): Promise<string | undefined> {
-  if (request.method === "GET") return new URL(request.url).searchParams.get("repo") ?? undefined;
-  const body = await request.clone().text();
-  const repo: unknown = body ? (JSON.parse(body) as { repo?: unknown }).repo : undefined;
-  return typeof repo === "string" ? repo : undefined;
+function requestedRepo(request: Request): string | undefined {
+  const repo = request.method === "GET" ? new URL(request.url).searchParams.get("repo") : null;
+  return isDid(repo) ? repo : undefined;
 }
 
 export async function mintSpaceCredentialWith(deps: SpaceCredentialDeps, space: string): Promise<SpaceCredential> {

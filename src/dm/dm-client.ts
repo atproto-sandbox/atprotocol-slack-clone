@@ -494,7 +494,9 @@ export class DmClient {
     if (pending) {
       const credential = await pending;
       if (credential.expiresAt - this.now() > SPACE_CREDENTIAL_RENEW_BEFORE_MS) return credential;
-      if (this.credentials.get(space) === pending) this.credentials.delete(space);
+      const current = this.credentials.get(space);
+      if (current && current !== pending) return current;
+      this.credentials.delete(space);
     }
     const minted = mintSpaceCredentialWith(this.deps, space);
     this.credentials.set(space, minted);

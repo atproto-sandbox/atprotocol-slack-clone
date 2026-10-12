@@ -1,6 +1,6 @@
 # Upstream protocol requests: summary
 
-Eleven drafts for the atproto core team, written from what a Slack-style team app (workspaces, public and private channels, direct messages, up to 200 members per workspace and 100 per group DM) hit while building on proposal 0016 and PDS PR #5187 (commit `787a730f`). Each draft is a self-contained issue body in this folder. The index with the app machinery each one would remove is in [README.md](README.md).
+Eleven drafts for the atproto core team, written from what a Slack-style team app (workspaces, public and private channels, direct messages, up to 200 members per workspace and 100 per group DM) hit while building on proposal 0016 and PDS PR #5187 (commit `787a730f`, re-checked against `5b95b2f2` on 2026-10-09). Each draft is a self-contained issue body in this folder. The index with the app machinery each one would remove is in [README.md](README.md).
 
 **Nothing has been filed.** Filing needs an explicit go-ahead.
 
@@ -11,8 +11,8 @@ Eleven drafts for the atproto core team, written from what a Slack-style team ap
 | U3 | [Member-readable roster](U3-member-readable-roster.md), opt-in | High |
 | U4 | [Delegated space management](U4-delegated-management.md): so the app need not hold the workspace account's OAuth session | High |
 | U10 | [Invitation discovery](U10-invitation-discovery.md): a way for an added member to learn the space exists | High |
-| U5 | [Host-assigned per-record rev and range bound](U5-record-rev.md): ordering without trusting author-chosen keys | Medium |
-| U6 | [Credential lifetime and revocation](U6-credential-revocation.md): we run a patch that makes credentials expire exactly at `exp` | Medium |
+| U5 | [Host-assigned per-record rev and range bound](U5-record-rev.md): ordering without trusting author-chosen keys (`spaceRev` is now host-assigned; per-record rev and range bound remain) | Medium |
+| U6 | [Credential expiry at `exp`](U6-credential-revocation.md): we run a patch that makes credentials expire exactly at `exp`; lifetime and revocation are now upstream | Medium |
 | U7 | [Batch membership calls](U7-batch-membership.md): hundreds of sequential calls per invite or group today | Medium |
 | U8 | [Third-party validation and key filter](U8-validation-and-key-filter.md) | Medium |
 | U11 | [Write-target existence](U11-write-target-existence.md): tell a writer whether the space they wrote into exists | Medium |
@@ -25,6 +25,16 @@ Eleven drafts for the atproto core team, written from what a Slack-style team ap
 - **U10, invitation discovery.** An invited member who accepted and signed in saw an empty dashboard: `listSpaces` returns only spaces the user has written to, so there is no way to ask which spaces you were added to. The app ships an invite link as the workaround.
 - **U11, write-target existence.** The pinned PDS accepts a `putRecord` into a space that does not exist, on the same host and across hosts, so a DM sender cannot tell delivered from lost. The workaround, asking the inbox for a credential first, needs a wider browser grant (`space:org.slack.dm.inbox?authority=*&action=read`) and two extra calls per recipient.
 - **U5, range bound (extended earlier).** An interim app-side ordering rule made reads worse and was backed out, so U5 now also asks for a bound that lets a client skip a hostile key range.
+
+## Status against `5b95b2f2`
+
+Re-read on 2026-10-09 against the upstream lexicons and `packages/pds` handlers.
+
+- **U6:** the default lifetime is now 600 s with a 3600 s ceiling, and `notifyCredentialRevoked` exists. Only exact-at-`exp` expiry remains.
+- **U5:** `spaceRev` is host-assigned per space update; per-record rev and a range bound are still missing.
+- **U1, U11:** still open. `removeMember` does not evict a writer; `putRecord` still returns success for a missing space.
+- **U10:** unchanged (`listSpaces` has only a `spaceType` rename).
+- **U2, U3, U4, U7, U8, U9:** not affected.
 
 ## Before filing
 

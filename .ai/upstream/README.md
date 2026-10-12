@@ -1,6 +1,6 @@
 # Upstream requests for atproto permissioned data
 
-Drafts for the atproto core team, written from what a Slack-style team app (channels, private channels, DMs, up to 200 members per workspace and 100 per group DM) hit while building on proposal 0016 and PDS PR #5187 (commit `787a730f`). Each file is a self-contained issue body.
+Drafts for the atproto core team, written from what a Slack-style team app (channels, private channels, DMs, up to 200 members per workspace and 100 per group DM) hit while building on proposal 0016 and PDS PR #5187 (commit `787a730f`, re-checked against `5b95b2f2` on 2026-10-09; each draft opens with a "Status against `5b95b2f2`" line). Each file is a self-contained issue body.
 
 **Nothing here has been posted.** Filing needs an explicit go-ahead. Suggested venue: comments on PR #5187 and the proposal's discussion thread, one topic per issue.
 
@@ -10,8 +10,8 @@ Drafts for the atproto core team, written from what a Slack-style team app (chan
 | U2 | [Client-direct change subscription](U2-client-direct-subscription.md) | High | A server relay that learns who follows which spaces |
 | U3 | [Member-readable roster (opt-in)](U3-member-readable-roster.md) | High | Shadow roster records and a reconciliation operator |
 | U4 | [Delegated space management](U4-delegated-management.md) | High | Custody of the workspace account's OAuth session |
-| U5 | [Host-assigned per-record rev and range bound](U5-record-rev.md) | Medium | Trust in author-chosen keys for ordering; no way to skip a hostile key range |
-| U6 | [Credential lifetime and revocation](U6-credential-revocation.md) | Medium | A patch that makes credentials expire exactly at `exp` |
+| U5 | [Host-assigned per-record rev and range bound](U5-record-rev.md) (`spaceRev` now exists; per-record rev and range bound remain) | Medium | Trust in author-chosen keys for ordering; no way to skip a hostile key range |
+| U6 | [Credential expiry at `exp`](U6-credential-revocation.md) (lifetime and revocation are now upstream) | Medium | A patch that makes credentials expire exactly at `exp` |
 | U7 | [Batch membership calls](U7-batch-membership.md) | Medium | Hundreds of sequential calls per invite or group |
 | U8 | [Third-party validation and key filter](U8-validation-and-key-filter.md) | Medium | Colon-delimited hash keys, local-only validation |
 | U9 | [Optional hidden spaces](U9-hidden-spaces.md) | Low | Random unguessable space keys as the only defense |
