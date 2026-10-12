@@ -12,7 +12,7 @@
 
 1. A member signs in through atproto OAuth. Their session and refresh state are stored separately from the authority session.
 2. The app requests the narrow operation scopes declared in `src/auth/permission-sets.ts`.
-3. For reads, the signed-in user exchanges a PDS delegation token for a space credential bound to the reader's own signing key. Every request made with it carries an HTTP message signature over the credential and its audience. A reader syncs writers and their records from each selected space, validating author, schema, key, and same-channel references.
+3. For reads, the signed-in user exchanges a PDS delegation token for a space credential bound to the reader's own signing key (ten minutes by default, one hour at most). Every request made with it carries an HTTP message signature over the credential and its audience. A reader syncs writers and their records from each selected space, validating author, schema, key, and same-channel references.
 4. For admin actions, the client obtains a `com.atproto.server.getServiceAuth` JWT with the operator DID service ref as `aud` and the exact method NSID as `lxm`. The operator verifies all claims and re-reads current authority records and PDS member lists before acting.
 5. The operator journals the desired state and applies resumable PDS membership and authority-record writes. It completes only after read-back reconciliation.
 6. Inbox clients reconcile `listRepos` and owner-authorized `listInboxWriters` at least once per minute, then fetch candidate request records directly with their own inbox credential.

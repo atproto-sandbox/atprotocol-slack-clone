@@ -168,7 +168,7 @@ Then("the operation stays pending until every PDS member list agrees", async fun
 
 // --- An old credential expires after removal --------------------------------------------------------
 
-Given("a member holds a space credential with a two hour maximum lifetime", async function (this: AppWorld) {
+Given("a member holds a space credential with a short maximum lifetime", async function (this: AppWorld) {
   const owner = await workspaceWithAdmin(this);
   const member = await this.actor("member", 1);
   const bystander = await this.actor("bystander", 0);
@@ -185,10 +185,10 @@ Given("a member holds a space credential with a two hour maximum lifetime", asyn
     const claims = claimsOf(credential.token);
     assert.equal(claims.sub, credential.space);
     assert.equal(claims.iss, owner.did, "the workspace authority signed it");
-    assert.ok(claims.exp - claims.iat <= MAX_CREDENTIAL_LIFETIME_SECONDS, `lifetime ${claims.exp - claims.iat}s exceeds two hours`);
+    assert.ok(claims.exp - claims.iat <= MAX_CREDENTIAL_LIFETIME_SECONDS, `lifetime ${claims.exp - claims.iat}s exceeds the one hour protocol ceiling`);
     assert.ok(claims.exp - claims.iat > 0);
     assert.ok(claims.exp * 1000 > Date.now(), "it has not expired");
-    assert.ok(claims.exp * 1000 <= mintedAt + MAX_CREDENTIAL_LIFETIME_SECONDS * 1000 + 5_000, "it was minted just now, so its expiry is at most two hours away");
+    assert.ok(claims.exp * 1000 <= mintedAt + MAX_CREDENTIAL_LIFETIME_SECONDS * 1000 + 5_000, "it was minted just now, so its expiry is at most the one hour ceiling away");
   }
   const profile = await readRecordsWith(this, held[0]!, owner.did, "org.slack.workspace.profile");
   assert.equal(profile.length, 1, "before removal the credential reads the workspace");
@@ -214,7 +214,7 @@ Then("the old credential works only until its signed expiration", async function
   assert.ok(workspaceCredential);
   const claims = claimsOf(workspaceCredential.token);
   assert.ok(claims.exp * 1000 > Date.now(), "the old credential is still inside its signed lifetime");
-  assert.ok(claims.exp - claims.iat <= MAX_CREDENTIAL_LIFETIME_SECONDS, "its signed lifetime is at most two hours");
+  assert.ok(claims.exp - claims.iat <= MAX_CREDENTIAL_LIFETIME_SECONDS, "its signed lifetime is at most the one hour ceiling");
   const profile = (credential: SpaceCredential) => tryReadWith(this, credential, owner.did, "org.slack.workspace.profile");
   assert.deepEqual(await profile(workspaceCredential), { records: 1 }, "removal does not revoke a credential that was already issued");
 

@@ -20,7 +20,7 @@ Build a Slack-style team workspace on atproto permissioned data. Accounts own th
 - Workspace and private-channel roster/admin/decision records count only when authored by the workspace DID. Message and reaction edits/deletes are limited to the author.
 - Admin mutations go through an authenticated operator. Every call validates a PDS-issued service-auth JWT and derives the actor from its verified `iss`, then checks current workspace, inbox, and admin state.
 - Mutations are serialized, journaled, idempotent by `(workspace DID, actor DID, operationId, canonical request hash)`, and remain pending until PDS state matches the desired state. One exception: a workspace setup that completed no steps because the account has not yet approved the required OAuth permission is discarded instead of left pending, since there is nothing to recover, so its operation ID can be reused.
-- Removing membership blocks new credentials. Existing space credentials may work until their signed expiry, at most two hours by default.
+- Removing membership blocks new credentials. Existing space credentials may work until their signed expiry, at most ten minutes by default and never more than the protocol ceiling of one hour.
 - Stable mutable records use canonical deterministic record keys as defined in the PRD. Message text is plain text, at most 10,000 Unicode code points.
 
 ## Direct-message invariants

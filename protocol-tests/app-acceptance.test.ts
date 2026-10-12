@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
+import { SPACE_CREDENTIAL_LIFETIME_MS } from "@/atproto/space-credential-core";
 import { createFixtureTempRoot } from "./fixture-temp";
 
 type TestAgent = {
@@ -378,7 +379,11 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     await putSpaceMember(ownerSession as never, privateSpace, member.did, true, true);
     const preRemovalCredential = await mintSpaceCredential(memberSession as never, bootstrap.workspace);
     assert.ok(preRemovalCredential.expiresAt > Date.now());
-    assert.ok(preRemovalCredential.expiresAt - Date.now() <= 2 * 60 * 60 * 1000);
+    const issued = JSON.parse(Buffer.from(preRemovalCredential.token.split(".")[1]!, "base64url").toString("utf8")) as { iat: number; exp: number; jti: string; cnf: { kid: string } };
+    assert.equal(issued.exp - issued.iat, SPACE_CREDENTIAL_LIFETIME_MS / 1000, "the PDS issues credentials with the lifetime the app plans its renewals around");
+    assert.ok(issued.exp - issued.iat <= 60 * 60, "and never above the one hour protocol ceiling");
+    assert.equal(issued.cnf.kid, preRemovalCredential.key.did(), "the credential is bound to the key that signs its requests");
+    assert.ok(issued.jti.length > 0);
 
     const cache = getRawDb();
     cache.prepare(`INSERT OR REPLACE INTO channel_record_cache (account_did,space_uri,repo_did,collection,rkey,uri,value_cipher,updated_at)

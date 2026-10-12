@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { TestNetworkNoAppView } from '@atproto/dev-env'
-import { createSpaceToken, parseSpaceToken } from '@atproto/space'
+import { createSpaceToken, parseSpaceToken, SPACE_CREDENTIAL_MAX_AGE_SEC } from '@atproto/space'
 import type { DidString, NsidString } from '@atproto/syntax'
 import { com } from '../../src/lexicons/index.js'
 import { SpaceClient, SpaceCredential } from '../_space.js'
@@ -301,7 +301,7 @@ describe('atproto Slack inbox protocol conformance', () => {
     }
   })
 
-  it('caps existing credentials at two hours and rejects new credentials after removal', async () => {
+  it('issues ten minute credentials capped at one hour and rejects new credentials after removal', async () => {
     const network = await TestNetworkNoAppView.create({ extraPdses: 1 })
     try {
       const spaces = new SpaceClient(network)
@@ -326,7 +326,8 @@ describe('atproto Slack inbox protocol conformance', () => {
 
       const issued = await spaces.credentialFor(member, inbox)
       const payload = parseSpaceToken('credential', issued.credential).payload
-      expect(payload.exp - payload.iat).toBe(7200)
+      expect(payload.exp - payload.iat).toBe(600)
+      expect(SPACE_CREDENTIAL_MAX_AGE_SEC).toBe(3600)
 
       await spaces.removeMember(authority, inbox, member)
       await expect(spaces.credentialFor(member, inbox)).rejects.toMatchObject({
@@ -350,6 +351,11 @@ describe('atproto Slack inbox protocol conformance', () => {
         },
         await authority.pds.ctx.actorStore.keypair(authority.did),
       )
+      await expect(createSpaceToken(
+        'credential',
+        { iss: authority.did, sub: inbox, keyId: shortKey.did() as DidString, expiresInSec: SPACE_CREDENTIAL_MAX_AGE_SEC + 1 },
+        await authority.pds.ctx.actorStore.keypair(authority.did),
+      )).rejects.toThrow(/lifetime/)
       const shortPayload = parseSpaceToken('credential', shortCredential).payload
       const shortLived = new SpaceCredential(shortCredential, shortKey)
       for (const [pds, repo, collection] of [

@@ -31,7 +31,7 @@ export type JournalEntry = {
 };
 export type AuditEvent = { id: number; actor: string; event: string };
 
-export const MAX_CREDENTIAL_LIFETIME_SECONDS = 2 * 60 * 60;
+export const MAX_CREDENTIAL_LIFETIME_SECONDS = 60 * 60;
 
 export function remember<T>(world: AppWorld, key: string, value: T): T {
   world.scratch.set(key, value);

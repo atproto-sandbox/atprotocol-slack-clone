@@ -1,5 +1,6 @@
 import { verifySignature } from "@atproto/crypto";
 import { fromBase64 } from "@atproto/lex-data";
+import { SPACE_CREDENTIAL_LIFETIME_MS } from "@/atproto/space-credential-core";
 import { generateSpaceKey } from "@/atproto/space-signature";
 import { AtprotoClient } from "@/atproto/xrpc";
 
@@ -47,7 +48,7 @@ type FakeAuth =
   | { kind: "none" }
   | { kind: "rejected"; error: FakeXrpcError };
 
-const CREDENTIAL_LIFETIME_MS = 2 * 60 * 60 * 1000;
+const NOTIFY_REGISTRATION_TTL_MS = 24 * 60 * 60 * 1000;
 
 export class FakeXrpcError extends Error {
   constructor(readonly status: number, readonly code: string, message = code) {
@@ -198,7 +199,7 @@ export class FakeDmNetwork {
       space.members.get(delegation.granteeDid)?.read === true;
     if (!authorized) throw new FakeXrpcError(400, "UserNotAuthorized", "User not authorized for this space");
     const token = `credential-${this.tokenCounter++}`;
-    this.credentials.set(token, { space: delegation.space, grantedDid: delegation.granteeDid, keyId: auth.keyId, expiresAt: this.now() + CREDENTIAL_LIFETIME_MS });
+    this.credentials.set(token, { space: delegation.space, grantedDid: delegation.granteeDid, keyId: auth.keyId, expiresAt: this.now() + SPACE_CREDENTIAL_LIFETIME_MS });
     return { credential: token };
   }
 
@@ -358,7 +359,7 @@ export class FakeDmNetwork {
   private registerNotify(params: Record<string, unknown>, auth: FakeAuth): { expiresAt: string } {
     this.requireCredential(params, auth);
     this.requireSpace(params.space);
-    return { expiresAt: new Date(this.now() + CREDENTIAL_LIFETIME_MS).toISOString() };
+    return { expiresAt: new Date(this.now() + NOTIFY_REGISTRATION_TTL_MS).toISOString() };
   }
 
   private nextRev(): string {

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { dmConversationUri, spaceRecordUri } from "@/protocol/keys";
+import { SPACE_CREDENTIAL_LIFETIME_MS, SPACE_CREDENTIAL_RENEW_BEFORE_MS } from "@/atproto/space-credential-core";
+import { dmConversationUri, dmInboxUri, spaceRecordUri } from "@/protocol/keys";
 import { DmClient, type DmDeps, type DmStore } from "./dm-client";
 import { FakeDmNetwork } from "./testing/fake-pds";
 
@@ -442,4 +443,47 @@ test("a local store failure while scanning requests propagates instead of masque
   await client("did:plc:carol").startConversation(["did:plc:bob"]);
 
   await assert.rejects(bob.scanRequests(), /store down/);
+});
+
+function countingExchanges(network: FakeDmNetwork): { fetchEndpoint: DmDeps["fetchEndpoint"]; count: () => number } {
+  let exchanges = 0;
+  return {
+    fetchEndpoint: (request) => {
+      if (request.url.includes("com.atproto.space.getSpaceCredential")) exchanges += 1;
+      return network.fetchEndpoint(request);
+    },
+    count: () => exchanges,
+  };
+}
+
+test("a cached credential is reused until the renewal window opens, then replaced", async () => {
+  const { network, client } = harness();
+  const exchanges = countingExchanges(network);
+  const alice = client("did:plc:alice", "pds1", { fetchEndpoint: exchanges.fetchEndpoint });
+  await alice.enableDms("everyone");
+  const inbox = dmInboxUri("did:plc:alice");
+
+  await alice.watch([inbox], "did:web:app.test");
+  assert.equal(exchanges.count(), 1);
+
+  network.advanceClock(SPACE_CREDENTIAL_LIFETIME_MS - SPACE_CREDENTIAL_RENEW_BEFORE_MS - 1);
+  await alice.watch([inbox], "did:web:app.test");
+  assert.equal(exchanges.count(), 1, "one millisecond before the window the credential is still reused");
+
+  network.advanceClock(1);
+  await alice.watch([inbox], "did:web:app.test");
+  assert.equal(exchanges.count(), 2, "inside the renewal window a fresh credential is minted");
+});
+
+test("an expired credential is never reused", async () => {
+  const { network, client } = harness();
+  const exchanges = countingExchanges(network);
+  const alice = client("did:plc:alice", "pds1", { fetchEndpoint: exchanges.fetchEndpoint });
+  await alice.enableDms("everyone");
+  const inbox = dmInboxUri("did:plc:alice");
+
+  await alice.watch([inbox], "did:web:app.test");
+  network.advanceClock(SPACE_CREDENTIAL_LIFETIME_MS);
+  await alice.watch([inbox], "did:web:app.test");
+  assert.equal(exchanges.count(), 2);
 });

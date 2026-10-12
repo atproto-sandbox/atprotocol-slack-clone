@@ -41,7 +41,7 @@ Two independent-app proofs exist side by side: `src/reader/independent.ts` (chan
         ▼
  getDelegationToken @ caller's own PDS  ──token──▶  getSpaceCredential @ half owner's PDS
         │
-        │ 2. key-bound space credential (≤ 2h)
+        │ 2. key-bound space credential (10 min default, 1 h max)
         ▼
  for each participant's conversation half (fan-out 8, src/lib/map-limited.ts):
    - read header, validate convKey + participant set match (validateDmHeaderMatchesRequest)

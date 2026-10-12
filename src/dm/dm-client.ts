@@ -1,5 +1,5 @@
 import { listBoundedMembers, listBoundedRecords, listBoundedRepos, listBoundedSpaces, assertBoundedRecordPage } from "@/atproto/record-pages";
-import { mintSpaceCredentialWith, SpaceCredential, SpaceCredentialError } from "@/atproto/space-credential-core";
+import { mintSpaceCredentialWith, SPACE_CREDENTIAL_RENEW_BEFORE_MS, SpaceCredential, SpaceCredentialError } from "@/atproto/space-credential-core";
 import type { SpaceKey } from "@/atproto/space-signature";
 import type { AtprotoClient } from "@/atproto/xrpc";
 import { mapLimited } from "@/lib/map-limited";
@@ -32,7 +32,6 @@ const MAX_REQUESTS_PER_WRITER = 1_000;
 const MAX_OWN_CONVERSATIONS = 10_000;
 const MAX_REACTIONS_PER_HALF = 20_000;
 const MAX_MERGE_ROUNDS = 10_000;
-const CREDENTIAL_RENEW_BEFORE_MS = 60_000;
 
 export type DmStore = {
   get(key: string): Promise<string | null>;
@@ -494,7 +493,7 @@ export class DmClient {
     const pending = this.credentials.get(space);
     if (pending) {
       const credential = await pending;
-      if (credential.expiresAt - this.now() > CREDENTIAL_RENEW_BEFORE_MS) return credential;
+      if (credential.expiresAt - this.now() > SPACE_CREDENTIAL_RENEW_BEFORE_MS) return credential;
       if (this.credentials.get(space) === pending) this.credentials.delete(space);
     }
     const minted = mintSpaceCredentialWith(this.deps, space);

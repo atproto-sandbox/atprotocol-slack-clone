@@ -4,7 +4,10 @@ import { parseSpaceUri } from "@/protocol/keys";
 import { createSpaceSigHeaders, type SpaceKey } from "./space-signature";
 import { AtprotoClient } from "./xrpc";
 
-const CREDENTIAL_LIFETIME_MS = 2 * 60 * 60 * 1000;
+/** The PDS default lifetime of a space credential; the protocol ceiling is one hour. */
+export const SPACE_CREDENTIAL_LIFETIME_MS = 10 * 60 * 1000;
+/** A cached credential is replaced once less than this remains of its lifetime. */
+export const SPACE_CREDENTIAL_RENEW_BEFORE_MS = SPACE_CREDENTIAL_LIFETIME_MS / 6;
 const GET_SPACE_CREDENTIAL = "/xrpc/com.atproto.space.getSpaceCredential";
 
 export type SpaceCredentialDeps = {
@@ -12,6 +15,7 @@ export type SpaceCredentialDeps = {
   resolvePds(did: string): Promise<string>;
   fetchEndpoint(request: Request): Promise<Response>;
   generateKey(): Promise<SpaceKey>;
+  now?: () => number;
 };
 
 export class SpaceCredentialError extends Error {
@@ -29,7 +33,7 @@ export class SpaceCredential {
     readonly token: string,
     readonly key: SpaceKey,
     private readonly fetchEndpoint: (request: Request) => Promise<Response>,
-    expiresAt = Date.now() + CREDENTIAL_LIFETIME_MS,
+    expiresAt = Date.now() + SPACE_CREDENTIAL_LIFETIME_MS,
   ) {
     this.expiresAt = expiresAt;
   }
@@ -76,7 +80,7 @@ export async function mintSpaceCredentialWith(deps: SpaceCredentialDeps, space: 
     key,
     fetchEndpoint: deps.fetchEndpoint,
   });
-  return new SpaceCredential(space, token, key, deps.fetchEndpoint);
+  return new SpaceCredential(space, token, key, deps.fetchEndpoint, (deps.now ?? Date.now)() + SPACE_CREDENTIAL_LIFETIME_MS);
 }
 
 export async function exchangeSpaceCredential(input: {

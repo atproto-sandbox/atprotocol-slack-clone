@@ -30,6 +30,7 @@ async function setup(tamper?: Tamper) {
       minted.push(key);
       return key;
     },
+    now: network.now,
   };
   return { network, deps, mintedKey: () => minted[0]! };
 }
