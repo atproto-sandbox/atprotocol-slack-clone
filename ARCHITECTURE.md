@@ -27,7 +27,7 @@
 
 ## Protocol compatibility
 
-The protocol adapter isolates the draft `com.atproto.simplespace.*` membership APIs and `com.atproto.space.*` record/credential APIs. The implementation is pinned to PDS commit `787a730fcd22ed7791e2636beb509a943017ba1c` and the exact lexicon hashes in `docs/protocol/atproto-spaces-pin.md`. Proposal 0016 is still draft; any pin drift blocks release until the conformance suite passes again.
+The protocol adapter isolates the draft `com.atproto.simplespace.*` membership APIs and `com.atproto.space.*` record/credential APIs. The implementation is pinned to PDS commit `619c6e8556db7dd37bb7df1d92a5eae83da8d8b0` and the exact lexicon hashes in `docs/protocol/atproto-spaces-pin.md`. Proposal 0016 is still draft; any pin drift blocks release until the conformance suite passes again.
 
 ## Direct-message runtime boundary
 

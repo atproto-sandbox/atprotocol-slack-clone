@@ -1,14 +1,14 @@
 # atproto Spaces Protocol Pin and Conformance
 
 Status: pinned PDS API/policy and strict-expiry conformance pass with the checked-in verifier patch; the unmodified upstream base still fails the PRD cutoff  
-Verified: 2026-10-09 (re-based from `787a730f`, which was verified 2026-09-25)
+Verified: 2026-10-21 (re-based from `5b95b2f2`, verified 2026-10-09; before that `787a730f`, verified 2026-09-25)
 
 ## Pinned source
 
 | Component | Pin |
 |---|---|
-| Proposal 0016 | `bluesky-social/proposals` `main` at `119fa6b63476d30c2516846c714319046e0422f3` |
-| PDS implementation | `bluesky-social/atproto` `permissioned-data`, PR [#5187](https://github.com/bluesky-social/atproto/pull/5187), commit `5b95b2f2723a2882824fbb0b819fd6aad884ef20` (previously `787a730f`) |
+| Proposal 0016 | `bluesky-social/proposals` `main` at `c76714ac3bc30318496d5d7f29d9341d4d8c0c69` (previously `119fa6b6`) |
+| PDS implementation | `bluesky-social/atproto` `permissioned-data`, PR [#5187](https://github.com/bluesky-social/atproto/pull/5187), commit `619c6e8556db7dd37bb7df1d92a5eae83da8d8b0` (previously `5b95b2f2`, `787a730f`) |
 | `@atproto/pds` | `0.5.32` |
 | `@atproto/oauth-scopes` | `0.5.11` |
 | `@atproto/oauth-provider` | `0.22.6` |
@@ -16,7 +16,7 @@ Verified: 2026-10-09 (re-based from `787a730f`, which was verified 2026-09-25)
 | PDS development environment | Same pinned monorepo commit; `@atproto/dev-env` multi-PDS fixture |
 | Strict credential-expiry overlay | [`protocol-tests/atproto/strict-credential-expiry.patch`](../../protocol-tests/atproto/strict-credential-expiry.patch), SHA-256 `e9cfae5beb29d01c494087abf79eaf58fd48312956422c91ff29a405977aae3f` |
 
-The proposal describes itself as a proposal, and PR #5187 (branch `permissioned-data`) is still marked Draft as of this verification. The unmodified `5b95b2f2` source still allows five seconds of expiry skew for credentials. The checked-in overlay changes `verifySpaceToken` in `packages/space/src/credential.ts` so a space credential is rejected at `exp` (zero skew) while delegation tokens and client attestations keep the five-second allowance, and it replaces the skew test in `packages/space/tests/credential.test.ts` with an at-`exp` rejection test plus a delegation-skew test. Space requests are signed with HTTP message signatures, not DPoP, so the overlay no longer mentions DPoP proofs. This is a local protocol fork requirement: any deployment must use this overlay or a compatible upstream revision and rerun conformance. Treat protocol drift as a release blocker.
+The proposal describes itself as a proposal, and PR #5187 (branch `permissioned-data`) is still marked Draft as of this verification. The unmodified `619c6e85` source still allows five seconds of expiry skew for credentials. The checked-in overlay changes `verifySpaceToken` in `packages/space/src/credential.ts` so a space credential is rejected at `exp` (zero skew) while delegation tokens and client attestations keep the five-second allowance, and it replaces the skew test in `packages/space/tests/credential.test.ts` with an at-`exp` rejection test plus a delegation-skew test. Space requests are signed with HTTP message signatures, not DPoP, so the overlay no longer mentions DPoP proofs. This is a local protocol fork requirement: any deployment must use this overlay or a compatible upstream revision and rerun conformance. Treat protocol drift as a release blocker.
 
 The pinned PDS validates only lexicons in its built-in schema map; publishing third-party `org.slack.*` schemas does not make them dynamically available to record validation in this revision. App writes therefore leave the optional PDS `validate` parameter unset and run `validateSpaceRecord` locally before every write. Every reader validates author, schema, key, and cross-record references and ignores invalid records. Do not set `validate: true` on app-owned records unless the PDS revision adds dynamic third-party schema resolution.
 
@@ -24,13 +24,13 @@ The pinned PDS also rejects record keys matching its explicit-slur filter. A con
 
 ## Reproduce the PDS conformance run
 
-Use Node 24 as selected by the pinned checkout's `.nvmrc` (the local proof also ran on Node 22.17.0) and pnpm 11.11.0. In a disposable clone (the app's checkout name for it is `atproto-spaces-phase1`):
+Use Node 24 as selected by the pinned checkout's `.nvmrc` (the local proof also ran on Node 22.17.0) and pnpm 11.11.0. In a disposable clone (the app's checkout name for it is `atproto-spaces-phase2`):
 
 ```sh
-git clone --filter=blob:none --no-checkout https://github.com/bluesky-social/atproto.git atproto-spaces-phase1
-git -C atproto-spaces-phase1 fetch --depth=1 origin 5b95b2f2723a2882824fbb0b819fd6aad884ef20
-git -C atproto-spaces-phase1 checkout --detach 5b95b2f2723a2882824fbb0b819fd6aad884ef20
-cd atproto-spaces-phase1
+git clone --filter=blob:none --no-checkout https://github.com/bluesky-social/atproto.git atproto-spaces-phase2
+git -C atproto-spaces-phase2 fetch --depth=1 origin 619c6e8556db7dd37bb7df1d92a5eae83da8d8b0
+git -C atproto-spaces-phase2 checkout --detach 619c6e8556db7dd37bb7df1d92a5eae83da8d8b0
+cd atproto-spaces-phase2
 shasum -a 256 /path/to/atproto-slack-clone/protocol-tests/atproto/strict-credential-expiry.patch
 git apply /path/to/atproto-slack-clone/protocol-tests/atproto/strict-credential-expiry.patch
 PUPPETEER_SKIP_DOWNLOAD=1 corepack pnpm@11.11.0 install --frozen-lockfile --filter @atproto/pds... --filter @atproto/dev-env...
@@ -52,9 +52,19 @@ NODE_OPTIONS=--experimental-vm-modules corepack pnpm@11.11.0 --filter @atproto/p
   tests/space/slack-dm-conformance.test.ts
 ```
 
-Build notes for `5b95b2f2`: the install needs `PUPPETEER_SKIP_DOWNLOAD=1` (shown above) and `npm_config_enable_pre_post_scripts=true` for the `build:tooling` and package builds; `oauth-provider-ui` needs its Lingui catalogs compiled once with `pnpm --filter @atproto/oauth-provider-ui i18n:compile` under Node 26 (the codegen uses `import.meta.main`) before the Node 22 build.
+Build notes (recorded on `5b95b2f2`): the install needs `PUPPETEER_SKIP_DOWNLOAD=1` (shown above) and `npm_config_enable_pre_post_scripts=true` for the `build:tooling` and package builds; `oauth-provider-ui` needs its Lingui catalogs compiled once with `pnpm --filter @atproto/oauth-provider-ui i18n:compile` under Node 26 (the codegen uses `import.meta.main`) before the Node 22 build.
 
-The verification recorded on `787a730f` passed 101 `@atproto/space` tests and six PDS suites with 108 tests passing and one upstream `todo`; the figures for `5b95b2f2` are in `PROGRESS.md`. It exercised independent accounts on up to three in-memory PDS hosts; the custom expiry test rejects at `exp + 2s` on both PDS hosts. The custom tests and exact source patch are retained in this checkout; see [protocol test instructions](../../protocol-tests/atproto/README.md).
+The verification recorded on `787a730f` passed 101 `@atproto/space` tests and six PDS suites with 108 tests passing and one upstream `todo`; the figures for `619c6e85` are in `PROGRESS.md`. It exercised independent accounts on up to three in-memory PDS hosts; the custom expiry test rejects at `exp + 2s` on both PDS hosts. The custom tests and exact source patch are retained in this checkout; see [protocol test instructions](../../protocol-tests/atproto/README.md).
+
+## What changed since `5b95b2f2`
+
+The drift to `619c6e85` is four upstream commits on PR #5187 (still a draft) plus a proposal revision. The overlay applies unchanged (same SHA-256), and the lexicons under `lexicons/com/atproto/space`, `lexicons/com/atproto/simplespace` and `lexicons/com/atproto/server/getServiceAuth.json` are byte-identical, so the generated clients are unchanged.
+
+| Upstream change | This app |
+|---|---|
+| `describeServer` returns `spacesAlpha: true` (`fb2cf002`) | Not used |
+| An authority writing to its own missing or deleted space gets `SpaceNotFound` (`7bad5ee2`, merged as #5655); a write into another authority's space stays unchecked and is now specified behavior | No change: nothing writes before creating its space. The DM probe (asking the recipient's inbox for a credential before sending a request) is still the only way to detect a missing foreign inbox. The fake PDS in the unit tests mirrors the rule |
+| Proposal "Repo lifecycle" (#121): the first write creates a repo, an empty repo equals a missing one, a user deletes a repo by deleting its records | No change |
 
 ## What changed since `787a730f`
 

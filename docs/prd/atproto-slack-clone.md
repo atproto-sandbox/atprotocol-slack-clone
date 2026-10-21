@@ -2,7 +2,7 @@
 
 Status: core app and browser OAuth authorization-code acceptance complete; production deployment and limited-workspace pilot evidence remain pending  
 Date: 2026-09-25  
-Protocol baseline: atproto permissioned data proposal 0016 draft semantics, reviewed on 2026-09-24 and verified against pinned PDS commit `5b95b2f2` plus the checked-in strict-expiry overlay in [`docs/protocol/atproto-spaces-pin.md`](../protocol/atproto-spaces-pin.md). API/policy and strict credential-expiry conformance pass with that overlay; the unmodified upstream base still accepts five seconds after `exp`, so production must use the overlay or a compatible upstream revision. Proposal and implementation drift remains a release blocker. [Proposal 0016](https://github.com/bluesky-social/proposals/blob/main/0016-permissioned-data/README.md)
+Protocol baseline: atproto permissioned data proposal 0016 draft semantics, reviewed on 2026-09-24 and verified against pinned PDS commit `619c6e85` plus the checked-in strict-expiry overlay in [`docs/protocol/atproto-spaces-pin.md`](../protocol/atproto-spaces-pin.md). API/policy and strict credential-expiry conformance pass with that overlay; the unmodified upstream base still accepts five seconds after `exp`, so production must use the overlay or a compatible upstream revision. Proposal and implementation drift remains a release blocker. [Proposal 0016](https://github.com/bluesky-social/proposals/blob/main/0016-permissioned-data/README.md)
 
 ## Problem
 

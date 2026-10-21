@@ -2,7 +2,7 @@
 
 These tests are written to run inside the pinned `bluesky-social/atproto` checkout so they can use its real PDS test network, test actors, lexicons, and OAuth provider. They are not app tests. Their source pin and setup commands are in [the protocol pin note](../../docs/protocol/atproto-spaces-pin.md).
 
-Apply [`strict-credential-expiry.patch`](./strict-credential-expiry.patch) to the pinned `5b95b2f2` PDS checkout (SHA-256 `e9cfae5beb29d01c494087abf79eaf58fd48312956422c91ff29a405977aae3f`) before building it; verify its SHA-256 against the pin note. This local overlay removes clock tolerance for space credentials only, preserving the allowance for delegation and client-attestation timing. Copy the three test files into the pin's `packages/pds/tests/space/` directory, then run the commands listed in the pin note from the atproto monorepo root. Each custom test file sets an isolated `TMPDIR` before creating its PDS network and removes that root after `network.close()`, because the pinned `TestPds.close()` stops servers without deleting their data and blob directories. The authority test publishes a temporary `org.slack.workspace` space lexicon to the fixture's lexicon authority; it does not modify PDS or dev-env source. The DM test (`slack-dm-conformance.test.ts`) is the DM plan's M0 gate; its observed behaviors are asserted, so protocol drift fails the suite. The inbox test simulates lost notifications by making the writer PDS unable to resolve the authority DID for the duration of one request.
+Apply [`strict-credential-expiry.patch`](./strict-credential-expiry.patch) to the pinned `619c6e85` PDS checkout (SHA-256 `e9cfae5beb29d01c494087abf79eaf58fd48312956422c91ff29a405977aae3f`) before building it; verify its SHA-256 against the pin note. This local overlay removes clock tolerance for space credentials only, preserving the allowance for delegation and client-attestation timing. Copy the three test files into the pin's `packages/pds/tests/space/` directory, then run the commands listed in the pin note from the atproto monorepo root. Each custom test file sets an isolated `TMPDIR` before creating its PDS network and removes that root after `network.close()`, because the pinned `TestPds.close()` stops servers without deleting their data and blob directories. The authority test publishes a temporary `org.slack.workspace` space lexicon to the fixture's lexicon authority; it does not modify PDS or dev-env source. The DM test (`slack-dm-conformance.test.ts`) is the DM plan's M0 gate; its observed behaviors are asserted, so protocol drift fails the suite. The inbox test simulates lost notifications by making the writer PDS unable to resolve the authority DID for the duration of one request.
 
 The inbox recovery test intentionally demonstrates that `listRepos` alone cannot recover a PDS-to-authority `notifyWrite` loss. It reads the candidate DID from owner-only `listMembers`, then proves the admin's inbox space credential can read that repo. The production `listInboxWriters` operator method will expose only this candidate DID list to a verified active admin; the admin app fetches request records directly from PDS.
 
@@ -11,7 +11,7 @@ The inbox recovery test intentionally demonstrates that `listRepos` alone cannot
 From the app checkout, run the two-host app flow and process-restart journal recovery against the pinned checkout:
 
 ```sh
-PATH=/path/to/node-v22.17.0/bin:$PATH ATPROTO_PINNED_CHECKOUT=/path/to/atproto-spaces-phase1 pnpm test:acceptance
+PATH=/path/to/node-v22.17.0/bin:$PATH ATPROTO_PINNED_CHECKOUT=/path/to/atproto-spaces-phase2 pnpm test:acceptance
 ```
 
 The harness starts two real local PDSes, creates accounts on both, then exercises backend bootstrap, operator mutations, workspace discovery, public-channel paging, private request denial, fresh-generation resubmission, stale approval rejection, current-generation approval, private roster/message reads, inbox credential recovery after a dropped writer notification, removal semantics, and bounded journal retries. The recovery path creates an online SQLite backup, restores it to a separate path, resumes the pending operation in a new process, rediscovers the workspace, and reconciles PDS membership. That subprocess restores a PDS-issued, DPoP-bound Node OAuth session from the encrypted store; `AUTH_ENCRYPTION_KEY` is supplied separately from the backup. A live Next server test also verifies the web-session cookie rejects anonymous requests and authorizes workspace bootstrap through the restored session. The session is constructed directly, so the test does not complete the browser authorization-code callback. Exact OAuth scopes and service-auth claims remain covered by the pinned PDS OAuth conformance suite above.
@@ -22,7 +22,7 @@ Run the scale workload against the same pinned checkout:
 
 ```sh
 PATH=/path/to/node-v22.17.0/bin:$PATH \
-ATPROTO_PINNED_CHECKOUT=/path/to/atproto-spaces-phase1 \
+ATPROTO_PINNED_CHECKOUT=/path/to/atproto-spaces-phase2 \
 pnpm test:performance
 ```
 

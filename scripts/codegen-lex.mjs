@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 
 const root = process.cwd();
 const checkout = process.env.ATPROTO_PIN_CHECKOUT;
-const expectedCommit = "5b95b2f2723a2882824fbb0b819fd6aad884ef20";
+const expectedCommit = "619c6e8556db7dd37bb7df1d92a5eae83da8d8b0";
 
 if (!checkout) {
   throw new Error(
