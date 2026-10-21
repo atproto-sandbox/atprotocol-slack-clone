@@ -288,8 +288,11 @@ export class FakeDmNetwork {
     const collection = String(params.collection);
     const rkey = String(params.rkey);
     const record = params.record as Record<string, unknown>;
+    if (typeof params.space === "string" && params.space.startsWith(`at://${did}/`) && (!this.spaces.has(params.space) || this.spaces.get(params.space)!.deleted)) {
+      throw new FakeXrpcError(400, "SpaceNotFound", "Space not found");
+    }
     if (typeof params.space !== "string" || !this.spaces.has(params.space) || this.spaces.get(params.space)!.deleted) {
-      // The pinned PDS stores the record in the writer's own repo and swallows the authority's SpaceNotFound.
+      // Writing into another authority's space stores the record in the writer's own repo without asking the authority.
       return { uri: `${String(params.space)}/${repo}/${collection}/${rkey}`, cid: `cid-${this.cidCounter++}` };
     }
     const space = this.requireSpace(params.space);
