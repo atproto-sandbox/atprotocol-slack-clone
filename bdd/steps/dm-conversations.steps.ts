@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { Given, Then, When } from "@cucumber/cucumber";
 import { reactionRecordKey, tidNow } from "@/protocol/keys";
 import type { FixtureAccount } from "../../protocol-tests/support/app-fixture";
-import type { AppWorld, Actor } from "../support/world";
+import { PAGE_TIMEOUT_MS, type AppWorld, type Actor } from "../support/world";
 import {
   type DmcReaction, type DmcRepoHistory, dmcAcceptRequestFrom, dmcAllowlistShown, dmcAppDatabaseMentions, dmcAppDatabaseText, dmcCard, dmcClientFor, dmcConnect, dmcConvKeyOf, dmcDeleteMessage, dmcDeliveryRows, dmcEditMessage, dmcEnableDms, dmcHalfOf, dmcHalfUris,
   dmcHeaderOf, dmcInboxOf, dmcInboxUris, dmcMembers, dmcMessagesOf, dmcMessageUri, dmcMint, dmcOpenOnlyConversation, dmcOpenRequests, dmcOpenSettings,
@@ -636,7 +636,7 @@ Then("copies other participants already fetched are not recalled", async functio
   for (const text of ["unsend one", "unsend two"]) await dmcCard(keeper, text).waitFor({ state: "visible" });
 
   const fresh: Actor = { ...keeper, page: await keeper.context.newPage() };
-  fresh.page.setDefaultTimeout(30_000);
+  fresh.page.setDefaultTimeout(PAGE_TIMEOUT_MS);
   await fresh.page.goto(this.appOrigin);
   await fresh.page.getByRole("button", { name: /New message/ }).waitFor({ state: "visible", timeout: 60_000 });
   await dmcOpenOnlyConversation(fresh);

@@ -6,7 +6,7 @@ import { AtprotoClient } from "@/atproto/xrpc";
 import { channelUri, spaceRecordUri } from "@/protocol/keys";
 import { inviteLinkFor } from "@/app/ui/client-api";
 import type { SecondApp } from "../../protocol-tests/support/app-fixture";
-import type { Actor, ApiCall, AppWorld } from "./world";
+import { PAGE_TIMEOUT_MS, type Actor, type ApiCall, type AppWorld } from "./world";
 import { approveAdminControls, completeConsent, createWorkspaceAs, eventually, inviteMemberAs } from "./ui";
 
 export type ChannelRef = { skey: string; name: string; uri: string; visibility: string };
@@ -115,7 +115,7 @@ export async function startSessionOn(world: AppWorld, actor: Actor, site: Site, 
   const role = `${actor.role}@${label}`;
   const context = await world.newContext(role);
   const page = await context.newPage();
-  page.setDefaultTimeout(30_000);
+  page.setDefaultTimeout(PAGE_TIMEOUT_MS);
   const session: Actor = { ...actor, role, context, page, calls: [] };
   world.recordCalls(session);
   world.actors.set(role, session);

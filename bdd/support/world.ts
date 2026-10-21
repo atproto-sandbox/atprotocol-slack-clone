@@ -4,6 +4,9 @@ import Database from "better-sqlite3";
 import type { Browser, BrowserContext, Page, Response as PlaywrightResponse } from "@playwright/test";
 import type { AppFixture, FixtureAccount } from "../../protocol-tests/support/app-fixture";
 
+/** How long a page waits for an element or navigation; one machine runs the app, two PDS hosts and every browser of a scenario at once. */
+export const PAGE_TIMEOUT_MS = 90_000;
+
 /**
  * `body` says what `responseBody` holds: "recorded" is the response text. "streamed" (text/event-stream) and "navigated-away" (the
  * page left before the browser would hand over the body, as it does right after an OAuth permission reply) are recorded headers-only
@@ -53,7 +56,7 @@ export class AppWorld extends World {
     const context = await this.newContext(role);
     await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: this.appOrigin });
     const page = await context.newPage();
-    page.setDefaultTimeout(30_000);
+    page.setDefaultTimeout(PAGE_TIMEOUT_MS);
     const actor: Actor = { ...account, role, context, page, calls: [] };
     this.recordCalls(actor);
     this.actors.set(role, actor);

@@ -24,7 +24,7 @@ type State = {
 
 const STATE = "privateRequests";
 const RECONCILIATION_WINDOW_MS = 150_000;
-const LONG_SETUP = { timeout: 300_000 };
+const LONG_SETUP = { timeout: 600_000 };
 
 function stateOf(world: AppWorld): State {
   const existing = world.scratch.get(STATE) as State | undefined;

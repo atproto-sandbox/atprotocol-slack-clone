@@ -7,7 +7,7 @@ import { dmConversationUri, dmInboxUri, recordKeyHash, stableHash, tidNow } from
 import { validateDmHeaderMatchesRequest, validateSpaceRecord } from "@/protocol/records";
 import type { SecondApp } from "../../protocol-tests/support/app-fixture";
 import { completeConsent, signIn, submitWorkspaceName, uniqueWorkspaceName } from "../support/ui";
-import type { Actor, AppWorld } from "../support/world";
+import { PAGE_TIMEOUT_MS, type Actor, type AppWorld } from "../support/world";
 import {
   DmpProbe, type DmpHostileHalf, type DmpMintedCredential, dmpAcceptRequestFrom, dmpAllowlistDids, dmpAllowDid, dmpChooseMode, dmpConnectDms, dmpEnableDms, dmpMessageTexts, dmpOpenConversationWith,
   dmpOwnConvKeys, dmpOwnHeader, dmpOwnMessages, dmpParticipantRows, dmpPoll, dmpReadRequests, dmpReadRequestsScanned, dmpReload, dmpRequestCount, dmpSend, dmpSidebarConversationLabels,
@@ -686,7 +686,7 @@ When("a participant signs in with any conforming OAuth client", { timeout: SETUP
   await context.route(`${this.appOrigin}/**`, (route) => route.abort("connectionrefused"));
   await context.route("**/api/notifications/dm**", (route) => { notificationStreamAttempts.push(route.request().url()); return route.abort("connectionrefused"); });
   const page = await context.newPage();
-  page.setDefaultTimeout(30_000);
+  page.setDefaultTimeout(PAGE_TIMEOUT_MS);
   const elsewhere: Actor = { ...alice, role: "alice-elsewhere", context, page, calls: [] };
   this.actors.set(elsewhere.role, elsewhere);
   this.scratch.set("rebuiltCredentials", dmpWatchCredentials(page));

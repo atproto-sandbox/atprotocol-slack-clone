@@ -631,6 +631,8 @@ Given("an app cached private-channel data", async function (this: AppWorld) {
 When("the credential can no longer be renewed", async function (this: AppWorld) {
   const member = actorNamed(this, "member");
   const vault = recall<ChannelRef>(this, "vault");
+  // An open page refreshes on its own after the removal, is refused and purges the cache before this scenario's own sync can.
+  await member.page.goto("about:blank");
   const executed = await removeMemberViaRoster(this, actorNamed(this, "owner"), member.did);
   assert.equal(executed.operation?.state, "completed", JSON.stringify(executed));
   for (const space of [vault.uri, this.workspaceUri]) {
@@ -651,7 +653,7 @@ Then("the app stops syncing and purges its cached copy", async function (this: A
     assert.doesNotMatch(await sync.text(), /Private note/, "the refusal does not leak the cached message");
     assert.deepEqual(cachedRows(this, member.did), { records: 0, cursors: 0, syncs: 0 }, `after attempt ${attempt} the app holds no cached copy`);
   }
-  await member.page.reload();
+  await member.page.goto(this.appOrigin);
   await member.page.getByText("No workspaces yet").waitFor({ state: "visible" });
   assert.equal(await member.page.locator(".message-card").count(), 0, "reopening the app shows none of the private messages");
 });
