@@ -39,5 +39,8 @@ Additive. Owner-only behavior remains the default.
 - Granularity: membership changes only, or policy changes too?
 - Whether managers can add other managers.
 
+## Related work: opensocial.group
+The `opensocial.group` draft addresses the same custody problem with a group service that is an OAuth authorization server for the group DID: an admin authenticates with their personal account, and the scopes they may request for the group DID are listed per role in the space's `access` record (`scopeGrant`, only `space:` scopes restricted to the containing space). That is delegation by role at the host level. It requires a dedicated group host and is explicitly not layered on simplespace, so it does not help a team space on an ordinary PDS. This request is the simplespace-level equivalent (manager list plus a management token); the two should use compatible scope shapes so a group host and a plain PDS can be driven by the same client.
+
 ## Internal references (remove before filing)
 `src/operator/**` (service that holds the authority session), `docs/protocol/operator-contract.md`.

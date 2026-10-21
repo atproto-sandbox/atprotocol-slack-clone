@@ -44,5 +44,8 @@ Additive. A host that does not implement `notifyMembership` simply produces no e
 - Should membership be pending until the user accepts, as in most invitation systems, instead of granting read access immediately on `putMember`?
 - Retention: entries should disappear on `removeMember` and `deleteSpace`.
 
+## Related work: opensocial.group
+The `opensocial.group` draft (peer proposal, 2026-09) solves the same gap at the application-standard level: each user hosts a `group.opensocial.invites/self` space, the inviting group writes an `invite` record into it from its own repo, and "delivery uses normal space write notifications". The inbox is owner-read-only. This is the "invitee-owned space" alternative above, standardized. Its limits are what motivate this request: the invitee must already host the space (it cannot reach an account that never enabled it, and the sender cannot tell that, see U11), and it needs a group service that existing PDSes do not run. A protocol-level membership notification would make that inbox unnecessary for accounts on any simplespace host; if the core team prefers the inbox pattern, the alternative should at least be blessed as the standard delivery path so apps stop inventing their own.
+
 ## Internal references (remove before filing)
 `src/app/ui/invite-banner.tsx` and `src/app/ui/client-api.ts` (`inviteLinkFor`), the BDD scenario "An invited member opens the link and sees the workspace" in `features/workspaces.feature`, and the investigation notes in `.ai/reviews/2026-10-07-invite-discovery.md`.

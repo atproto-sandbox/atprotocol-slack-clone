@@ -2,6 +2,8 @@
 
 Status against `5b95b2f2`: Still open. `putRecord` declares `SpaceNotFound` but the handler never checks the space host: it stores the record locally, and `spaceNotifications.notify` swallows a non-retryable `SpaceNotFound` from the authority with a log line. The writer still gets HTTP 200.
 
+Status against `619c6e85` and proposal `c76714ac` (2026-10-21): Still open, but now specified behavior rather than an oversight. The proposal's new "Repo lifecycle" section says that when the space authority is another DID, the writer's PDS "does not need to check whether the space exists before accepting the write", and PDS PR #5655 pins it with a test (`creates a repo in another authority's space without checking it exists`). The same change makes an authority's write to its *own* missing or deleted space fail with `SpaceNotFound`. So the request is no longer "fix the missing check"; it is "add an optional signal to a deliberately unchecked write", and both proposed options below leave the unchecked-write rule intact.
+
 ## Summary
 `com.atproto.space.putRecord` into a space hosted on another account succeeds whether or not that space exists: the record is stored in the writer's own repo and the authority host's `SpaceNotFound` is never reported back. A sender cannot tell "delivered" from "wrote into nothing", and the only workaround needs a read-level grant the sender should not need.
 
@@ -27,6 +29,9 @@ Additive: a new optional response field or a new method.
 
 ## Open questions
 - Does confirming existence let a stranger enumerate which accounts enabled a feature? The credential probe already allows that today, so this does not make it worse, and the write path discloses it anyway once the recipient tracks the writer.
+
+## Related work: opensocial.group
+The `opensocial.group` invitation flow has the same hazard: a group writes an `invite` into an invitee-hosted space it does not host. Its draft says the invitee's PDS forwards the notification, and defines no failure signal when the invitee never created the space. Any standard that delivers into recipient-hosted spaces needs the answer this request asks for.
 
 ## Internal references (remove before filing)
 `src/dm/dm-client.ts` (`sendRequest`), the scope comment in `src/auth/permission-sets.ts` (`DM_BROWSER_SCOPES`), and the BDD scenario "Enable DMs" in `features/direct-messages.feature`.

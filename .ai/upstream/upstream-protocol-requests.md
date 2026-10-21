@@ -1,6 +1,6 @@
 # Upstream protocol requests: summary
 
-Eleven drafts for the atproto core team, written from what a Slack-style team app (workspaces, public and private channels, direct messages, up to 200 members per workspace and 100 per group DM) hit while building on proposal 0016 and PDS PR #5187 (commit `787a730f`, re-checked against `5b95b2f2` on 2026-10-09). Each draft is a self-contained issue body in this folder. The index with the app machinery each one would remove is in [README.md](README.md).
+Eleven drafts for the atproto core team, written from what a Slack-style team app (workspaces, public and private channels, direct messages, up to 200 members per workspace and 100 per group DM) hit while building on proposal 0016 and PDS PR #5187 (commit `787a730f`, re-checked against `5b95b2f2` on 2026-10-09 and `619c6e85` on 2026-10-21). Each draft is a self-contained issue body in this folder. The index with the app machinery each one would remove is in [README.md](README.md).
 
 **Nothing has been filed.** Filing needs an explicit go-ahead.
 
@@ -35,6 +35,20 @@ Re-read on 2026-10-09 against the upstream lexicons and `packages/pds` handlers.
 - **U1, U11:** still open. `removeMember` does not evict a writer; `putRecord` still returns success for a missing space.
 - **U10:** unchanged (`listSpaces` has only a `spaceType` rename).
 - **U2, U3, U4, U7, U8, U9:** not affected.
+
+## Status against `619c6e85` and proposal `c76714ac`
+
+Re-read on 2026-10-21. Since `5b95b2f2` PR #5187 (still a draft, 167 commits) gained four commits: `fb2cf002` adds `spacesAlpha: true` to `describeServer`, and `7bad5ee2` (merged as #5655) rejects a space write with `SpaceNotFound` when the writer is the space authority and the space is missing or deleted. The proposal gained "Repo lifecycle" (#121): a repo is created by the first write, an empty repo equals a missing one, and a user deletes a repo by deleting its records.
+
+- **U11:** still open, but the unchecked write to another authority's space is now specified and tested behavior. The request is reframed as adding an optional signal, not fixing a missing check.
+- **U1, U10:** unchanged (no member, writer or listing changes in the new commits).
+- **U5, U6:** unchanged.
+- **U2, U3, U4, U7, U8, U9:** not affected.
+- **Our app:** no change was needed. Upstream's space and PDS suites (including our three conformance suites), our unit, acceptance and browser suites pass on `619c6e85`; the fake PDS used by unit tests now mirrors the new authority-write rule.
+
+## Related work: opensocial.group
+
+A peer proposal (`opensocial.group`, tangled.org/opensocial.group/proposal, draft from 2026-09-23) standardizes groups as a DID with `meta`, `members` and per-user `invites` spaces, flat role-based access, two-sided membership (`membership` plus member `acceptance`), a group service that is an OAuth server for the group DID, and moderation. It is not layered on simplespace and needs its own host, so this app does not implement it. It touches four drafts: U10 (its `invites` space is the application-level answer to invitation discovery), U4 (role-scoped group-DID grants are delegated management at the host level), U11 and U1 (same silent-delivery and eviction gaps). Each draft has a "Related work" section. Our private-roster-after-consent behavior already matches its `acceptance` model.
 
 ## Before filing
 

@@ -26,5 +26,8 @@ Additive and opt-in.
 - The tombstone retention period, and the cost of keeping a member list for deleted spaces.
 - Lower priority than the other requests. Included for completeness.
 
+## Related work: opensocial.group
+The `opensocial.group` draft goes the other way: a group publishes a public `declaration` record that points at its `meta` space so groups are discoverable, and keeps only members-only data private. An opt-in hidden space is compatible with that, since discoverability is declared per group rather than being a property of every space.
+
 ## Internal references (remove before filing)
 `docs/protocol/atproto-spaces-pin.md`, "Direct-message conformance" (existence oracle row).

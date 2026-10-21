@@ -41,5 +41,8 @@ Additive. Existing spaces behave exactly as today until an owner calls the new p
 - Should evicted writers' existing records stay readable to credential holders? (We would say yes: apps decide inclusion, as the proposal already says.)
 - Should `pruneWriters` be part of the first version?
 
+## Related work: opensocial.group
+`ejectMember` and `leaveGroup` in the `opensocial.group` draft stop issuing new read credentials and say "existing space credentials expire normally"; ejection does not delete member-authored records. That matches the gap here: removal changes who may read from now on, but nothing tells the space host to stop tracking the removed account as a writer.
+
 ## Internal references (remove before filing)
 `protocol-tests/atproto/slack-dm-conformance.test.ts` (policy switch checks); `docs/protocol/atproto-spaces-pin.md`, "Direct-message conformance".

@@ -18,6 +18,8 @@ Drafts for the atproto core team, written from what a Slack-style team app (chan
 | U10 | [Invitation discovery](U10-invitation-discovery.md) | High | Invite links as the only way a member learns they were added |
 | U11 | [Write-target existence](U11-write-target-existence.md) | Medium | A read-level grant and two extra calls per recipient just to learn whether a request can land |
 
+**Related work.** The peer `opensocial.group` draft overlaps U1, U4, U9, U10 and U11; each of those drafts has a "Related work: opensocial.group" section, summarized in [upstream-protocol-requests.md](upstream-protocol-requests.md).
+
 **Endorse only.** The proposal already lists an account and identity events endpoint for space-only syncers as future work and describes dynamic scope resolution like permission sets. Both would help us; a +1 is enough.
 
 Suggested order: U1 to U4 and U10 first, since they remove the most application-side machinery.
