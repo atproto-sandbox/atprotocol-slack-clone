@@ -3,6 +3,8 @@
 Status: **implemented 2026-09-28 (M0–M6 complete; see §6 "M6 results" for the independence proof, verification evidence, and deviations, and `PROGRESS.md` for exact command results).**
 Protocol baseline: proposal 0016 draft, pinned PDS `787a730f` (see `docs/protocol/atproto-spaces-pin.md`).
 
+> **Superseded in part (2026-10-31).** This is the historical plan. The app is now pinned to PDS `5d88b414`: `com.atproto.simplespace` and its read/write/app policies are replaced by one space `policy` (`com.atproto.memberspace.policy`) and `com.atproto.space`/`memberspace` methods; the sender no longer probes the recipient's inbox (a public `org.slack.dm.declaration` record replaced it); the DM latest-100 test budget is 8 s, raised from 5 s by the owner (see `.ai/plans/protocol-drift-5d88b41.md`).
+
 ## 1. Goal and the constraint that drives everything
 
 Add 1:1 and group DMs (up to 100 participants) such that **no app-operated component can read, gate, lose, or hold hostage a DM**. Concretely, every DM must remain readable, writable, discoverable, and revocable by its participants if this app's server, database, operator, and notification endpoint all disappear, using only participants' PDSes, published lexicons, and any OAuth client.
