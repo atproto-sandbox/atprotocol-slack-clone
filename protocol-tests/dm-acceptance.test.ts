@@ -3,7 +3,8 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
-import { generateSpaceKey } from "@/atproto/space-signature";
+import { kemKeyFromDidDocument } from "@/atproto/kem-key";
+import { generateSpaceKey } from "@/atproto/space-key";
 import { AtprotoClient } from "@/atproto/xrpc";
 import { DmClient, type DmConversationPage, type DmDeps, type DmStore } from "@/dm/dm-client";
 import { readIndependentDmConversation } from "@/reader/independent-dm";
@@ -80,6 +81,7 @@ test("DM acceptance: 1:1, group, dropped-notification recovery, all with the ser
         if (!url) throw new Error(`dm-acceptance: no known PDS for ${did}`);
         return url;
       },
+      resolveKemKey: async (did, forceRefresh) => kemKeyFromDidDocument(did, await network!.pds.ctx.idResolver.did.resolve(did, forceRefresh) as { verificationMethod?: unknown }),
       fetchEndpoint: (request) => fetch(request),
       generateKey: generateSpaceKey,
       store: createStore(),
@@ -122,6 +124,8 @@ test("DM acceptance: 1:1, group, dropped-notification recovery, all with the ser
     assert.deepEqual(await bobDm.listRequests(), [], "allowing while still in nobody mode keeps the entry dormant (M0 §6f)");
 
     await bobDm.setRequestMode("allowlist");
+    // Allowing alice while dormant evicted her from the writer set, but she is an active allowlist entry now, so her request is
+    // read directly from her repo.
     const visible = await bobDm.listRequests();
     assert.equal(visible.length, 1);
     assert.equal(visible[0]!.convKey, started.convKey);
@@ -153,7 +157,7 @@ test("DM acceptance: 1:1, group, dropped-notification recovery, all with the ser
     // revocation blocks new mints, it doesn't recall ones already issued. A
     // fresh client (no cached credential) observes the revocation immediately.
     const afterLeave = await dmFor(alice).readConversation(started.convKey, started.participants);
-    assert.equal(afterLeave.halves[bob.did], "revoked", "leaving removes alice from bob's own half");
+    assert.equal(afterLeave.halves[bob.did], "missing", "leaving removes alice from bob's own half");
     await assertDmParity(alice, afterLeave, started.convKey, started.participants);
 
     await aliceDm.deleteEverything(started.convKey);
@@ -204,15 +208,11 @@ test("DM acceptance: 1:1, group, dropped-notification recovery, all with the ser
     assert.deepEqual(await heidiDm.listRequests(), [], "a dormant member's new request is not tracked in listRepos");
 
     await heidiDm.setRequestMode("allowlist");
-    assert.deepEqual(await heidiDm.listRequests(), [], "reactivating alone does not retroactively track the earlier untracked write");
-
-    let dormantVirtualNow = Date.now();
-    const ivanWithClock = dmFor(ivan, () => dormantVirtualNow);
-    dormantVirtualNow += 61_000;
-    await ivanWithClock.renotifyPending();
-    const nowTracked = await heidiDm.listRequests();
-    assert.equal(nowTracked.length, 1, "ivan's next write, made while active again, is now tracked in listRepos");
-    assert.equal(nowTracked[0]!.convKey, dormantAttempt.convKey);
+    // Switching ivan off evicted him from the writer set and switching him back on does not list him again, but he is an active
+    // allowlist entry, so the scan reads his repo directly and his earlier request shows at once.
+    const nowVisible = await heidiDm.listRequests();
+    assert.equal(nowVisible.length, 1, "ivan's request made while dormant is read once he is allowed again");
+    assert.equal(nowVisible[0]!.convKey, dormantAttempt.convKey);
 
     // --- Dropped notification, recovered by renotifyPending ---
     const frank = await createActor(network.pds, "frank", "test");

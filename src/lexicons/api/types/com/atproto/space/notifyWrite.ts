@@ -24,8 +24,8 @@ export interface InputSchema {
   repo: string
   /** The repo revision after the write. */
   repoRev: string
-  /** The repo's current commit hash (sha256 of the LtHash state) after the write. Lets the space host maintain each repo's hash for listRepos. */
-  hash: Uint8Array
+  /** The repo's current commit data (sha256 of the LtHash state) after the write. Lets the space host maintain each repo's commit data for listRepos. */
+  data: Uint8Array
   /** The space revision assigned by the space host. Present only on notifications forwarded to syncers. */
   spaceRev?: string
   /** The previous space revision. Omitted on the first update in a space. A gap indicates missed notifications; recover using listRepos with cursor. */

@@ -175,12 +175,12 @@ Then("the PDS refuses a channel read credential", async function (this: AppWorld
   const outcome = this.scratch.get("credential") as CredentialOutcome;
   if (outcome.granted) assert.fail("the PDS must not hand a channel credential to an account missing from the member list");
   assert.equal(outcome.status, 403);
-  assert.equal(outcome.code, "UserNotAuthorized");
+  assert.equal(outcome.code, "SpaceNotFound", "the authority answers a user the member list excludes exactly as it answers for a space that does not exist");
 
   await grantedCredential(this, actorNamed(this, "insider"), channel.uri);
 
   assert.deepEqual(this.scratch.get("appAnswers"), [403, 403], "the app could not read the channel for this account, before or after approving read permission");
-  assert.match(this.scratch.get("appRefusal") as string, /not authorized for this space/, "the app reports the PDS's refusal");
+  assert.match(this.scratch.get("appRefusal") as string, /Space not found/, "the app reports the PDS's refusal");
   await outsider.page.getByText("You are not on this channel’s active roster.").waitFor({ state: "visible" });
   const secret = this.scratch.get("secret") as string;
   assert.equal(await messageCards(outsider).count(), 0, "no message is shown to the account");
@@ -542,7 +542,7 @@ Then("the message is rejected", async function (this: AppWorld) {
 
   const reader = people.owner;
   await openChannelReading(people.sites.get("alice")!, reader, "general");
-  assert.equal(await messageCards(reader).count(), 1, "a reader sees one message: the one at the limit");
+  await syncUntil(reader, async () => assert.equal(await messageCards(reader).count(), 1, "a reader sees one message: the one at the limit"));
   const shown = await messageCards(reader).locator("> p").innerText();
   assert.equal(Array.from(shown).length, 10_000);
   assert.notEqual(shown, overlong);

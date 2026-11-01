@@ -5,7 +5,9 @@ import nextTs from "eslint-config-next/typescript";
 const ISOMORPHIC_PROTOCOL_MODULES = [
   "src/dm/**/*.{ts,tsx}",
   "src/protocol/keys.ts",
-  "src/atproto/space-signature.ts",
+  "src/atproto/space-key.ts",
+  "src/atproto/kem-key.ts",
+  "src/atproto/space-policy.ts",
   "src/atproto/space-credential-core.ts",
   "src/atproto/xrpc.ts",
   "src/atproto/record-pages.ts",

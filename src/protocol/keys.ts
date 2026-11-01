@@ -14,7 +14,9 @@ export function isTid(value: unknown): value is string {
   return typeof value === "string" && /^[234567abcdefghijklmnopqrstuvwxyz]{13}$/.test(value);
 }
 
-export function isDid(value: unknown): value is string {
+export type Did = `did:${string}:${string}`;
+
+export function isDid(value: unknown): value is Did {
   return typeof value === "string" && /^did:[a-z0-9]+:[A-Za-z0-9._:%-]+$/.test(value);
 }
 
@@ -120,7 +122,7 @@ export function canonicalParticipants(dids: readonly string[]): string[] {
 
 const SPACE_URI_PATTERN = /^at:\/\/(did:[^/\s]+)\/space\/([A-Za-z0-9.-]+)\/([A-Za-z0-9._~:-]{1,128})$/;
 
-export function parseSpaceUri(uri: string): { authorityDid: string; type: string; skey: string } | null {
+export function parseSpaceUri(uri: string): { authorityDid: Did; type: string; skey: string } | null {
   const match = SPACE_URI_PATTERN.exec(uri);
   if (!match) return null;
   const [, authorityDid, type, skey] = match;

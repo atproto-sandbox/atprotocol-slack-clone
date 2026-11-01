@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
 import type { AtprotoDid } from "@atproto/oauth-client-browser";
 import { UpstreamResponseTooLargeError } from "@/lib/bounded-json";
-import { wellKnownHandleResolver } from "./browser-session";
+import { missingScopes, wellKnownHandleResolver } from "./browser-session";
 
 const realFetch = globalThis.fetch;
 let responder: (url: string) => Response;
@@ -50,4 +50,32 @@ test("an oversized well-known body throws instead of being silently accepted", a
   responder = () => new Response(`did:plc:${"a".repeat(1024)}`);
   const resolver = wellKnownHandleResolver(fakeAsResolvedHandle);
   await assert.rejects(resolver.resolve("huge.test"), UpstreamResponseTooLargeError);
+});
+
+test("missingScopes names the required scope tokens a stored grant lacks, whatever their order", () => {
+  const required = "atproto repo:org.slack.dm.declaration?action=create&action=update space:org.slack.dm.inbox?authority=self&action=read";
+  assert.deepEqual(missingScopes("repo:org.slack.dm.declaration?action=create&action=update atproto", required), [], "space tokens are not compared: the PDS rewrites them");
+  assert.deepEqual(missingScopes("atproto space:org.slack.dm.inbox?authority=did:plc:abc&collection=org.slack.dm.request&action=read", required), ["repo:org.slack.dm.declaration?action=create&action=update"], "a session granted before the declaration grant existed");
+  assert.deepEqual(missingScopes("", "atproto"), ["atproto"]);
+  assert.deepEqual(missingScopes("atproto  extra", "atproto"), [], "extra grants and repeated spaces are fine");
+});
+
+test("missingScopes accepts the scope string a real PDS returns for the DM grant, and flags the same grant without the declaration token", () => {
+  // Captured from the real OAuth flow in protocol-tests/browser/dm.spec.ts: the PDS resolves authority=self and expands read grants.
+  const granted = [
+    "atproto",
+    "space:org.slack.dm.inbox?authority=*&collection=org.slack.dm.request&action=create&action=update&action=delete",
+    "space:org.slack.dm.inbox?authority=did:plc:xezitkdo3czy5oedz2gww3l2&collection=org.slack.dm.request&action=read&manage=create&manage=update",
+    "repo:org.slack.dm.declaration?action=create&action=update",
+    "space:org.slack.dm.conversation?authority=*&collection=org.slack.dm.header&collection=org.slack.dm.message&collection=org.slack.dm.reaction&action=read",
+  ];
+  const required = [
+    "atproto",
+    "space:org.slack.dm.inbox?authority=*&collection=org.slack.dm.request&action=create&action=update&action=delete",
+    "space:org.slack.dm.inbox?authority=self&action=read&manage=create&manage=update",
+    "repo:org.slack.dm.declaration?action=create&action=update",
+    "space:org.slack.dm.conversation?authority=*&action=read",
+  ].join(" ");
+  assert.deepEqual(missingScopes(granted.join(" "), required), []);
+  assert.deepEqual(missingScopes(granted.filter((token) => !token.startsWith("repo:")).join(" "), required), ["repo:org.slack.dm.declaration?action=create&action=update"]);
 });

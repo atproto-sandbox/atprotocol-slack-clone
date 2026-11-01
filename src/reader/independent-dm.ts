@@ -3,6 +3,7 @@ import { mintSpaceCredentialWith, SpaceCredentialError, type SpaceCredential, ty
 import { XrpcError, type AtprotoClient } from "@/atproto/xrpc";
 import { canonicalParticipants, dmConversationUri, spaceRecordUri } from "@/protocol/keys";
 import { validateDmHeaderMatchesRequest, validateSpaceRecord } from "@/protocol/records";
+import { isUnverifiableRepo } from "@/atproto/kem-key";
 
 const DEFAULT_LIMIT = 100;
 const MAX_MESSAGES_PER_HALF = 20_000;
@@ -141,6 +142,8 @@ async function getOptionalRecord(client: AtprotoClient, space: string, repo: str
     return record.value;
   } catch (error) {
     if (error instanceof XrpcError && error.code === "RecordNotFound") return null;
+    // A header that cannot be authenticated is read as absent, like any other half that cannot be shown.
+    if (isUnverifiableRepo(error)) return null;
     throw error;
   }
 }

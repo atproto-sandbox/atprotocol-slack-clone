@@ -23,7 +23,7 @@ const actorNamed = (world: AppWorld, role: string): Actor => {
 };
 
 async function membersOf(world: AppWorld, as: Actor, space: string): Promise<Member[]> {
-  const result = await world.pdsGet<{ members?: Member[] }>(as, "com.atproto.simplespace.listMembers", { space, limit: "1000" });
+  const result = await world.pdsGet<{ members?: Member[] }>(as, "com.atproto.memberspace.listMembers", { space, limit: "1000" });
   assert.equal(result.status, 200, `listMembers ${space}: ${JSON.stringify(result.body)}`);
   return result.body.members ?? [];
 }
@@ -224,10 +224,10 @@ When("that DID opens a forwarded invite link and tries to join", async function 
 });
 
 Then("the app says the account has not been added to the workspace", async function (this: AppWorld) {
-  await actorNamed(this, "stranger").page.getByRole("alert").filter({ hasText: /haven't been added to this workspace/ }).waitFor({ state: "visible" });
+  await actorNamed(this, "stranger").page.getByRole("alert").filter({ hasText: /may not have been added to it yet/ }).waitFor({ state: "visible" });
   const accept = this.callsTo(actorNamed(this, "stranger"), "/api/workspaces/accept").at(-1);
-  assert.equal(accept?.status, 403);
-  assert.equal((JSON.parse(accept!.responseBody) as { code: string }).code, "not_a_member");
+  assert.equal(accept?.status, 404, "the authority gives an account it never added the same answer it gives for a missing workspace");
+  assert.equal((JSON.parse(accept!.responseBody) as { code: string }).code, "workspace_unavailable");
 });
 
 Then("the workspace does not appear in that account's dashboard", async function (this: AppWorld) {
@@ -330,7 +330,7 @@ Given("a user has an active authority-authored admin record", async function (th
 });
 
 When("that user calls a member-management operation without the authority session", async function (this: AppWorld) {
-  const result = await this.pdsPost(actorNamed(this, "member"), "com.atproto.simplespace.putMember", {
+  const result = await this.pdsPost(actorNamed(this, "member"), "com.atproto.memberspace.putMember", {
     space: this.workspaceUri, did: actorNamed(this, "outsider").did, read: true, write: true,
   });
   this.scratch.set("managementAttempt", result);

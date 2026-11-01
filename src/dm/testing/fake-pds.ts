@@ -1,54 +1,86 @@
-import { verifySignature } from "@atproto/crypto";
-import { fromBase64 } from "@atproto/lex-data";
+import { P256Keypair } from "@atproto/crypto";
+import { toBase64 } from "@atproto/lex-data";
+import { jsonToLex } from "@atproto/lexicon";
+import {
+  COMMIT_MAC_TYPE,
+  MAC_HEADER,
+  RECORD_MAC_TYPE,
+  RepoCommit,
+  SpaceMacError,
+  WANT_MAC_HEADER,
+  computeCommitMac,
+  computeRecordMac,
+  decapsulate,
+  formatMacHeader,
+  isP256DidKey,
+  parseWantMacHeader,
+  serializeRecord,
+  verifyCredentialSig,
+  type MacType,
+} from "@atproto/space";
 import { SPACE_CREDENTIAL_LIFETIME_MS } from "@/atproto/space-credential-core";
-import { generateSpaceKey } from "@/atproto/space-signature";
+import { generateSpaceKey } from "@/atproto/space-key";
+import { MEMBERSPACE_POLICY } from "@/atproto/space-policy";
 import { AtprotoClient } from "@/atproto/xrpc";
 
 /**
  * An in-memory, multi-host fake of the DM-relevant slice of the pinned PDS
  * protocol. Test-only: production code (`dm-client.ts`) never imports this.
  *
- * Space management (`createSpace`/`updateSpace`/`getSpace`/`putMember`/
- * `removeMember`/`deleteSpace`/`listMembers`/`listSpaces`) is authorized by the
- * caller's own identity (`clientFor(did)`, standing in for a self-authenticated
- * OAuth session): only the space's owner may call them, matching
- * `authority=self` in DM_BROWSER_SCOPES.
+ * Space management (`createSpace`/`updateSpace`/`getSpace`/`deleteSpace`, and
+ * `putMember`/`removeMember`/`listMembers` under memberspace, plus `listSpaces`)
+ * is authorized by the caller's own identity (`clientFor(did)`, standing in for
+ * a self-authenticated OAuth session): only the space's owner may call them,
+ * matching `authority=self` in DM_BROWSER_SCOPES.
  *
- * Repo content (`listRepos`/`listRecords`/`getRecord`/`registerNotify`) always
- * requires a minted space credential (`getDelegationToken` at the caller's own
- * host, then `getSpaceCredential` at the authority's host), even for the
- * authority's own space, matching the pinned PDS's uniform credential
- * mechanism (M0 conformance).
+ * Repo content (`listRepos`/`listRecords`/`getRecord`/`getLatestCommit`/
+ * `registerNotify`) always requires a minted space credential
+ * (`getDelegationToken` at the caller's own host, then `getSpaceCredential` at
+ * the authority's host), even for the authority's own space, matching the pinned
+ * PDS's uniform credential mechanism (M0 conformance). `getRecord` and
+ * `getLatestCommit` also require an `Atproto-Space-Want-Mac`
+ * request and answer with an `Atproto-Space-Mac`, keyed by a shared secret
+ * derived against the repo author's `#atproto_kem` key (`rotateKemKey` rotates it).
+ *
+ * The authority answers `SpaceNotFound` where a user the policy does not
+ * authorize asks for a credential, like the reference PDS.
  *
  * Reproduces the M0-observed quirks: a `putRecord` into someone else's space
  * always succeeds (you always own your own repo) but is only added to
  * `trackedWriters` (and therefore `listRepos`) when the space's *current*
- * write policy authorizes the writer; once tracked, a writer is never evicted
- * by tightening the policy or removing them from the member list.
+ * policy authorizes the writer. `removeMember` and `putMember` with
+ * `write: false` evict a tracked writer, as the reference PDS now does;
+ * `updateSpace` does not re-evaluate the writer set.
  */
 
-type Policy = "public" | "memberList";
+const PERSONALSPACE_POLICY = "com.atproto.personalspace.policy";
+
+type RecordEntry = { value: Record<string, unknown>; cid: Awaited<ReturnType<typeof serializeRecord>>["cid"] };
 
 type FakeSpace = {
   type: string;
   skey: string;
   ownerDid: string;
-  readPolicy: Policy;
-  writePolicy: Policy;
+  policy: { $type: string; publicRead: boolean; publicWrite: boolean; allowedApps?: string[]; publishPolicy?: boolean; publishMembers?: boolean };
   members: Map<string, { read: boolean; write: boolean }>;
   trackedWriters: Map<string, { repoRev: string; spaceRev: string }>;
+  repoRevs: Map<string, string>;
   deleted: boolean;
-  repos: Map<string, Map<string, Map<string, { value: Record<string, unknown>; cid: string }>>>;
+  repos: Map<string, Map<string, Map<string, RecordEntry>>>;
 };
 
 type FakeAuth =
   | { kind: "self"; did: string }
-  | { kind: "delegation"; token: string; keyId: string }
   | { kind: "credential"; token: string; audience: string }
   | { kind: "none" }
   | { kind: "rejected"; error: FakeXrpcError };
 
 const NOTIFY_REGISTRATION_TTL_MS = 24 * 60 * 60 * 1000;
+
+const MAC_METHODS: Readonly<Record<string, MacType>> = {
+  "com.atproto.space.getRecord": RECORD_MAC_TYPE,
+  "com.atproto.space.getLatestCommit": COMMIT_MAC_TYPE,
+};
 
 export class FakeXrpcError extends Error {
   constructor(readonly status: number, readonly code: string, message = code) {
@@ -57,15 +89,29 @@ export class FakeXrpcError extends Error {
   }
 }
 
+/** A response body together with the headers the method sets (the MAC). */
+/** The MAC header, plus what a browser needs to read it: the response varies on the request header and exposes the MAC. */
+function macHeaders(mac: string): Record<string, string> {
+  return { [MAC_HEADER]: mac, vary: WANT_MAC_HEADER, "access-control-expose-headers": MAC_HEADER };
+}
+
+class WithHeaders {
+  constructor(readonly body: unknown, readonly headers: Record<string, string>) {}
+}
+
 export class FakeDmNetwork {
   private virtualNow = Date.now();
 
   private readonly accounts = new Map<string, string>();
+  private readonly kemKeys = new Map<string, Promise<P256Keypair>>();
+  /** What a DID-document cache holds for each account: stale after `rotateKemKey` until a forced refresh. */
+  private readonly publishedKemKeys = new Map<string, string>();
   private readonly spaces = new Map<string, FakeSpace>();
+  /** Public repo records (`com.atproto.repo.*`), keyed by repo DID then `collection/rkey`. */
+  private readonly publicRecords = new Map<string, Map<string, { value: unknown; cid: string }>>();
   private readonly delegations = new Map<string, { space: string; granteeDid: string }>();
   private readonly credentials = new Map<string, { space: string; grantedDid: string; keyId: string; expiresAt: number }>();
   private tokenCounter = 0;
-  private cidCounter = 0;
   private revCounter = 0;
 
   now = (): number => this.virtualNow;
@@ -89,6 +135,34 @@ export class FakeDmNetwork {
     return `https://fake-pds.test/${host}`;
   };
 
+  /**
+   * Stands in for a DID-document lookup of `#atproto_kem`. A cached key stays until `forceRefresh`, so a test can
+   * observe a syncer holding a rotated-away key.
+   */
+  resolveKemKey = async (did: string, forceRefresh = false): Promise<string> => {
+    if (!this.accounts.has(did)) throw new Error(`fake-pds: no account registered for ${did}`);
+    const published = this.publishedKemKeys.get(did);
+    if (published && !forceRefresh) return published;
+    const current = (await this.kemKeypair(did)).did();
+    this.publishedKemKeys.set(did, current);
+    return current;
+  };
+
+  /** Replaces the account's `#atproto_kem` key. Resolvers that cached the old one fail verification until they refresh. */
+  async rotateKemKey(did: string): Promise<void> {
+    await this.resolveKemKey(did);
+    this.kemKeys.set(did, P256Keypair.create());
+  }
+
+  private kemKeypair(did: string): Promise<P256Keypair> {
+    let key = this.kemKeys.get(did);
+    if (!key) {
+      key = P256Keypair.create();
+      this.kemKeys.set(did, key);
+    }
+    return key;
+  }
+
   /** Stands in for a self-authenticated OAuth session client (the DM `memberClient`). */
   clientFor(did: string): AtprotoClient {
     if (!this.accounts.has(did)) throw new Error(`fake-pds: no account registered for ${did}`);
@@ -100,35 +174,36 @@ export class FakeDmNetwork {
     const url = new URL(request.url);
     const path = `${url.pathname}${url.search}`;
     const body = request.method === "GET" || request.method === "HEAD" ? undefined : await request.text();
-    return this.respond(path, { method: request.method, body }, await this.authFromRequest(request.headers));
+    return this.respond(path, { method: request.method, body }, await this.authFromRequest(request.headers), request.headers);
   };
 
   generateKey = generateSpaceKey;
 
   /**
-   * Authenticates a cross-host request the way the pinned PDS does: a `Bearer`
-   * delegation token needs a signature naming its own `keyid`; an
-   * `Atproto-Space` credential needs the audience header and a signature by the
-   * key the credential was bound to when it was minted.
+   * Authenticates a cross-host request the way the pinned PDS does: only
+   * `Atproto-Space-Credential` is a space scheme (any letter case), and it needs
+   * the audience header and a tagged signature by the key the credential was
+   * bound to when it was minted. The credential exchange itself carries no
+   * authorization at all.
    */
   private async authFromRequest(headers: Headers): Promise<FakeAuth> {
     const authorization = headers.get("authorization");
-    const [scheme, token] = authorization?.split(" ") ?? [];
-    if (!authorization || !scheme || !token) return { kind: "none" };
-    if (scheme === "Bearer") {
-      const keyId = /^\("authorization"\);keyid="(did:key:[^"]+)"$/.exec(signatureInput(headers) ?? "")?.[1];
-      if (!keyId || !(await signatureVerifies(headers, authorization, undefined, keyId))) return rejected("BadSpaceSignature", "invalid HTTP message signature");
-      return { kind: "delegation", token, keyId };
-    }
-    if (scheme !== "Atproto-Space") return { kind: "none" };
-    const audience = headers.get("atproto-space-audience");
+    if (!authorization) return { kind: "none" };
+    const [scheme, token] = authorization.split(" ");
+    if (scheme?.toLowerCase() === "atproto-space") return rejected(400, "InvalidToken", "Unsupported authorization type");
+    if (scheme?.toLowerCase() !== "atproto-space-credential" || !token) return { kind: "none" };
     const credential = this.credentials.get(token);
-    if (!audience || signatureInput(headers) !== '("authorization" "atproto-space-audience")' || !credential) return rejected("BadSpaceSignature", "invalid HTTP message signature");
-    if (!(await signatureVerifies(headers, authorization, audience, credential.keyId))) return rejected("BadSpaceSignature", "invalid HTTP message signature");
+    const audience = headers.get("atproto-space-audience");
+    if (!credential || !audience) return rejected(401, "BadSpaceSignature", "invalid HTTP message signature");
+    try {
+      await verifyCredentialSig(Object.fromEntries(headers.entries()), credential.keyId as `did:key:${string}`);
+    } catch (error) {
+      return rejected(401, "BadSpaceSignature", error instanceof Error ? error.message : "invalid HTTP message signature");
+    }
     return { kind: "credential", token, audience };
   }
 
-  private async respond(path: string, init: { method?: string; body?: unknown }, auth: FakeAuth): Promise<Response> {
+  private async respond(path: string, init: { method?: string; body?: unknown }, auth: FakeAuth, requestHeaders?: Headers): Promise<Response> {
     const url = new URL(path, "https://fake-pds.test");
     const method = url.pathname.replace(/^\/xrpc\//, "");
     const params: Record<string, unknown> = {};
@@ -136,29 +211,33 @@ export class FakeDmNetwork {
     if (typeof init.body === "string" && init.body.length > 0) Object.assign(params, JSON.parse(init.body));
     if (auth.kind === "rejected") return errorResponse(auth.error);
     try {
-      const body = this.handle(method, params, auth);
-      return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+      const handled = await this.handle(method, params, auth, requestHeaders);
+      const [body, headers] = handled instanceof WithHeaders ? [handled.body, handled.headers] : [handled, {}];
+      return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json", ...headers } });
     } catch (error) {
       if (error instanceof FakeXrpcError) return errorResponse(error);
       throw error;
     }
   }
 
-  private handle(method: string, params: Record<string, unknown>, auth: FakeAuth): unknown {
+  private async handle(method: string, params: Record<string, unknown>, auth: FakeAuth, requestHeaders: Headers | undefined): Promise<unknown> {
     switch (method) {
+      case "com.atproto.repo.putRecord": return this.putPublicRecord(params, auth);
+      case "com.atproto.repo.getRecord": return this.getPublicRecord(params);
       case "com.atproto.space.getDelegationToken": return this.getDelegationToken(params, auth);
-      case "com.atproto.space.getSpaceCredential": return this.getSpaceCredential(params, auth);
-      case "com.atproto.simplespace.createSpace": return this.createSpace(params, auth);
-      case "com.atproto.simplespace.updateSpace": return this.updateSpace(params, auth);
-      case "com.atproto.simplespace.getSpace": return this.getSpace(params, auth);
-      case "com.atproto.simplespace.putMember": return this.putMember(params, auth);
-      case "com.atproto.simplespace.removeMember": return this.removeMember(params, auth);
-      case "com.atproto.simplespace.deleteSpace": return this.deleteSpace(params, auth);
-      case "com.atproto.simplespace.listMembers": return this.listMembers(params, auth);
+      case "com.atproto.space.getSpaceCredential": return this.getSpaceCredential(params);
+      case "com.atproto.space.createSpace": return this.createSpace(params, auth);
+      case "com.atproto.space.updateSpace": return this.updateSpace(params, auth);
+      case "com.atproto.space.getSpace": return this.getSpace(params, auth);
+      case "com.atproto.memberspace.putMember": return this.putMember(params, auth);
+      case "com.atproto.memberspace.removeMember": return this.removeMember(params, auth);
+      case "com.atproto.space.deleteSpace": return this.deleteSpace(params, auth);
+      case "com.atproto.memberspace.listMembers": return this.listMembers(params, auth);
       case "com.atproto.space.listSpaces": return this.listSpaces(params, auth);
       case "com.atproto.space.putRecord": return this.putRecord(params, auth);
       case "com.atproto.space.deleteRecord": return this.deleteRecord(params, auth);
-      case "com.atproto.space.getRecord": return this.getRecord(params, auth);
+      case "com.atproto.space.getRecord": return this.getRecord(params, auth, requestHeaders);
+      case "com.atproto.space.getLatestCommit": return this.getLatestCommit(params, auth, requestHeaders);
       case "com.atproto.space.listRecords": return this.listRecords(params, auth);
       case "com.atproto.space.listRepos": return this.listRepos(params, auth);
       case "com.atproto.space.registerNotify": return this.registerNotify(params, auth);
@@ -180,6 +259,10 @@ export class FakeDmNetwork {
     if (space.ownerDid !== did) throw new FakeXrpcError(400, "NotSpaceOwner", "Not the space owner");
   }
 
+  private requireMemberspace(space: FakeSpace): void {
+    if (space.policy.$type !== MEMBERSPACE_POLICY) throw new FakeXrpcError(400, "PolicyMismatch", "The space is not governed by the memberspace policy.");
+  }
+
   private getDelegationToken(params: Record<string, unknown>, auth: FakeAuth): { token: string } {
     const granteeDid = this.requireSelf(auth);
     const space = String(params.space);
@@ -188,42 +271,56 @@ export class FakeDmNetwork {
     return { token };
   }
 
-  private getSpaceCredential(params: Record<string, unknown>, auth: FakeAuth): { credential: string } {
-    if (auth.kind !== "delegation") throw new FakeXrpcError(401, "MissingJwt", "missing space delegation token");
-    const delegation = this.delegations.get(auth.token);
-    if (!delegation || delegation.space !== params.space) throw new FakeXrpcError(400, "InvalidDelegationToken", "Delegation token subject does not match requested space");
-    const space = this.requireSpace(params.space);
-    if (space.deleted) throw new FakeXrpcError(400, "SpaceDeleted", "Space has been deleted");
-    const authorized = delegation.granteeDid === space.ownerDid ||
-      space.readPolicy === "public" ||
-      space.members.get(delegation.granteeDid)?.read === true;
-    if (!authorized) throw new FakeXrpcError(400, "UserNotAuthorized", "User not authorized for this space");
+  /**
+   * The exchange is authenticated by its body alone. A deleted space answers
+   * `SpaceDeleted` first, then the user is checked: a user the policy does not
+   * authorize (or no user, for a space that is not publicly readable) gets
+   * `SpaceNotFound`, so a refusal discloses nothing about the space.
+   */
+  private getSpaceCredential(params: Record<string, unknown>): { credential: string } {
+    const credentialKid = params.credentialKid;
+    if (typeof credentialKid !== "string" || !isP256DidKey(credentialKid)) throw new FakeXrpcError(400, "InvalidRequest", "credentialKid must be a P-256 did:key");
+    let userDid: string | undefined;
+    if (typeof params.delegationToken === "string") {
+      const delegation = this.delegations.get(params.delegationToken);
+      if (!delegation || delegation.space !== params.space) throw new FakeXrpcError(400, "InvalidDelegationToken", "Delegation token subject does not match requested space");
+      userDid = delegation.granteeDid;
+    }
+    const space = typeof params.space === "string" ? this.spaces.get(params.space) : undefined;
+    if (space?.deleted) throw new FakeXrpcError(400, "SpaceDeleted", "Space has been deleted");
+    if (!space) throw new FakeXrpcError(400, "SpaceNotFound", "Space not found");
+    const authorized = userDid === undefined
+      ? space.policy.publicRead
+      : userDid === space.ownerDid || space.policy.publicRead || space.members.get(userDid)?.read === true;
+    if (!authorized) throw new FakeXrpcError(400, "SpaceNotFound", "Space not found");
     const token = `credential-${this.tokenCounter++}`;
-    this.credentials.set(token, { space: delegation.space, grantedDid: delegation.granteeDid, keyId: auth.keyId, expiresAt: this.now() + SPACE_CREDENTIAL_LIFETIME_MS });
+    this.credentials.set(token, { space: String(params.space), grantedDid: userDid ?? "", keyId: credentialKid, expiresAt: this.now() + SPACE_CREDENTIAL_LIFETIME_MS });
     return { credential: token };
   }
 
   private createSpace(params: Record<string, unknown>, auth: FakeAuth): { uri: string } {
     const ownerDid = this.requireSelf(auth);
     const type = String(params.spaceType);
-    const skey = String(params.skey);
+    const skey = typeof params.skey === "string" ? params.skey : fakeTid(++this.revCounter);
     const uri = `at://${ownerDid}/space/${type}/${skey}`;
-    if (this.spaces.has(uri)) throw new FakeXrpcError(400, "SpaceAlreadyExists", "Space already exists");
+    const existing = this.spaces.get(uri);
+    if (existing && !existing.deleted) throw new FakeXrpcError(400, "SpaceAlreadyExists", "Space already exists");
     this.spaces.set(uri, {
       type, skey, ownerDid,
-      readPolicy: policyKind(params.readPolicy),
-      writePolicy: policyKind(params.writePolicy),
-      members: new Map(), trackedWriters: new Map(), deleted: false, repos: new Map(),
+      policy: toStoredPolicy(params.policy),
+      members: new Map(), trackedWriters: new Map(), repoRevs: new Map(), deleted: false, repos: new Map(),
     });
     return { uri };
   }
 
+  /** Replaces the whole policy. A different `$type` migrates the space and discards the member list; the writer set is not re-evaluated. */
   private updateSpace(params: Record<string, unknown>, auth: FakeAuth): Record<string, never> {
     const did = this.requireSelf(auth);
     const space = this.requireSpace(params.space);
     this.requireOwner(space, did);
-    if (params.readPolicy !== undefined) space.readPolicy = policyKind(params.readPolicy);
-    if (params.writePolicy !== undefined) space.writePolicy = policyKind(params.writePolicy);
+    const next = toStoredPolicy(params.policy);
+    if (next.$type !== space.policy.$type) space.members.clear();
+    space.policy = next;
     return {};
   }
 
@@ -231,19 +328,18 @@ export class FakeDmNetwork {
     const did = this.requireSelf(auth);
     const space = this.requireSpace(params.space);
     this.requireOwner(space, did);
-    return {
-      uri: params.space as string,
-      readPolicy: { $type: policyType(space.readPolicy) },
-      writePolicy: { $type: policyType(space.writePolicy) },
-      appAccess: { $type: "com.atproto.simplespace.defs#open" },
-    };
+    const { $type, ...settings } = space.policy;
+    return { uri: params.space as string, policy: $type === MEMBERSPACE_POLICY ? { $type, ...settings } : { $type } };
   }
 
   private putMember(params: Record<string, unknown>, auth: FakeAuth): Record<string, never> {
     const did = this.requireSelf(auth);
     const space = this.requireSpace(params.space);
     this.requireOwner(space, did);
-    space.members.set(String(params.did), { read: Boolean(params.read), write: Boolean(params.write) });
+    this.requireMemberspace(space);
+    const write = Boolean(params.write);
+    space.members.set(String(params.did), { read: Boolean(params.read), write });
+    if (!write) space.trackedWriters.delete(String(params.did));
     return {};
   }
 
@@ -251,7 +347,9 @@ export class FakeDmNetwork {
     const did = this.requireSelf(auth);
     const space = this.requireSpace(params.space);
     this.requireOwner(space, did);
+    this.requireMemberspace(space);
     space.members.delete(String(params.did));
+    space.trackedWriters.delete(String(params.did));
     return {};
   }
 
@@ -267,42 +365,65 @@ export class FakeDmNetwork {
     const did = this.requireSelf(auth);
     const space = this.requireSpace(params.space);
     this.requireOwner(space, did);
+    this.requireMemberspace(space);
     const all = [...space.members.entries()].map(([memberDid, access]) => ({ did: memberDid, ...access }));
     return paginate(all, params, (member) => member.did, "members");
   }
 
+  /** Spaces the caller is the authority of or holds a repo in, as the reference PDS lists them. */
   private listSpaces(params: Record<string, unknown>, auth: FakeAuth) {
     const did = this.requireSelf(auth);
     const all = [...this.spaces.values()]
-      .filter((space) => space.ownerDid === did && !space.deleted)
+      .filter((space) => !space.deleted && (space.ownerDid === did || space.repos.has(did)))
       .filter((space) => params.spaceType === undefined || space.type === params.spaceType)
       .filter((space) => params.did === undefined || space.ownerDid === params.did)
       .map((space) => ({ uri: `at://${space.ownerDid}/space/${space.type}/${space.skey}` }));
     return paginate(all, params, (space) => space.uri, "spaces");
   }
 
-  private putRecord(params: Record<string, unknown>, auth: FakeAuth) {
+  /** A record in the account's ordinary public repo (outside any space), writable only by its owner. */
+  private async putPublicRecord(params: Record<string, unknown>, auth: FakeAuth) {
+    const did = this.requireSelf(auth);
+    if (params.repo !== did) throw new FakeXrpcError(400, "InvalidRequest", "Can only write to your own repo");
+    const { cid } = await serializeRecord(String(params.collection) as `${string}.${string}.${string}`, String(params.rkey) as never, params.record as never);
+    let records = this.publicRecords.get(did);
+    if (!records) this.publicRecords.set(did, records = new Map());
+    records.set(`${String(params.collection)}/${String(params.rkey)}`, { value: params.record, cid: cid.toString() });
+    return { uri: `at://${did}/${String(params.collection)}/${String(params.rkey)}`, cid: cid.toString() };
+  }
+
+  /** Public: any caller, session or not, may read a public repo record. */
+  private getPublicRecord(params: Record<string, unknown>) {
+    const record = this.publicRecords.get(String(params.repo))?.get(`${String(params.collection)}/${String(params.rkey)}`);
+    if (!record) throw new FakeXrpcError(400, "RecordNotFound", "Record not found");
+    return { uri: `at://${String(params.repo)}/${String(params.collection)}/${String(params.rkey)}`, cid: record.cid, value: record.value };
+  }
+
+  private async putRecord(params: Record<string, unknown>, auth: FakeAuth) {
     const did = this.requireSelf(auth);
     const repo = String(params.repo);
     if (repo !== did) throw new FakeXrpcError(400, "UserNotAuthorized", "Can only write to your own repo");
     const collection = String(params.collection);
     const rkey = String(params.rkey);
     const record = params.record as Record<string, unknown>;
+    // The host stores a record in its Lexicon form (`$link` and `$bytes` objects become CIDs and bytes) and answers in JSON,
+    // so the CID covers the Lexicon form.
+    const { cid } = await serializeRecord(collection as `${string}.${string}.${string}`, rkey as never, jsonToLex(record as Parameters<typeof jsonToLex>[0]) as never);
     if (typeof params.space === "string" && params.space.startsWith(`at://${did}/`) && (!this.spaces.has(params.space) || this.spaces.get(params.space)!.deleted)) {
       throw new FakeXrpcError(400, "SpaceNotFound", "Space not found");
     }
     if (typeof params.space !== "string" || !this.spaces.has(params.space) || this.spaces.get(params.space)!.deleted) {
       // Writing into another authority's space stores the record in the writer's own repo without asking the authority.
-      return { uri: `${String(params.space)}/${repo}/${collection}/${rkey}`, cid: `cid-${this.cidCounter++}` };
+      return { uri: `${String(params.space)}/${repo}/${collection}/${rkey}`, cid: cid.toString() };
     }
     const space = this.requireSpace(params.space);
     const repoCollections = this.repoCollections(space, repo);
-    const records = repoCollections.get(collection) ?? new Map<string, { value: Record<string, unknown>; cid: string }>();
+    const records = repoCollections.get(collection) ?? new Map<string, RecordEntry>();
     repoCollections.set(collection, records);
-    const cid = `cid-${this.cidCounter++}`;
     records.set(rkey, { value: record, cid });
-    if (this.currentlyAuthorizedWriter(space, repo)) space.trackedWriters.set(repo, { repoRev: this.nextRev(), spaceRev: this.nextRev() });
-    return { uri: `${spaceUri(space)}/${repo}/${collection}/${rkey}`, cid };
+    space.repoRevs.set(repo, this.nextRev());
+    if (this.currentlyAuthorizedWriter(space, repo)) space.trackedWriters.set(repo, { repoRev: space.repoRevs.get(repo)!, spaceRev: this.nextRev() });
+    return { uri: `${spaceUri(space)}/${repo}/${collection}/${rkey}`, cid: cid.toString() };
   }
 
   private deleteRecord(params: Record<string, unknown>, auth: FakeAuth): Record<string, never> {
@@ -311,6 +432,7 @@ export class FakeDmNetwork {
     if (repo !== did) throw new FakeXrpcError(400, "UserNotAuthorized", "Can only delete from your own repo");
     const space = this.requireSpace(params.space);
     this.repoCollections(space, repo).get(String(params.collection))?.delete(String(params.rkey));
+    space.repoRevs.set(repo, this.nextRev());
     return {};
   }
 
@@ -324,15 +446,64 @@ export class FakeDmNetwork {
     return credential.grantedDid;
   }
 
-  private getRecord(params: Record<string, unknown>, auth: FakeAuth) {
-    this.requireCredential(params, auth);
+  /**
+   * The shared secret for a MAC-bearing read. A credential must ask for a MAC
+   * (`BadSpaceMac` otherwise); the secret is derived against the repo author's
+   * *current* `#atproto_kem` key, so a syncer holding a rotated-away key gets a
+   * MAC it cannot verify.
+   */
+  private async macSecret(method: string, repo: string, requestHeaders: Headers | undefined): Promise<Uint8Array> {
+    const type = MAC_METHODS[method]!;
+    try {
+      const keyShare = parseWantMacHeader(requestHeaders?.get(WANT_MAC_HEADER) ?? undefined, type);
+      return decapsulate(await this.kemKeypair(repo), keyShare);
+    } catch (error) {
+      if (error instanceof SpaceMacError) throw new FakeXrpcError(400, "BadSpaceMac", error.message);
+      throw error;
+    }
+  }
+
+  /** An account reading its own repo with its own OAuth session: no credential, and a MAC only if it asks for one. */
+  private isOwnRead(params: Record<string, unknown>, auth: FakeAuth): boolean {
+    return auth.kind === "self" && params.repo === auth.did;
+  }
+
+  private async getRecord(params: Record<string, unknown>, auth: FakeAuth, requestHeaders: Headers | undefined): Promise<WithHeaders> {
+    const own = this.isOwnRead(params, auth);
+    if (!own) this.requireCredential(params, auth);
     const space = this.requireSpace(params.space);
     const repo = String(params.repo);
     const collection = String(params.collection);
     const rkey = String(params.rkey);
+    const sharedSecret = own && !requestHeaders?.has(WANT_MAC_HEADER) ? undefined : await this.macSecret("com.atproto.space.getRecord", repo, requestHeaders);
     const record = space.deleted ? undefined : this.repoCollections(space, repo).get(collection)?.get(rkey);
     if (!record) throw new FakeXrpcError(400, "RecordNotFound", "Record not found");
-    return { uri: `${spaceUri(space)}/${repo}/${collection}/${rkey}`, cid: record.cid, value: record.value };
+    const uri = `${spaceUri(space)}/${repo}/${collection}/${rkey}`;
+    return new WithHeaders(
+      { uri, cid: record.cid.toString(), value: record.value },
+      sharedSecret ? macHeaders(formatMacHeader(RECORD_MAC_TYPE, computeRecordMac(sharedSecret, uri, record.cid))) : {},
+    );
+  }
+
+  private async getLatestCommit(params: Record<string, unknown>, auth: FakeAuth, requestHeaders: Headers | undefined): Promise<WithHeaders> {
+    const own = this.isOwnRead(params, auth);
+    if (!own) this.requireCredential(params, auth);
+    const space = this.requireSpace(params.space);
+    const repo = String(params.repo);
+    const sharedSecret = own && !requestHeaders?.has(WANT_MAC_HEADER) ? undefined : await this.macSecret("com.atproto.space.getLatestCommit", repo, requestHeaders);
+    const commit = this.commitFor(space, repo);
+    return new WithHeaders(
+      { commit: commitJson(commit) },
+      sharedSecret ? macHeaders(formatMacHeader(COMMIT_MAC_TYPE, computeCommitMac(sharedSecret, commit))) : {},
+    );
+  }
+
+  private commitFor(space: FakeSpace, repo: string) {
+    const rev = space.repoRevs.get(repo);
+    if (space.deleted || !rev) throw new FakeXrpcError(400, "RepoNotFound", "Repo not found");
+    const records = [...this.repoCollections(space, repo)].flatMap(([collection, entries]) =>
+      [...entries].map(([rkey, entry]) => ({ collection: collection as never, rkey: rkey as never, cid: entry.cid })));
+    return RepoCommit.fromRecords(records).toCommit({ space: spaceUri(space) as never, repo: repo as never, rev });
   }
 
   private listRecords(params: Record<string, unknown>, auth: FakeAuth) {
@@ -342,7 +513,7 @@ export class FakeDmNetwork {
     const collection = String(params.collection);
     const records = [...(space.deleted ? [] : this.repoCollections(space, repo).get(collection)?.entries() ?? [])]
       .sort(([left], [right]) => right.localeCompare(left))
-      .map(([rkey, entry]) => ({ collection, rkey, cid: entry.cid, value: entry.value }));
+      .map(([rkey, entry]) => ({ collection, rkey, cid: entry.cid.toString(), value: entry.value }));
     return paginate(records, params, (record) => record.rkey, "records");
   }
 
@@ -352,7 +523,7 @@ export class FakeDmNetwork {
     const limit = typeof params.limit === "number" ? params.limit : Number(params.limit ?? 100) || 100;
     const after = typeof params.cursor === "string" ? params.cursor : "";
     const updated = [...space.trackedWriters]
-      .map(([did, revs]) => ({ did, ...revs, hash: new Uint8Array(32) }))
+      .map(([did, revs]) => ({ did, ...revs, data: { $bytes: toBase64(new Uint8Array(32)) } }))
       .filter((repo) => repo.spaceRev > after)
       .sort((left, right) => left.spaceRev.localeCompare(right.spaceRev));
     const repos = updated.slice(0, limit);
@@ -369,7 +540,7 @@ export class FakeDmNetwork {
     return fakeTid(++this.revCounter);
   }
 
-  private repoCollections(space: FakeSpace, repo: string): Map<string, Map<string, { value: Record<string, unknown>; cid: string }>> {
+  private repoCollections(space: FakeSpace, repo: string): Map<string, Map<string, RecordEntry>> {
     let collections = space.repos.get(repo);
     if (!collections) {
       collections = new Map();
@@ -379,7 +550,7 @@ export class FakeDmNetwork {
   }
 
   private currentlyAuthorizedWriter(space: FakeSpace, did: string): boolean {
-    return did === space.ownerDid || space.writePolicy === "public" || space.members.get(did)?.write === true;
+    return did === space.ownerDid || space.policy.publicWrite || space.members.get(did)?.write === true;
   }
 }
 
@@ -387,13 +558,23 @@ function spaceUri(space: FakeSpace): string {
   return `at://${space.ownerDid}/space/${space.type}/${space.skey}`;
 }
 
-function policyKind(policy: unknown): Policy {
-  const type = (policy as { $type?: unknown } | undefined)?.$type;
-  return type === "com.atproto.simplespace.defs#publicPolicy" ? "public" : "memberList";
+/** The two baseline policies the fake implements; any other is refused like the reference PDS does. */
+function toStoredPolicy(policy: unknown): FakeSpace["policy"] {
+  const fields = (policy ?? {}) as { $type?: unknown; publicRead?: unknown; publicWrite?: unknown; allowedApps?: unknown; publishPolicy?: unknown; publishMembers?: unknown };
+  if (fields.$type === MEMBERSPACE_POLICY) {
+    return {
+      $type: MEMBERSPACE_POLICY, publicRead: fields.publicRead === true, publicWrite: fields.publicWrite === true,
+      ...(Array.isArray(fields.allowedApps) ? { allowedApps: fields.allowedApps.filter((app): app is string => typeof app === "string") } : {}),
+      ...(fields.publishPolicy === true ? { publishPolicy: true } : {}),
+      ...(fields.publishMembers === true ? { publishMembers: true } : {}),
+    };
+  }
+  if (fields.$type === PERSONALSPACE_POLICY) return { $type: PERSONALSPACE_POLICY, publicRead: false, publicWrite: false };
+  throw new FakeXrpcError(400, "UnsupportedPolicy", "The requested policy is not one the host implements.");
 }
 
-function policyType(policy: Policy): string {
-  return policy === "public" ? "com.atproto.simplespace.defs#publicPolicy" : "com.atproto.simplespace.defs#memberListPolicy";
+function commitJson(commit: { ver: number; repo: string; space: string; rev: string; data: Uint8Array }) {
+  return { ver: commit.ver, repo: commit.repo, space: commit.space, rev: commit.rev, data: { $bytes: toBase64(commit.data) } };
 }
 
 function paginate<T>(all: T[], params: Record<string, unknown>, key: (item: T) => string, field: string): Record<string, unknown> {
@@ -424,24 +605,6 @@ function errorResponse(error: FakeXrpcError): Response {
   });
 }
 
-function rejected(code: string, message: string): FakeAuth {
-  return { kind: "rejected", error: new FakeXrpcError(401, code, message) };
-}
-
-function signatureInput(headers: Headers): string | undefined {
-  return /^atproto-space=(.+)$/.exec(headers.get("signature-input") ?? "")?.[1];
-}
-
-async function signatureVerifies(headers: Headers, authorization: string, audience: string | undefined, keyId: string): Promise<boolean> {
-  const encoded = /^atproto-space=:([A-Za-z0-9+/=]+):$/.exec(headers.get("signature") ?? "")?.[1];
-  if (!encoded) return false;
-  const lines = [`"authorization": ${authorization.trim()}`];
-  if (audience !== undefined) lines.push(`"atproto-space-audience": ${audience.trim()}`);
-  lines.push(`"@signature-params": ${signatureInput(headers)}`);
-  try {
-    const signature = fromBase64(encoded);
-    return signature.length === 64 && await verifySignature(keyId, new TextEncoder().encode(lines.join("\n")), signature, { allowMalleableSig: true });
-  } catch {
-    return false;
-  }
+function rejected(status: number, code: string, message: string): FakeAuth {
+  return { kind: "rejected", error: new FakeXrpcError(status, code, message) };
 }

@@ -20,12 +20,12 @@ test("XRPC authorization and server errors are not treated as missing records", 
 
 test("a PDS missing-scope rejection is recognized from its error name, and other 403s are not", async () => {
   const scopeMissing = new AtprotoClient(async () => Response.json({ error: "ScopeMissingError", message: 'Missing required scope "space:x"' }, { status: 403 }));
-  await assert.rejects(scopeMissing.procedure("com.atproto.simplespace.createSpace", {}), (error: unknown) => {
+  await assert.rejects(scopeMissing.procedure("com.atproto.space.createSpace", {}), (error: unknown) => {
     assert.equal(isScopeMissingError(error), true);
     return true;
   });
   const otherForbidden = new AtprotoClient(async () => Response.json({ error: "UserNotAuthorized", message: "Denied." }, { status: 403 }));
-  await assert.rejects(otherForbidden.procedure("com.atproto.simplespace.createSpace", {}), (error: unknown) => {
+  await assert.rejects(otherForbidden.procedure("com.atproto.space.createSpace", {}), (error: unknown) => {
     assert.equal(isScopeMissingError(error), false);
     return true;
   });

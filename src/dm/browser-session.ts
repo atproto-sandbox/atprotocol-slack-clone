@@ -77,7 +77,21 @@ export async function restoreDmSession(expectedDid: string, config: DmConfig): P
     await client.revoke(result.session.sub);
     throw new DmAccountMismatchError();
   }
+  // A session granted before a scope was added cannot use what that scope is for, so it is not reported as connected: the
+  // user goes back through consent and the new grant replaces it.
+  const { scope } = await result.session.getTokenInfo(false);
+  if (missingScopes(scope, config.scope).length > 0) return null;
   return result.session;
+}
+
+/**
+ * The scope tokens in `required` that `granted` does not contain. `space:` tokens are not compared: the PDS rewrites them when it
+ * grants them (`authority=self` becomes the account's DID, and a read grant gains the collection list), so a granted token never
+ * equals the requested one. The other tokens (`atproto`, `repo:`, `rpc:`) are returned as requested.
+ */
+export function missingScopes(granted: string, required: string): string[] {
+  const have = new Set(granted.split(/\s+/).filter(Boolean));
+  return required.split(/\s+/).filter((token) => token !== "" && !token.startsWith("space:")).filter((token) => !have.has(token));
 }
 
 export async function disconnectDms(config: DmConfig): Promise<void> {

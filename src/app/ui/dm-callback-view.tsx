@@ -12,7 +12,10 @@ export function DmCallbackView({ expectedDid, dmConfig }: DmCallbackViewProps) {
 
   useEffect(() => {
     restoreDmSession(expectedDid, dmConfig)
-      .then(() => router.replace("/"))
+      .then((session) => {
+        if (session) router.replace("/");
+        else setError("Direct messages were not connected: the sign-in did not complete or did not grant every permission they need. Try connecting again.");
+      })
       .catch((caught: unknown) => setError(caught instanceof Error ? caught.message : "Could not finish connecting direct messages."));
   }, [expectedDid, dmConfig, router]);
 

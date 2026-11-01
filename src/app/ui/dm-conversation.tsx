@@ -3,16 +3,9 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { dmConversationUri, dmInboxUri } from "@/protocol/keys";
 import type { DmHalfStatus, DmMessage, DmReaction } from "@/dm/dm-client";
-import { conversationLabel, participantLabel, retainAfterRefresh } from "@/dm/ui-logic";
+import { conversationLabel, halfChip, participantLabel, retainAfterRefresh } from "@/dm/ui-logic";
 import { messageOf } from "./client-api";
 import { useDmContext } from "./dm-context";
-
-const HALF_CHIPS: Record<DmHalfStatus, string | null> = {
-  ok: null,
-  missing: "hasn't replied",
-  deleted: "left",
-  revoked: "revoked your access",
-};
 
 type ReactionChip = { emoji: string; count: number; active: boolean };
 
@@ -200,7 +193,7 @@ export function DmConversation({ convKey, participants }: { convKey: string; par
         <strong>Participants</strong>
         <div className="roster-list">
           {participants.map((participant) => {
-            const chip = HALF_CHIPS[halves[participant] ?? "missing"];
+            const chip = halfChip(halves[participant]);
             return (
               <div className="roster-row" key={participant}>
                 <span>{participantLabel(participant, labels)} <small className="mono-note">{participant}</small></span>

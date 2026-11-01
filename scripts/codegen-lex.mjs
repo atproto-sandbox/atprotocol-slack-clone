@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 
 const root = process.cwd();
 const checkout = process.env.ATPROTO_PIN_CHECKOUT;
-const expectedCommit = "619c6e8556db7dd37bb7df1d92a5eae83da8d8b0";
+const expectedCommit = "5d88b414a98de1ada22c94c78fa0667a7028163c";
 
 if (!checkout) {
   throw new Error(
@@ -31,12 +31,21 @@ if (!existsSync(cli)) {
   );
 }
 
+// Records the authority's PDS may publish into a space (policy and member list). The app never reads them, and
+// generating a record type also generates a com.atproto.repo client that this app does not bundle.
+const PUBLISHED_RECORD_TYPES = new Set([
+  "lexicons/com/atproto/space/policy.json",
+  "lexicons/com/atproto/memberspace/member.json",
+]);
+
 const inputs = [
   "lexicons/org/slack/operator/execute.json",
   "lexicons/org/slack/operator/getOperation.json",
   "lexicons/org/slack/operator/listInboxWriters.json",
   "lexicons/com/atproto/space/*.json",
-  "lexicons/com/atproto/simplespace/*.json",
+  "lexicons/com/atproto/memberspace/*.json",
+  "lexicons/com/atproto/managedspace/*.json",
+  "lexicons/com/atproto/personalspace/*.json",
   "lexicons/com/atproto/server/getServiceAuth.json",
 ].flatMap((pattern) => {
   if (!pattern.includes("*")) return [pattern];
@@ -44,7 +53,7 @@ const inputs = [
   return readdirSync(resolve(root, directory))
     .filter((file) => file.endsWith(suffix))
     .map((file) => `${directory}/${file}`);
-});
+}).filter((input) => !PUBLISHED_RECORD_TYPES.has(input));
 
 rmSync(resolve(root, "src/lexicons/api"), { recursive: true, force: true });
 execFileSync(

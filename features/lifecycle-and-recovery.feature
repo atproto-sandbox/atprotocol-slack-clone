@@ -30,7 +30,7 @@ Feature: Membership, privacy, and archive lifecycle
       When an admin starts a private transition for selected members
       Then the directory shows transitioning while membership changes
       And compliant apps stop new syncs during the transition
-      And the same channel URI and messages remain after completion
+      And the same channel URI and the messages of the remaining members remain after completion
       And unselected members cannot mint new credentials after completion
 
     Scenario: Recover a partially completed privacy transition

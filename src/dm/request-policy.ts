@@ -1,14 +1,13 @@
 export type DmRequestMode = "everyone" | "allowlist" | "nobody";
-export type DmWritePolicy = "public" | "memberList";
 export type DmAllowlistMember = { did: string; write: boolean };
 
-/** §3.6: the inbox `writePolicy` a request mode maps to. The read policy is always memberList, owner-only. */
-export function writePolicyForMode(mode: DmRequestMode): DmWritePolicy {
-  return mode === "everyone" ? "public" : "memberList";
+/** §3.6: whether the inbox's memberspace policy opens writes to anyone (`publicWrite`) for a request mode. Reads are always member-list, owner-only. */
+export function publicWriteForMode(mode: DmRequestMode): boolean {
+  return mode === "everyone";
 }
 
 /**
- * The inverse mapping, from what `getSpace` plus `listBoundedMembers` report
+ * The inverse mapping, from what `getSpace` (its `publicWrite` flag) plus `listBoundedMembers` report
  * back to a request mode. A member survives a switch to "nobody" as a
  * dormant (`write: false`) entry rather than being removed, so the allowlist
  * is preserved across mode switches; `mode` itself is "allowlist" only while
@@ -18,8 +17,8 @@ export function writePolicyForMode(mode: DmRequestMode): DmWritePolicy {
  * from "allowlist with everyone dormant", which is correct, since they
  * behave identically until someone is reactivated.
  */
-export function modeForInboxPolicy(writePolicy: DmWritePolicy, members: readonly DmAllowlistMember[]): DmRequestMode {
-  if (writePolicy === "public") return "everyone";
+export function modeForInboxPolicy(publicWrite: boolean, members: readonly DmAllowlistMember[]): DmRequestMode {
+  if (publicWrite) return "everyone";
   return members.some((member) => member.write) ? "allowlist" : "nobody";
 }
 

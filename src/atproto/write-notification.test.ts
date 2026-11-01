@@ -8,10 +8,10 @@ const valid = {
   repoRev: "3kabcdefghij2",
   spaceRev: "3kabcdefghij3",
   prevSpaceRev: "3kabcdefghij2",
-  hash: { $bytes: "q83vEjRWeJCrze8SNFZ4kKvN7xI0VniQq83vEjRWeJA" },
+  data: { $bytes: "q83vEjRWeJCrze8SNFZ4kKvN7xI0VniQq83vEjRWeJA" },
 };
 
-test("parseWriteNotification accepts the body the PDS sends, with hash as lexicon bytes", () => {
+test("parseWriteNotification accepts the body the PDS sends, with data as lexicon bytes", () => {
   // #given #when
   const parsed = parseWriteNotification(valid);
 
@@ -19,15 +19,15 @@ test("parseWriteNotification accepts the body the PDS sends, with hash as lexico
   assert.deepEqual(parsed, { space: valid.space, repo: valid.repo, repoRev: valid.repoRev });
 });
 
-test("parseWriteNotification rejects a hash that is not a bytes object", () => {
-  assert.equal(parseWriteNotification({ ...valid, hash: "q83vEjRWeJCrze8SNFZ4kKvN7xI0VniQ" }), null);
-  assert.equal(parseWriteNotification({ ...valid, hash: { $bytes: "not base64 !!" } }), null);
-  assert.equal(parseWriteNotification({ ...valid, hash: { $bytes: valid.hash.$bytes, extra: true } }), null);
-  assert.equal(parseWriteNotification({ ...valid, hash: null }), null);
+test("parseWriteNotification rejects a data value that is not a bytes object", () => {
+  assert.equal(parseWriteNotification({ ...valid, data: "q83vEjRWeJCrze8SNFZ4kKvN7xI0VniQ" }), null);
+  assert.equal(parseWriteNotification({ ...valid, data: { $bytes: "not base64 !!" } }), null);
+  assert.equal(parseWriteNotification({ ...valid, data: { $bytes: valid.data.$bytes, extra: true } }), null);
+  assert.equal(parseWriteNotification({ ...valid, data: null }), null);
 });
 
 test("parseWriteNotification accepts the repo host's body without the forwarded space revisions", () => {
-  const fromRepoHost = { space: valid.space, repo: valid.repo, repoRev: valid.repoRev, hash: valid.hash };
+  const fromRepoHost = { space: valid.space, repo: valid.repo, repoRev: valid.repoRev, data: valid.data };
   assert.deepEqual(parseWriteNotification(fromRepoHost), { space: valid.space, repo: valid.repo, repoRev: valid.repoRev });
 });
 

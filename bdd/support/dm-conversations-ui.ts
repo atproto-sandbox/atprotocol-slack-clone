@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { generateSpaceKey } from "@/atproto/space-signature";
+import { generateSpaceKey } from "@/atproto/space-key";
 import type { Locator } from "@playwright/test";
 import { mintSpaceCredentialWith, SpaceCredentialError } from "@/atproto/space-credential-core";
 import { AtprotoClient } from "@/atproto/xrpc";
@@ -40,7 +40,7 @@ export async function dmcRecords<T extends object>(
 }
 
 export async function dmcMembers(world: AppWorld, owner: FixtureAccount, space: string): Promise<DmcMember[]> {
-  const result = await world.pdsGet<{ members?: DmcMember[] }>(owner, "com.atproto.simplespace.listMembers", { space, limit: "1000" });
+  const result = await world.pdsGet<{ members?: DmcMember[] }>(owner, "com.atproto.memberspace.listMembers", { space, limit: "1000" });
   assert.equal(result.status, 200, `listMembers ${space}: ${JSON.stringify(result.body)}`);
   return result.body.members ?? [];
 }
@@ -175,6 +175,7 @@ function dmcDeps(world: AppWorld, account: FixtureAccount): DmDeps {
       return fetch(new URL(path, account.pdsUrl), { ...init, headers, redirect: "error" });
     }),
     resolvePds: (did) => resolvePds(did, { plcUrl: world.fixture.plcUrl, loopback: true }),
+    resolveKemKey: world.resolveKemKey,
     fetchEndpoint: (request) => fetch(request),
     generateKey: generateSpaceKey,
     store: {

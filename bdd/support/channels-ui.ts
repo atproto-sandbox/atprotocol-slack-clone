@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { generateSpaceKey } from "@/atproto/space-signature";
+import { generateSpaceKey } from "@/atproto/space-key";
 import { expect, type Locator } from "@playwright/test";
 import { mintSpaceCredentialWith, SpaceCredentialError, type SpaceCredential } from "@/atproto/space-credential-core";
 import { AtprotoClient } from "@/atproto/xrpc";
@@ -19,7 +19,7 @@ export const reactionCollection = "org.slack.channel.reaction";
 // --- PDS facts, read straight from the host with an account's own access token ------------------------
 
 export async function listMembers(world: AppWorld, as: Actor, space: string): Promise<Member[]> {
-  const result = await world.pdsGet<{ members?: Member[] }>(as, "com.atproto.simplespace.listMembers", { space, limit: "1000" });
+  const result = await world.pdsGet<{ members?: Member[] }>(as, "com.atproto.memberspace.listMembers", { space, limit: "1000" });
   assert.equal(result.status, 200, `listMembers ${space}: ${JSON.stringify(result.body)}`);
   return result.body.members ?? [];
 }
@@ -83,6 +83,7 @@ export async function requestChannelCredential(world: AppWorld, as: Actor, space
     const credential = await mintSpaceCredentialWith({
       memberClient,
       resolvePds: async (did) => pdsOf(world, did),
+      resolveKemKey: world.resolveKemKey,
       fetchEndpoint: (request) => fetch(request),
       generateKey: generateSpaceKey,
     }, space);

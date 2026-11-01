@@ -50,6 +50,7 @@ let serverOutput = "";
 
 type ApiRequestRecord = { actor: string; method: string; url: string; body: string };
 const apiRequests: ApiRequestRecord[] = [];
+const macResponses: Array<Promise<{ actor: string; url: string; headers: Record<string, string> }>> = [];
 
 before(async () => {
   assert.ok(pinnedCheckout, "set ATPROTO_PINNED_CHECKOUT to the pinned atproto checkout");
@@ -122,6 +123,8 @@ test("real browsers complete a DM round trip across two PDS hosts, then a leave 
     bobPage.setDefaultTimeout(30_000);
     recordApiRequests("alice", alicePage);
     recordApiRequests("bob", bobPage);
+    recordMacResponses("alice", alicePage);
+    recordMacResponses("bob", bobPage);
 
     await loginAndConnectDms(alicePage, appUrl, aliceDid, "dm-alice.test", alicePassword);
     await loginAndConnectDms(bobPage, appUrl, bobDid, "dm-bob.test2", bobPassword);
@@ -166,6 +169,15 @@ test("real browsers complete a DM round trip across two PDS hosts, then a leave 
     await bobPage.getByRole("button", { name: /Sync/ }).click();
     await bobPage.getByText(bobReply, { exact: true }).locator("xpath=ancestor::article").getByText("💜 1", { exact: true }).waitFor({ state: "visible" });
 
+    // The PDS exposes its MAC header to a page on another origin, and says the response varies on the request header: the DM client
+    // could not have verified a MAC it cannot read, so this is asserted from the responses themselves rather than assumed.
+    const macReads = (await Promise.all(macResponses)).filter((read) => read.headers["atproto-space-mac"]);
+    assert.ok(macReads.length > 0, "the browsers read MAC-bearing responses from the PDS");
+    for (const { url, headers } of macReads) {
+      assert.match(headers["access-control-expose-headers"] ?? "", /atproto-space-mac/i, `${url} exposes the MAC header to the page`);
+      assert.match(headers.vary ?? "", /atproto-space-want-mac/i, `${url} varies on the MAC request header`);
+    }
+
     // Bob leaves the conversation.
     await bobPage.getByRole("button", { name: "Leave conversation" }).click();
     await bobPage.getByRole("button", { name: "Confirm leave" }).click();
@@ -179,7 +191,7 @@ test("real browsers complete a DM round trip across two PDS hosts, then a leave 
     // so the conversation entry is labeled "dm-bob.test2" rather than his DID.
     const aliceConversationEntry = alicePage.locator(".channel-nav-item", { hasText: "dm-bob.test2" });
     await aliceConversationEntry.click();
-    await alicePage.getByText("revoked your access", { exact: true }).waitFor({ state: "visible" });
+    await alicePage.getByText("hasn't replied or removed your access", { exact: true }).waitFor({ state: "visible" });
     assert.equal(await alicePage.getByText(bobReply, { exact: true }).count(), 0, "bob's messages disappear once his half is revoked");
 
     const forbiddenBodies = apiRequests.filter((entry) => entry.body.includes(aliceMessage) || entry.body.includes(bobReply));
@@ -191,6 +203,15 @@ test("real browsers complete a DM round trip across two PDS hosts, then a leave 
     await browser.close();
   }
 });
+
+/** Every credentialed record or commit read a page makes, with the response headers as they came off the wire. */
+function recordMacResponses(actor: string, page: Page): void {
+  page.on("response", (response) => {
+    const path = new URL(response.url()).pathname;
+    if (!path.endsWith("com.atproto.space.getRecord") && !path.endsWith("com.atproto.space.getLatestCommit")) return;
+    macResponses.push(response.allHeaders().then((headers) => ({ actor, url: response.url(), headers })));
+  });
+}
 
 function recordApiRequests(actor: string, page: Page): void {
   page.on("request", (request) => {

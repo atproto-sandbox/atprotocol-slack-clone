@@ -1,5 +1,5 @@
 import type * as ListRecords from "@/lexicons/api/types/com/atproto/space/listRecords";
-import type * as ListMembers from "@/lexicons/api/types/com/atproto/simplespace/listMembers";
+import type * as ListMembers from "@/lexicons/api/types/com/atproto/memberspace/listMembers";
 import type * as ListRepos from "@/lexicons/api/types/com/atproto/space/listRepos";
 import type * as ListSpaces from "@/lexicons/api/types/com/atproto/space/listSpaces";
 import type { AtprotoClient } from "./xrpc";
@@ -186,7 +186,7 @@ function assertMemberPage(page: unknown, limit: number): asserts page is ListMem
   if (candidate.members.some((member) => typeof member !== "object" || member === null || Array.isArray(member) ||
     typeof member.did !== "string" || !/^did:[a-z0-9]+:[A-Za-z0-9._:%-]+$/.test(member.did) ||
     typeof member.read !== "boolean" || typeof member.write !== "boolean" ||
-    (member.$type !== undefined && member.$type !== "com.atproto.simplespace.listMembers#member"))) {
+    (member.$type !== undefined && member.$type !== "com.atproto.memberspace.listMembers#member"))) {
     throw new Error("PDS member page contains a malformed member.");
   }
   if (candidate.cursor !== undefined && (typeof candidate.cursor !== "string" || candidate.cursor.length === 0)) {
@@ -209,7 +209,7 @@ export async function listBoundedMembers(
     const requestedCursor = cursor;
     const limit = Math.min(500, input.maxMembers - members.length);
     if (++pages > MAX_SCAN_PAGES) throw new Error("PDS member pagination exceeded the bounded page limit.");
-    const page = await client.query<ListMembers.OutputSchema>("com.atproto.simplespace.listMembers", {
+    const page = await client.query<ListMembers.OutputSchema>("com.atproto.memberspace.listMembers", {
       space: input.space,
       limit,
       cursor,
@@ -230,7 +230,7 @@ export async function listBoundedMembers(
   let truncated = false;
   if (cursor) {
     if (++pages > MAX_SCAN_PAGES) throw new Error("PDS member pagination exceeded the bounded page limit.");
-    const page = await client.query<ListMembers.OutputSchema>("com.atproto.simplespace.listMembers", {
+    const page = await client.query<ListMembers.OutputSchema>("com.atproto.memberspace.listMembers", {
       space: input.space,
       limit: 1,
       cursor,

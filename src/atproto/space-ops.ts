@@ -1,21 +1,19 @@
 import type { OAuthSession } from "@atproto/oauth-client-node";
-import type * as CreateSpace from "@/lexicons/api/types/com/atproto/simplespace/createSpace";
-import type * as GetSpace from "@/lexicons/api/types/com/atproto/simplespace/getSpace";
-import type * as ListMembers from "@/lexicons/api/types/com/atproto/simplespace/listMembers";
-import type * as PutMember from "@/lexicons/api/types/com/atproto/simplespace/putMember";
-import type * as RemoveMember from "@/lexicons/api/types/com/atproto/simplespace/removeMember";
+import type * as CreateSpace from "@/lexicons/api/types/com/atproto/space/createSpace";
+import type * as GetSpace from "@/lexicons/api/types/com/atproto/space/getSpace";
+import type * as ListMembers from "@/lexicons/api/types/com/atproto/memberspace/listMembers";
+import type * as PutMember from "@/lexicons/api/types/com/atproto/memberspace/putMember";
+import type * as RemoveMember from "@/lexicons/api/types/com/atproto/memberspace/removeMember";
 import type * as PutRecord from "@/lexicons/api/types/com/atproto/space/putRecord";
 import type * as ListRecords from "@/lexicons/api/types/com/atproto/space/listRecords";
 import { resolvePds } from "./identity";
 import { sessionClient, serviceClient } from "./client";
 import { mintSpaceCredential } from "./space-credential";
+import { isMemberListOnly, memberspacePolicy } from "./space-policy";
 import { validateSpaceRecord } from "@/protocol/records";
 import { assertBoundedRecordPage, listBoundedMembers } from "./record-pages";
 import { spaceRecordUri } from "@/protocol/keys";
 import { WorkspaceEnvelopeError } from "@/workspaces/read-model";
-
-const MEMBER_LIST = { $type: "com.atproto.simplespace.defs#memberListPolicy" };
-const OPEN = { $type: "com.atproto.simplespace.defs#open" };
 
 export async function ensureMemberListSpace(
   session: OAuthSession,
@@ -26,14 +24,14 @@ export async function ensureMemberListSpace(
   const client = sessionClient(session);
   try {
     const result = await client.procedure<CreateSpace.InputSchema, CreateSpace.OutputSchema>(
-      "com.atproto.simplespace.createSpace",
-      { spaceType: type, skey, readPolicy: MEMBER_LIST, writePolicy: MEMBER_LIST, appAccess: OPEN },
+      "com.atproto.space.createSpace",
+      { spaceType: type, skey, policy: memberspacePolicy() },
     );
     return result.uri;
   } catch (error) {
     if (!isAlreadyExists(error)) throw error;
-    const current = await client.query<GetSpace.OutputSchema>("com.atproto.simplespace.getSpace", { space: uri });
-    if (!hasDesiredPolicies(current)) throw new Error(`Space already exists with incompatible policies: ${uri}`);
+    const current = await client.query<GetSpace.OutputSchema>("com.atproto.space.getSpace", { space: uri });
+    if (!isMemberListOnly(current.policy)) throw new Error(`Space already exists with an incompatible policy: ${uri}`);
     return current.uri;
   }
 }
@@ -46,13 +44,13 @@ export async function putSpaceMember(
   write: boolean,
 ): Promise<void> {
   await sessionClient(session).procedure<PutMember.InputSchema, unknown>(
-    "com.atproto.simplespace.putMember", { space, did, read, write },
+    "com.atproto.memberspace.putMember", { space, did, read, write },
   );
 }
 
 export async function removeSpaceMember(session: OAuthSession, space: string, did: string): Promise<void> {
   await sessionClient(session).procedure<RemoveMember.InputSchema, unknown>(
-    "com.atproto.simplespace.removeMember", { space, did },
+    "com.atproto.memberspace.removeMember", { space, did },
   );
 }
 
@@ -127,12 +125,6 @@ export async function publicServiceClientForDid(did: string) {
 function isAlreadyExists(error: unknown): boolean {
   return typeof error === "object" && error !== null &&
     (("status" in error && error.status === 409) || ("message" in error && typeof error.message === "string" && /already exists/i.test(error.message)));
-}
-
-function hasDesiredPolicies(space: GetSpace.OutputSchema): boolean {
-  return space.readPolicy.$type === "com.atproto.simplespace.defs#memberListPolicy" &&
-    space.writePolicy.$type === "com.atproto.simplespace.defs#memberListPolicy" &&
-    space.appAccess.$type === "com.atproto.simplespace.defs#open";
 }
 
 function parseAuthorityDid(space: string): string {

@@ -162,7 +162,7 @@ describe('atproto Slack authority OAuth protocol conformance', () => {
 
       await callAsOAuth(
         token.access_token,
-        'com.atproto.simplespace.putMember',
+        'com.atproto.memberspace.putMember',
         { space, did: member.did, read: true, write: true },
       )
 
@@ -202,7 +202,7 @@ describe('atproto Slack authority OAuth protocol conformance', () => {
         await generateCode(),
       )
       await expect(
-        callAsOAuth(readOnlyToken.access_token, 'com.atproto.simplespace.putMember', {
+        callAsOAuth(readOnlyToken.access_token, 'com.atproto.memberspace.putMember', {
           space,
           did: member.did,
           read: false,

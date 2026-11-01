@@ -4,7 +4,7 @@ import type { AtprotoClient } from "./xrpc";
 import { assertBoundedRecordPage, listBoundedMembers, listBoundedRecords, listBoundedRepos, listBoundedSpaces } from "./record-pages";
 
 function repo(did: string, rev: string) {
-  return { did: `did:plc:${did}`, repoRev: `r${rev}`, hash: { $bytes: "AAAA" }, spaceRev: rev };
+  return { did: `did:plc:${did}`, repoRev: `r${rev}`, data: { $bytes: "AAAA" }, spaceRev: rev };
 }
 
 test("bounded repo lookahead distinguishes an exact limit from actual overflow", async () => {

@@ -8,7 +8,7 @@ import type { DmClient, DmConversationSummary, DmInboxState, DmRequest } from "@
 import { resolveHandle } from "@/dm/browser-identity";
 import type { BrowserDmStore } from "@/dm/browser-store";
 import type { DmClientState, DmClientStatus } from "@/dm/use-dm-client";
-import { applyAllowlistEdit, coMemberDids, describeSkippedSenders, type UiWorkspace } from "@/dm/ui-logic";
+import { applyAllowlistEdit, coMemberDids, describeSkippedSenders, runDmCycle, type UiWorkspace } from "@/dm/ui-logic";
 import { messageOf } from "./client-api";
 
 // `DmProvider` must keep rendering its non-DM children (`Sidebar`, the
@@ -95,6 +95,7 @@ export function DmProvider({ did, dmConfig, workspaces, activeWorkspace, view, o
   const [localError, setError] = useState("");
   const error = localError || session.error;
   const resyncedRef = useRef(false);
+  const declarationCheckedRef = useRef(false);
 
   const refresh = useCallback(async (): Promise<DmInboxState | null> => {
     if (!client) return null;
@@ -111,13 +112,10 @@ export function DmProvider({ did, dmConfig, workspaces, activeWorkspace, view, o
     let cancelled = false;
     const cycle = async () => {
       if (cancelled) return;
-      try {
-        const state = await refresh();
-        await client.renotifyPending();
-        if (state?.exists) await client.watch([dmInboxUri(did)], dmConfig.serviceRef);
-      } catch (caught) {
-        if (!cancelled) setError(messageOf(caught));
-      }
+      await runDmCycle({
+        refresh, client, inboxUri: dmInboxUri(did), serviceRef: dmConfig.serviceRef, declarationChecked: declarationCheckedRef,
+        report: (caught) => { if (!cancelled) setError(messageOf(caught)); },
+      });
     };
     void cycle();
     const timer = window.setInterval(() => void cycle(), 60_000);

@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { generateSpaceKey } from "@/atproto/space-signature";
+import { generateSpaceKey } from "@/atproto/space-key";
 import { DmClient } from "./dm-client";
 import type { DmConfig } from "./browser-session";
-import { resolvePds } from "./browser-identity";
+import { resolveKemKey, resolvePds } from "./browser-identity";
 import { createBrowserDmStore, type BrowserDmStore } from "./browser-store";
 
 export type DmClientStatus = "disconnected" | "connecting" | "ready" | "error";
@@ -50,6 +50,7 @@ export function useDmClient(did: string, dmConfig: DmConfig): DmClientState {
           did,
           memberClient: dmXrpcClient(session),
           resolvePds: (target) => resolvePds(target, { plcUrl, loopback }),
+          resolveKemKey: (target, forceRefresh) => resolveKemKey(target, { plcUrl, loopback }, forceRefresh),
           fetchEndpoint: (request) => fetch(request, { redirect: "error" }),
           generateKey: generateSpaceKey,
           store: browserStore,

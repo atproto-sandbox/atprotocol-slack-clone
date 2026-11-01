@@ -2,7 +2,7 @@ import { readUpstreamJson } from "@/lib/bounded-json";
 
 export type XrpcParams = Record<string, string | number | boolean | readonly string[] | undefined>;
 export type AtprotoFetchHandler = (path: string, init: RequestInit) => Promise<Response>;
-const MAX_XRPC_RESPONSE_BYTES = 8 * 1024 * 1024;
+export const MAX_XRPC_RESPONSE_BYTES = 8 * 1024 * 1024;
 
 export class AtprotoClient {
   constructor(private readonly fetchHandler: AtprotoFetchHandler) {}

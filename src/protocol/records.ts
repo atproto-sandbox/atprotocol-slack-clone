@@ -83,6 +83,20 @@ export function validateSpaceRecord(collection: string, value: unknown, context:
   }
 }
 
+/**
+ * `org.slack.dm.declaration`: the record an account publishes in its own public repo (key `self`) to say it runs a DM inbox.
+ * It is not a space record, so it is not in the `validateSpaceRecord` registry; a sender checks it with this before treating
+ * a recipient as having an inbox.
+ */
+export function validateDmDeclaration(value: unknown): RecordValidation {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return invalid("DM declaration must be an object");
+  const record = value as Record<string, unknown>;
+  if (record.$type !== "org.slack.dm.declaration") return invalid("DM declaration has the wrong type");
+  if (!hasOnly(record, ["$type", "createdAt"])) return invalid("DM declaration has unknown fields");
+  if (!isDatetime(record.createdAt)) return invalid("invalid DM declaration timestamp");
+  return { valid: true };
+}
+
 export function validateMessageParent(
   parentUri: string,
   spaceUri: string,

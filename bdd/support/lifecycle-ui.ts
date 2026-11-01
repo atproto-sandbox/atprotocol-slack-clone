@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { generateSpaceKey } from "@/atproto/space-signature";
+import { generateSpaceKey } from "@/atproto/space-key";
 import type { Locator } from "@playwright/test";
 import Database from "better-sqlite3";
 import { inviteLinkFor } from "@/app/ui/client-api";
@@ -13,6 +13,7 @@ import { AtprotoClient, XrpcError } from "@/atproto/xrpc";
 import { mintSpaceCredentialWith, SpaceCredential, SpaceCredentialError } from "@/atproto/space-credential-core";
 import { inboxUri, subjectKey } from "@/protocol/keys";
 import type { Actor, AppWorld } from "./world";
+import { memberspacePolicy } from "@/atproto/space-policy";
 import {
   approveAdminControls, completeConsent, createWorkspaceAs, escapeRegExp, eventually, inviteMemberAs,
   joinFromInvitation, openInviteLinkAndSignIn, waitForApp,
@@ -55,7 +56,7 @@ export const inboxOf = (world: AppWorld): string => inboxUri(actorNamed(world, "
 // --- Independent observations of the PDS -------------------------------------------------------------
 
 export async function membersOf(world: AppWorld, as: Actor, space: string): Promise<Member[]> {
-  const result = await world.pdsGet<{ members?: Member[] }>(as, "com.atproto.simplespace.listMembers", { space, limit: "1000" });
+  const result = await world.pdsGet<{ members?: Member[] }>(as, "com.atproto.memberspace.listMembers", { space, limit: "1000" });
   assert.equal(result.status, 200, `listMembers ${space}: ${JSON.stringify(result.body)}`);
   return result.body.members ?? [];
 }
@@ -119,6 +120,7 @@ export async function mintAs(world: AppWorld, actor: Actor, space: string): Prom
       return fetch(new URL(path, actor.pdsUrl), { ...init, headers, redirect: "error" });
     }),
     resolvePds: async (did) => accountFor(world, did).pdsUrl,
+    resolveKemKey: world.resolveKemKey,
     fetchEndpoint: (request) => fetch(request),
     generateKey: generateSpaceKey,
   }, space);
@@ -155,17 +157,22 @@ export function claimsOf(token: string): CredentialClaims {
 }
 
 /** The same credential with its signed expiry pushed out and the original signature kept: what someone trying to outlive removal could forge. */
-export function withExtendedExpiry(credential: SpaceCredential, extraSeconds: number): SpaceCredential {
+export function withExtendedExpiry(world: AppWorld, credential: SpaceCredential, extraSeconds: number): SpaceCredential {
   const [header, , signature] = credential.token.split(".");
   const payload = Buffer.from(JSON.stringify({ ...claimsOf(credential.token), exp: claimsOf(credential.token).exp + extraSeconds }), "utf8").toString("base64url");
-  return new SpaceCredential(credential.space, `${header}.${payload}.${signature}`, credential.key, (request) => fetch(request));
+  return presented(world, credential, `${header}.${payload}.${signature}`);
+}
+
+/** The same grant and key presented with a different token, as a forged or re-signed copy would be. */
+function presented(world: AppWorld, credential: SpaceCredential, token: string): SpaceCredential {
+  return new SpaceCredential({ space: credential.space, token, key: credential.key, fetchEndpoint: (request) => fetch(request), resolveKemKey: world.resolveKemKey });
 }
 
 /** The credential's header and claims re-signed by its authority with a new `exp`, keeping its jti and key binding: a genuinely expired (or not yet expired) copy that verifies. */
 export async function withSignedExpiry(world: AppWorld, credential: SpaceCredential, exp: number): Promise<SpaceCredential> {
   const authority = accountFor(world, claimsOf(credential.token).iss);
   const token = await world.fixture.resignSpaceCredential(authority.host, credential.token, { exp });
-  return new SpaceCredential(credential.space, token, credential.key, (request) => fetch(request));
+  return presented(world, credential, token);
 }
 
 export async function readRecordsWith(world: AppWorld, credential: SpaceCredential, repoDid: string, collection: string): Promise<Array<{ rkey: string; value: Record<string, unknown> }>> {
@@ -385,19 +392,16 @@ export async function withFinalReading<T>(samples: Array<Timed<T>>, read: () => 
 
 // --- Faults only the PDS owner can cause -------------------------------------------------------------
 
-const MEMBER_LIST_POLICY = { $type: "com.atproto.simplespace.defs#memberListPolicy" };
-const OPEN_APP_ACCESS = { $type: "com.atproto.simplespace.defs#open" };
-
 /** The authority deletes a channel's space on its PDS, so every later write to that member list is refused. */
 export async function breakChannelSpace(world: AppWorld, owner: Actor, channel: ChannelRef): Promise<void> {
-  const result = await world.pdsPost(owner, "com.atproto.simplespace.deleteSpace", { space: channel.uri });
+  const result = await world.pdsPost(owner, "com.atproto.space.deleteSpace", { space: channel.uri });
   assert.equal(result.status, 200, JSON.stringify(result.body));
 }
 
 /** Lifts the fault: the authority creates the channel space again, with the policies the app uses. */
 export async function repairChannelSpace(world: AppWorld, owner: Actor, channel: ChannelRef): Promise<void> {
-  const result = await world.pdsPost(owner, "com.atproto.simplespace.createSpace", {
-    spaceType: "org.slack.channel", skey: channel.skey, readPolicy: MEMBER_LIST_POLICY, writePolicy: MEMBER_LIST_POLICY, appAccess: OPEN_APP_ACCESS,
+  const result = await world.pdsPost(owner, "com.atproto.space.createSpace", {
+    spaceType: "org.slack.channel", skey: channel.skey, policy: memberspacePolicy(),
   });
   assert.equal(result.status, 200, JSON.stringify(result.body));
 }

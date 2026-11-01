@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { DmClient, type DmDeps, type DmStore } from "./dm-client";
 import { FakeDmNetwork } from "./testing/fake-pds";
-import { applyAllowlistEdit, coMemberDids, conversationVisible, describeSkippedSenders, parseParticipantInput, retainAfterRefresh, sharesAnyWorkspace } from "./ui-logic";
+import { applyAllowlistEdit, coMemberDids, conversationVisible, describeSkippedSenders, halfChip, parseParticipantInput, retainAfterRefresh, runDmCycle, sharesAnyWorkspace } from "./ui-logic";
 
 function createStore(): DmStore {
   const map = new Map<string, string>();
@@ -24,6 +24,7 @@ function harness() {
         did,
         memberClient: network.clientFor(did),
         resolvePds: network.resolvePds,
+        resolveKemKey: network.resolveKemKey,
         fetchEndpoint: network.fetchEndpoint,
         generateKey: network.generateKey,
         store: createStore(),
@@ -142,4 +143,68 @@ test("retainAfterRefresh drops window entries from readable halves but keeps cop
 
   // #then
   assert.deepEqual(kept.map((entry) => entry.text), ["older than the window", "bob left, but this copy was already fetched"]);
+});
+
+function cycleHarness(failing: ReadonlySet<string> = new Set(), exists = true) {
+  const calls: string[] = [];
+  const errors: string[] = [];
+  const declarationChecked = { current: false };
+  const record = (name: string) => {
+    calls.push(name);
+    if (failing.has(name)) throw new Error(`${name} failed`);
+  };
+  const run = () => runDmCycle({
+    refresh: async () => { calls.push("refresh"); if (failing.has("refresh")) throw new Error("refresh failed"); return { exists }; },
+    client: {
+      renotifyPending: async () => record("renotify"),
+      watch: async () => { record("watch"); return {}; },
+      ensureDeclaration: async () => record("declaration"),
+    },
+    inboxUri: "at://did:plc:a/space/org.slack.dm.inbox/self", serviceRef: "did:web:app#svc", declarationChecked,
+    report: (error) => errors.push(error instanceof Error ? error.message : String(error)),
+  });
+  return { calls, errors, declarationChecked, run };
+}
+
+test("a DM cycle runs every step in order and marks the declaration checked", async () => {
+  const cycle = cycleHarness();
+  await cycle.run();
+  assert.deepEqual(cycle.calls, ["refresh", "renotify", "watch", "declaration"]);
+  assert.deepEqual(cycle.errors, []);
+  assert.equal(cycle.declarationChecked.current, true);
+});
+
+test("a failing renotify or watch does not keep the declaration from being repaired", async () => {
+  const cycle = cycleHarness(new Set(["renotify", "watch"]));
+  await cycle.run();
+  assert.deepEqual(cycle.calls, ["refresh", "renotify", "watch", "declaration"], "the declaration step still ran");
+  assert.deepEqual(cycle.errors, ["renotify failed", "watch failed"], "both failures were reported");
+  assert.equal(cycle.declarationChecked.current, true);
+});
+
+test("a failing declaration check does not keep notifications registered, and is retried next cycle", async () => {
+  const cycle = cycleHarness(new Set(["declaration"]));
+  await cycle.run();
+  assert.deepEqual(cycle.calls, ["refresh", "renotify", "watch", "declaration"], "watch ran before the failing declaration step");
+  assert.equal(cycle.declarationChecked.current, false, "not marked checked, so the next cycle tries again");
+  await cycle.run();
+  assert.equal(cycle.calls.filter((call) => call === "declaration").length, 2);
+});
+
+test("a DM cycle whose refresh fails reports it and stops, and a cycle with no inbox neither watches nor checks the declaration", async () => {
+  const refreshFails = cycleHarness(new Set(["refresh"]));
+  await refreshFails.run();
+  assert.deepEqual(refreshFails.calls, ["refresh"]);
+  assert.deepEqual(refreshFails.errors, ["refresh failed"]);
+  const noInbox = cycleHarness(new Set(), false);
+  await noInbox.run();
+  assert.deepEqual(noInbox.calls, ["refresh", "renotify"]);
+});
+
+test("a participant's half shows a note only for a state that is known, and nothing before the first page loads", () => {
+  assert.equal(halfChip(undefined), null, "unloaded: not 'missing', which would flash on the viewer's own row");
+  assert.equal(halfChip("ok"), null);
+  assert.equal(halfChip("missing"), "hasn't replied or removed your access");
+  assert.equal(halfChip("deleted"), "left");
+  assert.equal(halfChip("revoked"), "revoked your access");
 });

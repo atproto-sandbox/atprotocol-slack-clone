@@ -14,29 +14,27 @@ const is$typed = _is$typed,
   validate = _validate
 const id = 'com.atproto.space.defs'
 
-/** A signed commit over the current state of a permissioned repo. */
-export interface SignedCommit {
-  $type?: 'com.atproto.space.defs#signedCommit'
-  /** Commit format version, currently 1. Corresponds to the version in the ctx protocol tag (atproto-space-v1). */
+/** A commit over the current state of a permissioned repo. Carries no signature: the repo host authenticates it to a syncer with a MAC in the Atproto-Space-Mac response header. */
+export interface Commit {
+  $type?: 'com.atproto.space.defs#commit'
+  /** Commit format version, currently 1. */
   ver: number
-  /** sha256 digest of the LtHash state (32 bytes). */
-  hash: Uint8Array
-  /** Per-signature input keying material (32 random bytes) */
-  ikm: Uint8Array
-  /** Signature over ctx (space, author DID, rev, ikm) by the user's atproto signing key. Does not cover the repo hash. */
-  sig: Uint8Array
-  /** HMAC-SHA256 over hash, keyed by HKDF-SHA256(ikm, info=ctx). Binds the repo hash to this commit's context. */
-  mac: Uint8Array
-  /** Commit revision (TID), also bound into ctx. */
+  /** The author DID of the repo. */
+  repo: string
+  /** Reference to the space. */
+  space: string
+  /** Commit revision (TID). */
   rev: string
+  /** sha256 digest of the LtHash state (32 bytes). */
+  data: Uint8Array
 }
 
-const hashSignedCommit = 'signedCommit'
+const hashCommit = 'commit'
 
-export function isSignedCommit<V>(v: V) {
-  return is$typed(v, id, hashSignedCommit)
+export function isCommit<V>(v: V) {
+  return is$typed(v, id, hashCommit)
 }
 
-export function validateSignedCommit<V>(v: V) {
-  return validate<SignedCommit & V>(v, id, hashSignedCommit)
+export function validateCommit<V>(v: V) {
+  return validate<Commit & V>(v, id, hashCommit)
 }

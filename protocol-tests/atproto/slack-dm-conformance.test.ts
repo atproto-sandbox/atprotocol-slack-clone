@@ -35,7 +35,11 @@ const REQUEST = 'org.slack.dm.request' as NsidString
 const HEADER = 'org.slack.dm.header' as NsidString
 const MESSAGE = 'org.slack.dm.message' as NsidString
 const REACTION = 'org.slack.dm.reaction' as NsidString
-const { defs } = com.atproto.simplespace
+const { memberspace } = com.atproto
+// DM half and inbox reads: member list. Inbox writes: anyone. updateSpace replaces
+// the whole policy, so each call below passes the full policy it wants.
+const MEMBER_LIST_POLICY = memberspace.policy.$build({})
+const PUBLIC_WRITE_POLICY = memberspace.policy.$build({ publicWrite: true })
 const READ_ONLY = { read: true, write: false }
 const WRITE_ONLY = { read: false, write: true }
 
@@ -60,12 +64,12 @@ const credentialAt = async (
 ): Promise<SpaceCredential> => {
   const key = await P256Keypair.create()
   const token = await spaces.delegationTokenFor(actor, space as never)
-  const res = await ownerPds.getClient().call(
-    com.atproto.space.getSpaceCredential,
-    { space: space as never },
-    { headers: await createSpaceSigHeaders(key, { authorization: `Bearer ${token}` }) },
-  )
-  return new SpaceCredential(res.credential, key)
+  const res = await ownerPds.getClient().call(com.atproto.space.getSpaceCredential, {
+    space: space as never,
+    credentialKid: key.did(),
+    delegationToken: token,
+  })
+  return new SpaceCredential(res.credential, key, spaces.idResolver)
 }
 
 /** A browser-style space signing key: the private half never leaves WebCrypto. */
@@ -120,18 +124,16 @@ describe('atproto Slack direct-message protocol conformance', () => {
       await spaces.putMember(alice, aliceHalf, bob, READ_ONLY)
       const bobHalf = `at://${bob.did}/space/${CONVERSATION_TYPE}/${convKey}` as const
       await bob.client.call(
-        com.atproto.simplespace.createSpace,
+        com.atproto.space.createSpace,
         {
           spaceType: CONVERSATION_TYPE,
           skey: convKey,
-          readPolicy: defs.memberListPolicy.build({}),
-          writePolicy: defs.memberListPolicy.build({}),
-          appAccess: defs.open.build({}),
+          policy: MEMBER_LIST_POLICY,
         },
         { headers: bob.headers },
       )
       await bob.client.call(
-        com.atproto.simplespace.putMember,
+        com.atproto.memberspace.putMember,
         { space: bobHalf as never, did: alice.did, ...READ_ONLY },
         { headers: bob.headers },
       )
@@ -167,14 +169,16 @@ describe('atproto Slack direct-message protocol conformance', () => {
       expect(intrusion.ok).toBe(true)
       expect(afterIntrusion).toEqual([alice.did])
 
-      // Outsiders are refused. Record whether refusal differs for an existing vs. a missing space.
+      // Outsiders are refused, and the refusal does not tell an existing space from a missing one.
       const existing = await outcome(credentialAt(spaces, eve, aliceHalf, pds1))
       const missing = await outcome(credentialAt(spaces, eve, `at://${alice.did}/space/${CONVERSATION_TYPE}/3kdmmissing22`, pds1))
       console.log('DM-M0 existence oracle — existing:', JSON.stringify(existing), 'missing:', JSON.stringify(missing))
-      expect(existing).toMatchObject({ ok: false, error: 'UserNotAuthorized' })
-      // Existence oracle on the pinned PDS: a missing space is distinguishable. The DM
-      // design depends on unguessable random conversation keys because of this.
+      // No existence oracle on the pinned PDS: a non-member is told SpaceNotFound for both,
+      // with the same status and message, so the answer discloses nothing about the half.
+      // (SpaceDeleted, below, is the only refusal that still names a space.)
+      expect(existing).toMatchObject({ ok: false, error: 'SpaceNotFound' })
       expect(missing).toMatchObject({ ok: false, error: 'SpaceNotFound' })
+      expect(existing).toEqual(missing)
 
       // Cross-app recovery: a user's own PDS lists the halves they wrote to.
       const ownHalves = await alice.client.call(
@@ -184,7 +188,7 @@ describe('atproto Slack direct-message protocol conformance', () => {
       )
       expect(ownHalves.spaces.map((space) => space.uri)).toEqual([aliceHalf])
       const ownMembers = await alice.client.call(
-        com.atproto.simplespace.listMembers,
+        com.atproto.memberspace.listMembers,
         { space: aliceHalf },
         { headers: alice.headers },
       )
@@ -192,14 +196,18 @@ describe('atproto Slack direct-message protocol conformance', () => {
 
       // Revocation is unilateral and scoped to the revoker's own half.
       await spaces.removeMember(alice, aliceHalf, bob)
-      await expect(credentialAt(spaces, bob, aliceHalf, pds1)).rejects.toMatchObject({ error: 'UserNotAuthorized' })
+      await expect(credentialAt(spaces, bob, aliceHalf, pds1)).rejects.toMatchObject({ error: 'SpaceNotFound' })
       await expect(credentialAt(spaces, alice, bobHalf, pds2)).resolves.toBeInstanceOf(SpaceCredential)
 
-      // Deleting a half removes read access to it for everyone else.
-      await bob.client.call(com.atproto.simplespace.deleteSpace, { space: bobHalf as never }, { headers: bob.headers })
+      // Deleting a half removes read access to it for everyone else. SpaceDeleted is
+      // checked before the policy, so even a user the policy never admitted learns the
+      // half is gone (and can tell it from a half that never existed).
+      await bob.client.call(com.atproto.space.deleteSpace, { space: bobHalf as never }, { headers: bob.headers })
       const afterDelete = await outcome(credentialAt(spaces, alice, bobHalf, pds2))
-      console.log('DM-M0 credential after deleteSpace:', JSON.stringify(afterDelete))
+      const afterDeleteStranger = await outcome(credentialAt(spaces, eve, bobHalf, pds2))
+      console.log('DM-M0 credential after deleteSpace — member:', JSON.stringify(afterDelete), 'non-member:', JSON.stringify(afterDeleteStranger))
       expect(afterDelete).toMatchObject({ ok: false, error: 'SpaceDeleted' })
+      expect(afterDeleteStranger).toMatchObject({ ok: false, error: 'SpaceDeleted' })
     } finally {
       await network.close()
     }
@@ -220,7 +228,7 @@ describe('atproto Slack direct-message protocol conformance', () => {
 
       // "Everyone": owner-only reads, public writes.
       const inbox = await spaces.createSpace(bob, {
-        spaceType: INBOX_TYPE, skey: 'self', writePolicy: defs.publicPolicy.build({}),
+        spaceType: INBOX_TYPE, skey: 'self', policy: PUBLIC_WRITE_POLICY,
       })
       await spaces.put(carol, inbox, { collection: REQUEST, rkey: '3kdmcarol2222', record: request('3kdmcarol2222') })
       const bobInbox = await spaces.credentialFor(bob, inbox)
@@ -229,18 +237,19 @@ describe('atproto Slack direct-message protocol conformance', () => {
         space: inbox, repo: carol.did, collection: REQUEST,
       })
       expect(carolRequest.records).toHaveLength(1)
-      await expect(spaces.credentialFor(carol, inbox)).rejects.toMatchObject({ error: 'UserNotAuthorized' })
+      await expect(spaces.credentialFor(carol, inbox)).rejects.toMatchObject({ error: 'SpaceNotFound' })
 
       // "Only people I allow": switch policy; untracked strangers stay out.
       await bob.client.call(
-        com.atproto.simplespace.updateSpace,
-        { space: inbox, writePolicy: defs.memberListPolicy.build({}) },
+        com.atproto.space.updateSpace,
+        { space: inbox, policy: MEMBER_LIST_POLICY },
         { headers: bob.headers },
       )
       const carolAfterSwitch = await writerDids(await spaces.credentialFor(bob, inbox), pds1, inbox)
       console.log('DM-M0 writer tracked under public policy still listed after switch to memberList:', carolAfterSwitch.includes(carol.did))
-      // Tightening the policy does not evict already-tracked writers; clients must
-      // filter requests by the current allowlist themselves.
+      // Tightening the policy via updateSpace alone does not evict already-tracked
+      // writers (it does not re-evaluate the writer set); clients must filter requests
+      // by the current allowlist themselves.
       expect(carolAfterSwitch).toContain(carol.did)
 
       await spaces.put(dave, inbox, { collection: REQUEST, rkey: '3kdmdave22222', record: request('3kdmdave22222') })
@@ -249,27 +258,37 @@ describe('atproto Slack direct-message protocol conformance', () => {
       await spaces.putMember(bob, inbox, frank, WRITE_ONLY)
       await spaces.put(frank, inbox, { collection: REQUEST, rkey: '3kdmfrank2222', record: request('3kdmfrank2222') })
       expect(await settledWriters(spaces, await spaces.credentialFor(bob, inbox), pds1, inbox, (dids) => dids.includes(frank.did))).toContain(frank.did)
-      await expect(spaces.credentialFor(frank, inbox)).rejects.toMatchObject({ error: 'UserNotAuthorized' })
+      await expect(spaces.credentialFor(frank, inbox)).rejects.toMatchObject({ error: 'SpaceNotFound' })
 
-      // "Nobody": memberList with the allowlist emptied.
+      // "Nobody": memberList with the allowlist emptied. Removing the member also drops it
+      // from the writer set, so listRepos stops advertising its repo straight away.
       await spaces.removeMember(bob, inbox, frank)
+      expect(await writerDids(await spaces.credentialFor(bob, inbox), pds1, inbox)).not.toContain(frank.did)
       const frankRevRemoved = await outcome(spaces.put(frank, inbox, { collection: REQUEST, rkey: '3kdmfrank2223', record: request('3kdmfrank2223') }))
       const frankRequestsAfterRemoval = await (await spaces.credentialFor(bob, inbox)).clientFor(frank.pds).call(com.atproto.space.listRecords, {
         space: inbox, repo: frank.did, collection: REQUEST,
       })
       console.log('DM-M0 removed writer put outcome:', JSON.stringify(frankRevRemoved), 'records still readable by owner:', frankRequestsAfterRemoval.records.length)
+      // The removed account can still write into its own repo and the owner can still read it
+      // with a space credential, but the authority refuses to track the new write, so the
+      // writer stays out of listRepos: clients must also filter by the current allowlist.
       expect(frankRevRemoved.ok).toBe(true)
       expect(frankRequestsAfterRemoval.records).toHaveLength(2)
-      expect(await writerDids(await spaces.credentialFor(bob, inbox), pds1, inbox)).toContain(frank.did)
+      expect(await settledWriters(spaces, await spaces.credentialFor(bob, inbox), pds1, inbox)).not.toContain(frank.did)
 
-      // Switching back to "Everyone" lets a previously ignored writer through on their next write.
+      // Switching back to "Everyone" lets a previously ignored or evicted writer through on
+      // their next write: a removed account is tracked again only if it writes again while
+      // authorized.
       await bob.client.call(
-        com.atproto.simplespace.updateSpace,
-        { space: inbox, writePolicy: defs.publicPolicy.build({}) },
+        com.atproto.space.updateSpace,
+        { space: inbox, policy: PUBLIC_WRITE_POLICY },
         { headers: bob.headers },
       )
       await spaces.put(dave, inbox, { collection: REQUEST, rkey: '3kdmdave22222', record: request('3kdmdave22222') })
-      expect(await settledWriters(spaces, await spaces.credentialFor(bob, inbox), pds1, inbox, (dids) => dids.includes(dave.did))).toContain(dave.did)
+      await spaces.put(frank, inbox, { collection: REQUEST, rkey: '3kdmfrank2224', record: request('3kdmfrank2224') })
+      const everyoneWriters = await settledWriters(spaces, await spaces.credentialFor(bob, inbox), pds1, inbox, (dids) => dids.includes(dave.did) && dids.includes(frank.did))
+      expect(everyoneWriters).toContain(dave.did)
+      expect(everyoneWriters).toContain(frank.did)
     } finally {
       await network.close()
     }
@@ -301,12 +320,12 @@ describe('atproto Slack direct-message protocol conformance', () => {
 
       const bobInbox = `at://${bob.did}/space/${INBOX_TYPE}/self`
       const bobHalf = `at://${bob.did}/space/${CONVERSATION_TYPE}/${convKey}`
-      for (const [type, skey, writePolicy] of [[INBOX_TYPE, 'self', defs.publicPolicy.build({})], [CONVERSATION_TYPE, convKey, defs.memberListPolicy.build({})]] as const) {
-        await bob.client.call(com.atproto.simplespace.createSpace, {
-          spaceType: type, skey, readPolicy: defs.memberListPolicy.build({}), writePolicy, appAccess: defs.open.build({}),
+      for (const [type, skey, policy] of [[INBOX_TYPE, 'self', PUBLIC_WRITE_POLICY], [CONVERSATION_TYPE, convKey, MEMBER_LIST_POLICY]] as const) {
+        await bob.client.call(com.atproto.space.createSpace, {
+          spaceType: type, skey, policy,
         }, { headers: bob.headers })
       }
-      await bob.client.call(com.atproto.simplespace.putMember, { space: bobHalf as never, did: alice.did, ...READ_ONLY }, { headers: bob.headers })
+      await bob.client.call(com.atproto.memberspace.putMember, { space: bobHalf as never, did: alice.did, ...READ_ONLY }, { headers: bob.headers })
       await spaces.write(bob, bobHalf as never, { collection: MESSAGE, record: { $type: MESSAGE, text: 'from bob', createdAt: new Date().toISOString() } })
 
       // Browser key: private half never leaves WebCrypto.
@@ -406,12 +425,12 @@ describe('atproto Slack direct-message protocol conformance', () => {
       expect(await settledWriters(spaces, bobReadsInbox, pds2, bobInbox, (dids) => dids.includes(alice.did))).toContain(alice.did)
 
       // Own half: manage=create / manage=update from the browser session.
-      await callAsOAuth(dmToken.access_token, 'com.atproto.simplespace.createSpace', {
+      await callAsOAuth(dmToken.access_token, 'com.atproto.space.createSpace', {
         spaceType: CONVERSATION_TYPE, skey: convKey,
-        readPolicy: defs.memberListPolicy.build({}), writePolicy: defs.memberListPolicy.build({}), appAccess: defs.open.build({}),
+        policy: MEMBER_LIST_POLICY,
       })
       const aliceHalf = `at://${alice.did}/space/${CONVERSATION_TYPE}/${convKey}`
-      await callAsOAuth(dmToken.access_token, 'com.atproto.simplespace.putMember', { space: aliceHalf, did: bob.did, ...READ_ONLY })
+      await callAsOAuth(dmToken.access_token, 'com.atproto.memberspace.putMember', { space: aliceHalf, did: bob.did, ...READ_ONLY })
       await callAsOAuth(dmToken.access_token, 'com.atproto.space.createRecord', {
         space: aliceHalf, repo: alice.did, collection: MESSAGE,
         record: { $type: MESSAGE, text: 'from alice browser', createdAt: new Date().toISOString() },
@@ -422,11 +441,8 @@ describe('atproto Slack direct-message protocol conformance', () => {
       const exchangeUrl = new URL('/xrpc/com.atproto.space.getSpaceCredential', pds2.url).toString()
       const exchange = await fetch(exchangeUrl, {
         method: 'POST',
-        headers: {
-          ...(await createSpaceSigHeaders(spaceKey, { authorization: `Bearer ${delegation!.token as string}` })),
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({ space: bobHalf }),
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ space: bobHalf, credentialKid: spaceKey.did(), delegationToken: delegation!.token as string }),
       })
       expect(exchange.status).toBe(200)
       const { credential } = (await exchange.json()) as { credential: string }
@@ -435,7 +451,7 @@ describe('atproto Slack direct-message protocol conformance', () => {
       readUrl.searchParams.set('repo', bob.did)
       readUrl.searchParams.set('collection', MESSAGE)
       const read = await fetch(readUrl, {
-        headers: await createSpaceSigHeaders(spaceKey, { authorization: `Atproto-Space ${credential}`, audience: bob.did }),
+        headers: await createSpaceSigHeaders(spaceKey, { authorization: `Atproto-Space-Credential ${credential}`, audience: bob.did }),
       })
       expect(read.status).toBe(200)
       expect(((await read.json()) as { records: Array<{ value: { text: string } }> }).records.map((record) => record.value.text)).toEqual(['from bob'])
@@ -465,13 +481,13 @@ describe('atproto Slack direct-message protocol conformance', () => {
       const setupStarted = performance.now()
       const halves = await Promise.all(participants.map(async (owner) => {
         const half = `at://${owner.did}/space/${CONVERSATION_TYPE}/${convKey}` as const
-        await owner.client.call(com.atproto.simplespace.createSpace, {
+        await owner.client.call(com.atproto.space.createSpace, {
           spaceType: CONVERSATION_TYPE, skey: convKey,
-          readPolicy: defs.memberListPolicy.build({}), writePolicy: defs.memberListPolicy.build({}), appAccess: defs.open.build({}),
+          policy: MEMBER_LIST_POLICY,
         }, { headers: owner.headers })
         for (const member of participants) {
           if (member.did === owner.did) continue
-          await owner.client.call(com.atproto.simplespace.putMember, { space: half as never, did: member.did, ...READ_ONLY }, { headers: owner.headers })
+          await owner.client.call(com.atproto.memberspace.putMember, { space: half as never, did: member.did, ...READ_ONLY }, { headers: owner.headers })
         }
         await spaces.write(owner, half as never, { collection: MESSAGE, record: { $type: MESSAGE, text: `from ${owner.name}`, createdAt: new Date().toISOString() } })
         return { owner, half }
@@ -479,7 +495,7 @@ describe('atproto Slack direct-message protocol conformance', () => {
       const setupMs = performance.now() - setupStarted
 
       const firstMembers = await participants[0].client.call(
-        com.atproto.simplespace.listMembers,
+        com.atproto.memberspace.listMembers,
         { space: halves[0].half as never, limit: 1000 },
         { headers: participants[0].headers },
       )
@@ -535,12 +551,12 @@ describe('atproto Slack direct-message protocol conformance', () => {
 
       const bobInbox = `at://${bob.did}/space/${INBOX_TYPE}/self`
       const bobHalf = `at://${bob.did}/space/${CONVERSATION_TYPE}/${convKey}`
-      for (const [type, skey, writePolicy] of [[INBOX_TYPE, 'self', defs.publicPolicy.build({})], [CONVERSATION_TYPE, convKey, defs.memberListPolicy.build({})]] as const) {
-        await bob.client.call(com.atproto.simplespace.createSpace, {
-          spaceType: type, skey, readPolicy: defs.memberListPolicy.build({}), writePolicy, appAccess: defs.open.build({}),
+      for (const [type, skey, policy] of [[INBOX_TYPE, 'self', PUBLIC_WRITE_POLICY], [CONVERSATION_TYPE, convKey, MEMBER_LIST_POLICY]] as const) {
+        await bob.client.call(com.atproto.space.createSpace, {
+          spaceType: type, skey, policy,
         }, { headers: bob.headers })
       }
-      await bob.client.call(com.atproto.simplespace.putMember, { space: bobHalf as never, did: alice.did, ...READ_ONLY }, { headers: bob.headers })
+      await bob.client.call(com.atproto.memberspace.putMember, { space: bobHalf as never, did: alice.did, ...READ_ONLY }, { headers: bob.headers })
       await spaces.write(bob, bobHalf as never, { collection: MESSAGE, record: { $type: MESSAGE, text: 'from bob', createdAt: new Date().toISOString() } })
 
       // Browser key: private half never leaves WebCrypto (same shape as the OAuth-client test above).
@@ -602,7 +618,7 @@ describe('atproto Slack direct-message protocol conformance', () => {
         'atproto',
         `space:${INBOX_TYPE}?authority=*&collection=${REQUEST}&action=create&action=update&action=delete`,
         `space:${INBOX_TYPE}?authority=self&action=read&manage=create&manage=update`,
-        `space:${INBOX_TYPE}?authority=*&action=read`,
+        'repo:org.slack.dm.declaration?action=create&action=update',
         `space:${CONVERSATION_TYPE}?authority=self&collection=${HEADER}&collection=${MESSAGE}&collection=${REACTION}&action=create&action=update&action=delete&manage=create&manage=update&manage=delete`,
         `space:${CONVERSATION_TYPE}?authority=*&action=read`,
       ]
@@ -636,28 +652,28 @@ describe('atproto Slack direct-message protocol conformance', () => {
 
       // create its own inbox
       const aliceInbox = `at://${alice.did}/space/${INBOX_TYPE}/self`
-      const createdInbox = await callAsOAuth(dmToken.access_token, 'com.atproto.simplespace.createSpace', {
-        spaceType: INBOX_TYPE, skey: 'self', readPolicy: defs.memberListPolicy.build({}), writePolicy: defs.memberListPolicy.build({}), appAccess: defs.open.build({}),
+      const createdInbox = await callAsOAuth(dmToken.access_token, 'com.atproto.space.createSpace', {
+        spaceType: INBOX_TYPE, skey: 'self', policy: MEMBER_LIST_POLICY,
       })
       expect(createdInbox!.uri).toBe(aliceInbox)
 
       // updateSpace its inbox policy
-      await callAsOAuth(dmToken.access_token, 'com.atproto.simplespace.updateSpace', { space: aliceInbox, writePolicy: defs.publicPolicy.build({}) })
+      await callAsOAuth(dmToken.access_token, 'com.atproto.space.updateSpace', { space: aliceInbox, policy: PUBLIC_WRITE_POLICY })
 
       // putMember / removeMember on its own inbox
-      await callAsOAuth(dmToken.access_token, 'com.atproto.simplespace.putMember', { space: aliceInbox, did: bob.did, ...WRITE_ONLY })
-      await callAsOAuth(dmToken.access_token, 'com.atproto.simplespace.removeMember', { space: aliceInbox, did: bob.did })
+      await callAsOAuth(dmToken.access_token, 'com.atproto.memberspace.putMember', { space: aliceInbox, did: bob.did, ...WRITE_ONLY })
+      await callAsOAuth(dmToken.access_token, 'com.atproto.memberspace.removeMember', { space: aliceInbox, did: bob.did })
 
       // create its own half
       const aliceHalf = `at://${alice.did}/space/${CONVERSATION_TYPE}/${convKey}`
-      const createdHalf = await callAsOAuth(dmToken.access_token, 'com.atproto.simplespace.createSpace', {
-        spaceType: CONVERSATION_TYPE, skey: convKey, readPolicy: defs.memberListPolicy.build({}), writePolicy: defs.memberListPolicy.build({}), appAccess: defs.open.build({}),
+      const createdHalf = await callAsOAuth(dmToken.access_token, 'com.atproto.space.createSpace', {
+        spaceType: CONVERSATION_TYPE, skey: convKey, policy: MEMBER_LIST_POLICY,
       })
       expect(createdHalf!.uri).toBe(aliceHalf)
 
       // putMember / removeMember on its own half
-      await callAsOAuth(dmToken.access_token, 'com.atproto.simplespace.putMember', { space: aliceHalf, did: bob.did, ...READ_ONLY })
-      await callAsOAuth(dmToken.access_token, 'com.atproto.simplespace.removeMember', { space: aliceHalf, did: bob.did })
+      await callAsOAuth(dmToken.access_token, 'com.atproto.memberspace.putMember', { space: aliceHalf, did: bob.did, ...READ_ONLY })
+      await callAsOAuth(dmToken.access_token, 'com.atproto.memberspace.removeMember', { space: aliceHalf, did: bob.did })
 
       // write header, message and reaction records in its own half
       await callAsOAuth(dmToken.access_token, 'com.atproto.space.createRecord', {
@@ -674,7 +690,13 @@ describe('atproto Slack direct-message protocol conformance', () => {
       })
 
       // deleteSpace its own half
-      await callAsOAuth(dmToken.access_token, 'com.atproto.simplespace.deleteSpace', { space: aliceHalf })
+      await callAsOAuth(dmToken.access_token, 'com.atproto.space.deleteSpace', { space: aliceHalf })
+
+      // publish the public inbox declaration in its own repo (the one repo grant)
+      const DECLARATION = 'org.slack.dm.declaration'
+      await callAsOAuth(dmToken.access_token, 'com.atproto.repo.putRecord', {
+        repo: alice.did, collection: DECLARATION, rkey: 'self', record: { $type: DECLARATION, createdAt: new Date().toISOString() },
+      })
 
       // write a request into another user's inbox (collection-restricted, wildcard authority)
       await callAsOAuth(dmToken.access_token, 'com.atproto.space.putRecord', {
@@ -689,11 +711,8 @@ describe('atproto Slack direct-message protocol conformance', () => {
       const exchangeUrl = new URL('/xrpc/com.atproto.space.getSpaceCredential', pds2.url).toString()
       const exchange = await fetch(exchangeUrl, {
         method: 'POST',
-        headers: {
-          ...(await createSpaceSigHeaders(spaceKey, { authorization: `Bearer ${delegation!.token as string}` })),
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({ space: bobHalf }),
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ space: bobHalf, credentialKid: spaceKey.did(), delegationToken: delegation!.token as string }),
       })
       expect(exchange.status).toBe(200)
       const { credential } = (await exchange.json()) as { credential: string }
@@ -702,7 +721,7 @@ describe('atproto Slack direct-message protocol conformance', () => {
       readUrl.searchParams.set('repo', bob.did)
       readUrl.searchParams.set('collection', MESSAGE)
       const read = await fetch(readUrl, {
-        headers: await createSpaceSigHeaders(spaceKey, { authorization: `Atproto-Space ${credential}`, audience: bob.did }),
+        headers: await createSpaceSigHeaders(spaceKey, { authorization: `Atproto-Space-Credential ${credential}`, audience: bob.did }),
       })
       expect(read.status).toBe(200)
       expect(((await read.json()) as { records: Array<{ value: { text: string } }> }).records.map((record) => record.value.text)).toEqual(['from bob'])
@@ -710,7 +729,7 @@ describe('atproto Slack direct-message protocol conformance', () => {
       // --- capabilities DM_BROWSER_SCOPES withholds ---
 
       // cannot putMember on another user's half
-      await expect(callAsOAuth(dmToken.access_token, 'com.atproto.simplespace.putMember', { space: bobHalf, did: alice.did, ...WRITE_ONLY }))
+      await expect(callAsOAuth(dmToken.access_token, 'com.atproto.memberspace.putMember', { space: bobHalf, did: alice.did, ...WRITE_ONLY }))
         .rejects.toThrow()
 
       // cannot write a message record into another user's inbox (only the request collection is granted there)
@@ -718,9 +737,17 @@ describe('atproto Slack direct-message protocol conformance', () => {
         space: bobInbox, repo: alice.did, collection: MESSAGE, record: { $type: MESSAGE, text: 'not a request', createdAt: new Date().toISOString() },
       })).rejects.toThrow()
 
+      // cannot write any other collection into its own public repo (only the declaration is granted)
+      await expect(callAsOAuth(dmToken.access_token, 'com.atproto.repo.putRecord', {
+        repo: alice.did, collection: 'app.bsky.feed.post', rkey: 'self', record: { $type: 'app.bsky.feed.post', text: 'nope', createdAt: new Date().toISOString() },
+      })).rejects.toThrow()
+
+      // cannot get a delegation token for another user's inbox (the inbox read grant is gone: senders read the declaration instead)
+      await expect(callAsOAuth(dmToken.access_token, 'com.atproto.space.getDelegationToken', undefined, { space: bobInbox })).rejects.toThrow()
+
       // cannot create a space of a non-DM type
-      await expect(callAsOAuth(dmToken.access_token, 'com.atproto.simplespace.createSpace', {
-        spaceType: 'org.slack.channel', skey: 'general', readPolicy: defs.memberListPolicy.build({}), writePolicy: defs.memberListPolicy.build({}), appAccess: defs.open.build({}),
+      await expect(callAsOAuth(dmToken.access_token, 'com.atproto.space.createSpace', {
+        spaceType: 'org.slack.channel', skey: 'general', policy: MEMBER_LIST_POLICY,
       })).rejects.toThrow()
     } finally {
       await network.close()

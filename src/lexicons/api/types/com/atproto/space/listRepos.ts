@@ -63,8 +63,8 @@ export interface Repo {
   did: string
   /** The repo's current revision (TID), as last reported to the authority. May lag the repo host, which is the source of truth. */
   repoRev: string
-  /** The repo's current commit hash (sha256 of the LtHash state), as last reported to the authority. */
-  hash: Uint8Array
+  /** The repo's current commit data (sha256 of the LtHash state), as last reported to the authority. */
+  data: Uint8Array
   /** The space revision at which this repo was last updated. */
   spaceRev: string
 }
