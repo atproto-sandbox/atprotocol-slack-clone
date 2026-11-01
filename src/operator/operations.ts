@@ -2,7 +2,8 @@ import type { OAuthSession } from "@atproto/oauth-client-node";
 import type * as GetRecord from "@/lexicons/api/types/com/atproto/space/getRecord";
 import { sessionClient } from "@/atproto/client";
 import { listBoundedRecords } from "@/atproto/record-pages";
-import { isMissingXrpcResource } from "@/atproto/xrpc";
+import { isUnverifiableRepo } from "@/atproto/kem-key";
+import { isMissingXrpcResource, type AtprotoClient } from "@/atproto/xrpc";
 import { mintSpaceCredential } from "@/atproto/space-credential";
 import { resolvePds } from "@/atproto/identity";
 import { ensureMemberListSpace, listSpaceMembers, putAuthorityRecord, putSpaceMember, removeSpaceMember } from "@/atproto/space-ops";
@@ -536,7 +537,21 @@ function joinRequestBaseline(steps: string[]): { membership: "none" | string; ro
 
 async function readJoinRequest(session: OAuthSession, inbox: string, repoDid: string, rkey: string, authorityDid: string): Promise<Record<string, unknown> | null> {
   const credential = await mintSpaceCredential(session, inbox);
-  const client = credential.client(await resolvePds(repoDid));
+  return readJoinRequestRecord(credential.client(await resolvePds(repoDid)), inbox, repoDid, rkey, authorityDid);
+}
+
+/**
+ * The requester's join request, or null when there is no current one to act on. A repo that cannot be authenticated (no
+ * usable `#atproto_kem` key, or a MAC that does not verify) reads as null: the decision is rejected and any partial approval
+ * is undone, instead of the journal keeping the operation pending and every later admin operation replaying the same failure.
+ */
+export async function readJoinRequestRecord(
+  client: Pick<AtprotoClient, "query">,
+  inbox: string,
+  repoDid: string,
+  rkey: string,
+  authorityDid: string,
+): Promise<Record<string, unknown> | null> {
   try {
     const result = await client.query<GetRecord.OutputSchema>("com.atproto.space.getRecord", {
       space: inbox, repo: repoDid, collection: "org.slack.joinRequest", rkey,
@@ -545,7 +560,7 @@ async function readJoinRequest(session: OAuthSession, inbox: string, repoDid: st
       authorityDid, spaceUri: inbox, repoDid, rkey,
     }).valid ? result.value : null;
   } catch (error) {
-    if (isNotFound(error)) return null;
+    if (isNotFound(error) || isUnverifiableRepo(error)) return null;
     throw error;
   }
 }

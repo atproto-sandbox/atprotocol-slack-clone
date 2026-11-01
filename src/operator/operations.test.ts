@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assertWorkspaceRosterMatchesPds, savedWorkspaceOperations, validateOperatorRequest } from "./operations";
+import { SpaceMacError } from "@atproto/space";
+import { KemKeyError } from "@/atproto/kem-key";
+import { XrpcError } from "@/atproto/xrpc";
+import { channelUri, inboxUri, requestRecordKey } from "@/protocol/keys";
+import { assertWorkspaceRosterMatchesPds, readJoinRequestRecord, savedWorkspaceOperations, validateOperatorRequest } from "./operations";
 import type { OperatorActor } from "./security";
 
 const actor = { workspace: { authorityDid: "did:plc:owner" } } as OperatorActor;
@@ -57,4 +61,23 @@ test("recovery keeps unreadable journal rows visible instead of silently skippin
     { actor: "did:plc:other", operationId: "corrupt", request: null },
     { actor: "did:plc:other", operationId: "no-request", request: null },
   ]);
+});
+
+test("a join request from a repo that cannot be authenticated reads as no current request instead of failing the operation", async () => {
+  const authority = "did:plc:owner";
+  const requester = "did:plc:requester";
+  const inbox = inboxUri(authority);
+  const rkey = requestRecordKey(channelUri(authority, "secret"), requester);
+  const request = { channelSkey: "secret", requestId: "2222222222222", createdAt: "2026-11-01T00:00:00.000Z" };
+  const read = (outcome: () => unknown) => readJoinRequestRecord(
+    { query: async () => outcome() as never },
+    inbox, requester, rkey, authority,
+  );
+
+  assert.deepEqual(await read(() => ({ uri: "", value: request })), request, "a verified request is returned");
+  assert.equal(await read(() => { throw new KemKeyError(requester, "the DID document lists no #atproto_kem verification method"); }), null, "no usable KEM key");
+  assert.equal(await read(() => { throw new SpaceMacError("getRecord failed MAC verification"); }), null, "a MAC that does not verify");
+  assert.equal(await read(() => { throw new XrpcError(404, "not found", "RecordNotFound"); }), null, "no such record");
+  assert.equal(await read(() => ({ uri: "", value: { ...request, requestId: "not-a-tid" } })), null, "an invalid record");
+  await assert.rejects(read(() => { throw new XrpcError(500, "upstream failure", "InternalServerError"); }), /upstream failure/, "other failures still fail the operation so it can be retried");
 });
