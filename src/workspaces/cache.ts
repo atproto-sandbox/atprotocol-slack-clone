@@ -1,4 +1,5 @@
 import { getRawDb } from "@/lib/db";
+import { isAccessLost } from "@/atproto/space-credential-core";
 
 const WORKSPACE_URI = /^at:\/\/(did:[^/]+)\/space\/org\.slack\.workspace\/[A-Za-z0-9._~:-]{1,128}$/;
 const CHANNEL_URI = /^at:\/\/(did:[^/]+)\/space\/org\.slack\.channel\/[A-Za-z0-9._~:-]{1,128}$/;
@@ -12,12 +13,20 @@ export function markRepoStale(space: string, repo: string): void {
   getRawDb().prepare("UPDATE space_collection_cursor SET checked_at=0, rev='' WHERE space_uri=? AND repo_did=?").run(space, repo);
 }
 
+/**
+ * Drops what was cached from one writer's repo in a space. A writer that can no longer be authenticated must show nothing, and
+ * its rows must not count toward the fill cutoff or the history limit, or valid writers would be crowded out.
+ */
+export function purgeRepoCache(account: string, space: string, repo: string): void {
+  purgeWhere(account, "space_uri = ? AND repo_did = ?", [space, repo]);
+}
+
 export function purgeSpaceCache(account: string, space: string): void {
   purgeWhere(account, "space_uri = ?", [space]);
 }
 
 export function purgeDeniedPermissionCache(account: string, workspace: string, space: string, error: unknown): boolean {
-  if (!denied(error)) return false;
+  if (!isAccessLost(error)) return false;
   const workspaceDid = WORKSPACE_URI.exec(workspace)?.[1];
   if (!workspaceDid) return false;
   if (space === workspace) {
@@ -129,10 +138,6 @@ function purgeWhere(account: string, predicate: string, values: string[]): void 
   const db = getRawDb();
   const transaction = db.transaction(() => purgeWhereInTransaction(account, predicate, values));
   transaction();
-}
-
-function denied(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "status" in error && (error.status === 401 || error.status === 403);
 }
 
 function purgeSpaceCacheInTransaction(account: string, space: string): void {

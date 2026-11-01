@@ -9,6 +9,7 @@ import { channelUri } from "@/protocol/keys";
 import { validateSpaceRecord } from "@/protocol/records";
 import { WorkspaceEnvelopeError } from "./read-model";
 import { purgeDeniedPermissionCache, purgeSpaceCache, purgeWorkspaceCache, registerWorkspaceChannel, unregisterWorkspaceChannel } from "./cache";
+import { isAccessLost } from "@/atproto/space-credential-core";
 
 const MAX_SUPPORTED_MEMBERS = 200;
 const MAX_PRIVATE_ROSTER_SCAN = 1_000;
@@ -64,7 +65,7 @@ export async function readPrivateChannelRoster(session: OAuthSession, workspace:
   try {
     current = await requireReadableChannel(session, workspace, skey);
   } catch (error) {
-    if (denied(error)) purgeWorkspaceCache(session.did, workspace);
+    if (isAccessLost(error)) purgeWorkspaceCache(session.did, workspace);
     throw error;
   }
   if (current.visibility !== "private") return [];
@@ -82,13 +83,9 @@ export async function readPrivateChannelRoster(session: OAuthSession, workspace:
     if (members.size > MAX_SUPPORTED_MEMBERS) throw new WorkspaceEnvelopeError(`Private-channel roster exceeds ${MAX_SUPPORTED_MEMBERS} members.`);
     return [...members].sort();
   } catch (error) {
-    if (denied(error)) purgeSpaceCache(session.did, current.channel);
+    if (isAccessLost(error)) purgeSpaceCache(session.did, current.channel);
     throw error;
   }
-}
-
-function denied(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "status" in error && (error.status === 401 || error.status === 403);
 }
 
 export class ChannelUnavailableError extends Error {

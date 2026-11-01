@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { closeDb, getRawDb } from "@/lib/db";
-import { markRepoStale, purgeCachesForUnlistedWorkspaces, purgeDeniedPermissionCache, purgeWorkspaceCache, registerWorkspaceChannel } from "./cache";
+import { SpaceCredentialError } from "@/atproto/space-credential-core";
+import { markRepoStale, purgeCachesForUnlistedWorkspaces, purgeDeniedPermissionCache, purgeRepoCache, purgeWorkspaceCache, registerWorkspaceChannel } from "./cache";
 
 test("workspace cache revocation keeps other workspaces under the same authority", () => {
   const directory = mkdtempSync(join(tmpdir(), "slack-workspace-cache-test-"));
@@ -69,6 +70,10 @@ test("workspace cache revocation keeps other workspaces under the same authority
     assert.equal(purgeDeniedPermissionCache(account, workspaceA, workspaceA, { status: 403 }), true);
     assert.equal(counts("channel_record_cache", channelA), 0, "a denied workspace credential purges its associated channel cache");
     assert.equal(purgeDeniedPermissionCache(account, workspaceA, workspaceA, { status: 404 }), false);
+    registerWorkspaceChannel(account, workspaceA, channelA);
+    seed(channelA, "deleted-a");
+    assert.equal(purgeDeniedPermissionCache(account, workspaceB, channelA, new SpaceCredentialError("gone", 410, "SpaceDeleted")), true, "a credential renewal that finds the space deleted drops its cached copies");
+    assert.equal(counts("channel_record_cache", channelA), 0);
   } finally {
     closeDb();
     rmSync(directory, { recursive: true, force: true });
@@ -104,6 +109,46 @@ test("markRepoStale resets every account's cursor for one repo in one space and 
     assert.equal(stale.length, 3, "both collections for both accounts");
     assert.ok(stale.every((row) => row.rev === "" && row.space_uri === space && row.repo_did === "did:plc:author"));
     assert.equal(rows.filter((row) => row.rev === "rev-1").length, 2, "the other repo and the other space are untouched");
+  } finally {
+    closeDb();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("purgeRepoCache drops one writer's cached rows in a space and leaves the other writers and spaces alone", () => {
+  const directory = mkdtempSync(join(tmpdir(), "slack-repo-cache-test-"));
+  process.env.DATABASE_PATH = join(directory, "cache.db");
+  process.env.AUTH_ENCRYPTION_KEY = "33".repeat(32);
+  process.env.APP_URL = "http://127.0.0.1:3000";
+  process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_slack_admin";
+  const account = "did:plc:reader";
+  const channel = "at://did:plc:owner/space/org.slack.channel/alpha";
+  const other = "at://did:plc:owner/space/org.slack.channel/beta";
+  const raw = getRawDb();
+  const seed = (space: string, repo: string) => {
+    raw.prepare(`INSERT OR REPLACE INTO channel_record_cache
+      (account_did,space_uri,repo_did,collection,rkey,uri,value_cipher,updated_at) VALUES (?,?,?,?,?,?,?,?)`)
+      .run(account, space, repo, "org.slack.channel.message", "r1", `at://${repo}/org.slack.channel.message/r1`, "cipher", Date.now());
+    raw.prepare(`INSERT OR REPLACE INTO space_collection_cursor
+      (account_did,space_uri,repo_did,collection,rev,next_cursor,finished,checked_at) VALUES (?,?,?,?,?,?,?,?)`)
+      .run(account, space, repo, "org.slack.channel.message", "r1", null, 1, Date.now());
+    raw.prepare("INSERT OR REPLACE INTO sync_cursor (account_did,space_uri,repo_did,rev,updated_at) VALUES (?,?,?,?,?)")
+      .run(account, space, repo, "r1", Date.now());
+  };
+  const rows = (table: string, space: string, repo: string) => (raw.prepare(`SELECT count(*) AS count FROM ${table} WHERE account_did=? AND space_uri=? AND repo_did=?`)
+    .get(account, space, repo) as { count: number }).count;
+  try {
+    seed(channel, "did:plc:bad");
+    seed(channel, "did:plc:good");
+    seed(other, "did:plc:bad");
+
+    purgeRepoCache(account, channel, "did:plc:bad");
+
+    for (const table of ["channel_record_cache", "space_collection_cursor", "sync_cursor"]) {
+      assert.equal(rows(table, channel, "did:plc:bad"), 0, `${table}: the set-aside writer's rows are gone`);
+      assert.equal(rows(table, channel, "did:plc:good"), 1, `${table}: another writer in the space is untouched`);
+      assert.equal(rows(table, other, "did:plc:bad"), 1, `${table}: the same writer in another space is untouched`);
+    }
   } finally {
     closeDb();
     rmSync(directory, { recursive: true, force: true });

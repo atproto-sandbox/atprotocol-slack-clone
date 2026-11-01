@@ -15,7 +15,9 @@ import { mapLimited } from "@/lib/map-limited";
 import { channelUri, parseSpaceUri, spaceRecordUri } from "@/protocol/keys";
 import { validateSpaceRecord } from "@/protocol/records";
 import { ChannelUnavailableError, requireReadableChannel } from "./channels";
-import { purgeSpaceCache, purgeWorkspaceCache } from "./cache";
+import { purgeRepoCache, purgeSpaceCache, purgeWorkspaceCache } from "./cache";
+import { isUnverifiableRepo } from "@/atproto/kem-key";
+import { isAccessLost } from "@/atproto/space-credential-core";
 
 const PAGE = 100;
 const BACKFILL_PAGE = 1_000;
@@ -31,7 +33,7 @@ export async function readChannelPage(session: OAuthSession, workspace: string, 
     const parsed = parseSpaceUri(workspace);
     if (parsed?.type === "org.slack.workspace" && skey) {
       const space = channelUri(parsed.authorityDid, skey);
-      if (denied(error)) purgeWorkspaceCache(session.did, workspace);
+      if (isAccessLost(error)) purgeWorkspaceCache(session.did, workspace);
       else if (error instanceof ChannelUnavailableError && error.visibility === "archived") purgeSpaceCache(session.did, space);
     }
     throw error;
@@ -44,7 +46,7 @@ export async function readChannelPage(session: OAuthSession, workspace: string, 
     credential = await mintSpaceCredential(session, space);
     await registerSpaceNotifications(credential, space);
   } catch (error) {
-    if (denied(error)) purgeSpaceCache(session.did, space);
+    if (isAccessLost(error)) purgeSpaceCache(session.did, space);
     throw error;
   }
   try {
@@ -61,7 +63,7 @@ export async function readChannelPage(session: OAuthSession, workspace: string, 
       }
       return client;
     };
-    await mapLimited(repos, REPO_CONCURRENCY, async (repo) => {
+    const { readable, unverified } = await refreshWriterRepos(session.did, space, repos, REPO_CONCURRENCY, async (repo) => {
       const client = await clientFor(repo.did);
       await refresh(session.did, space, repo.did, client, "org.slack.channel.message");
       await refresh(session.did, space, repo.did, client, "org.slack.channel.reaction");
@@ -76,7 +78,7 @@ export async function readChannelPage(session: OAuthSession, workspace: string, 
       getParent: async () => null,
     });
     while (true) {
-      await fillLatest(session.did, space, repos, clientFor, scanTarget);
+      await fillLatest(session.did, space, readable, clientFor, scanTarget);
       const allMessages = cached(session.did, space, collection).sort((a, b) => b.rkey.localeCompare(a.rkey));
       selected = await selectValidChannelMessages(allMessages, {
         authorityDid,
@@ -95,7 +97,7 @@ export async function readChannelPage(session: OAuthSession, workspace: string, 
       if (nextTarget <= scanTarget) break;
       scanTarget = nextTarget;
     }
-    await fillOlder(session.did, space, repos, clientFor, "org.slack.channel.reaction", MAX_HISTORY);
+    await fillOlder(session.did, space, readable, clientFor, "org.slack.channel.reaction", MAX_HISTORY);
     const messages = selected.messages.slice(offset, offset + PAGE);
     const messageUris = new Set(messages.map((item) => item.uri));
     const knownMessages = new Set(messages.map((item) => item.uri));
@@ -107,7 +109,7 @@ export async function readChannelPage(session: OAuthSession, workspace: string, 
     const total = cachedCount(session.did, space, collection);
     const nextOffset = Math.min(offset + PAGE, MAX_HISTORY);
     const hasMore = channelPageHasMore(offset, PAGE, selected.messages.length, total, hasMoreCursor(session.did, space, collection));
-    const degradedReasons: string[] = [];
+    const degradedReasons: string[] = unverified.map(({ did, reason }) => `Messages from ${did} were skipped: ${reason}`);
     if (total >= MAX_HISTORY && hasMoreCursor(session.did, space, collection)) {
       degradedReasons.push(`Message history exceeds the ${MAX_HISTORY}-record channel sync limit.`);
     }
@@ -124,9 +126,48 @@ export async function readChannelPage(session: OAuthSession, workspace: string, 
       degradedReasons,
     };
   } catch (error) {
-    if (denied(error)) purgeSpaceCache(session.did, space);
+    if (isAccessLost(error)) purgeSpaceCache(session.did, space);
     throw error;
   }
+}
+
+/**
+ * Runs `refresh` for every writer repo. A repo that cannot be authenticated (no usable `#atproto_kem` key, or a MAC that does
+ * not verify) is set aside and reported, so one member's DID document cannot make a channel unreadable for everyone else.
+ * Any other failure still fails the read.
+ */
+export async function refreshAuthenticated<T extends { did: string }>(
+  repos: readonly T[],
+  concurrency: number,
+  refresh: (repo: T) => Promise<void>,
+): Promise<{ readable: T[]; unverified: Array<{ did: string; reason: string }> }> {
+  const unverified: Array<{ did: string; reason: string }> = [];
+  await mapLimited(repos, concurrency, async (repo) => {
+    try {
+      await refresh(repo);
+    } catch (error) {
+      if (!isUnverifiableRepo(error)) throw error;
+      unverified.push({ did: repo.did, reason: error instanceof Error ? error.message : "its repo could not be authenticated" });
+    }
+  });
+  const skipped = new Set(unverified.map(({ did }) => did));
+  return { readable: repos.filter((repo) => !skipped.has(repo.did)), unverified };
+}
+
+/**
+ * `refreshAuthenticated` for one account's view of a channel space, and dropping what the account cached from each writer that was
+ * set aside: that writer shows nothing and its rows count toward no cutoff or limit. Runs before any read of the cache.
+ */
+export async function refreshWriterRepos<T extends { did: string }>(
+  account: string,
+  space: string,
+  repos: readonly T[],
+  concurrency: number,
+  refresh: (repo: T) => Promise<void>,
+): Promise<{ readable: T[]; unverified: Array<{ did: string; reason: string }> }> {
+  const result = await refreshAuthenticated(repos, concurrency, refresh);
+  for (const { did } of result.unverified) purgeRepoCache(account, space, did);
+  return result;
 }
 
 export function channelPageHasMore(
@@ -382,10 +423,6 @@ function cachedCount(account: string, space: string, collection: string): number
 
 function hasMoreCursor(account: string, space: string, collection: string): boolean {
   return Boolean(getRawDb().prepare("SELECT 1 FROM space_collection_cursor WHERE account_did=? AND space_uri=? AND collection=? AND next_cursor IS NOT NULL LIMIT 1").get(account, space, collection));
-}
-
-function denied(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "status" in error && (error.status === 401 || error.status === 403);
 }
 
 function seconds(): number { return Math.floor(Date.now() / 1000); }

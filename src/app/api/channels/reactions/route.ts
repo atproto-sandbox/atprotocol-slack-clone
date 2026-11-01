@@ -12,6 +12,7 @@ import { requireCurrentChannelCredential, requireReadableChannel } from "@/works
 import { markRepoStale, purgeDeniedPermissionCache, purgeSpaceCache } from "@/workspaces/cache";
 import { readRequestJson } from "@/lib/bounded-json";
 import { rejectCrossOriginMutation } from "@/lib/same-origin-mutation";
+import { isAccessLost } from "@/atproto/space-credential-core";
 
 export const runtime = "nodejs";
 
@@ -55,7 +56,7 @@ export async function POST(request: NextRequest) {
         space, repo: target.repo, collection: "org.slack.channel.message", rkey: target.rkey,
       });
     } catch (error) {
-      if (isDenied(error)) purgeSpaceCache(session.did, space);
+      if (isAccessLost(error)) purgeSpaceCache(session.did, space);
       throw error;
     }
     const record = { $type: "org.slack.channel.reaction", subject: body.subject, emoji: body.emoji, createdAt: new Date().toISOString() };
@@ -73,8 +74,4 @@ export async function POST(request: NextRequest) {
     const status = message === "Unauthorized" ? 401 : error && typeof error === "object" && "status" in error && typeof error.status === "number" ? error.status : 400;
     return NextResponse.json({ error: message.slice(0, 500) }, { status });
   }
-}
-
-function isDenied(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "status" in error && (error.status === 401 || error.status === 403);
 }

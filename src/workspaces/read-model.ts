@@ -9,6 +9,7 @@ import { channelUri } from "@/protocol/keys";
 import { validateSpaceRecord } from "@/protocol/records";
 import { purgeCachesForUnlistedWorkspaces, purgeWorkspaceCache, replaceWorkspaceChannels } from "./cache";
 import { mapLimited } from "@/lib/map-limited";
+import { isAccessLost, isSpaceDeleted } from "@/atproto/space-credential-core";
 
 export type WorkspaceSummary = {
   uri: string;
@@ -61,9 +62,9 @@ export async function discoverWorkspaceState(session: OAuthSession): Promise<Wor
       if (!summary) purgeWorkspaceCache(session.did, uri);
       return { summary, candidate: null };
     } catch (error) {
-      if (!denied(error)) throw error;
+      if (!isAccessLost(error)) throw error;
       purgeWorkspaceCache(session.did, uri);
-      return { summary: null, candidate: workspaceCandidate(uri) };
+      return { summary: null, candidate: isSpaceDeleted(error) ? null : workspaceCandidate(uri) };
     }
   });
   purgeCachesForUnlistedWorkspaces(session.did, spaces);
@@ -82,13 +83,9 @@ export async function requireWorkspaceSummary(session: OAuthSession, uri: string
     }
     return summary;
   } catch (error) {
-    if (denied(error)) purgeWorkspaceCache(session.did, uri);
+    if (isAccessLost(error)) purgeWorkspaceCache(session.did, uri);
     throw error;
   }
-}
-
-function denied(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "status" in error && (error.status === 401 || error.status === 403);
 }
 
 function workspaceCandidate(uri: string): WorkspaceCandidate | null {
