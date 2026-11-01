@@ -85,10 +85,15 @@ src/
   atproto/                Low-level protocol clients, shared by server channel code and the
                            isomorphic DM engine.
     xrpc.ts                  Minimal XRPC client (query/procedure) over an injected fetch handler.
-    space-signature.ts       SpaceKey (WebCrypto P-256 did:key) and HTTP message signatures for
-                              space requests (isomorphic).
+    space-key.ts             SpaceKey (WebCrypto P-256 did:key) that binds one credential. Signing,
+                              KEM and MAC formats belong to @atproto/space (isomorphic).
+    space-policy.ts          The one owner of the memberspace policy object the app sends and reads.
+    kem-key.ts               `#atproto_kem` did:key from a DID document (server and browser share it).
     space-credential-core.ts Isomorphic space-credential mint/exchange (SpaceCredential,
-                              SpaceCredentialError, mintSpaceCredentialWith).
+                              SpaceCredentialError, mintSpaceCredentialWith) and the single owner of
+                              MAC requests and verification for getRecord and getLatestCommit (listRepoOps
+                              and getRepo are unsupported: nothing calls them); isAccessLost is the one
+                              "this account lost access" predicate (refused credential or deleted space).
     space-credential.ts      Thin server adapter over space-credential-core.ts (Node session,
                               SSRF-guarded fetch).
     record-pages.ts          Bounded listRepos/listRecords/listMembers/listSpaces paging with
@@ -131,8 +136,9 @@ scripts/                  codegen-lex.mjs, backup-db.mjs, reconcile-workspaces.t
   with injected transports (`memberClient`, `resolvePds`, `fetchEndpoint`, `generateKey`,
   `store`), so the same class runs in the browser and in Node tests/acceptance.
 - `merge.ts` — the pure k-way merge `readConversation` uses (paginate-only-what's-needed).
-- `request-policy.ts` — pure mapping between the inbox `writePolicy`/member state and the
+- `request-policy.ts` — pure mapping between the inbox memberspace `publicWrite` flag/member state and the
   user-facing mode (`everyone` / `allowlist` / `nobody`).
+- The inbox declaration (`org.slack.dm.declaration`, a public record in the owner's own repo, written by `enableDms`) is how a sender learns a recipient has an inbox: the authority answers a stranger asking for the inbox like a missing space.
 - `backoff.ts` — the re-notify backoff schedule (1 min, 10 min, 1 h, 1 day, then stop).
 - `browser-session.ts` — `@atproto/oauth-client-browser` wiring: `connectDms`, `restoreDmSession`,
   `disconnectDms`, the well-known-only handle resolver, `DmConfig`.

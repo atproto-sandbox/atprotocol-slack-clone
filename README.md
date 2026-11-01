@@ -4,7 +4,7 @@ A Slack-style team workspace built directly on atproto permissioned data ("space
 
 There is no app database of record. Each workspace, channel and conversation lives in spaces on the members' own PDSes, and the member lists on those PDSes decide who can read. The app is a client plus a small operator service that makes journaled, resumable membership changes.
 
-> **Status: alpha.** It targets proposal 0016 and the draft PDS implementation (PR [#5187](https://github.com/bluesky-social/atproto/pull/5187), commit `619c6e85`), which is not a released protocol. Expect it to break when the protocol moves. Nothing here has been deployed or load-tested beyond local fixtures.
+> **Status: alpha.** It targets proposal 0016 and the draft PDS implementation (PR [#5187](https://github.com/bluesky-social/atproto/pull/5187), commit `5d88b414`, the 29 October alpha), which is not a released protocol. Expect it to break when the protocol moves. Nothing here has been deployed or load-tested beyond local fixtures.
 
 ## What it does
 
@@ -22,7 +22,7 @@ Next.js 16 (App Router) with SQLite for session state, caches and the operator j
 
 You need Node 22.17 (`.nvmrc`) and pnpm 11 (`corepack pnpm`). The local stack runs two in-memory PDS hosts, a PLC directory and this app, all from a pinned atproto checkout.
 
-1. Check out and build the pinned atproto revision next to this repo as `atproto-spaces-phase2`, and apply `protocol-tests/atproto/strict-credential-expiry.patch`. The steps are in [`docs/protocol/atproto-spaces-pin.md`](docs/protocol/atproto-spaces-pin.md).
+1. Check out and build the pinned atproto revision next to this repo as `atproto-spaces-phase3`, and apply `protocol-tests/atproto/strict-credential-expiry.patch`. The steps are in [`docs/protocol/atproto-spaces-pin.md`](docs/protocol/atproto-spaces-pin.md).
 2. Install and build:
 
    ```sh
@@ -33,7 +33,7 @@ You need Node 22.17 (`.nvmrc`) and pnpm 11 (`corepack pnpm`). The local stack ru
 3. Start the playground:
 
    ```sh
-   ATPROTO_PINNED_CHECKOUT=../atproto-spaces-phase2 corepack pnpm playground
+   ATPROTO_PINNED_CHECKOUT=../atproto-spaces-phase3 corepack pnpm playground
    ```
 
    It prints a local URL and four ready-made accounts, all with the password `playground-pass`. Type the account's DID (not the handle) into the sign-in box. Everything lives in memory and disappears when you stop it.

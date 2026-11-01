@@ -23,7 +23,7 @@ For admin-only methods and admin execute requests, the authority-authored `org.s
 The operator also requires:
 
 1. The authority-authored `org.slack.workspace.roster` record for the actor has `active=true`.
-2. `com.atproto.simplespace.listMembers` shows workspace `read=true, write=true` and inbox `read=true, write=true` for an admin. Self-leave calls require active workspace and inbox write membership; `leaveChannel` additionally requires current private-channel membership.
+2. `com.atproto.memberspace.listMembers` shows workspace `read=true, write=true` and inbox `read=true, write=true` for an admin. Self-leave calls require active workspace and inbox write membership; `leaveChannel` additionally requires current private-channel membership.
 
 The authority DID session performs owner-only checks. A role record cannot replace protocol management scope or PDS membership.
 
