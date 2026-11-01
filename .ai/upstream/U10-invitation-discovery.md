@@ -1,5 +1,7 @@
 # Let a user discover the spaces they have been added to
 
+Status against `5d88b414` (2026-10-30): Unchanged. `listSpaces` still lists only the caller's own spaces (a `read_self` grant covers it) and there is still no membership lookup.
+
 Status against `5b95b2f2`: Unchanged. `listSpaces` still returns only spaces the user holds a repo in (the `type` filter is now `spaceType`); there is still no membership lookup.
 
 ## Summary
@@ -34,7 +36,7 @@ com.atproto.space.listMemberships     (member's PDS, OAuth)
 ## Alternatives considered
 - **Application-level invitation records** in an invitee-owned space. Works only for accounts that already enabled it, and every app reinvents it.
 - **Share links** (what we ship). Fine as a convenience, but it means being added is invisible without the link.
-- **Pending state**: a separate "invited, not yet accepted" state before the member can mint credentials. A bigger change to `simplespace` semantics, so listed as an open question and not required here.
+- **Pending state**: a separate "invited, not yet accepted" state before the member can mint credentials. A bigger change to member-space (`memberspace`) semantics, so listed as an open question and not required here.
 
 ## Compatibility
 Additive. A host that does not implement `notifyMembership` simply produces no entries, and applications keep falling back to share links.

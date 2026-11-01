@@ -1,5 +1,7 @@
 # Optional: let a space hide its existence from non-members
 
+Status against `5d88b414` (2026-10-30): Resolved for non-members. `getSpaceCredential` now checks the user before the app and answers `SpaceNotFound` both for a missing space and for a user the policy does not authorize; without a delegation token every non-public space also answers `SpaceNotFound`. `SpaceDeleted` is answered before any policy check, so a deleted space is still distinguishable. This closed our own credential probe for DM inboxes; see U11.
+
 Status against `5b95b2f2`: Not affected. `getSpaceCredential` still distinguishes `SpaceNotFound` from `UserNotAuthorized`.
 
 ## Summary

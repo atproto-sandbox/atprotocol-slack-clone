@@ -1,5 +1,7 @@
 # Tell a writer whether the space they wrote into exists
 
+Status against `5d88b414` (2026-10-30): Now blocking for applications. The workaround this draft describes (asking the recipient's inbox for a credential and reading `SpaceNotFound` versus `UserNotAuthorized`) no longer works, because the authority answers a non-member with `SpaceNotFound` for an existing space too (U9 was implemented). `putRecord` into another authority's space still succeeds either way. Our app now has recipients publish a small public declaration record in their own repo and has senders read it first, which drifts if a space is deleted by other means. A protocol-level signal is still the right fix; a minimal one would be an optional `delivered`/`spaceExists` hint in the `putRecord` response when the writer's PDS happens to know, or a way for a writer to ask a space host whether it accepts writes from them without a read grant.
+
 Status against `5b95b2f2`: Still open. `putRecord` declares `SpaceNotFound` but the handler never checks the space host: it stores the record locally, and `spaceNotifications.notify` swallows a non-retryable `SpaceNotFound` from the authority with a log line. The writer still gets HTTP 200.
 
 Status against `619c6e85` and proposal `c76714ac` (2026-10-21): Still open, but now specified behavior rather than an oversight. The proposal's new "Repo lifecycle" section says that when the space authority is another DID, the writer's PDS "does not need to check whether the space exists before accepting the write", and PDS PR #5655 pins it with a test (`creates a repo in another authority's space without checking it exists`). The same change makes an authority's write to its *own* missing or deleted space fail with `SpaceNotFound`. So the request is no longer "fix the missing check"; it is "add an optional signal to a deliberately unchecked write", and both proposed options below leave the unchecked-write rule intact.
@@ -13,7 +15,7 @@ Reproduced in a team-chat app built on `787a730f` (direct-message requests are w
 2. `did:plc:bob` calls `putRecord` for a request into that inbox, on the same host and across hosts. Both return HTTP 200 with a record URI and `validationStatus: unknown`.
 3. Bob's app reports the request as delivered. It never will be: nothing tracks Bob as a writer of a space that does not exist.
 
-The workaround is to mint a space credential for the inbox first and read the error (`SpaceNotFound` means no inbox, `UserNotAuthorized` means it exists). That requires the OAuth grant `space:<type>?authority=*&action=read`, i.e. permission to ask any account of that type for read credentials, purely to find out whether a write will land. It is also two extra round trips per recipient (a 100-person group conversation makes 99 of them).
+The earlier workaround was to mint a space credential for the inbox first and read the error (`SpaceNotFound` meant no inbox, `UserNotAuthorized` meant it existed); `5d88b414` closed it by answering `SpaceNotFound` for both. It had required the OAuth grant `space:<type>?authority=*&action=read`, i.e. permission to ask any account of that type for read credentials, purely to find out whether a write will land. It is also two extra round trips per recipient (a 100-person group conversation makes 99 of them).
 
 ## Proposed change
 Either of these, whichever fits the host's trust model better:
@@ -21,7 +23,7 @@ Either of these, whichever fits the host's trust model better:
 - **A write-scoped existence check.** `com.atproto.space.getSpaceStatus` (params `{ space }`) answers `{ exists, deleted }` for any caller holding a *write* grant on that space type. The answer discloses nothing a successful write would not.
 
 ## Alternatives considered
-- Keep the credential probe (what we ship). Works, but widens the browser grant to read-credential requests against every inbox and costs two calls per recipient.
+- A public declaration record in the recipient's own repo (what we ship since `5d88b414`, `org.slack.dm.declaration`, read with a plain public `getRecord` before sending). It works for an app that controls both sides, and it can go stale: an inbox deleted outside the app leaves the declaration behind, so a request to it still reads as delivered. It also puts the burden on every recipient app, which is what a host-side answer would remove.
 - Treat all requests as best-effort and never show delivery state. Loses the one signal a sender has that the recipient is unreachable.
 
 ## Compatibility

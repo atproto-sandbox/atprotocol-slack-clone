@@ -1,5 +1,7 @@
 # Let a space owner delegate space management to other accounts
 
+Status against `5d88b414` (2026-10-30): Not affected. `com.atproto.simplespace` is gone, and its member methods are now `com.atproto.memberspace.putMember`, `removeMember` and `listMembers`, with `updateSpace` under `com.atproto.space`; all still require OAuth as the space owner, and the new `managedspace` policy still puts an application in the access decision rather than delegating who edits the member list.
+
 Status against `5b95b2f2`: Not affected. `simplespace` management still requires auth as the space owner (`NotSpaceOwner`).
 
 ## Summary
@@ -13,10 +15,10 @@ Only the space owner can call `putMember`, `removeMember` and `updateSpace`. A t
 Let the owner nominate managers, and let managers act with their own identity:
 
 ```
-com.atproto.simplespace.putManager / removeManager     (owner only)
+com.atproto.memberspace.putManager / removeManager     (owner only)
   input: { space, did }
 
-com.atproto.simplespace.getManagementToken             (served by the manager's PDS)
+com.atproto.space.getManagementToken                   (served by the manager's PDS)
   params: { space }
   auth:   OAuth with a covering `manage` scope for authority=<owner did>
   output: a short-lived, single-use token addressed to the authority (typ

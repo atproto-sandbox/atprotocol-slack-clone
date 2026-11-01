@@ -1,5 +1,7 @@
 # Space credentials: expire exactly at `exp`
 
+Status against `5d88b414` (2026-10-30): Unchanged. The credential exchange is no longer signed (the key to bind travels as `credentialKid` in the request body); credential use is signed under the `atproto-space-credential` label with a required tag. Only item 1 below remains.
+
 Status against `5b95b2f2`: revocation, a shorter default and a lifetime ceiling now exist upstream. Only item 1 below remains.
 
 ## Summary
@@ -8,7 +10,7 @@ In the pinned implementation a space credential is still accepted for about five
 ## Resolved upstream (for the record)
 - Default lifetime is now 600 seconds with a 3600 second ceiling (was 7200 seconds), so the window in which a removed member keeps reading is at most an hour and ten minutes by default.
 - `com.atproto.space.notifyCredentialRevoked` lets the space authority tell a repo host that specific credentials (by `jti`) are revoked, so a removed member's credentials can be cut off before `exp`.
-- Credentials are bound to a key with an HTTP message signature instead of DPoP.
+- Credentials are bound to a key named in the exchange body (`credentialKid`), and each use is signed with an HTTP message signature instead of DPoP.
 
 ## Problem
 - `verifySpaceToken` rejects a token only when `now - CLOCK_SKEW_SEC >= exp`, with `CLOCK_SKEW_SEC = 5`, for credentials as well as delegation tokens and client attestations.
