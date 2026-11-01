@@ -77,9 +77,15 @@ export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: DmC
     setActiveChannel(channel);
   }, []);
 
-  const resetChannelContent = useCallback(() => {
+  /**
+   * Empties the open channel's content. The join-request state (the "grant request access" box and whether a request was
+   * sent) is the account's own, not channel data, so a background reload that fails to read the channel keeps it; only
+   * leaving the channel clears it.
+   */
+  const resetChannelContent = useCallback((options: { keepRequestAccess?: boolean } = {}) => {
     setMessages([]); setPrivateRoster([]); setHasMore(false); setNextOffset(0); setReplyTo(""); setMessageText("");
-    setNeedChannelRead(false); setNeedChannelWrite(false); setNeedJoinWrite(false); setRequestSubmitted(false);
+    setNeedChannelRead(false); setNeedChannelWrite(false);
+    if (!options.keepRequestAccess) { setNeedJoinWrite(false); setRequestSubmitted(false); }
   }, []);
 
   const clearChannelView = useCallback(() => {
@@ -98,7 +104,7 @@ export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: DmC
     const statusCode = httpStatus(caught);
     if (statusCode !== 401 && statusCode !== 403 && statusCode !== 409) return false;
     channelDataEpoch.current += 1;
-    resetChannelContent();
+    resetChannelContent({ keepRequestAccess: true });
     setNeedChannelRead(statusCode === 401 || statusCode === 403);
     const selected = activeChannelRef.current;
     if (selected) void refreshSelectedChannelRef.current?.(selected, false).catch((error) => setError(messageOf(error)));
