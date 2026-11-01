@@ -36,9 +36,9 @@ export const WORKSPACE_DISCOVERY_SCOPE =
 
 // The DM permission set requested by a browser-held OAuth session (M3). The
 // server's own OAuth session never requests these: DM tokens live only in the
-// browser (IndexedDB), never on this server, per docs/plans/direct-messages.md
+// browser (IndexedDB), never on this server, per .ai/plans/direct-messages.md
 // section 3.4. Grammar (manage=, authority=*, collection=) verified against
-// ../atproto-spaces-phase0/packages/oauth/oauth-scopes/src/scopes/space-permission.ts.
+// the pinned PDS checkout, packages/oauth/oauth-scopes/src/scopes/space-permission.ts.
 export const DM_BROWSER_SCOPES: readonly string[] = [
   "atproto",
   // Send, re-put (backoff retry), and withdraw a request into any recipient's
