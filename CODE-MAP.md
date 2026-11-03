@@ -91,12 +91,15 @@ src/
     kem-key.ts               `#atproto_kem` did:key from a DID document (server and browser share it).
     repo-failure.ts          The one classifier for "this one writer's repo cannot be read" (deactivated,
                               taken down, unauthenticated, oversized, host down): the sync, the admin inbox,
-                              DM reads and the operator set the writer aside instead of failing for everyone.
+                              DM reads, the independent channel reader and the operator set the writer aside instead of failing for everyone.
     space-credential-core.ts Isomorphic space-credential mint/exchange (SpaceCredential,
                               SpaceCredentialError, mintSpaceCredentialWith) and the single owner of
                               MAC requests and verification for getRecord and getLatestCommit (listRepoOps
                               and getRepo are unsupported: nothing calls them); isAccessLost is the one
-                              "this account lost access" predicate (refused credential or deleted space).
+                              "this account lost access" predicate (refused credential or deleted space);
+                              isCredentialRefused is the different question "did the host refuse this
+                              credential itself" (so its holder mints another); credentialLifetimeMs reads
+                              the authority's chosen lifetime from the token's iat and exp.
     space-credential.ts      Thin server adapter over space-credential-core.ts (Node session,
                               SSRF-guarded fetch).
     record-pages.ts          Bounded listRepos/listRecords/listMembers/listSpaces paging with
