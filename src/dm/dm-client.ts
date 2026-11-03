@@ -1,5 +1,5 @@
 import { listBoundedMembers, listBoundedRecords, listBoundedRepos, listBoundedSpaces, assertBoundedRecordPage } from "@/atproto/record-pages";
-import { mintSpaceCredentialWith, SPACE_CREDENTIAL_RENEW_BEFORE_MS, SpaceCredential, SpaceCredentialError, type ResolveKemKey } from "@/atproto/space-credential-core";
+import { isCredentialRefused, mintSpaceCredentialWith, SpaceCredential, SpaceCredentialError, type ResolveKemKey } from "@/atproto/space-credential-core";
 import type { SpaceKey } from "@/atproto/space-key";
 import { AtprotoClient, isMissingXrpcResource, isSpaceAlreadyExists } from "@/atproto/xrpc";
 import { mapLimited } from "@/lib/map-limited";
@@ -397,6 +397,7 @@ export class DmClient {
         // Another participant whose repo cannot be read (deactivated, taken down, unauthenticated, or on a host that is down) is an
         // unreadable half, not a reason to hide the other halves. A failure reading the caller's own half is the caller's own
         // problem (offline, their host down), not a participant's, and fails the read.
+        if (isCredentialRefused(error)) this.credentials.delete(half);
         if (ownerDid === this.deps.did || !classifyRepoFailure(error)) throw error;
         halves[ownerDid] = "missing";
         return;
@@ -449,6 +450,7 @@ export class DmClient {
           cursors.set(ownerDid, page.cursor);
         } catch (error) {
           // A half that stops being readable mid-read shows nothing, like one that was unreadable at the header.
+          if (isCredentialRefused(error)) this.credentials.delete(half);
           if (ownerDid === this.deps.did || !classifyRepoFailure(error)) throw error;
           halves[ownerDid] = "missing";
           pages.delete(ownerDid);
@@ -547,7 +549,7 @@ export class DmClient {
     const pending = this.credentials.get(space);
     if (pending) {
       const credential = await pending;
-      if (credential.expiresAt - this.now() > SPACE_CREDENTIAL_RENEW_BEFORE_MS) return credential;
+      if (credential.expiresAt - this.now() > credential.renewBeforeMs) return credential;
       const current = this.credentials.get(space);
       if (current && current !== pending) return current;
       this.credentials.delete(space);
@@ -735,6 +737,7 @@ export class DmClient {
         return reactions;
       } catch (error) {
         // A half whose reactions cannot be read is reported as unreadable rather than silently showing none.
+        if (isCredentialRefused(error)) this.credentials.delete(half);
         if (ownerDid === this.deps.did || !classifyRepoFailure(error)) throw error;
         halves[ownerDid] = "missing";
         return [];

@@ -25,6 +25,8 @@ import { AtprotoClient, MAX_XRPC_RESPONSE_BYTES, XrpcError } from "./xrpc";
 export const SPACE_CREDENTIAL_LIFETIME_MS = 10 * 60 * 1000;
 /** A cached credential is replaced once less than this remains of its lifetime. */
 export const SPACE_CREDENTIAL_RENEW_BEFORE_MS = SPACE_CREDENTIAL_LIFETIME_MS / 6;
+/** The protocol ceiling on a credential's lifetime. */
+const SPACE_CREDENTIAL_MAX_LIFETIME_MS = 60 * 60 * 1000;
 const GET_SPACE_CREDENTIAL = "/xrpc/com.atproto.space.getSpaceCredential";
 
 /**
@@ -74,6 +76,14 @@ export function isAccessLost(error: unknown): boolean {
   return isSpaceDeleted(error) || (typeof error === "object" && error !== null && "status" in error && (error.status === 401 || error.status === 403));
 }
 
+/**
+ * Whether a repo host refused the credential itself (expired by its clock, or minted for another audience), as opposed to refusing the
+ * reader access to the space. A cached credential the host refuses is useless, so its holder drops it and mints another.
+ */
+export function isCredentialRefused(error: unknown): boolean {
+  return error instanceof XrpcError && (error.status === 401 || error.code === "InvalidCredential" || error.code === "BadSpaceAudience");
+}
+
 export type SpaceCredentialInit = {
   space: string;
   token: string;
@@ -81,6 +91,7 @@ export type SpaceCredentialInit = {
   fetchEndpoint: (request: Request) => Promise<Response>;
   resolveKemKey: ResolveKemKey;
   expiresAt?: number;
+  renewBeforeMs?: number;
 };
 
 export class SpaceCredential {
@@ -88,6 +99,8 @@ export class SpaceCredential {
   readonly token: string;
   readonly key: SpaceKey;
   readonly expiresAt: number;
+  /** How long before `expiresAt` a holder should stop reusing the credential and mint another. */
+  readonly renewBeforeMs: number;
   private readonly fetchEndpoint: (request: Request) => Promise<Response>;
   private readonly resolveKemKey: ResolveKemKey;
 
@@ -98,6 +111,7 @@ export class SpaceCredential {
     this.fetchEndpoint = init.fetchEndpoint;
     this.resolveKemKey = init.resolveKemKey;
     this.expiresAt = init.expiresAt ?? Date.now() + SPACE_CREDENTIAL_LIFETIME_MS;
+    this.renewBeforeMs = init.renewBeforeMs ?? SPACE_CREDENTIAL_RENEW_BEFORE_MS;
   }
 
   /**
@@ -212,6 +226,25 @@ function commitFromJson(value: unknown): Commit | null {
   }
 }
 
+/**
+ * How long the authority made a credential last, from its own `iat` and `exp`, because the authority chooses the lifetime (ten
+ * minutes by default, an hour at most) and a shorter one would otherwise be presented after it expired. Both claims come from the
+ * issuer's clock, so the difference does not depend on the holder's, which a browser's often gets wrong; the holder adds it to its own
+ * now. The token is read as its holder, never verified, and only to schedule renewal. `null` when it is not a JWT with a positive
+ * lifetime within the protocol ceiling, and the default lifetime applies.
+ */
+export function credentialLifetimeMs(token: string): number | null {
+  try {
+    const payload = token.split(".")[1];
+    const claims = payload ? (JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/"))) as { iat?: unknown; exp?: unknown }) : undefined;
+    if (typeof claims?.iat !== "number" || typeof claims.exp !== "number") return null;
+    const lifetime = (claims.exp - claims.iat) * 1000;
+    return Number.isFinite(lifetime) && lifetime > 0 && lifetime <= SPACE_CREDENTIAL_MAX_LIFETIME_MS ? lifetime : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function mintSpaceCredentialWith(deps: SpaceCredentialDeps, space: string): Promise<SpaceCredential> {
   const parsed = parseSpaceUri(space);
   if (!parsed) throw new Error("Invalid permissioned space URI.");
@@ -228,11 +261,14 @@ export async function mintSpaceCredentialWith(deps: SpaceCredentialDeps, space: 
     key,
     fetchEndpoint: deps.fetchEndpoint,
   });
+  const lifetime = credentialLifetimeMs(token) ?? SPACE_CREDENTIAL_LIFETIME_MS;
   return new SpaceCredential({
     space, token, key,
     fetchEndpoint: deps.fetchEndpoint,
     resolveKemKey: deps.resolveKemKey,
-    expiresAt: (deps.now ?? Date.now)() + SPACE_CREDENTIAL_LIFETIME_MS,
+    expiresAt: (deps.now ?? Date.now)() + lifetime,
+    // A credential shorter than six renewal margins renews proportionally earlier instead of never being reused.
+    renewBeforeMs: Math.min(SPACE_CREDENTIAL_RENEW_BEFORE_MS, lifetime / 6),
   });
 }
 

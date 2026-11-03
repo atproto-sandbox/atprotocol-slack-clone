@@ -126,8 +126,8 @@ test("bounded space lookahead distinguishes an exact limit from actual overflow"
   assert.equal(overflowResult.spaces.length, 2);
   assert.equal(overflowResult.truncated, true);
 
-  const malformed = fakeClient([{ spaces: [{ uri: "not-a-space-uri" }] }]);
-  await assert.rejects(listBoundedSpaces(malformed.client, { maxSpaces: 2 }), /malformed space URI/);
+  const malformed = fakeClient([{ spaces: [{ uri: 5 }] }]);
+  await assert.rejects(listBoundedSpaces(malformed.client, { maxSpaces: 2 }), /malformed space/);
 
   const repeated = fakeClient([
     { spaces: [{ uri: uri("2222222222221") }], cursor: "next" },
@@ -276,4 +276,52 @@ test("workspace discovery returns every space URI at the exact limit and refuses
   // #then the exact list is returned whole and the overflowing one is an error, not a silent truncation
   assert.deepEqual(listed, [uri("a"), uri("b")]);
   await assert.rejects(listAllSpaceUris(overflow.client, { spaceType: "org.slack.workspace", maxSpaces: 2 }), /exceeds the 2-space discovery limit/);
+});
+
+test("a space whose URI this app cannot parse is skipped, not a reason to fail the whole listing", async () => {
+  // #given an account whose store holds a workspace with a record key longer than this app creates, between two ordinary ones
+  const uri = (skey: string) => `at://did:plc:a/space/org.slack.workspace/${skey}`;
+  const page = fakeClient([{ spaces: [{ uri: uri("a") }, { uri: uri("k".repeat(200)) }, { uri: "not-a-space-uri" }, { uri: uri("b") }] }]);
+
+  // #when workspaces are discovered
+  const listed = await listAllSpaceUris(page.client, { spaceType: "org.slack.workspace", maxSpaces: 10 });
+
+  // #then the usable ones are returned and the rest are ignored
+  assert.deepEqual(listed, [uri("a"), uri("b")]);
+});
+
+test("an unparseable space past the limit is not overflow, and a usable one behind it still is", async () => {
+  const uri = (skey: string) => `at://did:plc:a/space/org.slack.dm.conversation/${skey}`;
+  const junk = { uri: `at://did:plc:a/space/org.slack.dm.conversation/${"k".repeat(200)}` };
+
+  // #given exactly two usable spaces, then an entry the app cannot parse and nothing after it
+  const exact = fakeClient([{ spaces: [{ uri: uri("2222222222221") }, { uri: uri("2222222222222") }], cursor: "more" }, { spaces: [junk] }]);
+  // #and the same, but with a usable space behind the unparseable one
+  const behind = fakeClient([
+    { spaces: [{ uri: uri("2222222222221") }, { uri: uri("2222222222222") }], cursor: "more" },
+    { spaces: [junk], cursor: "later" },
+    { spaces: [{ uri: uri("2222222222223") }] },
+  ]);
+
+  // #when each is listed with a limit of two
+  const exactResult = await listBoundedSpaces(exact.client, { spaceType: "org.slack.dm.conversation", maxSpaces: 2 });
+  const behindResult = await listBoundedSpaces(behind.client, { spaceType: "org.slack.dm.conversation", maxSpaces: 2 });
+
+  // #then junk alone is not overflow, and a usable space behind junk is
+  assert.equal(exactResult.truncated, false);
+  assert.equal(behindResult.truncated, true);
+  assert.equal(behindResult.spaces.length, 2);
+});
+
+test("skipped spaces do not count toward the limit, across pages", async () => {
+  const uri = (skey: string) => `at://did:plc:a/space/org.slack.workspace/${skey}`;
+  const pages = fakeClient([
+    { spaces: [{ uri: uri("a") }, { uri: "not-a-space-uri" }], cursor: "p2" },
+    { spaces: [{ uri: uri("b") }] },
+  ]);
+
+  const result = await listBoundedSpaces(pages.client, { spaceType: "org.slack.workspace", maxSpaces: 2 });
+
+  assert.deepEqual(result.spaces.map((space) => space.uri), [uri("a"), uri("b")]);
+  assert.equal(result.truncated, false);
 });

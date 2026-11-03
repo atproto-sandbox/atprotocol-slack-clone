@@ -522,8 +522,10 @@ export class FakeDmNetwork {
   }
 
   private listRecords(params: Record<string, unknown>, auth: FakeAuth) {
-    this.requireCredential(params, auth);
-    this.assertRepoAvailability(String(params.repo), false);
+    // An account listing its own repo with its own OAuth session needs no credential, as on the pinned PDS.
+    const own = this.isOwnRead(params, auth);
+    if (!own) this.requireCredential(params, auth);
+    this.assertRepoAvailability(String(params.repo), own);
     const space = this.requireSpace(params.space);
     const repo = String(params.repo);
     const collection = String(params.collection);

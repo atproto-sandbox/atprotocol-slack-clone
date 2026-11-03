@@ -2,6 +2,9 @@ import { UpstreamResponseTooLargeError } from "@/lib/bounded-json";
 import { KemKeyError, isUnverifiableRepo } from "./kem-key";
 import { XrpcError } from "./xrpc";
 
+/** How many set-aside writers a response names; the rest are summarized, so a space full of failing writers cannot flood a reply. */
+export const MAX_LISTED_SET_ASIDE = 20;
+
 export type RepoFailure = {
   /** Safe to show a user: it never repeats text the repo's host chose. */
   reason: string;

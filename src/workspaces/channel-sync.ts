@@ -16,14 +16,13 @@ import { channelUri, parseSpaceUri, spaceRecordUri } from "@/protocol/keys";
 import { validateSpaceRecord } from "@/protocol/records";
 import { ChannelUnavailableError, requireReadableChannel } from "./channels";
 import { purgeRepoCache, purgeSpaceCache, purgeWorkspaceCache, sweepStaleCacheOccasionally } from "./cache";
-import { classifyRepoFailure, describeRepoFailure } from "@/atproto/repo-failure";
+import { classifyRepoFailure, describeRepoFailure, MAX_LISTED_SET_ASIDE } from "@/atproto/repo-failure";
 import { isAccessLost } from "@/atproto/space-credential-core";
 
 const PAGE = 100;
 const BACKFILL_PAGE = 1_000;
 const REPO_CONCURRENCY = 8;
 const MAX_HISTORY = 20_000;
-const MAX_LISTED_SET_ASIDE = 20;
 type Cached = { repo: string; rkey: string; uri: string; value: Record<string, unknown> };
 
 export async function readChannelPage(session: OAuthSession, workspace: string, skey: string, offset = 0) {

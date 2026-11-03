@@ -317,3 +317,17 @@ test("a denied credential request surfaces as a SpaceCredentialError with the Sp
   const { deps } = await setup(undefined, memberspacePolicy());
   await assert.rejects(mintSpaceCredentialWith(deps, SPACE), (error) => error instanceof SpaceCredentialError && error.status === 403 && error.code === "SpaceNotFound");
 });
+
+test("an account can list its own repo with its own session and no credential, as on the pinned PDS; anyone else needs a credential", async () => {
+  // #given the owner has put a record into a space
+  const { network } = await setup();
+  await network.clientFor(OWNER).procedure("com.atproto.space.putRecord", { space: SPACE, repo: OWNER, collection: "org.slack.dm.request", rkey: "a", record: { text: "x" } });
+  const listing = { space: SPACE, repo: OWNER, collection: "org.slack.dm.request" };
+
+  // #when the owner lists it through her own session, and another account tries the same
+  const own = await network.clientFor(OWNER).query<{ records: unknown[] }>("com.atproto.space.listRecords", listing);
+
+  // #then her own listing works and the other account is refused for the missing credential
+  assert.equal(own.records.length, 1);
+  await assert.rejects(network.clientFor(READER).query("com.atproto.space.listRecords", listing), /missing space credential/);
+});

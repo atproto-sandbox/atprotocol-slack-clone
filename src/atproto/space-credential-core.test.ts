@@ -4,7 +4,7 @@ import { COMMIT_MAC_TYPE, MAC_HEADER, RECORD_MAC_TYPE, SpaceMacError, WANT_MAC_H
 import { UpstreamResponseTooLargeError } from "@/lib/bounded-json";
 import { FakeDmNetwork } from "@/dm/testing/fake-pds";
 import { dmInboxUri } from "@/protocol/keys";
-import { exchangeSpaceCredential, isAccessLost, isSpaceDeleted, mintSpaceCredentialWith, SPACE_CREDENTIAL_LIFETIME_MS, SPACE_CREDENTIAL_RENEW_BEFORE_MS, SpaceCredentialError, type SpaceCredential } from "./space-credential-core";
+import { credentialLifetimeMs, exchangeSpaceCredential, isAccessLost, isCredentialRefused, isSpaceDeleted, mintSpaceCredentialWith, SPACE_CREDENTIAL_LIFETIME_MS, SPACE_CREDENTIAL_RENEW_BEFORE_MS, SpaceCredentialError, type SpaceCredential } from "./space-credential-core";
 import { MEMBERSPACE_POLICY } from "./space-policy";
 import { XrpcError } from "./xrpc";
 
@@ -310,4 +310,56 @@ test("a MAC-bearing response larger than the bound fails at once instead of wait
     new Promise((resolve) => setTimeout(() => resolve("hung"), 5_000)),
   ]);
   assert.ok(outcome instanceof UpstreamResponseTooLargeError, `expected the size bound to trip, got ${String(outcome)}`);
+});
+
+const jwtWith = (claims: Record<string, unknown>) => {
+  const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  return `${part({ alg: "ES256", typ: "JWT" })}.${part(claims)}.signature`;
+};
+
+test("a credential lasts as long as the authority made it last, measured by the authority's own iat and exp", () => {
+  assert.equal(credentialLifetimeMs(jwtWith({ iat: 1_000, exp: 1_120 })), 120_000, "a two-minute credential is not kept for ten");
+  assert.equal(credentialLifetimeMs(jwtWith({ iat: 1_000, exp: 2_800 })), 1_800_000, "a half-hour credential is kept that long");
+  assert.equal(credentialLifetimeMs(jwtWith({ iat: 5_000_000_000, exp: 5_000_000_600 })), 600_000, "the issuer's clock being far from ours does not matter");
+});
+
+test("a lifetime the authority claims beyond the protocol ceiling, or that cannot be read, is not used", () => {
+  assert.equal(credentialLifetimeMs(jwtWith({ iat: 1_000, exp: 1_000 + 24 * 3600 })), null, "longer than an hour");
+  assert.equal(credentialLifetimeMs(jwtWith({ iat: 1_000, exp: 1_000 })), null, "no lifetime");
+  assert.equal(credentialLifetimeMs(jwtWith({ iat: 2_000, exp: 1_000 })), null, "expires before it was issued");
+  assert.equal(credentialLifetimeMs(jwtWith({ exp: 1_600 })), null, "no iat");
+  assert.equal(credentialLifetimeMs(jwtWith({ iat: "now", exp: 1_600 })), null, "iat is not a number");
+  assert.equal(credentialLifetimeMs("an-opaque-token"), null, "not a JWT");
+  assert.equal(credentialLifetimeMs("a.!!!.c"), null, "payload is not base64 JSON");
+});
+
+test("minting keeps a short-lived credential for its own lifetime and renews it proportionally early, and falls back to the default for an opaque one", async () => {
+  // #given an authority that issues a 60-second credential, and one that issues an opaque token
+  const mintWith = async (credential: string) => mintSpaceCredentialWith({
+    memberClient: { query: async () => ({ token: "delegation" }) } as never,
+    resolvePds: async () => "https://authority.test",
+    resolveKemKey: async () => "did:key:unused",
+    fetchEndpoint: async () => Response.json({ credential }),
+    generateKey: async () => (await import("./space-key")).generateSpaceKey(),
+    now: () => 1_000_000,
+  }, "at://did:plc:owner/space/org.slack.channel/alpha");
+
+  // #when each is minted at a fixed clock
+  const short = await mintWith(jwtWith({ iat: 1_000, exp: 1_060 }));
+  const opaque = await mintWith("an-opaque-token");
+
+  // #then the short one lasts 60 s and renews 10 s early (a sixth of its life), the opaque one gets the defaults
+  assert.equal(short.expiresAt, 1_000_000 + 60_000);
+  assert.equal(short.renewBeforeMs, 10_000);
+  assert.equal(opaque.expiresAt, 1_000_000 + SPACE_CREDENTIAL_LIFETIME_MS);
+  assert.equal(opaque.renewBeforeMs, SPACE_CREDENTIAL_RENEW_BEFORE_MS);
+});
+
+test("only a host refusing the credential itself counts as a refused credential, not a refusal of the reader or a host failure", () => {
+  assert.equal(isCredentialRefused(new XrpcError(401, "expired", "InvalidToken")), true);
+  assert.equal(isCredentialRefused(new XrpcError(401, "audience", "BadSpaceAudience")), true);
+  assert.equal(isCredentialRefused(new XrpcError(400, "not scoped to this space", "InvalidCredential")), true);
+  assert.equal(isCredentialRefused(new XrpcError(403, "denied", "Forbidden")), false);
+  assert.equal(isCredentialRefused(new XrpcError(502, "bad gateway", "UpstreamFailure")), false);
+  assert.equal(isCredentialRefused(new TypeError("fetch failed")), false);
 });

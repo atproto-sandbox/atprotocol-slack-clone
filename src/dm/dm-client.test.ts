@@ -842,3 +842,31 @@ test("a failure reading the caller's own half fails the read instead of marking 
   // #when/#then the read rejects, so the caller sees an error rather than a conversation in which nobody is reachable
   await assert.rejects(alice.readConversation(started.convKey, started.participants), /Bad Gateway/);
 });
+
+test("a cached credential a participant's host refuses is dropped, so the next read mints another instead of failing until it expires", async () => {
+  // #given alice holds a cached credential for bob's half, and bob's host refuses it once (for example its clock disagrees)
+  let mints = 0;
+  let refuseBobHeaderOnce = false;
+  const { alice, started } = await conversationWithBob({
+    aliceFetch: async (request, real) => {
+      if (request.url.includes("getSpaceCredential")) mints += 1;
+      if (refuseBobHeaderOnce && bobsRepo(request, "org.slack.dm.header")) {
+        refuseBobHeaderOnce = false;
+        return new Response(JSON.stringify({ error: "InvalidToken", message: "expired" }), { status: 401, headers: { "content-type": "application/json" } });
+      }
+      return real(request);
+    },
+  });
+  assert.equal((await alice.readConversation(started.convKey, started.participants)).halves["did:plc:bob"], "ok");
+  const mintsAfterFirstRead = mints;
+
+  // #when the refusal happens, and alice reads again
+  refuseBobHeaderOnce = true;
+  const refused = await alice.readConversation(started.convKey, started.participants);
+  const retried = await alice.readConversation(started.convKey, started.participants);
+
+  // #then the refused read reports the half as missing without throwing, and the next read re-mints and reads it
+  assert.equal(refused.halves["did:plc:bob"], "missing");
+  assert.equal(retried.halves["did:plc:bob"], "ok");
+  assert.ok(mints > mintsAfterFirstRead, "a fresh credential was minted for bob's half");
+});

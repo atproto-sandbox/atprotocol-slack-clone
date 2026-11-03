@@ -125,9 +125,8 @@ function assertSpacePage(page: unknown, limit: number): asserts page is ListSpac
   if (typeof page !== "object" || page === null) throw new Error("PDS space page is malformed.");
   const candidate = page as { spaces?: unknown; cursor?: unknown };
   if (!Array.isArray(candidate.spaces) || candidate.spaces.length > limit) throw new Error("PDS space page exceeded the requested limit.");
-  if (candidate.spaces.some((space) => typeof space !== "object" || space === null || Array.isArray(space) ||
-    typeof space.uri !== "string" || !parseSpaceUri(space.uri))) {
-    throw new Error("PDS space page contains a malformed space URI.");
+  if (candidate.spaces.some((space) => typeof space !== "object" || space === null || Array.isArray(space) || typeof space.uri !== "string")) {
+    throw new Error("PDS space page contains a malformed space.");
   }
   if (candidate.cursor !== undefined && (typeof candidate.cursor !== "string" || candidate.cursor.length === 0)) {
     throw new Error("PDS space pagination returned an invalid cursor.");
@@ -157,7 +156,9 @@ export async function listBoundedSpaces(
       if (seenUris.has(space.uri)) throw new Error("PDS space pagination returned a duplicate space URI.");
       seenUris.add(space.uri);
     }
-    spaces.push(...page.spaces);
+    // A space whose URI this app cannot parse (for example a record key longer than it creates) is not one of its spaces. It is
+    // skipped, not a reason to fail the listing: a space the account wrote into elsewhere could otherwise break discovery for good.
+    spaces.push(...page.spaces.filter((space) => parseSpaceUri(space.uri) !== null));
     cursor = page.cursor;
     if (cursor) {
       if (cursor === requestedCursor || seenCursors.has(cursor)) throw new Error("PDS space pagination did not advance.");
@@ -166,16 +167,22 @@ export async function listBoundedSpaces(
     }
   } while (cursor && spaces.length < input.maxSpaces);
 
+  // One entry past the limit decides whether the list was cut short. An entry this app cannot parse is not one of its spaces, so it
+  // does not count as more; keep looking past it, within the same page bound.
   let truncated = false;
-  if (cursor) {
+  let probe = cursor;
+  while (probe && !truncated) {
     if (++pages > MAX_SCAN_PAGES) throw new Error("PDS space pagination exceeded the bounded page limit.");
     const lookahead = await client.query<ListSpaces.OutputSchema>("com.atproto.space.listSpaces", {
-      spaceType: input.spaceType, did: input.did, limit: 1, cursor,
+      spaceType: input.spaceType, did: input.did, limit: 1, cursor: probe,
     });
     assertSpacePage(lookahead, 1);
     if (lookahead.spaces.some((space) => seenUris.has(space.uri))) throw new Error("PDS space pagination returned a duplicate space URI.");
-    if (lookahead.cursor && (lookahead.cursor === cursor || seenCursors.has(lookahead.cursor))) throw new Error("PDS space pagination did not advance.");
-    truncated = lookahead.spaces.length > 0;
+    if (lookahead.cursor && (lookahead.cursor === probe || seenCursors.has(lookahead.cursor))) throw new Error("PDS space pagination did not advance.");
+    if (lookahead.spaces.length === 0 && lookahead.cursor) throw new Error("PDS space pagination returned an empty nonterminal page.");
+    truncated = lookahead.spaces.some((space) => parseSpaceUri(space.uri) !== null);
+    if (lookahead.cursor) seenCursors.add(lookahead.cursor);
+    probe = lookahead.cursor;
   }
   return { spaces, truncated };
 }
