@@ -305,6 +305,77 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     ) as { uri: string }).uri;
     assert.equal(migratedMessageUri, latestMessageUri, "legacy encrypted cache values migrate to the PDS-canonical URI without data loss");
 
+    // One writer whose account is deactivated must not make the channel unreadable for everyone else: the pinned PDS refuses every other
+    // account's read of its repo with RepoDeactivated while the authority still issues it credentials.
+    const accountCall = (method: string, jwt: string, body?: string) => fetch(new URL(`/xrpc/${method}`, admin.pds.url), {
+      method: "POST", headers: { authorization: `Bearer ${jwt}`, ...(body ? { "content-type": "application/json" } : {}) }, body,
+    });
+    const lobby = `${workspace.skey}-team-lobby`;
+    assert.equal((await accountCall("com.atproto.server.deactivateAccount", admin.accessJwt, "{}")).status, 200, "the admin's host deactivates the account");
+    let activated: Response | undefined;
+    try {
+      // The app re-checks a writer at most once a minute unless a write notice marks it stale, as one would here.
+      (await import("@/workspaces/cache")).markRepoStale(messageSpace, admin.did);
+      const appPage = await readChannelPage(memberSession as never, bootstrap.workspace, lobby);
+      assert.equal(appPage.degraded, true);
+      assert.ok(appPage.degradedReasons.some((reason) => reason.includes(admin.did) && reason.includes("its account is deactivated")), "the app names the deactivated writer");
+      assert.ok(appPage.messages.some((message) => message.value.text === "latest second PDS message"), "the app still reads the other writers");
+      assert.ok(!appPage.messages.some((message) => message.repo === admin.did), "the app serves nothing from the deactivated writer");
+      const independentPage = await readIndependentChannelPage(memberSession as never, bootstrap.workspace, lobby);
+      assert.equal(independentPage.degraded, true);
+      assert.ok(independentPage.degradedReasons.some((reason) => reason.includes(admin.did) && reason.includes("its account is deactivated")), "the independent reader names the deactivated writer");
+      assert.ok(independentPage.messages.some((message) => message.value.text === "latest second PDS message"), "the independent reader still reads the other writers");
+      assert.ok(!independentPage.messages.some((message) => message.repo === admin.did), "the independent reader serves nothing from the deactivated writer");
+    } finally {
+      // Reactivate whatever happened above, without asserting here, so a failure in the try block is not hidden by this one.
+      activated = await accountCall("com.atproto.server.activateAccount", admin.accessJwt);
+      if (!activated.ok) {
+        admin.accessJwt = (await admin.pds.getAgent().com.atproto.server.createSession({ identifier: "carol.test2", password: "carol-acceptance-pass" })).data.accessJwt;
+        activated = await accountCall("com.atproto.server.activateAccount", admin.accessJwt);
+      }
+    }
+    assert.equal(activated?.status, 200, `the admin's account is active again: ${await activated?.clone().text()}`);
+    const restoredPage = await readChannelPage(memberSession as never, bootstrap.workspace, lobby);
+    assert.ok(restoredPage.messages.some((message) => message.value.text === "admin host message"), "the writer's messages return once the account is active");
+    assert.ok(!restoredPage.degradedReasons.some((reason) => reason.includes(admin.did)), "and the writer is no longer reported");
+    const restoredIndependent = await readIndependentChannelPage(memberSession as never, bootstrap.workspace, lobby);
+    assert.ok(restoredIndependent.messages.some((message) => message.value.text === "admin host message"), "the independent reader sees the writer again too");
+    assert.ok(!restoredIndependent.degradedReasons.some((reason) => reason.includes(admin.did)), "and no longer reports it");
+
+    // The authority's space-deleted notice drops every account's copy, through the real route with a token the authority's PDS signed.
+    const doomedSpace = channelUri(owner.did, "doomed-by-notice");
+    const seedCopy = (account: string) => {
+      getRawDb().prepare(`INSERT INTO channel_record_cache (account_did,space_uri,repo_did,collection,rkey,uri,value_cipher,updated_at) VALUES (?,?,?,?,?,?,?,?)`)
+        .run(account, doomedSpace, owner.did, "org.slack.channel.message", "r1", `${doomedSpace}/${owner.did}/org.slack.channel.message/r1`, "cipher", Math.floor(Date.now() / 1000));
+      getRawDb().prepare(`INSERT INTO space_collection_cursor (account_did,space_uri,repo_did,collection,rev,next_cursor,finished,checked_at) VALUES (?,?,?,?,?,?,?,?)`)
+        .run(account, doomedSpace, owner.did, "org.slack.channel.message", "r1", null, 1, Math.floor(Date.now() / 1000));
+    };
+    const copies = () => (getRawDb().prepare("SELECT count(*) AS count FROM channel_record_cache WHERE space_uri=?").get(doomedSpace) as { count: number }).count;
+    seedCopy(member.did);
+    seedCopy(admin.did);
+    getRawDb().prepare("INSERT INTO notification_registration (service_ref,space_uri,expires_at) VALUES (?,?,?)").run(serviceRef, doomedSpace, Date.now() + 2 * 60 * 60 * 1000);
+    const serviceToken = async (actor: TestActor, lxm = "com.atproto.space.notifySpaceDeleted"): Promise<string> => {
+      const response = await fetch(new URL(`/xrpc/com.atproto.server.getServiceAuth?aud=${encodeURIComponent(serviceRef)}&lxm=${lxm}`, actor.pds.url), {
+        headers: { authorization: `Bearer ${actor.accessJwt}` },
+      });
+      assert.equal(response.status, 200, "the PDS signs a service token for the app's service ref");
+      return ((await response.json()) as { token: string }).token;
+    };
+    const [{ POST: applySpaceDeleted }, { NextRequest }] = await Promise.all([
+      import("@/app/xrpc/com.atproto.space.notifySpaceDeleted/route"), import("next/server"),
+    ]);
+    const notice = (token: string | null, space: string) => applySpaceDeleted(new NextRequest("http://127.0.0.1:3000/xrpc/com.atproto.space.notifySpaceDeleted", {
+      method: "POST", headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify({ space }),
+    }));
+    assert.equal((await notice(null, doomedSpace)).status, 403, "no token");
+    assert.equal((await notice(await serviceToken(member), doomedSpace)).status, 403, "a token from someone who is not the space's authority");
+    assert.equal((await notice(await serviceToken(owner), channelUri(owner.did, "never-registered"))).status, 403, "a space the app never registered");
+    assert.equal((await notice(await serviceToken(owner, "com.atproto.space.notifyWrite"), doomedSpace)).status, 403, "the authority's token, but minted for another method");
+    assert.equal(copies(), 2, "nothing was dropped by a refused notice");
+    assert.equal((await notice(await serviceToken(owner), doomedSpace)).status, 200, "the authority's own token is accepted");
+    assert.equal(copies(), 0, "every account's copy of the deleted space is gone");
+    assert.equal((getRawDb().prepare("SELECT count(*) AS count FROM notification_registration WHERE space_uri=?").get(doomedSpace) as { count: number }).count, 0, "and so is its notify registration");
+
     const inbox = inboxUri(owner.did, workspace.skey);
     const privateSkey = `${workspace.skey}-team-private`;
     const privateSpace = channelUri(owner.did, privateSkey);
