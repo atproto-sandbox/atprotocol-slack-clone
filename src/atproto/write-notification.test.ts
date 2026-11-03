@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseWriteNotification } from "./write-notification";
+import { parseSpaceDeletedNotification, parseWriteNotification } from "./write-notification";
 
 const valid = {
   space: "at://did:plc:authority/space/org.slack.workspace/team",
@@ -46,4 +46,16 @@ test("parseWriteNotification rejects unexpected fields, a bad repo DID, and a mi
   assert.equal(parseWriteNotification({ ...valid, repoRev: "x".repeat(129) }), null);
   assert.equal(parseWriteNotification([valid]), null);
   assert.equal(parseWriteNotification(null), null);
+});
+
+test("parseSpaceDeletedNotification accepts the lexicon's one field and ignores a field a later revision adds", () => {
+  assert.deepEqual(parseSpaceDeletedNotification({ space: valid.space }), { space: valid.space });
+  assert.deepEqual(parseSpaceDeletedNotification({ space: valid.space, deletedAt: "later" }), { space: valid.space });
+});
+
+test("parseSpaceDeletedNotification rejects a body without a valid space", () => {
+  assert.equal(parseSpaceDeletedNotification(null), null);
+  assert.equal(parseSpaceDeletedNotification([valid.space]), null);
+  assert.equal(parseSpaceDeletedNotification({}), null);
+  assert.equal(parseSpaceDeletedNotification({ space: "at://not-a-space" }), null);
 });

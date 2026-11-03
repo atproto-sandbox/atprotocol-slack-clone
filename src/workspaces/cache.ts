@@ -1,5 +1,7 @@
 import { getRawDb } from "@/lib/db";
 import { isAccessLost } from "@/atproto/space-credential-core";
+import { purgeExpiredNotificationRegistrations, purgeSpaceNotifications, purgeStaleNotifications } from "@/atproto/notifications";
+import { getConfig } from "@/lib/config";
 import { parseChannelUri, parseSpaceUri, parseWorkspaceUri } from "@/protocol/keys";
 
 const isWorkspace = (uri: string): boolean => parseWorkspaceUri(uri) !== null;
@@ -19,8 +21,9 @@ export function markRepoStale(space: string, repo: string): void {
 }
 
 /**
- * Drops what was cached from one writer's repo in a space. A writer that can no longer be authenticated must show nothing, and
- * its rows must not count toward the fill cutoff or the history limit, or valid writers would be crowded out.
+ * Drops what was cached from one writer's repo in a space. A writer that is permanently unreadable (deactivated, taken down,
+ * unauthenticated, oversized) must show nothing, and its rows must not count toward the fill cutoff or the history limit, or
+ * valid writers would be crowded out.
  */
 export function purgeRepoCache(account: string, space: string, repo: string): void {
   purgeWhere(account, "space_uri = ? AND repo_did = ?", [space, repo]);
@@ -28,6 +31,76 @@ export function purgeRepoCache(account: string, space: string, repo: string): vo
 
 export function purgeSpaceCache(account: string, space: string): void {
   purgeWhere(account, "space_uri = ?", [space]);
+}
+
+/**
+ * The space authority said the space was deleted: every account's copy of it goes, whether or not that account ever comes back to
+ * learn it from a refused credential renewal. A deleted workspace takes its channels' copies with it.
+ */
+export function purgeDeletedSpace(space: string): void {
+  const db = getRawDb();
+  db.transaction(() => {
+    // A cached record always has a cursor row, so the cursor tables name every account that holds a copy.
+    const accounts = db.prepare(`SELECT account_did FROM space_collection_cursor WHERE space_uri=?
+      UNION SELECT account_did FROM sync_cursor WHERE space_uri=?
+      UNION SELECT account_did FROM workspace_channel_cache WHERE space_uri=? OR workspace_uri=?`)
+      .all(space, space, space, space) as Array<{ account_did: string }>;
+    for (const { account_did: account } of accounts) {
+      if (isWorkspace(space)) {
+        purgeWorkspaceCache(account, space);
+      } else {
+        db.prepare("DELETE FROM workspace_channel_cache WHERE account_did=? AND space_uri=?").run(account, space);
+        purgeSpaceCache(account, space);
+      }
+    }
+    purgeSpaceNotifications(space);
+  }).immediate();
+}
+
+const SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+/** Copies dropped per sweep, so the first sweep on a database that has never been swept cannot hold the write lock for long. */
+const SWEEP_BATCH = 100;
+/** When a sweep dropped a full batch there is more backlog, so the next one comes after this instead of the hour. */
+const SWEEP_BACKLOG_RETRY_MS = 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+let lastSweepAt = 0;
+
+/**
+ * Drops each account's copy of every space it has not read for `CACHE_RETENTION_DAYS`. An account that never returns cannot learn
+ * of a deleted space or of its own removal from a refused credential, so age is what bounds what is kept for it. A space an
+ * account still reads is checked at least once a minute, so only abandoned copies reach the cutoff. The cursor tables are the
+ * record of when a copy was last read (a cached record always has one), so the sweep never scans the record cache itself. It
+ * drops at most `batch` copies per call. Returns how many copies went.
+ */
+export function sweepStaleCache(now = Date.now(), retentionMs = getConfig().cacheRetentionDays * DAY_MS, batch = SWEEP_BATCH): number {
+  const db = getRawDb();
+  const cutoffSeconds = Math.floor((now - retentionMs) / 1000);
+  const stale = db.prepare(`SELECT account_did, space_uri FROM (
+      SELECT account_did, space_uri, checked_at AS seen FROM space_collection_cursor
+      UNION ALL SELECT account_did, space_uri, updated_at AS seen FROM sync_cursor)
+    GROUP BY account_did, space_uri HAVING max(seen) < ? LIMIT ?`).all(cutoffSeconds, batch) as Array<{ account_did: string; space_uri: string }>;
+  db.transaction(() => {
+    for (const { account_did: account, space_uri: space } of stale) purgeSpaceCache(account, space);
+    db.prepare("DELETE FROM workspace_channel_cache WHERE updated_at < ?").run(now - retentionMs);
+    purgeExpiredNotificationRegistrations(now - retentionMs);
+    purgeStaleNotifications(Math.floor(now / 1000));
+  })();
+  return stale.length;
+}
+
+/**
+ * `sweepStaleCache` at most once an hour per process, called from a read path. Housekeeping must never fail the read that
+ * happened to trigger it, so a failure is logged and the next hour tries again.
+ */
+export function sweepStaleCacheOccasionally(now = Date.now()): void {
+  if (now - lastSweepAt < SWEEP_INTERVAL_MS) return;
+  lastSweepAt = now;
+  try {
+    // A full batch means more is waiting: come back soon instead of after the hour.
+    if (sweepStaleCache(now) >= SWEEP_BATCH) lastSweepAt = now - SWEEP_INTERVAL_MS + SWEEP_BACKLOG_RETRY_MS;
+  } catch (error) {
+    console.error("Stale cache sweep failed; it will be retried within the hour.", error);
+  }
 }
 
 export function purgeDeniedPermissionCache(account: string, workspace: string, space: string, error: unknown): boolean {

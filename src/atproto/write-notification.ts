@@ -20,3 +20,13 @@ export function parseWriteNotification(body: unknown): WriteNotification | null 
   if (typeof encoded !== "string" || !BASE64.test(encoded)) return null;
   return { space, repo, repoRev };
 }
+
+/**
+ * `com.atproto.space.notifySpaceDeleted`: the authority tells a registered syncer that a space was deleted. The lexicon's one
+ * field is `space`; a field a later revision adds is ignored rather than refused.
+ */
+export function parseSpaceDeletedNotification(body: unknown): { space: string } | null {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+  const { space } = body as Record<string, unknown>;
+  return typeof space === "string" && parseSpaceUri(space) ? { space } : null;
+}

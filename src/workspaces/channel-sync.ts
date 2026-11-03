@@ -15,7 +15,7 @@ import { mapLimited } from "@/lib/map-limited";
 import { channelUri, parseSpaceUri, spaceRecordUri } from "@/protocol/keys";
 import { validateSpaceRecord } from "@/protocol/records";
 import { ChannelUnavailableError, requireReadableChannel } from "./channels";
-import { purgeRepoCache, purgeSpaceCache, purgeWorkspaceCache } from "./cache";
+import { purgeRepoCache, purgeSpaceCache, purgeWorkspaceCache, sweepStaleCacheOccasionally } from "./cache";
 import { classifyRepoFailure, describeRepoFailure } from "@/atproto/repo-failure";
 import { isAccessLost } from "@/atproto/space-credential-core";
 
@@ -27,6 +27,7 @@ const MAX_LISTED_SET_ASIDE = 20;
 type Cached = { repo: string; rkey: string; uri: string; value: Record<string, unknown> };
 
 export async function readChannelPage(session: OAuthSession, workspace: string, skey: string, offset = 0) {
+  sweepStaleCacheOccasionally();
   let readable: Awaited<ReturnType<typeof requireReadableChannel>>;
   try {
     readable = await requireReadableChannel(session, workspace, skey);

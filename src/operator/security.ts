@@ -24,9 +24,27 @@ export function parseWorkspaceRef(uri: string): WorkspaceRef {
   return { uri, ...workspace };
 }
 
+function bearerToken(request: Request): string | undefined {
+  return request.headers.get("authorization")?.match(/^Bearer ([A-Za-z0-9._~-]+)$/)?.[1];
+}
+
+/**
+ * The `iss` a bearer service token claims, read without verifying it, or `null` when there is no well-formed token. It proves
+ * nothing; it lets a caller refuse a token that names the wrong issuer before any DID is resolved for it.
+ */
+export function unverifiedBearerIssuer(request: Request): string | null {
+  const payload = bearerToken(request)?.split(".")[1];
+  if (!payload) return null;
+  try {
+    const claims: unknown = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    return isPlainObject(claims) && typeof claims.iss === "string" ? claims.iss : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function authenticateOperatorRequest(request: Request, method: string): Promise<string> {
-  const authorization = request.headers.get("authorization");
-  const token = authorization?.match(/^Bearer ([A-Za-z0-9._~-]+)$/)?.[1];
+  const token = bearerToken(request);
   if (!token) throw new OperatorAuthError("Bearer service authorization is required.");
   const serviceRef = getConfig().operatorServiceRef;
   const payload = await verifyJwt(

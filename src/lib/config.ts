@@ -6,6 +6,8 @@ export type AppConfig = {
   encryptionKey: Buffer;
   plcDirectoryUrl: URL;
   operatorServiceRef: string;
+  /** How long a cached copy of a space stays after the account last read it, for accounts that never return. */
+  cacheRetentionDays: number;
 };
 
 let cached: AppConfig | undefined;
@@ -32,12 +34,18 @@ export function getConfig(): AppConfig {
     throw new Error("OPERATOR_SERVICE_REF must be a DID service reference with a fragment.");
   }
 
+  const cacheRetentionDays = Number(process.env.CACHE_RETENTION_DAYS || "30");
+  if (!Number.isSafeInteger(cacheRetentionDays) || cacheRetentionDays < 1 || cacheRetentionDays > 3650) {
+    throw new Error("CACHE_RETENTION_DAYS must be a whole number of days from 1 to 3650.");
+  }
+
   cached = {
     appUrl,
     databasePath: process.env.DATABASE_PATH ?? "./data/slack.db",
     encryptionKey: Buffer.from(rawKey, "hex"),
     plcDirectoryUrl: absoluteUrl("PLC_URL", process.env.PLC_URL ?? "https://plc.directory"),
     operatorServiceRef,
+    cacheRetentionDays,
   };
   return cached;
 }
