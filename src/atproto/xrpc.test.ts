@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { AtprotoClient, isMissingXrpcResource, isScopeMissingError } from "./xrpc";
+import { AtprotoClient, isMissingXrpcResource, isScopeMissingError, isSpaceAlreadyExists } from "./xrpc";
 
 test("XRPC missing-record errors retain their lexicon error code", async () => {
   const client = new AtprotoClient(async () => Response.json({ error: "RecordNotFound", message: "Missing record." }, { status: 400 }));
@@ -30,4 +30,18 @@ test("a PDS missing-scope rejection is recognized from its error name, and other
     return true;
   });
   assert.equal(isScopeMissingError(new Error('Missing required scope "space:x"')), false, "message text alone is not trusted");
+});
+
+test("createSpace's SpaceAlreadyExists is recognized from its error name, and other failures are not", async () => {
+  const conflict = new AtprotoClient(async () => Response.json({ error: "SpaceAlreadyExists", message: "Space already exists" }, { status: 400 }));
+  await assert.rejects(conflict.procedure("com.atproto.space.createSpace", {}), (error: unknown) => {
+    assert.equal(isSpaceAlreadyExists(error), true);
+    return true;
+  });
+  const other = new AtprotoClient(async () => Response.json({ error: "UnsupportedPolicy", message: "No." }, { status: 400 }));
+  await assert.rejects(other.procedure("com.atproto.space.createSpace", {}), (error: unknown) => {
+    assert.equal(isSpaceAlreadyExists(error), false);
+    return true;
+  });
+  assert.equal(isSpaceAlreadyExists(Object.assign(new Error("something already exists"), { status: 409 })), false, "neither a 409 nor message text counts");
 });

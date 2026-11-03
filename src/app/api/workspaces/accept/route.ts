@@ -3,7 +3,7 @@ import type * as PutRecord from "@/lexicons/api/types/com/atproto/space/putRecor
 import { requireSession } from "@/auth/session";
 import { sessionClient } from "@/atproto/client";
 import { mintSpaceCredential } from "@/atproto/space-credential";
-import { acceptanceRecordKey } from "@/protocol/keys";
+import { acceptanceRecordKey, parseWorkspaceUri } from "@/protocol/keys";
 import { validateSpaceRecord } from "@/protocol/records";
 import { purgeDeniedPermissionCache } from "@/workspaces/cache";
 import { readRequestJson } from "@/lib/bounded-json";
@@ -19,9 +19,9 @@ export async function POST(request: NextRequest) {
     const session = await requireSession();
     const body = await readRequestJson<{ workspace?: unknown }>(request);
     if (typeof body.workspace !== "string") return NextResponse.json({ error: "Workspace URI is required." }, { status: 400 });
-    const match = /^at:\/\/(did:[^/]+)\/space\/org\.slack\.workspace\/([A-Za-z0-9._~:-]{1,128})$/.exec(body.workspace);
-    if (!match) return NextResponse.json({ error: "Invalid workspace URI." }, { status: 400 });
-    const [, authorityDid] = match;
+    const parsedWorkspace = parseWorkspaceUri(body.workspace);
+    if (!parsedWorkspace) return NextResponse.json({ error: "Invalid workspace URI." }, { status: 400 });
+    const { authorityDid } = parsedWorkspace;
     const record = { $type: "org.slack.acceptance", workspace: body.workspace, createdAt: new Date().toISOString() };
     const rkey = acceptanceRecordKey(body.workspace);
     const validation = validateSpaceRecord("org.slack.acceptance", record, {

@@ -2,11 +2,12 @@ import type * as ListRecords from "@/lexicons/api/types/com/atproto/space/listRe
 import type * as ListMembers from "@/lexicons/api/types/com/atproto/memberspace/listMembers";
 import type * as ListRepos from "@/lexicons/api/types/com/atproto/space/listRepos";
 import type * as ListSpaces from "@/lexicons/api/types/com/atproto/space/listSpaces";
+import { isDid, parseSpaceUri } from "@/protocol/keys";
 import type { AtprotoClient } from "./xrpc";
 
 const MAX_SCAN_PAGES = 128;
 const MAX_REPO_SCAN_PAGES = 512;
-const MAX_SPACE_PAGE = 100; // com.atproto.space.listSpaces caps `limit` at 100, unlike the 500 shared by listRepos/listMembers/listRecords.
+const MAX_SPACE_PAGE = 100; // com.atproto.space.listSpaces caps `limit` at 100; the app caps listRepos/listMembers/listRecords pages at 500 itself.
 
 export type BoundedRecords = {
   records: Array<{ rkey: string; value: Record<string, unknown> }>;
@@ -61,7 +62,7 @@ function assertRepoPage(page: unknown, limit: number): asserts page is ListRepos
   const candidate = page as { repos?: unknown };
   if (!Array.isArray(candidate.repos) || candidate.repos.length > limit) throw new Error("PDS repo page exceeded the requested limit.");
   if (candidate.repos.some((repo) => typeof repo !== "object" || repo === null || Array.isArray(repo) ||
-    typeof repo.did !== "string" || !/^did:[a-z0-9]+:[A-Za-z0-9._:%-]+$/.test(repo.did))) {
+    !isDid(repo.did))) {
     throw new Error("PDS repo page contains a malformed repo DID.");
   }
   if (candidate.repos.some((repo) => typeof repo.repoRev !== "string" || typeof repo.spaceRev !== "string" || repo.spaceRev.length === 0)) {
@@ -125,7 +126,7 @@ function assertSpacePage(page: unknown, limit: number): asserts page is ListSpac
   const candidate = page as { spaces?: unknown; cursor?: unknown };
   if (!Array.isArray(candidate.spaces) || candidate.spaces.length > limit) throw new Error("PDS space page exceeded the requested limit.");
   if (candidate.spaces.some((space) => typeof space !== "object" || space === null || Array.isArray(space) ||
-    typeof space.uri !== "string" || !/^at:\/\/did:[a-z0-9]+:[A-Za-z0-9._:%-]+\/space\/[A-Za-z0-9.-]+\/[A-Za-z0-9._~:-]{1,128}$/.test(space.uri))) {
+    typeof space.uri !== "string" || !parseSpaceUri(space.uri))) {
     throw new Error("PDS space page contains a malformed space URI.");
   }
   if (candidate.cursor !== undefined && (typeof candidate.cursor !== "string" || candidate.cursor.length === 0)) {
@@ -179,12 +180,19 @@ export async function listBoundedSpaces(
   return { spaces, truncated };
 }
 
+/** Every space URI of a type, or an error when there are more than `maxSpaces`: discovery must not silently hide some of an account's spaces. */
+export async function listAllSpaceUris(client: AtprotoClient, input: { spaceType: string; maxSpaces: number }): Promise<string[]> {
+  const scan = await listBoundedSpaces(client, input);
+  if (scan.truncated) throw new Error(`Account ${input.spaceType} list exceeds the ${input.maxSpaces}-space discovery limit.`);
+  return scan.spaces.map(({ uri }) => uri);
+}
+
 function assertMemberPage(page: unknown, limit: number): asserts page is ListMembers.OutputSchema {
   if (typeof page !== "object" || page === null) throw new Error("PDS member page is malformed.");
   const candidate = page as { members?: unknown; cursor?: unknown };
   if (!Array.isArray(candidate.members) || candidate.members.length > limit) throw new Error("PDS member page exceeded the requested limit.");
   if (candidate.members.some((member) => typeof member !== "object" || member === null || Array.isArray(member) ||
-    typeof member.did !== "string" || !/^did:[a-z0-9]+:[A-Za-z0-9._:%-]+$/.test(member.did) ||
+    !isDid(member.did) ||
     typeof member.read !== "boolean" || typeof member.write !== "boolean" ||
     (member.$type !== undefined && member.$type !== "com.atproto.memberspace.listMembers#member"))) {
     throw new Error("PDS member page contains a malformed member.");

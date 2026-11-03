@@ -5,10 +5,9 @@ import type * as ListRepos from "@/lexicons/api/types/com/atproto/space/listRepo
 import { resolvePds } from "@/atproto/identity";
 import { sessionClient } from "@/atproto/client";
 import { mintSpaceCredential, SpaceCredentialError } from "@/atproto/space-credential";
-import { assertBoundedRecordPage, listBoundedRecords, listBoundedRepos } from "@/atproto/record-pages";
+import { assertBoundedRecordPage, listAllSpaceUris, listBoundedRecords, listBoundedRepos } from "@/atproto/record-pages";
 import { selectValidChannelMessages } from "@/atproto/valid-channel-messages";
-import { listBoundedSpaces } from "@/atproto/space-pages";
-import { channelUri, spaceRecordUri } from "@/protocol/keys";
+import { channelUri, parseWorkspaceUri, spaceRecordUri } from "@/protocol/keys";
 import { validateSpaceRecord } from "@/protocol/records";
 import { mapLimited } from "@/lib/map-limited";
 
@@ -47,7 +46,7 @@ export type IndependentChannelPage = {
  * does not import the primary app's database, sync cache, or web-session layer.
  */
 export async function listIndependentWorkspaces(session: OAuthSession): Promise<IndependentWorkspace[]> {
-  const spaces = await listBoundedSpaces(sessionClient(session), { spaceType: "org.slack.workspace", maxSpaces: MAX_DISCOVERABLE_WORKSPACES });
+  const spaces = await listAllSpaceUris(sessionClient(session), { spaceType: "org.slack.workspace", maxSpaces: MAX_DISCOVERABLE_WORKSPACES });
   const summaries = await mapLimited(spaces, 8, async (uri) => {
     try { return await readIndependentWorkspace(session, uri); }
     catch (error) {
@@ -59,9 +58,9 @@ export async function listIndependentWorkspaces(session: OAuthSession): Promise<
 }
 
 export async function readIndependentWorkspace(session: OAuthSession, uri: string): Promise<IndependentWorkspace | null> {
-  const match = /^at:\/\/(did:[^/]+)\/space\/org\.slack\.workspace\/([A-Za-z0-9._~:-]{1,128})$/.exec(uri);
-  if (!match) return null;
-  const authorityDid = match[1];
+  const workspace = parseWorkspaceUri(uri);
+  if (!workspace) return null;
+  const { authorityDid } = workspace;
   const credential = await mintSpaceCredential(session, uri);
   const client = credential.client(await resolvePds(authorityDid));
   const [profile, directories, roster, adminRecords] = await Promise.all([

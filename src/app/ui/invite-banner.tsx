@@ -1,7 +1,7 @@
-import { parseWorkspaceUri } from "./client-api";
+import { parsePastedWorkspaceUri } from "./client-api";
 
 export function InviteBanner({ workspace, busy, join, dismiss }: { workspace: string; busy: boolean; join: () => void; dismiss: () => void }) {
-  const owner = parseWorkspaceUri(workspace)?.authorityDid;
+  const owner = parsePastedWorkspaceUri(workspace)?.authorityDid;
   return (
     <div className="starter-card" role="region" aria-label="Workspace invitation">
       <h3>You&rsquo;ve been invited to a workspace</h3>

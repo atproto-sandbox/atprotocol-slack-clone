@@ -66,6 +66,11 @@ export function isScopeMissingError(error: unknown): boolean {
   return error instanceof XrpcError && error.status === 403 && error.code === "ScopeMissingError";
 }
 
+/** `createSpace` found a live space with the same owner, type and key: the pinned PDS answers 400 `SpaceAlreadyExists`. */
+export function isSpaceAlreadyExists(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "SpaceAlreadyExists";
+}
+
 export function isMissingXrpcResource(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;
   if ("status" in error && error.status === 404) return true;

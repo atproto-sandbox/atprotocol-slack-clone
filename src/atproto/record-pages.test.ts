@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { AtprotoClient } from "./xrpc";
-import { assertBoundedRecordPage, listBoundedMembers, listBoundedRecords, listBoundedRepos, listBoundedSpaces } from "./record-pages";
+import { assertBoundedRecordPage, listAllSpaceUris, listBoundedMembers, listBoundedRecords, listBoundedRepos, listBoundedSpaces } from "./record-pages";
 
 function repo(did: string, rev: string) {
   return { did: `did:plc:${did}`, repoRev: `r${rev}`, data: { $bytes: "AAAA" }, spaceRev: rev };
@@ -263,3 +263,17 @@ function fakeClient(pages: Array<Record<string, unknown>>) {
   } as unknown as AtprotoClient;
   return { client, calls };
 }
+
+test("workspace discovery returns every space URI at the exact limit and refuses to hide some when there are more", async () => {
+  // #given an account with exactly as many workspaces as the limit, and another with one more
+  const uri = (skey: string) => `at://did:plc:a/space/org.slack.workspace/${skey}`;
+  const exact = fakeClient([{ spaces: [{ uri: uri("a") }, { uri: uri("b") }], cursor: "next" }, { spaces: [] }]);
+  const overflow = fakeClient([{ spaces: [{ uri: uri("a") }, { uri: uri("b") }], cursor: "next" }, { spaces: [{ uri: uri("c") }] }]);
+
+  // #when each is listed with a limit of two
+  const listed = await listAllSpaceUris(exact.client, { spaceType: "org.slack.workspace", maxSpaces: 2 });
+
+  // #then the exact list is returned whole and the overflowing one is an error, not a silent truncation
+  assert.deepEqual(listed, [uri("a"), uri("b")]);
+  await assert.rejects(listAllSpaceUris(overflow.client, { spaceType: "org.slack.workspace", maxSpaces: 2 }), /exceeds the 2-space discovery limit/);
+});

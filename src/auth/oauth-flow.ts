@@ -1,5 +1,6 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { NodeOAuthClient } from "@atproto/oauth-client-node";
+import { isDid } from "@/protocol/keys";
 import { canonicalOAuthScope } from "./oauth-scope";
 
 export type OAuthFlowBinding =
@@ -125,7 +126,7 @@ function isBinding(value: unknown): value is OAuthFlowBinding {
   const binding = value as Record<string, unknown>;
   if (binding.kind === "login") return Object.keys(binding).length === 2 && typeof binding.appState === "string" && APP_STATE_PATTERN.test(binding.appState);
   return binding.kind === "permission" && Object.keys(binding).length === 4 &&
-    typeof binding.expectedDid === "string" && /^did:[a-z0-9]{1,64}:[A-Za-z0-9._:%-]{1,512}$/.test(binding.expectedDid) &&
+    isDid(binding.expectedDid) &&
     typeof binding.appState === "string" && APP_STATE_PATTERN.test(binding.appState) &&
     typeof binding.flowLockToken === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(binding.flowLockToken);
 }

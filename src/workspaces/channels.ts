@@ -5,7 +5,7 @@ import { mintSpaceCredential } from "@/atproto/space-credential";
 import { registerSpaceNotifications } from "@/atproto/notifications";
 import { listBoundedRecords } from "@/atproto/record-pages";
 import { isMissingXrpcResource } from "@/atproto/xrpc";
-import { channelUri } from "@/protocol/keys";
+import { channelUri, isSkey, parseWorkspaceUri } from "@/protocol/keys";
 import { validateSpaceRecord } from "@/protocol/records";
 import { WorkspaceEnvelopeError } from "./read-model";
 import { purgeDeniedPermissionCache, purgeSpaceCache, purgeWorkspaceCache, registerWorkspaceChannel, unregisterWorkspaceChannel } from "./cache";
@@ -15,9 +15,9 @@ const MAX_SUPPORTED_MEMBERS = 200;
 const MAX_PRIVATE_ROSTER_SCAN = 1_000;
 
 export async function requireChannelDirectory(session: OAuthSession, workspace: string, skey: string): Promise<{ authorityDid: string; channel: string; visibility: "public" | "private" | "transitioning" | "archived" }> {
-  const match = /^at:\/\/(did:[^/]+)\/space\/org\.slack\.workspace\/[A-Za-z0-9._~:-]{1,128}$/.exec(workspace);
-  if (!match || !/^[A-Za-z0-9][A-Za-z0-9._~:-]{0,127}$/.test(skey)) throw new Error("Invalid workspace or channel reference.");
-  const authorityDid = match[1];
+  const parsedWorkspace = parseWorkspaceUri(workspace);
+  if (!parsedWorkspace || !isSkey(skey)) throw new Error("Invalid workspace or channel reference.");
+  const { authorityDid } = parsedWorkspace;
   const directoryReader = await mintSpaceCredential(session, workspace);
   await registerSpaceNotifications(directoryReader, workspace);
   const directoryClient = directoryReader.client(await resolvePds(authorityDid));

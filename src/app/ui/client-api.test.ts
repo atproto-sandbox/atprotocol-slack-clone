@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { api, ApiError, captureInviteLink, clearAccountScopedState, INVITE_LINK_KEY, inviteLinkFor, workspaceFromInviteSearch, isAccessFailure, isAuthorizationRequired, makeTid, mergeMessages, threadMessages, workspaceOperationIdFor, parseWorkspaceUri, splitDids, toSlug, withReactions, type Message } from "./client-api";
+import { api, ApiError, captureInviteLink, clearAccountScopedState, INVITE_LINK_KEY, inviteLinkFor, workspaceFromInviteSearch, isAccessFailure, isAuthorizationRequired, makeTid, mergeMessages, threadMessages, workspaceOperationIdFor, parsePastedWorkspaceUri, splitDids, toSlug, withReactions, type Message } from "./client-api";
 
 const message = (rkey: string): Message => ({ uri: `at://did:plc:a/space/x/${rkey}`, rkey, repo: "did:plc:a", value: { text: rkey } });
 
@@ -21,8 +21,8 @@ test("mergeMessages dedupes by URI and sorts newest first", () => {
 });
 
 test("client helpers parse workspace URIs, DID lists, slugs, TIDs, and access failures", () => {
-  assert.deepEqual(parseWorkspaceUri(" at://did:plc:abc/space/org.slack.workspace/team "), { authorityDid: "did:plc:abc", skey: "team" });
-  assert.equal(parseWorkspaceUri("at://did:plc:abc/space/org.slack.channel/team"), null);
+  assert.deepEqual(parsePastedWorkspaceUri(" at://did:plc:abc/space/org.slack.workspace/team "), { authorityDid: "did:plc:abc", skey: "team" });
+  assert.equal(parsePastedWorkspaceUri("at://did:plc:abc/space/org.slack.channel/team"), null);
   assert.deepEqual(splitDids(" did:plc:a, did:plc:b\n"), ["did:plc:a", "did:plc:b"]);
   assert.equal(toSlug("  Project Room!! "), "project-room");
   assert.equal(toSlug("!!!"), "channel");
@@ -85,14 +85,14 @@ test("captureInviteLink stores only a valid workspace, so sign-in redirects cann
 
 test("workspace URIs must have the exact shape the server accepts, so a hostile link cannot render odd text", () => {
   const valid = "at://did:plc:abc/space/org.slack.workspace/acme-1";
-  assert.deepEqual(parseWorkspaceUri(valid), { authorityDid: "did:plc:abc", skey: "acme-1" });
+  assert.deepEqual(parsePastedWorkspaceUri(valid), { authorityDid: "did:plc:abc", skey: "acme-1" });
   for (const bad of [
     "at://did:plc:ab\u202ec/space/org.slack.workspace/acme-1",
     "at://did:plc:abc d/space/org.slack.workspace/acme-1",
     `at://did:plc:${"a".repeat(600)}/space/org.slack.workspace/acme-1`,
     "at://did:PLC:abc/space/org.slack.workspace/acme-1",
     "at://did:plc:abc/space/org.slack.workspace/",
-  ]) assert.equal(parseWorkspaceUri(bad), null, bad);
+  ]) assert.equal(parsePastedWorkspaceUri(bad), null, bad);
 });
 
 test("signing out clears this app's account-scoped session state and nothing else", () => {

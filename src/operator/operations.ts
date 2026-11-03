@@ -7,7 +7,7 @@ import { isMissingXrpcResource, type AtprotoClient } from "@/atproto/xrpc";
 import { mintSpaceCredential } from "@/atproto/space-credential";
 import { resolvePds } from "@/atproto/identity";
 import { ensureMemberListSpace, listSpaceMembers, putAuthorityRecord, putSpaceMember, removeSpaceMember } from "@/atproto/space-ops";
-import { channelUri, decisionRecordKey, parseSpaceRecordUri, requestRecordKey, subjectKey } from "@/protocol/keys";
+import { channelUri, decisionRecordKey, inboxUri, isDid, isSkey, isTid, parseSpaceRecordUri, requestRecordKey, subjectKey } from "@/protocol/keys";
 import { validateSpaceRecord } from "@/protocol/records";
 import { bootstrapWorkspace } from "@/workspaces/bootstrap";
 import { WorkspaceEnvelopeError } from "@/workspaces/read-model";
@@ -680,26 +680,10 @@ function parseJoinRequestUri(uri: string, authorityDid: string, inbox: string): 
   return !parsed || parsed.repo === authorityDid ? null : parsed;
 }
 
-function inboxUri(authorityDid: string, workspaceSkey: string): string {
-  return `at://${authorityDid}/space/org.slack.inbox/${workspaceSkey}`;
-}
-
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const proto = Object.getPrototypeOf(value);
   return proto === Object.prototype || proto === null;
-}
-
-function isDid(value: unknown): value is string {
-  return typeof value === "string" && /^did:[a-z0-9]+:[A-Za-z0-9._:%-]+$/.test(value);
-}
-
-function isSkey(value: unknown): value is string {
-  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._~:-]{0,127}$/.test(value);
-}
-
-function isTid(value: unknown): value is string {
-  return typeof value === "string" && /^[234567abcdefghijklmnopqrstuvwxyz]{13}$/.test(value);
 }
 
 function isNotFound(error: unknown): boolean {

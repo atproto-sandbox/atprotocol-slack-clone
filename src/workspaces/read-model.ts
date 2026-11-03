@@ -1,11 +1,10 @@
 import type { OAuthSession } from "@atproto/oauth-client-node";
 import { sessionClient } from "@/atproto/client";
 import { resolvePds } from "@/atproto/identity";
-import { listBoundedRecords } from "@/atproto/record-pages";
-import { listBoundedSpaces } from "@/atproto/space-pages";
+import { listAllSpaceUris, listBoundedRecords } from "@/atproto/record-pages";
 import { mintSpaceCredential } from "@/atproto/space-credential";
 import { registerSpaceNotifications } from "@/atproto/notifications";
-import { channelUri } from "@/protocol/keys";
+import { channelUri, parseWorkspaceUri } from "@/protocol/keys";
 import { validateSpaceRecord } from "@/protocol/records";
 import { purgeCachesForUnlistedWorkspaces, purgeWorkspaceCache, replaceWorkspaceChannels } from "./cache";
 import { mapLimited } from "@/lib/map-limited";
@@ -55,7 +54,7 @@ export async function discoverWorkspaces(session: OAuthSession): Promise<Workspa
 }
 
 export async function discoverWorkspaceState(session: OAuthSession): Promise<WorkspaceDiscovery> {
-  const spaces = await listBoundedSpaces(sessionClient(session), { spaceType: "org.slack.workspace", maxSpaces: MAX_DISCOVERABLE_WORKSPACES });
+  const spaces = await listAllSpaceUris(sessionClient(session), { spaceType: "org.slack.workspace", maxSpaces: MAX_DISCOVERABLE_WORKSPACES });
   const results = await mapLimited(spaces, 8, async (uri) => {
     try {
       const summary = await readWorkspaceSummary(session, uri);
@@ -89,14 +88,14 @@ export async function requireWorkspaceSummary(session: OAuthSession, uri: string
 }
 
 function workspaceCandidate(uri: string): WorkspaceCandidate | null {
-  const match = /^at:\/\/(did:[^/]+)\/space\/org\.slack\.workspace\/([A-Za-z0-9._~:-]{1,128})$/.exec(uri);
-  return match ? { uri, authorityDid: match[1], skey: match[2] } : null;
+  const workspace = parseWorkspaceUri(uri);
+  return workspace ? { uri, ...workspace } : null;
 }
 
 async function readWorkspaceSummary(session: OAuthSession, uri: string): Promise<WorkspaceSummary | null> {
-  const match = /^at:\/\/(did:[^/]+)\/space\/org\.slack\.workspace\/([A-Za-z0-9._~:-]{1,128})$/.exec(uri);
-  if (!match) return null;
-  const [, authorityDid, skey] = match;
+  const workspace = parseWorkspaceUri(uri);
+  if (!workspace) return null;
+  const { authorityDid, skey } = workspace;
   const credential = await mintSpaceCredential(session, uri);
   await registerSpaceNotifications(credential, uri);
   const reader = credential.client(await resolvePds(authorityDid));

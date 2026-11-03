@@ -1,9 +1,14 @@
 import { getRawDb } from "@/lib/db";
 import { isAccessLost } from "@/atproto/space-credential-core";
+import { parseChannelUri, parseSpaceUri, parseWorkspaceUri } from "@/protocol/keys";
 
-const WORKSPACE_URI = /^at:\/\/(did:[^/]+)\/space\/org\.slack\.workspace\/[A-Za-z0-9._~:-]{1,128}$/;
-const CHANNEL_URI = /^at:\/\/(did:[^/]+)\/space\/org\.slack\.channel\/[A-Za-z0-9._~:-]{1,128}$/;
-const RELATED_SPACE_URI = /^at:\/\/(did:[^/]+)\/space\/(?:org\.slack\.channel|org\.slack\.inbox)\/[A-Za-z0-9._~:-]{1,128}$/;
+const isWorkspace = (uri: string): boolean => parseWorkspaceUri(uri) !== null;
+const isChannel = (uri: string): boolean => parseChannelUri(uri) !== null;
+/** The authority of a channel or inbox space, which can belong to a workspace by authority alone. */
+const relatedSpaceAuthority = (uri: string): string | undefined => {
+  const parsed = parseSpaceUri(uri);
+  return parsed && (parsed.type === "org.slack.channel" || parsed.type === "org.slack.inbox") ? parsed.authorityDid : undefined;
+};
 
 /**
  * The next channel read re-fetches this repo instead of waiting out the freshness window. The empty revision matches
@@ -27,11 +32,11 @@ export function purgeSpaceCache(account: string, space: string): void {
 
 export function purgeDeniedPermissionCache(account: string, workspace: string, space: string, error: unknown): boolean {
   if (!isAccessLost(error)) return false;
-  const workspaceDid = WORKSPACE_URI.exec(workspace)?.[1];
+  const workspaceDid = parseWorkspaceUri(workspace)?.authorityDid;
   if (!workspaceDid) return false;
   if (space === workspace) {
     purgeWorkspaceCache(account, workspace);
-  } else if (RELATED_SPACE_URI.exec(space)?.[1] === workspaceDid) {
+  } else if (relatedSpaceAuthority(space) === workspaceDid) {
     purgeSpaceCache(account, space);
   } else {
     purgeWorkspaceCache(account, workspace);
@@ -40,8 +45,8 @@ export function purgeDeniedPermissionCache(account: string, workspace: string, s
 }
 
 export function registerWorkspaceChannel(account: string, workspace: string, channel: string): void {
-  const workspaceDid = WORKSPACE_URI.exec(workspace)?.[1];
-  const channelDid = CHANNEL_URI.exec(channel)?.[1];
+  const workspaceDid = parseWorkspaceUri(workspace)?.authorityDid;
+  const channelDid = parseChannelUri(channel)?.authorityDid;
   if (!workspaceDid || workspaceDid !== channelDid) return;
   getRawDb().prepare(`INSERT OR IGNORE INTO workspace_channel_cache (account_did,workspace_uri,space_uri,updated_at)
     VALUES (?,?,?,?)`).run(account, workspace, channel, Date.now());
@@ -58,9 +63,9 @@ export function unregisterWorkspaceChannel(account: string, workspace: string, c
 }
 
 export function replaceWorkspaceChannels(account: string, workspace: string, channels: string[]): void {
-  if (!WORKSPACE_URI.test(workspace)) return;
-  const workspaceDid = WORKSPACE_URI.exec(workspace)?.[1];
-  const validChannels = [...new Set(channels.filter((channel) => CHANNEL_URI.exec(channel)?.[1] === workspaceDid))];
+  const workspaceDid = parseWorkspaceUri(workspace)?.authorityDid;
+  if (!workspaceDid) return;
+  const validChannels = [...new Set(channels.filter((channel) => parseChannelUri(channel)?.authorityDid === workspaceDid))];
   const db = getRawDb();
   const transaction = db.transaction(() => {
     const previous = db.prepare("SELECT space_uri FROM workspace_channel_cache WHERE account_did=? AND workspace_uri=?")
@@ -77,7 +82,7 @@ export function replaceWorkspaceChannels(account: string, workspace: string, cha
 }
 
 export function purgeWorkspaceCache(account: string, workspace: string): void {
-  if (!WORKSPACE_URI.test(workspace)) {
+  if (!isWorkspace(workspace)) {
     purgeSpaceCache(account, workspace);
     return;
   }
@@ -90,12 +95,12 @@ export function purgeWorkspaceCache(account: string, workspace: string): void {
     for (const { space_uri: channel } of channels) {
       if (!hasWorkspaceAssociation(account, channel)) purgeSpaceCacheInTransaction(account, channel);
     }
-    const authorityDid = WORKSPACE_URI.exec(workspace)?.[1];
+    const authorityDid = parseWorkspaceUri(workspace)?.authorityDid;
     const cachedChannels = db.prepare(`SELECT space_uri FROM channel_record_cache WHERE account_did=?
       UNION SELECT space_uri FROM space_collection_cursor WHERE account_did=?
       UNION SELECT space_uri FROM sync_cursor WHERE account_did=?`).all(account, account, account) as Array<{ space_uri: string }>;
     for (const { space_uri: channel } of cachedChannels) {
-      if (CHANNEL_URI.exec(channel)?.[1] === authorityDid && !hasWorkspaceAssociation(account, channel)) {
+      if (parseChannelUri(channel)?.authorityDid === authorityDid && !hasWorkspaceAssociation(account, channel)) {
         purgeSpaceCacheInTransaction(account, channel);
       }
     }
@@ -104,7 +109,7 @@ export function purgeWorkspaceCache(account: string, workspace: string): void {
 }
 
 export function purgeCachesForUnlistedWorkspaces(account: string, workspaceUris: string[]): void {
-  const listed = [...new Set(workspaceUris.filter((uri) => WORKSPACE_URI.test(uri)))];
+  const listed = [...new Set(workspaceUris.filter(isWorkspace))];
   const db = getRawDb();
   const transaction = db.transaction(() => {
     const unlistedPredicate = listed.length === 0
@@ -124,7 +129,7 @@ export function purgeCachesForUnlistedWorkspaces(account: string, workspaceUris:
       UNION SELECT space_uri FROM space_collection_cursor WHERE account_did=?
       UNION SELECT space_uri FROM sync_cursor WHERE account_did=?`).all(account, account, account) as Array<{ space_uri: string }>;
     for (const { space_uri: channel } of cachedChannels) {
-      if (CHANNEL_URI.test(channel) && !hasWorkspaceAssociation(account, channel)) purgeSpaceCacheInTransaction(account, channel);
+      if (isChannel(channel) && !hasWorkspaceAssociation(account, channel)) purgeSpaceCacheInTransaction(account, channel);
     }
   });
   transaction();

@@ -1,7 +1,7 @@
 import { listBoundedMembers, listBoundedRecords, listBoundedRepos, listBoundedSpaces, assertBoundedRecordPage } from "@/atproto/record-pages";
 import { mintSpaceCredentialWith, SPACE_CREDENTIAL_RENEW_BEFORE_MS, SpaceCredential, SpaceCredentialError, type ResolveKemKey } from "@/atproto/space-credential-core";
 import type { SpaceKey } from "@/atproto/space-key";
-import { AtprotoClient, isMissingXrpcResource } from "@/atproto/xrpc";
+import { AtprotoClient, isMissingXrpcResource, isSpaceAlreadyExists } from "@/atproto/xrpc";
 import { mapLimited } from "@/lib/map-limited";
 import {
   canonicalParticipants,
@@ -113,7 +113,7 @@ export class DmClient {
         policy: memberspacePolicy({ publicWrite: publicWriteForMode(mode) }),
       });
     } catch (error) {
-      if (!isAlreadyExists(error)) throw error;
+      if (!isSpaceAlreadyExists(error)) throw error;
       await this.applyRequestMode(mode);
     }
     // The seed list's active/dormant state comes from `mode` directly, not
@@ -560,7 +560,7 @@ export class DmClient {
         policy: memberspacePolicy(),
       });
     } catch (error) {
-      if (!isAlreadyExists(error)) throw error;
+      if (!isSpaceAlreadyExists(error)) throw error;
     }
   }
 
@@ -792,10 +792,6 @@ function isSpaceNotFound(error: unknown): boolean {
 
 function isRecordNotFound(error: unknown): boolean {
   return hasErrorCode(error, "RecordNotFound");
-}
-
-function isAlreadyExists(error: unknown): boolean {
-  return hasErrorCode(error, "SpaceAlreadyExists");
 }
 
 function hasErrorCode(error: unknown, code: string): boolean {

@@ -12,7 +12,8 @@ import { mintSpaceCredential } from "./space-credential";
 import { isMemberListOnly, memberspacePolicy } from "./space-policy";
 import { validateSpaceRecord } from "@/protocol/records";
 import { assertBoundedRecordPage, listBoundedMembers } from "./record-pages";
-import { spaceRecordUri } from "@/protocol/keys";
+import { isSpaceAlreadyExists } from "./xrpc";
+import { requireSpaceAuthority, spaceRecordUri, spaceUri } from "@/protocol/keys";
 import { WorkspaceEnvelopeError } from "@/workspaces/read-model";
 
 export async function ensureMemberListSpace(
@@ -20,7 +21,7 @@ export async function ensureMemberListSpace(
   type: string,
   skey: string,
 ): Promise<string> {
-  const uri = `at://${session.did}/space/${type}/${skey}`;
+  const uri = spaceUri(session.did, type, skey);
   const client = sessionClient(session);
   try {
     const result = await client.procedure<CreateSpace.InputSchema, CreateSpace.OutputSchema>(
@@ -29,7 +30,7 @@ export async function ensureMemberListSpace(
     );
     return result.uri;
   } catch (error) {
-    if (!isAlreadyExists(error)) throw error;
+    if (!isSpaceAlreadyExists(error)) throw error;
     const current = await client.query<GetSpace.OutputSchema>("com.atproto.space.getSpace", { space: uri });
     if (!isMemberListOnly(current.policy)) throw new Error(`Space already exists with an incompatible policy: ${uri}`);
     return current.uri;
@@ -67,7 +68,7 @@ export async function putAuthorityRecord(
   rkey: string,
   value: Record<string, unknown>,
 ): Promise<PutRecord.OutputSchema> {
-  const authorityDid = parseAuthorityDid(space);
+  const authorityDid = requireSpaceAuthority(space);
   if (authorityDid !== session.did) throw new Error("Authority record must be written by the space authority.");
   const record = { $type: collection, ...value };
   const validation = validateSpaceRecord(collection, record, { authorityDid, spaceUri: space, repoDid: session.did, rkey });
@@ -104,7 +105,7 @@ export async function putMemberRecord(
   value: Record<string, unknown>,
   context: { knownMessages?: ReadonlySet<string>; knownTopLevelMessages?: ReadonlySet<string> } = {},
 ): Promise<string> {
-  const authorityDid = parseAuthorityDid(space);
+  const authorityDid = requireSpaceAuthority(space);
   const record = { $type: collection, ...value };
   const validation = validateSpaceRecord(collection, record, {
     authorityDid, spaceUri: space, repoDid: session.did, rkey,
@@ -120,15 +121,4 @@ export async function putMemberRecord(
 
 export async function publicServiceClientForDid(did: string) {
   return serviceClient(await resolvePds(did));
-}
-
-function isAlreadyExists(error: unknown): boolean {
-  return typeof error === "object" && error !== null &&
-    (("status" in error && error.status === 409) || ("message" in error && typeof error.message === "string" && /already exists/i.test(error.message)));
-}
-
-function parseAuthorityDid(space: string): string {
-  const match = /^at:\/\/(did:[^/]+)\/space\/[a-zA-Z0-9.-]+\/[A-Za-z0-9._~:-]{1,128}$/.exec(space);
-  if (!match) throw new Error("Invalid permissioned space URI.");
-  return match[1];
 }

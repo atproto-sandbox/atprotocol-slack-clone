@@ -1,4 +1,5 @@
 import { AUTHORIZATION_REQUIRED } from "@/lib/api-codes";
+import { parseWorkspaceUri as parseWorkspaceSpaceUri } from "@/protocol/keys";
 
 export type Message = { uri: string; rkey: string; repo: string; value: { text?: string; createdAt?: string; parent?: string }; reactions?: Array<{ emoji: string; count: number; active: boolean }> };
 export type Reaction = { repo: string; value: { subject?: string; emoji?: string } };
@@ -26,9 +27,9 @@ export function isAuthorizationRequired(error: unknown): boolean { return error 
 export function isAccessFailure(error: unknown): boolean { return [401, 403, 409].includes(httpStatus(error) ?? 0); }
 export function messageOf(error: unknown): string { return error instanceof Error ? error.message : "Request failed."; }
 
-export function parseWorkspaceUri(uri: string): { authorityDid: string; skey: string } | null {
-  const match = /^at:\/\/(did:[a-z0-9]{1,64}:[A-Za-z0-9._:%-]{1,512})\/space\/org\.slack\.workspace\/([A-Za-z0-9._~:-]{1,128})$/.exec(uri.trim());
-  return match ? { authorityDid: match[1], skey: match[2] } : null;
+/** The protocol layer's `parseWorkspaceUri` for a link a person pasted: surrounding whitespace is ignored. */
+export function parsePastedWorkspaceUri(uri: string): { authorityDid: string; skey: string } | null {
+  return parseWorkspaceSpaceUri(uri.trim());
 }
 
 export function withReactions(messages: Array<Omit<Message, "reactions">>, reactions: Reaction[], viewerDid: string): Message[] {
@@ -100,7 +101,7 @@ export function inviteLinkFor(origin: string, workspaceUri: string): string {
 /** The workspace an invite link names, or null when the query string has none or it is malformed. */
 export function workspaceFromInviteSearch(search: string): string | null {
   const value = new URLSearchParams(search).get("invite");
-  return value && parseWorkspaceUri(value) ? value.trim() : null;
+  return value && parsePastedWorkspaceUri(value) ? value.trim() : null;
 }
 
 /** Remembers an invite link across the sign-in redirects, and returns the workspace it names. */

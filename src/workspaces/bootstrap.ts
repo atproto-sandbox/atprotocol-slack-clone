@@ -1,6 +1,6 @@
 import type { OAuthSession } from "@atproto/oauth-client-node";
 import { getRawDb } from "@/lib/db";
-import { canonicalJson, requestDigest, stableHash, subjectKey, channelUri, workspaceUri, inboxUri } from "@/protocol/keys";
+import { canonicalJson, requestDigest, stableHash, subjectKey, channelUri, workspaceUri, inboxUri, parseWorkspaceUri } from "@/protocol/keys";
 import { ensureMemberListSpace, putAuthorityRecord } from "@/atproto/space-ops";
 import { isScopeMissingError } from "@/atproto/xrpc";
 import { discardEmptyOperationIfWorkspaceLockOwned, listRecoverableOperations, persistPendingIfWorkspaceLockOwned, withWorkspaceLock, type WorkspaceLock } from "@/operator/journal";
@@ -22,8 +22,7 @@ export async function bootstrapWorkspace(session: OAuthSession, input: { name: s
 }
 
 export async function resumePendingWorkspaceBootstraps(session: OAuthSession, workspace: string): Promise<BootstrapResult[]> {
-  const match = /^at:\/\/(did:[^/]+)\/space\/org\.slack\.workspace\/[A-Za-z0-9._~:-]{1,128}$/.exec(workspace);
-  if (!match || match[1] !== session.did) throw new Error("Workspace bootstrap recovery requires its authority session.");
+  if (parseWorkspaceUri(workspace)?.authorityDid !== session.did) throw new Error("Workspace bootstrap recovery requires its authority session.");
   const pending = listRecoverableOperations(session.did, workspace).filter((row) => row.actor === session.did);
   const results: BootstrapResult[] = [];
   for (const row of pending) {
