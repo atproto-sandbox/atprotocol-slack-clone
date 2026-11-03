@@ -2,7 +2,7 @@ import type { OAuthSession } from "@atproto/oauth-client-node";
 import type * as GetRecord from "@/lexicons/api/types/com/atproto/space/getRecord";
 import { sessionClient } from "@/atproto/client";
 import { listBoundedRecords } from "@/atproto/record-pages";
-import { isUnverifiableRepo } from "@/atproto/kem-key";
+import { classifyRepoFailure } from "@/atproto/repo-failure";
 import { isMissingXrpcResource, type AtprotoClient } from "@/atproto/xrpc";
 import { mintSpaceCredential } from "@/atproto/space-credential";
 import { resolvePds } from "@/atproto/identity";
@@ -560,7 +560,9 @@ export async function readJoinRequestRecord(
       authorityDid, spaceUri: inbox, repoDid, rkey,
     }).valid ? result.value : null;
   } catch (error) {
-    if (isNotFound(error) || isUnverifiableRepo(error)) return null;
+    // A repo that is gone for good (deactivated, taken down, unauthenticated, oversized) will fail the same way on every replay, so
+    // it reads as no current request; a host that is merely down still fails the operation so it can be retried.
+    if (isNotFound(error) || classifyRepoFailure(error)?.permanent) return null;
     throw error;
   }
 }

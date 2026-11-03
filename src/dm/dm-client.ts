@@ -19,7 +19,7 @@ import {
 import { validateDmDeclaration, validateDmHeaderMatchesRequest, validateSpaceRecord } from "@/protocol/records";
 import { advanceRenotifyState, isRenotifyDue, type DmRenotifyState } from "./backoff";
 import { mergeDmHalves, type DmHalfPage } from "./merge";
-import { isUnverifiableRepo } from "@/atproto/kem-key";
+import { classifyRepoFailure } from "@/atproto/repo-failure";
 import { memberspacePolicy, readMemberspacePolicy, withPublicWrite } from "@/atproto/space-policy";
 import { isSenderAllowedUnderMode, modeForInboxPolicy, publicWriteForMode, type DmRequestMode } from "./request-policy";
 
@@ -390,13 +390,14 @@ export class DmClient {
         halves[ownerDid] = classifyHalfError(error);
         return;
       }
-      const client = credential.client(await this.deps.resolvePds(ownerDid));
       let header: Record<string, unknown> | null;
       try {
-        header = await this.readRecord(client, half, ownerDid, "org.slack.dm.header", "self");
+        header = await this.readRecord(credential.client(await this.deps.resolvePds(ownerDid)), half, ownerDid, "org.slack.dm.header", "self");
       } catch (error) {
-        // A participant whose header cannot be authenticated is an unreadable half, not a reason to hide the other halves.
-        if (!isUnverifiableRepo(error)) throw error;
+        // Another participant whose repo cannot be read (deactivated, taken down, unauthenticated, or on a host that is down) is an
+        // unreadable half, not a reason to hide the other halves. A failure reading the caller's own half is the caller's own
+        // problem (offline, their host down), not a participant's, and fails the read.
+        if (ownerDid === this.deps.did || !classifyRepoFailure(error)) throw error;
         halves[ownerDid] = "missing";
         return;
       }
@@ -424,27 +425,35 @@ export class DmClient {
       const perHalfLimit = Math.max(1, Math.min(100, Math.ceil(limit / merge.needsMore.length)));
       await mapLimited(merge.needsMore, FANOUT, async (ownerDid) => {
         const half = dmConversationUri(ownerDid, convKey);
-        const client = credentials.get(ownerDid)!.client(await this.deps.resolvePds(ownerDid));
-        const cursor = cursors.get(ownerDid);
-        const usedCursors = seenCursors.get(ownerDid) ?? new Set<string>();
-        seenCursors.set(ownerDid, usedCursors);
-        if (cursor && usedCursors.has(cursor)) throw new Error("PDS record pagination did not advance.");
-        if (cursor) usedCursors.add(cursor);
-        const page = await client.query<{ cursor?: string; records: Array<{ rkey: string; value?: Record<string, unknown> }> }>(
-          "com.atproto.space.listRecords", { space: half, repo: ownerDid, collection: "org.slack.dm.message", cursor, limit: perHalfLimit },
-        );
-        assertBoundedRecordPage(page, { collection: "org.slack.dm.message", limit: perHalfLimit, cursor, seenCursors: usedCursors });
-        const existing = pages.get(ownerDid)!;
-        const validRecords = page.records.flatMap((record) => {
-          if (!record.value) return [];
-          const validation = validateSpaceRecord("org.slack.dm.message", record.value, {
-            authorityDid: ownerDid, spaceUri: half, repoDid: ownerDid, rkey: record.rkey, participants: canonical,
+        try {
+          const client = credentials.get(ownerDid)!.client(await this.deps.resolvePds(ownerDid));
+          const cursor = cursors.get(ownerDid);
+          const usedCursors = seenCursors.get(ownerDid) ?? new Set<string>();
+          seenCursors.set(ownerDid, usedCursors);
+          if (cursor && usedCursors.has(cursor)) throw new Error("PDS record pagination did not advance.");
+          if (cursor) usedCursors.add(cursor);
+          const page = await client.query<{ cursor?: string; records: Array<{ rkey: string; value?: Record<string, unknown> }> }>(
+            "com.atproto.space.listRecords", { space: half, repo: ownerDid, collection: "org.slack.dm.message", cursor, limit: perHalfLimit },
+          );
+          assertBoundedRecordPage(page, { collection: "org.slack.dm.message", limit: perHalfLimit, cursor, seenCursors: usedCursors });
+          const existing = pages.get(ownerDid)!;
+          const validRecords = page.records.flatMap((record) => {
+            if (!record.value) return [];
+            const validation = validateSpaceRecord("org.slack.dm.message", record.value, {
+              authorityDid: ownerDid, spaceUri: half, repoDid: ownerDid, rkey: record.rkey, participants: canonical,
+            });
+            if (!validation.valid) return [];
+            return [{ uri: spaceRecordUri(half, ownerDid, "org.slack.dm.message", record.rkey), rkey: record.rkey, ownerDid, value: record.value }];
           });
-          if (!validation.valid) return [];
-          return [{ uri: spaceRecordUri(half, ownerDid, "org.slack.dm.message", record.rkey), rkey: record.rkey, ownerDid, value: record.value }];
-        });
-        pages.set(ownerDid, { ownerDid, records: [...existing.records, ...validRecords], exhausted: !page.cursor });
-        cursors.set(ownerDid, page.cursor);
+          pages.set(ownerDid, { ownerDid, records: [...existing.records, ...validRecords], exhausted: !page.cursor });
+          cursors.set(ownerDid, page.cursor);
+        } catch (error) {
+          // A half that stops being readable mid-read shows nothing, like one that was unreadable at the header.
+          if (ownerDid === this.deps.did || !classifyRepoFailure(error)) throw error;
+          halves[ownerDid] = "missing";
+          pages.delete(ownerDid);
+          credentials.delete(ownerDid);
+        }
       });
       merge = mergeDmHalves([...pages.values()], { limit, before: options.before });
     }
@@ -455,7 +464,7 @@ export class DmClient {
       parent: typeof record.value.parent === "string" ? record.value.parent : undefined,
     }));
     const messageUris = new Set(messages.map((message) => message.uri));
-    const reactions = await this.readReactions(convKey, canonical, credentials, messageUris);
+    const reactions = await this.readReactions(convKey, canonical, credentials, messageUris, halves);
     return { messages, reactions, halves, nextBefore: merge.nextBefore };
   }
 
@@ -703,25 +712,33 @@ export class DmClient {
     participants: readonly string[],
     credentials: ReadonlyMap<string, SpaceCredential>,
     messageUris: ReadonlySet<string>,
+    halves: Record<string, DmHalfStatus>,
   ): Promise<DmReaction[]> {
     const perHalf = await mapLimited(participants, FANOUT, async (ownerDid): Promise<DmReaction[]> => {
       const credential = credentials.get(ownerDid);
       if (!credential) return [];
       const half = dmConversationUri(ownerDid, convKey);
-      const client = credential.client(await this.deps.resolvePds(ownerDid));
-      const page = await listBoundedRecords(client, { space: half, repo: ownerDid, collection: "org.slack.dm.reaction", maxRecords: MAX_REACTIONS_PER_HALF });
-      if (page.truncated) throw new Error("DM reaction history exceeds the bounded scan limit.");
-      const reactions: DmReaction[] = [];
-      for (const record of page.records) {
-        const validation = validateSpaceRecord("org.slack.dm.reaction", record.value, {
-          authorityDid: ownerDid, spaceUri: half, repoDid: ownerDid, rkey: record.rkey, participants,
-        });
-        if (!validation.valid) continue;
-        const value = record.value as { subject: string; emoji: string; createdAt: string };
-        if (!messageUris.has(value.subject)) continue;
-        reactions.push({ uri: spaceRecordUri(half, ownerDid, "org.slack.dm.reaction", record.rkey), ownerDid, subject: value.subject, emoji: value.emoji, createdAt: value.createdAt });
+      try {
+        const client = credential.client(await this.deps.resolvePds(ownerDid));
+        const page = await listBoundedRecords(client, { space: half, repo: ownerDid, collection: "org.slack.dm.reaction", maxRecords: MAX_REACTIONS_PER_HALF });
+        if (page.truncated) throw new Error("DM reaction history exceeds the bounded scan limit.");
+        const reactions: DmReaction[] = [];
+        for (const record of page.records) {
+          const validation = validateSpaceRecord("org.slack.dm.reaction", record.value, {
+            authorityDid: ownerDid, spaceUri: half, repoDid: ownerDid, rkey: record.rkey, participants,
+          });
+          if (!validation.valid) continue;
+          const value = record.value as { subject: string; emoji: string; createdAt: string };
+          if (!messageUris.has(value.subject)) continue;
+          reactions.push({ uri: spaceRecordUri(half, ownerDid, "org.slack.dm.reaction", record.rkey), ownerDid, subject: value.subject, emoji: value.emoji, createdAt: value.createdAt });
+        }
+        return reactions;
+      } catch (error) {
+        // A half whose reactions cannot be read is reported as unreadable rather than silently showing none.
+        if (ownerDid === this.deps.did || !classifyRepoFailure(error)) throw error;
+        halves[ownerDid] = "missing";
+        return [];
       }
-      return reactions;
     });
     return perHalf.flat();
   }

@@ -16,13 +16,14 @@ import { channelUri, parseSpaceUri, spaceRecordUri } from "@/protocol/keys";
 import { validateSpaceRecord } from "@/protocol/records";
 import { ChannelUnavailableError, requireReadableChannel } from "./channels";
 import { purgeRepoCache, purgeSpaceCache, purgeWorkspaceCache } from "./cache";
-import { isUnverifiableRepo } from "@/atproto/kem-key";
+import { classifyRepoFailure, describeRepoFailure } from "@/atproto/repo-failure";
 import { isAccessLost } from "@/atproto/space-credential-core";
 
 const PAGE = 100;
 const BACKFILL_PAGE = 1_000;
 const REPO_CONCURRENCY = 8;
 const MAX_HISTORY = 20_000;
+const MAX_LISTED_SET_ASIDE = 20;
 type Cached = { repo: string; rkey: string; uri: string; value: Record<string, unknown> };
 
 export async function readChannelPage(session: OAuthSession, workspace: string, skey: string, offset = 0) {
@@ -63,7 +64,8 @@ export async function readChannelPage(session: OAuthSession, workspace: string, 
       }
       return client;
     };
-    const { readable, unverified } = await refreshWriterRepos(session.did, space, repos, REPO_CONCURRENCY, async (repo) => {
+    const aside = new SetAsideRepos(session.did, space);
+    const readable = await aside.refresh(repos, REPO_CONCURRENCY, async (repo) => {
       const client = await clientFor(repo.did);
       await refresh(session.did, space, repo.did, client, "org.slack.channel.message");
       await refresh(session.did, space, repo.did, client, "org.slack.channel.reaction");
@@ -78,7 +80,7 @@ export async function readChannelPage(session: OAuthSession, workspace: string, 
       getParent: async () => null,
     });
     while (true) {
-      await fillLatest(session.did, space, readable, clientFor, scanTarget);
+      await fillLatest(session.did, space, readable, clientFor, scanTarget, aside);
       const allMessages = cached(session.did, space, collection).sort((a, b) => b.rkey.localeCompare(a.rkey));
       selected = await selectValidChannelMessages(allMessages, {
         authorityDid,
@@ -92,12 +94,12 @@ export async function readChannelPage(session: OAuthSession, workspace: string, 
         },
       });
       const total = cachedCount(session.did, space, collection);
-      if (selected.messages.length >= required || total >= MAX_HISTORY || !hasMoreCursor(session.did, space, collection)) break;
+      if (selected.messages.length >= required || total >= MAX_HISTORY || !hasMoreCursor(session.did, space, collection, aside)) break;
       const nextTarget = Math.min(MAX_HISTORY, Math.max(scanTarget + PAGE, total + PAGE));
       if (nextTarget <= scanTarget) break;
       scanTarget = nextTarget;
     }
-    await fillOlder(session.did, space, readable, clientFor, "org.slack.channel.reaction", MAX_HISTORY);
+    await fillOlder(session.did, space, readable, clientFor, "org.slack.channel.reaction", MAX_HISTORY, aside);
     const messages = selected.messages.slice(offset, offset + PAGE);
     const messageUris = new Set(messages.map((item) => item.uri));
     const knownMessages = new Set(messages.map((item) => item.uri));
@@ -108,13 +110,15 @@ export async function readChannelPage(session: OAuthSession, workspace: string, 
     ).sort((left, right) => left.uri.localeCompare(right.uri));
     const total = cachedCount(session.did, space, collection);
     const nextOffset = Math.min(offset + PAGE, MAX_HISTORY);
-    const hasMore = channelPageHasMore(offset, PAGE, selected.messages.length, total, hasMoreCursor(session.did, space, collection));
-    const degradedReasons: string[] = unverified.map(({ did, reason }) => `Messages from ${did} were skipped: ${reason}`);
-    if (total >= MAX_HISTORY && hasMoreCursor(session.did, space, collection)) {
+    const hasMore = channelPageHasMore(offset, PAGE, selected.messages.length, total, hasMoreCursor(session.did, space, collection, aside));
+    const setAside = aside.reasons();
+    const degradedReasons: string[] = setAside.slice(0, MAX_LISTED_SET_ASIDE).map(({ did, reason }) => `Messages from ${did} may be missing or out of date: ${reason}`);
+    if (setAside.length > MAX_LISTED_SET_ASIDE) degradedReasons.push(`${setAside.length - MAX_LISTED_SET_ASIDE} more writers' messages may be missing or out of date.`);
+    if (total >= MAX_HISTORY && hasMoreCursor(session.did, space, collection, aside)) {
       degradedReasons.push(`Message history exceeds the ${MAX_HISTORY}-record channel sync limit.`);
     }
     const reactionCount = cachedCount(session.did, space, "org.slack.channel.reaction");
-    if (reactionCount >= MAX_HISTORY && hasMoreCursor(session.did, space, "org.slack.channel.reaction")) {
+    if (reactionCount >= MAX_HISTORY && hasMoreCursor(session.did, space, "org.slack.channel.reaction", aside)) {
       degradedReasons.push(`Reaction history exceeds the ${MAX_HISTORY}-record channel sync limit.`);
     }
     return {
@@ -132,42 +136,47 @@ export async function readChannelPage(session: OAuthSession, workspace: string, 
 }
 
 /**
- * Runs `refresh` for every writer repo. A repo that cannot be authenticated (no usable `#atproto_kem` key, or a MAC that does
- * not verify) is set aside and reported, so one member's DID document cannot make a channel unreadable for everyone else.
- * Any other failure still fails the read.
+ * The writer repos set aside during one read of a channel. A writer whose account is deactivated or taken down, whose records
+ * cannot be authenticated, whose answer is oversized, or whose host is down or misbehaving is reported and left out of the rest
+ * of the read, so one member cannot make a channel unreadable for everyone else. Only this app's own failures (a store error)
+ * and a refusal of the credential itself, which is raised where the credential is minted, still fail the read.
  */
-export async function refreshAuthenticated<T extends { did: string }>(
-  repos: readonly T[],
-  concurrency: number,
-  refresh: (repo: T) => Promise<void>,
-): Promise<{ readable: T[]; unverified: Array<{ did: string; reason: string }> }> {
-  const unverified: Array<{ did: string; reason: string }> = [];
-  await mapLimited(repos, concurrency, async (repo) => {
-    try {
-      await refresh(repo);
-    } catch (error) {
-      if (!isUnverifiableRepo(error)) throw error;
-      unverified.push({ did: repo.did, reason: error instanceof Error ? error.message : "its repo could not be authenticated" });
-    }
-  });
-  const skipped = new Set(unverified.map(({ did }) => did));
-  return { readable: repos.filter((repo) => !skipped.has(repo.did)), unverified };
-}
+export class SetAsideRepos {
+  private readonly setAside = new Map<string, string>();
 
-/**
- * `refreshAuthenticated` for one account's view of a channel space, and dropping what the account cached from each writer that was
- * set aside: that writer shows nothing and its rows count toward no cutoff or limit. Runs before any read of the cache.
- */
-export async function refreshWriterRepos<T extends { did: string }>(
-  account: string,
-  space: string,
-  repos: readonly T[],
-  concurrency: number,
-  refresh: (repo: T) => Promise<void>,
-): Promise<{ readable: T[]; unverified: Array<{ did: string; reason: string }> }> {
-  const result = await refreshAuthenticated(repos, concurrency, refresh);
-  for (const { did } of result.unverified) purgeRepoCache(account, space, did);
-  return result;
+  constructor(private readonly account: string, private readonly space: string) {}
+
+  has(did: string): boolean {
+    return this.setAside.has(did);
+  }
+
+  reasons(): Array<{ did: string; reason: string }> {
+    return [...this.setAside].map(([did, reason]) => ({ did, reason }));
+  }
+
+  /**
+   * Runs `run` for one writer. A failure that classifies as the writer's sets the writer aside and returns `undefined`; a
+   * permanent one also drops what this account cached from the writer: that writer shows nothing and its rows count toward no
+   * cutoff or limit. A transient one keeps the cached copy, since the host may recover.
+   */
+  async guard<T>(did: string, run: () => Promise<T>): Promise<T | undefined> {
+    try {
+      return await run();
+    } catch (error) {
+      const failure = classifyRepoFailure(error);
+      if (!failure) throw error;
+      console.warn(`Channel sync set a writer aside (${failure.permanent ? "permanent" : "transient"}): ${describeRepoFailure(error)}`);
+      this.setAside.set(did, failure.reason);
+      if (failure.permanent) purgeRepoCache(this.account, this.space, did);
+      return undefined;
+    }
+  }
+
+  /** Runs `refresh` for every writer repo and returns the ones that were not set aside. Runs before any read of the cache. */
+  async refresh<T extends { did: string }>(repos: readonly T[], concurrency: number, refresh: (repo: T) => Promise<void>): Promise<T[]> {
+    await mapLimited(repos, concurrency, (repo) => this.guard(repo.did, () => refresh(repo)));
+    return repos.filter((repo) => !this.has(repo.did));
+  }
 }
 
 export function channelPageHasMore(
@@ -224,12 +233,13 @@ async function refresh(account: string, space: string, repo: string, client: Atp
   resetAndStore();
 }
 
-async function fillLatest(
+export async function fillLatest(
   account: string,
   space: string,
   repos: ListRepos.Repo[],
   clientFor: (did: string) => Promise<AtprotoClient>,
   target: number,
+  aside: SetAsideRepos,
 ): Promise<void> {
   const raw = getRawDb();
   const collection = "org.slack.channel.message";
@@ -247,6 +257,7 @@ async function fillLatest(
     const records = cached(account, space, collection).sort((left, right) => right.rkey.localeCompare(left.rkey));
     const cutoff = records.length >= goal ? records[goal - 1]?.rkey : undefined;
     const candidates = repos.flatMap((repo) => {
+      if (aside.has(repo.did)) return [];
       const state = raw.prepare("SELECT rev,next_cursor,finished FROM space_collection_cursor WHERE account_did=? AND space_uri=? AND repo_did=? AND collection=?")
         .get(account, space, repo.did, collection) as { rev: string; next_cursor: string | null; finished: number } | undefined;
       if (!state?.next_cursor || state.finished) return [];
@@ -255,7 +266,7 @@ async function fillLatest(
       return !cutoff || !lastSeen || lastSeen >= cutoff ? [{ repo, state }] : [];
     });
     if (candidates.length === 0 || records.length >= MAX_HISTORY) return;
-    await mapLimited(candidates, REPO_CONCURRENCY, async ({ repo, state }) => {
+    await mapLimited(candidates, REPO_CONCURRENCY, ({ repo, state }) => aside.guard(repo.did, async () => {
       const client = await clientFor(repo.did);
       const cursor = state.next_cursor ?? undefined;
       const usedCursors = seenCursors.get(repo.did) ?? new Set<string>();
@@ -269,17 +280,18 @@ async function fillLatest(
       const keys = seenRkeys.get(repo.did) ?? new Set<string>();
       seenRkeys.set(repo.did, keys);
       commitPageAndAdvanceCursor(account, space, repo.did, collection, state.rev, cursor!, page, keys);
-    });
+    }));
   }
 }
 
-async function fillOlder(
+export async function fillOlder(
   account: string,
   space: string,
   repos: ListRepos.Repo[],
   clientFor: (did: string) => Promise<AtprotoClient>,
   collection: string,
   target: number,
+  aside: SetAsideRepos,
 ): Promise<void> {
   const raw = getRawDb();
   const goal = Math.min(target, MAX_HISTORY);
@@ -295,13 +307,14 @@ async function fillOlder(
     const remaining = Math.min(goal, MAX_HISTORY) - cachedCount(account, space, collection);
     if (remaining <= 0) break;
     const candidates = repos.flatMap((repo) => {
+      if (aside.has(repo.did)) return [];
       const state = raw.prepare("SELECT rev,next_cursor,finished FROM space_collection_cursor WHERE account_did=? AND space_uri=? AND repo_did=? AND collection=?")
         .get(account, space, repo.did, collection) as { rev: string; next_cursor: string | null; finished: number } | undefined;
       return state?.next_cursor && !state.finished ? [{ repo, cursor: state.next_cursor, rev: state.rev }] : [];
     }).slice(0, remaining);
     if (candidates.length === 0) return;
     const limit = backfillPageLimit(remaining, candidates.length);
-    const stored = await mapLimited(candidates, REPO_CONCURRENCY, async ({ repo, cursor, rev }) => {
+    const stored = await mapLimited(candidates, REPO_CONCURRENCY, ({ repo, cursor, rev }) => aside.guard(repo.did, async () => {
       const client = await clientFor(repo.did);
       const usedCursors = seenCursors.get(repo.did) ?? new Set<string>();
       seenCursors.set(repo.did, usedCursors);
@@ -314,27 +327,33 @@ async function fillOlder(
       const keys = seenRkeys.get(repo.did) ?? new Set<string>();
       seenRkeys.set(repo.did, keys);
       return commitPageAndAdvanceCursor(account, space, repo.did, collection, rev, cursor, page, keys).stored;
-    });
-    if (stored.every((count) => count === 0)) return;
+    }));
+    if (stored.every((count) => !count)) return;
   }
   if (goal < MAX_HISTORY || cachedCount(account, space, collection) < goal) return;
   for (const repo of repos) {
+    if (aside.has(repo.did)) continue;
     const state = raw.prepare("SELECT rev,next_cursor,finished FROM space_collection_cursor WHERE account_did=? AND space_uri=? AND repo_did=? AND collection=?")
       .get(account, space, repo.did, collection) as { rev: string; next_cursor: string | null; finished: number } | undefined;
     if (!state?.next_cursor || state.finished) continue;
-    const client = await clientFor(repo.did);
-    const usedCursors = seenCursors.get(repo.did) ?? new Set<string>();
-    seenCursors.set(repo.did, usedCursors);
-    if (usedCursors.has(state.next_cursor)) throw new Error("PDS record pagination did not advance.");
-    usedCursors.add(state.next_cursor);
-    const page = await client.query<ListRecords.OutputSchema>("com.atproto.space.listRecords", {
-      space, repo: repo.did, collection, cursor: state.next_cursor, limit: 1,
+    const nextCursor = state.next_cursor;
+    const hasRecords = await aside.guard(repo.did, async () => {
+      const client = await clientFor(repo.did);
+      const usedCursors = seenCursors.get(repo.did) ?? new Set<string>();
+      seenCursors.set(repo.did, usedCursors);
+      if (usedCursors.has(nextCursor)) throw new Error("PDS record pagination did not advance.");
+      usedCursors.add(nextCursor);
+      const page = await client.query<ListRecords.OutputSchema>("com.atproto.space.listRecords", {
+        space, repo: repo.did, collection, cursor: nextCursor, limit: 1,
+      });
+      assertBoundedRecordPage(page, { collection, limit: 1, cursor: nextCursor, seenCursors: usedCursors });
+      if (page.records.length > 0) return true;
+      const keys = seenRkeys.get(repo.did) ?? new Set<string>();
+      seenRkeys.set(repo.did, keys);
+      commitPageAndAdvanceCursor(account, space, repo.did, collection, state.rev, nextCursor, page, keys);
+      return false;
     });
-    assertBoundedRecordPage(page, { collection, limit: 1, cursor: state.next_cursor, seenCursors: usedCursors });
-    if (page.records.length > 0) return;
-    const keys = seenRkeys.get(repo.did) ?? new Set<string>();
-    seenRkeys.set(repo.did, keys);
-    commitPageAndAdvanceCursor(account, space, repo.did, collection, state.rev, state.next_cursor, page, keys);
+    if (hasRecords) return;
   }
 }
 
@@ -421,8 +440,11 @@ function cachedCount(account: string, space: string, collection: string): number
   return (getRawDb().prepare("SELECT count(*) AS count FROM channel_record_cache WHERE account_did=? AND space_uri=? AND collection=?").get(account, space, collection) as { count: number }).count;
 }
 
-function hasMoreCursor(account: string, space: string, collection: string): boolean {
-  return Boolean(getRawDb().prepare("SELECT 1 FROM space_collection_cursor WHERE account_did=? AND space_uri=? AND collection=? AND next_cursor IS NOT NULL LIMIT 1").get(account, space, collection));
+/** Whether a writer that is still being read has older records to fetch. A set-aside writer is not fetched from, so its cursor offers nothing. */
+export function hasMoreCursor(account: string, space: string, collection: string, aside: SetAsideRepos): boolean {
+  const rows = getRawDb().prepare("SELECT repo_did FROM space_collection_cursor WHERE account_did=? AND space_uri=? AND collection=? AND next_cursor IS NOT NULL")
+    .all(account, space, collection) as Array<{ repo_did: string }>;
+  return rows.some((row) => !aside.has(row.repo_did));
 }
 
 function seconds(): number { return Math.floor(Date.now() / 1000); }

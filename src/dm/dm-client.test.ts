@@ -761,3 +761,84 @@ test("a member who wrote while switched off is read again after the mode change,
   const requests = await alice.listRequests();
   assert.deepEqual(requests.map((request) => request.convKey), [started.convKey]);
 });
+
+async function conversationWithBob(options: { aliceFetch?: (request: Request, real: (request: Request) => Promise<Response>) => Promise<Response> } = {}) {
+  const { network, client } = harness();
+  network.createAccount("did:plc:alice", "pds1");
+  network.createAccount("did:plc:bob", "pds2");
+  const alice = client("did:plc:alice", "pds1", options.aliceFetch
+    ? { fetchEndpoint: (request) => options.aliceFetch!(request, network.fetchEndpoint) }
+    : {});
+  const bob = client("did:plc:bob");
+  await bob.enableDms("everyone");
+  const started = await alice.startConversation(["did:plc:bob"]);
+  await bob.accept((await bob.listRequests())[0]!);
+  await alice.send(started.convKey, "hi bob");
+  network.advanceClock(2);
+  await bob.send(started.convKey, "hi alice");
+  return { network, alice, bob, started };
+}
+
+const bobsRepo = (request: Request, collection: string) => request.url.includes("repo=did%3Aplc%3Abob") && request.url.includes(collection);
+const hostFailure = () => new Response(JSON.stringify({ error: "UpstreamFailure", message: "Bad Gateway" }), { status: 502, headers: { "content-type": "application/json" } });
+
+test("a participant whose account was deactivated reads as a missing half, and the other halves are still read", async () => {
+  // #given a conversation in which bob's account is then deactivated (the authority still issues credentials for it)
+  const { network, alice, started } = await conversationWithBob();
+  network.setAccountState("did:plc:bob", "deactivated");
+
+  // #when alice reads the conversation
+  const page = await alice.readConversation(started.convKey, started.participants);
+
+  // #then the read succeeds, bob's half is missing and shows nothing, and alice's own messages remain
+  assert.equal(page.halves["did:plc:bob"], "missing");
+  assert.equal(page.halves["did:plc:alice"], "ok");
+  assert.deepEqual(page.messages.map((message) => message.text), ["hi bob"]);
+});
+
+test("a participant whose account was taken down reads as a missing half too", async () => {
+  const { network, alice, started } = await conversationWithBob();
+  network.setAccountState("did:plc:bob", "takendown");
+  const page = await alice.readConversation(started.convKey, started.participants);
+  assert.equal(page.halves["did:plc:bob"], "missing");
+  assert.deepEqual(page.messages.map((message) => message.text), ["hi bob"]);
+});
+
+test("a participant whose host fails while its messages are listed reads as a missing half and none of its messages are shown", async () => {
+  // #given bob's host answers the header read but fails the message listing
+  const { alice, started } = await conversationWithBob({
+    aliceFetch: async (request, real) => bobsRepo(request, "org.slack.dm.message") ? hostFailure() : real(request),
+  });
+
+  // #when alice reads the conversation
+  const page = await alice.readConversation(started.convKey, started.participants);
+
+  // #then bob's half is reported missing, the read still succeeds, and alice's messages are shown
+  assert.equal(page.halves["did:plc:bob"], "missing");
+  assert.deepEqual(page.messages.map((message) => message.text), ["hi bob"]);
+});
+
+test("a participant whose host fails while its reactions are listed is reported as a missing half instead of silently showing none", async () => {
+  // #given bob's host answers the header and the messages but fails the reaction listing
+  const { alice, started } = await conversationWithBob({
+    aliceFetch: async (request, real) => bobsRepo(request, "org.slack.dm.reaction") ? hostFailure() : real(request),
+  });
+
+  // #when alice reads the conversation
+  const page = await alice.readConversation(started.convKey, started.participants);
+
+  // #then both halves' messages are shown and bob's half is flagged
+  assert.equal(page.halves["did:plc:bob"], "missing");
+  assert.deepEqual(page.messages.map((message) => message.text), ["hi alice", "hi bob"]);
+  assert.deepEqual(page.reactions, []);
+});
+
+test("a failure reading the caller's own half fails the read instead of marking every half missing", async () => {
+  // #given alice's own host fails while her own half's header is read (for example she is offline)
+  const { alice, started } = await conversationWithBob({
+    aliceFetch: async (request, real) => request.url.includes("repo=did%3Aplc%3Aalice") && request.url.includes("org.slack.dm.header") ? hostFailure() : real(request),
+  });
+
+  // #when/#then the read rejects, so the caller sees an error rather than a conversation in which nobody is reachable
+  await assert.rejects(alice.readConversation(started.convKey, started.participants), /Bad Gateway/);
+});

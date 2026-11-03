@@ -7,6 +7,7 @@ const ISOMORPHIC_PROTOCOL_MODULES = [
   "src/protocol/keys.ts",
   "src/atproto/space-key.ts",
   "src/atproto/kem-key.ts",
+  "src/atproto/repo-failure.ts",
   "src/atproto/space-policy.ts",
   "src/atproto/space-credential-core.ts",
   "src/atproto/xrpc.ts",

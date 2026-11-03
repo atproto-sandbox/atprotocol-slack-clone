@@ -319,9 +319,10 @@ export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: DmC
     const requestEpoch = operatorDataEpoch.current;
     inboxRequestInFlightRef.current = true;
     try {
-      const result = await api<{ requests: InboxRequest[] }>(`/api/inbox/requests?workspace=${encodeURIComponent(workspaceUri)}`);
+      const result = await api<{ requests: InboxRequest[]; skipped?: Array<{ did: string; reason: string }> }>(`/api/inbox/requests?workspace=${encodeURIComponent(workspaceUri)}`);
       if (operatorDataEpoch.current !== requestEpoch || activeUriRef.current !== workspaceUri) return;
       setInbox(result.requests);
+      if (result.skipped?.length) setStatus(`Join requests from ${result.skipped.map(({ did, reason }) => `${did} (${reason})`).join("; ")} could not be read.`);
       setInboxLoaded(true);
       setInboxPermissionMissing(false);
       inboxPermissionMissingRef.current = false;

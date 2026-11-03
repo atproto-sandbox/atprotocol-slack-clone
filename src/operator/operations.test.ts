@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { SpaceMacError } from "@atproto/space";
 import { KemKeyError } from "@/atproto/kem-key";
+import { UpstreamResponseTooLargeError } from "@/lib/bounded-json";
 import { XrpcError } from "@/atproto/xrpc";
 import { channelUri, inboxUri, requestRecordKey } from "@/protocol/keys";
 import { assertWorkspaceRosterMatchesPds, readJoinRequestRecord, savedWorkspaceOperations, validateOperatorRequest } from "./operations";
@@ -63,7 +64,7 @@ test("recovery keeps unreadable journal rows visible instead of silently skippin
   ]);
 });
 
-test("a join request from a repo that cannot be authenticated reads as no current request instead of failing the operation", async () => {
+test("a join request from a repo that cannot be read for good reads as no current request instead of failing the operation", async () => {
   const authority = "did:plc:owner";
   const requester = "did:plc:requester";
   const inbox = inboxUri(authority);
@@ -79,5 +80,9 @@ test("a join request from a repo that cannot be authenticated reads as no curren
   assert.equal(await read(() => { throw new SpaceMacError("getRecord failed MAC verification"); }), null, "a MAC that does not verify");
   assert.equal(await read(() => { throw new XrpcError(404, "not found", "RecordNotFound"); }), null, "no such record");
   assert.equal(await read(() => ({ uri: "", value: { ...request, requestId: "not-a-tid" } })), null, "an invalid record");
-  await assert.rejects(read(() => { throw new XrpcError(500, "upstream failure", "InternalServerError"); }), /upstream failure/, "other failures still fail the operation so it can be retried");
+  assert.equal(await read(() => { throw new XrpcError(400, "Repo has been deactivated", "RepoDeactivated"); }), null, "a deactivated account");
+  assert.equal(await read(() => { throw new XrpcError(400, "Repo has been takendown", "RepoTakendown"); }), null, "a taken-down account");
+  assert.equal(await read(() => { throw new UpstreamResponseTooLargeError(8 * 1024 * 1024); }), null, "an answer larger than this app reads");
+  await assert.rejects(read(() => { throw new XrpcError(500, "upstream failure", "InternalServerError"); }), /upstream failure/, "a host that is down still fails the operation so it can be retried");
+  await assert.rejects(read(() => { throw new TypeError("fetch failed"); }), /fetch failed/, "an unreachable host still fails the operation so it can be retried");
 });

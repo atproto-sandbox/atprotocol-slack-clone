@@ -103,6 +103,8 @@ export class FakeDmNetwork {
   private virtualNow = Date.now();
 
   private readonly accounts = new Map<string, string>();
+  /** Accounts whose repo the host refuses to serve to anyone but the account itself, like the pinned PDS's `assertRepoAvailability`. */
+  private readonly unavailable = new Map<string, "RepoDeactivated" | "RepoTakendown">();
   private readonly kemKeys = new Map<string, Promise<P256Keypair>>();
   /** What a DID-document cache holds for each account: stale after `rotateKemKey` until a forced refresh. */
   private readonly publishedKemKeys = new Map<string, string>();
@@ -123,6 +125,12 @@ export class FakeDmNetwork {
 
   createAccount(did: string, host = "pds1"): void {
     this.accounts.set(did, host);
+  }
+
+  /** Deactivates or takes down an account: the authority still issues credentials for it, but its host refuses every other account's read of its repos. */
+  setAccountState(did: string, state: "active" | "deactivated" | "takendown"): void {
+    if (state === "active") this.unavailable.delete(did);
+    else this.unavailable.set(did, state === "deactivated" ? "RepoDeactivated" : "RepoTakendown");
   }
 
   hasAccount(did: string): boolean {
@@ -468,9 +476,15 @@ export class FakeDmNetwork {
     return auth.kind === "self" && params.repo === auth.did;
   }
 
+  private assertRepoAvailability(repo: string, own: boolean): void {
+    const state = this.unavailable.get(repo);
+    if (state && !own) throw new FakeXrpcError(400, state, `Repo is not available: ${repo}`);
+  }
+
   private async getRecord(params: Record<string, unknown>, auth: FakeAuth, requestHeaders: Headers | undefined): Promise<WithHeaders> {
     const own = this.isOwnRead(params, auth);
     if (!own) this.requireCredential(params, auth);
+    this.assertRepoAvailability(String(params.repo), own);
     const space = this.requireSpace(params.space);
     const repo = String(params.repo);
     const collection = String(params.collection);
@@ -488,6 +502,7 @@ export class FakeDmNetwork {
   private async getLatestCommit(params: Record<string, unknown>, auth: FakeAuth, requestHeaders: Headers | undefined): Promise<WithHeaders> {
     const own = this.isOwnRead(params, auth);
     if (!own) this.requireCredential(params, auth);
+    this.assertRepoAvailability(String(params.repo), own);
     const space = this.requireSpace(params.space);
     const repo = String(params.repo);
     const sharedSecret = own && !requestHeaders?.has(WANT_MAC_HEADER) ? undefined : await this.macSecret("com.atproto.space.getLatestCommit", repo, requestHeaders);
@@ -508,6 +523,7 @@ export class FakeDmNetwork {
 
   private listRecords(params: Record<string, unknown>, auth: FakeAuth) {
     this.requireCredential(params, auth);
+    this.assertRepoAvailability(String(params.repo), false);
     const space = this.requireSpace(params.space);
     const repo = String(params.repo);
     const collection = String(params.collection);
