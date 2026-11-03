@@ -11,7 +11,7 @@ test("an inbox change stream is limited to its owner", () => {
   assert.deepEqual(authorizeDmSubscription(`at://${alice}/space/org.slack.dm.inbox/self`, bob), { allowed: false, status: 403, reason: "A DM inbox change stream is limited to its owner." });
 });
 
-test("a conversation half stream is allowed for any signed-in user because its random key is the guard", () => {
+test("a conversation half stream is allowed for any signed-in user because the stream is content-free (its key is a TID, not a secret)", () => {
   const half = `at://${alice}/space/org.slack.dm.conversation/${convKey}`;
   assert.deepEqual(authorizeDmSubscription(half, bob), { allowed: true, space: half });
 });

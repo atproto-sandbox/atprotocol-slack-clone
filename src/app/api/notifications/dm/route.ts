@@ -7,7 +7,8 @@ export const runtime = "nodejs";
 export const maxDuration = 35;
 
 // Content-free DM change stream. Inbox streams are owner-only; a conversation
-// half is guarded by its random `convKey`. Events carry only a monotonic
+// half's key is a TID (creation time plus 10 random bits), so it hides little and the stream
+// is safe to expose only because events carry only a monotonic
 // cursor, so this endpoint reveals change timing and nothing else: it never
 // reads records, never mints credentials, and never touches DM content.
 export async function GET(request: NextRequest) {

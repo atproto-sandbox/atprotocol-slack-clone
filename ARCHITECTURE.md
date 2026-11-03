@@ -22,7 +22,8 @@
 - SQLite tables are limited to encrypted auth state, per-account sync cursors, app cache data, operation journal, and audit history.
 - Never persist a locally authoritative member/admin ACL.
 - Message/request ownership remains in the member's PDS repo. The operator never reads or proxies request bodies.
-- On failure to renew a private space credential, stop sync and remove that account's cached private data.
+- When the authority refuses a private space credential (the account lost access) or reports the space deleted, stop sync and remove that account's cached copy of the space. A failure to renew for any other reason says nothing about the space and keeps the copy.
+- The copy also goes when the authority sends `notifySpaceDeleted` (for every account), when a writer's repo is permanently unreadable (deactivated, taken down, unauthenticated, or oversized), and after `CACHE_RETENTION_DAYS` without a read, which bounds what is kept for an account that never returns. A writer whose host is merely down, or whose DID cannot be resolved, keeps its cached rows.
 - None of the rules above apply to DMs, because no DM state is ever written to SQLite; see "Direct-message runtime boundary" below.
 
 ## Protocol compatibility
