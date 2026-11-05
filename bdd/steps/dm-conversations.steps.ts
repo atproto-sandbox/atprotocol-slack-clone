@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { Given, Then, When } from "@cucumber/cucumber";
 import { reactionRecordKey, tidNow } from "@/protocol/keys";
 import type { FixtureAccount } from "../../protocol-tests/support/app-fixture";
-import type { AppWorld, Actor } from "../support/world";
+import { PAGE_TIMEOUT_MS, type AppWorld, type Actor } from "../support/world";
 import {
   type DmcReaction, type DmcRepoHistory, dmcAcceptRequestFrom, dmcAllowlistShown, dmcAppDatabaseMentions, dmcAppDatabaseText, dmcCard, dmcClientFor, dmcConnect, dmcConvKeyOf, dmcDeleteMessage, dmcDeliveryRows, dmcEditMessage, dmcEnableDms, dmcHalfOf, dmcHalfUris,
   dmcHeaderOf, dmcInboxOf, dmcInboxUris, dmcMembers, dmcMessagesOf, dmcMessageUri, dmcMint, dmcOpenOnlyConversation, dmcOpenRequests, dmcOpenSettings,
@@ -61,25 +61,26 @@ When("they enable DMs", async function (this: AppWorld) {
 Then("a DM inbox space with the fixed self key exists on their own PDS", async function (this: AppWorld) {
   const user = dmcActor(this, "user");
   assert.deepEqual(await dmcInboxUris(this, user), [`at://${user.did}/space/org.slack.dm.inbox/self`]);
-  const space = await this.pdsGet(user, "com.atproto.simplespace.getSpace", { space: dmcInboxOf(user) });
+  const space = await this.pdsGet(user, "com.atproto.space.getSpace", { space: dmcInboxOf(user) });
   assert.equal(space.status, 200, JSON.stringify(space.body));
 });
 
 Then("only its owner can read it", async function (this: AppWorld) {
   const user = dmcActor(this, "user");
   const inbox = dmcInboxOf(user);
-  const space = await this.pdsGet<{ readPolicy: { $type: string } }>(user, "com.atproto.simplespace.getSpace", { space: inbox });
-  assert.equal(space.body.readPolicy.$type, "com.atproto.simplespace.defs#memberListPolicy", "reads are limited to the member list");
+  const space = await this.pdsGet<{ policy: { $type: string; publicRead?: boolean } }>(user, "com.atproto.space.getSpace", { space: inbox });
+  assert.equal(space.body.policy.$type, "com.atproto.memberspace.policy");
+  assert.equal(space.body.policy.publicRead, false, "reads are limited to the member list");
 
   const writer = await this.actor("writer", 1);
-  const allowed = await this.pdsPost(user, "com.atproto.simplespace.putMember", { space: inbox, did: writer.did, read: false, write: true });
+  const allowed = await this.pdsPost(user, "com.atproto.memberspace.putMember", { space: inbox, did: writer.did, read: false, write: true });
   assert.equal(allowed.status, 200, JSON.stringify(allowed.body));
   assert.deepEqual(await dmcMembers(this, user, inbox), [{ did: writer.did, read: false, write: true }], "an allowed writer is on the member list without read access");
 
   const stranger = await this.actor("stranger", 1);
   assert.deepEqual(await dmcMint(this, user, inbox), { minted: true }, "the owner is given a read credential");
-  assert.deepEqual(await dmcMint(this, writer, inbox), { minted: false, status: 403, code: "UserNotAuthorized" }, "a writer allowed to send requests cannot read the inbox");
-  assert.deepEqual(await dmcMint(this, stranger, inbox), { minted: false, status: 403, code: "UserNotAuthorized" }, "a stranger cannot read the inbox");
+  assert.deepEqual(await dmcMint(this, writer, inbox), { minted: false, status: 403, code: "SpaceNotFound" }, "a writer allowed to send requests cannot read the inbox");
+  assert.deepEqual(await dmcMint(this, stranger, inbox), { minted: false, status: 403, code: "SpaceNotFound" }, "a stranger cannot read the inbox");
 });
 
 Then("a user without an inbox is shown as not having enabled DMs", async function (this: AppWorld) {
@@ -450,7 +451,7 @@ Then("another participant cannot edit it because the record lives in its author'
   await assert.rejects(dmcClientFor(this, reader).edit(uri, "forged edit"), /Can only modify your own DM messages/);
   await assert.rejects(dmcClientFor(this, reader).delete(uri), /Can only modify your own DM messages/);
 
-  const granted = await this.pdsPost(author, "com.atproto.simplespace.putMember", { space: half, did: reader.did, read: true, write: true });
+  const granted = await this.pdsPost(author, "com.atproto.memberspace.putMember", { space: half, did: reader.did, read: true, write: true });
   assert.equal(granted.status, 200, "the reader is even given write access to the author's half, so only the repo boundary can stop the edit");
   const forged = { space: half, repo: author.did, collection: "org.slack.dm.message", rkey: message!.rkey };
   const edit = await this.pdsPost(reader, "com.atproto.space.putRecord", {
@@ -571,14 +572,14 @@ Then("new credentials for that half are refused", async function (this: AppWorld
   const leaver = dmcActor(this, "leaver");
   const convKey = dmcRecall<string>(this, "convKey");
   assert.deepEqual(await dmcMembers(this, leaver, dmcHalfOf(leaver, convKey)), [], "the leaver's half lists no member");
-  assert.deepEqual(await dmcMint(this, stayer, dmcHalfOf(leaver, convKey)), { minted: false, status: 403, code: "UserNotAuthorized" });
+  assert.deepEqual(await dmcMint(this, stayer, dmcHalfOf(leaver, convKey)), { minted: false, status: 403, code: "SpaceNotFound" });
   const page = await dmcClientFor(this, stayer).readConversation(convKey, [stayer.did, leaver.did].sort());
-  assert.equal(page.halves[leaver.did], "revoked");
+  assert.equal(page.halves[leaver.did], "missing", "the reference authority answers a revoked reader like a half that does not exist");
   assert.deepEqual(page.messages.map((message) => message.text), ["words from the stayer"], "the leaver's words are no longer readable");
 
   await dmcReload(stayer);
   await dmcOpenOnlyConversation(stayer);
-  await stayer.page.getByText("revoked your access", { exact: true }).waitFor({ state: "visible" });
+  await stayer.page.getByText("hasn't replied or removed your access", { exact: true }).waitFor({ state: "visible" });
   await dmcCard(stayer, "words from the stayer").waitFor({ state: "visible" });
   assert.equal(await dmcCard(stayer, "words from the leaver").count(), 0, "the stayer's view no longer shows the leaver's words");
   assert.equal((await dmcMessagesOf(this, leaver, convKey)).length, 1, "leaving revokes access without deleting the leaver's own records");
@@ -618,7 +619,7 @@ Then("their messages are gone from their own PDS", async function (this: AppWorl
   const convKey = dmcRecall<string>(this, "convKey");
   const half = dmcHalfOf(unsender, convKey);
   assert.deepEqual(await dmcHalfUris(this, unsender), []);
-  const space = await this.pdsGet(unsender, "com.atproto.simplespace.getSpace", { space: half });
+  const space = await this.pdsGet(unsender, "com.atproto.space.getSpace", { space: half });
   assert.deepEqual({ status: space.status, error: space.body.error }, { status: 400, error: "SpaceNotFound" });
   assert.deepEqual(await dmcMessagesOf(this, unsender, convKey), [], "no message record remains in the deleted half");
   const page = await dmcClientFor(this, keeper).readConversation(convKey, [unsender.did, keeper.did].sort());
@@ -636,7 +637,7 @@ Then("copies other participants already fetched are not recalled", async functio
   for (const text of ["unsend one", "unsend two"]) await dmcCard(keeper, text).waitFor({ state: "visible" });
 
   const fresh: Actor = { ...keeper, page: await keeper.context.newPage() };
-  fresh.page.setDefaultTimeout(30_000);
+  fresh.page.setDefaultTimeout(PAGE_TIMEOUT_MS);
   await fresh.page.goto(this.appOrigin);
   await fresh.page.getByRole("button", { name: /New message/ }).waitFor({ state: "visible", timeout: 60_000 });
   await dmcOpenOnlyConversation(fresh);
@@ -791,8 +792,8 @@ Then("the sender gains no read access", async function (this: AppWorld) {
   const sender = dmcActor(this, "sender");
   const recipient = dmcActor(this, "recipient");
   const convKey = dmcRecall<string>(this, "convKey");
-  assert.deepEqual(await dmcMint(this, sender, dmcHalfOf(recipient, convKey)), { minted: false, status: 404, code: "SpaceNotFound" }, "there is no recipient half for the sender to read");
-  assert.deepEqual(await dmcMint(this, sender, dmcInboxOf(recipient)), { minted: false, status: 403, code: "UserNotAuthorized" }, "the sender cannot read the recipient's inbox");
+  assert.deepEqual(await dmcMint(this, sender, dmcHalfOf(recipient, convKey)), { minted: false, status: 403, code: "SpaceNotFound" }, "there is no recipient half for the sender to read");
+  assert.deepEqual(await dmcMint(this, sender, dmcInboxOf(recipient)), { minted: false, status: 403, code: "SpaceNotFound" }, "the sender cannot read the recipient's inbox");
   assert.deepEqual((await dmcMembers(this, recipient, dmcInboxOf(recipient))).filter((member) => member.read), [], "no one but the owner can read the inbox");
   const page = await dmcClientFor(this, sender).readConversation(convKey, [sender.did, recipient.did].sort());
   assert.equal(page.halves[recipient.did], "missing");
@@ -801,6 +802,6 @@ Then("the sender gains no read access", async function (this: AppWorld) {
   await dmcOpenOnlyConversation(sender);
   await dmcUntil(async () => {
     const chips = new Map((await dmcRoster(sender)).map((row) => [row.did, row.chip]));
-    return chips.get(sender.did) === "" && chips.get(recipient.did) === "hasn't replied";
+    return chips.get(sender.did) === "" && chips.get(recipient.did) === "hasn't replied or removed your access";
   }, "the sender's view to show that the recipient has not replied");
 });

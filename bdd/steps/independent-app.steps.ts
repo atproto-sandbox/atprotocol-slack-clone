@@ -342,7 +342,7 @@ Then("the app ignores the record because the workspace DID did not author it", {
   assert.equal(views.memberStalled.status, 400, "the admin-only operator read is refused to the member");
   assert.deepEqual(JSON.parse(views.memberStalled.body), STALLED_REFUSAL, "the refusal is the admin check's own, not a generic failure");
   assert.equal(views.memberVaultStatus, 403, "the member still cannot read the private channel");
-  const vaultMembers = await this.pdsGet<{ members?: Array<{ did: string }> }>(owner, "com.atproto.simplespace.listMembers", { space: channelUri(owner.did, vaultSkey), limit: "1000" });
+  const vaultMembers = await this.pdsGet<{ members?: Array<{ did: string }> }>(owner, "com.atproto.memberspace.listMembers", { space: channelUri(owner.did, vaultSkey), limit: "1000" });
   assert.equal((vaultMembers.body.members ?? []).some((entry) => entry.did === member.did), false, "the PDS member list of the private channel is unchanged");
 
   await authorityWritesWhatTheMemberForged(this, viewerNamed(this, "owner"), viewerNamed(this, "member"), outsider);
@@ -406,7 +406,7 @@ Then("it does not treat absence from that writer set as absence from membership"
   const writers = this.scratch.get("writers") as string[];
   assert.deepEqual(writers, [owner.did], "listRepos names only the account that has written");
 
-  const members = await this.pdsGet<{ members?: Array<{ did: string; read: boolean; write: boolean }> }>(owner, "com.atproto.simplespace.listMembers", { space, limit: "1000" });
+  const members = await this.pdsGet<{ members?: Array<{ did: string; read: boolean; write: boolean }> }>(owner, "com.atproto.memberspace.listMembers", { space, limit: "1000" });
   const onList = (members.body.members ?? []).find((entry) => entry.did === member.did);
   assert.deepEqual(onList && { read: onList.read, write: onList.write }, { read: true, write: true }, "the PDS member list still has the member with read and write");
 
@@ -577,11 +577,11 @@ async function runProtocolReconcile(world: AppWorld): Promise<ChildRun> {
 const PAUSED_MESSAGE = "Workspace admin mutations are paused.";
 
 async function pdsSnapshot(world: AppWorld, owner: Actor): Promise<unknown> {
-  const channels = await world.pdsGet<{ spaces: Array<{ uri: string }> }>(owner, "com.atproto.space.listSpaces", { type: "org.slack.channel", limit: "100" });
+  const channels = await world.pdsGet<{ spaces: Array<{ uri: string }> }>(owner, "com.atproto.space.listSpaces", { spaceType: "org.slack.channel", limit: "100" });
   const spaces = [world.workspaceUri, inboxUri(owner.did, workspaceSkeyOf(world)), ...channels.body.spaces.map((space) => space.uri)].sort();
   const memberLists: Record<string, string[]> = {};
   for (const space of spaces) {
-    const listed = await world.pdsGet<{ members?: Array<{ did: string; read: boolean; write: boolean }> }>(owner, "com.atproto.simplespace.listMembers", { space, limit: "1000" });
+    const listed = await world.pdsGet<{ members?: Array<{ did: string; read: boolean; write: boolean }> }>(owner, "com.atproto.memberspace.listMembers", { space, limit: "1000" });
     assert.equal(listed.status, 200, `listMembers ${space}: ${JSON.stringify(listed.body)}`);
     memberLists[space] = (listed.body.members ?? []).map((entry) => `${entry.did} read=${entry.read} write=${entry.write}`).sort();
   }

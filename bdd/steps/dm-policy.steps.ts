@@ -7,7 +7,7 @@ import { dmConversationUri, dmInboxUri, recordKeyHash, stableHash, tidNow } from
 import { validateDmHeaderMatchesRequest, validateSpaceRecord } from "@/protocol/records";
 import type { SecondApp } from "../../protocol-tests/support/app-fixture";
 import { completeConsent, signIn, submitWorkspaceName, uniqueWorkspaceName } from "../support/ui";
-import type { Actor, AppWorld } from "../support/world";
+import { PAGE_TIMEOUT_MS, type Actor, type AppWorld } from "../support/world";
 import {
   DmpProbe, type DmpHostileHalf, type DmpMintedCredential, dmpAcceptRequestFrom, dmpAllowlistDids, dmpAllowDid, dmpChooseMode, dmpConnectDms, dmpEnableDms, dmpMessageTexts, dmpOpenConversationWith,
   dmpOwnConvKeys, dmpOwnHeader, dmpOwnMessages, dmpParticipantRows, dmpPoll, dmpReadRequests, dmpReadRequestsScanned, dmpReload, dmpRequestCount, dmpSend, dmpSidebarConversationLabels,
@@ -15,8 +15,6 @@ import {
 } from "../support/dm-policy-ui";
 
 const SETUP_TIMEOUT = 300_000;
-const PUBLIC_POLICY = "com.atproto.simplespace.defs#publicPolicy";
-const MEMBER_LIST_POLICY = "com.atproto.simplespace.defs#memberListPolicy";
 
 const actorNamed = (world: AppWorld, role: string): Actor => {
   const actor = world.actors.get(role);
@@ -34,13 +32,14 @@ async function joinDms(world: AppWorld, role: string, host: 0 | 1): Promise<Acto
   return actor;
 }
 
-async function inboxPolicy(world: AppWorld, owner: Actor): Promise<{ writePolicy: string; members: Array<{ did: string; read: boolean; write: boolean }> }> {
+async function inboxPolicy(world: AppWorld, owner: Actor): Promise<{ publicWrite: boolean; members: Array<{ did: string; read: boolean; write: boolean }> }> {
   const space = dmInboxUri(owner.did);
-  const policy = await world.pdsGet<{ writePolicy: { $type: string } }>(owner, "com.atproto.simplespace.getSpace", { space });
+  const policy = await world.pdsGet<{ policy: { $type: string; publicWrite?: boolean } }>(owner, "com.atproto.space.getSpace", { space });
   assert.equal(policy.status, 200, JSON.stringify(policy.body));
-  const members = await world.pdsGet<{ members?: Array<{ did: string; read: boolean; write: boolean }> }>(owner, "com.atproto.simplespace.listMembers", { space, limit: "1000" });
+  const members = await world.pdsGet<{ members?: Array<{ did: string; read: boolean; write: boolean }> }>(owner, "com.atproto.memberspace.listMembers", { space, limit: "1000" });
   assert.equal(members.status, 200, JSON.stringify(members.body));
-  return { writePolicy: policy.body.writePolicy.$type, members: members.body.members ?? [] };
+  assert.equal(policy.body.policy.$type, "com.atproto.memberspace.policy");
+  return { publicWrite: policy.body.policy.publicWrite === true, members: members.body.members ?? [] };
 }
 
 async function trackedDids(world: AppWorld, owner: Actor): Promise<string[]> {
@@ -58,7 +57,7 @@ Given("a user sets their inbox policy to everyone", { timeout: SETUP_TIMEOUT }, 
   const user = await joinDms(this, "user", 0);
   await dmpEnableDms(user);
   await dmpChooseMode(user, "Everyone");
-  assert.equal((await inboxPolicy(this, user)).writePolicy, PUBLIC_POLICY, "the setting is stored on the user's own PDS");
+  assert.equal((await inboxPolicy(this, user)).publicWrite, true, "the setting is stored on the user's own PDS");
 });
 
 When("a stranger writes a request", { timeout: SETUP_TIMEOUT }, async function (this: AppWorld) {
@@ -89,7 +88,7 @@ Given("a user sets their inbox policy to an allowlist of writers", { timeout: SE
   await dmpEnableDms(user);
   await dmpAllowDid(user, friend.did);
   const inbox = await inboxPolicy(this, user);
-  assert.equal(inbox.writePolicy, MEMBER_LIST_POLICY);
+  assert.equal(inbox.publicWrite, false);
   assert.deepEqual(inbox.members.map(({ did, write }) => ({ did, write })), [{ did: friend.did, write: true }], "the allowlist holds exactly the allowed writer");
 });
 
@@ -135,7 +134,7 @@ Given("a user sets their inbox policy to nobody", { timeout: SETUP_TIMEOUT }, as
 
   await dmpChooseMode(user, "Nobody");
   const inbox = await inboxPolicy(this, user);
-  assert.equal(inbox.writePolicy, MEMBER_LIST_POLICY);
+  assert.equal(inbox.publicWrite, false);
   assert.deepEqual(inbox.members.map(({ did, write }) => ({ did, write })), [{ did: friend.did, write: false }], "nobody keeps the allowlist but switches every entry off");
   this.scratch.set("trackedBefore", await probeFor(this, user).trackedWriters(user));
 });
@@ -158,9 +157,9 @@ Then("no new writer is tracked", async function (this: AppWorld) {
   assert.deepEqual(after, before, "the set of tracked writers, and each writer's last recorded revision, is unchanged");
   assert.equal(after.some((writer) => writer.did === actorNamed(this, "stranger").did), false);
   const requestsFromFriend = new Set((await dmpRequestOps(this, friend, user)).map((op) => op.rkey));
-  assert.equal(requestsFromFriend.size, 2, "the friend, who is still tracked, has a second, unanswered request on the friend's PDS besides the accepted one");
+  assert.equal(requestsFromFriend.size, 2, "the friend has a second, unanswered request on the friend's PDS besides the accepted one");
   const { rows, scannedWriters } = await dmpReadRequestsScanned(user);
-  assert.deepEqual(scannedWriters, [friend.did], "the user's own scan was handed the friend as a candidate writer");
+  assert.deepEqual(scannedWriters, [], "switching the friend off evicted them from the writer set, so the user's own scan is handed nobody");
   assert.equal((await dmpSidebarConversationLabels(user)).length, 1, "and the same scan result listed the accepted conversation, so the folder was read after the scan, not before it");
   assert.deepEqual(rows.map((row) => row.sender), [], "no request is shown either");
 });
@@ -220,10 +219,15 @@ When("the user switches to an allowlist or to nobody", { timeout: SETUP_TIMEOUT 
   this.scratch.set("afterNobody", await observePolicy(this, user));
 });
 
-Then("those writers stay listed by the PDS", function (this: AppWorld) {
+Then("switching the policy alone leaves those writers listed by the PDS", function (this: AppWorld) {
   const both = [actorNamed(this, "kept").did, actorNamed(this, "dropped").did].sort();
-  assert.deepEqual((this.scratch.get("afterAllowlist") as PolicyObservation).pdsWriters, both);
-  assert.deepEqual((this.scratch.get("afterNobody") as PolicyObservation).pdsWriters, both);
+  assert.deepEqual((this.scratch.get("afterAllowlist") as PolicyObservation).pdsWriters, both, "updateSpace does not re-evaluate the writer set");
+});
+
+Then("switching an allowed writer off evicts that writer", function (this: AppWorld) {
+  // "Nobody" turns every allowlist entry off (putMember write:false), which now drops that member from the writer set;
+  // the writer who was never on the allowlist is not touched by the member change.
+  assert.deepEqual((this.scratch.get("afterNobody") as PolicyObservation).pdsWriters, [actorNamed(this, "dropped").did]);
 });
 
 Then("the client drops requests from writers outside the current policy", async function (this: AppWorld) {
@@ -235,14 +239,14 @@ Then("the client drops requests from writers outside the current policy", async 
   const afterAllowlist = this.scratch.get("afterAllowlist") as PolicyObservation;
   const afterNobody = this.scratch.get("afterNobody") as PolicyObservation;
   assert.deepEqual(afterAllowlist.scannedWriters, both, "the client's own scan was handed both writers under the allowlist");
-  assert.deepEqual(afterNobody.scannedWriters, both, "and under nobody");
+  assert.deepEqual(afterNobody.scannedWriters, [dropped.did], "and only the writer who was never allowed under nobody, because switching the allowed writer off evicted it");
   assert.deepEqual(afterAllowlist.shownSenders, [kept.did], "under the allowlist only the allowed writer's request is shown");
   assert.deepEqual(afterNobody.shownSenders, [], "under nobody no request is shown");
 });
 
 // --- Reads merge validated halves -------------------------------------------------------------------
 
-const MISSING_HALF_CHIP = "hasn't replied";
+const MISSING_HALF_CHIP = "hasn't replied or removed your access";
 
 async function waitForRequestFrom(recipient: Actor, sender: Actor): Promise<void> {
   await dmpPoll(async () => (await dmpReadRequests(recipient)).some((row) => row.sender === sender.did), { what: `${sender.role}'s request in ${recipient.role}'s folder`, timeoutMs: 60_000 });
@@ -528,8 +532,8 @@ Then("a party who cannot guess the key cannot confirm who talks to whom", { time
   }
   assert.deepEqual([...outcomes.get("random")!], ["SpaceNotFound"], "a key nobody ever created is reported as not found");
   assert.deepEqual([...outcomes.get("derived")!], ["SpaceNotFound"], "every key derived from the participants is reported exactly like a key nobody created");
-  assert.equal(await probe.credentialOutcome(dmConversationUri(actorNamed(this, first.owner).did, first.convKey)), "denied", "whereas knowing the real key would reveal that the conversation exists");
-  assert.equal(await probe.credentialOutcome(dmConversationUri(actorNamed(this, second.owner).did, second.convKey)), "denied");
+  assert.equal(await probe.credentialOutcome(dmConversationUri(actorNamed(this, first.owner).did, first.convKey)), "SpaceNotFound", "and even the real key reveals nothing to a non-member: the authority answers exactly as for a key nobody created");
+  assert.equal(await probe.credentialOutcome(dmConversationUri(actorNamed(this, second.owner).did, second.convKey)), "SpaceNotFound");
   assert.deepEqual(await dmpOwnConvKeys(this, outsider), [], "the outsider's own PDS lists no conversation to learn from");
 });
 
@@ -686,7 +690,7 @@ When("a participant signs in with any conforming OAuth client", { timeout: SETUP
   await context.route(`${this.appOrigin}/**`, (route) => route.abort("connectionrefused"));
   await context.route("**/api/notifications/dm**", (route) => { notificationStreamAttempts.push(route.request().url()); return route.abort("connectionrefused"); });
   const page = await context.newPage();
-  page.setDefaultTimeout(30_000);
+  page.setDefaultTimeout(PAGE_TIMEOUT_MS);
   const elsewhere: Actor = { ...alice, role: "alice-elsewhere", context, page, calls: [] };
   this.actors.set(elsewhere.role, elsewhere);
   this.scratch.set("rebuiltCredentials", dmpWatchCredentials(page));

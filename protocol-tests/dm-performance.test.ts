@@ -1,17 +1,22 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { acceptedTimestamps, loadSlurFilter } from "./support/accepted-tid";
 import test from "node:test";
-import { JoseKey } from "@atproto/jwk-jose";
+import { kemKeyFromDidDocument } from "@/atproto/kem-key";
+import { generateSpaceKey } from "@/atproto/space-key";
 import { AtprotoClient } from "@/atproto/xrpc";
 import { DmClient, type DmDeps, type DmStore } from "@/dm/dm-client";
 import { tidNow } from "@/protocol/keys";
 import { mapLimited } from "@/lib/map-limited";
 import { createFixtureTempRoot } from "./fixture-temp";
+import { memberspacePolicy } from "@/atproto/space-policy";
 
 // M4 exit evidence (.ai/plans/dm-tasks/m4.md): a 100-participant conversation
 // with 20,000 total messages must let `readConversation` fetch the latest 100
-// in <= 5 seconds on the local two-PDS fixture.
+// within the budget below on the local two-PDS fixture. The budget was 5 s until 2026-10-31. Every credentialed read now carries a MAC
+// (an ephemeral ECDH on both sides, all in one process here), and four runs on the 5d88b414 pin measured 4.84, 4.96, 5.01 and
+// 5.14 s, so the owner raised it to 8 s explicitly. It still fails on a slowdown well beyond that.
 
 type TestAgent = {
   com: { atproto: { server: {
@@ -27,9 +32,9 @@ const PARTICIPANTS = 100;
 const TOTAL_MESSAGES = 20_000;
 const MESSAGES_PER_HALF = TOTAL_MESSAGES / PARTICIPANTS;
 const APPLY_WRITES_BATCH = 100;
-const READ_BUDGET_MS = 5_000;
+const READ_BUDGET_MS = 8_000;
 
-test("DM read budget: 100 participants, 20,000 total messages, latest-100 read in <= 5s", { timeout: 10 * 60 * 1000 }, async () => {
+test("DM read budget: 100 participants, 20,000 total messages, latest-100 read in <= 8s", { timeout: 10 * 60 * 1000 }, async () => {
   assert.ok(PINNED_CHECKOUT, "set ATPROTO_PINNED_CHECKOUT to the pinned atproto checkout");
   const { TestNetworkNoAppView } = await import(pathToFileURL(join(PINNED_CHECKOUT, "packages/dev-env/src/index.ts")).href) as {
     TestNetworkNoAppView: { create(options: { extraPdses: number; pds?: { rateLimitsEnabled?: boolean } }): Promise<TestNetwork> };
@@ -71,8 +76,9 @@ test("DM read budget: 100 participants, 20,000 total messages, latest-100 read i
         if (!url) throw new Error(`dm-performance: no known PDS for ${did}`);
         return url;
       },
+      resolveKemKey: async (did, forceRefresh) => kemKeyFromDidDocument(did, await network!.pds.ctx.idResolver.did.resolve(did, forceRefresh) as { verificationMethod?: unknown }),
       fetchEndpoint: (request) => fetch(request),
-      generateKey: () => JoseKey.generate(["ES256"]),
+      generateKey: generateSpaceKey,
       store: createStore(),
     });
 
@@ -93,14 +99,12 @@ test("DM read budget: 100 participants, 20,000 total messages, latest-100 read i
     await mapLimited(participants, 16, async (owner) => {
       const client = rawClientFor(owner);
       const half = `at://${owner.did}/space/org.slack.dm.conversation/${convKey}`;
-      await client.procedure("com.atproto.simplespace.createSpace", {
-        type: "org.slack.dm.conversation", skey: convKey,
-        readPolicy: { $type: "com.atproto.simplespace.defs#memberListPolicy" },
-        writePolicy: { $type: "com.atproto.simplespace.defs#memberListPolicy" },
-        appAccess: { $type: "com.atproto.simplespace.defs#open" },
+      await client.procedure("com.atproto.space.createSpace", {
+        spaceType: "org.slack.dm.conversation", skey: convKey,
+        policy: memberspacePolicy(),
       });
       await mapLimited(participants.filter((other) => other.did !== owner.did), 16, (other) =>
-        client.procedure("com.atproto.simplespace.putMember", { space: half, did: other.did, read: true, write: false }));
+        client.procedure("com.atproto.memberspace.putMember", { space: half, did: other.did, read: true, write: false }));
       await client.procedure("com.atproto.space.putRecord", {
         space: half, repo: owner.did, collection: "org.slack.dm.header", rkey: "self",
         record: { $type: "org.slack.dm.header", convKey, participants: allDids, createdAt },
@@ -114,6 +118,7 @@ test("DM read budget: 100 participants, 20,000 total messages, latest-100 read i
     // in the same relative time slot, so the true latest 100 spans all 100
     // halves instead of one participant's own tail.
     const base = Date.now() - PARTICIPANTS * MESSAGES_PER_HALF - 1_000;
+    const stamps = acceptedTimestamps(tidNow, await loadSlurFilter(PINNED_CHECKOUT), base, PARTICIPANTS * MESSAGES_PER_HALF);
     const messageStarted = performance.now();
     let totalWritten = 0;
     await mapLimited(participants.map((owner, participantIndex) => ({ owner, participantIndex })), 16, async ({ owner, participantIndex }) => {
@@ -122,7 +127,7 @@ test("DM read budget: 100 participants, 20,000 total messages, latest-100 read i
       for (let batchStart = 0; batchStart < MESSAGES_PER_HALF; batchStart += APPLY_WRITES_BATCH) {
         const writes = Array.from({ length: Math.min(APPLY_WRITES_BATCH, MESSAGES_PER_HALF - batchStart) }, (_unused, offset) => {
           const sequence = batchStart + offset;
-          const timestamp = base + sequence * PARTICIPANTS + participantIndex;
+          const timestamp = stamps[sequence * PARTICIPANTS + participantIndex]!;
           const rkey = tidNow(timestamp, 0);
           return {
             $type: "com.atproto.space.applyWrites#create", collection: "org.slack.dm.message", rkey,

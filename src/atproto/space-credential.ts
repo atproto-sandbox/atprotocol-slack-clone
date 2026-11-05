@@ -1,7 +1,7 @@
-import { JoseKey } from "@atproto/jwk-jose";
 import type { OAuthSession } from "@atproto/oauth-client-node";
-import { fetchValidatedEndpoint, resolvePds } from "./identity";
+import { fetchValidatedEndpoint, resolveKemKey, resolvePds } from "./identity";
 import { sessionClient } from "./client";
+import { generateSpaceKey } from "./space-key";
 import { mintSpaceCredentialWith, SpaceCredential, SpaceCredentialError } from "./space-credential-core";
 
 export { SpaceCredential, SpaceCredentialError };
@@ -11,8 +11,9 @@ export async function mintSpaceCredential(session: OAuthSession, space: string):
     {
       memberClient: sessionClient(session),
       resolvePds,
+      resolveKemKey,
       fetchEndpoint: fetchValidatedEndpoint,
-      generateKey: () => JoseKey.generate(["ES256"]),
+      generateKey: generateSpaceKey,
     },
     space,
   );

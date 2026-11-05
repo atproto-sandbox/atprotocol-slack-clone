@@ -4,8 +4,10 @@ export type DmSubscriptionDecision = { allowed: true; space: string } | { allowe
 
 /**
  * An inbox URI is derivable from a DID, so its change stream is limited to its
- * owner. A conversation half is protected by its random key instead; membership
- * cannot be checked here because the server never holds DM credentials.
+ * owner. A conversation half cannot be checked here, because the server never holds
+ * DM credentials, and its key is a TID (creation time plus 10 random bits), not a
+ * secret. That is acceptable only because the stream is content-free: it carries a
+ * change counter and nothing else.
  */
 export function authorizeDmSubscription(space: string, sessionDid: string): DmSubscriptionDecision {
   const parsed = parseDmSpaceUri(space);

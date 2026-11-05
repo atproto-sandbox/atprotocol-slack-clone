@@ -1,5 +1,9 @@
 # Let a user discover the spaces they have been added to
 
+Status against `5d88b414` (2026-10-30): Unchanged. `listSpaces` still lists only the caller's own spaces (a `read_self` grant covers it) and there is still no membership lookup.
+
+Status against `5b95b2f2`: Unchanged. `listSpaces` still returns only spaces the user holds a repo in (the `type` filter is now `spaceType`); there is still no membership lookup.
+
 ## Summary
 A member's PDS tracks only the spaces its user has *written to*, and the authority's member list is host-internal and readable only by the owner. So an account that has been added to a space has no protocol-level way to learn the space exists. Applications must deliver the space URI out of band.
 
@@ -32,7 +36,7 @@ com.atproto.space.listMemberships     (member's PDS, OAuth)
 ## Alternatives considered
 - **Application-level invitation records** in an invitee-owned space. Works only for accounts that already enabled it, and every app reinvents it.
 - **Share links** (what we ship). Fine as a convenience, but it means being added is invisible without the link.
-- **Pending state**: a separate "invited, not yet accepted" state before the member can mint credentials. A bigger change to `simplespace` semantics, so listed as an open question and not required here.
+- **Pending state**: a separate "invited, not yet accepted" state before the member can mint credentials. A bigger change to member-space (`memberspace`) semantics, so listed as an open question and not required here.
 
 ## Compatibility
 Additive. A host that does not implement `notifyMembership` simply produces no entries, and applications keep falling back to share links.
@@ -41,6 +45,9 @@ Additive. A host that does not implement `notifyMembership` simply produces no e
 - Abuse: an authority can add arbitrary accounts, so the member's PDS needs per-sender rate limits, and probably a way for the user to dismiss or block an authority.
 - Should membership be pending until the user accepts, as in most invitation systems, instead of granting read access immediately on `putMember`?
 - Retention: entries should disappear on `removeMember` and `deleteSpace`.
+
+## Related work: opensocial.group
+The `opensocial.group` draft (peer proposal, 2026-09) solves the same gap at the application-standard level: each user hosts a `group.opensocial.invites/self` space, the inviting group writes an `invite` record into it from its own repo, and "delivery uses normal space write notifications". The inbox is owner-read-only. This is the "invitee-owned space" alternative above, standardized. Its limits are what motivate this request: the invitee must already host the space (it cannot reach an account that never enabled it, and the sender cannot tell that, see U11), and it needs a group service that existing PDSes do not run. A protocol-level membership notification would make that inbox unnecessary for accounts on any simplespace host; if the core team prefers the inbox pattern, the alternative should at least be blessed as the standard delivery path so apps stop inventing their own.
 
 ## Internal references (remove before filing)
 `src/app/ui/invite-banner.tsx` and `src/app/ui/client-api.ts` (`inviteLinkFor`), the BDD scenario "An invited member opens the link and sees the workspace" in `features/workspaces.feature`, and the investigation notes in `.ai/reviews/2026-10-07-invite-discovery.md`.

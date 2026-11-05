@@ -6,16 +6,20 @@ const TID_BASE32 = "234567abcdefghijklmnopqrstuvwxyz";
 
 export const DM_INBOX_SKEY = "self";
 
+/** A space key: record-key syntax (the PDS refuses `.` and `..`), at most 128 characters. */
 export function isSkey(value: unknown): value is string {
-  return typeof value === "string" && /^[A-Za-z0-9._~:-]{1,128}$/.test(value);
+  return typeof value === "string" && /^[A-Za-z0-9._~:-]{1,128}$/.test(value) && value !== "." && value !== "..";
 }
 
 export function isTid(value: unknown): value is string {
   return typeof value === "string" && /^[234567abcdefghijklmnopqrstuvwxyz]{13}$/.test(value);
 }
 
-export function isDid(value: unknown): value is string {
-  return typeof value === "string" && /^did:[a-z0-9]+:[A-Za-z0-9._:%-]+$/.test(value);
+export type Did = `did:${string}:${string}`;
+
+/** A DID in the syntax every part of this app accepts; the length bounds keep a hostile link from rendering as a wall of text. */
+export function isDid(value: unknown): value is Did {
+  return typeof value === "string" && /^did:[a-z0-9]{1,64}:[A-Za-z0-9._:%-]{1,512}$/.test(value);
 }
 
 export function stableHash(value: string): string {
@@ -46,16 +50,20 @@ export function decisionRecordKey(requestUri: string): string {
   return `q-${recordKeyHash(requestUri)}`;
 }
 
+export function spaceUri(authorityDid: string, type: string, skey: string): string {
+  return `at://${authorityDid}/space/${type}/${skey}`;
+}
+
 export function workspaceUri(authorityDid: string, skey = "workspace"): string {
-  return `at://${authorityDid}/space/org.slack.workspace/${skey}`;
+  return spaceUri(authorityDid, "org.slack.workspace", skey);
 }
 
 export function inboxUri(authorityDid: string, skey = "workspace"): string {
-  return `at://${authorityDid}/space/org.slack.inbox/${skey}`;
+  return spaceUri(authorityDid, "org.slack.inbox", skey);
 }
 
 export function channelUri(authorityDid: string, skey: string): string {
-  return `at://${authorityDid}/space/org.slack.channel/${skey}`;
+  return spaceUri(authorityDid, "org.slack.channel", skey);
 }
 
 export function dmInboxUri(ownerDid: string): string {
@@ -120,16 +128,34 @@ export function canonicalParticipants(dids: readonly string[]): string[] {
 
 const SPACE_URI_PATTERN = /^at:\/\/(did:[^/\s]+)\/space\/([A-Za-z0-9.-]+)\/([A-Za-z0-9._~:-]{1,128})$/;
 
-export function parseSpaceUri(uri: string): { authorityDid: string; type: string; skey: string } | null {
+export function parseSpaceUri(uri: string): { authorityDid: Did; type: string; skey: string } | null {
   const match = SPACE_URI_PATTERN.exec(uri);
   if (!match) return null;
   const [, authorityDid, type, skey] = match;
-  return isDid(authorityDid) ? { authorityDid, type, skey } : null;
+  return isDid(authorityDid) && isSkey(skey) ? { authorityDid, type, skey } : null;
+}
+
+/** The authority of any space URI. */
+export function requireSpaceAuthority(space: string): Did {
+  const parsed = parseSpaceUri(space);
+  if (!parsed) throw new Error("Invalid permissioned space URI.");
+  return parsed.authorityDid;
+}
+
+/** A workspace space URI's authority and skey, or null for any other URI. */
+export function parseWorkspaceUri(uri: string): { authorityDid: Did; skey: string } | null {
+  const parsed = parseSpaceUri(uri);
+  return parsed?.type === "org.slack.workspace" ? { authorityDid: parsed.authorityDid, skey: parsed.skey } : null;
+}
+
+/** A channel space URI's authority and skey, or null for any other URI. */
+export function parseChannelUri(uri: string): { authorityDid: Did; skey: string } | null {
+  const parsed = parseSpaceUri(uri);
+  return parsed?.type === "org.slack.channel" ? { authorityDid: parsed.authorityDid, skey: parsed.skey } : null;
 }
 
 export function spaceRecordUri(spaceUri: string, repoDid: string, collection: string, rkey: string): string {
-  if (!/^at:\/\/did:[^/\s]+\/space\/[A-Za-z0-9.-]+\/[A-Za-z0-9._~:-]{1,128}$/.test(spaceUri) ||
-    !/^did:[^/\s]+$/.test(repoDid) || !/^[A-Za-z0-9.-]+$/.test(collection) || !/^[A-Za-z0-9._~:-]+$/.test(rkey)) {
+  if (!parseSpaceUri(spaceUri) || !isDid(repoDid) || !/^[A-Za-z0-9.-]+$/.test(collection) || !/^[A-Za-z0-9._~:-]+$/.test(rkey)) {
     throw new TypeError("Invalid space record URI components.");
   }
   return `${spaceUri}/${repoDid}/${collection}/${rkey}`;
@@ -143,7 +169,7 @@ export function parseSpaceRecordUri(
   const prefix = `${spaceUri}/`;
   if (!uri.startsWith(prefix)) return null;
   const parts = uri.slice(prefix.length).split("/");
-  if (parts.length !== 3 || parts[1] !== collection || !/^did:[^/\s]+$/.test(parts[0]) || !/^[A-Za-z0-9._~:-]+$/.test(parts[2])) return null;
+  if (parts.length !== 3 || parts[1] !== collection || !isDid(parts[0]) || !/^[A-Za-z0-9._~:-]+$/.test(parts[2])) return null;
   try {
     return spaceRecordUri(spaceUri, parts[0], collection, parts[2]) === uri
       ? { repo: parts[0], rkey: parts[2] }

@@ -1,5 +1,9 @@
 # Let clients subscribe to space changes directly, without a relay service
 
+Status against `5d88b414` (2026-10-30): Not affected. `registerNotify` still takes a service identifier, and `notifyWrite` now carries `data` (renamed from `hash`); a browser still has no delivery endpoint. `listRepoOps` and `getLatestCommit` now need a MAC request, which a streaming method would have to carry as well.
+
+Status against `5b95b2f2`: Not affected. `registerNotify` still takes a service identifier; `notifyWrite` gained `spaceRev` and `prevSpaceRev`, which makes a gap detectable but does not give a browser a delivery endpoint.
+
 ## Summary
 The only real-time mechanism, `registerNotify`, delivers `notifyWrite` to a *service endpoint*. A browser-only application therefore has to relay through a server, and that server learns which spaces each user follows.
 
@@ -15,8 +19,8 @@ A long-lived stream on the space host, and the same on a repo host for one repo:
 ```
 com.atproto.space.subscribeSpace   (space host)
   params: { space, cursor? }
-  auth:   space credential + DPoP (same as other sync methods)
-  frames: { seq, repo, rev, hash }   // same payload as notifyWrite
+  auth:   space credential (the same `Atproto-Space-Credential` scheme as other sync methods)
+  frames: { seq, repo, rev, data }   // same payload as notifyWrite
           { seq, deleted: true }     // the space was deleted (as notifySpaceDeleted)
 
 com.atproto.space.subscribeRepoOps (repo host)
@@ -26,7 +30,7 @@ com.atproto.space.subscribeRepoOps (repo host)
 
 Notes:
 - A frame reveals only that a repo advanced, exactly what `notifyWrite` already reveals. Clients then pull with `listRepoOps` as today.
-- Browsers cannot set an `Authorization` header on a WebSocket. Either specify streaming over HTTP (fetch with a readable body, which can carry DPoP headers) or define a first-frame authentication for WebSocket.
+- Browsers cannot set an `Authorization` header on a WebSocket. Either specify streaming over HTTP (fetch with a readable body, which can carry the credential's signature headers) or define a first-frame authentication for WebSocket.
 - `cursor` may be best-effort: if it is older than retention, the stream sends a "resync" frame and clients fall back to `listRepos` and `getLatestCommit`.
 
 ## Alternatives considered

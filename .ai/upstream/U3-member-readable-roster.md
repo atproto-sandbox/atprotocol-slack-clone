@@ -1,5 +1,9 @@
 # Optional: let members list who else is in a space
 
+Status against `5d88b414` (2026-10-30): Partly addressed. `memberspace.policy.publishMembers` (opt-in) publishes the member list as `com.atproto.memberspace.member` records (`{ read, write }`, keyed by the member's DID) in the authority's own repo, readable with a space credential. It carries no roles or display data, so an app that needs admin roles still keeps its own roster records; it also exposes which members may read. `listMembers` itself is still owner-only. We do not use it yet.
+
+Status against `5b95b2f2`: Not affected. `simplespace.listMembers` is still owner-only OAuth and not readable with a space credential.
+
 ## Summary
 `listMembers` must be called on the authority's PDS with OAuth and a read grant, and the lexicon states that a space credential is not sufficient, so members hosted on other PDSes cannot enumerate the list. Applications that need a roster (any team or group product) must duplicate membership as records and keep them in sync with the authority's member list.
 

@@ -3,7 +3,7 @@
 import dynamic from "next/dynamic";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChannelView } from "./channel-view";
-import { api, captureInviteLink, httpStatus, INVITE_LINK_KEY, isAccessFailure, isAuthorizationRequired, makeTid, WORKSPACE_OPERATION_KEY, workspaceOperationIdFor, mergeMessages, messageOf, parseWorkspaceUri, TRANSITIONING_STATUS, withReactions, type ChannelSelection, type InboxRequest, type Message, type PendingOperation, type Reaction, type StalledOperation } from "./client-api";
+import { api, captureInviteLink, httpStatus, INVITE_LINK_KEY, isAccessFailure, isAuthorizationRequired, makeTid, WORKSPACE_OPERATION_KEY, workspaceOperationIdFor, mergeMessages, messageOf, parsePastedWorkspaceUri, TRANSITIONING_STATUS, withReactions, type ChannelSelection, type InboxRequest, type Message, type PendingOperation, type Reaction, type StalledOperation } from "./client-api";
 import { DmProvider, type DmView } from "./dm-context";
 import { InviteBanner } from "./invite-banner";
 import { Sidebar } from "./sidebar";
@@ -77,9 +77,15 @@ export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: DmC
     setActiveChannel(channel);
   }, []);
 
-  const resetChannelContent = useCallback(() => {
+  /**
+   * Empties the open channel's content. The join-request state (the "grant request access" box and whether a request was
+   * sent) is the account's own, not channel data, so a background reload that fails to read the channel keeps it; only
+   * leaving the channel clears it.
+   */
+  const resetChannelContent = useCallback((options: { keepRequestAccess?: boolean } = {}) => {
     setMessages([]); setPrivateRoster([]); setHasMore(false); setNextOffset(0); setReplyTo(""); setMessageText("");
-    setNeedChannelRead(false); setNeedChannelWrite(false); setNeedJoinWrite(false); setRequestSubmitted(false);
+    setNeedChannelRead(false); setNeedChannelWrite(false);
+    if (!options.keepRequestAccess) { setNeedJoinWrite(false); setRequestSubmitted(false); }
   }, []);
 
   const clearChannelView = useCallback(() => {
@@ -98,7 +104,7 @@ export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: DmC
     const statusCode = httpStatus(caught);
     if (statusCode !== 401 && statusCode !== 403 && statusCode !== 409) return false;
     channelDataEpoch.current += 1;
-    resetChannelContent();
+    resetChannelContent({ keepRequestAccess: true });
     setNeedChannelRead(statusCode === 401 || statusCode === 403);
     const selected = activeChannelRef.current;
     if (selected) void refreshSelectedChannelRef.current?.(selected, false).catch((error) => setError(messageOf(error)));
@@ -256,7 +262,7 @@ export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: DmC
   }, [clearChannelView, refreshWorkspaces, selectWorkspace]);
 
   const grant = useCallback(async (action: string, workspaceUri?: string, skey?: string) => {
-    const ref = workspaceUri ? parseWorkspaceUri(workspaceUri) : null;
+    const ref = workspaceUri ? parsePastedWorkspaceUri(workspaceUri) : null;
     const response = await api<{ redirectUrl: string }>("/api/oauth/permission", {
       method: "POST",
       body: JSON.stringify({ action, workspaceDid: ref?.authorityDid ?? did, ...(ref ? { workspaceSkey: ref.skey } : {}), ...(skey ? { skey } : {}) }),
@@ -313,9 +319,10 @@ export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: DmC
     const requestEpoch = operatorDataEpoch.current;
     inboxRequestInFlightRef.current = true;
     try {
-      const result = await api<{ requests: InboxRequest[] }>(`/api/inbox/requests?workspace=${encodeURIComponent(workspaceUri)}`);
+      const result = await api<{ requests: InboxRequest[]; skipped?: Array<{ did: string; reason: string }> }>(`/api/inbox/requests?workspace=${encodeURIComponent(workspaceUri)}`);
       if (operatorDataEpoch.current !== requestEpoch || activeUriRef.current !== workspaceUri) return;
       setInbox(result.requests);
+      if (result.skipped?.length) setStatus(`Join requests from ${result.skipped.map(({ did, reason }) => `${did} (${reason})`).join("; ")} could not be read.`);
       setInboxLoaded(true);
       setInboxPermissionMissing(false);
       inboxPermissionMissingRef.current = false;
@@ -475,7 +482,7 @@ export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: DmC
   async function connectInvitation(uri: string) {
     // A double-click must not start two permission requests; the guard lapses by itself so a cancelled navigation cannot stick.
     if (joiningRef.current) return;
-    const ref = parseWorkspaceUri(uri);
+    const ref = parsePastedWorkspaceUri(uri);
     if (!ref) { setError("Paste a workspace URI in the form at://DID/space/org.slack.workspace/key."); return; }
     joiningRef.current = true;
     window.setTimeout(() => { joiningRef.current = false; }, 3_000);

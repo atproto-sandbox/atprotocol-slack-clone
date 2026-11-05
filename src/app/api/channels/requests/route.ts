@@ -5,7 +5,7 @@ import { requireSession } from "@/auth/session";
 import { isMissingXrpcResource } from "@/atproto/xrpc";
 import { sessionClient } from "@/atproto/client";
 import { inboxUri } from "@/protocol/keys";
-import { channelUri, requestRecordKey, tidNow } from "@/protocol/keys";
+import { channelUri, parseWorkspaceUri, requestRecordKey, tidNow } from "@/protocol/keys";
 import { validateSpaceRecord } from "@/protocol/records";
 import { requireChannelDirectory } from "@/workspaces/channels";
 import { purgeDeniedPermissionCache } from "@/workspaces/cache";
@@ -29,9 +29,9 @@ export async function POST(request: NextRequest) {
       throw error;
     }
     if (current.visibility !== "private" && body.action !== "withdraw") return NextResponse.json({ error: "Join requests are only used for private channels." }, { status: 400 });
-    const workspaceMatch = /^at:\/\/(did:[^/]+)\/space\/org\.slack\.workspace\/([A-Za-z0-9._~:-]{1,128})$/.exec(body.workspace);
-    if (!workspaceMatch) return NextResponse.json({ error: "Invalid workspace URI." }, { status: 400 });
-    const space = inboxUri(current.authorityDid, workspaceMatch[2]);
+    const parsedWorkspace = parseWorkspaceUri(body.workspace);
+    if (!parsedWorkspace) return NextResponse.json({ error: "Invalid workspace URI." }, { status: 400 });
+    const space = inboxUri(current.authorityDid, parsedWorkspace.skey);
     const rkey = requestRecordKey(channelUri(current.authorityDid, body.skey), session.did);
     if (body.action === "withdraw") {
       try {

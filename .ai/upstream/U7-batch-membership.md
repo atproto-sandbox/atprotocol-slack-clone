@@ -1,4 +1,8 @@
-# Add batch membership calls to `simplespace`
+# Add batch membership calls to `memberspace`
+
+Status against `5d88b414` (2026-10-30): Not affected. The calls moved to `com.atproto.memberspace.putMember` and `removeMember` (`simplespace` is gone) and still take one DID per call. `removeMember` and `putMember` with `write: false` now also evict a tracked writer, which makes one more call per removal worth batching.
+
+Status against `5b95b2f2`: Not affected. `putMember` and `removeMember` still take one DID per call.
 
 ## Summary
 `putMember` and `removeMember` change one member per call. Group and team products change hundreds of memberships at once, and each change is a separate authenticated request.
@@ -11,8 +15,8 @@ Measured on a local two-host fixture with rate limits disabled:
 
 ## Proposed change
 ```
-com.atproto.simplespace.putMembers      input: { space, members: [{ did, read, write }] }   (max 100 to 1000)
-com.atproto.simplespace.removeMembers   input: { space, dids: [did] }
+com.atproto.memberspace.putMembers      input: { space, members: [{ did, read, write }] }   (max 100 to 1000)
+com.atproto.memberspace.removeMembers   input: { space, dids: [did] }
 ```
 Output should give per-item results, so partial failure is visible. All-or-nothing is optional. Same auth as the single-member calls.
 

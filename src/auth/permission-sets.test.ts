@@ -72,7 +72,7 @@ test("DM_BROWSER_SCOPES is the exact browser-session grant (M3)", () => {
     "atproto",
     "space:org.slack.dm.inbox?authority=*&collection=org.slack.dm.request&action=create&action=update&action=delete",
     "space:org.slack.dm.inbox?authority=self&action=read&manage=create&manage=update",
-    "space:org.slack.dm.inbox?authority=*&action=read",
+    "repo:org.slack.dm.declaration?action=create&action=update",
     "space:org.slack.dm.conversation?authority=self&collection=org.slack.dm.header&collection=org.slack.dm.message&collection=org.slack.dm.reaction&action=create&action=update&action=delete&manage=create&manage=update&manage=delete",
     "space:org.slack.dm.conversation?authority=*&action=read",
   ]);

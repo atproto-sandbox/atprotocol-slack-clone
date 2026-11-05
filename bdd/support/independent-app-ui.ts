@@ -5,7 +5,7 @@ import type { OAuthSession } from "@atproto/oauth-client-node";
 import { inviteLinkFor } from "@/app/ui/client-api";
 import { pinnedCheckoutPath } from "../../protocol-tests/support/app-fixture";
 import { completeConsent, escapeRegExp, eventually } from "./ui";
-import type { Actor, ApiCall, AppWorld } from "./world";
+import { PAGE_TIMEOUT_MS, type Actor, type ApiCall, type AppWorld } from "./world";
 
 // Helpers for scenarios that compare, attack or stress the app from outside: a second app instance viewed through
 // its own browser context, journal rows only an outage could leave behind, and the delegated launch-envelope run.
@@ -40,7 +40,7 @@ export function onPrimaryApp(world: AppWorld, actor: Actor): AppViewer {
 export async function openViewer(world: AppWorld, account: Actor, origin: string, role: string): Promise<AppViewer> {
   const context = await world.newContext(role);
   const page = await context.newPage();
-  page.setDefaultTimeout(30_000);
+  page.setDefaultTimeout(PAGE_TIMEOUT_MS);
   const viewer: AppViewer = { ...account, role, context, page, calls: [], origin, requestUrls: [] };
   page.on("request", (request) => viewer.requestUrls.push(request.url()));
   world.recordCalls(viewer);

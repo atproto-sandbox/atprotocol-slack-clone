@@ -2,8 +2,8 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { TestNetworkNoAppView } from '@atproto/dev-env'
-import { createSpaceToken, dpopJktForKey, parseSpaceToken } from '@atproto/space'
-import type { NsidString } from '@atproto/syntax'
+import { createSpaceToken, parseSpaceToken, SPACE_CREDENTIAL_MAX_AGE_SEC } from '@atproto/space'
+import type { DidString, NsidString } from '@atproto/syntax'
 import { com } from '../../src/lexicons/index.js'
 import { SpaceClient, SpaceCredential } from '../_space.js'
 
@@ -44,7 +44,7 @@ describe('atproto Slack inbox protocol conformance', () => {
       )
 
       const workspace = await spaces.createSpace(authority, {
-        type: WORKSPACE_TYPE,
+        spaceType: WORKSPACE_TYPE,
         skey: 'workspace',
         members: [admin, requester, ordinary],
       })
@@ -73,7 +73,7 @@ describe('atproto Slack inbox protocol conformance', () => {
       // own PDS after the acceptance record is written.
       const discovered = await requester.client.call(
         com.atproto.space.listSpaces,
-        { type: WORKSPACE_TYPE, did: authority.did },
+        { spaceType: WORKSPACE_TYPE, did: authority.did },
         { headers: requester.headers },
       )
       expect(discovered.spaces.map((space) => space.uri)).toContain(workspace)
@@ -94,7 +94,7 @@ describe('atproto Slack inbox protocol conformance', () => {
       })
 
       const privateChannel = await spaces.createSpace(authority, {
-        type: CHANNEL_TYPE,
+        spaceType: CHANNEL_TYPE,
         skey: 'secret',
         members: [admin, requester],
       })
@@ -109,10 +109,10 @@ describe('atproto Slack inbox protocol conformance', () => {
       })
       await expect(
         spaces.credentialFor(ordinary, privateChannel),
-      ).rejects.toMatchObject({ error: 'UserNotAuthorized' })
+      ).rejects.toMatchObject({ error: 'SpaceNotFound' })
 
       const inbox = await spaces.createSpace(authority, {
-        type: INBOX_TYPE,
+        spaceType: INBOX_TYPE,
         skey: 'inbox',
         members: [admin],
       })
@@ -126,7 +126,7 @@ describe('atproto Slack inbox protocol conformance', () => {
       })
 
       const memberList = await authority.client.call(
-        com.atproto.simplespace.listMembers,
+        com.atproto.memberspace.listMembers,
         { space: inbox },
         { headers: authority.headers },
       )
@@ -177,7 +177,8 @@ describe('atproto Slack inbox protocol conformance', () => {
       )
 
       // A request author can read their own repo, but cannot turn the write
-      // membership bit into a whole-space credential.
+      // membership bit into a whole-space credential. The refusal is SpaceNotFound,
+      // the same answer a missing space gets, so it does not confirm the inbox exists.
       const requesterOwnRead = await requester.client.call(
         com.atproto.space.listRecords,
         { space: inbox, repo: requester.did, collection: REQUEST_COLLECTION },
@@ -185,10 +186,10 @@ describe('atproto Slack inbox protocol conformance', () => {
       )
       expect(requesterOwnRead.records).toHaveLength(1)
       await expect(spaces.credentialFor(requester, inbox)).rejects.toMatchObject(
-        { error: 'UserNotAuthorized' },
+        { error: 'SpaceNotFound' },
       )
       await expect(spaces.credentialFor(ordinary, inbox)).rejects.toMatchObject(
-        { error: 'UserNotAuthorized' },
+        { error: 'SpaceNotFound' },
       )
 
       // The member's own OAuth/PDS identity cannot fetch another writer's repo.
@@ -225,7 +226,7 @@ describe('atproto Slack inbox protocol conformance', () => {
       })
       await expect(
         admin.client.call(
-          com.atproto.simplespace.putMember,
+          com.atproto.memberspace.putMember,
           { space: inbox, did: ordinary.did, read: true, write: true },
           { headers: admin.headers },
         ),
@@ -244,7 +245,7 @@ describe('atproto Slack inbox protocol conformance', () => {
       const admin = await spaces.createActor('bob', network.pds)
       const requester = await spaces.createActor('carol', network.extraPdses[0], 'test2')
       const inbox = await spaces.createSpace(authority, {
-        type: INBOX_TYPE,
+        spaceType: INBOX_TYPE,
         skey: 'inbox',
         members: [admin],
       })
@@ -280,7 +281,7 @@ describe('atproto Slack inbox protocol conformance', () => {
       // read credential can fetch the request directly even though listRepos
       // does not list its writer.
       const members = await authority.client.call(
-        com.atproto.simplespace.listMembers,
+        com.atproto.memberspace.listMembers,
         { space: inbox },
         { headers: authority.headers },
       )
@@ -301,14 +302,14 @@ describe('atproto Slack inbox protocol conformance', () => {
     }
   })
 
-  it('caps existing credentials at two hours and rejects new credentials after removal', async () => {
+  it('issues ten minute credentials capped at one hour and rejects new credentials after removal', async () => {
     const network = await TestNetworkNoAppView.create({ extraPdses: 1 })
     try {
       const spaces = new SpaceClient(network)
       const authority = await spaces.createActor('alice', network.pds)
       const member = await spaces.createActor('bob', network.extraPdses[0], 'test2')
       const inbox = await spaces.createSpace(authority, {
-        type: INBOX_TYPE,
+        spaceType: INBOX_TYPE,
         skey: 'inbox',
         members: [member],
       })
@@ -326,11 +327,12 @@ describe('atproto Slack inbox protocol conformance', () => {
 
       const issued = await spaces.credentialFor(member, inbox)
       const payload = parseSpaceToken('credential', issued.credential).payload
-      expect(payload.exp - payload.iat).toBe(7200)
+      expect(payload.exp - payload.iat).toBe(600)
+      expect(SPACE_CREDENTIAL_MAX_AGE_SEC).toBe(3600)
 
       await spaces.removeMember(authority, inbox, member)
       await expect(spaces.credentialFor(member, inbox)).rejects.toMatchObject({
-        error: 'UserNotAuthorized',
+        error: 'SpaceNotFound',
       })
       await expect(
         issued.clientFor(authority.pds).call(com.atproto.space.getLatestCommit, {
@@ -345,13 +347,18 @@ describe('atproto Slack inbox protocol conformance', () => {
         {
           iss: authority.did,
           sub: inbox,
-          dpopJkt: await dpopJktForKey(shortKey),
+          keyId: shortKey.did() as DidString,
           expiresInSec: 10,
         },
         await authority.pds.ctx.actorStore.keypair(authority.did),
       )
+      await expect(createSpaceToken(
+        'credential',
+        { iss: authority.did, sub: inbox, keyId: shortKey.did() as DidString, expiresInSec: SPACE_CREDENTIAL_MAX_AGE_SEC + 1 },
+        await authority.pds.ctx.actorStore.keypair(authority.did),
+      )).rejects.toThrow(/lifetime/)
       const shortPayload = parseSpaceToken('credential', shortCredential).payload
-      const shortLived = new SpaceCredential(shortCredential, shortKey)
+      const shortLived = new SpaceCredential(shortCredential, shortKey, spaces.idResolver)
       for (const [pds, repo, collection] of [
         [authority.pds, authority.did, 'org.slack.admin' as NsidString],
         [member.pds, member.did, REQUEST_COLLECTION],

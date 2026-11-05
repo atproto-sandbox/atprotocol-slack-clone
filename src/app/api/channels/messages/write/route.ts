@@ -14,6 +14,7 @@ import { requireCurrentChannelCredential, requireReadableChannel } from "@/works
 import { markRepoStale, purgeDeniedPermissionCache, purgeSpaceCache } from "@/workspaces/cache";
 import { readRequestJson } from "@/lib/bounded-json";
 import { rejectCrossOriginMutation } from "@/lib/same-origin-mutation";
+import { isAccessLost } from "@/atproto/space-credential-core";
 
 export const runtime = "nodejs";
 
@@ -112,13 +113,9 @@ async function readMessage(session: Awaited<ReturnType<typeof requireSession>>, 
     return record.uri === uri ? record : null;
   } catch (error) {
     if (isMissingXrpcResource(error)) return null;
-    if (isDenied(error)) purgeSpaceCache(session.did, space);
+    if (isAccessLost(error)) purgeSpaceCache(session.did, space);
     throw error;
   }
-}
-
-function isDenied(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "status" in error && (error.status === 401 || error.status === 403);
 }
 
 function parseMessageUri(uri: string, space: string): { repo: string; rkey: string } | null {

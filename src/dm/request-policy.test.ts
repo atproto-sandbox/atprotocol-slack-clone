@@ -1,20 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isSenderAllowedUnderMode, modeForInboxPolicy, writePolicyForMode } from "./request-policy";
+import { isSenderAllowedUnderMode, modeForInboxPolicy, publicWriteForMode } from "./request-policy";
 
-test("writePolicyForMode maps everyone to public and every other mode to memberList", () => {
-  assert.equal(writePolicyForMode("everyone"), "public");
-  assert.equal(writePolicyForMode("allowlist"), "memberList");
-  assert.equal(writePolicyForMode("nobody"), "memberList");
+test("publicWriteForMode opens writes only for everyone", () => {
+  assert.equal(publicWriteForMode("everyone"), true);
+  assert.equal(publicWriteForMode("allowlist"), false);
+  assert.equal(publicWriteForMode("nobody"), false);
 });
 
-test("modeForInboxPolicy inverts writePolicyForMode, using active (write:true) members to split allowlist from nobody", () => {
-  assert.equal(modeForInboxPolicy("public", []), "everyone");
-  assert.equal(modeForInboxPolicy("public", [{ did: "did:plc:a", write: true }]), "everyone");
-  assert.equal(modeForInboxPolicy("memberList", []), "nobody");
-  assert.equal(modeForInboxPolicy("memberList", [{ did: "did:plc:a", write: true }]), "allowlist");
-  assert.equal(modeForInboxPolicy("memberList", [{ did: "did:plc:a", write: false }]), "nobody", "a dormant-only member list reports nobody");
-  assert.equal(modeForInboxPolicy("memberList", [{ did: "did:plc:a", write: false }, { did: "did:plc:b", write: true }]), "allowlist", "any active member reports allowlist");
+test("modeForInboxPolicy inverts publicWriteForMode, using active (write:true) members to split allowlist from nobody", () => {
+  assert.equal(modeForInboxPolicy(true, []), "everyone");
+  assert.equal(modeForInboxPolicy(true, [{ did: "did:plc:a", write: true }]), "everyone");
+  assert.equal(modeForInboxPolicy(false, []), "nobody");
+  assert.equal(modeForInboxPolicy(false, [{ did: "did:plc:a", write: true }]), "allowlist");
+  assert.equal(modeForInboxPolicy(false, [{ did: "did:plc:a", write: false }]), "nobody", "a dormant-only member list reports nobody");
+  assert.equal(modeForInboxPolicy(false, [{ did: "did:plc:a", write: false }, { did: "did:plc:b", write: true }]), "allowlist", "any active member reports allowlist");
 });
 
 test("isSenderAllowedUnderMode enforces client-side filtering regardless of PDS-side tracking", () => {

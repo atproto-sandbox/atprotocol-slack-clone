@@ -8,6 +8,7 @@ import { permissionScopeFor } from "@/auth/permission-sets";
 import { canonicalOAuthScope } from "@/auth/oauth-scope";
 import { oauthFlowCookieName, startOAuthFlow } from "@/auth/oauth-flow";
 import { getConfig } from "@/lib/config";
+import { isDid } from "@/protocol/keys";
 import { readRequestJson, RequestJsonError } from "@/lib/bounded-json";
 import { rejectCrossOriginMutation } from "@/lib/same-origin-mutation";
 
@@ -21,7 +22,7 @@ export async function POST(request: NextRequest) {
   try {
     const session = await requireSession();
     const body = await readRequestJson<{ action?: unknown; workspaceDid?: unknown; workspaceSkey?: unknown; skey?: unknown }>(request);
-    if (typeof body.action !== "string" || typeof body.workspaceDid !== "string" || !/^did:[a-z0-9]{1,64}:[A-Za-z0-9._:%-]{1,512}$/.test(body.workspaceDid)) {
+    if (typeof body.action !== "string" || typeof body.workspaceDid !== "string" || !isDid(body.workspaceDid)) {
       return NextResponse.json({ error: "Invalid permission request." }, { status: 400 });
     }
     if (body.skey !== undefined && typeof body.skey !== "string") {

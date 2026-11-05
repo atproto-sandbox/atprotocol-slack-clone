@@ -12,8 +12,7 @@ export type DmSessionBridgeProps = {
 
 /**
  * The only module that statically imports `@/dm/use-dm-client` (and, through
- * it, dynamically loads `@atproto/oauth-client-browser` and
- * `@atproto/jwk-webcrypto`). `dm-context.tsx` renders this component through
+ * it, dynamically loads `@atproto/oauth-client-browser`). `dm-context.tsx` renders this component through
  * `next/dynamic(..., { ssr: false })` so that reachability never enters any
  * server bundle: `DmProvider` itself must render its non-DM children
  * (`Sidebar`, the workspace stage) normally during SSR, which a dynamic

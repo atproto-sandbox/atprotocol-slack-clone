@@ -5,10 +5,10 @@ import type * as ListRepos from "@/lexicons/api/types/com/atproto/space/listRepo
 import { resolvePds } from "@/atproto/identity";
 import { sessionClient } from "@/atproto/client";
 import { mintSpaceCredential, SpaceCredentialError } from "@/atproto/space-credential";
-import { assertBoundedRecordPage, listBoundedRecords, listBoundedRepos } from "@/atproto/record-pages";
+import { assertBoundedRecordPage, listAllSpaceUris, listBoundedRecords, listBoundedRepos } from "@/atproto/record-pages";
 import { selectValidChannelMessages } from "@/atproto/valid-channel-messages";
-import { listBoundedSpaces } from "@/atproto/space-pages";
-import { channelUri, spaceRecordUri } from "@/protocol/keys";
+import { classifyRepoFailure, describeRepoFailure, MAX_LISTED_SET_ASIDE } from "@/atproto/repo-failure";
+import { channelUri, parseWorkspaceUri, spaceRecordUri } from "@/protocol/keys";
 import { validateSpaceRecord } from "@/protocol/records";
 import { mapLimited } from "@/lib/map-limited";
 
@@ -47,7 +47,7 @@ export type IndependentChannelPage = {
  * does not import the primary app's database, sync cache, or web-session layer.
  */
 export async function listIndependentWorkspaces(session: OAuthSession): Promise<IndependentWorkspace[]> {
-  const spaces = await listBoundedSpaces(sessionClient(session), { type: "org.slack.workspace", maxSpaces: MAX_DISCOVERABLE_WORKSPACES });
+  const spaces = await listAllSpaceUris(sessionClient(session), { spaceType: "org.slack.workspace", maxSpaces: MAX_DISCOVERABLE_WORKSPACES });
   const summaries = await mapLimited(spaces, 8, async (uri) => {
     try { return await readIndependentWorkspace(session, uri); }
     catch (error) {
@@ -59,9 +59,9 @@ export async function listIndependentWorkspaces(session: OAuthSession): Promise<
 }
 
 export async function readIndependentWorkspace(session: OAuthSession, uri: string): Promise<IndependentWorkspace | null> {
-  const match = /^at:\/\/(did:[^/]+)\/space\/org\.slack\.workspace\/([A-Za-z0-9._~:-]{1,128})$/.exec(uri);
-  if (!match) return null;
-  const authorityDid = match[1];
+  const workspace = parseWorkspaceUri(uri);
+  if (!workspace) return null;
+  const { authorityDid } = workspace;
   const credential = await mintSpaceCredential(session, uri);
   const client = credential.client(await resolvePds(authorityDid));
   const [profile, directories, roster, adminRecords] = await Promise.all([
@@ -127,11 +127,29 @@ export async function readIndependentChannelPage(
   const repoScan = await listBoundedRepos(authorityClient, { space: channel.uri, maxRepos: MAX_CHANNEL_WRITERS });
   if (repoScan.truncated) throw new Error("Channel writer count exceeds the v1 envelope.");
   const repos = repoScan.repos;
+  // A writer whose repo cannot be read (deactivated, taken down, unauthenticated, oversized, or on a host that is down) is reported and
+  // read no further, so one member cannot make the channel unreadable for everyone else. What was read from it before it failed is
+  // kept; its reactions are skipped. This covers a failed page read. A page that arrives but breaks the record rules (a record with no
+  // value, a duplicate key) still fails the read, as before.
+  const setAside = new Map<string, string>();
+  const readWriter = async <T>(did: string, run: () => Promise<T>): Promise<T | null> => {
+    try {
+      return await run();
+    } catch (error) {
+      const failure = classifyRepoFailure(error);
+      if (!failure) throw error;
+      console.warn(`Independent reader set a writer aside (${failure.permanent ? "permanent" : "transient"}): ${describeRepoFailure(error)}`);
+      setAside.set(did, failure.reason);
+      return null;
+    }
+  };
   const finishPage = async (messages: IndependentMessage[]): Promise<IndependentChannelPage> => {
-    const { reactions, truncated } = await readIndependentReactions(credential, channel.uri, summary.authorityDid, repos, messages);
-    const degradedReasons = truncated
-      ? [`Reaction history exceeds the ${MAX_CHANNEL_REACTION_RECORDS}-record channel sync limit.`]
-      : [];
+    const { reactions, truncated } = await readIndependentReactions(credential, channel.uri, summary.authorityDid, repos.filter((repo) => !setAside.has(repo.did)), messages, readWriter);
+    const degradedReasons = [
+      ...[...setAside].slice(0, MAX_LISTED_SET_ASIDE).map(([did, reason]) => `Messages or reactions from ${did} may be missing: ${reason}`),
+      ...(setAside.size > MAX_LISTED_SET_ASIDE ? [`${setAside.size - MAX_LISTED_SET_ASIDE} more writers' messages or reactions may be missing.`] : []),
+      ...(truncated ? [`Reaction history exceeds the ${MAX_CHANNEL_REACTION_RECORDS}-record channel sync limit.`] : []),
+    ];
     return { messages, reactions, degraded: degradedReasons.length > 0, degradedReasons };
   };
   const states = repos.map((repo) => ({
@@ -177,14 +195,14 @@ export async function readIndependentChannelPage(
     if (pageLimit < 1) {
       if (pageRequests + candidates.length > MAX_CHANNEL_RECORD_PAGES) throw new Error("Channel pagination exceeded the bounded page request limit.");
       pageRequests += candidates.length;
-      const lookahead = await mapLimited(candidates, 8, async (state) => {
+      const lookahead = (await mapLimited(candidates, 8, (state) => readWriter(state.repo.did, async () => {
         if (state.cursor) state.seenCursors.add(state.cursor);
         const page = await credential.client(await resolvePds(state.repo.did)).query<ListRecords.OutputSchema>("com.atproto.space.listRecords", {
           space: channel.uri, repo: state.repo.did, collection: "org.slack.channel.message", cursor: state.cursor, limit: 1,
         });
         assertBoundedRecordPage(page, { collection: "org.slack.channel.message", limit: 1, cursor: state.cursor, seenCursors: state.seenCursors });
         return { state, page };
-      });
+      }).then((read) => { if (!read) state.finished = true; return read; }))).flatMap((read) => read ? [read] : []);
       const lookaheadRecordCount = lookahead.reduce((count, { page }) => count + page.records.length, 0);
       if (lookaheadRecordCount > remaining) throw new Error("Channel history exceeds the bounded 20,000-record scan limit.");
       for (const { state, page } of lookahead) {
@@ -210,14 +228,14 @@ export async function readIndependentChannelPage(
     }
     if (pageRequests + candidates.length > MAX_CHANNEL_RECORD_PAGES) throw new Error("Channel pagination exceeded the bounded page request limit.");
     pageRequests += candidates.length;
-    const pages = await mapLimited(candidates, 8, async (state) => {
+    const pages = (await mapLimited(candidates, 8, (state) => readWriter(state.repo.did, async () => {
       if (state.cursor) state.seenCursors.add(state.cursor);
       const page = await credential.client(await resolvePds(state.repo.did)).query<ListRecords.OutputSchema>("com.atproto.space.listRecords", {
         space: channel.uri, repo: state.repo.did, collection: "org.slack.channel.message", cursor: state.cursor, limit: pageLimit,
       });
       assertBoundedRecordPage(page, { collection: "org.slack.channel.message", limit: pageLimit, cursor: state.cursor, seenCursors: state.seenCursors });
       return { state, page };
-    });
+    }).then((read) => { if (!read) state.finished = true; return read; }))).flatMap((read) => read ? [read] : []);
     for (const { state, page } of pages) {
       for (const record of page.records) {
         if (!record.value) throw new Error("PDS record page contains a malformed record.");
@@ -247,6 +265,7 @@ async function readIndependentReactions(
   authorityDid: string,
   repos: ListRepos.Repo[],
   messages: IndependentMessage[],
+  readWriter: <T>(did: string, run: () => Promise<T>) => Promise<T | null>,
 ): Promise<{ reactions: IndependentReaction[]; truncated: boolean }> {
   const knownMessages = new Set(messages.map((message) => message.uri));
   const reactions: IndependentReaction[] = [];
@@ -263,10 +282,14 @@ async function readIndependentReactions(
       if (cursor) seenCursors.add(cursor);
       const remaining = MAX_CHANNEL_REACTION_RECORDS - scanned;
       const limit = Math.min(100, remaining > 0 ? remaining + 1 : 1);
-      const page = await credential.client(await resolvePds(repo.did)).query<ListRecords.OutputSchema>("com.atproto.space.listRecords", {
-        space, repo: repo.did, collection: "org.slack.channel.reaction", cursor, limit,
+      const page = await readWriter(repo.did, async () => {
+        const read = await credential.client(await resolvePds(repo.did)).query<ListRecords.OutputSchema>("com.atproto.space.listRecords", {
+          space, repo: repo.did, collection: "org.slack.channel.reaction", cursor, limit,
+        });
+        assertBoundedRecordPage(read, { collection: "org.slack.channel.reaction", limit, cursor, seenCursors });
+        return read;
       });
-      assertBoundedRecordPage(page, { collection: "org.slack.channel.reaction", limit, cursor, seenCursors });
+      if (!page) break;
       const overflow = page.records.length > remaining;
       const rows = overflow ? page.records.slice(0, remaining) : page.records;
       const repoRkeys = seenRkeys.get(repo.did) ?? new Set<string>();

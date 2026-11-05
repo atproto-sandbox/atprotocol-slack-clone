@@ -1,3 +1,4 @@
+import { kemKeyFromDidDocument } from "@/atproto/kem-key";
 import { readUpstreamJson } from "@/lib/bounded-json";
 import { isDid } from "@/protocol/keys";
 
@@ -9,6 +10,7 @@ const MAX_DID_DOCUMENT_BYTES = 256 * 1024;
 type DidDocument = {
   id?: unknown;
   service?: Array<{ id?: unknown; serviceEndpoint?: unknown }>;
+  verificationMethod?: unknown;
   alsoKnownAs?: unknown;
 };
 
@@ -43,6 +45,11 @@ export async function resolvePds(did: string, config: BrowserIdentityConfig): Pr
   return endpoint.origin;
 }
 
+/** The account's `#atproto_kem` did:key. `forceRefresh` skips the cached DID document, for a MAC that failed after a key rotation. */
+export async function resolveKemKey(did: string, config: BrowserIdentityConfig, forceRefresh = false): Promise<string> {
+  return kemKeyFromDidDocument(did, await resolveDidDocument(did, config, forceRefresh));
+}
+
 /** The account's handle from `alsoKnownAs` (`at://handle`), for display only. */
 export async function resolveHandle(did: string, config: BrowserIdentityConfig): Promise<string | null> {
   const document = await resolveDidDocument(did, config);
@@ -55,11 +62,11 @@ export async function resolveHandle(did: string, config: BrowserIdentityConfig):
   return null;
 }
 
-async function resolveDidDocument(did: string, config: BrowserIdentityConfig): Promise<DidDocument> {
+async function resolveDidDocument(did: string, config: BrowserIdentityConfig, forceRefresh = false): Promise<DidDocument> {
   if (!isDid(did)) throw new TypeError("Invalid DID.");
   const now = Date.now();
   const cached = documentCache.get(did);
-  if (cached && cached.expiresAt > now) return cached.document;
+  if (!forceRefresh && cached && cached.expiresAt > now) return cached.document;
   const url = didDocumentUrl(did, config);
   const response = await fetch(url, {
     method: "GET",

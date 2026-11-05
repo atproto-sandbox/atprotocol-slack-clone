@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { AtprotoClient } from "./xrpc";
-import { assertBoundedRecordPage, listBoundedMembers, listBoundedRecords, listBoundedRepos, listBoundedSpaces } from "./record-pages";
+import { assertBoundedRecordPage, listAllSpaceUris, listBoundedMembers, listBoundedRecords, listBoundedRepos, listBoundedSpaces } from "./record-pages";
+
+function repo(did: string, rev: string) {
+  return { did: `did:plc:${did}`, repoRev: `r${rev}`, data: { $bytes: "AAAA" }, spaceRev: rev };
+}
 
 test("bounded repo lookahead distinguishes an exact limit from actual overflow", async () => {
   const exact = fakeClient([
-    { repos: [{ did: "did:plc:a" }, { did: "did:plc:b" }], cursor: "page-two" },
+    { repos: [repo("a", "2"), repo("b", "3")], cursor: "page-two" },
     { repos: [] },
   ]);
   const exactResult = await listBoundedRepos(exact.client, { space: "space", maxRepos: 2 });
@@ -17,8 +21,8 @@ test("bounded repo lookahead distinguishes an exact limit from actual overflow",
   ]);
 
   const overflow = fakeClient([
-    { repos: [{ did: "did:plc:a" }, { did: "did:plc:b" }], cursor: "page-two" },
-    { repos: [{ did: "did:plc:c" }] },
+    { repos: [repo("a", "2"), repo("b", "3")], cursor: "page-two" },
+    { repos: [repo("c", "4")] },
   ]);
   const overflowResult = await listBoundedRepos(overflow.client, { space: "space", maxRepos: 2 });
   assert.equal(overflowResult.repos.length, 2);
@@ -26,7 +30,7 @@ test("bounded repo lookahead distinguishes an exact limit from actual overflow",
 });
 
 test("bounded repo scan rejects oversized pages and empty nonterminal pages", async () => {
-  const oversized = fakeClient([{ repos: [{ did: "did:plc:a" }, { did: "did:plc:b" }] }]);
+  const oversized = fakeClient([{ repos: [repo("a", "2"), repo("b", "3")] }]);
   await assert.rejects(
     listBoundedRepos(oversized.client, { space: "space", maxRepos: 1 }),
     /PDS repo page exceeded the requested limit/,
@@ -41,11 +45,66 @@ test("bounded repo scan rejects oversized pages and empty nonterminal pages", as
   const malformedDid = fakeClient([{ repos: [{ did: "not-a-did" }] }]);
   await assert.rejects(listBoundedRepos(malformedDid.client, { space: "space", maxRepos: 2 }), /malformed repo DID/);
 
-  const repeatedDid = fakeClient([
-    { repos: [{ did: "did:plc:a" }], cursor: "next" },
-    { repos: [{ did: "did:plc:a" }] },
+  const missingRevs = fakeClient([{ repos: [{ did: "did:plc:a", rev: "old-shape" }] }]);
+  await assert.rejects(listBoundedRepos(missingRevs.client, { space: "space", maxRepos: 2 }), /without repoRev and spaceRev/);
+
+  const descending = fakeClient([{ repos: [repo("a", "3"), repo("b", "2")] }]);
+  await assert.rejects(listBoundedRepos(descending.client, { space: "space", maxRepos: 2 }), /ascending spaceRev order/);
+
+  const stuck = fakeClient([{ repos: [repo("a", "2")], cursor: "next" }, { repos: [repo("b", "3")], cursor: "next" }]);
+  await assert.rejects(listBoundedRepos(stuck.client, { space: "space", maxRepos: 5 }), /did not advance/);
+});
+
+test("a repo updated while paginating reappears and the writer set keeps its latest entry", async () => {
+  const reappearing = fakeClient([
+    { repos: [repo("a", "2"), repo("b", "3")], cursor: "3" },
+    { repos: [repo("a", "5"), repo("c", "6")] },
   ]);
-  await assert.rejects(listBoundedRepos(repeatedDid.client, { space: "space", maxRepos: 2 }), /duplicate repo DID/);
+  const result = await listBoundedRepos(reappearing.client, { space: "space", maxRepos: 4 });
+  assert.deepEqual(result.repos.map(({ did, spaceRev }) => [did, spaceRev]), [["did:plc:a", "5"], ["did:plc:b", "3"], ["did:plc:c", "6"]]);
+  assert.equal(result.truncated, false);
+  assert.deepEqual(reappearing.calls.map(({ cursor }) => cursor), [undefined, "3"]);
+});
+
+test("reappearing repos count once toward the bound and do not cause false truncation", async () => {
+  const noisy = fakeClient([
+    { repos: [repo("a", "2"), repo("b", "3")], cursor: "3" },
+    { repos: [repo("a", "4")], cursor: "4" },
+    { repos: [repo("b", "5")], cursor: "5" },
+    { repos: [repo("a", "6")] },
+  ]);
+  const result = await listBoundedRepos(noisy.client, { space: "space", maxRepos: 2 });
+  assert.deepEqual(result.repos.map(({ did, spaceRev }) => [did, spaceRev]), [["did:plc:a", "6"], ["did:plc:b", "5"]]);
+  assert.equal(result.truncated, false);
+});
+
+test("a lookahead entry for an already collected repo does not truncate, a later new repo does", async () => {
+  const lookahead = fakeClient([
+    { repos: [repo("a", "2"), repo("b", "3")], cursor: "3" },
+    { repos: [repo("a", "4")], cursor: "4" },
+    { repos: [repo("c", "5")] },
+  ]);
+  const result = await listBoundedRepos(lookahead.client, { space: "space", maxRepos: 2 });
+  assert.deepEqual(result.repos.map(({ did, spaceRev }) => [did, spaceRev]), [["did:plc:a", "4"], ["did:plc:b", "3"]]);
+  assert.equal(result.truncated, true);
+});
+
+test("more distinct repos than the bound truncates", async () => {
+  const overflow = fakeClient([
+    { repos: [repo("a", "2"), repo("b", "3")], cursor: "3" },
+    { repos: [repo("c", "4")] },
+  ]);
+  const result = await listBoundedRepos(overflow.client, { space: "space", maxRepos: 2 });
+  assert.equal(result.repos.length, 2);
+  assert.equal(result.truncated, true);
+});
+
+test("the repo scan page cap still applies when every page repeats a known repo", async () => {
+  const pages = Array.from({ length: 600 }, (_, i) => ({ repos: [repo("a", String(i).padStart(4, "0"))], cursor: `c${i}` }));
+  await assert.rejects(
+    listBoundedRepos(fakeClient(pages).client, { space: "space", maxRepos: 2 }),
+    /exceeded the bounded page limit/,
+  );
 });
 
 test("bounded space lookahead distinguishes an exact limit from actual overflow", async () => {
@@ -55,7 +114,7 @@ test("bounded space lookahead distinguishes an exact limit from actual overflow"
     { spaces: [{ uri: uri("2222222222221") }, { uri: uri("2222222222222") }], cursor: "page-two" },
     { spaces: [] },
   ]);
-  const exactResult = await listBoundedSpaces(exact.client, { type: "org.slack.dm.conversation", maxSpaces: 2 });
+  const exactResult = await listBoundedSpaces(exact.client, { spaceType: "org.slack.dm.conversation", maxSpaces: 2 });
   assert.equal(exactResult.spaces.length, 2);
   assert.equal(exactResult.truncated, false);
 
@@ -63,12 +122,12 @@ test("bounded space lookahead distinguishes an exact limit from actual overflow"
     { spaces: [{ uri: uri("2222222222221") }, { uri: uri("2222222222222") }], cursor: "page-two" },
     { spaces: [{ uri: uri("2222222222223") }] },
   ]);
-  const overflowResult = await listBoundedSpaces(overflow.client, { type: "org.slack.dm.conversation", maxSpaces: 2 });
+  const overflowResult = await listBoundedSpaces(overflow.client, { spaceType: "org.slack.dm.conversation", maxSpaces: 2 });
   assert.equal(overflowResult.spaces.length, 2);
   assert.equal(overflowResult.truncated, true);
 
-  const malformed = fakeClient([{ spaces: [{ uri: "not-a-space-uri" }] }]);
-  await assert.rejects(listBoundedSpaces(malformed.client, { maxSpaces: 2 }), /malformed space URI/);
+  const malformed = fakeClient([{ spaces: [{ uri: 5 }] }]);
+  await assert.rejects(listBoundedSpaces(malformed.client, { maxSpaces: 2 }), /malformed space/);
 
   const repeated = fakeClient([
     { spaces: [{ uri: uri("2222222222221") }], cursor: "next" },
@@ -204,3 +263,65 @@ function fakeClient(pages: Array<Record<string, unknown>>) {
   } as unknown as AtprotoClient;
   return { client, calls };
 }
+
+test("workspace discovery returns every space URI at the exact limit and refuses to hide some when there are more", async () => {
+  // #given an account with exactly as many workspaces as the limit, and another with one more
+  const uri = (skey: string) => `at://did:plc:a/space/org.slack.workspace/${skey}`;
+  const exact = fakeClient([{ spaces: [{ uri: uri("a") }, { uri: uri("b") }], cursor: "next" }, { spaces: [] }]);
+  const overflow = fakeClient([{ spaces: [{ uri: uri("a") }, { uri: uri("b") }], cursor: "next" }, { spaces: [{ uri: uri("c") }] }]);
+
+  // #when each is listed with a limit of two
+  const listed = await listAllSpaceUris(exact.client, { spaceType: "org.slack.workspace", maxSpaces: 2 });
+
+  // #then the exact list is returned whole and the overflowing one is an error, not a silent truncation
+  assert.deepEqual(listed, [uri("a"), uri("b")]);
+  await assert.rejects(listAllSpaceUris(overflow.client, { spaceType: "org.slack.workspace", maxSpaces: 2 }), /exceeds the 2-space discovery limit/);
+});
+
+test("a space whose URI this app cannot parse is skipped, not a reason to fail the whole listing", async () => {
+  // #given an account whose store holds a workspace with a record key longer than this app creates, between two ordinary ones
+  const uri = (skey: string) => `at://did:plc:a/space/org.slack.workspace/${skey}`;
+  const page = fakeClient([{ spaces: [{ uri: uri("a") }, { uri: uri("k".repeat(200)) }, { uri: "not-a-space-uri" }, { uri: uri("b") }] }]);
+
+  // #when workspaces are discovered
+  const listed = await listAllSpaceUris(page.client, { spaceType: "org.slack.workspace", maxSpaces: 10 });
+
+  // #then the usable ones are returned and the rest are ignored
+  assert.deepEqual(listed, [uri("a"), uri("b")]);
+});
+
+test("an unparseable space past the limit is not overflow, and a usable one behind it still is", async () => {
+  const uri = (skey: string) => `at://did:plc:a/space/org.slack.dm.conversation/${skey}`;
+  const junk = { uri: `at://did:plc:a/space/org.slack.dm.conversation/${"k".repeat(200)}` };
+
+  // #given exactly two usable spaces, then an entry the app cannot parse and nothing after it
+  const exact = fakeClient([{ spaces: [{ uri: uri("2222222222221") }, { uri: uri("2222222222222") }], cursor: "more" }, { spaces: [junk] }]);
+  // #and the same, but with a usable space behind the unparseable one
+  const behind = fakeClient([
+    { spaces: [{ uri: uri("2222222222221") }, { uri: uri("2222222222222") }], cursor: "more" },
+    { spaces: [junk], cursor: "later" },
+    { spaces: [{ uri: uri("2222222222223") }] },
+  ]);
+
+  // #when each is listed with a limit of two
+  const exactResult = await listBoundedSpaces(exact.client, { spaceType: "org.slack.dm.conversation", maxSpaces: 2 });
+  const behindResult = await listBoundedSpaces(behind.client, { spaceType: "org.slack.dm.conversation", maxSpaces: 2 });
+
+  // #then junk alone is not overflow, and a usable space behind junk is
+  assert.equal(exactResult.truncated, false);
+  assert.equal(behindResult.truncated, true);
+  assert.equal(behindResult.spaces.length, 2);
+});
+
+test("skipped spaces do not count toward the limit, across pages", async () => {
+  const uri = (skey: string) => `at://did:plc:a/space/org.slack.workspace/${skey}`;
+  const pages = fakeClient([
+    { spaces: [{ uri: uri("a") }, { uri: "not-a-space-uri" }], cursor: "p2" },
+    { spaces: [{ uri: uri("b") }] },
+  ]);
+
+  const result = await listBoundedSpaces(pages.client, { spaceType: "org.slack.workspace", maxSpaces: 2 });
+
+  assert.deepEqual(result.spaces.map((space) => space.uri), [uri("a"), uri("b")]);
+  assert.equal(result.truncated, false);
+});

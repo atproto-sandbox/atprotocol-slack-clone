@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { Given, Then, When } from "@cucumber/cucumber";
 import { expect } from "@playwright/test";
 import { reactionRecordKey, spaceRecordUri, tidNow } from "@/protocol/keys";
-import type { Actor, AppWorld } from "../support/world";
+import { PAGE_TIMEOUT_MS, type Actor, type AppWorld } from "../support/world";
 import {
   approveAdminControls, completeConsent, copyInviteLink, createWorkspaceAs, inviteMemberAs, joinFromInvitation, openInviteLinkAndSignIn, ownerInvites,
 } from "../support/ui";
@@ -48,7 +48,7 @@ function watchPublication(world: AppWorld, authority: Actor, name: string, space
 }
 
 async function listChannelSpaces(world: AppWorld, authority: Actor): Promise<string[]> {
-  const listed = await world.pdsGet<{ spaces: Array<{ uri: string }> }>(authority, "com.atproto.space.listSpaces", { type: "org.slack.channel", limit: "100" });
+  const listed = await world.pdsGet<{ spaces: Array<{ uri: string }> }>(authority, "com.atproto.space.listSpaces", { spaceType: "org.slack.channel", limit: "100" });
   assert.equal(listed.status, 200, JSON.stringify(listed.body));
   return listed.body.spaces.map((space) => space.uri);
 }
@@ -175,12 +175,12 @@ Then("the PDS refuses a channel read credential", async function (this: AppWorld
   const outcome = this.scratch.get("credential") as CredentialOutcome;
   if (outcome.granted) assert.fail("the PDS must not hand a channel credential to an account missing from the member list");
   assert.equal(outcome.status, 403);
-  assert.equal(outcome.code, "UserNotAuthorized");
+  assert.equal(outcome.code, "SpaceNotFound", "the authority answers a user the member list excludes exactly as it answers for a space that does not exist");
 
   await grantedCredential(this, actorNamed(this, "insider"), channel.uri);
 
   assert.deepEqual(this.scratch.get("appAnswers"), [403, 403], "the app could not read the channel for this account, before or after approving read permission");
-  assert.match(this.scratch.get("appRefusal") as string, /not authorized for this space/, "the app reports the PDS's refusal");
+  assert.match(this.scratch.get("appRefusal") as string, /Space not found/, "the app reports the PDS's refusal");
   await outsider.page.getByText("You are not on this channel’s active roster.").waitFor({ state: "visible" });
   const secret = this.scratch.get("secret") as string;
   assert.equal(await messageCards(outsider).count(), 0, "no message is shown to the account");
@@ -542,7 +542,7 @@ Then("the message is rejected", async function (this: AppWorld) {
 
   const reader = people.owner;
   await openChannelReading(people.sites.get("alice")!, reader, "general");
-  assert.equal(await messageCards(reader).count(), 1, "a reader sees one message: the one at the limit");
+  await syncUntil(reader, async () => assert.equal(await messageCards(reader).count(), 1, "a reader sees one message: the one at the limit"));
   const shown = await messageCards(reader).locator("> p").innerText();
   assert.equal(Array.from(shown).length, 10_000);
   assert.notEqual(shown, overlong);
@@ -581,14 +581,14 @@ Given("a channel contains more than 100 messages", async function (this: AppWorl
   this.scratch.set("channels", channels);
 });
 
-When("a member opens that channel", async function (this: AppWorld) {
+When("a member opens that channel", { timeout: 420_000 }, async function (this: AppWorld) {
   const people = roster(this);
   const alice = people.sessions.get("alice")!;
   const channels = this.scratch.get("channels") as { history: ChannelRef };
   this.scratch.set("requests", trackApiRequests(alice));
   this.scratch.set("spacesBefore", cachedSpaces(this, alice));
   await openChannelReading(people.sites.get("alice")!, alice, channels.history.name);
-  await expect(messageCards(alice).first()).toBeVisible({ timeout: 30_000 });
+  await expect(messageCards(alice).first()).toBeVisible({ timeout: PAGE_TIMEOUT_MS });
 });
 
 const historyRequests = (world: AppWorld): URL[] => (world.scratch.get("requests") as URL[]).filter((url) => url.pathname === "/api/channels/messages");
@@ -597,7 +597,7 @@ Then("the initial view contains the latest 100 messages", async function (this: 
   const people = roster(this);
   const alice = people.sessions.get("alice")!;
   const channels = this.scratch.get("channels") as { history: ChannelRef };
-  await expect(messageCards(alice)).toHaveCount(100, { timeout: 30_000 });
+  await expect(messageCards(alice)).toHaveCount(100, { timeout: PAGE_TIMEOUT_MS });
   assert.deepEqual(await messageCards(alice).locator("> p").allInnerTexts(), newestFirst("history", 31, 130), "the view shows the newest 100 messages, newest first");
 
   assert.ok(historyRequests(this).some((url) => url.searchParams.get("offset") === "0"), "the first request asked for the newest page");
@@ -610,12 +610,12 @@ Then("the initial view contains the latest 100 messages", async function (this: 
   assert.equal(historyRequests(this).every((url) => url.searchParams.get("skey") === channels.history.skey), true);
 });
 
-Then("older messages load by page", async function (this: AppWorld) {
+Then("older messages load by page", { timeout: 420_000 }, async function (this: AppWorld) {
   const people = roster(this);
   const alice = people.sessions.get("alice")!;
   const before = historyRequests(this).length;
   await alice.page.getByRole("button", { name: "Load older messages", exact: true }).click();
-  await expect(messageCards(alice)).toHaveCount(HISTORY_SIZE, { timeout: 30_000 });
+  await expect(messageCards(alice)).toHaveCount(HISTORY_SIZE, { timeout: PAGE_TIMEOUT_MS });
   assert.deepEqual(await messageCards(alice).locator("> p").allInnerTexts(), newestFirst("history", 1, 130), "the older 30 messages are appended after the newest 100");
   const requested = historyRequests(this).slice(before);
   assert.deepEqual(requested.map((url) => url.searchParams.get("offset")), ["100"], "exactly one more page was requested, starting after the first 100");

@@ -6,9 +6,9 @@ import type { Actor, AppWorld } from "../support/world";
 import {
   PRIVATE_CHANNEL_NAME, accessOf, activeRosterOf, assertCredentialRefused, callOperator, createPrivateChannelAs, decideInUi, decisionFor,
   grantChannelReadAs, inboxOf, inboxRequestsSeen, inboxRow, joinWorkspaceAs, leaveChannelForWorkspaceHome, membersOf, messagesOf,
-  inboxWriterSources, mintCredential, onboardMember, openChannelRoster, removeFromInboxMembers, ownerWithAdminControls, postMessageAs, requestPrivateAccessAs, requestsReadByOwner,
+  inboxWriterSources, mintCredential, onboardMember, openChannelRoster, ownerWithAdminControls, postMessageAs, requestPrivateAccessAs, requestsReadByOwner,
   requestsReadWithCredential, resubmitRequestAs, snapshotOfDecisionWrites, submitOperationAs, syncInbox, unregisterAppNotifications,
-  watchDecisionWrites, withdrawRequestAs, workspaceWithPrivateChannel, writeRequestDirectly, writerSetOf, operatorServiceRef,
+  watchDecisionWrites, withdrawRequestAs, workspaceWithPrivateChannel, writeRequestAsUnlistedWriter, writeRequestDirectly, writerSetOf, operatorServiceRef,
   type OperationOutcome, type PrivateChannel, type SubmittedRequest, type WriteSnapshot,
 } from "../support/private-requests-ui";
 
@@ -24,7 +24,7 @@ type State = {
 
 const STATE = "privateRequests";
 const RECONCILIATION_WINDOW_MS = 150_000;
-const LONG_SETUP = { timeout: 300_000 };
+const LONG_SETUP = { timeout: 600_000 };
 
 function stateOf(world: AppWorld): State {
   const existing = world.scratch.get(STATE) as State | undefined;
@@ -159,11 +159,10 @@ Given("a request write reached the authority PDS writer set", LONG_SETUP, async 
   const state = stateOf(this);
   state.channel = channel;
   state.sweepsBefore = this.callsTo(owner, "/api/inbox/requests").length;
-  state.request = await writeRequestDirectly(this, requester, channel);
+  state.request = await writeRequestAsUnlistedWriter(this, owner, requester, channel);
   const writers = await writerSetOf(await mintCredential(this, owner, inboxOf(this)), owner);
   assert.ok(writers.includes(requester.did), "the authority PDS lists the requester among the inbox writers");
-  await removeFromInboxMembers(this, owner, requester);
-  assert.equal(accessOf(await membersOf(this, owner, inboxOf(this)), requester.did), undefined, "the requester is no longer on the inbox member list");
+  assert.equal(accessOf(await membersOf(this, owner, inboxOf(this)), requester.did), undefined, "the requester is not on the inbox member list");
 });
 
 Given("the app notification was dropped", function (this: AppWorld) {

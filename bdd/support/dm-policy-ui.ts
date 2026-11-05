@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createDecipheriv } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { JoseKey } from "@atproto/jwk-jose";
+import { generateSpaceKey } from "@/atproto/space-key";
 import type { Frame, Locator, Page, Response as PlaywrightResponse } from "@playwright/test";
 import Database from "better-sqlite3";
 import { listBoundedRecords, listBoundedRepos } from "@/atproto/record-pages";
@@ -11,6 +11,7 @@ import { dmConversationUri, dmInboxUri, parseDmConversationUri, tidNow } from "@
 import type { FixtureAccount } from "../../protocol-tests/support/app-fixture";
 import { completeConsent, signInIfPrompted } from "./ui";
 import type { Actor, AppWorld } from "./world";
+import { memberspacePolicy } from "@/atproto/space-policy";
 
 // One helper per thing a person does with direct messages, plus an independent Node-side view of the PDS
 // (`DmpProbe`) so a step can check what the recipient's PDS tracks without trusting the browser client.
@@ -45,16 +46,24 @@ export async function dmpWaitForOrigin(actor: Actor, origin: string): Promise<vo
   await actor.page.waitForURL((url) => url.origin === origin && !url.pathname.startsWith("/oauth"), { timeout: 30_000 });
 }
 
+/** Clicks the sidebar's connect button; when it never shows, says what the sidebar showed instead, so a rare miss can be diagnosed. */
+async function clickConnectDms(actor: Actor): Promise<void> {
+  await actor.page.getByRole("button", { name: /Connect direct messages/ }).click().catch(async (error: unknown) => {
+    const sidebar = await actor.page.locator(".channel-nav").first().innerText({ timeout: 2_000 }).catch(() => "(no sidebar)");
+    throw new Error(`The "Connect direct messages" button never appeared at ${actor.page.url()}; the sidebar showed: ${sidebar.replace(/\s+/g, " ")}`, { cause: error });
+  });
+}
+
 /** The separate, browser-held DM sign-in: its own consent screen, its own OAuth client. */
 export async function dmpConnectDms(actor: Actor): Promise<void> {
-  await actor.page.getByRole("button", { name: /Connect direct messages/ }).click();
+  await clickConnectDms(actor);
   await completeConsent(actor);
   await dmpWaitForDmReady(actor);
 }
 
 /** Like `dmpConnectDms`, and reports the scopes the PDS consent screen listed for this separate DM sign-in. */
 export async function dmpConnectDmsReadingScope(actor: Actor): Promise<string[]> {
-  await actor.page.getByRole("button", { name: /Connect direct messages/ }).click();
+  await clickConnectDms(actor);
   await actor.page.waitForURL(/\/oauth\/authorize\?/, { timeout: 30_000 });
   await signInIfPrompted(actor);
   await actor.page.getByRole("button", { name: "Authorize", exact: true }).waitFor({ state: "visible" });
@@ -269,8 +278,9 @@ export class DmpProbe {
         return fetch(new URL(path, as.pdsUrl), { ...init, headers, redirect: "error" });
       }),
       resolvePds: async (did) => this.pdsOf(did),
+      resolveKemKey: this.world.resolveKemKey,
       fetchEndpoint: (request) => fetch(request),
-      generateKey: () => JoseKey.generate(["ES256"]),
+      generateKey: generateSpaceKey,
     };
   }
 
@@ -295,7 +305,7 @@ export class DmpProbe {
     const space = dmInboxUri(inboxOwner.did);
     const credential = await this.mint(space);
     const scan = await listBoundedRepos(credential.client(inboxOwner.pdsUrl), { space, maxRepos: 1_000 });
-    return scan.repos.map((repo) => ({ did: repo.did, rev: repo.rev }));
+    return scan.repos.map((repo) => ({ did: repo.did, rev: repo.repoRev }));
   }
 
   /** A record collection as the half owner's PDS serves it to a credential holder for `space`. */
@@ -311,7 +321,7 @@ export type DmpMessageRecord = { rkey: string; text: string };
 
 /** The conversation keys of the halves an account owns, from its own PDS. */
 export async function dmpOwnConvKeys(world: AppWorld, owner: FixtureAccount): Promise<string[]> {
-  const listed = await world.pdsGet<{ spaces?: Array<{ uri: string }> }>(owner, "com.atproto.space.listSpaces", { type: "org.slack.dm.conversation", limit: "100" });
+  const listed = await world.pdsGet<{ spaces?: Array<{ uri: string }> }>(owner, "com.atproto.space.listSpaces", { spaceType: "org.slack.dm.conversation", limit: "100" });
   if (listed.status !== 200) throw new Error(`listSpaces for ${owner.handle}: ${JSON.stringify(listed.body)}`);
   return (listed.body.spaces ?? []).flatMap((space) => {
     const parsed = parseDmConversationUri(space.uri);
@@ -347,10 +357,9 @@ export type DmpHostileHalf = {
 /** A participant who skips the client and writes their own half by hand, with whatever header they like. */
 export async function dmpWriteHostileHalf(world: AppWorld, half: DmpHostileHalf): Promise<{ messageRkey: string }> {
   const space = dmConversationUri(half.owner.did, half.convKey);
-  const memberList = { $type: "com.atproto.simplespace.defs#memberListPolicy" };
   const steps: Array<[string, unknown]> = [
-    ["com.atproto.simplespace.createSpace", { type: "org.slack.dm.conversation", skey: half.convKey, readPolicy: memberList, writePolicy: memberList, appAccess: { $type: "com.atproto.simplespace.defs#open" } }],
-    ...half.readers.map((reader): [string, unknown] => ["com.atproto.simplespace.putMember", { space, did: reader.did, read: true, write: false }]),
+    ["com.atproto.space.createSpace", { spaceType: "org.slack.dm.conversation", skey: half.convKey, policy: memberspacePolicy() }],
+    ...half.readers.map((reader): [string, unknown] => ["com.atproto.memberspace.putMember", { space, did: reader.did, read: true, write: false }]),
     ["com.atproto.space.putRecord", { space, repo: half.owner.did, collection: "org.slack.dm.header", rkey: "self", record: { $type: "org.slack.dm.header", ...half.header, createdAt: new Date().toISOString() } }],
   ];
   for (const [nsid, input] of steps) {

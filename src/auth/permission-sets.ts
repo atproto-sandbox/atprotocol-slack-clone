@@ -23,6 +23,7 @@ export const SLACK_COLLECTIONS = {
   reaction: "org.slack.channel.reaction",
   channelRoster: "org.slack.channel.roster",
   dmRequest: "org.slack.dm.request",
+  dmDeclaration: "org.slack.dm.declaration",
   dmHeader: "org.slack.dm.header",
   dmMessage: "org.slack.dm.message",
   dmReaction: "org.slack.dm.reaction",
@@ -35,9 +36,9 @@ export const WORKSPACE_DISCOVERY_SCOPE =
 
 // The DM permission set requested by a browser-held OAuth session (M3). The
 // server's own OAuth session never requests these: DM tokens live only in the
-// browser (IndexedDB), never on this server, per docs/plans/direct-messages.md
+// browser (IndexedDB), never on this server, per .ai/plans/direct-messages.md
 // section 3.4. Grammar (manage=, authority=*, collection=) verified against
-// ../atproto-spaces-phase0/packages/oauth/oauth-scopes/src/scopes/space-permission.ts.
+// the pinned PDS checkout, packages/oauth/oauth-scopes/src/scopes/space-permission.ts.
 export const DM_BROWSER_SCOPES: readonly string[] = [
   "atproto",
   // Send, re-put (backoff retry), and withdraw a request into any recipient's
@@ -46,9 +47,10 @@ export const DM_BROWSER_SCOPES: readonly string[] = [
   // The user's own inbox: create it, read it and its member list, switch its
   // request policy (updateSpace), and manage its allowlist (putMember/removeMember).
   `space:${SLACK_SPACE_TYPES.dmInbox}?authority=self&action=read&manage=create&manage=update`,
-  // Asking any inbox for a credential, so a sender can tell "no inbox" (SpaceNotFound) from "inbox exists" (UserNotAuthorized:
-  // the member list is the real read gate) before a putRecord that the PDS accepts either way.
-  `space:${SLACK_SPACE_TYPES.dmInbox}?authority=*&action=read`,
+  // The public declaration that this account runs an inbox, which a sender reads before writing a request: the space
+  // authority answers a stranger asking for the inbox exactly as it answers for a space that does not exist, and the PDS
+  // accepts a putRecord into either. The inbox is never deleted by the app, so the declaration is never withdrawn.
+  `repo:${SLACK_COLLECTIONS.dmDeclaration}?action=create&action=update`,
   // The user's own conversation halves: create, write every DM record type,
   // manage membership, and delete the half outright.
   `space:${SLACK_SPACE_TYPES.dmConversation}?authority=self&collection=${SLACK_COLLECTIONS.dmHeader}&collection=${SLACK_COLLECTIONS.dmMessage}&collection=${SLACK_COLLECTIONS.dmReaction}&action=create&action=update&action=delete&manage=create&manage=update&manage=delete`,

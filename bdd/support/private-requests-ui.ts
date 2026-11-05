@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { JoseKey } from "@atproto/jwk-jose";
+import { generateSpaceKey } from "@/atproto/space-key";
 import type { Locator, Page, Response as PlaywrightResponse } from "@playwright/test";
 import { inviteLinkFor, type InboxRequest } from "@/app/ui/client-api";
 import { mintSpaceCredentialWith, SpaceCredentialError, type SpaceCredential } from "@/atproto/space-credential-core";
@@ -7,6 +7,7 @@ import { AtprotoClient } from "@/atproto/xrpc";
 import { channelUri, decisionRecordKey, inboxUri, parseSpaceUri, requestRecordKey, spaceRecordUri, tidNow } from "@/protocol/keys";
 import type { Actor, AppWorld } from "./world";
 import { approveAdminControls, completeConsent, createWorkspaceAs, inviteMemberAs, joinFromInvitation, openInviteLinkAndSignIn, waitForApp } from "./ui";
+import { memberspacePolicy } from "@/atproto/space-policy";
 
 export const PRIVATE_CHANNEL_NAME = "Private Room";
 
@@ -56,19 +57,20 @@ export async function mintCredential(world: AppWorld, as: Actor, space: string):
       assert.ok(url, `no PDS is known for ${did}`);
       return url;
     },
+    resolveKemKey: world.resolveKemKey,
     fetchEndpoint: (request) => fetch(request),
-    generateKey: () => JoseKey.generate(["ES256"]),
+    generateKey: generateSpaceKey,
   }, space);
 }
 
 export async function assertCredentialRefused(world: AppWorld, as: Actor, space: string, what: string): Promise<void> {
   const outcome = await mintCredential(world, as, space).then(() => null, (error: unknown) => error);
   assert.ok(outcome instanceof SpaceCredentialError, `${what}: the PDS should refuse a credential, got ${outcome === null ? "a credential" : String(outcome)}`);
-  assert.deepEqual({ status: outcome.status, code: outcome.code }, { status: 403, code: "UserNotAuthorized" }, `${what}: the PDS denies the credential because the account is not authorized for the space`);
+  assert.deepEqual({ status: outcome.status, code: outcome.code }, { status: 403, code: "SpaceNotFound" }, `${what}: the PDS denies the credential because the account is not authorized for the space`);
 }
 
 export async function membersOf(world: AppWorld, as: Actor, space: string): Promise<Member[]> {
-  const result = await world.pdsGet<{ members?: Member[] }>(as, "com.atproto.simplespace.listMembers", { space, limit: "1000" });
+  const result = await world.pdsGet<{ members?: Member[] }>(as, "com.atproto.memberspace.listMembers", { space, limit: "1000" });
   assert.equal(result.status, 200, `listMembers ${space}: ${JSON.stringify(result.body)}`);
   return result.body.members ?? [];
 }
@@ -183,12 +185,32 @@ export async function unregisterAppNotifications(world: AppWorld, authority: Act
 
 /**
  * Takes the account off the inbox member list on the authority's PDS, the way an outage or a stale member list leaves it. The PDS
- * never evicts a writer from the set listRepos returns (that set only ever grows), so afterwards the account is a writer the
- * operator's member list no longer names.
+ * drops the account from the writer set listRepos returns when it is removed, so afterwards the account is neither a member nor a
+ * listed writer until it writes again while authorized.
  */
 export async function removeFromInboxMembers(world: AppWorld, authority: Actor, account: Actor): Promise<void> {
-  const removed = await world.pdsPost(authority, "com.atproto.simplespace.removeMember", { space: inboxOf(world), did: account.did });
+  const removed = await world.pdsPost(authority, "com.atproto.memberspace.removeMember", { space: inboxOf(world), did: account.did });
   assert.equal(removed.status, 200, `removing ${account.role} from the inbox member list: ${JSON.stringify(removed.body)}`);
+}
+
+async function setInboxPublicWrite(world: AppWorld, authority: Actor, publicWrite: boolean): Promise<void> {
+  const updated = await world.pdsPost(authority, "com.atproto.space.updateSpace", { space: inboxOf(world), policy: memberspacePolicy({ publicWrite }) });
+  assert.equal(updated.status, 200, `setting the inbox policy to publicWrite=${publicWrite}: ${JSON.stringify(updated.body)}`);
+}
+
+/**
+ * Leaves the account writing into the inbox as a tracked writer that the member list does not name. Removing a member evicts it
+ * from the writer set, so the only way to get there is the one `updateSpace` leaves open: it does not re-evaluate the writer set.
+ * The inbox is opened to public writes just long enough for the account's request to be tracked, then closed again.
+ */
+export async function writeRequestAsUnlistedWriter(world: AppWorld, authority: Actor, requester: Actor, channel: PrivateChannel): Promise<SubmittedRequest> {
+  await removeFromInboxMembers(world, authority, requester);
+  await setInboxPublicWrite(world, authority, true);
+  try {
+    return await writeRequestDirectly(world, requester, channel);
+  } finally {
+    await setInboxPublicWrite(world, authority, false);
+  }
 }
 
 /** The inbox writers each discovery path can name right now: the operator's current member list and the PDS writer set. */

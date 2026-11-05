@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { JoseKey } from "@atproto/jwk-jose";
+import { generateSpaceKey } from "@/atproto/space-key";
 import { expect, type Locator } from "@playwright/test";
 import { mintSpaceCredentialWith, SpaceCredentialError, type SpaceCredential } from "@/atproto/space-credential-core";
 import { AtprotoClient } from "@/atproto/xrpc";
 import { channelUri, spaceRecordUri } from "@/protocol/keys";
 import { inviteLinkFor } from "@/app/ui/client-api";
 import type { SecondApp } from "../../protocol-tests/support/app-fixture";
-import type { Actor, ApiCall, AppWorld } from "./world";
+import { PAGE_TIMEOUT_MS, type Actor, type ApiCall, type AppWorld } from "./world";
 import { approveAdminControls, completeConsent, createWorkspaceAs, eventually, inviteMemberAs } from "./ui";
 
 export type ChannelRef = { skey: string; name: string; uri: string; visibility: string };
@@ -19,7 +19,7 @@ export const reactionCollection = "org.slack.channel.reaction";
 // --- PDS facts, read straight from the host with an account's own access token ------------------------
 
 export async function listMembers(world: AppWorld, as: Actor, space: string): Promise<Member[]> {
-  const result = await world.pdsGet<{ members?: Member[] }>(as, "com.atproto.simplespace.listMembers", { space, limit: "1000" });
+  const result = await world.pdsGet<{ members?: Member[] }>(as, "com.atproto.memberspace.listMembers", { space, limit: "1000" });
   assert.equal(result.status, 200, `listMembers ${space}: ${JSON.stringify(result.body)}`);
   return result.body.members ?? [];
 }
@@ -83,8 +83,9 @@ export async function requestChannelCredential(world: AppWorld, as: Actor, space
     const credential = await mintSpaceCredentialWith({
       memberClient,
       resolvePds: async (did) => pdsOf(world, did),
+      resolveKemKey: world.resolveKemKey,
       fetchEndpoint: (request) => fetch(request),
-      generateKey: () => JoseKey.generate(["ES256"]),
+      generateKey: generateSpaceKey,
     }, space);
     return { granted: true, credential };
   } catch (error) {
@@ -115,7 +116,7 @@ export async function startSessionOn(world: AppWorld, actor: Actor, site: Site, 
   const role = `${actor.role}@${label}`;
   const context = await world.newContext(role);
   const page = await context.newPage();
-  page.setDefaultTimeout(30_000);
+  page.setDefaultTimeout(PAGE_TIMEOUT_MS);
   const session: Actor = { ...actor, role, context, page, calls: [] };
   world.recordCalls(session);
   world.actors.set(role, session);

@@ -8,7 +8,7 @@ import { listBoundedMembers } from "@/atproto/record-pages";
 import { isMissingXrpcResource } from "@/atproto/xrpc";
 import { listSpaceMembers } from "@/atproto/space-ops";
 import { getConfig } from "@/lib/config";
-import { subjectKey } from "@/protocol/keys";
+import { channelUri, inboxUri, isDid, isSkey, parseWorkspaceUri, subjectKey } from "@/protocol/keys";
 import { validateSpaceRecord } from "@/protocol/records";
 import { WorkspaceEnvelopeError } from "@/workspaces/read-model";
 import { OperatorInfrastructureError, isTransientOperatorInfrastructureError } from "./errors";
@@ -19,14 +19,32 @@ export type OperatorActor = { did: string; session: OAuthSession; workspace: Wor
 const MAX_READ_ONLY_MEMBER_SCAN = 1_000;
 
 export function parseWorkspaceRef(uri: string): WorkspaceRef {
-  const match = /^at:\/\/(did:[^/]+)\/space\/org\.slack\.workspace\/([A-Za-z0-9._~:-]{1,128})$/.exec(uri);
-  if (!match) throw new Error("Invalid workspace space URI.");
-  return { uri, authorityDid: match[1], skey: match[2] };
+  const workspace = parseWorkspaceUri(uri);
+  if (!workspace) throw new Error("Invalid workspace space URI.");
+  return { uri, ...workspace };
+}
+
+function bearerToken(request: Request): string | undefined {
+  return request.headers.get("authorization")?.match(/^Bearer ([A-Za-z0-9._~-]+)$/)?.[1];
+}
+
+/**
+ * The `iss` a bearer service token claims, read without verifying it, or `null` when there is no well-formed token. It proves
+ * nothing; it lets a caller refuse a token that names the wrong issuer before any DID is resolved for it.
+ */
+export function unverifiedBearerIssuer(request: Request): string | null {
+  const payload = bearerToken(request)?.split(".")[1];
+  if (!payload) return null;
+  try {
+    const claims: unknown = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    return isPlainObject(claims) && typeof claims.iss === "string" ? claims.iss : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function authenticateOperatorRequest(request: Request, method: string): Promise<string> {
-  const authorization = request.headers.get("authorization");
-  const token = authorization?.match(/^Bearer ([A-Za-z0-9._~-]+)$/)?.[1];
+  const token = bearerToken(request);
   if (!token) throw new OperatorAuthError("Bearer service authorization is required.");
   const serviceRef = getConfig().operatorServiceRef;
   const payload = await verifyJwt(
@@ -38,7 +56,7 @@ export async function authenticateOperatorRequest(request: Request, method: stri
     if (isTransientOperatorInfrastructureError(error)) throw new OperatorInfrastructureError();
     throw new OperatorAuthError("Service authorization is invalid or expired.");
   });
-  if (!/^did:[a-z0-9]+:[A-Za-z0-9._:%-]+$/.test(payload.iss)) {
+  if (!isDid(payload.iss)) {
     throw new OperatorAuthError("Service authorization issuer must be an actor DID.");
   }
   const payloadBytes = Buffer.from(token.split(".")[1] ?? "", "base64url");
@@ -66,7 +84,7 @@ export async function requireActiveWorkspaceAdmin(
   ]);
   if (admin?.subject !== actorDid || admin.active !== true || roster?.subject !== actorDid || roster.active !== true) throw new OperatorAuthError("Actor is not an active workspace admin.");
   const isAuthority = actorDid === workspace.authorityDid;
-  const inbox = `at://${workspace.authorityDid}/space/org.slack.inbox/${workspace.skey}`;
+  const inbox = inboxUri(workspace.authorityDid, workspace.skey);
   const [hasWorkspaceAccess, hasInboxAccess] = isAuthority
     ? [true, true]
     : await Promise.all([
@@ -97,7 +115,7 @@ export async function requireWorkspaceActorForOperation(workspaceUri: string, ac
     readOwnerRecord(client, workspace.uri, workspace.authorityDid, "org.slack.admin", subjectKey(actorDid)),
     readOwnerRecord(client, workspace.uri, workspace.authorityDid, "org.slack.workspace.roster", subjectKey(actorDid)),
     listSpaceMembers(session, workspace.uri),
-    listSpaceMembers(session, `at://${workspace.authorityDid}/space/org.slack.inbox/${workspace.skey}`),
+    listSpaceMembers(session, inboxUri(workspace.authorityDid, workspace.skey)),
   ]);
   const isAuthority = actorDid === workspace.authorityDid;
   const isAdmin = admin?.subject === actorDid && admin.active === true && roster?.subject === actorDid && roster.active === true &&
@@ -110,10 +128,10 @@ export async function requireWorkspaceActorForOperation(workspaceUri: string, ac
     throw new OperatorAuthError("Active workspace admin permission is required.");
   }
   if (request.kind === "leaveChannel") {
-    if (typeof request.skey !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._~:-]{0,127}$/.test(request.skey)) throw new OperatorAuthError("Invalid channel key.");
+    if (!isSkey(request.skey)) throw new OperatorAuthError("Invalid channel key.");
     const directory = await readOwnerRecord(client, workspace.uri, workspace.authorityDid, "org.slack.directory", request.skey);
     if (directory?.visibility !== "private") throw new OperatorAuthError("Only an active private channel can be left.");
-    const channelMembers = await listSpaceMembers(session, `at://${workspace.authorityDid}/space/org.slack.channel/${request.skey}`);
+    const channelMembers = await listSpaceMembers(session, channelUri(workspace.authorityDid, request.skey));
     if (!channelMembers.some((member) => member.did === actorDid && member.read && member.write)) throw new OperatorAuthError("Actor is not a member of this channel.");
   }
   return { did: actorDid, session, workspace, canRecoverOperations: false };

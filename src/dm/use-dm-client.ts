@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { DpopKey } from "@/atproto/dpop";
+import { generateSpaceKey } from "@/atproto/space-key";
 import { DmClient } from "./dm-client";
 import type { DmConfig } from "./browser-session";
-import { resolvePds } from "./browser-identity";
+import { resolveKemKey, resolvePds } from "./browser-identity";
 import { createBrowserDmStore, type BrowserDmStore } from "./browser-store";
 
 export type DmClientStatus = "disconnected" | "connecting" | "ready" | "error";
@@ -18,9 +18,9 @@ export type DmClientState = {
 
 /**
  * Restores the M3 browser-held DM session for the signed-in DID and builds the
- * M4 `DmClient` on top of it. The OAuth client and WebCrypto key modules load
- * through dynamic imports so their module graph never runs outside the
- * browser; DPoP keys are non-extractable `WebcryptoKey`s.
+ * M4 `DmClient` on top of it. The OAuth client loads through a dynamic import
+ * so its module graph never runs outside the browser; space signing keys are
+ * non-extractable WebCrypto P-256 keys.
  */
 export function useDmClient(did: string, dmConfig: DmConfig): DmClientState {
   const { appUrl, plcUrl, scope, serviceRef, loopback } = dmConfig;
@@ -50,8 +50,9 @@ export function useDmClient(did: string, dmConfig: DmConfig): DmClientState {
           did,
           memberClient: dmXrpcClient(session),
           resolvePds: (target) => resolvePds(target, { plcUrl, loopback }),
+          resolveKemKey: (target, forceRefresh) => resolveKemKey(target, { plcUrl, loopback }, forceRefresh),
           fetchEndpoint: (request) => fetch(request, { redirect: "error" }),
-          generateKey: generateDpopKey,
+          generateKey: generateSpaceKey,
           store: browserStore,
         });
         if (epoch.current !== run) return;
@@ -97,9 +98,4 @@ export function useDmClient(did: string, dmConfig: DmConfig): DmClientState {
   }, [appUrl, plcUrl, scope, serviceRef, loopback]);
 
   return { status, client, store, error, connect, disconnect };
-}
-
-async function generateDpopKey(): Promise<DpopKey> {
-  const { WebcryptoKey } = await import("@atproto/jwk-webcrypto");
-  return WebcryptoKey.generate(["ES256"]);
 }

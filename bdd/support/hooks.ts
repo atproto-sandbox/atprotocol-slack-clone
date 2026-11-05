@@ -35,8 +35,8 @@ Before(function (this: AppWorld) {
 After(async function (this: AppWorld, scenario) {
   if (scenario.result?.status === Status.FAILED) {
     for (const actor of this.actors.values()) {
-      this.attach(await actor.page.screenshot({ fullPage: true }).catch(() => Buffer.from("")), "image/png");
-      this.attach(`[${actor.role}] ${actor.page.url()}\n${(await actor.page.locator("body").innerText().catch(() => "")).slice(0, 4_000)}`, "text/plain");
+      this.attach(await actor.page.screenshot({ fullPage: true, timeout: 10_000 }).catch(() => Buffer.from("")), "image/png");
+      this.attach(`[${actor.role}] ${actor.page.url()}\n${(await actor.page.locator("body").innerText({ timeout: 10_000 }).catch(() => "")).slice(0, 4_000)}`, "text/plain");
     }
     this.attach(`App server output (tail):\n${this.fixture.serverOutput().slice(-4_000)}`, "text/plain");
   }

@@ -44,6 +44,12 @@ export interface Response {
   data: OutputSchema
 }
 
+export class BadSpaceMacError extends XRPCError {
+  constructor(src: XRPCError) {
+    super(src.status, src.error, src.message, src.headers, { cause: src })
+  }
+}
+
 export class RecordNotFoundError extends XRPCError {
   constructor(src: XRPCError) {
     super(src.status, src.error, src.message, src.headers, { cause: src })
@@ -82,6 +88,7 @@ export class RepoDeactivatedError extends XRPCError {
 
 export function toKnownErr(e: any) {
   if (e instanceof XRPCError) {
+    if (e.error === 'BadSpaceMac') return new BadSpaceMacError(e)
     if (e.error === 'RecordNotFound') return new RecordNotFoundError(e)
     if (e.error === 'SpaceNotFound') return new SpaceNotFoundError(e)
     if (e.error === 'RepoNotFound') return new RepoNotFoundError(e)

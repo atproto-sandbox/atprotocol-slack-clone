@@ -168,7 +168,7 @@ Then("the operation stays pending until every PDS member list agrees", async fun
 
 // --- An old credential expires after removal --------------------------------------------------------
 
-Given("a member holds a space credential with a two hour maximum lifetime", async function (this: AppWorld) {
+Given("a member holds a space credential with a short maximum lifetime", async function (this: AppWorld) {
   const owner = await workspaceWithAdmin(this);
   const member = await this.actor("member", 1);
   const bystander = await this.actor("bystander", 0);
@@ -185,10 +185,10 @@ Given("a member holds a space credential with a two hour maximum lifetime", asyn
     const claims = claimsOf(credential.token);
     assert.equal(claims.sub, credential.space);
     assert.equal(claims.iss, owner.did, "the workspace authority signed it");
-    assert.ok(claims.exp - claims.iat <= MAX_CREDENTIAL_LIFETIME_SECONDS, `lifetime ${claims.exp - claims.iat}s exceeds two hours`);
+    assert.ok(claims.exp - claims.iat <= MAX_CREDENTIAL_LIFETIME_SECONDS, `lifetime ${claims.exp - claims.iat}s exceeds the one hour protocol ceiling`);
     assert.ok(claims.exp - claims.iat > 0);
     assert.ok(claims.exp * 1000 > Date.now(), "it has not expired");
-    assert.ok(claims.exp * 1000 <= mintedAt + MAX_CREDENTIAL_LIFETIME_SECONDS * 1000 + 5_000, "it was minted just now, so its expiry is at most two hours away");
+    assert.ok(claims.exp * 1000 <= mintedAt + MAX_CREDENTIAL_LIFETIME_SECONDS * 1000 + 5_000, "it was minted just now, so its expiry is at most the one hour ceiling away");
   }
   const profile = await readRecordsWith(this, held[0]!, owner.did, "org.slack.workspace.profile");
   assert.equal(profile.length, 1, "before removal the credential reads the workspace");
@@ -203,7 +203,7 @@ Then("they cannot obtain a new credential", async function (this: AppWorld) {
   const member = actorNamed(this, "member");
   const bystander = actorNamed(this, "bystander");
   for (const space of recall<Space[]>(this, "credentialSpaces")) {
-    assert.deepEqual(refusal(await tryMintAs(this, member, space.uri)), { status: 403, code: "UserNotAuthorized" }, `removed member, ${space.label}`);
+    assert.deepEqual(refusal(await tryMintAs(this, member, space.uri)), { status: 403, code: "SpaceNotFound" }, `removed member, ${space.label}`);
     assert.equal(refusal(await tryMintAs(this, bystander, space.uri)), "granted", `a member who was not removed can still mint for ${space.label}`);
   }
 });
@@ -214,12 +214,12 @@ Then("the old credential works only until its signed expiration", async function
   assert.ok(workspaceCredential);
   const claims = claimsOf(workspaceCredential.token);
   assert.ok(claims.exp * 1000 > Date.now(), "the old credential is still inside its signed lifetime");
-  assert.ok(claims.exp - claims.iat <= MAX_CREDENTIAL_LIFETIME_SECONDS, "its signed lifetime is at most two hours");
+  assert.ok(claims.exp - claims.iat <= MAX_CREDENTIAL_LIFETIME_SECONDS, "its signed lifetime is at most the one hour ceiling");
   const profile = (credential: SpaceCredential) => tryReadWith(this, credential, owner.did, "org.slack.workspace.profile");
   assert.deepEqual(await profile(workspaceCredential), { records: 1 }, "removal does not revoke a credential that was already issued");
 
   assert.deepEqual(
-    await profile(withExtendedExpiry(workspaceCredential, 365 * 24 * 60 * 60)),
+    await profile(withExtendedExpiry(this, workspaceCredential, 600)),
     { refused: { status: 401, code: "BadJwtSignature" } },
     "stretching the signed expiry breaks the signature, so the expiry the authority signed is the only limit",
   );
@@ -283,13 +283,13 @@ Then("channel access and the private roster entry are removed", async function (
   assert.deepEqual(await memberAccess(this, owner, room.uri, bystander.did), FULL_ACCESS, "other members keep the channel");
   assert.equal(await subjectRecordActive(this, owner, room.uri, "org.slack.channel.roster", bystander.did), true);
   const outcome = await tryMintAs(this, member, room.uri);
-  assert.deepEqual(refusal(outcome), { status: 403, code: "UserNotAuthorized" });
+  assert.deepEqual(refusal(outcome), { status: 403, code: "SpaceNotFound" });
   const steps = requiredJournalEntry(this, recall<Executed>(this, "leave").operationId).steps;
   assert.deepEqual(steps, ["leave-channel-membership", "leave-channel-roster", "leave-channel-verified"]);
   const before = this.callsTo(member, "/api/channels/messages").length;
   await channelButton(member, "Private Room").click();
   const reopened = await eventually(() => this.callsTo(member, "/api/channels/messages")[before], { what: "the member's next look at the channel" });
-  assert.ok(reopened.status === 401 || reopened.status === 403, `the app no longer syncs the channel for them (${reopened.status})`);
+  assert.ok([401, 403].includes(reopened.status), `the app no longer syncs the channel for them (${reopened.status})`);
 });
 
 Then("workspace access remains active", async function (this: AppWorld) {
@@ -410,7 +410,7 @@ Then("compliant apps stop new syncs during the transition", function (this: AppW
   assert.equal(recall<Probe>(this, "syncAfter").status, 200, "once the transition is complete the channel syncs again");
 });
 
-Then("the same channel URI and messages remain after completion", async function (this: AppWorld) {
+Then("the same channel URI and the messages of the remaining members remain after completion", async function (this: AppWorld) {
   const owner = actorNamed(this, "owner");
   const roadmap = recall<ChannelRef>(this, "roadmap");
   const entry = await channelNamed(this, "Roadmap");
@@ -426,7 +426,7 @@ Then("the same channel URI and messages remain after completion", async function
 Then("unselected members cannot mint new credentials after completion", async function (this: AppWorld) {
   const roadmap = recall<ChannelRef>(this, "roadmap");
   const outcome = await tryMintAs(this, actorNamed(this, "dropped"), roadmap.uri);
-  assert.deepEqual(refusal(outcome), { status: 403, code: "UserNotAuthorized" });
+  assert.deepEqual(refusal(outcome), { status: 403, code: "SpaceNotFound" });
   assert.equal(refusal(await tryMintAs(this, actorNamed(this, "kept"), roadmap.uri)), "granted", "the selected member still can");
 });
 
@@ -508,7 +508,7 @@ Then("no new channel credentials are issued", async function (this: AppWorld) {
   const room = recall<ChannelRef>(this, "archiveRoom");
   for (const role of ["author", "reader"]) {
     const outcome = await tryMintAs(this, actorNamed(this, role), room.uri);
-    assert.deepEqual(refusal(outcome), { status: 403, code: "UserNotAuthorized" }, `${role} is refused a credential for the archived channel`);
+    assert.deepEqual(refusal(outcome), { status: 403, code: "SpaceNotFound" }, `${role} is refused a credential for the archived channel`);
   }
   const query = new URLSearchParams({ workspace: this.workspaceUri, skey: room.skey, offset: "0" });
   for (const role of ["owner", "author"]) {
@@ -631,11 +631,13 @@ Given("an app cached private-channel data", async function (this: AppWorld) {
 When("the credential can no longer be renewed", async function (this: AppWorld) {
   const member = actorNamed(this, "member");
   const vault = recall<ChannelRef>(this, "vault");
+  // An open page refreshes on its own after the removal, is refused and purges the cache before this scenario's own sync can.
+  await member.page.goto("about:blank");
   const executed = await removeMemberViaRoster(this, actorNamed(this, "owner"), member.did);
   assert.equal(executed.operation?.state, "completed", JSON.stringify(executed));
   for (const space of [vault.uri, this.workspaceUri]) {
     const outcome = await tryMintAs(this, member, space);
-    assert.deepEqual(refusal(outcome), { status: 403, code: "UserNotAuthorized" }, `renewal is refused for ${space}`);
+    assert.deepEqual(refusal(outcome), { status: 403, code: "SpaceNotFound" }, `renewal is refused for ${space}`);
   }
 });
 
@@ -647,11 +649,11 @@ Then("the app stops syncing and purges its cached copy", async function (this: A
   assert.ok(cached.records > 0 && cached.cursors > 0 && cached.syncs > 0, `revoking access alone left the cached copy in place, so only the app's refused sync can purge it: ${JSON.stringify(cached)}`);
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     const sync = await member.page.request.get(`${this.appOrigin}/api/channels/messages?${query}`);
-    assert.ok(sync.status() === 401 || sync.status() === 403, `sync attempt ${attempt} is refused (${sync.status()})`);
+    assert.ok([401, 403].includes(sync.status()), `sync attempt ${attempt} is refused (${sync.status()})`);
     assert.doesNotMatch(await sync.text(), /Private note/, "the refusal does not leak the cached message");
     assert.deepEqual(cachedRows(this, member.did), { records: 0, cursors: 0, syncs: 0 }, `after attempt ${attempt} the app holds no cached copy`);
   }
-  await member.page.reload();
+  await member.page.goto(this.appOrigin);
   await member.page.getByText("No workspaces yet").waitFor({ state: "visible" });
   assert.equal(await member.page.locator(".message-card").count(), 0, "reopening the app shows none of the private messages");
 });

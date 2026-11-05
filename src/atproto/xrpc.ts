@@ -2,7 +2,7 @@ import { readUpstreamJson } from "@/lib/bounded-json";
 
 export type XrpcParams = Record<string, string | number | boolean | readonly string[] | undefined>;
 export type AtprotoFetchHandler = (path: string, init: RequestInit) => Promise<Response>;
-const MAX_XRPC_RESPONSE_BYTES = 8 * 1024 * 1024;
+export const MAX_XRPC_RESPONSE_BYTES = 8 * 1024 * 1024;
 
 export class AtprotoClient {
   constructor(private readonly fetchHandler: AtprotoFetchHandler) {}
@@ -64,6 +64,11 @@ export class XrpcError extends Error {
 /** The PDS rejected the call because the session's OAuth grant does not cover it (HTTP 403, `ScopeMissingError`). */
 export function isScopeMissingError(error: unknown): boolean {
   return error instanceof XrpcError && error.status === 403 && error.code === "ScopeMissingError";
+}
+
+/** `createSpace` found a live space with the same owner, type and key: the pinned PDS answers 400 `SpaceAlreadyExists`. */
+export function isSpaceAlreadyExists(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "SpaceAlreadyExists";
 }
 
 export function isMissingXrpcResource(error: unknown): boolean {

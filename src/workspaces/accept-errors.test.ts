@@ -8,11 +8,13 @@ test("a refusal to issue a workspace credential becomes a specific, actionable a
   assert.deepEqual(acceptFailure(new SpaceCredentialError("denied", 403, "UserNotAuthorized")), {
     status: 403, code: "not_a_member", error: "You haven't been added to this workspace yet. Ask an admin to invite your account, then open the invite link again.",
   });
-  for (const code of ["SpaceNotFound", "SpaceDeleted"] as const) {
-    const failure = acceptFailure(new SpaceCredentialError("gone", code === "SpaceNotFound" ? 404 : 410, code));
-    assert.equal(failure?.code, "workspace_unavailable");
-    assert.equal(failure?.status, 404);
-  }
+  const notFound = acceptFailure(new SpaceCredentialError("not found", 403, "SpaceNotFound"));
+  assert.equal(notFound?.status, 404);
+  assert.equal(notFound?.code, "workspace_unavailable");
+  assert.match(notFound?.error ?? "", /may not exist, or you may not have been added/, "one answer for a missing workspace and a user who is not a member");
+  const deleted = acceptFailure(new SpaceCredentialError("gone", 410, "SpaceDeleted"));
+  assert.equal(deleted?.code, "workspace_unavailable");
+  assert.equal(deleted?.error, "That workspace was deleted.");
 });
 
 test("other failures are left to the generic handler", () => {

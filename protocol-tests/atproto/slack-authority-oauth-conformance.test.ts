@@ -3,11 +3,10 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { TestNetworkNoAppView } from '@atproto/dev-env'
-import { decodeJwt } from 'jose'
+import { calculateJwkThumbprint, decodeJwt } from 'jose'
 import { JoseKey } from '@atproto/oauth-provider/provider'
 import { Client } from '../../../oauth/oauth-provider/src/client/client.js'
 import { generateCode } from '../../../oauth/oauth-provider/src/request/code.js'
-import { dpopJktForKey } from '@atproto/space'
 import type { NsidString } from '@atproto/syntax'
 import { SpaceClient } from '../_space.js'
 
@@ -55,7 +54,7 @@ describe('atproto Slack authority OAuth protocol conformance', () => {
       const authority = await spaces.createActor('alice', network.pds)
       const member = await spaces.createActor('bob', network.extraPdses[0], 'test2')
       const space = await spaces.createSpace(authority, {
-        type: 'org.slack.workspace' as NsidString,
+        spaceType: 'org.slack.workspace' as NsidString,
         skey: 'workspace',
       })
 
@@ -99,7 +98,7 @@ describe('atproto Slack authority OAuth protocol conformance', () => {
           redirect_uri: 'https://slack.example/callback',
           response_type: 'code',
           scope,
-          dpop_jkt: await dpopJktForKey(key),
+          dpop_jkt: await calculateJwkThumbprint(key.bareJwk!, 'sha256'),
         },
         await generateCode(),
       )
@@ -163,7 +162,7 @@ describe('atproto Slack authority OAuth protocol conformance', () => {
 
       await callAsOAuth(
         token.access_token,
-        'com.atproto.simplespace.putMember',
+        'com.atproto.memberspace.putMember',
         { space, did: member.did, read: true, write: true },
       )
 
@@ -198,12 +197,12 @@ describe('atproto Slack authority OAuth protocol conformance', () => {
           redirect_uri: 'https://slack.example/callback',
           response_type: 'code',
           scope: 'atproto space:org.slack.workspace?skey=workspace&action=read',
-          dpop_jkt: await dpopJktForKey(key),
+          dpop_jkt: await calculateJwkThumbprint(key.bareJwk!, 'sha256'),
         },
         await generateCode(),
       )
       await expect(
-        callAsOAuth(readOnlyToken.access_token, 'com.atproto.simplespace.putMember', {
+        callAsOAuth(readOnlyToken.access_token, 'com.atproto.memberspace.putMember', {
           space,
           did: member.did,
           read: false,

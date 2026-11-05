@@ -8,16 +8,21 @@ import {
   DM_INBOX_SKEY,
   dmConversationUri,
   dmInboxUri,
+  isDid,
+  isSkey,
+  parseChannelUri,
   parseDmConversationUri,
   parseDmInboxUri,
   parseDmMessageUri,
   parseDmSpaceUri,
   parseSpaceRecordUri,
   parseSpaceUri,
+  parseWorkspaceUri,
   reactionRecordKey,
   recordKeyHash,
   requestDigest,
   requestRecordKey,
+  requireSpaceAuthority,
   spaceRecordUri,
   stableHash,
   subjectKey,
@@ -65,6 +70,32 @@ test("parseSpaceUri extracts the authority, type, and skey and rejects malformed
   assert.equal(parseSpaceUri("at://alice/space/org.slack.channel/general"), null);
   assert.equal(parseSpaceUri("at://did:plc:owner/org.slack.channel/general"), null);
   assert.equal(parseSpaceUri("at://did:plc:owner/space/org.slack.channel/general/extra"), null);
+});
+
+test("a space key follows record-key syntax: the PDS refuses `.` and `..`, so no parser here accepts them", () => {
+  assert.equal(isSkey("acme-1"), true);
+  assert.equal(isSkey(".hidden"), true);
+  for (const bad of [".", "..", "", "a/b", "a b", "x".repeat(129)]) assert.equal(isSkey(bad), false, bad);
+  assert.equal(parseSpaceUri("at://did:plc:owner/space/org.slack.channel/.."), null);
+  assert.equal(parseSpaceUri("at://did:plc:owner/space/org.slack.channel/."), null);
+});
+
+test("a DID is bounded in length so a hostile link cannot render as a wall of text", () => {
+  assert.equal(isDid("did:plc:abc"), true);
+  assert.equal(isDid("did:web:localhost%3A3000"), true);
+  assert.equal(isDid(`did:plc:${"a".repeat(512)}`), true);
+  assert.equal(isDid(`did:plc:${"a".repeat(513)}`), false);
+  assert.equal(isDid("did:PLC:abc"), false);
+  assert.equal(isDid("did:plc:ab c"), false);
+});
+
+test("workspace and channel URIs parse only their own space type, and any space URI names its authority", () => {
+  assert.deepEqual(parseWorkspaceUri("at://did:plc:owner/space/org.slack.workspace/team"), { authorityDid: "did:plc:owner", skey: "team" });
+  assert.equal(parseWorkspaceUri("at://did:plc:owner/space/org.slack.channel/team"), null);
+  assert.deepEqual(parseChannelUri("at://did:plc:owner/space/org.slack.channel/general"), { authorityDid: "did:plc:owner", skey: "general" });
+  assert.equal(parseChannelUri("at://did:plc:owner/space/org.slack.workspace/general"), null);
+  assert.equal(requireSpaceAuthority("at://did:plc:owner/space/org.slack.inbox/team"), "did:plc:owner");
+  assert.throws(() => requireSpaceAuthority("at://did:plc:owner/space/org.slack.inbox/.."), /Invalid permissioned space URI/);
 });
 
 test("canonical JSON sorts keys and rejects values outside its JSON domain", () => {

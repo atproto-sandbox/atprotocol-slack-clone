@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { acceptedTimestamps, loadSlurFilter } from "./support/accepted-tid";
 import test from "node:test";
 import { createFixtureTempRoot } from "./fixture-temp";
 
@@ -181,6 +182,7 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
 
       const messageStartedAt = performance.now();
       const base = Date.now() - CHANNELS * MESSAGES - 1000;
+      const stamps = acceptedTimestamps(tidNow, await loadSlurFilter(PINNED_CHECKOUT), base, CHANNELS * MESSAGES);
       const writtenPerChannel: number[] = [];
       const reactionsPerChannel: number[] = [];
       for (let channelIndex = 0; channelIndex < channels.length; channelIndex += 1) {
@@ -191,7 +193,7 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
           const writeCount = Math.floor(MESSAGES / writers.length) + (actorIndex < MESSAGES % writers.length ? 1 : 0);
           const writes = Array.from({ length: writeCount }, (_, localIndex) => {
             const sequence = localIndex * writers.length + actorIndex;
-            const timestamp = base + channelIndex * MESSAGES + sequence;
+            const timestamp = stamps[channelIndex * MESSAGES + sequence]!;
             const rkey = tidNow(timestamp, 0);
             return {
               $type: "com.atproto.space.applyWrites#create", collection: "org.slack.channel.message", rkey,
@@ -218,7 +220,7 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
         const writes: Array<Record<string, unknown>> = [];
         for (let sequence = 0; sequence < REACTIONS; sequence += 1) {
           const messageAuthorIndex = sequence % writers.length;
-          const timestamp = base + channelIndex * MESSAGES + sequence;
+          const timestamp = stamps[channelIndex * MESSAGES + sequence]!;
           const messageRkey = tidNow(timestamp, 0);
           const messageUri = spaceRecordUri(channel, writers[messageAuthorIndex].did, "org.slack.channel.message", messageRkey);
           const rkey = reactionRecordKey(messageUri, "👍", reactionAuthor.did);

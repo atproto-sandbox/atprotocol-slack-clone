@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { JoseKey } from "@atproto/jwk-jose";
+import { generateSpaceKey } from "@/atproto/space-key";
 import type { Locator } from "@playwright/test";
 import { mintSpaceCredentialWith, SpaceCredentialError } from "@/atproto/space-credential-core";
 import { AtprotoClient } from "@/atproto/xrpc";
@@ -40,20 +40,20 @@ export async function dmcRecords<T extends object>(
 }
 
 export async function dmcMembers(world: AppWorld, owner: FixtureAccount, space: string): Promise<DmcMember[]> {
-  const result = await world.pdsGet<{ members?: DmcMember[] }>(owner, "com.atproto.simplespace.listMembers", { space, limit: "1000" });
+  const result = await world.pdsGet<{ members?: DmcMember[] }>(owner, "com.atproto.memberspace.listMembers", { space, limit: "1000" });
   assert.equal(result.status, 200, `listMembers ${space}: ${JSON.stringify(result.body)}`);
   return result.body.members ?? [];
 }
 
 /** The conversation halves the account itself hosts. The PDS also lists foreign halves the account has written into. */
 export async function dmcHalfUris(world: AppWorld, as: FixtureAccount): Promise<string[]> {
-  const result = await world.pdsGet<{ spaces?: Array<{ uri: string }> }>(as, "com.atproto.space.listSpaces", { type: "org.slack.dm.conversation", limit: "100" });
+  const result = await world.pdsGet<{ spaces?: Array<{ uri: string }> }>(as, "com.atproto.space.listSpaces", { spaceType: "org.slack.dm.conversation", limit: "100" });
   assert.equal(result.status, 200, `listSpaces: ${JSON.stringify(result.body)}`);
   return (result.body.spaces ?? []).map((space) => space.uri).filter((uri) => uri.startsWith(`at://${as.did}/`)).sort();
 }
 
 export async function dmcInboxUris(world: AppWorld, as: FixtureAccount): Promise<string[]> {
-  const result = await world.pdsGet<{ spaces?: Array<{ uri: string }> }>(as, "com.atproto.space.listSpaces", { type: "org.slack.dm.inbox", limit: "100" });
+  const result = await world.pdsGet<{ spaces?: Array<{ uri: string }> }>(as, "com.atproto.space.listSpaces", { spaceType: "org.slack.dm.inbox", limit: "100" });
   assert.equal(result.status, 200, `listSpaces: ${JSON.stringify(result.body)}`);
   return (result.body.spaces ?? []).map((space) => space.uri);
 }
@@ -105,8 +105,8 @@ export async function dmcMint(world: AppWorld, as: FixtureAccount, space: string
 /** The accounts the space authority tracks as writers of `space` and each one's last recorded revision, listed with a credential minted by `member`. */
 export async function dmcWriterRevs(world: AppWorld, member: FixtureAccount, authority: FixtureAccount, space: string): Promise<Record<string, string>> {
   const credential = await mintSpaceCredentialWith(dmcDeps(world, member), space);
-  const page = await credential.client(authority.pdsUrl).query<{ repos: Array<{ did: string; rev: string }> }>("com.atproto.space.listRepos", { space });
-  return Object.fromEntries(page.repos.map((repo): [string, string] => [repo.did, repo.rev]).sort(([left], [right]) => left.localeCompare(right)));
+  const page = await credential.client(authority.pdsUrl).query<{ repos: Array<{ did: string; repoRev: string }> }>("com.atproto.space.listRepos", { space });
+  return Object.fromEntries(page.repos.map((repo): [string, string] => [repo.did, repo.repoRev]).sort(([left], [right]) => left.localeCompare(right)));
 }
 
 /** The accounts the space authority tracks as writers of `space`, listed with a credential minted by `member`. */
@@ -175,8 +175,9 @@ function dmcDeps(world: AppWorld, account: FixtureAccount): DmDeps {
       return fetch(new URL(path, account.pdsUrl), { ...init, headers, redirect: "error" });
     }),
     resolvePds: (did) => resolvePds(did, { plcUrl: world.fixture.plcUrl, loopback: true }),
+    resolveKemKey: world.resolveKemKey,
     fetchEndpoint: (request) => fetch(request),
-    generateKey: () => JoseKey.generate(["ES256"]),
+    generateKey: generateSpaceKey,
     store: {
       get: async (key) => values.get(key) ?? null,
       set: async (key, value) => { values.set(key, value); },

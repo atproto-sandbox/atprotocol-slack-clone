@@ -1,12 +1,13 @@
 import type * as ListRecords from "@/lexicons/api/types/com/atproto/space/listRecords";
-import type * as ListMembers from "@/lexicons/api/types/com/atproto/simplespace/listMembers";
+import type * as ListMembers from "@/lexicons/api/types/com/atproto/memberspace/listMembers";
 import type * as ListRepos from "@/lexicons/api/types/com/atproto/space/listRepos";
 import type * as ListSpaces from "@/lexicons/api/types/com/atproto/space/listSpaces";
+import { isDid, parseSpaceUri } from "@/protocol/keys";
 import type { AtprotoClient } from "./xrpc";
 
 const MAX_SCAN_PAGES = 128;
 const MAX_REPO_SCAN_PAGES = 512;
-const MAX_SPACE_PAGE = 100; // com.atproto.space.listSpaces caps `limit` at 100, unlike the 500 shared by listRepos/listMembers/listRecords.
+const MAX_SPACE_PAGE = 100; // com.atproto.space.listSpaces caps `limit` at 100; the app caps listRepos/listMembers/listRecords pages at 500 itself.
 
 export type BoundedRecords = {
   records: Array<{ rkey: string; value: Record<string, unknown> }>;
@@ -61,62 +62,71 @@ function assertRepoPage(page: unknown, limit: number): asserts page is ListRepos
   const candidate = page as { repos?: unknown };
   if (!Array.isArray(candidate.repos) || candidate.repos.length > limit) throw new Error("PDS repo page exceeded the requested limit.");
   if (candidate.repos.some((repo) => typeof repo !== "object" || repo === null || Array.isArray(repo) ||
-    typeof repo.did !== "string" || !/^did:[a-z0-9]+:[A-Za-z0-9._:%-]+$/.test(repo.did))) {
+    !isDid(repo.did))) {
     throw new Error("PDS repo page contains a malformed repo DID.");
+  }
+  if (candidate.repos.some((repo) => typeof repo.repoRev !== "string" || typeof repo.spaceRev !== "string" || repo.spaceRev.length === 0)) {
+    throw new Error("PDS repo page contains a repo without repoRev and spaceRev.");
+  }
+  for (let i = 1; i < candidate.repos.length; i++) {
+    if (candidate.repos[i - 1].spaceRev > candidate.repos[i].spaceRev) throw new Error("PDS repo page is not in ascending spaceRev order.");
   }
 }
 
+function assertRepoCursor(page: ListRepos.OutputSchema, requested: string | undefined, seenCursors: ReadonlySet<string>): void {
+  if (page.cursor !== undefined && (typeof page.cursor !== "string" || page.cursor.length === 0)) throw new Error("PDS repo pagination returned an invalid cursor.");
+  if (!page.cursor) return;
+  if (page.cursor === requested || seenCursors.has(page.cursor)) throw new Error("PDS repo pagination did not advance.");
+  if (page.repos.length === 0) throw new Error("PDS repo pagination returned an empty nonterminal page.");
+}
+
+/**
+ * Pages are ordered by spaceRev, so a repo updated while paginating reappears at a later
+ * spaceRev. The latest entry wins, and only distinct DIDs count toward the bound and the
+ * truncation flag.
+ */
 export async function listBoundedRepos(
   client: AtprotoClient,
   input: { space: string; maxRepos: number },
 ): Promise<BoundedRepos> {
   if (!Number.isSafeInteger(input.maxRepos) || input.maxRepos < 1) throw new RangeError("Repo scan limit must be a positive safe integer.");
-  const repos: ListRepos.Repo[] = [];
+  const collected = new Map<string, ListRepos.Repo>();
   const seenCursors = new Set<string>();
-  const seenDids = new Set<string>();
   let pages = 0;
   let cursor: string | undefined;
-  do {
-    const requestedCursor = cursor;
-    const limit = Math.min(500, input.maxRepos - repos.length);
+  const fetchPage = async (limit: number): Promise<ListRepos.OutputSchema> => {
     if (++pages > MAX_REPO_SCAN_PAGES) throw new Error("PDS repo pagination exceeded the bounded page limit.");
+    const requested = cursor;
     const page = await client.query<ListRepos.OutputSchema>("com.atproto.space.listRepos", { space: input.space, limit, cursor });
     assertRepoPage(page, limit);
-    for (const repo of page.repos) {
-      if (seenDids.has(repo.did)) throw new Error("PDS repo pagination returned a duplicate repo DID.");
-      seenDids.add(repo.did);
-    }
-    repos.push(...page.repos);
-    if (page.cursor !== undefined && (typeof page.cursor !== "string" || page.cursor.length === 0)) throw new Error("PDS repo pagination returned an invalid cursor.");
+    assertRepoCursor(page, requested, seenCursors);
     cursor = page.cursor;
-    if (cursor) {
-      if (cursor === requestedCursor || seenCursors.has(cursor)) throw new Error("PDS repo pagination did not advance.");
-      if (page.repos.length === 0) throw new Error("PDS repo pagination returned an empty nonterminal page.");
-      seenCursors.add(cursor);
-    }
-  } while (cursor && repos.length < input.maxRepos);
+    if (cursor) seenCursors.add(cursor);
+    return page;
+  };
+
+  do {
+    const page = await fetchPage(Math.min(500, input.maxRepos - collected.size));
+    for (const repo of page.repos) collected.set(repo.did, repo);
+  } while (cursor && collected.size < input.maxRepos);
 
   let truncated = false;
-  if (cursor) {
-    if (++pages > MAX_REPO_SCAN_PAGES) throw new Error("PDS repo pagination exceeded the bounded page limit.");
-    const lookahead = await client.query<ListRepos.OutputSchema>("com.atproto.space.listRepos", { space: input.space, limit: 1, cursor });
-    assertRepoPage(lookahead, 1);
-    if (lookahead.repos.some((repo) => seenDids.has(repo.did))) throw new Error("PDS repo pagination returned a duplicate repo DID.");
-    if (lookahead.cursor !== undefined && (typeof lookahead.cursor !== "string" || lookahead.cursor.length === 0)) throw new Error("PDS repo pagination returned an invalid cursor.");
-    if (lookahead.repos.length === 0 && lookahead.cursor) throw new Error("PDS repo pagination returned an empty nonterminal page.");
-    if (lookahead.cursor && (lookahead.cursor === cursor || seenCursors.has(lookahead.cursor))) throw new Error("PDS repo pagination did not advance.");
-    truncated = lookahead.repos.length > 0;
+  while (cursor && !truncated) {
+    const page = await fetchPage(1);
+    for (const repo of page.repos) {
+      if (collected.has(repo.did)) collected.set(repo.did, repo);
+      else truncated = true;
+    }
   }
-  return { repos, truncated };
+  return { repos: [...collected.values()], truncated };
 }
 
 function assertSpacePage(page: unknown, limit: number): asserts page is ListSpaces.OutputSchema {
   if (typeof page !== "object" || page === null) throw new Error("PDS space page is malformed.");
   const candidate = page as { spaces?: unknown; cursor?: unknown };
   if (!Array.isArray(candidate.spaces) || candidate.spaces.length > limit) throw new Error("PDS space page exceeded the requested limit.");
-  if (candidate.spaces.some((space) => typeof space !== "object" || space === null || Array.isArray(space) ||
-    typeof space.uri !== "string" || !/^at:\/\/did:[a-z0-9]+:[A-Za-z0-9._:%-]+\/space\/[A-Za-z0-9.-]+\/[A-Za-z0-9._~:-]{1,128}$/.test(space.uri))) {
-    throw new Error("PDS space page contains a malformed space URI.");
+  if (candidate.spaces.some((space) => typeof space !== "object" || space === null || Array.isArray(space) || typeof space.uri !== "string")) {
+    throw new Error("PDS space page contains a malformed space.");
   }
   if (candidate.cursor !== undefined && (typeof candidate.cursor !== "string" || candidate.cursor.length === 0)) {
     throw new Error("PDS space pagination returned an invalid cursor.");
@@ -126,7 +136,7 @@ function assertSpacePage(page: unknown, limit: number): asserts page is ListSpac
 
 export async function listBoundedSpaces(
   client: AtprotoClient,
-  input: { type?: string; did?: string; maxSpaces: number },
+  input: { spaceType?: string; did?: string; maxSpaces: number },
 ): Promise<BoundedSpaces> {
   if (!Number.isSafeInteger(input.maxSpaces) || input.maxSpaces < 1) throw new RangeError("Space scan limit must be a positive safe integer.");
   const spaces: ListSpaces.SpaceView[] = [];
@@ -139,14 +149,16 @@ export async function listBoundedSpaces(
     const limit = Math.min(MAX_SPACE_PAGE, input.maxSpaces - spaces.length);
     if (++pages > MAX_SCAN_PAGES) throw new Error("PDS space pagination exceeded the bounded page limit.");
     const page = await client.query<ListSpaces.OutputSchema>("com.atproto.space.listSpaces", {
-      type: input.type, did: input.did, limit, cursor,
+      spaceType: input.spaceType, did: input.did, limit, cursor,
     });
     assertSpacePage(page, limit);
     for (const space of page.spaces) {
       if (seenUris.has(space.uri)) throw new Error("PDS space pagination returned a duplicate space URI.");
       seenUris.add(space.uri);
     }
-    spaces.push(...page.spaces);
+    // A space whose URI this app cannot parse (for example a record key longer than it creates) is not one of its spaces. It is
+    // skipped, not a reason to fail the listing: a space the account wrote into elsewhere could otherwise break discovery for good.
+    spaces.push(...page.spaces.filter((space) => parseSpaceUri(space.uri) !== null));
     cursor = page.cursor;
     if (cursor) {
       if (cursor === requestedCursor || seenCursors.has(cursor)) throw new Error("PDS space pagination did not advance.");
@@ -155,18 +167,31 @@ export async function listBoundedSpaces(
     }
   } while (cursor && spaces.length < input.maxSpaces);
 
+  // One entry past the limit decides whether the list was cut short. An entry this app cannot parse is not one of its spaces, so it
+  // does not count as more; keep looking past it, within the same page bound.
   let truncated = false;
-  if (cursor) {
+  let probe = cursor;
+  while (probe && !truncated) {
     if (++pages > MAX_SCAN_PAGES) throw new Error("PDS space pagination exceeded the bounded page limit.");
     const lookahead = await client.query<ListSpaces.OutputSchema>("com.atproto.space.listSpaces", {
-      type: input.type, did: input.did, limit: 1, cursor,
+      spaceType: input.spaceType, did: input.did, limit: 1, cursor: probe,
     });
     assertSpacePage(lookahead, 1);
     if (lookahead.spaces.some((space) => seenUris.has(space.uri))) throw new Error("PDS space pagination returned a duplicate space URI.");
-    if (lookahead.cursor && (lookahead.cursor === cursor || seenCursors.has(lookahead.cursor))) throw new Error("PDS space pagination did not advance.");
-    truncated = lookahead.spaces.length > 0;
+    if (lookahead.cursor && (lookahead.cursor === probe || seenCursors.has(lookahead.cursor))) throw new Error("PDS space pagination did not advance.");
+    if (lookahead.spaces.length === 0 && lookahead.cursor) throw new Error("PDS space pagination returned an empty nonterminal page.");
+    truncated = lookahead.spaces.some((space) => parseSpaceUri(space.uri) !== null);
+    if (lookahead.cursor) seenCursors.add(lookahead.cursor);
+    probe = lookahead.cursor;
   }
   return { spaces, truncated };
+}
+
+/** Every space URI of a type, or an error when there are more than `maxSpaces`: discovery must not silently hide some of an account's spaces. */
+export async function listAllSpaceUris(client: AtprotoClient, input: { spaceType: string; maxSpaces: number }): Promise<string[]> {
+  const scan = await listBoundedSpaces(client, input);
+  if (scan.truncated) throw new Error(`Account ${input.spaceType} list exceeds the ${input.maxSpaces}-space discovery limit.`);
+  return scan.spaces.map(({ uri }) => uri);
 }
 
 function assertMemberPage(page: unknown, limit: number): asserts page is ListMembers.OutputSchema {
@@ -174,9 +199,9 @@ function assertMemberPage(page: unknown, limit: number): asserts page is ListMem
   const candidate = page as { members?: unknown; cursor?: unknown };
   if (!Array.isArray(candidate.members) || candidate.members.length > limit) throw new Error("PDS member page exceeded the requested limit.");
   if (candidate.members.some((member) => typeof member !== "object" || member === null || Array.isArray(member) ||
-    typeof member.did !== "string" || !/^did:[a-z0-9]+:[A-Za-z0-9._:%-]+$/.test(member.did) ||
+    !isDid(member.did) ||
     typeof member.read !== "boolean" || typeof member.write !== "boolean" ||
-    (member.$type !== undefined && member.$type !== "com.atproto.simplespace.listMembers#member"))) {
+    (member.$type !== undefined && member.$type !== "com.atproto.memberspace.listMembers#member"))) {
     throw new Error("PDS member page contains a malformed member.");
   }
   if (candidate.cursor !== undefined && (typeof candidate.cursor !== "string" || candidate.cursor.length === 0)) {
@@ -199,7 +224,7 @@ export async function listBoundedMembers(
     const requestedCursor = cursor;
     const limit = Math.min(500, input.maxMembers - members.length);
     if (++pages > MAX_SCAN_PAGES) throw new Error("PDS member pagination exceeded the bounded page limit.");
-    const page = await client.query<ListMembers.OutputSchema>("com.atproto.simplespace.listMembers", {
+    const page = await client.query<ListMembers.OutputSchema>("com.atproto.memberspace.listMembers", {
       space: input.space,
       limit,
       cursor,
@@ -220,7 +245,7 @@ export async function listBoundedMembers(
   let truncated = false;
   if (cursor) {
     if (++pages > MAX_SCAN_PAGES) throw new Error("PDS member pagination exceeded the bounded page limit.");
-    const page = await client.query<ListMembers.OutputSchema>("com.atproto.simplespace.listMembers", {
+    const page = await client.query<ListMembers.OutputSchema>("com.atproto.memberspace.listMembers", {
       space: input.space,
       limit: 1,
       cursor,

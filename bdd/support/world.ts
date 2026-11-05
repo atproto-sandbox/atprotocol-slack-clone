@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import { World, type IWorldOptions } from "@cucumber/cucumber";
 import Database from "better-sqlite3";
+import { resolveKemKey } from "../../src/dm/browser-identity";
 import type { Browser, BrowserContext, Page, Response as PlaywrightResponse } from "@playwright/test";
 import type { AppFixture, FixtureAccount } from "../../protocol-tests/support/app-fixture";
+
+/** How long a page waits for an element or navigation; one machine runs the app, two PDS hosts and every browser of a scenario at once. */
+export const PAGE_TIMEOUT_MS = 90_000;
 
 /**
  * `body` says what `responseBody` holds: "recorded" is the response text. "streamed" (text/event-stream) and "navigated-away" (the
@@ -23,6 +27,9 @@ export class AppWorld extends World {
   fixture!: AppFixture;
   browser!: Browser;
   readonly actors = new Map<string, Actor>();
+  /** An account's `#atproto_kem` key from the fixture's PLC directory, as a syncer resolves it before asking for a MAC. */
+  readonly resolveKemKey = (did: string, forceRefresh: boolean): Promise<string> =>
+    resolveKemKey(did, { plcUrl: this.fixture.plcUrl, loopback: true }, forceRefresh);
   workspaceName = "";
   workspaceUri = "";
   inviteLink = "";
@@ -53,7 +60,7 @@ export class AppWorld extends World {
     const context = await this.newContext(role);
     await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: this.appOrigin });
     const page = await context.newPage();
-    page.setDefaultTimeout(30_000);
+    page.setDefaultTimeout(PAGE_TIMEOUT_MS);
     const actor: Actor = { ...account, role, context, page, calls: [] };
     this.recordCalls(actor);
     this.actors.set(role, actor);

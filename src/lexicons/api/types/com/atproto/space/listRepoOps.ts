@@ -34,7 +34,7 @@ export type InputSchema = undefined
 
 export interface OutputSchema {
   ops: OpEntry[]
-  commit?: ComAtprotoSpaceDefs.SignedCommit
+  commit?: ComAtprotoSpaceDefs.Commit
   /** Pass as `cursor` to fetch the next page. Absent once the response reaches the head of the oplog. */
   cursor?: string
 }
@@ -48,6 +48,12 @@ export interface Response {
   success: boolean
   headers: HeadersMap
   data: OutputSchema
+}
+
+export class BadSpaceMacError extends XRPCError {
+  constructor(src: XRPCError) {
+    super(src.status, src.error, src.message, src.headers, { cause: src })
+  }
 }
 
 export class SpaceNotFoundError extends XRPCError {
@@ -82,6 +88,7 @@ export class RepoDeactivatedError extends XRPCError {
 
 export function toKnownErr(e: any) {
   if (e instanceof XRPCError) {
+    if (e.error === 'BadSpaceMac') return new BadSpaceMacError(e)
     if (e.error === 'SpaceNotFound') return new SpaceNotFoundError(e)
     if (e.error === 'RepoNotFound') return new RepoNotFoundError(e)
     if (e.error === 'RepoTakendown') return new RepoTakendownError(e)

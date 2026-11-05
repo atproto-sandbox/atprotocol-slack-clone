@@ -20,12 +20,16 @@ export type QueryParams = {}
 export interface InputSchema {
   /** Reference to the space. */
   space: string
+  /** P-256 did:key to bind the credential to. Each request using the credential is signed by this key. */
+  credentialKid: string
+  /** Optional delegation token establishing the user being acted for. Required only when the space gates on the user. */
+  delegationToken?: string
   /** Optional client attestation JWT establishing the app's identity. Required only when the space gates on app identity. */
   clientAttestation?: string
 }
 
 export interface OutputSchema {
-  /** A signed JWT space credential, bound through its cnf.jkt claim to the key that signed the request's DPoP proof. */
+  /** A signed JWT space credential. */
   credential: string
 }
 

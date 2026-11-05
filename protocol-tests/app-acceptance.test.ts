@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
+import { isAccessLost, SPACE_CREDENTIAL_LIFETIME_MS } from "@/atproto/space-credential-core";
 import { createFixtureTempRoot } from "./fixture-temp";
 
 type TestAgent = {
@@ -127,7 +128,7 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     const flakyBootstrapSession = {
       ...ownerSession,
       fetchHandler: async (path: string, init: RequestInit) => {
-        if (rejectBootstrapSpaceCreate && path.includes("com.atproto.simplespace.createSpace")) {
+        if (rejectBootstrapSpaceCreate && path.includes("com.atproto.space.createSpace")) {
           rejectBootstrapSpaceCreate = false;
           return new Response(JSON.stringify({ error: "ServiceUnavailable", message: "injected bootstrap outage" }), {
             status: 503, headers: { "content-type": "application/json" },
@@ -149,7 +150,7 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     const schedulerFlakySession = {
       ...ownerSession,
       fetchHandler: async (path: string, init: RequestInit) => {
-        if (rejectScheduledBootstrap && path.includes("com.atproto.simplespace.createSpace")) {
+        if (rejectScheduledBootstrap && path.includes("com.atproto.space.createSpace")) {
           rejectScheduledBootstrap = false;
           return new Response(JSON.stringify({ error: "ServiceUnavailable", message: "injected pre-admin bootstrap outage" }), {
             status: 503, headers: { "content-type": "application/json" },
@@ -304,6 +305,77 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     ) as { uri: string }).uri;
     assert.equal(migratedMessageUri, latestMessageUri, "legacy encrypted cache values migrate to the PDS-canonical URI without data loss");
 
+    // One writer whose account is deactivated must not make the channel unreadable for everyone else: the pinned PDS refuses every other
+    // account's read of its repo with RepoDeactivated while the authority still issues it credentials.
+    const accountCall = (method: string, jwt: string, body?: string) => fetch(new URL(`/xrpc/${method}`, admin.pds.url), {
+      method: "POST", headers: { authorization: `Bearer ${jwt}`, ...(body ? { "content-type": "application/json" } : {}) }, body,
+    });
+    const lobby = `${workspace.skey}-team-lobby`;
+    assert.equal((await accountCall("com.atproto.server.deactivateAccount", admin.accessJwt, "{}")).status, 200, "the admin's host deactivates the account");
+    let activated: Response | undefined;
+    try {
+      // The app re-checks a writer at most once a minute unless a write notice marks it stale, as one would here.
+      (await import("@/workspaces/cache")).markRepoStale(messageSpace, admin.did);
+      const appPage = await readChannelPage(memberSession as never, bootstrap.workspace, lobby);
+      assert.equal(appPage.degraded, true);
+      assert.ok(appPage.degradedReasons.some((reason) => reason.includes(admin.did) && reason.includes("its account is deactivated")), "the app names the deactivated writer");
+      assert.ok(appPage.messages.some((message) => message.value.text === "latest second PDS message"), "the app still reads the other writers");
+      assert.ok(!appPage.messages.some((message) => message.repo === admin.did), "the app serves nothing from the deactivated writer");
+      const independentPage = await readIndependentChannelPage(memberSession as never, bootstrap.workspace, lobby);
+      assert.equal(independentPage.degraded, true);
+      assert.ok(independentPage.degradedReasons.some((reason) => reason.includes(admin.did) && reason.includes("its account is deactivated")), "the independent reader names the deactivated writer");
+      assert.ok(independentPage.messages.some((message) => message.value.text === "latest second PDS message"), "the independent reader still reads the other writers");
+      assert.ok(!independentPage.messages.some((message) => message.repo === admin.did), "the independent reader serves nothing from the deactivated writer");
+    } finally {
+      // Reactivate whatever happened above, without asserting here, so a failure in the try block is not hidden by this one.
+      activated = await accountCall("com.atproto.server.activateAccount", admin.accessJwt);
+      if (!activated.ok) {
+        admin.accessJwt = (await admin.pds.getAgent().com.atproto.server.createSession({ identifier: "carol.test2", password: "carol-acceptance-pass" })).data.accessJwt;
+        activated = await accountCall("com.atproto.server.activateAccount", admin.accessJwt);
+      }
+    }
+    assert.equal(activated?.status, 200, `the admin's account is active again: ${await activated?.clone().text()}`);
+    const restoredPage = await readChannelPage(memberSession as never, bootstrap.workspace, lobby);
+    assert.ok(restoredPage.messages.some((message) => message.value.text === "admin host message"), "the writer's messages return once the account is active");
+    assert.ok(!restoredPage.degradedReasons.some((reason) => reason.includes(admin.did)), "and the writer is no longer reported");
+    const restoredIndependent = await readIndependentChannelPage(memberSession as never, bootstrap.workspace, lobby);
+    assert.ok(restoredIndependent.messages.some((message) => message.value.text === "admin host message"), "the independent reader sees the writer again too");
+    assert.ok(!restoredIndependent.degradedReasons.some((reason) => reason.includes(admin.did)), "and no longer reports it");
+
+    // The authority's space-deleted notice drops every account's copy, through the real route with a token the authority's PDS signed.
+    const doomedSpace = channelUri(owner.did, "doomed-by-notice");
+    const seedCopy = (account: string) => {
+      getRawDb().prepare(`INSERT INTO channel_record_cache (account_did,space_uri,repo_did,collection,rkey,uri,value_cipher,updated_at) VALUES (?,?,?,?,?,?,?,?)`)
+        .run(account, doomedSpace, owner.did, "org.slack.channel.message", "r1", `${doomedSpace}/${owner.did}/org.slack.channel.message/r1`, "cipher", Math.floor(Date.now() / 1000));
+      getRawDb().prepare(`INSERT INTO space_collection_cursor (account_did,space_uri,repo_did,collection,rev,next_cursor,finished,checked_at) VALUES (?,?,?,?,?,?,?,?)`)
+        .run(account, doomedSpace, owner.did, "org.slack.channel.message", "r1", null, 1, Math.floor(Date.now() / 1000));
+    };
+    const copies = () => (getRawDb().prepare("SELECT count(*) AS count FROM channel_record_cache WHERE space_uri=?").get(doomedSpace) as { count: number }).count;
+    seedCopy(member.did);
+    seedCopy(admin.did);
+    getRawDb().prepare("INSERT INTO notification_registration (service_ref,space_uri,expires_at) VALUES (?,?,?)").run(serviceRef, doomedSpace, Date.now() + 2 * 60 * 60 * 1000);
+    const serviceToken = async (actor: TestActor, lxm = "com.atproto.space.notifySpaceDeleted"): Promise<string> => {
+      const response = await fetch(new URL(`/xrpc/com.atproto.server.getServiceAuth?aud=${encodeURIComponent(serviceRef)}&lxm=${lxm}`, actor.pds.url), {
+        headers: { authorization: `Bearer ${actor.accessJwt}` },
+      });
+      assert.equal(response.status, 200, "the PDS signs a service token for the app's service ref");
+      return ((await response.json()) as { token: string }).token;
+    };
+    const [{ POST: applySpaceDeleted }, { NextRequest }] = await Promise.all([
+      import("@/app/xrpc/com.atproto.space.notifySpaceDeleted/route"), import("next/server"),
+    ]);
+    const notice = (token: string | null, space: string) => applySpaceDeleted(new NextRequest("http://127.0.0.1:3000/xrpc/com.atproto.space.notifySpaceDeleted", {
+      method: "POST", headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify({ space }),
+    }));
+    assert.equal((await notice(null, doomedSpace)).status, 403, "no token");
+    assert.equal((await notice(await serviceToken(member), doomedSpace)).status, 403, "a token from someone who is not the space's authority");
+    assert.equal((await notice(await serviceToken(owner), channelUri(owner.did, "never-registered"))).status, 403, "a space the app never registered");
+    assert.equal((await notice(await serviceToken(owner, "com.atproto.space.notifyWrite"), doomedSpace)).status, 403, "the authority's token, but minted for another method");
+    assert.equal(copies(), 2, "nothing was dropped by a refused notice");
+    assert.equal((await notice(await serviceToken(owner), doomedSpace)).status, 200, "the authority's own token is accepted");
+    assert.equal(copies(), 0, "every account's copy of the deleted space is gone");
+    assert.equal((getRawDb().prepare("SELECT count(*) AS count FROM notification_registration WHERE space_uri=?").get(doomedSpace) as { count: number }).count, 0, "and so is its notify registration");
+
     const inbox = inboxUri(owner.did, workspace.skey);
     const privateSkey = `${workspace.skey}-team-private`;
     const privateSpace = channelUri(owner.did, privateSkey);
@@ -324,9 +396,9 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
       memberDidResolver.resolve = resolveMemberDid;
     }
     assert.equal(memberRequestUri, `${inbox}/${member.did}/org.slack.joinRequest/${memberRequestKey}`);
-    await assert.rejects(mintSpaceCredential(memberSession as never, privateSpace), (error: unknown) => hasStatus(error, 401, 403));
-    await assert.rejects(mintSpaceCredential(memberSession as never, inbox), (error: unknown) => hasStatus(error, 401, 403));
-    await assert.rejects(mintSpaceCredential(outsiderSession as never, inbox), (error: unknown) => hasStatus(error, 401, 403));
+    await assert.rejects(mintSpaceCredential(memberSession as never, privateSpace), (error: unknown) => isAccessLost(error));
+    await assert.rejects(mintSpaceCredential(memberSession as never, inbox), (error: unknown) => isAccessLost(error));
+    await assert.rejects(mintSpaceCredential(outsiderSession as never, inbox), (error: unknown) => isAccessLost(error));
     const adminInbox = await mintSpaceCredential(adminSession as never, inbox);
     const inboxRepos = await adminInbox.client(network.pds.url).query<{ repos: Array<{ did: string }> }>("com.atproto.space.listRepos", { space: inbox });
     assert.ok(!inboxRepos.repos.some(({ did }) => did === member.did), "a dropped PDS notification leaves the writer absent from listRepos");
@@ -340,7 +412,7 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
       kind: "decideJoinRequest", request: memberRequestUri, requestId: memberRequestId, decision: "deny",
     });
     assert.equal(denial.state, "completed");
-    await assert.rejects(mintSpaceCredential(memberSession as never, privateSpace), (error: unknown) => hasStatus(error, 401, 403));
+    await assert.rejects(mintSpaceCredential(memberSession as never, privateSpace), (error: unknown) => isAccessLost(error));
     const denialRecord = await adminInbox.client(network.pds.url).query<{ records: Array<{ value?: { requestId?: string; decision?: string } }> }>("com.atproto.space.listRecords", {
       space: inbox, repo: owner.did, collection: "org.slack.joinDecision", rkey: decisionRecordKey(memberRequestUri),
     });
@@ -356,7 +428,7 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     });
     assert.equal(staleApproval.state, "failed");
     assert.match(staleApproval.error ?? "", /generation is no longer current/i);
-    await assert.rejects(mintSpaceCredential(memberSession as never, privateSpace), (error: unknown) => hasStatus(error, 401, 403));
+    await assert.rejects(mintSpaceCredential(memberSession as never, privateSpace), (error: unknown) => isAccessLost(error));
     const approval = await executeOperatorOperation(operatorActor as never, tidNow(), {
       kind: "decideJoinRequest", request: memberRequestUri, requestId: replacementRequestId, decision: "approve",
     });
@@ -372,13 +444,17 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     await removeSpaceMember(ownerSession as never, privateSpace, member.did);
     await assert.rejects(
       requireCurrentChannelCredential(memberSession as never, bootstrap.workspace, privateSpace),
-      (error: unknown) => hasStatus(error, 401, 403),
+      (error: unknown) => isAccessLost(error),
       "a removed private-channel member cannot pass the app's fresh credential gate for writes",
     );
     await putSpaceMember(ownerSession as never, privateSpace, member.did, true, true);
     const preRemovalCredential = await mintSpaceCredential(memberSession as never, bootstrap.workspace);
     assert.ok(preRemovalCredential.expiresAt > Date.now());
-    assert.ok(preRemovalCredential.expiresAt - Date.now() <= 2 * 60 * 60 * 1000);
+    const issued = JSON.parse(Buffer.from(preRemovalCredential.token.split(".")[1]!, "base64url").toString("utf8")) as { iat: number; exp: number; jti: string; cnf: { kid: string } };
+    assert.equal(issued.exp - issued.iat, SPACE_CREDENTIAL_LIFETIME_MS / 1000, "the PDS issues credentials with the lifetime the app plans its renewals around");
+    assert.ok(issued.exp - issued.iat <= 60 * 60, "and never above the one hour protocol ceiling");
+    assert.equal(issued.cnf.kid, preRemovalCredential.key.did(), "the credential is bound to the key that signs its requests");
+    assert.ok(issued.jti.length > 0);
 
     const cache = getRawDb();
     cache.prepare(`INSERT OR REPLACE INTO channel_record_cache (account_did,space_uri,repo_did,collection,rkey,uri,value_cipher,updated_at)
@@ -396,7 +472,7 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
       ...ownerSession,
       fetchHandler: async (path: string, init: RequestInit) => {
         const body = typeof init.body === "string" ? init.body : "";
-        if (injectedAttempts < 4 && path.includes("com.atproto.simplespace.removeMember") && body.includes("/space/org.slack.channel/")) {
+        if (injectedAttempts < 4 && path.includes("com.atproto.memberspace.removeMember") && body.includes("/space/org.slack.channel/")) {
           injectedAttempts += 1;
           return new Response(JSON.stringify({ message: "injected crash window" }), { status: 503, headers: { "content-type": "application/json" } });
         }
@@ -483,9 +559,9 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     assert.equal(countRows("sync_cursor"), 0);
     cache.prepare(`INSERT INTO channel_record_cache (account_did,space_uri,repo_did,collection,rkey,uri,value_cipher,updated_at)
       VALUES (?,?,?,?,?,?,?,?)`).run(member.did, messageSpace, member.did, "org.slack.channel.message", "stale-after-list", `at://${member.did}/org.slack.channel.message/stale-after-list`, "encrypted-stale-value", Date.now());
-    await assert.rejects(readChannelPage(memberSession as never, bootstrap.workspace, `${workspace.skey}-team-lobby`), (error: unknown) => hasStatus(error, 401, 403));
+    await assert.rejects(readChannelPage(memberSession as never, bootstrap.workspace, `${workspace.skey}-team-lobby`), (error: unknown) => isAccessLost(error));
     assert.equal(countRows("channel_record_cache"), 0, "a failed workspace credential renewal purges the local channel cache");
-    await assert.rejects(mintSpaceCredential(memberSession as never, bootstrap.workspace), (error: unknown) => hasStatus(error, 401, 403));
+    await assert.rejects(mintSpaceCredential(memberSession as never, bootstrap.workspace), (error: unknown) => isAccessLost(error));
     assert.equal((await listIndependentWorkspaces(memberSession as never)).length, 0, "the independent reader drops a stale acceptance marker after access is revoked");
     const existingCredentialStillWorks = await preRemovalCredential.client(network.pds.url).query<{ records: Array<{ rkey: string }> }>("com.atproto.space.listRecords", {
       space: bootstrap.workspace, repo: owner.did, collection: "org.slack.workspace.profile",
@@ -631,7 +707,7 @@ async function runPhase5FailureMatrix(input: {
     catch { return false; }
   };
   const memberMutation = (method: "putMember" | "removeMember", space: string, did: string, read?: boolean, write?: boolean) =>
-    isRequest(`com.atproto.simplespace.${method}`, (body) => body.space === space && body.did === did &&
+    isRequest(`com.atproto.memberspace.${method}`, (body) => body.space === space && body.did === did &&
       (read === undefined || body.read === read) && (write === undefined || body.write === write));
   const recordMutation = (space: string, collection: string, rkey: string, predicate: (value: Record<string, unknown>) => boolean = () => true) =>
     isRequest("com.atproto.space.putRecord", (body) => body.space === space && body.collection === collection && body.rkey === rkey &&
@@ -655,7 +731,7 @@ async function runPhase5FailureMatrix(input: {
     const faultySession: Session = {
       ...originalSession,
       fetchHandler: async (path, init) => {
-        if (path.includes("com.atproto.simplespace.putMember") && typeof init.body === "string") observedMembershipWrites.push(init.body);
+        if (path.includes("com.atproto.memberspace.putMember") && typeof init.body === "string") observedMembershipWrites.push(init.body);
         if (injected < 4 && matcher(path, init)) {
           injected += 1;
           if (failBeforeCommit) {
@@ -766,7 +842,7 @@ async function runPhase5FailureMatrix(input: {
 
   // Channel creation writes the member list before publishing its directory entry.
   const createCases = [
-    ["create channel space", "create-space", "channel-space", (space: string) => isRequest("com.atproto.simplespace.createSpace", (body) => body.skey === space.split("/").at(-1))],
+    ["create channel space", "create-space", "channel-space", (space: string) => isRequest("com.atproto.space.createSpace", (body) => body.skey === space.split("/").at(-1))],
     ["add private channel member", "create-private-member", `channel-member-${input.outsiderDid}`, (space: string) => memberMutation("putMember", space, input.outsiderDid, true, true)],
     ["write private channel roster", "create-private-roster", `channel-roster-${input.outsiderDid}`, (space: string) => recordMutation(space, "org.slack.channel.roster", subjectKey(input.outsiderDid), (value) => value.active === true)],
     ["publish channel directory", "create-directory", "channel-directory", (space: string) => recordMutation(workspace, "org.slack.directory", space.split("/").at(-1) ?? "")],
@@ -862,7 +938,7 @@ async function runPhase5FailureMatrix(input: {
         });
         assert.equal(archivedMessage.uri, `${space}/${input.memberDid}/org.slack.channel.message/${messageRkey}`);
         assert.equal(archivedMessage.value.text, "retained after archive");
-        await assert.rejects(mintSpaceCredential(input.memberSession as never, space), (error: unknown) => hasStatus(error, 401, 403));
+        await assert.rejects(mintSpaceCredential(input.memberSession as never, space), (error: unknown) => isAccessLost(error));
       }, failBeforeCommit,
       async () => assert.equal(
         (await record(workspace, "org.slack.directory", skey))?.visibility,
@@ -1238,10 +1314,6 @@ function waitForChildClose(child: ReturnType<typeof spawn>): Promise<void> {
       resolve();
     });
   });
-}
-
-function hasStatus(error: unknown, ...statuses: number[]): boolean {
-  return typeof error === "object" && error !== null && "status" in error && statuses.includes(Number(error.status));
 }
 
 async function runRestartRecovery(input: {

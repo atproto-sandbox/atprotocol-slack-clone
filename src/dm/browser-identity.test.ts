@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
-import { clearBrowserIdentityCache, resolveHandle, resolvePds, type BrowserIdentityConfig } from "./browser-identity";
+import { P256Keypair } from "@atproto/crypto";
+import { clearBrowserIdentityCache, resolveHandle, resolveKemKey, resolvePds, type BrowserIdentityConfig } from "./browser-identity";
 
 type FetchCall = { url: string; redirect: string | undefined };
 
@@ -168,4 +169,26 @@ test("resolveHandle reads the first at:// entry from alsoKnownAs for display", a
   clearBrowserIdentityCache();
   responder = () => jsonDocument({ id: "did:plc:carol" });
   assert.equal(await resolveHandle("did:plc:carol", config), null);
+});
+
+test("resolveKemKey reads #atproto_kem from the cached DID document and refetches only when asked to refresh", async () => {
+  const first = await P256Keypair.create();
+  const rotated = await P256Keypair.create();
+  let current = first;
+  responder = () => jsonDocument({
+    id: "did:plc:alice",
+    verificationMethod: [{ id: "did:plc:alice#atproto_kem", type: "Multikey", controller: "did:plc:alice", publicKeyMultibase: current.did().slice("did:key:".length) }],
+  });
+  assert.equal(await resolveKemKey("did:plc:alice", config), first.did());
+  current = rotated;
+  assert.equal(await resolveKemKey("did:plc:alice", config), first.did(), "a cached document is reused");
+  assert.equal(calls.length, 1);
+  assert.equal(await resolveKemKey("did:plc:alice", config, true), rotated.did(), "a forced refresh bypasses the cache and sees the rotated key");
+  assert.equal(calls.length, 2);
+  assert.equal(await resolveKemKey("did:plc:alice", config), rotated.did(), "and replaces the cached document");
+});
+
+test("resolveKemKey names the account when its document has no #atproto_kem key", async () => {
+  responder = () => jsonDocument({ id: "did:plc:bob", verificationMethod: [] });
+  await assert.rejects(resolveKemKey("did:plc:bob", config), /did:plc:bob has no usable #atproto_kem key/);
 });

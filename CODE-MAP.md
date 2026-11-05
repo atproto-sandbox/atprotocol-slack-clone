@@ -10,7 +10,7 @@ A Slack-style team workspace built directly on atproto (AT Protocol) permissione
   │ React UI (src/app/ui/**)                   │      │ App Router pages/routes (src/app/**)   │     │ org.slack.workspace / .channel /   │
   │  - workspace-manager, sidebar, channel-view│◀────▶│  - page.tsx (entry), layout.tsx        │────▶│   .inbox spaces                    │
   │  - dm-sidebar/home/requests/settings/      │      │  - api/** authenticated JSON routes    │     │ org.slack.directory/.roster/.admin │
-  │    conversation (src/app/ui/dm-*.tsx)      │      │  - xrpc/** operator + notifyWrite      │     │ org.slack.channel.message/.reaction│
+  │    conversation (src/app/ui/dm-*.tsx)      │      │  - xrpc/** operator + notices           │     │ org.slack.channel.message/.reaction│
   │                                             │      │  - oauth/** login/callback/metadata    │     │ (member-list read/write, open      │
   │ Workspace OAuth session (server-issued)     │      │                                         │     │  app access; member lists ARE the  │
   │  - used for channel/workspace reads+writes  │      │ Workspace authority operator            │     │  read gate)                        │
@@ -18,8 +18,8 @@ A Slack-style team workspace built directly on atproto (AT Protocol) permissione
   │ DM OAuth session (browser-held, M3)         │      │  - signs service-auth JWTs, journals,   │     │ org.slack.dm.inbox (self)          │
   │  - IndexedDB, non-extractable DPoP keys     │      │    resumes, reconciles PDS membership   │     │ org.slack.dm.conversation/<convKey>│
   │  - src/dm/browser-session.ts                │      │                                         │     │   header/message/reaction          │
-  │  - scopes: DM_BROWSER_SCOPES only            │      │ SQLite (src/lib/db.ts)                  │     │ (member-list; convKey is a random, │
-  │                                             │      │  - encrypted OAuth/session state,       │◀───▶│  unguessable TID — DM state lives  │
+  │  - scopes: DM_BROWSER_SCOPES only            │      │ SQLite (src/lib/db.ts)                  │     │ (member-list; convKey is a TID,    │
+  │                                             │      │  - encrypted OAuth/session state,       │◀───▶│  not a secret — DM state lives     │
   │ DmClient (src/dm/dm-client.ts)              │──────┼─▶  sync cursors, channel-message cache,│     │  only here, per participant)       │
   │  isomorphic engine; runs unmodified here    │ mint │    operator journal, audit,             │     └───────────────────────────────────┘
   │  and in Node tests/acceptance               │ space│    space_notification (write pings)     │                 ▲
@@ -41,7 +41,7 @@ Two independent-app proofs exist side by side: `src/reader/independent.ts` (chan
         ▼
  getDelegationToken @ caller's own PDS  ──token──▶  getSpaceCredential @ half owner's PDS
         │
-        │ 2. DPoP-bound space credential (≤ 2h)
+        │ 2. key-bound space credential (10 min default, 1 h max)
         ▼
  for each participant's conversation half (fan-out 8, src/lib/map-limited.ts):
    - read header, validate convKey + participant set match (validateDmHeaderMatchesRequest)
@@ -75,7 +75,7 @@ src/
       operator/*             Admin-only routes that call into src/operator/.
     oauth/                  Login, callback, and client-metadata routes (workspace + DM).
     xrpc/                   Server-published XRPC methods: the operator's own RPCs
-                             (org.slack.operator.*) and com.atproto.space.notifyWrite.
+                             (org.slack.operator.*), com.atproto.space.notifyWrite and com.atproto.space.notifySpaceDeleted.
     dm/callback/            Browser DM OAuth callback page (client component).
     .well-known/did.json/   The operator's did:web document (OPERATOR_SERVICE_REF), when the
                              operator DID is hosted as did:web on this app's own origin.
@@ -85,18 +85,35 @@ src/
   atproto/                Low-level protocol clients, shared by server channel code and the
                            isomorphic DM engine.
     xrpc.ts                  Minimal XRPC client (query/procedure) over an injected fetch handler.
-    dpop.ts                  DPoP proof creation (WebCrypto-based; isomorphic).
+    space-key.ts             SpaceKey (WebCrypto P-256 did:key) that binds one credential. Signing,
+                              KEM and MAC formats belong to @atproto/space (isomorphic).
+    space-policy.ts          The one owner of the memberspace policy object the app sends and reads.
+    kem-key.ts               `#atproto_kem` did:key from a DID document (server and browser share it).
+    repo-failure.ts          The one classifier for "this one writer's repo cannot be read" (deactivated,
+                              taken down, unauthenticated, oversized, host down): the sync, the admin inbox,
+                              DM reads, the independent channel reader and the operator set the writer aside instead of failing for everyone.
     space-credential-core.ts Isomorphic space-credential mint/exchange (SpaceCredential,
-                              SpaceCredentialError, mintSpaceCredentialWith).
+                              SpaceCredentialError, mintSpaceCredentialWith) and the single owner of
+                              MAC requests and verification for getRecord and getLatestCommit (listRepoOps
+                              and getRepo are unsupported: nothing calls them); isAccessLost is the one
+                              "this account lost access" predicate (refused credential or deleted space);
+                              isCredentialRefused is the different question "did the host refuse this
+                              credential itself" (so its holder mints another); credentialLifetimeMs reads
+                              the authority's chosen lifetime from the token's iat and exp.
     space-credential.ts      Thin server adapter over space-credential-core.ts (Node session,
                               SSRF-guarded fetch).
     record-pages.ts          Bounded listRepos/listRecords/listMembers/listSpaces paging with
-                              cursor/duplicate/limit assertions.
+                              cursor/duplicate/limit assertions; the one listBoundedSpaces and
+                              listAllSpaceUris (workspace discovery).
     identity.ts               Server-side DID→PDS resolution (SSRF-guarded; Node-only).
-    notifications.ts, space-ops.ts, space-pages.ts, valid-channel-messages.ts, client.ts
+    notifications.ts         registerNotify bookkeeping; which write/deleted notices are accepted; the
+                              capped write-notice table the change streams read.
+    space-ops.ts, valid-channel-messages.ts, client.ts
   protocol/               Pure, isomorphic protocol logic shared by everything above.
-    keys.ts                  URI builders/parsers (workspace/channel/dm), canonical record
-                              keys, TID generation, canonicalParticipants.
+    keys.ts                  The one owner of URI and key syntax: parseSpaceUri / parseWorkspaceUri /
+                              parseChannelUri / requireSpaceAuthority, isDid / isSkey / isTid, canonical
+                              record keys, TID generation, canonicalParticipants. No other module
+                              hand-writes an at:// regex.
     records.ts                validateSpaceRecord: schema + authorship + key-derivation checks
                               for every org.slack.* and org.slack.dm.* collection.
   auth/                   Server session, OAuth flow, and scope definitions.
@@ -130,8 +147,9 @@ scripts/                  codegen-lex.mjs, backup-db.mjs, reconcile-workspaces.t
   with injected transports (`memberClient`, `resolvePds`, `fetchEndpoint`, `generateKey`,
   `store`), so the same class runs in the browser and in Node tests/acceptance.
 - `merge.ts` — the pure k-way merge `readConversation` uses (paginate-only-what's-needed).
-- `request-policy.ts` — pure mapping between the inbox `writePolicy`/member state and the
+- `request-policy.ts` — pure mapping between the inbox memberspace `publicWrite` flag/member state and the
   user-facing mode (`everyone` / `allowlist` / `nobody`).
+- The inbox declaration (`org.slack.dm.declaration`, a public record in the owner's own repo, written by `enableDms`) is how a sender learns a recipient has an inbox: the authority answers a stranger asking for the inbox like a missing space.
 - `backoff.ts` — the re-notify backoff schedule (1 min, 10 min, 1 h, 1 day, then stop).
 - `browser-session.ts` — `@atproto/oauth-client-browser` wiring: `connectDms`, `restoreDmSession`,
   `disconnectDms`, the well-known-only handle resolver, `DmConfig`.
@@ -197,8 +215,8 @@ Run: `pnpm test:bdd` (headless), `pnpm test:bdd:chrome` (visible Google Chrome),
 - Every externally supplied DID, AT-URI, record key, and record is validated before use
   (`src/protocol/keys.ts` parsers/predicates, `src/protocol/records.ts` validators); nothing
   parsed from a PDS response is trusted without going through them first.
-- Every PDS list/page fetch goes through the bounded helpers in `src/atproto/record-pages.ts`
-  (or `space-pages.ts`), which assert cursor progress, page-size limits, and no duplicate keys,
+- Every PDS list/page fetch goes through the bounded helpers in `src/atproto/record-pages.ts`,
+  which assert cursor progress, page-size limits, and no duplicate keys,
   and report `truncated` rather than silently dropping data past a scan cap.
 - Concurrency is `src/lib/map-limited.ts` (fixed fan-out, currently 8 for DM/channel fan-out),
   not ad hoc `Promise.all` over unbounded arrays.

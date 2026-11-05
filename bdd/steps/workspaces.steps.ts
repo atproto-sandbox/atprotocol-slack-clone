@@ -23,7 +23,7 @@ const actorNamed = (world: AppWorld, role: string): Actor => {
 };
 
 async function membersOf(world: AppWorld, as: Actor, space: string): Promise<Member[]> {
-  const result = await world.pdsGet<{ members?: Member[] }>(as, "com.atproto.simplespace.listMembers", { space, limit: "1000" });
+  const result = await world.pdsGet<{ members?: Member[] }>(as, "com.atproto.memberspace.listMembers", { space, limit: "1000" });
   assert.equal(result.status, 200, `listMembers ${space}: ${JSON.stringify(result.body)}`);
   return result.body.members ?? [];
 }
@@ -40,7 +40,7 @@ const workspaceSkey = (world: AppWorld): string => world.workspaceUri.split("/")
 
 /** The workspace spaces an account's own PDS lists, whatever the app says about them. */
 async function workspaceSpacesOn(world: AppWorld, as: Actor): Promise<string[]> {
-  const listed = await world.pdsGet<{ spaces: Array<{ uri: string }> }>(as, "com.atproto.space.listSpaces", { type: "org.slack.workspace", limit: "100" });
+  const listed = await world.pdsGet<{ spaces: Array<{ uri: string }> }>(as, "com.atproto.space.listSpaces", { spaceType: "org.slack.workspace", limit: "100" });
   assert.equal(listed.status, 200, JSON.stringify(listed.body));
   return listed.body.spaces.map((space) => space.uri);
 }
@@ -140,7 +140,7 @@ Then("the DID has write-only access to the admin inbox", async function (this: A
 });
 
 Then("the DID has read and write access to each public channel", async function (this: AppWorld) {
-  const spaces = await this.pdsGet<{ spaces: Array<{ uri: string }> }>(owner(this), "com.atproto.space.listSpaces", { type: "org.slack.channel", limit: "100" });
+  const spaces = await this.pdsGet<{ spaces: Array<{ uri: string }> }>(owner(this), "com.atproto.space.listSpaces", { spaceType: "org.slack.channel", limit: "100" });
   assert.equal(spaces.body.spaces.length, 2, "the workspace has exactly two public channels");
   for (const space of spaces.body.spaces) {
     const member = (await membersOf(this, owner(this), space.uri)).find((entry) => entry.did === actorNamed(this, "invitee").did);
@@ -224,10 +224,10 @@ When("that DID opens a forwarded invite link and tries to join", async function 
 });
 
 Then("the app says the account has not been added to the workspace", async function (this: AppWorld) {
-  await actorNamed(this, "stranger").page.getByRole("alert").filter({ hasText: /haven't been added to this workspace/ }).waitFor({ state: "visible" });
+  await actorNamed(this, "stranger").page.getByRole("alert").filter({ hasText: /may not have been added to it yet/ }).waitFor({ state: "visible" });
   const accept = this.callsTo(actorNamed(this, "stranger"), "/api/workspaces/accept").at(-1);
-  assert.equal(accept?.status, 403);
-  assert.equal((JSON.parse(accept!.responseBody) as { code: string }).code, "not_a_member");
+  assert.equal(accept?.status, 404, "the authority gives an account it never added the same answer it gives for a missing workspace");
+  assert.equal((JSON.parse(accept!.responseBody) as { code: string }).code, "workspace_unavailable");
 });
 
 Then("the workspace does not appear in that account's dashboard", async function (this: AppWorld) {
@@ -245,7 +245,7 @@ Then("the DID is still absent from the member list and left no acceptance marker
   const stranger = actorNamed(this, "stranger");
   const members = await membersOf(this, owner(this), this.workspaceUri);
   assert.equal(members.some((entry) => entry.did === stranger.did), false);
-  const spaces = await this.pdsGet<{ spaces: Array<{ uri: string }> }>(stranger, "com.atproto.space.listSpaces", { type: "org.slack.workspace", limit: "100" });
+  const spaces = await this.pdsGet<{ spaces: Array<{ uri: string }> }>(stranger, "com.atproto.space.listSpaces", { spaceType: "org.slack.workspace", limit: "100" });
   assert.equal(spaces.body.spaces.some((space) => space.uri === this.workspaceUri), false, "no acceptance marker was written for a non-member");
 });
 
@@ -262,7 +262,7 @@ When("the invitee joins the workspace from its invite link", async function (thi
 });
 
 Then("the workspace appears in that account's spaces index", async function (this: AppWorld) {
-  const spaces = await this.pdsGet<{ spaces: Array<{ uri: string }> }>(actorNamed(this, "invitee"), "com.atproto.space.listSpaces", { type: "org.slack.workspace", limit: "100" });
+  const spaces = await this.pdsGet<{ spaces: Array<{ uri: string }> }>(actorNamed(this, "invitee"), "com.atproto.space.listSpaces", { spaceType: "org.slack.workspace", limit: "100" });
   assert.ok(spaces.body.spaces.some((space) => space.uri === this.workspaceUri), "the acceptance marker makes the workspace discoverable from the invitee's own PDS");
 });
 
@@ -330,7 +330,7 @@ Given("a user has an active authority-authored admin record", async function (th
 });
 
 When("that user calls a member-management operation without the authority session", async function (this: AppWorld) {
-  const result = await this.pdsPost(actorNamed(this, "member"), "com.atproto.simplespace.putMember", {
+  const result = await this.pdsPost(actorNamed(this, "member"), "com.atproto.memberspace.putMember", {
     space: this.workspaceUri, did: actorNamed(this, "outsider").did, read: true, write: true,
   });
   this.scratch.set("managementAttempt", result);

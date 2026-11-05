@@ -2,11 +2,12 @@ import type { OAuthSession } from "@atproto/oauth-client-node";
 import type * as GetRecord from "@/lexicons/api/types/com/atproto/space/getRecord";
 import { sessionClient } from "@/atproto/client";
 import { listBoundedRecords } from "@/atproto/record-pages";
-import { isMissingXrpcResource } from "@/atproto/xrpc";
+import { classifyRepoFailure } from "@/atproto/repo-failure";
+import { isMissingXrpcResource, type AtprotoClient } from "@/atproto/xrpc";
 import { mintSpaceCredential } from "@/atproto/space-credential";
 import { resolvePds } from "@/atproto/identity";
 import { ensureMemberListSpace, listSpaceMembers, putAuthorityRecord, putSpaceMember, removeSpaceMember } from "@/atproto/space-ops";
-import { channelUri, decisionRecordKey, parseSpaceRecordUri, requestRecordKey, subjectKey } from "@/protocol/keys";
+import { channelUri, decisionRecordKey, inboxUri, isDid, isSkey, isTid, parseSpaceRecordUri, requestRecordKey, subjectKey } from "@/protocol/keys";
 import { validateSpaceRecord } from "@/protocol/records";
 import { bootstrapWorkspace } from "@/workspaces/bootstrap";
 import { WorkspaceEnvelopeError } from "@/workspaces/read-model";
@@ -536,7 +537,21 @@ function joinRequestBaseline(steps: string[]): { membership: "none" | string; ro
 
 async function readJoinRequest(session: OAuthSession, inbox: string, repoDid: string, rkey: string, authorityDid: string): Promise<Record<string, unknown> | null> {
   const credential = await mintSpaceCredential(session, inbox);
-  const client = credential.client(await resolvePds(repoDid));
+  return readJoinRequestRecord(credential.client(await resolvePds(repoDid)), inbox, repoDid, rkey, authorityDid);
+}
+
+/**
+ * The requester's join request, or null when there is no current one to act on. A repo that cannot be authenticated (no
+ * usable `#atproto_kem` key, or a MAC that does not verify) reads as null: the decision is rejected and any partial approval
+ * is undone, instead of the journal keeping the operation pending and every later admin operation replaying the same failure.
+ */
+export async function readJoinRequestRecord(
+  client: Pick<AtprotoClient, "query">,
+  inbox: string,
+  repoDid: string,
+  rkey: string,
+  authorityDid: string,
+): Promise<Record<string, unknown> | null> {
   try {
     const result = await client.query<GetRecord.OutputSchema>("com.atproto.space.getRecord", {
       space: inbox, repo: repoDid, collection: "org.slack.joinRequest", rkey,
@@ -545,7 +560,9 @@ async function readJoinRequest(session: OAuthSession, inbox: string, repoDid: st
       authorityDid, spaceUri: inbox, repoDid, rkey,
     }).valid ? result.value : null;
   } catch (error) {
-    if (isNotFound(error)) return null;
+    // A repo that is gone for good (deactivated, taken down, unauthenticated, oversized) will fail the same way on every replay, so
+    // it reads as no current request; a host that is merely down still fails the operation so it can be retried.
+    if (isNotFound(error) || classifyRepoFailure(error)?.permanent) return null;
     throw error;
   }
 }
@@ -665,26 +682,10 @@ function parseJoinRequestUri(uri: string, authorityDid: string, inbox: string): 
   return !parsed || parsed.repo === authorityDid ? null : parsed;
 }
 
-function inboxUri(authorityDid: string, workspaceSkey: string): string {
-  return `at://${authorityDid}/space/org.slack.inbox/${workspaceSkey}`;
-}
-
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const proto = Object.getPrototypeOf(value);
   return proto === Object.prototype || proto === null;
-}
-
-function isDid(value: unknown): value is string {
-  return typeof value === "string" && /^did:[a-z0-9]+:[A-Za-z0-9._:%-]+$/.test(value);
-}
-
-function isSkey(value: unknown): value is string {
-  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._~:-]{0,127}$/.test(value);
-}
-
-function isTid(value: unknown): value is string {
-  return typeof value === "string" && /^[234567abcdefghijklmnopqrstuvwxyz]{13}$/.test(value);
 }
 
 function isNotFound(error: unknown): boolean {

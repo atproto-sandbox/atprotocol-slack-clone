@@ -95,3 +95,56 @@ export function retainAfterRefresh<T extends { ownerDid: string }>(
 ): T[] {
   return current.filter((entry) => !inWindow(entry) || halves[entry.ownerDid] !== "ok");
 }
+
+/**
+ * One background cycle of the DM view: refresh, re-send pending requests, register for notifications, repair the public
+ * declaration. After the refresh each step runs on its own, so a failure in one (a notification service that is down) never keeps
+ * the others from running, and every failure is reported. The declaration is marked checked only once it succeeded.
+ */
+export async function runDmCycle(input: {
+  refresh: () => Promise<{ exists: boolean } | null>;
+  client: Pick<DmClient, "renotifyPending" | "watch" | "ensureDeclaration">;
+  inboxUri: string;
+  serviceRef: string;
+  declarationChecked: { current: boolean };
+  report: (error: unknown) => void;
+}): Promise<void> {
+  let inbox: { exists: boolean } | null;
+  try {
+    inbox = await input.refresh();
+  } catch (error) {
+    input.report(error);
+    return;
+  }
+  const step = async (run: () => Promise<unknown>): Promise<void> => {
+    try {
+      await run();
+    } catch (error) {
+      input.report(error);
+    }
+  };
+  await step(() => input.client.renotifyPending());
+  if (!inbox?.exists) return;
+  await step(() => input.client.watch([input.inboxUri], input.serviceRef));
+  if (!input.declarationChecked.current) {
+    await step(async () => {
+      await input.client.ensureDeclaration();
+      input.declarationChecked.current = true;
+    });
+  }
+}
+
+const HALF_CHIPS: Record<DmHalfStatus, string | null> = {
+  ok: null,
+  missing: "hasn't replied or removed your access",
+  deleted: "left",
+  revoked: "revoked your access",
+};
+
+/**
+ * The note shown beside a participant for the state of their half. A half whose state is not known yet (the first page has not
+ * loaded) shows nothing: calling it missing would tell the viewer, for a moment, that their own half does not exist.
+ */
+export function halfChip(status: DmHalfStatus | undefined): string | null {
+  return status === undefined ? null : HALF_CHIPS[status];
+}

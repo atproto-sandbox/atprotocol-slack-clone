@@ -7,3 +7,8 @@ node_modules/
 data/
 coverage/
 test-results/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+.DS_Store

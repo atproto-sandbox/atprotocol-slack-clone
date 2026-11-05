@@ -34,9 +34,9 @@ function sessionWith(createSpace: (type: SpaceType, skey: string) => Response): 
   return {
     did: OWNER,
     fetchHandler: async (path: string, init: RequestInit) => {
-      if (!path.startsWith("/xrpc/com.atproto.simplespace.createSpace")) throw new Error(`unexpected request: ${path}`);
-      const body = JSON.parse(String(init.body)) as { type: SpaceType; skey: string };
-      return createSpace(body.type, body.skey);
+      if (!path.startsWith("/xrpc/com.atproto.space.createSpace")) throw new Error(`unexpected request: ${path}`);
+      const body = JSON.parse(String(init.body)) as { spaceType: SpaceType; skey: string };
+      return createSpace(body.spaceType, body.skey);
     },
   } as unknown as OAuthSession;
 }

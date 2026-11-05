@@ -105,7 +105,8 @@ Feature: Direct messages
     Scenario: Switch the policy
       Given writers were tracked while the inbox policy allowed everyone
       When the user switches to an allowlist or to nobody
-      Then those writers stay listed by the PDS
+      Then switching the policy alone leaves those writers listed by the PDS
+      And switching an allowed writer off evicts that writer
       And the client drops requests from writers outside the current policy
 
   Rule: Reads merge validated halves

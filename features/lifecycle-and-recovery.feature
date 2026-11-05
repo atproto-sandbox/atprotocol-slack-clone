@@ -12,7 +12,7 @@ Feature: Membership, privacy, and archive lifecycle
       And the operation stays pending until every PDS member list agrees
 
     Scenario: An old credential expires after removal
-      Given a member holds a space credential with a two hour maximum lifetime
+      Given a member holds a space credential with a short maximum lifetime
       When the member is removed
       Then they cannot obtain a new credential
       But the old credential works only until its signed expiration
@@ -30,7 +30,7 @@ Feature: Membership, privacy, and archive lifecycle
       When an admin starts a private transition for selected members
       Then the directory shows transitioning while membership changes
       And compliant apps stop new syncs during the transition
-      And the same channel URI and messages remain after completion
+      And the same channel URI and the messages of the remaining members remain after completion
       And unselected members cannot mint new credentials after completion
 
     Scenario: Recover a partially completed privacy transition

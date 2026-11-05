@@ -8,8 +8,10 @@ import {
   isSkey,
   isTid,
   parseDmConversationUri,
+  parseDmInboxUri,
   parseDmMessageUri,
   parseSpaceRecordUri,
+  parseSpaceUri,
   reactionRecordKey,
   requestRecordKey,
   spaceRecordUri,
@@ -81,6 +83,20 @@ export function validateSpaceRecord(collection: string, value: unknown, context:
     default:
       return invalid("unknown collection");
   }
+}
+
+/**
+ * `org.slack.dm.declaration`: the record an account publishes in its own public repo (key `self`) to say it runs a DM inbox.
+ * It is not a space record, so it is not in the `validateSpaceRecord` registry; a sender checks it with this before treating
+ * a recipient as having an inbox.
+ */
+export function validateDmDeclaration(value: unknown): RecordValidation {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return invalid("DM declaration must be an object");
+  const record = value as Record<string, unknown>;
+  if (record.$type !== "org.slack.dm.declaration") return invalid("DM declaration has the wrong type");
+  if (!hasOnly(record, ["$type", "createdAt"])) return invalid("DM declaration has unknown fields");
+  if (!isDatetime(record.createdAt)) return invalid("invalid DM declaration timestamp");
+  return { valid: true };
 }
 
 export function validateMessageParent(
@@ -170,7 +186,7 @@ function validateReaction(record: Record<string, unknown>, context: RecordContex
 }
 
 function validateDmRequest(record: Record<string, unknown>, context: RecordContext): RecordValidation {
-  const inboxOwnerDid = parseDmInboxUri(context.spaceUri);
+  const inboxOwnerDid = parseDmInboxUri(context.spaceUri)?.ownerDid;
   if (!inboxOwnerDid) return invalid("DM request must be scoped to a DM inbox space");
   if (!hasOnly(record, ["convKey", "participants", "createdAt"])) return invalid("DM request has unknown fields");
   if (!isTid(record.convKey) || context.rkey !== record.convKey) return invalid("DM request key must equal its conversation key");
@@ -267,14 +283,8 @@ function sameParticipants(left: unknown, right: unknown): boolean {
   return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
-function parseDmInboxUri(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const match = /^at:\/\/(did:[^/\s]+)\/space\/org\.slack\.dm\.inbox\/self$/.exec(value);
-  return match && isDid(match[1]) ? match[1] : null;
-}
-
 function isSpaceUri(value: unknown, spaceType: string): value is string {
-  return typeof value === "string" && new RegExp(`^at:\\/\\/did:[^/\\s]+\\/space\\/${spaceType}\\/[A-Za-z0-9._~:-]{1,128}$`).test(value);
+  return typeof value === "string" && parseSpaceUri(value)?.type === spaceType;
 }
 
 function collectionSpaceType(collection: string): string | undefined {

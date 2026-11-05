@@ -1,4 +1,4 @@
-import type { Actor, AppWorld } from "./world";
+import { PAGE_TIMEOUT_MS, type Actor, type AppWorld } from "./world";
 
 // Each helper is one thing a person does in the app. They drive the real UI against the real PDS fixture, so a
 // scenario that passes proves the journey works for a user, not just that the underlying calls succeed.
@@ -7,7 +7,7 @@ export const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}(
 
 /** Polls until `read` returns something truthy, so steps wait on observable facts instead of fixed sleeps. */
 export async function eventually<T>(read: () => T | undefined | null | false, options: { timeoutMs?: number; what?: string } = {}): Promise<T> {
-  const deadline = Date.now() + (options.timeoutMs ?? 30_000);
+  const deadline = Date.now() + (options.timeoutMs ?? PAGE_TIMEOUT_MS);
   for (;;) {
     const value = read();
     if (value) return value;

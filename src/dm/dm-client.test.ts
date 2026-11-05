@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { dmConversationUri, spaceRecordUri } from "@/protocol/keys";
+import { SPACE_CREDENTIAL_LIFETIME_MS, SPACE_CREDENTIAL_RENEW_BEFORE_MS } from "@/atproto/space-credential-core";
+import { dmConversationUri, dmInboxUri, spaceRecordUri } from "@/protocol/keys";
 import { DmClient, type DmDeps, type DmStore } from "./dm-client";
 import { FakeDmNetwork } from "./testing/fake-pds";
 
@@ -24,6 +25,7 @@ function harness() {
         did,
         memberClient: network.clientFor(did),
         resolvePds: network.resolvePds,
+        resolveKemKey: network.resolveKemKey,
         fetchEndpoint: network.fetchEndpoint,
         generateKey: network.generateKey,
         store: createStore(),
@@ -71,7 +73,7 @@ test("enableDms and getInbox round-trip every request-policy mode, preserving th
   assert.deepEqual(await alice.getInbox(), { exists: true, mode: "allowlist", allowlist: ["did:plc:carol"] });
 });
 
-test("switching allowlist -> nobody -> allowlist preserves the allowlist and tracks writes again only after reactivating", async () => {
+test("switching allowlist -> nobody -> allowlist preserves the allowlist, and an allowed sender's earlier request shows again once reactivated", async () => {
   const { network, client } = harness();
   network.createAccount("did:plc:alice", "pds1");
   network.createAccount("did:plc:carol", "pds2");
@@ -87,12 +89,8 @@ test("switching allowlist -> nobody -> allowlist preserves the allowlist and tra
   assert.deepEqual(await alice.listRequests(), [], "a dormant member's write is stored but not tracked");
 
   await alice.setRequestMode("allowlist");
-  assert.deepEqual(await alice.listRequests(), [], "reactivating alone does not retroactively track carol's earlier untracked write");
-
-  network.advanceClock(61_000);
-  await carol.renotifyPending();
   const requests = await alice.listRequests();
-  assert.equal(requests.length, 1, "carol's next write, made while active again, is now tracked");
+  assert.equal(requests.length, 1, "carol is an active allowlist entry again, so her request is read although the PDS never tracked it as a writer");
   assert.equal(requests[0]!.convKey, started.convKey);
 });
 
@@ -150,6 +148,8 @@ test("listRequests filters already-tracked writers by the current mode, not by w
   await alice.allow(["did:plc:carol"]);
   assert.deepEqual(await alice.listRequests(), [], "a dormant allow entry is still hidden");
 
+  // A dormant (write:false) entry evicts the writer from the PDS writer set, so reactivating carol does not list her
+  // as a writer again until she writes again; but she is an active allowlist entry, which the scan reads directly.
   await alice.setRequestMode("allowlist");
   const seenUnderAllowlist = await alice.listRequests();
   assert.deepEqual(seenUnderAllowlist.map((request) => request.sender), ["did:plc:carol"]);
@@ -173,42 +173,96 @@ test("startConversation deduplicates identical participant sets and reports noIn
   assert.deepEqual(second.delivery, {}, "no new requests are sent on dedupe");
 });
 
-test("startConversation reports noInbox for a recipient who deleted their inbox", async () => {
-  // #given bob enabled DMs and then deleted his inbox space
+test("startConversation reports noInbox for a recipient whose inbox space exists but who never published the declaration", async () => {
+  // #given bob's inbox was created outside the DM client, so nothing public says he accepts requests
   const { network, client } = harness();
   network.createAccount("did:plc:alice", "pds1");
   network.createAccount("did:plc:bob", "pds2");
-  await client("did:plc:bob").enableDms("everyone");
-  await network.clientFor("did:plc:bob").procedure("com.atproto.simplespace.deleteSpace", { space: "at://did:plc:bob/space/org.slack.dm.inbox/self" });
+  await network.clientFor("did:plc:bob").procedure("com.atproto.space.createSpace", {
+    spaceType: "org.slack.dm.inbox", skey: "self", policy: { $type: "com.atproto.memberspace.policy", publicWrite: true },
+  });
 
   // #when
   const started = await client("did:plc:alice").startConversation(["did:plc:bob"]);
 
-  // #then
+  // #then the declaration, not the space, is the signal a sender can read
   assert.equal(started.delivery["did:plc:bob"]?.status, "noInbox");
 });
 
-test("startConversation reports failed, not delivered, when the inbox probe itself is refused for a reason other than denial", async () => {
-  // #given the sender's session lacks the scope to ask for a delegation token (not a SpaceCredentialError)
+test("enableDms publishes the declaration, and a later enableDms or mode change leaves a valid one alone", async () => {
+  // #given bob enabled DMs
+  const { network, client } = harness();
+  network.createAccount("did:plc:bob", "pds2");
+  const bob = client("did:plc:bob");
+  const read = () => network.clientFor("did:plc:bob").query<{ cid: string; value: { $type: string; createdAt: string } }>("com.atproto.repo.getRecord", { repo: "did:plc:bob", collection: "org.slack.dm.declaration", rkey: "self" });
+  await bob.enableDms("allowlist");
+  const first = await read();
+  assert.equal(first.value.$type, "org.slack.dm.declaration");
+  assert.ok(Number.isFinite(Date.parse(first.value.createdAt)));
+
+  // #when he enables again and changes his request mode later
+  network.advanceClock(60_000);
+  await bob.enableDms("everyone");
+  await bob.setRequestMode("nobody");
+
+  // #then the public record is not rewritten, so a settings change is not a public commit
+  assert.equal((await read()).cid, first.cid);
+});
+
+test("ensureDeclaration replaces a declaration that is not valid", async () => {
+  // #given bob's public repo holds a record under the declaration key that a sender would not accept
+  const { network, client } = harness();
+  network.createAccount("did:plc:alice", "pds1");
+  network.createAccount("did:plc:bob", "pds2");
+  const bobRepo = network.clientFor("did:plc:bob");
+  const bob = client("did:plc:bob");
+  await bob.enableDms("everyone");
+  await bobRepo.procedure("com.atproto.repo.putRecord", {
+    repo: "did:plc:bob", collection: "org.slack.dm.declaration", rkey: "self", record: { $type: "org.slack.dm.declaration", createdAt: "yesterday" },
+  });
+  assert.equal((await client("did:plc:alice").startConversation(["did:plc:bob"])).delivery["did:plc:bob"]?.status, "noInbox");
+
+  // #when
+  await bob.ensureDeclaration();
+
+  // #then senders accept it again
+  network.createAccount("did:plc:carol", "pds1");
+  assert.equal((await client("did:plc:carol").startConversation(["did:plc:bob"])).delivery["did:plc:bob"]?.status, "delivered");
+});
+
+test("a declaration that outlives an inbox deleted outside the app still reads as an inbox, so the request reads as delivered", async () => {
+  // #given bob's inbox was deleted directly, leaving his public declaration behind
   const { network, client } = harness();
   network.createAccount("did:plc:alice", "pds1");
   network.createAccount("did:plc:bob", "pds2");
   await client("did:plc:bob").enableDms("everyone");
-  const real = network.clientFor("did:plc:alice");
-  const refusing = Object.create(real, {
-    query: { value: async (method: string, ...rest: unknown[]) => {
-      if (method === "com.atproto.space.getDelegationToken") throw new Error("Missing required scope");
-      return (real.query as (method: string, ...rest: unknown[]) => Promise<unknown>)(method, ...rest);
-    } },
+  await network.clientFor("did:plc:bob").procedure("com.atproto.space.deleteSpace", { space: dmInboxUri("did:plc:bob") });
+
+  // #when alice starts a conversation with bob
+  const started = await client("did:plc:alice").startConversation(["did:plc:bob"]);
+
+  // #then the stale declaration still reads as an inbox, which the pin note documents; the app never deletes an inbox
+  assert.deepEqual(started.delivery["did:plc:bob"], { status: "delivered" });
+});
+
+test("startConversation reports failed, not delivered, when the declaration cannot be read for a reason other than its absence", async () => {
+  // #given bob's PDS answers the public declaration read with a server error
+  const { network, client } = harness();
+  network.createAccount("did:plc:alice", "pds1");
+  network.createAccount("did:plc:bob", "pds2");
+  await client("did:plc:bob").enableDms("everyone");
+  const alice = client("did:plc:alice", "pds1", {
+    fetchEndpoint: async (request) => request.url.includes("com.atproto.repo.getRecord")
+      ? new Response(JSON.stringify({ error: "InternalServerError", message: "upstream exploded" }), { status: 500 })
+      : network.fetchEndpoint(request),
   });
-  const alice = client("did:plc:alice", "pds1", { memberClient: refusing });
 
   // #when
   const started = await alice.startConversation(["did:plc:bob"]);
 
   // #then
   assert.equal(started.delivery["did:plc:bob"]?.status, "failed");
-  assert.match(started.delivery["did:plc:bob"]?.message ?? "", /Missing required scope/);
+  assert.match(started.delivery["did:plc:bob"]?.message ?? "", /upstream exploded/);
 });
 
 test("accept creates the reader's own half, matches the header, and always allows the sender (so a later mode switch does not lock them out)", async () => {
@@ -297,7 +351,7 @@ test("readConversation merges both halves newest-first, paginates with before, a
 
   const eve = client("did:plc:eve");
   const asEve = await eve.readConversation(started.convKey, started.participants);
-  assert.equal(asEve.halves["did:plc:alice"], "revoked", "a non-participant is not on either half's member list");
+  assert.equal(asEve.halves["did:plc:alice"], "missing", "a non-participant is refused exactly like a half that does not exist");
 });
 
 test("leave revokes the leaver's half for the other participant, and deleteEverything removes the deleter's own half", async () => {
@@ -313,7 +367,7 @@ test("leave revokes the leaver's half for the other participant, and deleteEvery
 
   await bob.leave(started.convKey);
   const afterLeave = await alice.readConversation(started.convKey, started.participants);
-  assert.equal(afterLeave.halves["did:plc:bob"], "revoked");
+  assert.equal(afterLeave.halves["did:plc:bob"], "missing", "the reference authority answers a revoked reader like a missing half");
   assert.equal(afterLeave.halves["did:plc:alice"], "ok");
 
   await alice.deleteEverything(started.convKey);
@@ -358,12 +412,12 @@ test("renotifyPending re-sends the request only once its backoff interval has el
   // setRequestMode is the separate, explicit step that reopens the inbox.
   await bob.allow(["did:plc:alice"]);
   await bob.setRequestMode("allowlist");
-  assert.deepEqual(await bob.listRequests(), [], "alice is now allowed, but her only write so far was never tracked, and the retry isn't due yet either");
+  const [request] = await bob.listRequests();
+  assert.ok(request, "alice is an active allowlist entry now, so her request is read even though the PDS never tracked her write");
 
   network.advanceClock(2_000);
   await alice.renotifyPending();
-  const [request] = await bob.listRequests();
-  assert.ok(request, "the re-put after the 1-minute backoff is now tracked under the allowlist");
+  assert.equal((await bob.listRequests()).length, 1, "the re-put after the 1-minute backoff does not duplicate it");
 
   await bob.accept(request!);
   network.advanceClock(10 * 60_000 + 1_000);
@@ -442,4 +496,377 @@ test("a local store failure while scanning requests propagates instead of masque
   await client("did:plc:carol").startConversation(["did:plc:bob"]);
 
   await assert.rejects(bob.scanRequests(), /store down/);
+});
+
+function countingExchanges(network: FakeDmNetwork): { fetchEndpoint: DmDeps["fetchEndpoint"]; count: () => number } {
+  let exchanges = 0;
+  return {
+    fetchEndpoint: (request) => {
+      if (request.url.includes("com.atproto.space.getSpaceCredential")) exchanges += 1;
+      return network.fetchEndpoint(request);
+    },
+    count: () => exchanges,
+  };
+}
+
+test("a cached credential is reused until the renewal window opens, then replaced", async () => {
+  const { network, client } = harness();
+  const exchanges = countingExchanges(network);
+  const alice = client("did:plc:alice", "pds1", { fetchEndpoint: exchanges.fetchEndpoint });
+  await alice.enableDms("everyone");
+  const inbox = dmInboxUri("did:plc:alice");
+
+  await alice.watch([inbox], "did:web:app.test");
+  assert.equal(exchanges.count(), 1);
+
+  network.advanceClock(SPACE_CREDENTIAL_LIFETIME_MS - SPACE_CREDENTIAL_RENEW_BEFORE_MS - 1);
+  await alice.watch([inbox], "did:web:app.test");
+  assert.equal(exchanges.count(), 1, "one millisecond before the window the credential is still reused");
+
+  network.advanceClock(1);
+  await alice.watch([inbox], "did:web:app.test");
+  assert.equal(exchanges.count(), 2, "inside the renewal window a fresh credential is minted");
+});
+
+test("an expired credential is never reused", async () => {
+  const { network, client } = harness();
+  const exchanges = countingExchanges(network);
+  const alice = client("did:plc:alice", "pds1", { fetchEndpoint: exchanges.fetchEndpoint });
+  await alice.enableDms("everyone");
+  const inbox = dmInboxUri("did:plc:alice");
+
+  await alice.watch([inbox], "did:web:app.test");
+  network.advanceClock(SPACE_CREDENTIAL_LIFETIME_MS);
+  await alice.watch([inbox], "did:web:app.test");
+  assert.equal(exchanges.count(), 2);
+});
+
+test("two concurrent callers over an expired credential mint exactly one replacement", async () => {
+  const { network, client } = harness();
+  const exchanges = countingExchanges(network);
+  const alice = client("did:plc:alice", "pds1", { fetchEndpoint: exchanges.fetchEndpoint });
+  await alice.enableDms("everyone");
+  const inbox = dmInboxUri("did:plc:alice");
+
+  await alice.watch([inbox], "did:web:app.test");
+  network.advanceClock(SPACE_CREDENTIAL_LIFETIME_MS);
+  await Promise.all([alice.watch([inbox], "did:web:app.test"), alice.watch([inbox], "did:web:app.test")]);
+  assert.equal(exchanges.count(), 2);
+});
+
+test("a half whose authority still answers UserNotAuthorized is reported revoked, not missing", async () => {
+  // #given an authority that tells a refused reader apart from a missing half, as other PDS implementations may
+  const { network, client } = harness();
+  network.createAccount("did:plc:alice", "pds1");
+  network.createAccount("did:plc:bob", "pds2");
+  const alice = client("did:plc:alice", "pds1", {
+    fetchEndpoint: async (request) => {
+      const response = await network.fetchEndpoint(request);
+      if (!request.url.includes("getSpaceCredential") || response.ok) return response;
+      const body = await response.json() as { error: string; message: string };
+      return new Response(JSON.stringify({ ...body, error: body.error === "SpaceNotFound" ? "UserNotAuthorized" : body.error }), { status: response.status });
+    },
+  });
+  const bob = client("did:plc:bob");
+  await bob.enableDms("everyone");
+  const started = await alice.startConversation(["did:plc:bob"]);
+  await bob.accept((await bob.listRequests())[0]!);
+  await bob.send(started.convKey, "hi");
+
+  // #when bob leaves, revoking alice's access to his half
+  await bob.leave(started.convKey);
+  const afterLeave = await alice.readConversation(started.convKey, started.participants);
+
+  // #then
+  assert.equal(afterLeave.halves["did:plc:bob"], "revoked");
+});
+
+test("setRequestMode keeps the other settings another client put on the inbox policy, and never makes the inbox publicly readable", async () => {
+  // #given bob's inbox carries an app allow-list and published members, set by some other client
+  const { network, client } = harness();
+  network.createAccount("did:plc:bob", "pds2");
+  await network.clientFor("did:plc:bob").procedure("com.atproto.space.createSpace", {
+    spaceType: "org.slack.dm.inbox", skey: "self",
+    policy: { $type: "com.atproto.memberspace.policy", publicRead: true, allowedApps: ["https://other.example/client.json"], publishMembers: true },
+  });
+
+  // #when bob switches the request mode here
+  await client("did:plc:bob").setRequestMode("everyone");
+
+  // #then only publicWrite changed (and publicRead is forced off)
+  const reported = await network.clientFor("did:plc:bob").query<{ policy: Record<string, unknown> }>("com.atproto.space.getSpace", { space: "at://did:plc:bob/space/org.slack.dm.inbox/self" });
+  assert.deepEqual(reported.policy, {
+    $type: "com.atproto.memberspace.policy", publicRead: false, publicWrite: true,
+    allowedApps: ["https://other.example/client.json"], publishMembers: true,
+  });
+});
+
+test("setRequestMode refuses to rewrite an inbox governed by another policy type", async () => {
+  const { network, client } = harness();
+  network.createAccount("did:plc:bob", "pds2");
+  await network.clientFor("did:plc:bob").procedure("com.atproto.space.createSpace", { spaceType: "org.slack.dm.inbox", skey: "self", policy: { $type: "com.atproto.personalspace.policy" } });
+  await assert.rejects(client("did:plc:bob").setRequestMode("everyone"), /unexpected policy/);
+});
+
+test("changing the request mode publishes the declaration an inbox created before senders needed one is missing", async () => {
+  // #given bob's inbox exists but nothing public says so
+  const { network, client } = harness();
+  network.createAccount("did:plc:alice", "pds1");
+  network.createAccount("did:plc:bob", "pds2");
+  await network.clientFor("did:plc:bob").procedure("com.atproto.space.createSpace", { spaceType: "org.slack.dm.inbox", skey: "self", policy: { $type: "com.atproto.memberspace.policy", publicWrite: true } });
+  assert.equal((await client("did:plc:alice").startConversation(["did:plc:bob"])).delivery["did:plc:bob"]?.status, "noInbox");
+
+  // #when bob changes his request mode
+  await client("did:plc:bob").setRequestMode("everyone");
+
+  // #then senders can find the inbox
+  network.createAccount("did:plc:carol", "pds1");
+  assert.equal((await client("did:plc:carol").startConversation(["did:plc:bob"])).delivery["did:plc:bob"]?.status, "delivered");
+});
+
+test("enableDms publishes the declaration last, so a failure there leaves the allowlist seeded and a second call repairs it", async () => {
+  const { network, client } = harness();
+  network.createAccount("did:plc:bob", "pds2");
+  const real = network.clientFor("did:plc:bob");
+  let failures = 1;
+  const flaky = Object.create(real, {
+    procedure: { value: async (method: string, ...rest: unknown[]) => {
+      if (method === "com.atproto.repo.putRecord" && failures-- > 0) throw new Error("Missing required scope");
+      return (real.procedure as (method: string, ...rest: unknown[]) => Promise<unknown>)(method, ...rest);
+    } },
+  });
+  const bob = client("did:plc:bob", "pds2", { memberClient: flaky });
+  await assert.rejects(bob.enableDms("allowlist", ["did:plc:friend"]), /Missing required scope/);
+  assert.deepEqual((await bob.getInbox()).allowlist, ["did:plc:friend"], "the allowlist was seeded before the declaration was attempted");
+  await bob.enableDms("allowlist", ["did:plc:friend"]);
+  const declaration = await real.query<{ value: { $type: string } }>("com.atproto.repo.getRecord", { repo: "did:plc:bob", collection: "org.slack.dm.declaration", rkey: "self" });
+  assert.equal(declaration.value.$type, "org.slack.dm.declaration");
+});
+
+test("a 2xx answer that is not the declaration record does not count as one", async () => {
+  const { network, client } = harness();
+  network.createAccount("did:plc:alice", "pds1");
+  network.createAccount("did:plc:bob", "pds2");
+  await client("did:plc:bob").enableDms("everyone");
+  const alice = client("did:plc:alice", "pds1", {
+    fetchEndpoint: async (request) => request.url.includes("com.atproto.repo.getRecord")
+      ? new Response(JSON.stringify({ uri: "at://did:plc:bob/app.bsky.actor.profile/self", value: { $type: "app.bsky.actor.profile" } }), { status: 200 })
+      : network.fetchEndpoint(request),
+  });
+  assert.equal((await alice.startConversation(["did:plc:bob"])).delivery["did:plc:bob"]?.status, "noInbox");
+});
+
+test("one participant whose header cannot be authenticated reads as a missing half, and the other halves are still read", async () => {
+  // #given a conversation in which bob's host answers the header read with a record its MAC does not cover
+  const { network, client } = harness();
+  network.createAccount("did:plc:alice", "pds1");
+  network.createAccount("did:plc:bob", "pds2");
+  const alice = client("did:plc:alice", "pds1", {
+    fetchEndpoint: async (request) => {
+      const response = await network.fetchEndpoint(request);
+      if (!request.url.includes("getRecord") || !request.url.includes("org.slack.dm.header") || !request.url.includes("repo=did%3Aplc%3Abob") || !response.ok) return response;
+      const body = await response.json() as { value: Record<string, unknown> };
+      return new Response(JSON.stringify({ ...body, value: { ...body.value, createdAt: "2000-01-01T00:00:00.000Z" } }), { status: 200, headers: response.headers });
+    },
+  });
+  const bob = client("did:plc:bob");
+  await bob.enableDms("everyone");
+  const started = await alice.startConversation(["did:plc:bob"]);
+  await bob.accept((await bob.listRequests())[0]!);
+  await bob.send(started.convKey, "hi alice");
+
+  // #when alice reads the conversation
+  const page = await alice.readConversation(started.convKey, started.participants);
+
+  // #then bob's half is unreadable but the read as a whole succeeds, and nothing from the unverified half is shown
+  assert.equal(page.halves["did:plc:bob"], "missing");
+  assert.equal(page.halves["did:plc:alice"], "ok");
+  assert.deepEqual(page.messages.filter((message) => message.ownerDid === "did:plc:bob"), []);
+});
+
+test("a declaration without its timestamp does not count, so the recipient reads as having no inbox", async () => {
+  const { network, client } = harness();
+  network.createAccount("did:plc:alice", "pds1");
+  network.createAccount("did:plc:bob", "pds2");
+  await client("did:plc:bob").enableDms("everyone");
+  const alice = client("did:plc:alice", "pds1", {
+    fetchEndpoint: async (request) => request.url.includes("com.atproto.repo.getRecord")
+      ? new Response(JSON.stringify({ uri: "at://did:plc:bob/org.slack.dm.declaration/self", value: { $type: "org.slack.dm.declaration" } }), { status: 200 })
+      : network.fetchEndpoint(request),
+  });
+  assert.equal((await alice.startConversation(["did:plc:bob"])).delivery["did:plc:bob"]?.status, "noInbox");
+});
+
+test("ensureDeclaration publishes a missing declaration and leaves an existing one alone", async () => {
+  const { network, client } = harness();
+  network.createAccount("did:plc:alice", "pds1");
+  network.createAccount("did:plc:bob", "pds2");
+  await network.clientFor("did:plc:bob").procedure("com.atproto.space.createSpace", { spaceType: "org.slack.dm.inbox", skey: "self", policy: { $type: "com.atproto.memberspace.policy", publicWrite: true } });
+  const bob = client("did:plc:bob");
+  await bob.ensureDeclaration();
+  const first = await network.clientFor("did:plc:bob").query<{ cid: string }>("com.atproto.repo.getRecord", { repo: "did:plc:bob", collection: "org.slack.dm.declaration", rkey: "self" });
+  network.advanceClock(60_000);
+  await bob.ensureDeclaration();
+  const second = await network.clientFor("did:plc:bob").query<{ cid: string }>("com.atproto.repo.getRecord", { repo: "did:plc:bob", collection: "org.slack.dm.declaration", rkey: "self" });
+  assert.equal(second.cid, first.cid, "an existing declaration is not rewritten");
+  assert.equal((await client("did:plc:alice").startConversation(["did:plc:bob"])).delivery["did:plc:bob"]?.status, "delivered");
+});
+
+test("scanning does not ask an allowlisted member who never wrote again on every poll", async () => {
+  // #given alice allows two members who have not written, and counts the reads that go to their hosts
+  const { network, client } = harness();
+  network.createAccount("did:plc:alice", "pds1");
+  network.createAccount("did:plc:carol", "pds2");
+  network.createAccount("did:plc:dan", "pds2");
+  const reads: string[] = [];
+  const alice = client("did:plc:alice", "pds1", {
+    fetchEndpoint: async (request) => {
+      const url = new URL(request.url);
+      if (url.pathname.endsWith("com.atproto.space.listRecords")) reads.push(url.searchParams.get("repo") ?? "");
+      return network.fetchEndpoint(request);
+    },
+  });
+  await alice.enableDms("allowlist", ["did:plc:carol", "did:plc:dan"]);
+
+  // #when she scans twice
+  await alice.scanRequests();
+  const afterFirst = reads.length;
+  await alice.scanRequests();
+
+  // #then the second scan asks nobody
+  assert.equal(afterFirst, 2, "each member is asked once");
+  assert.equal(reads.length, afterFirst, "an answer of nothing to read is trusted until it ages or the allowlist changes");
+
+  // #and once the answer has aged they are asked again
+  network.advanceClock(5 * 60_000 + 1);
+  await alice.scanRequests();
+  assert.equal(reads.length, afterFirst + 2);
+});
+
+test("a member who wrote while switched off is read again after the mode change, even if the last scan found nothing to read from them", async () => {
+  // #given alice scanned while carol, an active allowlist member, had not written
+  const { network, client } = harness();
+  network.createAccount("did:plc:alice", "pds1");
+  network.createAccount("did:plc:carol", "pds2");
+  const alice = client("did:plc:alice");
+  await alice.enableDms("allowlist", ["did:plc:carol"]);
+  assert.deepEqual(await alice.listRequests(), []);
+
+  // #when alice switches DMs off, carol writes (stored, untracked), and alice switches back to the allowlist
+  await alice.setRequestMode("nobody");
+  const started = await client("did:plc:carol").startConversation(["did:plc:alice"]);
+  await alice.setRequestMode("allowlist");
+
+  // #then the cached "nothing to read" answer did not hide her request
+  const requests = await alice.listRequests();
+  assert.deepEqual(requests.map((request) => request.convKey), [started.convKey]);
+});
+
+async function conversationWithBob(options: { aliceFetch?: (request: Request, real: (request: Request) => Promise<Response>) => Promise<Response> } = {}) {
+  const { network, client } = harness();
+  network.createAccount("did:plc:alice", "pds1");
+  network.createAccount("did:plc:bob", "pds2");
+  const alice = client("did:plc:alice", "pds1", options.aliceFetch
+    ? { fetchEndpoint: (request) => options.aliceFetch!(request, network.fetchEndpoint) }
+    : {});
+  const bob = client("did:plc:bob");
+  await bob.enableDms("everyone");
+  const started = await alice.startConversation(["did:plc:bob"]);
+  await bob.accept((await bob.listRequests())[0]!);
+  await alice.send(started.convKey, "hi bob");
+  network.advanceClock(2);
+  await bob.send(started.convKey, "hi alice");
+  return { network, alice, bob, started };
+}
+
+const bobsRepo = (request: Request, collection: string) => request.url.includes("repo=did%3Aplc%3Abob") && request.url.includes(collection);
+const hostFailure = () => new Response(JSON.stringify({ error: "UpstreamFailure", message: "Bad Gateway" }), { status: 502, headers: { "content-type": "application/json" } });
+
+test("a participant whose account was deactivated reads as a missing half, and the other halves are still read", async () => {
+  // #given a conversation in which bob's account is then deactivated (the authority still issues credentials for it)
+  const { network, alice, started } = await conversationWithBob();
+  network.setAccountState("did:plc:bob", "deactivated");
+
+  // #when alice reads the conversation
+  const page = await alice.readConversation(started.convKey, started.participants);
+
+  // #then the read succeeds, bob's half is missing and shows nothing, and alice's own messages remain
+  assert.equal(page.halves["did:plc:bob"], "missing");
+  assert.equal(page.halves["did:plc:alice"], "ok");
+  assert.deepEqual(page.messages.map((message) => message.text), ["hi bob"]);
+});
+
+test("a participant whose account was taken down reads as a missing half too", async () => {
+  const { network, alice, started } = await conversationWithBob();
+  network.setAccountState("did:plc:bob", "takendown");
+  const page = await alice.readConversation(started.convKey, started.participants);
+  assert.equal(page.halves["did:plc:bob"], "missing");
+  assert.deepEqual(page.messages.map((message) => message.text), ["hi bob"]);
+});
+
+test("a participant whose host fails while its messages are listed reads as a missing half and none of its messages are shown", async () => {
+  // #given bob's host answers the header read but fails the message listing
+  const { alice, started } = await conversationWithBob({
+    aliceFetch: async (request, real) => bobsRepo(request, "org.slack.dm.message") ? hostFailure() : real(request),
+  });
+
+  // #when alice reads the conversation
+  const page = await alice.readConversation(started.convKey, started.participants);
+
+  // #then bob's half is reported missing, the read still succeeds, and alice's messages are shown
+  assert.equal(page.halves["did:plc:bob"], "missing");
+  assert.deepEqual(page.messages.map((message) => message.text), ["hi bob"]);
+});
+
+test("a participant whose host fails while its reactions are listed is reported as a missing half instead of silently showing none", async () => {
+  // #given bob's host answers the header and the messages but fails the reaction listing
+  const { alice, started } = await conversationWithBob({
+    aliceFetch: async (request, real) => bobsRepo(request, "org.slack.dm.reaction") ? hostFailure() : real(request),
+  });
+
+  // #when alice reads the conversation
+  const page = await alice.readConversation(started.convKey, started.participants);
+
+  // #then both halves' messages are shown and bob's half is flagged
+  assert.equal(page.halves["did:plc:bob"], "missing");
+  assert.deepEqual(page.messages.map((message) => message.text), ["hi alice", "hi bob"]);
+  assert.deepEqual(page.reactions, []);
+});
+
+test("a failure reading the caller's own half fails the read instead of marking every half missing", async () => {
+  // #given alice's own host fails while her own half's header is read (for example she is offline)
+  const { alice, started } = await conversationWithBob({
+    aliceFetch: async (request, real) => request.url.includes("repo=did%3Aplc%3Aalice") && request.url.includes("org.slack.dm.header") ? hostFailure() : real(request),
+  });
+
+  // #when/#then the read rejects, so the caller sees an error rather than a conversation in which nobody is reachable
+  await assert.rejects(alice.readConversation(started.convKey, started.participants), /Bad Gateway/);
+});
+
+test("a cached credential a participant's host refuses is dropped, so the next read mints another instead of failing until it expires", async () => {
+  // #given alice holds a cached credential for bob's half, and bob's host refuses it once (for example its clock disagrees)
+  let mints = 0;
+  let refuseBobHeaderOnce = false;
+  const { alice, started } = await conversationWithBob({
+    aliceFetch: async (request, real) => {
+      if (request.url.includes("getSpaceCredential")) mints += 1;
+      if (refuseBobHeaderOnce && bobsRepo(request, "org.slack.dm.header")) {
+        refuseBobHeaderOnce = false;
+        return new Response(JSON.stringify({ error: "InvalidToken", message: "expired" }), { status: 401, headers: { "content-type": "application/json" } });
+      }
+      return real(request);
+    },
+  });
+  assert.equal((await alice.readConversation(started.convKey, started.participants)).halves["did:plc:bob"], "ok");
+  const mintsAfterFirstRead = mints;
+
+  // #when the refusal happens, and alice reads again
+  refuseBobHeaderOnce = true;
+  const refused = await alice.readConversation(started.convKey, started.participants);
+  const retried = await alice.readConversation(started.convKey, started.participants);
+
+  // #then the refused read reports the half as missing without throwing, and the next read re-mints and reads it
+  assert.equal(refused.halves["did:plc:bob"], "missing");
+  assert.equal(retried.halves["did:plc:bob"], "ok");
+  assert.ok(mints > mintsAfterFirstRead, "a fresh credential was minted for bob's half");
 });
