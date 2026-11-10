@@ -182,9 +182,10 @@ workspace layers even by accident.
 - `pnpm backup:db` (`scripts/backup-db.mjs`) — online SQLite backup.
 - `pnpm test` — unit tests (`node --test` over every `src/**/*.test.ts`), plus `bdd/gate.test.ts`, which keeps the Gherkin features honest (below).
 - `pnpm test:bdd` — builds, then runs the executable Gherkin scenarios in `features/` with `@cucumber/cucumber`, driving real browsers against a real pinned PDS network.
-- `pnpm test:acceptance` — builds, then runs `protocol-tests/{app-acceptance,reconcile-workspaces,dm-acceptance}.test.ts` against a real pinned PDS network (needs `ATPROTO_PINNED_CHECKOUT`).
-- `pnpm test:browser` — builds, then runs Playwright specs in `protocol-tests/browser/` (`--test-concurrency=1`, since both specs start real Next.js server subprocesses).
-- `pnpm test:performance` — `protocol-tests/{performance-envelope,dm-performance}.test.ts` (slow; the channel envelope test is ~30 minutes).
+- `pnpm test:acceptance` — builds, then runs `protocol-tests/{app-acceptance,reconcile-workspaces,dm-acceptance,authority-grant,platform-capabilities}.test.ts` against a real pinned PDS network (needs `ATPROTO_PINNED_CHECKOUT`). The last two hold the platform refactor's capability checks (K1, K3, K7), on the network-only helper `protocol-tests/support/pds-network.ts`.
+- `pnpm test:browser` — builds, then runs Playwright specs in `protocol-tests/browser/` (`--test-concurrency=1`, since the specs start real servers); `cross-origin.spec.ts` (K9) signs in through the real OAuth flow and sends every request from a separate web origin.
+- `pnpm test:performance` — `protocol-tests/{performance-envelope,dm-performance}.test.ts` (slow; the channel envelope test is ~30 minutes); each latest-100 read is repeated ten times and reported as median and p95.
+- `pnpm test:sync-budget` — `protocol-tests/sync-budget.ts` (K4): calls and time of the planned sync at 20, 100 and 200 writers.
 
 ## Executable Gherkin
 

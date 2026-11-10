@@ -33,6 +33,7 @@ const TOTAL_MESSAGES = 20_000;
 const MESSAGES_PER_HALF = TOTAL_MESSAGES / PARTICIPANTS;
 const APPLY_WRITES_BATCH = 100;
 const READ_BUDGET_MS = 8_000;
+const READ_RUNS = 10;
 
 test("DM read budget: 100 participants, 20,000 total messages, latest-100 read in <= 8s", { timeout: 10 * 60 * 1000 }, async () => {
   assert.ok(PINNED_CHECKOUT, "set ATPROTO_PINNED_CHECKOUT to the pinned atproto checkout");
@@ -147,6 +148,19 @@ test("DM read budget: 100 participants, 20,000 total messages, latest-100 read i
     const readStarted = performance.now();
     const page = await reader.readConversation(convKey, allDids, { limit: 100 });
     const readMs = performance.now() - readStarted;
+    // The bar for later phases (`.ai/plans/platform-refactor.md`, R0 baseline): the same read repeated by fresh clients,
+    // reported as median and 95th percentile.
+    const readsMs = [Math.round(readMs)];
+    for (let run = 1; run < READ_RUNS; run += 1) {
+      const runStarted = performance.now();
+      const repeat = await new DmClient(depsFor(participants[0]!)).readConversation(convKey, allDids, { limit: 100 });
+      readsMs.push(Math.round(performance.now() - runStarted));
+      // Checked after the timer stops: every timed read returns the same full page.
+      assert.deepEqual(repeat.messages.map((message) => message.uri), page.messages.map((message) => message.uri), "a repeated read returns the same latest-100 page");
+      assert.deepEqual(repeat.halves, page.halves, "a repeated read classifies every half the same way");
+    }
+    readsMs.sort((left, right) => left - right);
+    const percentile = (fraction: number) => readsMs[Math.min(readsMs.length - 1, Math.ceil(fraction * readsMs.length) - 1)]!;
 
     assert.equal(page.messages.length, 100, "the latest-100 page is full");
     assert.equal(Object.keys(page.halves).length, PARTICIPANTS);
@@ -161,6 +175,7 @@ test("DM read budget: 100 participants, 20,000 total messages, latest-100 read i
       halfSetupMs: Math.round(halfSetupMs),
       messageWriteMs: Math.round(messageWriteMs),
       readLatest100Ms: Math.round(readMs),
+      readLatest100Reads: { runs: readsMs.length, medianMs: percentile(0.5), p95Ms: percentile(0.95) },
     };
     process.stdout.write(`DM_PERFORMANCE_ENVELOPE ${JSON.stringify(report)}\n`);
     assert.ok(readMs <= READ_BUDGET_MS, `readConversation took ${Math.round(readMs)}ms, exceeding the ${READ_BUDGET_MS}ms budget`);

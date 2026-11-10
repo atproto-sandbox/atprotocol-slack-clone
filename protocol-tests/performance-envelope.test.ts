@@ -33,6 +33,7 @@ const MEMBERS = 200;
 const CHANNELS = 100;
 const MESSAGES = 20_000;
 const REACTIONS = 20_000;
+const READ_RUNS = 10;
 
 test("supported-size workload: 200 members, 100 channels, 20,000 messages and reactions per channel", { timeout: 60 * 60 * 1000 }, async () => {
   const fixtureTemp = createFixtureTempRoot("slack-performance-fixture-");
@@ -280,6 +281,39 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
       assert.deepEqual(normalized(independentPage.messages), normalized(primaryPage.messages), "the two readers return the same latest-100 URI and content set");
       assert.deepEqual(independentPage.reactions, primaryPage.reactions, "the two readers return the same latest-100 reaction records");
 
+      // The bar for later phases (`.ai/plans/platform-refactor.md`, R0 baseline and R4 gate): each latest-100 read repeated,
+      // reported as median and 95th percentile. The independent reader always reads from scratch; the primary reader is timed
+      // from an empty cache (a first open) and with a warm one (a reopen).
+      const channelSkey = `${workspaceSkey}-general`;
+      const independentReadsMs = [independentReadMs];
+      const primaryColdReadsMs = [primaryReadMs];
+      const primaryWarmReadsMs: number[] = [];
+      // Every timed read must return the page the first, fully checked reads returned; it is checked after its timer stops.
+      const assertSamePage = (page: { messages: Array<{ uri: string; value: Record<string, unknown> }>; reactions: unknown[]; degraded: boolean }, what: string) => {
+        assert.deepEqual(normalized(page.messages), normalized(primaryPage.messages), `${what} returns the same latest-100 messages`);
+        assert.deepEqual(page.reactions, primaryPage.reactions, `${what} returns the same reactions`);
+        assert.equal(page.degraded, false, `${what} is not degraded`);
+      };
+      for (let run = 1; run < READ_RUNS; run += 1) {
+        const independentRun = performance.now();
+        const independentRepeat = await readIndependentChannelPage(ownerSession as never, bootstrap.workspace, channelSkey);
+        independentReadsMs.push(elapsed(independentRun));
+        assertSamePage(independentRepeat, "a repeated independent read");
+        for (const table of ["channel_record_cache", "space_collection_cursor", "sync_cursor"]) {
+          getRawDb().prepare(`DELETE FROM ${table} WHERE account_did = ?`).run(owner.did);
+        }
+        const coldRun = performance.now();
+        const coldPage = await readChannelPage(ownerSession as never, bootstrap.workspace, channelSkey);
+        primaryColdReadsMs.push(elapsed(coldRun));
+        assertSamePage(coldPage, "a primary read from an empty cache");
+      }
+      for (let run = 0; run < READ_RUNS; run += 1) {
+        const warmRun = performance.now();
+        const warmPage = await readChannelPage(ownerSession as never, bootstrap.workspace, channelSkey);
+        primaryWarmReadsMs.push(elapsed(warmRun));
+        assertSamePage(warmPage, "a warm primary read");
+      }
+
       const allWorkspaceMembers = [owner.did, ...members.map((member) => member.did)];
       const visibilityStartedAt = performance.now();
       const visibilityOperation = await executeOperatorOperation({
@@ -327,6 +361,9 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
         inboxWriterReconciliationMs,
         independentLatest100ReadMs: independentReadMs,
         primaryLatest100ReadMs: primaryReadMs,
+        independentLatest100Reads: summary(independentReadsMs),
+        primaryLatest100ColdReads: summary(primaryColdReadsMs),
+        primaryLatest100WarmReads: summary(primaryWarmReadsMs),
       };
       process.stdout.write(`PERFORMANCE_ENVELOPE ${JSON.stringify(report)}\n`);
     } finally {
@@ -379,6 +416,12 @@ function sessionFor(actor: Actor): Session {
 
 function elapsed(startedAt: number): number {
   return Math.round(performance.now() - startedAt);
+}
+
+function summary(samples: number[]): { runs: number; medianMs: number; p95Ms: number } {
+  const sorted = [...samples].sort((left, right) => left - right);
+  const at = (fraction: number) => sorted[Math.min(sorted.length - 1, Math.ceil(fraction * sorted.length) - 1)]!;
+  return { runs: sorted.length, medianMs: at(0.5), p95Ms: at(0.95) };
 }
 
 async function mapLimited<T, R>(items: T[], concurrency: number, action: (item: T, index: number) => Promise<R>): Promise<R[]> {
