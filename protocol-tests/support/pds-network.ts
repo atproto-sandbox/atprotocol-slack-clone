@@ -5,6 +5,9 @@ import { readdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { kemKeyFromDidDocument } from "@/atproto/kem-key";
+import { generateSpaceKey } from "@/atproto/space-key";
+import { AtprotoClient } from "@/atproto/xrpc";
 import { createFixtureTempRoot } from "../fixture-temp";
 
 // The pinned PDS network without the Next app: two in-memory PDS hosts, a PLC directory and the app's lexicons published
@@ -339,4 +342,46 @@ export async function outcome(run: () => Promise<unknown>): Promise<Outcome> {
     const message = error instanceof Error ? error.message : String(error);
     return { ok: false, error: `${name}: ${message}`.slice(0, 200) };
   }
+}
+
+/**
+ * The engine's transport for an actor on the real network: its own bearer client, DID documents from the PLC directory
+ * (cached, refetched when asked), and plain fetch for every other host. `fetchVia` lets a measurement count or limit
+ * requests; `now` lets a test move the engine's clock past a truth interval.
+ */
+export function actorTransport(
+  network: PdsNetwork,
+  actor: NetworkActor,
+  options: { now?: () => number; fetchVia?: (request: Request) => Promise<Response> } = {},
+): import("@/client/transport").ClientTransport {
+  const send = options.fetchVia ?? ((request: Request) => fetch(request));
+  const documents = new Map<string, Promise<{ service?: Array<{ id?: string; serviceEndpoint?: unknown }>; verificationMethod?: unknown }>>();
+  const document = (did: string, forceRefresh: boolean) => {
+    const cached = documents.get(did);
+    if (cached && !forceRefresh) return cached;
+    const resolved = send(new Request(new URL(`/${encodeURIComponent(did)}`, network.plcUrl))).then(async (response) => {
+      if (!response.ok) throw new Error(`PLC answered ${response.status} for ${did}.`);
+      return await response.json() as { service?: Array<{ id?: string; serviceEndpoint?: unknown }>; verificationMethod?: unknown };
+    });
+    documents.set(did, resolved);
+    resolved.catch(() => documents.delete(did));
+    return resolved;
+  };
+  return {
+    did: actor.did,
+    memberClient: new AtprotoClient((path, init) => {
+      const headers = new Headers(init.headers);
+      headers.set("authorization", `Bearer ${actor.accessJwt}`);
+      return send(new Request(new URL(path, actor.pds.url), { ...init, headers, redirect: "error" }));
+    }),
+    resolvePds: async (did) => {
+      const endpoint = (await document(did, false)).service?.find((service) => service.id === "#atproto_pds" || service.id === `${did}#atproto_pds`)?.serviceEndpoint;
+      if (typeof endpoint !== "string") throw new Error(`No PDS in the DID document of ${did}.`);
+      return endpoint;
+    },
+    resolveKemKey: async (did, forceRefresh) => kemKeyFromDidDocument(did, await document(did, forceRefresh)),
+    fetchEndpoint: send,
+    generateKey: generateSpaceKey,
+    ...(options.now ? { now: options.now } : {}),
+  };
 }

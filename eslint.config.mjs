@@ -3,6 +3,7 @@ import nextVitals from "eslint-config-next/core-web-vitals";
 import nextTs from "eslint-config-next/typescript";
 
 const ISOMORPHIC_PROTOCOL_MODULES = [
+  "src/client/**/*.{ts,tsx}",
   "src/dm/**/*.{ts,tsx}",
   "src/protocol/**/*.{ts,tsx}",
   "src/atproto/space-key.ts",
@@ -18,13 +19,13 @@ const ISOMORPHIC_PROTOCOL_MODULES = [
 // Test files for the above run under Node's own test runner (`node --test`),
 // so they need `node:*` imports even though the modules they exercise must
 // stay browser-safe. They still may not reach into server-only app layers.
-const ISOMORPHIC_PROTOCOL_TEST_FILES = ["src/dm/**/*.test.{ts,tsx}", "src/protocol/**/*.test.{ts,tsx}"];
+const ISOMORPHIC_PROTOCOL_TEST_FILES = ["src/client/**/*.test.{ts,tsx}", "src/dm/**/*.test.{ts,tsx}", "src/protocol/**/*.test.{ts,tsx}"];
 const APP_LAYER_BOUNDARY = {
   group: [
     "@/lib/db", "@/lib/config", "@/auth/*", "@/operator/*", "@/workspaces/*",
     "@atproto/oauth-client-node", "undici", "@/atproto/identity",
   ],
-  message: "Isomorphic DM/protocol modules must not depend on the server-only session, database, or SSRF-guarded fetch layer.",
+  message: "Isomorphic engine, DM and protocol modules must not depend on the server-only session, database, or SSRF-guarded fetch layer.",
 };
 const ONE_WAY_IMPORTS = {
   group: ["@/workspaces", "@/workspaces/*", "@/app", "@/app/*"],

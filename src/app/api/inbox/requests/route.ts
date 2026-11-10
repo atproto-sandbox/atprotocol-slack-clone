@@ -9,7 +9,7 @@ import { registerSpaceNotifications } from "@/operator/notices";
 import { fetchInboxWriters } from "@/operator/client";
 import { decisionRecordKey, inboxUri } from "@/protocol/keys";
 import { validateSpaceRecord } from "@/protocol/registry";
-import { readWriterJoinRequests } from "@/workspaces/inbox-requests";
+import { readWriterJoinRequests } from "@/client/inbox-requests";
 import { requireWorkspaceSummary } from "@/workspaces/read-model";
 import { WorkspaceEnvelopeError, workspaceDegradedMessage } from "@/protocol/workspace-summary";
 import { mapLimited } from "@/lib/map-limited";

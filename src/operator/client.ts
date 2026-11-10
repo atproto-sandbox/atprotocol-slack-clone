@@ -10,6 +10,7 @@ import { getConfig } from "@/lib/config";
 import { readUpstreamJson } from "@/lib/bounded-json";
 import { operatorHttpFailure } from "./errors";
 import { OPERATOR_METHOD } from "@/protocol/nsids";
+import { OperatorRemoteError, operatorResponseFailure } from "@/client/operator-client";
 
 export async function submitOperation(
   session: OAuthSession,
@@ -85,23 +86,6 @@ export async function requestOperatorServiceAuth(
 ): Promise<string> {
   const result = await sessionClient(session).query<GetServiceAuth.OutputSchema>("com.atproto.server.getServiceAuth", { aud: serviceRef, lxm: method });
   return result.token;
-}
-
-export class OperatorRemoteError extends Error {
-  constructor(readonly status: number, readonly code: string, message: string) {
-    super(message);
-    this.name = "OperatorRemoteError";
-  }
-}
-
-export function operatorResponseFailure(
-  status: number,
-  ok: boolean,
-  body: { error?: string; message?: string } | null,
-): OperatorRemoteError | null {
-  if (body === null) return new OperatorRemoteError(502, "InvalidUpstreamResponse", "Operator service returned invalid JSON.");
-  if (!ok) return new OperatorRemoteError(status, body.error ?? "OperatorError", body.message ?? `Operator request failed (${status}).`);
-  return null;
 }
 
 /** The operator holds no usable grant for the workspace's authority; only the authority approving again fixes it. */

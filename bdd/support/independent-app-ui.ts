@@ -245,7 +245,7 @@ export async function observeWorkspace(viewer: AppViewer, workspaceName: string,
 export async function withIndependentReader<T>(
   world: AppWorld,
   account: Actor,
-  read: (reader: typeof import("@/reader/independent"), session: OAuthSession) => Promise<T>,
+  read: (reader: typeof import("@/reader/independent"), deps: import("@/reader/independent").IndependentDeps, session: OAuthSession) => Promise<T>,
 ): Promise<T> {
   const environment: Record<string, string> = {
     APP_URL: world.appOrigin, PLC_URL: world.fixture.plcUrl, ATPROTO_ACCEPTANCE_TEST: "true",
@@ -263,7 +263,8 @@ export async function withIndependentReader<T>(
         return fetch(new URL(path, account.pdsUrl), { ...init, headers, redirect: "error" });
       },
     } as unknown as OAuthSession;
-    return await read(await import("@/reader/independent"), session);
+    const { sessionCredentialDeps } = await import("@/atproto/space-credential");
+    return await read(await import("@/reader/independent"), sessionCredentialDeps(session), session);
   } finally {
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key]; else process.env[key] = value;
@@ -273,7 +274,7 @@ export async function withIndependentReader<T>(
 
 /** The repos that have written to a space, listed the way the app lists them: with a PDS-issued space credential. */
 export async function listWriters(world: AppWorld, account: Actor, space: string): Promise<string[]> {
-  return withIndependentReader(world, account, async (_reader, session) => {
+  return withIndependentReader(world, account, async (_reader, _deps, session) => {
     const [{ mintSpaceCredential }, { resolvePds }, { listBoundedRepos }] = await Promise.all([
       import("@/atproto/space-credential"), import("@/atproto/identity"), import("@/atproto/record-pages"),
     ]);

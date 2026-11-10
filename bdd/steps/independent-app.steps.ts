@@ -146,11 +146,11 @@ Then("both show the same directory, roster, messages, and private roster", async
   assert.deepEqual(first.privateRosters.Vault, vaultRoster);
   assert.deepEqual(vaultRoster, [member.did]);
 
-  const independent = await withIndependentReader(this, member, async (reader, session) => ({
-    workspace: (await reader.listIndependentWorkspaces(session)).find((entry) => entry.uri === this.workspaceUri),
-    general: await reader.readIndependentChannelPage(session, this.workspaceUri, general.skey),
-    vault: await reader.readIndependentChannelPage(session, this.workspaceUri, vault.skey),
-    vaultRoster: await reader.readIndependentPrivateRoster(session, this.workspaceUri, vault.skey),
+  const independent = await withIndependentReader(this, member, async (reader, deps) => ({
+    workspace: (await reader.listIndependentWorkspaces(deps)).find((entry) => entry.uri === this.workspaceUri),
+    general: await reader.readIndependentChannelPage(deps, this.workspaceUri, general.skey),
+    vault: await reader.readIndependentChannelPage(deps, this.workspaceUri, vault.skey),
+    vaultRoster: await reader.readIndependentPrivateRoster(deps, this.workspaceUri, vault.skey),
   }));
   assert.ok(independent.workspace, "the stateless reader finds the workspace from the member's credentials alone");
   assert.deepEqual([...independent.workspace.members].sort(), first.state.members);

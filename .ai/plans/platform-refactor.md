@@ -558,3 +558,83 @@ Departures: the review found that the first pass renamed file contents but not t
 Gate: the pinned-checkout conformance suites pass under the new names (13 suites, 275 tests and one upstream `todo`), as do unit, acceptance, browser and BDD. Not done here (owner prerequisites before any deployment): control of `flock.new`, the `_lexicon` TXT records, and publishing the lexicon records.
 
 Review: Codex was not run (the configured model is the one rejected in R1; the owner said to continue). A Sonnet reviewer checked the rename's completeness and consistency, regenerated the client independently (byte-identical), and found the route-directory defect above.
+
+### R4 (2026-11-10)
+
+Done as planned: `src/client/` is the engine, isomorphic and under the lint boundary.
+- `transport.ts`: `ClientTransport` is today's `DmDeps` without the store.
+- `credentials.ts`: the credential cache, lifted from `DmClient`.
+- `identity.ts`: DID resolution held in the store and bounded per origin, from K4.
+- `store.ts`, `memory-store.ts`, `indexeddb-store.ts`: the store interface with memory and IndexedDB stores, one IndexedDB database per account.
+- `merge.ts`: the merge order (newest key, then URI) and an opaque `(key, uri)` cursor.
+- `sync.ts`: the sync core.
+- `lifecycle.ts`: the lifecycle rules.
+- `ChannelClient`, `WorkspaceClient` and `OperatorClient`: the route table's methods, wired by `createEngine`.
+
+`DmClient` runs on the same credential cache and sync core over a memory store (D10). `src/dm/testing/fake-pds.ts` became the general fake network in `src/testing/fake-network.ts`, with:
+- spaces of any type;
+- `listRepos` with revisions, a cursor and a controllable lag;
+- the create, put and delete calls and `getServiceAuth`;
+- a notice hook;
+- a hook between two pages of a listing;
+- an unreachable host;
+- call counts.
+
+The server routes are not rewired (D11). The working notes, `.ai/plans/r4-engine-progress.md`, list every decision. The ones that shape behavior:
+- **Refresh.** A refresh is the bracket: a revision read, then the listings of every collection the writer has held, then a second revision read. It commits only when the two revisions match, and tries at most three times. One generation and one `syncedRev` cover all of a writer's collections, so a writer costs K4's four calls. Commits are compare-and-set on the writer's generation, on the revision, and on a space epoch that every purge and sign-out advances, so neither a slow refresh nor a retry can bring back a purged space.
+- **Window and first page.** A refresh lists the window only down to the bottom of the latest page this session showed. A writer's first listing asks for its share of the page, at least ten records. A writer whose share falls short is backfilled under the same bracket.
+- **Reactions.** Collections held in full are listed at the host's largest page, 1,000, as K4 asked.
+- **Bound.** The bound is per space and collection. Each page reserves its room before it is fetched, so concurrent listings cannot pass the bound together, and a collection cut at the bound is reported as cut on every read.
+- **Own writes.** The reader's own writer stays visible while the authority has not yet listed its write, for at most one truth interval.
+- **Ties.** Ties between writers break by URI, in the engine and in the independent reader alike.
+- **DID resolution.** The engine holds a DID's host and KEM key in its store for `DID_DOCUMENT_TTL_MS`, ten minutes. That is the bound the browser's DID documents and the server's KEM keys already used, now one constant in `src/atproto/kem-key.ts`. At most six resolutions per origin run at once, and one that has not answered in ten seconds is given up.
+
+Departures:
+- **Paging cursor.** `DmClient`'s `nextBefore` is now the opaque cursor, not a message key. The DM view takes its window start from the page's last message. Two halves sharing a key at a page boundary therefore no longer lose a message.
+- **DM history bound.** DM message history per half is bounded at 20,000 records, like a channel's. Past that, a read fails with a named error. Before R4 there was no bound.
+- **DM tests.** `DmClient`'s tests are unchanged apart from the fake's new name; two were added for the cases above.
+- **DM reads.** A DM read checks every half at its host on each read (truth interval 0), because DM halves have no `listRepos` hint until the feed in R5/R6. Only halves whose revision moved are listed.
+- **Independent reader.** The independent channel reader takes injected transports. `sessionCredentialDeps` builds them from a server session, so the reader runs on the fake network and against real hosts alike.
+- **Operator endpoint.** The operator client takes the operator's endpoint as configuration. Resolving it from the operator's DID document waits for R5/R6.
+- **Moved accounts, not followed.** A one-hour TTL that re-read a writer's DID document when its host failed was built, reviewed three times, and dropped. Following a moved account correctly needs a hook at every call to a writer's or an authority's host: reads, `listRepos`, summaries, the credential exchange and DM headers. That is more than K4 asked for. With the ten-minute bound, a moved account is followed about as fast as before R4. On the browser path, the browser's own document cache can make that up to twice the bound.
+- **Fake network.** The fake's `listRecords` now returns a cursor on any full page, as the pinned PDS does. That is what exercises the engine's one-record probe at an exactly full bound.
+- **Performance reporting.** The performance tests report every run (`samplesMs`). The envelope also reports the machine's load average around its timed reads. Its engine reads now take turns with the independent and primary readers, so load from elsewhere on the machine falls on all three alike.
+
+Gate:
+- Unit: 520 of 520 (R0: 363).
+- Typecheck and lint are clean. The one warning, in `src/app/ui/logout-button.tsx`, predates R4.
+- Acceptance: 13 of 13, including `engine-acceptance`, the engine's channel page against the independent reader on two real hosts.
+- Browser: 4 of 4.
+- BDD: 66 of 66 executable scenarios (473 steps).
+- Conformance: 13 suites, 275 tests and the one upstream `todo`.
+- Sync budget: a reopen within the truth interval is 1 call (`listRepos`) at 20, 100 and 200 writers. One new message is 5 calls, and a first open is 105, 505 and 1,005 calls.
+
+Performance against the R0 baseline. This machine had other work running during the reads (one-minute load average about 16); R0 ran on an otherwise idle machine.
+- **Engine from an empty store** (latest-100 at the channel envelope): median 11,632 ms, p95 13,375 ms. R0: 12,166 and 12,753.
+- **Engine from a warm store:** median 105 ms, p95 272 ms. R0, primary reader warm: 999 and 1,037.
+- **The p95.** The p95 is the slowest of ten runs, and it is 622 ms (5%) above R0's.
+- **Same-run comparison.** In the same run the readers took turns, and the primary reader from an empty cache took 13,189 and 14,070 ms. That is 8% and 10% above its own R0 figures, so under the same conditions the engine was faster than the R0 bar's reader: 12% at the median and 5% at the p95.
+- **Accumulation check.** Fifteen rounds alternated the engine with the independent reader on real hosts: 199 writers, with one writer holding 19,900 reactions. Nothing grew across runs. The heap stayed between 300 and 550 MB and the engine between 10.1 and 13.7 s. The one spike was shared with the control reader, so the slow runs track machine load, not the engine.
+- **Two causes found and fixed on the way:**
+  - The first gate run listed a full page from every writer on a first open. Fixed: a writer's first listing is now its share of the page.
+  - The second gate run listed the envelope's one reaction author's 20,000 reactions in 200 sequential pages of 100, a 29.4 s median. Fixed: these collections are now listed at the host's 1,000-record page, 20 pages.
+- **DM latest-100 read** (100 halves): first read 7,206 ms, median 6,629, p95 7,294. That passes the test's 8-second budget but is above R0's DM bar of 4,308 and 4,910. A cold read now costs every half the bracket's two MAC-verified revision reads, 200 of the read's 700 calls, which the plan's design requires. The DM bar is not part of R4's gate. R5/R6's feed lets a reopened conversation skip the revision reads of halves that did not move; a first read still pays them.
+
+Review: Codex was not run (the configured model is the one rejected in R1; the owner said to continue). Review followed the code-review procedure with Sonnet subagents.
+- **Rounds 1 and 2: the engine** (a reviewer and a critic, then the fix delta). Their findings were fixed with tests. Defects fixed while building R4, each with a test, include:
+  - a purge followed by a late retry that resurrected a space, fixed with the space epoch;
+  - a backfill that could pass the bound, fixed with exact reservations;
+  - false cuts from reservations other listings might not need;
+  - an own message that flickered out before the authority listed it;
+  - lifecycle and route-table gaps.
+- **Round 3: the late changes** (reaction page size, identity cache, first-page sizing), reviewer and critic. No defect in the bound or the paging. Fixed:
+  - a future-dated cached identity counted as fresh;
+  - an older resolution could overwrite a forced KEM refresh;
+  - the per-origin limit was per engine, not per process;
+  - a hung resolution held its slot forever.
+  - Added the missing exact-fit and backfill tests.
+  - The critic upgraded the moved-account finding to important, and rounds 4 and 5 reviewed two attempts to follow moves. Both left a case open, and the design was replaced by the ten-minute bound above.
+- **Final round: the delta.** No correctness defect. Three comments and one note were corrected. Left as recorded:
+  - slot hand-off is not FIFO;
+  - an identity entry can be written after sign-out;
+  - the fake's `listSpaces` and `listMembers` still end without a cursor on a full page.

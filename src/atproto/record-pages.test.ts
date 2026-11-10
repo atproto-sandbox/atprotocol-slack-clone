@@ -325,3 +325,22 @@ test("skipped spaces do not count toward the limit, across pages", async () => {
   assert.deepEqual(result.spaces.map((space) => space.uri), [uri("a"), uri("b")]);
   assert.equal(result.truncated, false);
 });
+
+test("the writers changed since a space revision are read page by page, a short page ending the scan", async () => {
+  const { listReposSince } = await import("./record-pages");
+  const repos = Array.from({ length: 150 }, (_, index) => ({ did: `did:plc:w${String(index).padStart(3, "0")}`, repoRev: "3jzfcijpj2z2a", spaceRev: `3jzfcijpj${String(index).padStart(4, "0")}` }));
+  const requests: Array<string | undefined> = [];
+  const client = {
+    query: async (_method: string, params: { cursor?: string; limit: number }) => {
+      requests.push(params.cursor);
+      const start = params.cursor ? repos.findIndex((repo) => repo.spaceRev === params.cursor) + 1 : 0;
+      const page = repos.slice(start, start + params.limit);
+      return { repos: page, ...(page.length > 0 ? { cursor: page.at(-1)!.spaceRev } : {}) };
+    },
+  } as unknown as Parameters<typeof listReposSince>[0];
+  const changed = await listReposSince(client, { space: "at://did:plc:a/space/new.flock.channel/x", since: null, maxRepos: 1_000 });
+  assert.equal(changed.repos.length, 150);
+  assert.equal(changed.spaceRev, repos.at(-1)!.spaceRev);
+  assert.equal(requests.length, 2, "the second page is short, so no third request asks for an empty one");
+  await assert.rejects(listReposSince(client, { space: "at://did:plc:a/space/new.flock.channel/x", since: null, maxRepos: 99 }), /scan limit/);
+});

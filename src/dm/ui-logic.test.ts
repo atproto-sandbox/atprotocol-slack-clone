@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { DmClient, type DmDeps, type DmStore } from "./dm-client";
-import { FakeDmNetwork } from "./testing/fake-pds";
+import { FakeNetwork } from "@/testing/fake-network";
 import { applyAllowlistEdit, coMemberDids, conversationVisible, describeSkippedSenders, halfChip, parseParticipantInput, retainAfterRefresh, runDmCycle, sharesAnyWorkspace } from "./ui-logic";
 
 function createStore(): DmStore {
@@ -14,7 +14,7 @@ function createStore(): DmStore {
 }
 
 function harness() {
-  const network = new FakeDmNetwork();
+  const network = new FakeNetwork();
   const clients = new Map<string, DmClient>();
   const client = (did: string, host = "pds1"): DmClient => {
     let instance = clients.get(did);

@@ -3,7 +3,7 @@ import { lookup } from "node:dns/promises";
 import { IdResolver } from "@atproto/identity";
 import { Agent, fetch as undiciFetch } from "undici";
 import { UpstreamResponseTooLargeError } from "@/lib/bounded-json";
-import { cacheKemKeys, kemKeyFromDidDocument } from "./kem-key";
+import { cacheKemKeys, DID_DOCUMENT_TTL_MS, kemKeyFromDidDocument } from "./kem-key";
 import { getConfig } from "@/lib/config";
 
 let resolver: IdResolver | undefined;
@@ -33,7 +33,6 @@ export async function resolvePds(did: string): Promise<string> {
   return pds;
 }
 
-const KEM_KEY_TTL_MS = 10 * 60 * 1000;
 const MAX_CACHED_KEM_KEYS = 1_024;
 
 /**
@@ -44,7 +43,7 @@ export const resolveKemKey = cacheKemKeys(async (did, forceRefresh) => {
   const document = await getIdResolver().did.resolve(did, forceRefresh);
   if (!document) throw new Error(`Could not resolve ${did}.`);
   return kemKeyFromDidDocument(did, document);
-}, { ttlMs: KEM_KEY_TTL_MS, maxEntries: MAX_CACHED_KEM_KEYS });
+}, { ttlMs: DID_DOCUMENT_TTL_MS, maxEntries: MAX_CACHED_KEM_KEYS });
 
 export async function assertSafePdsEndpoint(endpoint: string): Promise<void> {
   await resolveSafePdsEndpoint(endpoint);

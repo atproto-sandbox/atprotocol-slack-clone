@@ -11,6 +11,7 @@ import { WorkspaceEnvelopeError } from "@/protocol/workspace-summary";
 import { purgeDeniedPermissionCache, purgeSpaceCache, purgeWorkspaceCache, registerWorkspaceChannel, unregisterWorkspaceChannel } from "./cache";
 import { isAccessLost } from "@/atproto/space-credential-core";
 import { COLLECTION } from "@/protocol/nsids";
+import { ChannelUnavailableError } from "@/client/errors";
 
 const MAX_SUPPORTED_MEMBERS = 200;
 const MAX_PRIVATE_ROSTER_SCAN = 1_000;
@@ -86,12 +87,5 @@ export async function readPrivateChannelRoster(session: OAuthSession, workspace:
   } catch (error) {
     if (isAccessLost(error)) purgeSpaceCache(session.did, current.channel);
     throw error;
-  }
-}
-
-export class ChannelUnavailableError extends Error {
-  constructor(message: string, readonly visibility: "transitioning" | "archived") {
-    super(message);
-    this.name = "ChannelUnavailableError";
   }
 }

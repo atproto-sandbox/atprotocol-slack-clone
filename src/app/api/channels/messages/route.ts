@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { requireSession } from "@/auth/session";
 import { readChannelPage } from "@/workspaces/channel-sync";
-import { ChannelUnavailableError } from "@/workspaces/channels";
+import { ChannelUnavailableError } from "@/client/errors";
 
 export const runtime = "nodejs";
 

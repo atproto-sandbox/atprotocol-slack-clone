@@ -159,6 +159,7 @@ test("DM read budget: 100 participants, 20,000 total messages, latest-100 read i
       assert.deepEqual(repeat.messages.map((message) => message.uri), page.messages.map((message) => message.uri), "a repeated read returns the same latest-100 page");
       assert.deepEqual(repeat.halves, page.halves, "a repeated read classifies every half the same way");
     }
+    const samplesMs = [...readsMs];
     readsMs.sort((left, right) => left - right);
     const percentile = (fraction: number) => readsMs[Math.min(readsMs.length - 1, Math.ceil(fraction * readsMs.length) - 1)]!;
 
@@ -175,7 +176,7 @@ test("DM read budget: 100 participants, 20,000 total messages, latest-100 read i
       halfSetupMs: Math.round(halfSetupMs),
       messageWriteMs: Math.round(messageWriteMs),
       readLatest100Ms: Math.round(readMs),
-      readLatest100Reads: { runs: readsMs.length, medianMs: percentile(0.5), p95Ms: percentile(0.95) },
+      readLatest100Reads: { runs: readsMs.length, medianMs: percentile(0.5), p95Ms: percentile(0.95), samplesMs },
     };
     process.stdout.write(`DM_PERFORMANCE_ENVELOPE ${JSON.stringify(report)}\n`);
     assert.ok(readMs <= READ_BUDGET_MS, `readConversation took ${Math.round(readMs)}ms, exceeding the ${READ_BUDGET_MS}ms budget`);

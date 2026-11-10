@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
+import { loadavg } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { acceptedTimestamps, loadSlurFilter } from "./support/accepted-tid";
@@ -70,8 +71,9 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
 
     try {
       await publishAppLexicons(network);
-      const [{ bootstrapWorkspace }, { ensureMemberListSpace, listSpaceMembers, putAuthorityRecord, putSpaceMember }, { executeOperatorOperation, listInboxWriters }, { mintSpaceCredential }, { readIndependentChannelPage }, { inboxUri, reactionRecordKey, requestRecordKey, spaceRecordUri, subjectKey, tidNow }, { readChannelPage }, { parseWorkspaceRef }, { getRawDb }, { resolvePds }] = await Promise.all([
+      const [{ bootstrapWorkspace }, { ensureMemberListSpace, listSpaceMembers, putAuthorityRecord, putSpaceMember }, { executeOperatorOperation, listInboxWriters }, { mintSpaceCredential, sessionCredentialDeps }, { readIndependentChannelPage }, { inboxUri, reactionRecordKey, requestRecordKey, spaceRecordUri, subjectKey, tidNow }, { readChannelPage }, { parseWorkspaceRef }, { getRawDb }, { resolvePds }, { createEngine }] = await Promise.all([
         import("@/operator/kinds/bootstrap-workspace"), import("@/atproto/space-ops"), import("@/operator/operations"), import("@/atproto/space-credential"), import("@/reader/independent"), import("@/protocol/keys"), import("@/workspaces/channel-sync"), import("@/operator/actor"), import("@/lib/db"), import("@/atproto/identity"),
+        import("@/client/engine"),
       ]);
       const owner = await createActor(network.pds, "scaleowner", "test");
       const ownerSession = sessionFor(owner);
@@ -261,7 +263,7 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
       const listedWriters = await authorityCredential.client(network.pds.url).query<{ repos: Array<{ did: string }> }>("com.atproto.space.listRepos", { space: bootstrap.channel, limit: 500 });
       assert.equal(listedWriters.repos.length, MEMBERS - 1, "each target-channel member wrote at least one message");
       const independentStartedAt = performance.now();
-      const independentPage = await readIndependentChannelPage(ownerSession as never, bootstrap.workspace, `${workspaceSkey}-general`);
+      const independentPage = await readIndependentChannelPage(sessionCredentialDeps(ownerSession as never), bootstrap.workspace, `${workspaceSkey}-general`);
       const independentReadMs = elapsed(independentStartedAt);
       assert.equal(independentPage.messages.length, 100);
       assert.equal(independentPage.messages[0]?.value.text, `scale channel 0 message ${MESSAGES - 1}`);
@@ -282,9 +284,11 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
       assert.deepEqual(independentPage.reactions, primaryPage.reactions, "the two readers return the same latest-100 reaction records");
 
       // The bar for later phases (`.ai/plans/platform-refactor.md`, R0 baseline and R4 gate): each latest-100 read repeated,
-      // reported as median and 95th percentile. The independent reader always reads from scratch; the primary reader is timed
-      // from an empty cache (a first open) and with a warm one (a reopen).
+      // reported as median and 95th percentile. The independent reader always reads from scratch; the primary reader and the
+      // engine are timed from an empty cache or store (a first open) and with a warm one (a reopen). The readers take turns, so
+      // load from elsewhere on the machine falls on all of them alike.
       const channelSkey = `${workspaceSkey}-general`;
+      const loadAverageBeforeReads = loadavg()[0]!;
       const independentReadsMs = [independentReadMs];
       const primaryColdReadsMs = [primaryReadMs];
       const primaryWarmReadsMs: number[] = [];
@@ -294,9 +298,31 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
         assert.deepEqual(page.reactions, primaryPage.reactions, `${what} returns the same reactions`);
         assert.equal(page.degraded, false, `${what} is not degraded`);
       };
+      // R4 gate: the latest-100 read through the engine: a fresh engine with an empty store (a first open) and the last one
+      // again within the truth interval (a reopen), with the same checks on every page.
+      const engineRef = { workspace: bootstrap.workspace, skey: channelSkey };
+      const engineTransport = { did: owner.did, ...sessionCredentialDeps(ownerSession as never) };
+      const assertSameEnginePage = (page: Awaited<ReturnType<ReturnType<typeof createEngine>["channels"]["readPage"]>>, what: string) => {
+        assert.deepEqual(normalized(page.messages), normalized(primaryPage.messages), `${what} returns the same latest-100 messages`);
+        assert.deepEqual(normalized(page.reactions), normalized(primaryPage.reactions as Array<{ uri: string; value: Record<string, unknown> }>), `${what} returns the same reactions`);
+        assert.equal(page.reactions.length, 100, `${what} has every reaction on the latest page`);
+        assert.deepEqual(page.degradedReasons, [], `${what} is not degraded`);
+        assert.equal(page.complete, true, `${what} is complete`);
+      };
+      const engineColdReadsMs: number[] = [];
+      const engineWarmReadsMs: number[] = [];
+      let warmEngine = createEngine(engineTransport);
+      const engineColdRead = async () => {
+        warmEngine = createEngine(engineTransport);
+        const coldRun = performance.now();
+        const coldPage = await warmEngine.channels.readPage(engineRef);
+        engineColdReadsMs.push(elapsed(coldRun));
+        assertSameEnginePage(coldPage, "an engine read from an empty store");
+      };
+      await engineColdRead();
       for (let run = 1; run < READ_RUNS; run += 1) {
         const independentRun = performance.now();
-        const independentRepeat = await readIndependentChannelPage(ownerSession as never, bootstrap.workspace, channelSkey);
+        const independentRepeat = await readIndependentChannelPage(sessionCredentialDeps(ownerSession as never), bootstrap.workspace, channelSkey);
         independentReadsMs.push(elapsed(independentRun));
         assertSamePage(independentRepeat, "a repeated independent read");
         for (const table of ["channel_record_cache", "space_collection_cursor", "sync_cursor"]) {
@@ -306,13 +332,19 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
         const coldPage = await readChannelPage(ownerSession as never, bootstrap.workspace, channelSkey);
         primaryColdReadsMs.push(elapsed(coldRun));
         assertSamePage(coldPage, "a primary read from an empty cache");
+        await engineColdRead();
       }
       for (let run = 0; run < READ_RUNS; run += 1) {
         const warmRun = performance.now();
         const warmPage = await readChannelPage(ownerSession as never, bootstrap.workspace, channelSkey);
         primaryWarmReadsMs.push(elapsed(warmRun));
         assertSamePage(warmPage, "a warm primary read");
+        const engineWarmRun = performance.now();
+        const engineWarmPage = await warmEngine.channels.readPage(engineRef);
+        engineWarmReadsMs.push(elapsed(engineWarmRun));
+        assertSameEnginePage(engineWarmPage, "a warm engine read");
       }
+      const loadAverageAfterReads = loadavg()[0]!;
 
       const allWorkspaceMembers = [owner.did, ...members.map((member) => member.did)];
       const visibilityStartedAt = performance.now();
@@ -364,6 +396,10 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
         independentLatest100Reads: summary(independentReadsMs),
         primaryLatest100ColdReads: summary(primaryColdReadsMs),
         primaryLatest100WarmReads: summary(primaryWarmReadsMs),
+        engineLatest100ColdReads: summary(engineColdReadsMs),
+        engineLatest100WarmReads: summary(engineWarmReadsMs),
+        // The machine's one-minute load average around the timed reads, this test's own work included.
+        machineLoadAverage: { beforeReads: loadAverageBeforeReads, afterReads: loadAverageAfterReads },
       };
       process.stdout.write(`PERFORMANCE_ENVELOPE ${JSON.stringify(report)}\n`);
     } finally {
@@ -418,10 +454,11 @@ function elapsed(startedAt: number): number {
   return Math.round(performance.now() - startedAt);
 }
 
-function summary(samples: number[]): { runs: number; medianMs: number; p95Ms: number } {
+/** Median and 95th percentile, with every run in the order it ran, so one slow run can be told from a slow read. */
+function summary(samples: number[]): { runs: number; medianMs: number; p95Ms: number; samplesMs: number[] } {
   const sorted = [...samples].sort((left, right) => left - right);
   const at = (fraction: number) => sorted[Math.min(sorted.length - 1, Math.ceil(fraction * sorted.length) - 1)]!;
-  return { runs: sorted.length, medianMs: at(0.5), p95Ms: at(0.95) };
+  return { runs: sorted.length, medianMs: at(0.5), p95Ms: at(0.95), samplesMs: samples.map(Math.round) };
 }
 
 async function mapLimited<T, R>(items: T[], concurrency: number, action: (item: T, index: number) => Promise<R>): Promise<R[]> {

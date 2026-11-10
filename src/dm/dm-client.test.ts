@@ -3,7 +3,7 @@ import test from "node:test";
 import { SPACE_CREDENTIAL_LIFETIME_MS, SPACE_CREDENTIAL_RENEW_BEFORE_MS } from "@/atproto/space-credential-core";
 import { dmConversationUri, dmInboxUri, spaceRecordUri } from "@/protocol/keys";
 import { DmClient, type DmDeps, type DmStore } from "./dm-client";
-import { FakeDmNetwork } from "./testing/fake-pds";
+import { FakeNetwork } from "@/testing/fake-network";
 
 function createStore(): DmStore {
   const map = new Map<string, string>();
@@ -15,7 +15,7 @@ function createStore(): DmStore {
 }
 
 function harness() {
-  const network = new FakeDmNetwork();
+  const network = new FakeNetwork();
   const clients = new Map<string, DmClient>();
   const client = (did: string, host = "pds1", overrides: Partial<DmDeps> = {}): DmClient => {
     let instance = clients.get(did);
@@ -530,7 +530,7 @@ test("a local store failure while scanning requests propagates instead of masque
   await assert.rejects(bob.scanRequests(), /store down/);
 });
 
-function countingExchanges(network: FakeDmNetwork): { fetchEndpoint: DmDeps["fetchEndpoint"]; count: () => number } {
+function countingExchanges(network: FakeNetwork): { fetchEndpoint: DmDeps["fetchEndpoint"]; count: () => number } {
   let exchanges = 0;
   return {
     fetchEndpoint: (request) => {
@@ -901,4 +901,46 @@ test("a cached credential a participant's host refuses is dropped, so the next r
   assert.equal(refused.halves["did:plc:bob"], "missing");
   assert.equal(retried.halves["did:plc:bob"], "ok");
   assert.ok(mints > mintsAfterFirstRead, "a fresh credential was minted for bob's half");
+});
+
+test("paging a conversation where two halves share message keys at a page boundary shows every message once", async () => {
+  const { network, client } = harness();
+  network.createAccount("did:plc:alice", "pds1");
+  network.createAccount("did:plc:bob", "pds2");
+  const alice = client("did:plc:alice");
+  const bob = client("did:plc:bob");
+  await bob.enableDms("everyone");
+  const started = await alice.startConversation(["did:plc:bob"]);
+  await bob.accept((await bob.listRequests())[0]!);
+  const keys = ["3jzfcijpj2z2a", "3jzfcijpj2z2b", "3jzfcijpj2z2c"];
+  for (const did of ["did:plc:alice", "did:plc:bob"]) {
+    for (const rkey of keys) await network.writeAs(did, dmConversationUri(did, started.convKey), "new.flock.dm.message", rkey, { text: `${did} ${rkey}`, createdAt: "2026-11-10T12:00:00.000Z" });
+  }
+  const seen: string[] = [];
+  let before: string | undefined;
+  for (let pages = 0; pages < 10; pages += 1) {
+    const page = await alice.readConversation(started.convKey, started.participants, { limit: 4, before });
+    seen.push(...page.messages.map((message) => message.uri));
+    if (!page.nextBefore) break;
+    before = page.nextBefore;
+  }
+  assert.equal(seen.length, 6);
+  assert.equal(new Set(seen).size, 6);
+});
+
+test("a half whose message history passes the read limit is reported, not silently cut", async () => {
+  const { network, client } = harness();
+  network.createAccount("did:plc:alice", "pds1");
+  network.createAccount("did:plc:bob", "pds2");
+  const alice = client("did:plc:alice", "pds1", { limits: { maxRecordsPerHalf: 3 } });
+  const bob = client("did:plc:bob");
+  await bob.enableDms("everyone");
+  const started = await alice.startConversation(["did:plc:bob"]);
+  await bob.accept((await bob.listRequests())[0]!);
+  for (let n = 0; n < 5; n += 1) {
+    await bob.send(started.convKey, `message ${n}`);
+    network.advanceClock(1);
+  }
+  const first = await alice.readConversation(started.convKey, started.participants, { limit: 2 });
+  await assert.rejects(alice.readConversation(started.convKey, started.participants, { limit: 2, before: first.nextBefore }), /read limit/);
 });

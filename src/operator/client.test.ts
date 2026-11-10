@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { UpstreamResponseTooLargeError } from "@/lib/bounded-json";
-import { OperatorRemoteError, operatorRemoteHttpStatus, operatorResponseFailure } from "./client";
+import { OperatorRemoteError, operatorResponseFailure } from "@/client/operator-client";
+import { operatorRemoteHttpStatus } from "./client";
 
 test("operator proxy preserves valid remote statuses and maps invalid statuses to bad gateway", () => {
   assert.equal(operatorRemoteHttpStatus(new OperatorRemoteError(503, "Busy", "Try again")), 503);

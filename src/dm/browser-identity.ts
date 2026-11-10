@@ -1,10 +1,9 @@
-import { kemKeyFromDidDocument } from "@/atproto/kem-key";
+import { DID_DOCUMENT_TTL_MS, kemKeyFromDidDocument } from "@/atproto/kem-key";
 import { readUpstreamJson } from "@/lib/bounded-json";
 import { isDid } from "@/protocol/keys";
 
 export type BrowserIdentityConfig = { plcUrl: string; loopback: boolean };
 
-const DID_DOCUMENT_TTL_MS = 10 * 60 * 1000;
 const MAX_DID_DOCUMENT_BYTES = 256 * 1024;
 
 type DidDocument = {

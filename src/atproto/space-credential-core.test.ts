@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { COMMIT_MAC_TYPE, MAC_HEADER, RECORD_MAC_TYPE, SpaceMacError, WANT_MAC_HEADER, parseMacHeader, serializeRecord } from "@atproto/space";
 import { UpstreamResponseTooLargeError } from "@/lib/bounded-json";
-import { FakeDmNetwork } from "@/dm/testing/fake-pds";
+import { FakeNetwork } from "@/testing/fake-network";
 import { dmInboxUri } from "@/protocol/keys";
 import { credentialLifetimeMs, exchangeSpaceCredential, isAccessLost, isCredentialRefused, isSpaceDeleted, mintSpaceCredentialWith, SPACE_CREDENTIAL_LIFETIME_MS, SPACE_CREDENTIAL_RENEW_BEFORE_MS, SpaceCredentialError, type SpaceCredential } from "./space-credential-core";
 import { MEMBERSPACE_POLICY } from "./space-policy";
@@ -17,7 +17,7 @@ const COLLECTION = "new.flock.dm.request";
 type Respond = (response: Response, request: Request) => Promise<Response> | Response;
 
 async function capture(respond?: Respond) {
-  const network = new FakeDmNetwork();
+  const network = new FakeNetwork();
   network.createAccount(OWNER, "pds1");
   network.createAccount(READER, "pds2");
   await network.clientFor(OWNER).procedure("com.atproto.space.createSpace", {
@@ -40,7 +40,7 @@ async function capture(respond?: Respond) {
   return { network, credential, requests };
 }
 
-async function writeRequest(network: FakeDmNetwork, rkey: string, text = "hello"): Promise<void> {
+async function writeRequest(network: FakeNetwork, rkey: string, text = "hello"): Promise<void> {
   await network.clientFor(OWNER).procedure("com.atproto.space.putRecord", { space: SPACE, repo: OWNER, collection: COLLECTION, rkey, record: { text } });
 }
 
@@ -238,7 +238,7 @@ test("the MAC header the fake PDS returns parses as a record MAC", async () => {
 // --- Telling a lost grant from a missing record ---------------------------------------------------------------
 
 test("a removed member's credential request fails with the authority's SpaceNotFound code as a 403, and that counts as lost access", async () => {
-  const network = new FakeDmNetwork();
+  const network = new FakeNetwork();
   network.createAccount(OWNER, "pds1");
   network.createAccount(READER, "pds2");
   const owner = network.clientFor(OWNER);
@@ -251,7 +251,7 @@ test("a removed member's credential request fails with the authority's SpaceNotF
 });
 
 test("the exchange reports each refusal the lexicon declares as a denial, and a malformed request as its own error", async () => {
-  const network = new FakeDmNetwork();
+  const network = new FakeNetwork();
   const key = await network.generateKey();
   const answer = (error: string, status = 400) => exchangeSpaceCredential({
     authorityPds: "https://pds.example", delegationToken: "token", space: SPACE, key,
