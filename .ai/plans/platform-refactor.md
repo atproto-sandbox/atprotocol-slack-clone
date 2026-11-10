@@ -347,6 +347,8 @@ Before this phase starts I will show the owner the UI data-flow approach and wai
 - **R6b.** Writes and operator calls go through the engine: browser to PDS, and browser to operator with a service token.
 - **R6c.** Delete what "What is deleted" lists. `page.tsx` no longer resolves a server session; sign-in is the browser OAuth flow.
 
+Gate before R6a, because R6a is the step that puts the type-wide member grant and channel history in the browser: `script-src` no longer contains `'unsafe-inline'` (`src/lib/security-headers.ts:7` has it today). Scripts run under a nonce or hash set per request, and a browser test shows that an injected inline script does not run. `connect-src` has to keep allowing any HTTPS host, since a PDS can be anywhere, so the script policy is the control that stops injected script from using the session or sending history out. `style-src` is not part of this gate.
+
 Browser hardening in this phase: the content security policy (`src/lib/security-headers.ts`) reviewed for the new connect targets; no third-party script; stores are per account and a test shows one account cannot read another's. After R6c, and not before (R6a still writes through the server), a test shows that no member token and no record content is sent to the web app's origin. Requests to the operator are excluded from that test, since service tokens go there by design and until R7 the operator shares the web app's origin.
 
 Scenario changes, each needing the owner's sign-off because the behavior itself goes away: "Declining the join permission explains itself and keeps the invitation" (`features/workspaces.feature:45-49`) and every step that clicks a per-channel access button. All other scenarios keep their wording. Steps that read `channel_record_cache`, `web_session` or `oauth_session` (`bdd/steps/independent-app.steps.ts:166-172`, `bdd/support/dm-policy-ui.ts:486-508`, `bdd/support/lifecycle-ui.ts:349`, `protocol-tests/app-acceptance.test.ts`) assert the same facts against the browser store where the fact still exists (a lost credential purges the copy) and assert the table is gone where it does not.
@@ -357,9 +359,10 @@ Rollback: R6a and R6b are revertible one at a time; R6c is the point of no retur
 ### R7. Packages and the operator as its own service — M
 
 - Moves only for `packages/{protocol,client,testing,reader}` and `apps/web`: pnpm workspace entries, package dependencies replace the path lists in `eslint.config.mjs`.
-- `apps/operator` runs as its own process on `@atproto/xrpc-server` (already a dependency), serving the operator methods, the two notice methods, the authority flow and its `did:web` document. CORS for the web origin. The reconcile job lives here.
+- `apps/operator` runs as its own process on `@atproto/xrpc-server` (already a dependency), serving the operator methods, the two notice methods, the authority flow and its `did:web` document. The reconcile job lives here.
+- CORS follows what authenticates a route, not who the first-party client is. The methods authenticated by a service token (the operator methods and `getChanges`) answer any origin, with `Access-Control-Allow-Origin: *` and no credentials: the token is the only thing that authorizes a call, a wildcard origin cannot carry a cookie, and a third-party browser client has to be able to call them for the platform goal to hold. Their preflight is answered, and it names `Authorization` and `Content-Type` in `Access-Control-Allow-Headers`, because a wildcard there does not cover `Authorization`. The authority flow, which uses a per-flow cookie, sends no CORS headers and is reached by top-level navigation only. The two notice methods are called by PDS hosts, not by browsers.
 
-Gate: `packages/client` and `packages/protocol` build with no Node built-in and no Next import; `packages/reader` depends on `packages/protocol` only; the full suites pass with web and operator on different origins; K9 passes against the real operator process; and in a real browser with web and operator on different origins, once on the same site and once on different sites, the authority flow starts and completes, is rejected without its cookie, rejects a replayed ticket and a replayed state, and runs two flows at once.
+Gate: `packages/client` and `packages/protocol` build with no Node built-in and no Next import; `packages/reader` depends on `packages/protocol` only; the full suites pass with web and operator on different origins; K9 passes against the real operator process; in a real browser with web and operator on different origins, once on the same site and once on different sites, the authority flow starts and completes, is rejected without its cookie, rejects a replayed ticket and a replayed state, and runs two flows at once; and a page on a third origin calls an operator method with a service token and succeeds, while a page on another origin cannot read an answer from the authority flow.
 
 ### R8. Dedicated workspace account — S to M
 
@@ -367,8 +370,10 @@ Workspace creation takes the authority account and the creating person separatel
 
 Recovery before an admin exists: the row is inserted in the transaction that consumes the creation authorization, so the row is the proof that its actor was allowed to create. Until the creator's admin record is written, only that actor may resume the row, as only the authority may resume a `bootstrapWorkspace` row today (`operations.ts:44-50`). Once the admin record exists, any active admin recovers it like every other kind, and the original actor stays the journal and audit principal.
 
-Tests: a DID without a creation authorization cannot create a workspace under an authority that has a grant; an authorization for one name cannot create another; a second `createWorkspace` on one authorization is refused while a retry of the same operation resumes; a pending `bootstrapWorkspace` row still resumes for its authority; a pending `createWorkspace` row resumes for its creator at every step, is refused to anyone else before the admin record exists, and is recovered by another admin after it; when the authority's grant lacks the scope for the first step, the creation answers "reauthorization required" and leaves no row, the creator reauthorizes and retries the same operation id, and the workspace is created with no second creation flow; another DID, or another operation id, cannot use the restored authorization; a restored authorization that is not used expires.
-Gate: a workspace whose authority never signs in to the web app is created, administered by two admins, and survives every admin signing out.
+Scheduled work without an admin: from this phase the authority holds no admin or roster record, and today the reconcile job requires one. It calls `requireActiveWorkspaceAdmin` for the authority in both of its paths (`scripts/reconcile-workspaces.ts:34,45`), and that check wants active admin and roster records even from the authority (`src/operator/security.ts:73-77`), so the job would fail on every workspace created here. The job therefore stops acting as an admin. It runs as the operator itself: an actor built from the restored grant, allowed to run `reconcileWorkspace` and to resume the pending operations an active admin could resume, and nothing else, with the authority as the journal and audit principal as today. A `createWorkspace` row whose creator has no admin record yet stays with its creator, as the paragraph above says. Its read-only check while mutations are paused restores the grant and reads the workspace without asking for an admin record. `reconcileWorkspace` submitted through `execute` still needs an active admin. The notice sweep (R5) is specified to run on the grant alone and needs no change.
+
+Tests: a DID without a creation authorization cannot create a workspace under an authority that has a grant; an authorization for one name cannot create another; a second `createWorkspace` on one authorization is refused while a retry of the same operation resumes; a pending `bootstrapWorkspace` row still resumes for its authority; a pending `createWorkspace` row resumes for its creator at every step, is refused to anyone else before the admin record exists, and is recovered by another admin after it; when the authority's grant lacks the scope for the first step, the creation answers "reauthorization required" and leaves no row, the creator reauthorizes and retries the same operation id, and the workspace is created with no second creation flow; another DID, or another operation id, cannot use the restored authorization; a restored authorization that is not used expires; the reconcile job completes for a workspace whose authority has no admin or roster record, resumes a pending operation there, and with mutations paused verifies the grant and writes nothing; a workspace created before this phase still reconciles.
+Gate: a workspace whose authority never signs in to the web app is created, administered by two admins, survives every admin signing out, and is reconciled on schedule throughout.
 
 ### R9. Apps — M
 
@@ -498,6 +503,32 @@ Sandbox as before; plan hash identical before and after; no other file changed. 
 While applying it I found and fixed an inconsistency the reviews had not raised: the creation authorization was written as if every creation needed one, which would have made the authority account approve again for each workspace. It applies only to a caller other than the authority, from R8; the R1 test that assumed otherwise is replaced.
 
 Not re-reviewed: this round's change and that correction. The raw output of all five rounds is in `.ai/reviews/codex-plan-review-platform-refactor.md`.
+
+### Independent project review (agy CLI 1.5.5, `gemini-4-carbon-high`; 2026-11-10; advice, no verdict)
+
+A static review of commit `6a3dbd2` (R0 to R3) and of this plan. I checked its eight defects and the evidence behind its main advice against the code; the report with that check and the raw output is `.ai/reviews/gemini-project-review-6a3dbd2.md`. The owner agreed to four fixes and three amendments.
+
+Fixed in code, outside any phase:
+
+- Outbound requests end after 30 seconds, and one run of an operation starts no step once it has held the workspace lock for three minutes (`src/atproto/identity.ts`, `src/operator/journal.ts`). A host that stalled could hold the lock without limit. The web app's `execute` call to the operator keeps a longer limit, the time the operator can take to answer (`src/operator/client.ts`).
+- Leaving a DM takes it off the device's list and stops announcing it again, and starting it again readmits the others (`src/dm/dm-client.ts`). The key `leave` wrote was never read.
+- The submitter of a request that ends their own role (`leaveWorkspace`, `leaveChannel`, `removeMember` or a demoting `setAdmin` naming themselves) can send it again after it stopped part-way (`src/operator/security.ts`, the `endsOwnRole` rule in `src/operator/kinds/`). The retry was refused with 403. The web app's own check no longer stops such a retry before it reaches the operator (`src/app/api/operator/execute/route.ts`).
+- A channel name has one length rule, the directory lexicon's, which the request lexicon now repeats exactly (`lexicons/new/flock/operator/execute.json`, `src/operator/operations.ts`).
+
+Amended in this plan: the script-policy gate before R6a; R7's CORS rule; R8's scheduled work without an admin.
+
+The fixes were reviewed by two independent passes (a reviewer and a critic, both Sonnet); the record is `.ai/reviews/sonnet-code-review-review-fixes-6a3dbd2.md`.
+
+Raised by the review and not adopted here, each still open:
+
+- D14 for apps: uninstalling an app hides everything it wrote. The review wants uninstalled apps kept readable. That is a product decision for the owner.
+- The workspace lock and journal are keyed by authority, and a channel key is `workspace-channel` with hyphens allowed in both parts, so two workspaces under one authority share a lock and can collide on a channel key. R8 gives each workspace its own authority, which avoids both for new workspaces and fixes neither.
+- Declaring the app collections in the authority scope before R9, so that adding them does not send every authority through approval again.
+- Splitting R11 into the UI surfaces and the verified sync.
+- CI, and a test run with PDS rate limits on.
+- Four of its eight defects, none fixed here: `createChannel` under a new operation id adds members to an existing channel of the same name and visibility; an acceptance record is not checked against the space it sits in; a stream opened with `after=0` causes one extra refresh; the lint boundary misses relative imports and `src/reader`.
+
+Not re-reviewed: the fixes and the amendments above.
 
 ## Outcome and departures from this plan
 
