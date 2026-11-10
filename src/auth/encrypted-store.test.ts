@@ -39,7 +39,7 @@ test("OAuth state store prunes abandoned flows and retries deletion after a SQLi
   process.env.DATABASE_PATH = databasePath;
   process.env.AUTH_ENCRYPTION_KEY = "44".repeat(32);
   process.env.APP_URL = "http://127.0.0.1:3000";
-  process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_slack_admin";
+  process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
   let blocker: BetterSqlite3.Database | undefined;
   let releaseTimer: NodeJS.Timeout | undefined;
   try {

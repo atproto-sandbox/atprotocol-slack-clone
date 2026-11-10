@@ -21,8 +21,8 @@ test("mergeMessages dedupes by URI and sorts newest first", () => {
 });
 
 test("client helpers parse workspace URIs, DID lists, slugs, TIDs, and access failures", () => {
-  assert.deepEqual(parsePastedWorkspaceUri(" at://did:plc:abc/space/org.slack.workspace/team "), { authorityDid: "did:plc:abc", skey: "team" });
-  assert.equal(parsePastedWorkspaceUri("at://did:plc:abc/space/org.slack.channel/team"), null);
+  assert.deepEqual(parsePastedWorkspaceUri(" at://did:plc:abc/space/new.flock.workspace/team "), { authorityDid: "did:plc:abc", skey: "team" });
+  assert.equal(parsePastedWorkspaceUri("at://did:plc:abc/space/new.flock.channel/team"), null);
   assert.deepEqual(splitDids(" did:plc:a, did:plc:b\n"), ["did:plc:a", "did:plc:b"]);
   assert.equal(toSlug("  Project Room!! "), "project-room");
   assert.equal(toSlug("!!!"), "channel");
@@ -64,11 +64,11 @@ test("a stored workspace operation ID is reused only for the exact name it was i
 });
 
 test("invite links round-trip a workspace URI and reject anything that is not one", () => {
-  const uri = "at://did:plc:abc/space/org.slack.workspace/acme-1";
+  const uri = "at://did:plc:abc/space/new.flock.workspace/acme-1";
   const link = inviteLinkFor("http://127.0.0.1:3000", uri);
-  assert.equal(link, "http://127.0.0.1:3000/?invite=at%3A%2F%2Fdid%3Aplc%3Aabc%2Fspace%2Forg.slack.workspace%2Facme-1");
+  assert.equal(link, "http://127.0.0.1:3000/?invite=at%3A%2F%2Fdid%3Aplc%3Aabc%2Fspace%2Fnew.flock.workspace%2Facme-1");
   assert.equal(workspaceFromInviteSearch(new URL(link).search), uri);
-  for (const search of ["", "?invite=", "?invite=hello", "?invite=at%3A%2F%2Fdid%3Aplc%3Aabc%2Fspace%2Forg.slack.channel%2Fgeneral", "?other=1", "?invite=javascript%3Aalert(1)"]) {
+  for (const search of ["", "?invite=", "?invite=hello", "?invite=at%3A%2F%2Fdid%3Aplc%3Aabc%2Fspace%2Fnew.flock.channel%2Fgeneral", "?other=1", "?invite=javascript%3Aalert(1)"]) {
     assert.equal(workspaceFromInviteSearch(search), null, search);
   }
 });
@@ -78,20 +78,20 @@ test("captureInviteLink stores only a valid workspace, so sign-in redirects cann
   const storage = { setItem: (key: string, value: string) => { stored.set(key, value); } };
   assert.equal(captureInviteLink("?invite=nonsense", storage), null);
   assert.equal(stored.size, 0);
-  const uri = "at://did:plc:abc/space/org.slack.workspace/acme-1";
+  const uri = "at://did:plc:abc/space/new.flock.workspace/acme-1";
   assert.equal(captureInviteLink(new URL(inviteLinkFor("http://x", uri)).search, storage), uri);
   assert.equal(stored.get(INVITE_LINK_KEY), uri);
 });
 
 test("workspace URIs must have the exact shape the server accepts, so a hostile link cannot render odd text", () => {
-  const valid = "at://did:plc:abc/space/org.slack.workspace/acme-1";
+  const valid = "at://did:plc:abc/space/new.flock.workspace/acme-1";
   assert.deepEqual(parsePastedWorkspaceUri(valid), { authorityDid: "did:plc:abc", skey: "acme-1" });
   for (const bad of [
-    "at://did:plc:ab\u202ec/space/org.slack.workspace/acme-1",
-    "at://did:plc:abc d/space/org.slack.workspace/acme-1",
-    `at://did:plc:${"a".repeat(600)}/space/org.slack.workspace/acme-1`,
-    "at://did:PLC:abc/space/org.slack.workspace/acme-1",
-    "at://did:plc:abc/space/org.slack.workspace/",
+    "at://did:plc:ab\u202ec/space/new.flock.workspace/acme-1",
+    "at://did:plc:abc d/space/new.flock.workspace/acme-1",
+    `at://did:plc:${"a".repeat(600)}/space/new.flock.workspace/acme-1`,
+    "at://did:PLC:abc/space/new.flock.workspace/acme-1",
+    "at://did:plc:abc/space/new.flock.workspace/",
   ]) assert.equal(parsePastedWorkspaceUri(bad), null, bad);
 });
 

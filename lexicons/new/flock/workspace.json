@@ -1,0 +1,13 @@
+{
+  "lexicon": 1,
+  "id": "new.flock.workspace",
+  "defs": {
+    "main": {
+      "type": "space",
+      "key": "any",
+      "name": "Workspace",
+      "collections": ["new.flock.workspace.profile", "new.flock.directory", "new.flock.workspace.roster", "new.flock.admin", "new.flock.acceptance"],
+      "description": "A shared team workspace directory, roster, admin state, and acceptance index."
+    }
+  }
+}

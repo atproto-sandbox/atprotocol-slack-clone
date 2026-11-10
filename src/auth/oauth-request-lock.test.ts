@@ -17,7 +17,7 @@ test("SQLite OAuth request lock serializes concurrent refreshes for one DID", as
   const directory = mkdtempSync(join(tmpdir(), "slack-oauth-lock-test-"));
   process.env.DATABASE_PATH = join(directory, "oauth.db");
   process.env.AUTH_ENCRYPTION_KEY = "88".repeat(32);
-  process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_slack_admin";
+  process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
   process.env.APP_URL = "http://127.0.0.1:3000";
   process.env.OAUTH_LOCK_TEST_LOG = join(directory, "events.log");
   let markStarted!: () => void;

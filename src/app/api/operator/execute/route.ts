@@ -7,7 +7,7 @@ import { workspaceDegradedMessage } from "@/protocol/workspace-summary";
 import { readRequestJson, RequestJsonError } from "@/lib/bounded-json";
 import { AdminMutationsPausedError } from "@/operator/mutations-paused";
 import { rejectCrossOriginMutation } from "@/lib/same-origin-mutation";
-import type * as Execute from "@/lexicons/api/types/org/slack/operator/execute";
+import type * as Execute from "@/lexicons/api/types/new/flock/operator/execute";
 
 export const runtime = "nodejs";
 

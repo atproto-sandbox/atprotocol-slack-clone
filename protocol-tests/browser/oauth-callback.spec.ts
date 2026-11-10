@@ -83,7 +83,7 @@ before(async () => {
     DATABASE_PATH: databasePath,
     AUTH_ENCRYPTION_KEY: encryptionKey,
     PLC_URL: network.plc.url,
-    OPERATOR_SERVICE_REF: `did:web:localhost%3A${port}#atproto_slack_admin`,
+    OPERATOR_SERVICE_REF: `did:web:localhost%3A${port}#atproto_flock_operator`,
   };
   server = spawn(process.execPath, [
     join(projectRoot, "node_modules/next/dist/bin/next"),
@@ -206,13 +206,13 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
     assert.ok(clientId);
     const requestedScope = new URL(clientId).searchParams.get("scope") ?? "";
     for (const method of ["execute", "getOperation", "listInboxWriters"]) {
-      assert.ok(requestedScope.includes(`lxm=org.slack.operator.${method}`), `client metadata includes operator method ${method}`);
+      assert.ok(requestedScope.includes(`lxm=new.flock.operator.${method}`), `client metadata includes operator method ${method}`);
     }
     await signInIfPrompted(page);
     await page.getByRole("button", { name: "Authorize", exact: true }).waitFor({ state: "visible" });
     const consentScope = await page.evaluate(() => String((window as unknown as { __authorizeData?: { scope?: string } }).__authorizeData?.scope ?? ""));
     for (const method of ["execute", "getOperation", "listInboxWriters"]) {
-      assert.ok(consentScope.includes(`lxm=org.slack.operator.${method}`), `PDS consent includes operator method ${method}`);
+      assert.ok(consentScope.includes(`lxm=new.flock.operator.${method}`), `PDS consent includes operator method ${method}`);
     }
     await page.getByRole("button", { name: "Authorize", exact: true }).click();
     await page.waitForURL(appUrl.origin, { timeout: 30_000 });
@@ -239,7 +239,7 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
       throw new Error(`PDS did not show consent for channel posting. Page: ${(await page.locator("body").innerText()).slice(0, 2_000)}\nServer: ${serverOutput}`, { cause: error });
     });
     const channelConsentScope = await page.evaluate(() => String((window as unknown as { __authorizeData?: { scope?: string } }).__authorizeData?.scope ?? ""));
-    assert.ok(channelConsentScope.includes("org.slack.channel.message") && channelConsentScope.includes("action=create"), "PDS consent includes channel message write scope");
+    assert.ok(channelConsentScope.includes("new.flock.channel.message") && channelConsentScope.includes("action=create"), "PDS consent includes channel message write scope");
     await page.getByRole("button", { name: "Authorize", exact: true }).click();
     await page.waitForURL(appUrl.origin, { timeout: 30_000 }).catch(async (error: unknown) => {
       throw new Error(`Channel consent did not return to the app. URL: ${page.url()} Page: ${(await page.locator("body").innerText()).slice(0, 2_000)}\nServer: ${serverOutput}`, { cause: error });
@@ -286,7 +286,7 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
         DATABASE_PATH: join(scratchDirectory!, "independent-app.db"),
         AUTH_ENCRYPTION_KEY: Buffer.alloc(32, 0x6b).toString("hex"),
         PLC_URL: network!.plc.url,
-        OPERATOR_SERVICE_REF: `did:web:localhost%3A${independentPort}#atproto_slack_admin`,
+        OPERATOR_SERVICE_REF: `did:web:localhost%3A${independentPort}#atproto_flock_operator`,
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -404,7 +404,7 @@ async function publishAppLexicons(fixture: NonNullable<typeof network>): Promise
   assert.ok(fixture.lexiconAuthority, "fixture must expose its lexicon authority");
   const agent = fixture.pds.getAgent();
   const session = await agent.com.atproto.server.createSession({ identifier: "lex-authority.test", password: "hunter2" });
-  const root = join(projectRoot, "lexicons/org/slack");
+  const root = join(projectRoot, "lexicons/new/flock");
   const files = await readdir(root, { recursive: true });
   const published = new Set<string>();
   for (const relative of files.filter((file) => file.endsWith(".json"))) {

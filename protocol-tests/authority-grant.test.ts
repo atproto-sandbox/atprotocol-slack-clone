@@ -128,16 +128,16 @@ async function adminOperations(pds: PdsNetwork, workspace: WorkspaceUnderTest): 
   const operationId = tidNow();
   return {
     "second admin creates a channel (execute)": await outcome(async () => {
-      const answer = await callOperatorMethod(admin, pds.serviceRef, "org.slack.operator.execute", {}, {
+      const answer = await callOperatorMethod(admin, pds.serviceRef, "new.flock.operator.execute", {}, {
         workspace: workspace.uri, operationId, request: { kind: "createChannel", skey: `k1-${operationId}`, name: "k1", visibility: "public" },
       }) as { operation?: { state?: string } };
       assert.equal(answer.operation?.state, "completed");
     }),
     "second admin reads that operation (getOperation)": await outcome(async () => {
-      const answer = await callOperatorMethod(admin, pds.serviceRef, "org.slack.operator.getOperation", { workspace: workspace.uri, operationId }) as { operation?: { state?: string } };
+      const answer = await callOperatorMethod(admin, pds.serviceRef, "new.flock.operator.getOperation", { workspace: workspace.uri, operationId }) as { operation?: { state?: string } };
       assert.equal(answer.operation?.state, "completed");
     }),
-    "second admin lists inbox writers (listInboxWriters)": await outcome(() => callOperatorMethod(admin, pds.serviceRef, "org.slack.operator.listInboxWriters", { workspace: workspace.uri })),
+    "second admin lists inbox writers (listInboxWriters)": await outcome(() => callOperatorMethod(admin, pds.serviceRef, "new.flock.operator.listInboxWriters", { workspace: workspace.uri })),
     "the authority account passes the operator admin check": await outcome(() => requireActiveWorkspaceAdmin(workspace.uri, workspace.authority.did)),
     "the reconcile job verifies the workspace": await outcome(() => runReconcileJob(pds, workspace.uri)),
   };
@@ -146,7 +146,7 @@ async function adminOperations(pds: PdsNetwork, workspace: WorkspaceUnderTest): 
 async function runReconcileJob(pds: PdsNetwork, workspaceUri: string): Promise<void> {
   const child = spawn(process.execPath, ["--import", "tsx", "scripts/reconcile-workspaces.ts"], {
     cwd: process.cwd(),
-    env: { ...process.env, DATABASE_PATH: pds.databasePath, SLACK_ADMIN_MUTATIONS_PAUSED: "true" },
+    env: { ...process.env, DATABASE_PATH: pds.databasePath, FLOCK_ADMIN_MUTATIONS_PAUSED: "true" },
     stdio: ["ignore", "pipe", "pipe"],
   });
   let output = "";

@@ -16,7 +16,7 @@ There is no app database of record. Each workspace, channel and conversation liv
 
 ## How it is built
 
-Next.js 16 (App Router) with SQLite for session state, caches and the operator journal. Lexicons are in `lexicons/org/slack/`. See [`ARCHITECTURE.md`](ARCHITECTURE.md) for runtime boundaries and data flow, [`CODE-MAP.md`](CODE-MAP.md) for the directory map and who owns what, and [`SPEC.md`](SPEC.md) for product scope.
+Next.js 16 (App Router) with SQLite for session state, caches and the operator journal. Lexicons are in `lexicons/new/flock/`. See [`ARCHITECTURE.md`](ARCHITECTURE.md) for runtime boundaries and data flow, [`CODE-MAP.md`](CODE-MAP.md) for the directory map and who owns what, and [`SPEC.md`](SPEC.md) for product scope.
 
 ## Run it locally
 

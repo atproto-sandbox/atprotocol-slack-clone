@@ -32,7 +32,7 @@ test("operator infrastructure failures are distinct from authorization and valid
 
 test("a scope the authority's grant lacks asks the authority to approve again, wherever the PDS refuses it", () => {
   // #given the PDS refusing an operator read or write for a missing scope
-  const refused = new XrpcError(403, 'Missing required scope "space:org.slack.channel"', "ScopeMissingError");
+  const refused = new XrpcError(403, 'Missing required scope "space:new.flock.channel"', "ScopeMissingError");
 
   // #then the operator answers with the code the app turns into a reauthorization prompt, not a generic rejection
   assert.deepEqual(operatorHttpFailure(refused), {

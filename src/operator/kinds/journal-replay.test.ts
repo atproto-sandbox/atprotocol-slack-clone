@@ -23,7 +23,7 @@ before(() => {
   directory = mkdtempSync(join(tmpdir(), "slack-journal-replay-test-"));
   process.env.DATABASE_PATH = join(directory, "replay.db");
   process.env.AUTH_ENCRYPTION_KEY = "44".repeat(32);
-  process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_slack_admin";
+  process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
   process.env.APP_URL = "http://127.0.0.1:3000";
 });
 after(() => {
@@ -57,9 +57,10 @@ const journalRow = (operationId: string) => getRawDb().prepare("SELECT actor, re
 
 const BOOTSTRAP_STEPS = ["workspace-space", "inbox-space", "general-channel-space", "workspace-profile", "owner-roster", "owner-admin", "general-directory"];
 
-// The workspace the code before the kind table derived from the name "Acme", and the hash it stored for that bootstrap.
-const ACME = "at://did:plc:owner/space/org.slack.workspace/acme-g4bwzwhzor";
-const ACME_BOOTSTRAP_HASH = "3f4494a9a74bce3eecdca090703b11fe39a177308acd99494a0e44bdaf81f8d3";
+// The workspace the name "Acme" derives, and the hash the journal stores for its bootstrap: pinned literals, so a change to
+// key derivation or to the request digest fails here. The namespace rename (R3) changed both, and rows were not carried over.
+const ACME = "at://did:plc:owner/space/new.flock.workspace/acme-g4bwzwhzor";
+const ACME_BOOTSTRAP_HASH = "97b0d215c6aadcaa08eed9e2644926678c4605415ef0b5c9538cc3d2e4a5e1fc";
 
 test("a pre-table bootstrap row with no step done resumes under its hash and runs every step once", async () => {
   // #given a bootstrap that recorded its intent and nothing else
@@ -147,7 +148,7 @@ for (const scenario of [
 test("recovery that meets a missing scope keeps the other admin's row pending and asks the authority to approve", async () => {
   // #given an admin's channel creation pending with no step done, and a grant that cannot create channel spaces
   const scopeMissing = (method: string) => method === "com.atproto.space.createSpace"
-    ? Response.json({ error: "ScopeMissingError", message: 'Missing required scope "space:org.slack.channel"' }, { status: 403 })
+    ? Response.json({ error: "ScopeMissingError", message: 'Missing required scope "space:new.flock.channel"' }, { status: 403 })
     : undefined;
   const { workspace, owner } = seededWorkspace("epsilon", scopeMissing);
   const request = { kind: "createChannel", skey: "design", name: "design", visibility: "private", members: [ADMIN] };

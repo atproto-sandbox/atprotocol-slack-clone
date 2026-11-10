@@ -44,7 +44,7 @@ export function getConfig(): AppConfig {
 
   cached = {
     appUrl,
-    databasePath: process.env.DATABASE_PATH ?? "./data/slack.db",
+    databasePath: process.env.DATABASE_PATH ?? "./data/flock.db",
     encryptionKey: Buffer.from(rawKey, "hex"),
     plcDirectoryUrl: absoluteUrl("PLC_URL", process.env.PLC_URL ?? "https://plc.directory"),
     operatorServiceRef,

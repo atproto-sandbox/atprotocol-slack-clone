@@ -1,7 +1,7 @@
 import type { OAuthSession } from "@atproto/oauth-client-node";
-import type * as Execute from "@/lexicons/api/types/org/slack/operator/execute";
-import type * as GetOperation from "@/lexicons/api/types/org/slack/operator/getOperation";
-import type * as ListInboxWriters from "@/lexicons/api/types/org/slack/operator/listInboxWriters";
+import type * as Execute from "@/lexicons/api/types/new/flock/operator/execute";
+import type * as GetOperation from "@/lexicons/api/types/new/flock/operator/getOperation";
+import type * as ListInboxWriters from "@/lexicons/api/types/new/flock/operator/listInboxWriters";
 import { assertSafePdsEndpoint, fetchValidatedEndpoint, getIdResolver } from "@/atproto/identity";
 import type * as GetServiceAuth from "@/lexicons/api/types/com/atproto/server/getServiceAuth";
 import { sessionClient } from "@/atproto/client";

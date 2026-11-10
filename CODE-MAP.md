@@ -7,16 +7,16 @@ A Slack-style team workspace built directly on atproto (AT Protocol) permissione
 ```
                          BROWSER                                    NEXT.JS SERVER                          EACH ACCOUNT'S PDS
   ┌──────────────────────────────────────────┐      ┌───────────────────────────────────────┐     ┌───────────────────────────────────┐
-  │ React UI (src/app/ui/**)                   │      │ App Router pages/routes (src/app/**)   │     │ org.slack.workspace / .channel /   │
+  │ React UI (src/app/ui/**)                   │      │ App Router pages/routes (src/app/**)   │     │ new.flock.workspace / .channel /   │
   │  - workspace-manager, sidebar, channel-view│◀────▶│  - page.tsx (entry), layout.tsx        │────▶│   .inbox spaces                    │
-  │  - dm-sidebar/home/requests/settings/      │      │  - api/** authenticated JSON routes    │     │ org.slack.directory/.roster/.admin │
-  │    conversation (src/app/ui/dm-*.tsx)      │      │  - xrpc/** operator + notices           │     │ org.slack.channel.message/.reaction│
+  │  - dm-sidebar/home/requests/settings/      │      │  - api/** authenticated JSON routes    │     │ new.flock.directory/.roster/.admin │
+  │    conversation (src/app/ui/dm-*.tsx)      │      │  - xrpc/** operator + notices           │     │ new.flock.channel.message/.reaction│
   │                                             │      │  - oauth/** login/callback/metadata    │     │ (member-list read/write, open      │
   │ Workspace OAuth session (server-issued)     │      │                                         │     │  app access; member lists ARE the  │
   │  - used for channel/workspace reads+writes  │      │ Workspace authority operator            │     │  read gate)                        │
   │                                             │      │  (src/operator/**)                      │     ├───────────────────────────────────┤
-  │ DM OAuth session (browser-held, M3)         │      │  - signs service-auth JWTs, journals,   │     │ org.slack.dm.inbox (self)          │
-  │  - IndexedDB, non-extractable DPoP keys     │      │    resumes, reconciles PDS membership   │     │ org.slack.dm.conversation/<convKey>│
+  │ DM OAuth session (browser-held, M3)         │      │  - signs service-auth JWTs, journals,   │     │ new.flock.dm.inbox (self)          │
+  │  - IndexedDB, non-extractable DPoP keys     │      │    resumes, reconciles PDS membership   │     │ new.flock.dm.conversation/<convKey>│
   │  - src/dm/browser-session.ts                │      │                                         │     │   header/message/reaction          │
   │  - scopes: DM_BROWSER_SCOPES only            │      │ SQLite (src/lib/db.ts)                  │     │ (member-list; convKey is a TID,    │
   │                                             │      │  - encrypted OAuth/session state,       │◀───▶│  not a secret — DM state lives     │
@@ -45,7 +45,7 @@ Two independent-app proofs exist side by side: `src/reader/independent.ts` (chan
         ▼
  for each participant's conversation half (fan-out 8, src/lib/map-limited.ts):
    - read header, validate convKey + participant set match (validateDmHeaderMatchesRequest)
-   - page org.slack.dm.message / org.slack.dm.reaction, validate every record (validateSpaceRecord)
+   - page new.flock.dm.message / new.flock.dm.reaction, validate every record (validateSpaceRecord)
    - classify a failed mint as missing / deleted / revoked (SpaceCredentialError.code)
         │
         │ 3. merge
@@ -76,7 +76,7 @@ src/
     oauth/                  Login, callback, and client-metadata routes (member sign-in + DM).
     authority/              The workspace authority flow: start, callback, client metadata, JWKS.
     xrpc/                   Server-published XRPC methods: the operator's own RPCs
-                             (org.slack.operator.*), com.atproto.space.notifyWrite and com.atproto.space.notifySpaceDeleted.
+                             (new.flock.operator.*), com.atproto.space.notifyWrite and com.atproto.space.notifySpaceDeleted.
     dm/callback/            Browser DM OAuth callback page (client component).
     .well-known/did.json/   The operator's did:web document (OPERATOR_SERVICE_REF), when the
                              operator DID is hosted as did:web on this app's own origin.
@@ -156,7 +156,7 @@ src/
                            map-limited concurrency, security headers, same-origin checks.
   lexicons/api/           Generated lexicon clients (do not hand-edit; see codegen:lex).
 
-lexicons/                 Source NSID lexicon JSON (org.slack.*, org.slack.dm.*).
+lexicons/                 Source NSID lexicon JSON (new.flock.*, new.flock.dm.*).
 protocol-tests/           Backend acceptance/performance against the pinned PDS checkout, plus
                            Playwright browser acceptance (protocol-tests/browser/).
   atproto/                  Protocol conformance suites copied into the pinned checkout to run.
@@ -175,7 +175,7 @@ scripts/                  codegen-lex.mjs, backup-db.mjs, reconcile-workspaces.t
 - `merge.ts` — the pure k-way merge `readConversation` uses (paginate-only-what's-needed).
 - `request-policy.ts` — pure mapping between the inbox memberspace `publicWrite` flag/member state and the
   user-facing mode (`everyone` / `allowlist` / `nobody`).
-- The inbox declaration (`org.slack.dm.declaration`, a public record in the owner's own repo, written by `enableDms`) is how a sender learns a recipient has an inbox: the authority answers a stranger asking for the inbox like a missing space.
+- The inbox declaration (`new.flock.dm.declaration`, a public record in the owner's own repo, written by `enableDms`) is how a sender learns a recipient has an inbox: the authority answers a stranger asking for the inbox like a missing space.
 - `backoff.ts` — the re-notify backoff schedule (1 min, 10 min, 1 h, 1 day, then stop).
 - `browser-session.ts` — `@atproto/oauth-client-browser` wiring: `connectDms`, `restoreDmSession`,
   `disconnectDms`, the well-known-only handle resolver, `DmConfig`.

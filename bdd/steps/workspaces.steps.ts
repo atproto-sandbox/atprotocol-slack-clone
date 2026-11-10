@@ -30,7 +30,7 @@ async function membersOf(world: AppWorld, as: Actor, space: string): Promise<Mem
 
 async function adminRecords(world: AppWorld, as: Actor): Promise<Array<{ subject: string; active: boolean }>> {
   const result = await world.pdsGet<{ records?: Array<{ value: { subject: string; active: boolean } }> }>(
-    as, "com.atproto.space.listRecords", { space: world.workspaceUri, repo: as.did, collection: "org.slack.admin", limit: "100" },
+    as, "com.atproto.space.listRecords", { space: world.workspaceUri, repo: as.did, collection: "new.flock.admin", limit: "100" },
   );
   assert.equal(result.status, 200, JSON.stringify(result.body));
   return (result.body.records ?? []).map((record) => record.value);
@@ -40,7 +40,7 @@ const workspaceSkey = (world: AppWorld): string => world.workspaceUri.split("/")
 
 /** The workspace spaces an account's own PDS lists, whatever the app says about them. */
 async function workspaceSpacesOn(world: AppWorld, as: Actor): Promise<string[]> {
-  const listed = await world.pdsGet<{ spaces: Array<{ uri: string }> }>(as, "com.atproto.space.listSpaces", { spaceType: "org.slack.workspace", limit: "100" });
+  const listed = await world.pdsGet<{ spaces: Array<{ uri: string }> }>(as, "com.atproto.space.listSpaces", { spaceType: "new.flock.workspace", limit: "100" });
   assert.equal(listed.status, 200, JSON.stringify(listed.body));
   return listed.body.spaces.map((space) => space.uri);
 }
@@ -140,7 +140,7 @@ Then("the DID has write-only access to the admin inbox", async function (this: A
 });
 
 Then("the DID has read and write access to each public channel", async function (this: AppWorld) {
-  const spaces = await this.pdsGet<{ spaces: Array<{ uri: string }> }>(owner(this), "com.atproto.space.listSpaces", { spaceType: "org.slack.channel", limit: "100" });
+  const spaces = await this.pdsGet<{ spaces: Array<{ uri: string }> }>(owner(this), "com.atproto.space.listSpaces", { spaceType: "new.flock.channel", limit: "100" });
   assert.equal(spaces.body.spaces.length, 2, "the workspace has exactly two public channels");
   for (const space of spaces.body.spaces) {
     const member = (await membersOf(this, owner(this), space.uri)).find((entry) => entry.did === actorNamed(this, "invitee").did);
@@ -245,7 +245,7 @@ Then("the DID is still absent from the member list and left no acceptance marker
   const stranger = actorNamed(this, "stranger");
   const members = await membersOf(this, owner(this), this.workspaceUri);
   assert.equal(members.some((entry) => entry.did === stranger.did), false);
-  const spaces = await this.pdsGet<{ spaces: Array<{ uri: string }> }>(stranger, "com.atproto.space.listSpaces", { spaceType: "org.slack.workspace", limit: "100" });
+  const spaces = await this.pdsGet<{ spaces: Array<{ uri: string }> }>(stranger, "com.atproto.space.listSpaces", { spaceType: "new.flock.workspace", limit: "100" });
   assert.equal(spaces.body.spaces.some((space) => space.uri === this.workspaceUri), false, "no acceptance marker was written for a non-member");
 });
 
@@ -262,7 +262,7 @@ When("the invitee joins the workspace from its invite link", async function (thi
 });
 
 Then("the workspace appears in that account's spaces index", async function (this: AppWorld) {
-  const spaces = await this.pdsGet<{ spaces: Array<{ uri: string }> }>(actorNamed(this, "invitee"), "com.atproto.space.listSpaces", { spaceType: "org.slack.workspace", limit: "100" });
+  const spaces = await this.pdsGet<{ spaces: Array<{ uri: string }> }>(actorNamed(this, "invitee"), "com.atproto.space.listSpaces", { spaceType: "new.flock.workspace", limit: "100" });
   assert.ok(spaces.body.spaces.some((space) => space.uri === this.workspaceUri), "the acceptance marker makes the workspace discoverable from the invitee's own PDS");
 });
 
@@ -310,7 +310,7 @@ Then("the authority can read the workspace without a member-list entry", async f
   const actor = owner(this);
   assert.equal((await membersOf(this, actor, this.workspaceUri)).some((entry) => entry.did === actor.did), false, "the authority is not on its own member list");
   const profile = await this.pdsGet<{ records?: Array<{ value: { name?: string } }> }>(actor, "com.atproto.space.listRecords", {
-    space: this.workspaceUri, repo: actor.did, collection: "org.slack.workspace.profile", limit: "10",
+    space: this.workspaceUri, repo: actor.did, collection: "new.flock.workspace.profile", limit: "10",
   });
   assert.equal(profile.status, 200, `the authority's PDS lets it read its workspace: ${JSON.stringify(profile.body)}`);
   assert.deepEqual(profile.body.records?.map((record) => record.value.name), [this.workspaceName], "what it reads is the workspace it just created");

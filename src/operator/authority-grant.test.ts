@@ -9,7 +9,7 @@ import test from "node:test";
 process.env.DATABASE_PATH = join(mkdtempSync(join(tmpdir(), "authority-grant-test-")), "app.db");
 process.env.AUTH_ENCRYPTION_KEY = "3c".repeat(32);
 process.env.APP_URL = "http://127.0.0.1:3000";
-process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_slack_admin";
+process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
 
 const AUTHORITY = "did:plc:authority";
 const OTHER = "did:plc:someoneelse";
@@ -376,5 +376,5 @@ test("outside loopback the authority client is confidential and publishes its ke
 test("the authority grant scope asks for authority records only, never message content", () => {
   const scope = grant.authorityGrantScope();
   assert.ok(scope.split(" ").includes("atproto"));
-  assert.ok(!scope.includes("channel.message") && !scope.includes("channel.reaction") && !scope.includes("org.slack.dm"));
+  assert.ok(!scope.includes("channel.message") && !scope.includes("channel.reaction") && !scope.includes("new.flock.dm"));
 });

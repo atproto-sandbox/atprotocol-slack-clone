@@ -12,7 +12,7 @@ const OWNER = "did:plc:owner";
 const READER = "did:plc:reader";
 const SPACE = dmInboxUri(OWNER);
 const PDS1 = "https://fake-pds.test/pds1";
-const COLLECTION = "org.slack.dm.request";
+const COLLECTION = "new.flock.dm.request";
 
 type Respond = (response: Response, request: Request) => Promise<Response> | Response;
 
@@ -21,7 +21,7 @@ async function capture(respond?: Respond) {
   network.createAccount(OWNER, "pds1");
   network.createAccount(READER, "pds2");
   await network.clientFor(OWNER).procedure("com.atproto.space.createSpace", {
-    spaceType: "org.slack.dm.inbox", skey: "self",
+    spaceType: "new.flock.dm.inbox", skey: "self",
     policy: { $type: MEMBERSPACE_POLICY, publicRead: true, publicWrite: true },
   });
   const requests: Request[] = [];
@@ -242,7 +242,7 @@ test("a removed member's credential request fails with the authority's SpaceNotF
   network.createAccount(OWNER, "pds1");
   network.createAccount(READER, "pds2");
   const owner = network.clientFor(OWNER);
-  await owner.procedure("com.atproto.space.createSpace", { spaceType: "org.slack.dm.inbox", skey: "self", policy: { $type: MEMBERSPACE_POLICY } });
+  await owner.procedure("com.atproto.space.createSpace", { spaceType: "new.flock.dm.inbox", skey: "self", policy: { $type: MEMBERSPACE_POLICY } });
   await owner.procedure("com.atproto.memberspace.putMember", { space: SPACE, did: READER, read: true, write: false });
   const deps = { memberClient: network.clientFor(READER), resolvePds: network.resolvePds, resolveKemKey: network.resolveKemKey, fetchEndpoint: network.fetchEndpoint, generateKey: network.generateKey, now: network.now };
   await mintSpaceCredentialWith(deps, SPACE);
@@ -342,7 +342,7 @@ test("minting keeps a short-lived credential for its own lifetime and renews it 
     fetchEndpoint: async () => Response.json({ credential }),
     generateKey: async () => (await import("./space-key")).generateSpaceKey(),
     now: () => 1_000_000,
-  }, "at://did:plc:owner/space/org.slack.channel/alpha");
+  }, "at://did:plc:owner/space/new.flock.channel/alpha");
 
   // #when each is minted at a fixed clock
   const short = await mintWith(jwtWith({ iat: 1_000, exp: 1_060 }));

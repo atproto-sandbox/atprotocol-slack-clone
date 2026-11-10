@@ -12,7 +12,7 @@ test("scheduled reconciliation reports stalled work and a missing authority gran
     NODE_ENV: "test",
     APP_URL: "http://127.0.0.1:3000",
     AUTH_ENCRYPTION_KEY: "4c".repeat(32),
-    OPERATOR_SERVICE_REF: "did:web:localhost%3A3000#atproto_slack_admin",
+    OPERATOR_SERVICE_REF: "did:web:localhost%3A3000#atproto_flock_operator",
     DATABASE_PATH: databasePath,
   });
 
@@ -20,7 +20,7 @@ test("scheduled reconciliation reports stalled work and a missing authority gran
     const { getRawDb } = await import("@/lib/db");
     const db = getRawDb();
     const authorityDid = "did:plc:reconcilefixture0001";
-    const workspace = `at://${authorityDid}/space/org.slack.workspace/reconcile-fixture`;
+    const workspace = `at://${authorityDid}/space/new.flock.workspace/reconcile-fixture`;
     const operationId = "2222222222222";
     const updatedAt = Math.floor(Date.now() / 1000) - 301;
     db.prepare(`INSERT INTO operation
@@ -33,7 +33,7 @@ test("scheduled reconciliation reports stalled work and a missing authority gran
 
     const child = spawn(process.execPath, ["--import", "tsx", "scripts/reconcile-workspaces.ts"], {
       cwd: process.cwd(),
-      env: { ...process.env, DATABASE_PATH: databasePath, SLACK_ADMIN_MUTATIONS_PAUSED: "true" },
+      env: { ...process.env, DATABASE_PATH: databasePath, FLOCK_ADMIN_MUTATIONS_PAUSED: "true" },
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";

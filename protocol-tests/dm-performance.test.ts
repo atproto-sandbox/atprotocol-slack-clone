@@ -99,16 +99,16 @@ test("DM read budget: 100 participants, 20,000 total messages, latest-100 read i
     const halfSetupStarted = performance.now();
     await mapLimited(participants, 16, async (owner) => {
       const client = rawClientFor(owner);
-      const half = `at://${owner.did}/space/org.slack.dm.conversation/${convKey}`;
+      const half = `at://${owner.did}/space/new.flock.dm.conversation/${convKey}`;
       await client.procedure("com.atproto.space.createSpace", {
-        spaceType: "org.slack.dm.conversation", skey: convKey,
+        spaceType: "new.flock.dm.conversation", skey: convKey,
         policy: memberspacePolicy(),
       });
       await mapLimited(participants.filter((other) => other.did !== owner.did), 16, (other) =>
         client.procedure("com.atproto.memberspace.putMember", { space: half, did: other.did, read: true, write: false }));
       await client.procedure("com.atproto.space.putRecord", {
-        space: half, repo: owner.did, collection: "org.slack.dm.header", rkey: "self",
-        record: { $type: "org.slack.dm.header", convKey, participants: allDids, createdAt },
+        space: half, repo: owner.did, collection: "new.flock.dm.header", rkey: "self",
+        record: { $type: "new.flock.dm.header", convKey, participants: allDids, createdAt },
       });
       return { owner, half, client };
     });
@@ -124,15 +124,15 @@ test("DM read budget: 100 participants, 20,000 total messages, latest-100 read i
     let totalWritten = 0;
     await mapLimited(participants.map((owner, participantIndex) => ({ owner, participantIndex })), 16, async ({ owner, participantIndex }) => {
       const client = rawClientFor(owner);
-      const half = `at://${owner.did}/space/org.slack.dm.conversation/${convKey}`;
+      const half = `at://${owner.did}/space/new.flock.dm.conversation/${convKey}`;
       for (let batchStart = 0; batchStart < MESSAGES_PER_HALF; batchStart += APPLY_WRITES_BATCH) {
         const writes = Array.from({ length: Math.min(APPLY_WRITES_BATCH, MESSAGES_PER_HALF - batchStart) }, (_unused, offset) => {
           const sequence = batchStart + offset;
           const timestamp = stamps[sequence * PARTICIPANTS + participantIndex]!;
           const rkey = tidNow(timestamp, 0);
           return {
-            $type: "com.atproto.space.applyWrites#create", collection: "org.slack.dm.message", rkey,
-            value: { $type: "org.slack.dm.message", text: `from ${owner.did} #${sequence}`, createdAt: new Date(timestamp).toISOString() },
+            $type: "com.atproto.space.applyWrites#create", collection: "new.flock.dm.message", rkey,
+            value: { $type: "new.flock.dm.message", text: `from ${owner.did} #${sequence}`, createdAt: new Date(timestamp).toISOString() },
           };
         });
         const response = await client.procedure<unknown, { results?: unknown[] }>("com.atproto.space.applyWrites", { space: half, repo: owner.did, writes });

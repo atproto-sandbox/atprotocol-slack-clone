@@ -33,7 +33,7 @@ test("a kind outside the table, a wrong lexicon type, or a wrongly typed field i
     assert.throws(() => validateOperatorRequest({ kind }, actor, "execute"), /unsupported operation kind|operation kind is required/i, String(kind));
   }
   assert.throws(() => validateOperatorRequest({ kind: "reconcileWorkspace", $type: "org.example.other" }, actor, "execute"), /invalid operation type/i);
-  assert.equal(validateOperatorRequest({ kind: "reconcileWorkspace", $type: "org.slack.operator.execute#operationRequest" }, actor, "execute").kind.kind, "reconcileWorkspace");
+  assert.equal(validateOperatorRequest({ kind: "reconcileWorkspace", $type: "new.flock.operator.execute#operationRequest" }, actor, "execute").kind.kind, "reconcileWorkspace");
   assert.throws(() => validateOperatorRequest({ kind: "setAdmin", subject: "did:plc:member", active: "yes" }, actor, "execute"), /must be boolean/i);
   assert.throws(() => validateOperatorRequest({ kind: "inviteMember" }, actor, "execute"), /missing or unexpected fields/i);
   assert.throws(() => validateOperatorRequest({ kind: "createChannel", skey: "x", name: " ", visibility: "public" }, actor, "execute"), /1 to 80 characters/i);
@@ -70,7 +70,7 @@ test("workspace channel grants require the roster and live PDS membership to mat
 });
 
 test("recovery keeps unreadable journal rows visible instead of silently skipping them", () => {
-  const workspace = "at://did:plc:owner/space/org.slack.workspace/team";
+  const workspace = "at://did:plc:owner/space/new.flock.workspace/team";
   const recoveringActor = { did: "did:plc:admin", workspace: { authorityDid: "did:plc:owner", uri: workspace } } as OperatorActor;
   const rows = [
     { actor: "did:plc:admin", operationId: "current", requestJson: JSON.stringify({ workspace, request: { kind: "reconcileWorkspace" } }) },

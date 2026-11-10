@@ -9,7 +9,7 @@ import { OperatorAuthError } from "./errors";
 import { authenticateSpaceNotification } from "./space-notification";
 
 const DIRECTORY = mkdtempSync(join(tmpdir(), "slack-space-notification-test-"));
-const SERVICE_REF = "did:web:localhost%3A3000#atproto_slack_admin";
+const SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
 process.env.DATABASE_PATH = join(DIRECTORY, "notification-auth.db");
 process.env.AUTH_ENCRYPTION_KEY = "33".repeat(32);
 process.env.APP_URL = "http://127.0.0.1:3000";
@@ -19,7 +19,7 @@ after(() => {
   rmSync(DIRECTORY, { recursive: true, force: true });
 });
 
-const CHANNEL = "at://did:plc:owner/space/org.slack.channel/alpha";
+const CHANNEL = "at://did:plc:owner/space/new.flock.channel/alpha";
 const METHOD = "com.atproto.space.notifyWrite";
 
 /** A bearer token whose payload claims `iss`; its signature is junk, which only a verifier would notice. */
@@ -50,7 +50,7 @@ test("every refusal carries the same message: no token, a token naming a strange
   await assert.rejects(authenticateSpaceNotification(requestClaiming(), METHOD, CHANNEL), isRefusal);
   await assert.rejects(authenticateSpaceNotification(requestClaiming("did:plc:stranger"), METHOD, CHANNEL), isRefusal);
   await assert.rejects(authenticateSpaceNotification(requestClaiming("did:plc:owner"), METHOD, CHANNEL, async () => { throw new OperatorAuthError("Service authorization is invalid or expired."); }), isRefusal);
-  await assert.rejects(authenticateSpaceNotification(requestClaiming("did:plc:owner"), METHOD, "at://did:plc:owner/space/org.slack.channel/unregistered"), isRefusal);
+  await assert.rejects(authenticateSpaceNotification(requestClaiming("did:plc:owner"), METHOD, "at://did:plc:owner/space/new.flock.channel/unregistered"), isRefusal);
 });
 
 test("a token that names anyone but the space's authority is refused before registration is looked up or any DID is resolved", async () => {

@@ -144,7 +144,7 @@ async function spawnApp(network: TestNetwork, projectRoot: string, scratchDirect
     DATABASE_PATH: databasePath,
     AUTH_ENCRYPTION_KEY: randomBytes(32).toString("hex"),
     PLC_URL: network.plc.url,
-    OPERATOR_SERVICE_REF: `did:web:localhost%3A${port}#atproto_slack_admin`,
+    OPERATOR_SERVICE_REF: `did:web:localhost%3A${port}#atproto_flock_operator`,
     ...extraEnv,
   };
   const child = spawn(process.execPath, [
@@ -169,7 +169,7 @@ async function publishAppLexicons(fixture: TestNetwork, projectRoot: string): Pr
   if (!fixture.lexiconAuthority) throw new Error("The fixture must expose its lexicon authority.");
   const agent = fixture.pds.getAgent();
   const session = await agent.com.atproto.server.createSession({ identifier: "lex-authority.test", password: "hunter2" });
-  const root = join(projectRoot, "lexicons/org/slack");
+  const root = join(projectRoot, "lexicons/new/flock");
   const files = await readdir(root, { recursive: true });
   const published = new Set<string>();
   for (const relative of files.filter((file) => file.endsWith(".json"))) {

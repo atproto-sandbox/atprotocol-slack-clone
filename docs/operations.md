@@ -21,7 +21,7 @@ The app resolves PDS endpoints from account DID documents. It requires HTTPS for
 
 ## Membership reconciliation and alerts
 
-Run `corepack pnpm reconcile` from the app checkout as a scheduled job every minute. It finds workspaces from the durable operator journal, reports operations stalled for five minutes before attempting recovery, restores each authority grant from the encrypted store, resumes incomplete bootstrap operations with that grant, checks current authority/admin records, resumes other saved operations, and reconciles stable workspace/inbox/channel membership. When `SLACK_ADMIN_MUTATIONS_PAUSED=true`, stalled-operation alerts and read-only authority/admin checks still run, while all mutations are skipped. Missing or revoked authority grants and failed workspace checks produce stderr output and exit code 1. Forward stderr to the operator's alert channel. The admin screen also shows stalled operations and reconciles every five minutes while open after an authorized admin operation.
+Run `corepack pnpm reconcile` from the app checkout as a scheduled job every minute. It finds workspaces from the durable operator journal, reports operations stalled for five minutes before attempting recovery, restores each authority grant from the encrypted store, resumes incomplete bootstrap operations with that grant, checks current authority/admin records, resumes other saved operations, and reconciles stable workspace/inbox/channel membership. When `FLOCK_ADMIN_MUTATIONS_PAUSED=true`, stalled-operation alerts and read-only authority/admin checks still run, while all mutations are skipped. Missing or revoked authority grants and failed workspace checks produce stderr output and exit code 1. Forward stderr to the operator's alert channel. The admin screen also shows stalled operations and reconciles every five minutes while open after an authorized admin operation.
 
 The OAuth client uses a per-DID SQLite lease to prevent simultaneous processes from consuming the same one-use refresh token. A stale lease left by a crashed process expires. OAuth state rows older than 30 minutes are pruned when state is read or written; browser flow cookies expire after 15 minutes. OAuth state/session writes and deletes retry SQLite busy/locked errors for three total attempts; lock, transport, timeout, and other recoverable restore failures preserve the web-session row and show a retry state. If refreshed-token persistence still fails after those attempts, the OAuth library revokes and removes that OAuth session, so the web-session row is invalidated and the user must sign in again. Authentication failures also invalidate the web session.
 
@@ -29,7 +29,7 @@ The operation journal is retry metadata. Each run retries recognized transient P
 
 ## Pause and resume
 
-Set `SLACK_ADMIN_MUTATIONS_PAUSED=true` and restart/redeploy the app and operator process to reject administrative mutation requests, including workspace bootstrap and recovery. Reads, message sync, and existing PDS state remain available. Remove the variable and restart to resume. A pending operation can then be retried or picked up by the next reconciliation run.
+Set `FLOCK_ADMIN_MUTATIONS_PAUSED=true` and restart/redeploy the app and operator process to reject administrative mutation requests, including workspace bootstrap and recovery. Reads, message sync, and existing PDS state remain available. Remove the variable and restart to resume. A pending operation can then be retried or picked up by the next reconciliation run.
 
 ## Database backup and recovery
 

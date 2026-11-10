@@ -13,8 +13,8 @@ export type ChannelRef = { skey: string; name: string; uri: string; visibility: 
 export type Member = { did: string; read: boolean; write: boolean };
 export type SpaceRecord = { uri: string; rkey: string; cid?: string; value: Record<string, unknown> };
 
-export const messageCollection = "org.slack.channel.message";
-export const reactionCollection = "org.slack.channel.reaction";
+export const messageCollection = "new.flock.channel.message";
+export const reactionCollection = "new.flock.channel.reaction";
 
 // --- PDS facts, read straight from the host with an account's own access token ------------------------
 
@@ -26,7 +26,7 @@ export async function listMembers(world: AppWorld, as: Actor, space: string): Pr
 
 export async function directoryOf(world: AppWorld, owner: Actor): Promise<ChannelRef[]> {
   const result = await world.pdsGet<{ records?: Array<{ value: { skey: string; name: string; visibility: string } }> }>(
-    owner, "com.atproto.space.listRecords", { space: world.workspaceUri, repo: owner.did, collection: "org.slack.directory", limit: "100" },
+    owner, "com.atproto.space.listRecords", { space: world.workspaceUri, repo: owner.did, collection: "new.flock.directory", limit: "100" },
   );
   assert.equal(result.status, 200, JSON.stringify(result.body));
   return (result.body.records ?? []).map(({ value }) => ({ ...value, uri: channelUri(owner.did, value.skey) }));

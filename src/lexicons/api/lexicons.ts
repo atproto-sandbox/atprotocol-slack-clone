@@ -2206,9 +2206,9 @@ export const schemaDict = {
       },
     },
   },
-  OrgSlackOperatorExecute: {
+  NewFlockOperatorExecute: {
     lexicon: 1,
-    id: 'org.slack.operator.execute',
+    id: 'new.flock.operator.execute',
     defs: {
       main: {
         type: 'procedure',
@@ -2230,7 +2230,7 @@ export const schemaDict = {
               },
               request: {
                 type: 'ref',
-                ref: 'lex:org.slack.operator.execute#operationRequest',
+                ref: 'lex:new.flock.operator.execute#operationRequest',
               },
             },
           },
@@ -2243,7 +2243,7 @@ export const schemaDict = {
             properties: {
               operation: {
                 type: 'ref',
-                ref: 'lex:org.slack.operator.execute#operation',
+                ref: 'lex:new.flock.operator.execute#operation',
               },
             },
           },
@@ -2375,9 +2375,9 @@ export const schemaDict = {
       },
     },
   },
-  OrgSlackOperatorGetOperation: {
+  NewFlockOperatorGetOperation: {
     lexicon: 1,
-    id: 'org.slack.operator.getOperation',
+    id: 'new.flock.operator.getOperation',
     defs: {
       main: {
         type: 'query',
@@ -2405,7 +2405,7 @@ export const schemaDict = {
             properties: {
               operation: {
                 type: 'ref',
-                ref: 'lex:org.slack.operator.execute#operation',
+                ref: 'lex:new.flock.operator.execute#operation',
               },
             },
           },
@@ -2421,9 +2421,9 @@ export const schemaDict = {
       },
     },
   },
-  OrgSlackOperatorListInboxWriters: {
+  NewFlockOperatorListInboxWriters: {
     lexicon: 1,
-    id: 'org.slack.operator.listInboxWriters',
+    id: 'new.flock.operator.listInboxWriters',
     defs: {
       main: {
         type: 'query',
@@ -2545,7 +2545,7 @@ export const ids = {
   ComAtprotoSpaceRemoveWriter: 'com.atproto.space.removeWriter',
   ComAtprotoSpaceUnregisterNotify: 'com.atproto.space.unregisterNotify',
   ComAtprotoSpaceUpdateSpace: 'com.atproto.space.updateSpace',
-  OrgSlackOperatorExecute: 'org.slack.operator.execute',
-  OrgSlackOperatorGetOperation: 'org.slack.operator.getOperation',
-  OrgSlackOperatorListInboxWriters: 'org.slack.operator.listInboxWriters',
+  NewFlockOperatorExecute: 'new.flock.operator.execute',
+  NewFlockOperatorGetOperation: 'new.flock.operator.getOperation',
+  NewFlockOperatorListInboxWriters: 'new.flock.operator.listInboxWriters',
 } as const

@@ -139,7 +139,7 @@ Then("an ordinary member cannot read the request repo", async function (this: Ap
   const requester = actorNamed(this, "requester");
   await assertCredentialRefused(this, bystander, inboxOf(this), "the ordinary member");
   const direct = await this.pdsGet<{ records?: unknown[]; error?: string }>(bystander, "com.atproto.space.listRecords", {
-    space: inboxOf(this), repo: requester.did, collection: "org.slack.joinRequest", limit: "100",
+    space: inboxOf(this), repo: requester.did, collection: "new.flock.joinRequest", limit: "100",
   });
   assert.equal(direct.status, 400, `the requester's repo is hidden from another account: ${JSON.stringify(direct.body)}`);
   assert.equal(direct.body.error, "RepoNotFound");
@@ -213,7 +213,7 @@ Then("it finds the request writer through listRepos", async function (this: AppW
 Then("the operator returns the current inbox write-member DID", async function (this: AppWorld) {
   const owner = actorNamed(this, "owner");
   const requester = actorNamed(this, "requester");
-  const operator = await callOperator(this, owner, "org.slack.operator.listInboxWriters", { workspace: this.workspaceUri });
+  const operator = await callOperator(this, owner, "new.flock.operator.listInboxWriters", { workspace: this.workspaceUri });
   assert.equal(operator.status, 200, operator.text);
   const body = JSON.parse(operator.text) as { inbox: string; writers: string[] };
   assert.equal(body.inbox, inboxOf(this));
@@ -237,7 +237,7 @@ Then("the operator never returns the request body", async function (this: AppWor
   const owner = actorNamed(this, "owner");
   const [stored] = await requestsReadWithCredential(await mintCredential(this, owner, inboxOf(this)), actorNamed(this, "requester"));
   assert.ok(stored, "there is a request body to leak");
-  const operator = await callOperator(this, owner, "org.slack.operator.listInboxWriters", { workspace: this.workspaceUri });
+  const operator = await callOperator(this, owner, "new.flock.operator.listInboxWriters", { workspace: this.workspaceUri });
   assert.equal(operator.status, 200, operator.text);
   assert.deepEqual(Object.keys(JSON.parse(operator.text) as object).sort(), ["checkedAt", "inbox", "writers"]);
   for (const secret of [stored.requestId, stored.channelSkey, stored.createdAt, "joinRequest"]) {

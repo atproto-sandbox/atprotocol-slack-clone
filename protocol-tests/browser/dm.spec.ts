@@ -90,7 +90,7 @@ before(async () => {
     DATABASE_PATH: join(scratchDirectory, "app.db"),
     AUTH_ENCRYPTION_KEY: Buffer.alloc(32, 0x3c).toString("hex"),
     PLC_URL: network.plc.url,
-    OPERATOR_SERVICE_REF: `did:web:localhost%3A${port}#atproto_slack_admin`,
+    OPERATOR_SERVICE_REF: `did:web:localhost%3A${port}#atproto_flock_operator`,
   };
   server = spawn(process.execPath, [
     join(projectRoot, "node_modules/next/dist/bin/next"),
@@ -258,7 +258,7 @@ async function publishAppLexicons(fixture: TestNetwork): Promise<void> {
   assert.ok(fixture.lexiconAuthority, "fixture must expose its lexicon authority");
   const agent = fixture.pds.getAgent();
   const session = await agent.com.atproto.server.createSession({ identifier: "lex-authority.test", password: "hunter2" });
-  const root = join(projectRoot, "lexicons/org/slack");
+  const root = join(projectRoot, "lexicons/new/flock");
   const files = await readdir(root, { recursive: true });
   const published = new Set<string>();
   for (const relative of files.filter((file) => file.endsWith(".json"))) {

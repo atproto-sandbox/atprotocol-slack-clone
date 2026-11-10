@@ -18,7 +18,7 @@ before(() => {
   directory = mkdtempSync(join(tmpdir(), "slack-bootstrap-test-"));
   process.env.DATABASE_PATH = join(directory, "bootstrap.db");
   process.env.AUTH_ENCRYPTION_KEY = "33".repeat(32);
-  process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_slack_admin";
+  process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
   process.env.APP_URL = "http://127.0.0.1:3000";
 });
 after(() => {
@@ -27,11 +27,11 @@ after(() => {
 });
 
 const SCOPE_MISSING = () => Response.json(
-  { error: "ScopeMissingError", message: 'Missing required scope "space:org.slack.workspace?authority=did:plc:owner&skey=x&action=read_self&manage=create"' },
+  { error: "ScopeMissingError", message: 'Missing required scope "space:new.flock.workspace?authority=did:plc:owner&skey=x&action=read_self&manage=create"' },
   { status: 403 },
 );
 
-type SpaceType = "org.slack.workspace" | "org.slack.inbox" | "org.slack.channel";
+type SpaceType = "new.flock.workspace" | "new.flock.inbox" | "new.flock.channel";
 
 function sessionWith(createSpace: (type: SpaceType, skey: string) => Response): OAuthSession {
   return {
@@ -103,7 +103,7 @@ test("a generic failure stays pending, and a retry that fails at its first remai
 
 test("a missing permission after some steps keeps the journal row, still signals authorization, and survives a retry", async () => {
   // #given the workspace space can be created but the inbox space cannot (a partial grant)
-  const partial = sessionWith((type, skey) => type === "org.slack.workspace" ? created(type, skey) : SCOPE_MISSING());
+  const partial = sessionWith((type, skey) => type === "new.flock.workspace" ? created(type, skey) : SCOPE_MISSING());
 
   // #when setup runs, then is retried
   const first = await bootstrapWorkspace(partial, { name: "Gamma", operationId: "4444444444444" });

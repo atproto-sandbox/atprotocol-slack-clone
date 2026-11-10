@@ -3,7 +3,7 @@ import test from "node:test";
 import { parseSpaceDeletedNotification, parseWriteNotification } from "./write-notification";
 
 const valid = {
-  space: "at://did:plc:authority/space/org.slack.workspace/team",
+  space: "at://did:plc:authority/space/new.flock.workspace/team",
   repo: "did:plc:member",
   repoRev: "3kabcdefghij2",
   spaceRev: "3kabcdefghij3",

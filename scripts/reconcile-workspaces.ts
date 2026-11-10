@@ -8,7 +8,7 @@ import { assertOperatorWorkspaceWithinEnvelope } from "@/operator/workspace-enve
 
 async function main() {
   let failed = false;
-  const mutationsPaused = process.env.SLACK_ADMIN_MUTATIONS_PAUSED === "true";
+  const mutationsPaused = process.env.FLOCK_ADMIN_MUTATIONS_PAUSED === "true";
   const workspaces = listJournaledWorkspaces();
   for (const workspace of workspaces) {
     const stalledResult = listStalledOperations(workspace.authorityDid, workspace.uri);

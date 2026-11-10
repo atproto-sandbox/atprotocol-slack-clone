@@ -1,0 +1,20 @@
+{
+  "lexicon": 1,
+  "id": "new.flock.permissions.workspaceAuthority",
+  "defs": {
+    "main": {
+      "type": "permission-set",
+      "title": "Workspace authority administration",
+      "detail": "Manage the workspace's spaces and authority-owned records. Message and request records remain outside this grant.",
+      "permissions": [
+        { "type": "permission", "resource": "space", "spaceType": "new.flock.workspace", "action": ["read_self", "read"], "manage": ["create", "update"] },
+        { "type": "permission", "resource": "space", "spaceType": "new.flock.workspace", "collection": ["new.flock.workspace.profile", "new.flock.directory", "new.flock.workspace.roster", "new.flock.admin"], "action": ["create", "update", "delete"] },
+        { "type": "permission", "resource": "space", "spaceType": "new.flock.inbox", "action": ["read_self", "read"], "manage": ["create", "update"] },
+        { "type": "permission", "resource": "space", "spaceType": "new.flock.inbox", "collection": ["new.flock.joinDecision"], "action": ["create", "update", "delete"] },
+        { "type": "permission", "resource": "space", "spaceType": "new.flock.channel", "action": ["read_self", "read"], "manage": ["create", "update"] },
+        { "type": "permission", "resource": "space", "spaceType": "new.flock.channel", "collection": ["new.flock.channel.roster"], "action": ["create", "update", "delete"] },
+        { "type": "permission", "resource": "rpc", "inheritAud": true, "lxm": ["new.flock.operator.execute", "new.flock.operator.getOperation", "new.flock.operator.listInboxWriters"] }
+      ]
+    }
+  }
+}

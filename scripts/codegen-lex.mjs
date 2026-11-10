@@ -39,9 +39,9 @@ const PUBLISHED_RECORD_TYPES = new Set([
 ]);
 
 const inputs = [
-  "lexicons/org/slack/operator/execute.json",
-  "lexicons/org/slack/operator/getOperation.json",
-  "lexicons/org/slack/operator/listInboxWriters.json",
+  "lexicons/new/flock/operator/execute.json",
+  "lexicons/new/flock/operator/getOperation.json",
+  "lexicons/new/flock/operator/listInboxWriters.json",
   "lexicons/com/atproto/space/*.json",
   "lexicons/com/atproto/memberspace/*.json",
   "lexicons/com/atproto/managedspace/*.json",

@@ -109,12 +109,12 @@ test("the repo scan page cap still applies when every page repeats a known repo"
 
 test("bounded space lookahead distinguishes an exact limit from actual overflow", async () => {
   const owner = "did:plc:a";
-  const uri = (skey: string) => `at://${owner}/space/org.slack.dm.conversation/${skey}`;
+  const uri = (skey: string) => `at://${owner}/space/new.flock.dm.conversation/${skey}`;
   const exact = fakeClient([
     { spaces: [{ uri: uri("2222222222221") }, { uri: uri("2222222222222") }], cursor: "page-two" },
     { spaces: [] },
   ]);
-  const exactResult = await listBoundedSpaces(exact.client, { spaceType: "org.slack.dm.conversation", maxSpaces: 2 });
+  const exactResult = await listBoundedSpaces(exact.client, { spaceType: "new.flock.dm.conversation", maxSpaces: 2 });
   assert.equal(exactResult.spaces.length, 2);
   assert.equal(exactResult.truncated, false);
 
@@ -122,7 +122,7 @@ test("bounded space lookahead distinguishes an exact limit from actual overflow"
     { spaces: [{ uri: uri("2222222222221") }, { uri: uri("2222222222222") }], cursor: "page-two" },
     { spaces: [{ uri: uri("2222222222223") }] },
   ]);
-  const overflowResult = await listBoundedSpaces(overflow.client, { spaceType: "org.slack.dm.conversation", maxSpaces: 2 });
+  const overflowResult = await listBoundedSpaces(overflow.client, { spaceType: "new.flock.dm.conversation", maxSpaces: 2 });
   assert.equal(overflowResult.spaces.length, 2);
   assert.equal(overflowResult.truncated, true);
 
@@ -266,33 +266,33 @@ function fakeClient(pages: Array<Record<string, unknown>>) {
 
 test("workspace discovery returns every space URI at the exact limit and refuses to hide some when there are more", async () => {
   // #given an account with exactly as many workspaces as the limit, and another with one more
-  const uri = (skey: string) => `at://did:plc:a/space/org.slack.workspace/${skey}`;
+  const uri = (skey: string) => `at://did:plc:a/space/new.flock.workspace/${skey}`;
   const exact = fakeClient([{ spaces: [{ uri: uri("a") }, { uri: uri("b") }], cursor: "next" }, { spaces: [] }]);
   const overflow = fakeClient([{ spaces: [{ uri: uri("a") }, { uri: uri("b") }], cursor: "next" }, { spaces: [{ uri: uri("c") }] }]);
 
   // #when each is listed with a limit of two
-  const listed = await listAllSpaceUris(exact.client, { spaceType: "org.slack.workspace", maxSpaces: 2 });
+  const listed = await listAllSpaceUris(exact.client, { spaceType: "new.flock.workspace", maxSpaces: 2 });
 
   // #then the exact list is returned whole and the overflowing one is an error, not a silent truncation
   assert.deepEqual(listed, [uri("a"), uri("b")]);
-  await assert.rejects(listAllSpaceUris(overflow.client, { spaceType: "org.slack.workspace", maxSpaces: 2 }), /exceeds the 2-space discovery limit/);
+  await assert.rejects(listAllSpaceUris(overflow.client, { spaceType: "new.flock.workspace", maxSpaces: 2 }), /exceeds the 2-space discovery limit/);
 });
 
 test("a space whose URI this app cannot parse is skipped, not a reason to fail the whole listing", async () => {
   // #given an account whose store holds a workspace with a record key longer than this app creates, between two ordinary ones
-  const uri = (skey: string) => `at://did:plc:a/space/org.slack.workspace/${skey}`;
+  const uri = (skey: string) => `at://did:plc:a/space/new.flock.workspace/${skey}`;
   const page = fakeClient([{ spaces: [{ uri: uri("a") }, { uri: uri("k".repeat(200)) }, { uri: "not-a-space-uri" }, { uri: uri("b") }] }]);
 
   // #when workspaces are discovered
-  const listed = await listAllSpaceUris(page.client, { spaceType: "org.slack.workspace", maxSpaces: 10 });
+  const listed = await listAllSpaceUris(page.client, { spaceType: "new.flock.workspace", maxSpaces: 10 });
 
   // #then the usable ones are returned and the rest are ignored
   assert.deepEqual(listed, [uri("a"), uri("b")]);
 });
 
 test("an unparseable space past the limit is not overflow, and a usable one behind it still is", async () => {
-  const uri = (skey: string) => `at://did:plc:a/space/org.slack.dm.conversation/${skey}`;
-  const junk = { uri: `at://did:plc:a/space/org.slack.dm.conversation/${"k".repeat(200)}` };
+  const uri = (skey: string) => `at://did:plc:a/space/new.flock.dm.conversation/${skey}`;
+  const junk = { uri: `at://did:plc:a/space/new.flock.dm.conversation/${"k".repeat(200)}` };
 
   // #given exactly two usable spaces, then an entry the app cannot parse and nothing after it
   const exact = fakeClient([{ spaces: [{ uri: uri("2222222222221") }, { uri: uri("2222222222222") }], cursor: "more" }, { spaces: [junk] }]);
@@ -304,8 +304,8 @@ test("an unparseable space past the limit is not overflow, and a usable one behi
   ]);
 
   // #when each is listed with a limit of two
-  const exactResult = await listBoundedSpaces(exact.client, { spaceType: "org.slack.dm.conversation", maxSpaces: 2 });
-  const behindResult = await listBoundedSpaces(behind.client, { spaceType: "org.slack.dm.conversation", maxSpaces: 2 });
+  const exactResult = await listBoundedSpaces(exact.client, { spaceType: "new.flock.dm.conversation", maxSpaces: 2 });
+  const behindResult = await listBoundedSpaces(behind.client, { spaceType: "new.flock.dm.conversation", maxSpaces: 2 });
 
   // #then junk alone is not overflow, and a usable space behind junk is
   assert.equal(exactResult.truncated, false);
@@ -314,13 +314,13 @@ test("an unparseable space past the limit is not overflow, and a usable one behi
 });
 
 test("skipped spaces do not count toward the limit, across pages", async () => {
-  const uri = (skey: string) => `at://did:plc:a/space/org.slack.workspace/${skey}`;
+  const uri = (skey: string) => `at://did:plc:a/space/new.flock.workspace/${skey}`;
   const pages = fakeClient([
     { spaces: [{ uri: uri("a") }, { uri: "not-a-space-uri" }], cursor: "p2" },
     { spaces: [{ uri: uri("b") }] },
   ]);
 
-  const result = await listBoundedSpaces(pages.client, { spaceType: "org.slack.workspace", maxSpaces: 2 });
+  const result = await listBoundedSpaces(pages.client, { spaceType: "new.flock.workspace", maxSpaces: 2 });
 
   assert.deepEqual(result.spaces.map((space) => space.uri), [uri("a"), uri("b")]);
   assert.equal(result.truncated, false);

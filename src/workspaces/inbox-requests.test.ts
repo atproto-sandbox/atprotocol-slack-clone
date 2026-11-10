@@ -7,7 +7,7 @@ import { readWriterJoinRequests } from "./inbox-requests";
 const AUTHORITY = "did:plc:authority";
 const INBOX = inboxUri(AUTHORITY, "team");
 const CHANNELS = [{ skey: "secret", name: "secret-plans", visibility: "private" }, { skey: "general", name: "general", visibility: "public" }];
-const COLLECTION = "org.slack.joinRequest";
+const COLLECTION = "new.flock.joinRequest";
 
 function joinRequest(repoDid: string, channelSkey = "secret") {
   return {

@@ -164,8 +164,8 @@ class PrototypeSync {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const before = await client.query<{ commit: { rev: string } }>("com.atproto.space.getLatestCommit", { space: this.space, repo: did });
       const [messages] = await Promise.all([
-        client.query<{ records: Array<{ rkey: string }> }>("com.atproto.space.listRecords", { space: this.space, repo: did, collection: "org.slack.channel.message", limit: PAGE }),
-        client.query<{ records: Array<{ rkey: string }> }>("com.atproto.space.listRecords", { space: this.space, repo: did, collection: "org.slack.channel.reaction", limit: PAGE }),
+        client.query<{ records: Array<{ rkey: string }> }>("com.atproto.space.listRecords", { space: this.space, repo: did, collection: "new.flock.channel.message", limit: PAGE }),
+        client.query<{ records: Array<{ rkey: string }> }>("com.atproto.space.listRecords", { space: this.space, repo: did, collection: "new.flock.channel.reaction", limit: PAGE }),
       ]);
       const after = await client.query<{ commit: { rev: string } }>("com.atproto.space.getLatestCommit", { space: this.space, repo: did });
       if (before.commit.rev === after.commit.rev) {
@@ -264,7 +264,7 @@ async function provision(pds: PdsNetwork, count: number): Promise<{ authority: N
 async function createChannel(pds: PdsNetwork, authority: NetworkActor, reader: NetworkActor, writers: NetworkActor[], skey: string): Promise<string> {
   const [{ ensureMemberListSpace, putSpaceMember }, { mapLimited }] = await Promise.all([import("@/atproto/space-ops"), import("@/lib/map-limited")]);
   const owner = bearerSession(authority) as never;
-  const space = await ensureMemberListSpace(owner, "org.slack.channel", skey);
+  const space = await ensureMemberListSpace(owner, "new.flock.channel", skey);
   await putSpaceMember(owner, space, reader.did, true, true);
   await mapLimited(writers, 8, (writer) => putSpaceMember(owner, space, writer.did, true, true));
   await mapLimited(writers, 8, async (writer) => {
@@ -280,15 +280,15 @@ async function writeMessage(writer: NetworkActor, space: string, text: string): 
   const { tidNow } = await import("@/protocol/keys");
   const rkey = tidNow();
   await new AtprotoClient(bearerSession(writer).fetchHandler).procedure("com.atproto.space.createRecord", {
-    space, repo: writer.did, collection: "org.slack.channel.message", rkey,
-    record: { $type: "org.slack.channel.message", text, createdAt: new Date().toISOString() },
+    space, repo: writer.did, collection: "new.flock.channel.message", rkey,
+    record: { $type: "new.flock.channel.message", text, createdAt: new Date().toISOString() },
   });
   return rkey;
 }
 
 async function deleteMessage(writer: NetworkActor, space: string, rkey: string): Promise<void> {
   await new AtprotoClient(bearerSession(writer).fetchHandler).procedure("com.atproto.space.deleteRecord", {
-    space, repo: writer.did, collection: "org.slack.channel.message", rkey,
+    space, repo: writer.did, collection: "new.flock.channel.message", rkey,
   });
 }
 

@@ -1,7 +1,7 @@
 // Every NSID this app defines, built from one namespace. No other source module spells an NSID: they import these (a test
 // enforces it), so renaming the namespace is this one constant plus the lexicon documents.
 
-export const NAMESPACE = "org.slack";
+export const NAMESPACE = "new.flock";
 
 type Nsid<Name extends string> = `${typeof NAMESPACE}.${Name}`;
 

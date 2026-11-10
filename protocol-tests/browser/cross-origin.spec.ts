@@ -14,7 +14,7 @@ import { combinedMemberScopes, outcome, startPdsNetwork, type NetworkActor, type
 // the operator call) is sent by the browser from the web origin. Node keeps the keys and verifies MACs; the browser decides
 // what is reachable, which preflights pass, and which response headers the page may read.
 
-const OPERATOR_METHOD = "org.slack.operator.getChanges";
+const OPERATOR_METHOD = "new.flock.operator.getChanges";
 
 type BrowserFailure = { method: string; url: string; error: string };
 type Preflight = { url: string; outcome: string };
@@ -87,7 +87,7 @@ async function steps(pds: PdsNetwork, input: {
     await mintSpaceCredentialWith(deps(memberSide), input.channel);
     const renewed = await mintSpaceCredentialWith(deps(memberSide), input.channel);
     const record = await renewed.client(input.authority.pds.url).query<{ value: { text?: string } }>("com.atproto.space.getRecord", {
-      space: input.channel, repo: input.authority.did, collection: "org.slack.channel.message", rkey: input.rkey,
+      space: input.channel, repo: input.authority.did, collection: "new.flock.channel.message", rkey: input.rkey,
     });
     assert.equal(record.value.text, "k9 from the authority host");
   });
@@ -96,8 +96,8 @@ async function steps(pds: PdsNetwork, input: {
     await credential.client(input.authority.pds.url).query("com.atproto.space.listRepos", { space: input.channel });
   });
   results["writes a message to its own host with its DPoP-bound session"] = await outcome(() => sessionClient(memberSide.session).procedure("com.atproto.space.createRecord", {
-    space: input.channel, repo: memberSide.actor.did, collection: "org.slack.channel.message", rkey: tidNow(),
-    record: { $type: "org.slack.channel.message", text: "k9 from the browser", createdAt: new Date().toISOString() },
+    space: input.channel, repo: memberSide.actor.did, collection: "new.flock.channel.message", rkey: tidNow(),
+    record: { $type: "new.flock.channel.message", text: "k9 from the browser", createdAt: new Date().toISOString() },
   }));
   results["calls the operator origin with a service token"] = await outcome(async () => {
     const { token } = await sessionClient(memberSide.session).query<{ token: string }>("com.atproto.server.getServiceAuth", { aud: pds.serviceRef, lxm: OPERATOR_METHOD });
@@ -114,7 +114,7 @@ async function steps(pds: PdsNetwork, input: {
   results["an unreachable writer host fails as a network error"] = await outcome(async () => {
     const credential = await mintSpaceCredentialWith(deps(memberSide), input.channel);
     const failure = await credential.client(input.unreachableOrigin).query("com.atproto.space.listRecords", {
-      space: input.channel, repo: memberSide.actor.did, collection: "org.slack.channel.message",
+      space: input.channel, repo: memberSide.actor.did, collection: "new.flock.channel.message",
     }).then(() => null, (error: unknown) => error);
     assert.ok(failure instanceof TypeError, `expected a network-level TypeError, got ${String(failure)}`);
   });
@@ -214,12 +214,12 @@ async function provision(pds: PdsNetwork): Promise<{ authority: NetworkActor; me
   const member = await pds.createActor("k9member", 1);
   const outsider = await pds.createActor("k9outsider", 1);
   const owner = bearerSession(authority);
-  const channel = await ensureMemberListSpace(owner as never, "org.slack.channel", "k9");
+  const channel = await ensureMemberListSpace(owner as never, "new.flock.channel", "k9");
   await putSpaceMember(owner as never, channel, member.did, true, true);
   const rkey = tidNow();
   await new AtprotoClient(owner.fetchHandler).procedure("com.atproto.space.createRecord", {
-    space: channel, repo: authority.did, collection: "org.slack.channel.message", rkey,
-    record: { $type: "org.slack.channel.message", text: "k9 from the authority host", createdAt: new Date().toISOString() },
+    space: channel, repo: authority.did, collection: "new.flock.channel.message", rkey,
+    record: { $type: "new.flock.channel.message", text: "k9 from the authority host", createdAt: new Date().toISOString() },
   });
   return { authority, member, outsider, channel, rkey };
 }

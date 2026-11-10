@@ -62,8 +62,8 @@ test("workspace filtering shows only conversations whose other participants are 
 
 test("co-members and workspace sharing span every workspace without the viewer", () => {
   const workspaces = [
-    { uri: "at://did:plc:a/space/org.slack.workspace/one", name: "One", members: [{ did: "did:plc:me", active: true }, { did: "did:plc:bob", active: true }] },
-    { uri: "at://did:plc:a/space/org.slack.workspace/two", name: "Two", members: [{ did: "did:plc:carol", active: true }, { did: "did:plc:bob", active: true }] },
+    { uri: "at://did:plc:a/space/new.flock.workspace/one", name: "One", members: [{ did: "did:plc:me", active: true }, { did: "did:plc:bob", active: true }] },
+    { uri: "at://did:plc:a/space/new.flock.workspace/two", name: "Two", members: [{ did: "did:plc:carol", active: true }, { did: "did:plc:bob", active: true }] },
   ];
   assert.deepEqual(coMemberDids(workspaces, "did:plc:me"), ["did:plc:bob", "did:plc:carol"]);
   assert.equal(sharesAnyWorkspace("did:plc:carol", workspaces), true);
@@ -160,7 +160,7 @@ function cycleHarness(failing: ReadonlySet<string> = new Set(), exists = true) {
       watch: async () => { record("watch"); return {}; },
       ensureDeclaration: async () => record("declaration"),
     },
-    inboxUri: "at://did:plc:a/space/org.slack.dm.inbox/self", serviceRef: "did:web:app#svc", declarationChecked,
+    inboxUri: "at://did:plc:a/space/new.flock.dm.inbox/self", serviceRef: "did:web:app#svc", declarationChecked,
     report: (error) => errors.push(error instanceof Error ? error.message : String(error)),
   });
   return { calls, errors, declarationChecked, run };

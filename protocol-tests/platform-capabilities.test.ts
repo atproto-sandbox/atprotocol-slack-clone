@@ -19,7 +19,7 @@ import {
 // K3 and K7 of `.ai/plans/platform-refactor.md`: capability checks against the pinned PDS that the browser member session
 // (R5, R6) and the first bot (R9) depend on. K7 found that an app password cannot mint a space credential, so the bot path
 // is proven with the bot's own OAuth session. They exercise the protocol and today's server-side code paths with the
-// final grant shape, under today's `org.slack.*` names (R3 renames them).
+// final grant shape, under today's `new.flock.*` names (R3 renames them).
 
 test("platform capabilities at the pinned PDS (K3, K7)", async (t) => {
   const pds = await startPdsNetwork("platform-capabilities");
@@ -57,12 +57,12 @@ test("platform capabilities at the pinned PDS (K3, K7)", async (t) => {
       // when it writes into its own repo, asks for a service token, and asks for a space credential
       const results: Record<string, Outcome> = {
         "writes a message into its own repo": await outcome(() => sessionClient(session).procedure("com.atproto.space.createRecord", {
-          space: workspace.general, repo: bot.did, collection: "org.slack.channel.message", rkey: tidNow(),
-          record: { $type: "org.slack.channel.message", text: "k7 app password", createdAt: new Date().toISOString() },
+          space: workspace.general, repo: bot.did, collection: "new.flock.channel.message", rkey: tidNow(),
+          record: { $type: "new.flock.channel.message", text: "k7 app password", createdAt: new Date().toISOString() },
         })),
         "gets a service token for an operator method": await outcome(async () => {
-          const { token } = await sessionClient(session).query<{ token: string }>("com.atproto.server.getServiceAuth", { aud: pds.serviceRef, lxm: "org.slack.operator.getChanges" });
-          await verifyServiceToken(token, pds.serviceRef, "org.slack.operator.getChanges");
+          const { token } = await sessionClient(session).query<{ token: string }>("com.atproto.server.getServiceAuth", { aud: pds.serviceRef, lxm: "new.flock.operator.getChanges" });
+          await verifyServiceToken(token, pds.serviceRef, "new.flock.operator.getChanges");
         }),
       };
       for (const [operation, result] of Object.entries(results)) st.diagnostic(`${operation}: ${result.ok ? "ok" : result.error}`);
@@ -144,10 +144,10 @@ async function memberGrantOperations(
   const results: Record<string, Outcome> = {};
   results["accepting the invitation writes the acceptance record"] = await outcome(async () => {
     const rkey = keys.acceptanceRecordKey(workspace.uri);
-    const record = { $type: "org.slack.acceptance", workspace: workspace.uri, createdAt: new Date().toISOString() };
-    assert.ok(validateSpaceRecord("org.slack.acceptance", record, { authorityDid, spaceUri: workspace.uri, repoDid: member.did, rkey }).valid);
+    const record = { $type: "new.flock.acceptance", workspace: workspace.uri, createdAt: new Date().toISOString() };
+    assert.ok(validateSpaceRecord("new.flock.acceptance", record, { authorityDid, spaceUri: workspace.uri, repoDid: member.did, rkey }).valid);
     await mintSpaceCredential(member, workspace.uri);
-    await sessionClient(member).procedure("com.atproto.space.putRecord", { space: workspace.uri, repo: member.did, collection: "org.slack.acceptance", rkey, record });
+    await sessionClient(member).procedure("com.atproto.space.putRecord", { space: workspace.uri, repo: member.did, collection: "new.flock.acceptance", rkey, record });
   });
   // Discovery finds a workspace through the member's own acceptance record (the protocol has no "spaces I was added to").
   results["discovery lists the accepted workspace"] = await outcome(async () => {
@@ -156,8 +156,8 @@ async function memberGrantOperations(
   });
   results["writing a channel message"] = await outcome(async () => {
     await mintSpaceCredential(member, workspace.general);
-    const record = { $type: "org.slack.channel.message", text: "k3 hello", createdAt: new Date().toISOString() };
-    await sessionClient(member).procedure("com.atproto.space.createRecord", { space: workspace.general, repo: member.did, collection: "org.slack.channel.message", rkey: keys.tidNow(), record });
+    const record = { $type: "new.flock.channel.message", text: "k3 hello", createdAt: new Date().toISOString() };
+    await sessionClient(member).procedure("com.atproto.space.createRecord", { space: workspace.general, repo: member.did, collection: "new.flock.channel.message", rkey: keys.tidNow(), record });
   });
   results["reading the channel page"] = await outcome(async () => {
     // The authority lists a writer once its host has delivered the write notice, which is asynchronous.
@@ -170,32 +170,32 @@ async function memberGrantOperations(
   });
   const requestKey = keys.requestRecordKey(workspace.general, member.did);
   results["a member files a join request in the inbox"] = await outcome(async () => {
-    const record = { $type: "org.slack.joinRequest", channelSkey: workspace.generalSkey, requestId: keys.tidNow(), createdAt: new Date().toISOString() };
-    assert.ok(validateSpaceRecord("org.slack.joinRequest", record, { authorityDid, spaceUri: workspace.inbox, repoDid: member.did, rkey: requestKey }).valid);
-    await sessionClient(member).procedure("com.atproto.space.putRecord", { space: workspace.inbox, repo: member.did, collection: "org.slack.joinRequest", rkey: requestKey, record });
+    const record = { $type: "new.flock.joinRequest", channelSkey: workspace.generalSkey, requestId: keys.tidNow(), createdAt: new Date().toISOString() };
+    assert.ok(validateSpaceRecord("new.flock.joinRequest", record, { authorityDid, spaceUri: workspace.inbox, repoDid: member.did, rkey: requestKey }).valid);
+    await sessionClient(member).procedure("com.atproto.space.putRecord", { space: workspace.inbox, repo: member.did, collection: "new.flock.joinRequest", rkey: requestKey, record });
   });
   results["an admin reads that request from the inbox (MAC-verified)"] = await outcome(async () => {
     const credential = await mintSpaceCredential(admin, workspace.inbox);
     const request = await credential.client(actors.member.pds.url).query<{ value: { channelSkey?: string } }>("com.atproto.space.getRecord", {
-      space: workspace.inbox, repo: member.did, collection: "org.slack.joinRequest", rkey: requestKey,
+      space: workspace.inbox, repo: member.did, collection: "new.flock.joinRequest", rkey: requestKey,
     });
     assert.equal(request.value.channelSkey, workspace.generalSkey);
   });
   const callOperator = (method: (typeof SERVICE_METHODS_TODAY)[number], query: Record<string, string>, body?: unknown) =>
     callOperatorMethod(admin, pds.serviceRef, method, query, body);
   const operationId = keys.tidNow();
-  results["the admin calls org.slack.operator.execute"] = await outcome(async () => {
-    const answer = await callOperator("org.slack.operator.execute", {}, {
+  results["the admin calls new.flock.operator.execute"] = await outcome(async () => {
+    const answer = await callOperator("new.flock.operator.execute", {}, {
       workspace: workspace.uri, operationId, request: { kind: "createChannel", skey: `k3-${operationId}`, name: "k3", visibility: "public" },
     }) as { operation?: { state?: string } };
     assert.equal(answer.operation?.state, "completed");
   });
-  results["the admin calls org.slack.operator.getOperation"] = await outcome(async () => {
-    const answer = await callOperator("org.slack.operator.getOperation", { workspace: workspace.uri, operationId }) as { operation?: { state?: string } };
+  results["the admin calls new.flock.operator.getOperation"] = await outcome(async () => {
+    const answer = await callOperator("new.flock.operator.getOperation", { workspace: workspace.uri, operationId }) as { operation?: { state?: string } };
     assert.equal(answer.operation?.state, "completed");
   });
-  results["the admin calls org.slack.operator.listInboxWriters"] = await outcome(async () => {
-    const answer = await callOperator("org.slack.operator.listInboxWriters", { workspace: workspace.uri }) as { writers?: string[] };
+  results["the admin calls new.flock.operator.listInboxWriters"] = await outcome(async () => {
+    const answer = await callOperator("new.flock.operator.listInboxWriters", { workspace: workspace.uri }) as { writers?: string[] };
     assert.ok(answer.writers?.includes(member.did), "the member who filed a request is an inbox writer");
   });
   for (const method of SERVICE_METHODS_PLANNED) {
@@ -233,16 +233,16 @@ async function botOperations(pds: PdsNetwork, workspace: Workspace, bot: Network
   let messageUri = "";
   results["mints a channel credential (getDelegationToken, getSpaceCredential)"] = await outcome(() => mintSpaceCredential(session, workspace.general));
   results["writes a message into its own repo in the channel"] = await outcome(async () => {
-    const record = { $type: "org.slack.channel.message", text: "k7 bot", createdAt: new Date().toISOString() };
-    const created = await sessionClient(session).procedure<unknown, { uri: string }>("com.atproto.space.createRecord", { space: workspace.general, repo: bot.did, collection: "org.slack.channel.message", rkey: keys.tidNow(), record });
+    const record = { $type: "new.flock.channel.message", text: "k7 bot", createdAt: new Date().toISOString() };
+    const created = await sessionClient(session).procedure<unknown, { uri: string }>("com.atproto.space.createRecord", { space: workspace.general, repo: bot.did, collection: "new.flock.channel.message", rkey: keys.tidNow(), record });
     messageUri = created.uri;
   });
   results["reads the message back with a MAC-verified getRecord"] = await outcome(async () => {
     const credential = await mintSpaceCredential(session, workspace.general);
-    const parsed = keys.parseSpaceRecordUri(messageUri, workspace.general, "org.slack.channel.message");
+    const parsed = keys.parseSpaceRecordUri(messageUri, workspace.general, "new.flock.channel.message");
     assert.ok(parsed);
     const record = await credential.client(await resolvePds(bot.did)).query<{ value: { text?: string } }>("com.atproto.space.getRecord", {
-      space: workspace.general, repo: bot.did, collection: "org.slack.channel.message", rkey: parsed.rkey,
+      space: workspace.general, repo: bot.did, collection: "new.flock.channel.message", rkey: parsed.rkey,
     });
     assert.equal(record.value.text, "k7 bot");
   });
@@ -261,16 +261,16 @@ async function botOperations(pds: PdsNetwork, workspace: Workspace, bot: Network
     const first = await mintSpaceCredential(session, workspace.general);
     const second = await mintSpaceCredential(session, workspace.general);
     assert.notEqual(second.token, first.token);
-    const parsed = keys.parseSpaceRecordUri(messageUri, workspace.general, "org.slack.channel.message");
+    const parsed = keys.parseSpaceRecordUri(messageUri, workspace.general, "new.flock.channel.message");
     assert.ok(parsed);
     const record = await second.client(await resolvePds(bot.did)).query<{ value: { text?: string } }>("com.atproto.space.getRecord", {
-      space: workspace.general, repo: bot.did, collection: "org.slack.channel.message", rkey: parsed.rkey,
+      space: workspace.general, repo: bot.did, collection: "new.flock.channel.message", rkey: parsed.rkey,
     });
     assert.equal(record.value.text, "k7 bot");
   });
   results["gets a service token for an operator method"] = await outcome(async () => {
-    const token = await sessionClient(session).query<{ token: string }>("com.atproto.server.getServiceAuth", { aud: pds.serviceRef, lxm: "org.slack.operator.getChanges" });
-    await verifyServiceToken(token.token, pds.serviceRef, "org.slack.operator.getChanges");
+    const token = await sessionClient(session).query<{ token: string }>("com.atproto.server.getServiceAuth", { aud: pds.serviceRef, lxm: "new.flock.operator.getChanges" });
+    await verifyServiceToken(token.token, pds.serviceRef, "new.flock.operator.getChanges");
   });
   results["is refused a credential once removed from the workspace"] = await outcome(async () => {
     await workspace.remove(bot.did);

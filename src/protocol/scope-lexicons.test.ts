@@ -8,7 +8,7 @@ import { OPERATOR_METHODS, workspaceAuthorityScopes } from "./scopes";
 type LexPermission = { type: "permission"; resource: "space" | "rpc"; spaceType?: string; authority?: string; skey?: string; collection?: string[]; action?: string[]; manage?: string[]; lxm?: string[] };
 
 function readPermissionSet(name: string): LexPermission[] {
-  const document = JSON.parse(readFileSync(join(process.cwd(), "lexicons/org/slack/permissions", `${name}.json`), "utf8")) as { defs: { main: { permissions: LexPermission[] } } };
+  const document = JSON.parse(readFileSync(join(process.cwd(), "lexicons/new/flock/permissions", `${name}.json`), "utf8")) as { defs: { main: { permissions: LexPermission[] } } };
   return document.defs.main.permissions;
 }
 

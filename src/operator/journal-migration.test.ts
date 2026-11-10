@@ -11,10 +11,10 @@ test("journal migration indexes legacy operation rows by workspace URI", () => {
   const directory = mkdtempSync(join(tmpdir(), "slack-journal-migration-test-"));
   const databasePath = join(directory, "legacy.db");
   const workspaceDid = "did:plc:legacyowner";
-  const workspaceUri = `at://${workspaceDid}/space/org.slack.workspace/legacy`;
+  const workspaceUri = `at://${workspaceDid}/space/new.flock.workspace/legacy`;
   process.env.DATABASE_PATH = databasePath;
   process.env.AUTH_ENCRYPTION_KEY = "66".repeat(32);
-  process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_slack_admin";
+  process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
   process.env.APP_URL = "http://127.0.0.1:3000";
   const legacy = new BetterSqlite3(databasePath);
   legacy.exec(`CREATE TABLE operation (
@@ -56,13 +56,13 @@ test("journal migration indexes legacy operation rows by workspace URI", () => {
     );
   `);
   const account = "did:plc:legacyreader";
-  const channel = `at://${workspaceDid}/space/org.slack.channel/general`;
+  const channel = `at://${workspaceDid}/space/new.flock.channel/general`;
   legacy.prepare(`INSERT INTO channel_record_cache
     (account_did,space_uri,repo_did,collection,rkey,uri,value_cipher,updated_at) VALUES (?,?,?,?,?,?,?,?)`)
-    .run(account, channel, account, "org.slack.channel.message", "2222222222299", `at://${account}/org.slack.channel.message/2222222222299`, "v1.unbound", now);
+    .run(account, channel, account, "new.flock.channel.message", "2222222222299", `at://${account}/new.flock.channel.message/2222222222299`, "v1.unbound", now);
   legacy.prepare(`INSERT INTO space_collection_cursor
     (account_did,space_uri,repo_did,collection,rev,next_cursor,finished,checked_at) VALUES (?,?,?,?,?,?,?,?)`)
-    .run(account, channel, account, "org.slack.channel.message", "rev", null, 1, now);
+    .run(account, channel, account, "new.flock.channel.message", "rev", null, 1, now);
   legacy.prepare("INSERT INTO sync_cursor (account_did,space_uri,repo_did,rev,updated_at) VALUES (?,?,?,?,?)")
     .run(account, channel, account, "rev", now);
   legacy.prepare("INSERT INTO workspace_channel_cache (account_did,workspace_uri,space_uri,updated_at) VALUES (?,?,?,?)")

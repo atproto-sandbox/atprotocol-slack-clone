@@ -12,22 +12,22 @@ test("workspace cache revocation keeps other workspaces under the same authority
   process.env.DATABASE_PATH = join(directory, "cache.db");
   process.env.AUTH_ENCRYPTION_KEY = "33".repeat(32);
   process.env.APP_URL = "http://127.0.0.1:3000";
-  process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_slack_admin";
+  process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
   const account = "did:plc:reader";
   const authority = "did:plc:owner";
-  const workspaceA = `at://${authority}/space/org.slack.workspace/team-a`;
-  const workspaceB = `at://${authority}/space/org.slack.workspace/team-b`;
-  const channelA = `at://${authority}/space/org.slack.channel/alpha`;
-  const channelB = `at://${authority}/space/org.slack.channel/beta`;
-  const sharedChannel = `at://${authority}/space/org.slack.channel/shared`;
+  const workspaceA = `at://${authority}/space/new.flock.workspace/team-a`;
+  const workspaceB = `at://${authority}/space/new.flock.workspace/team-b`;
+  const channelA = `at://${authority}/space/new.flock.channel/alpha`;
+  const channelB = `at://${authority}/space/new.flock.channel/beta`;
+  const sharedChannel = `at://${authority}/space/new.flock.channel/shared`;
   const raw = getRawDb();
   const seed = (space: string, suffix: string) => {
     raw.prepare(`INSERT OR REPLACE INTO channel_record_cache
       (account_did,space_uri,repo_did,collection,rkey,uri,value_cipher,updated_at) VALUES (?,?,?,?,?,?,?,?)`)
-      .run(account, space, account, "org.slack.channel.message", suffix, `at://${account}/org.slack.channel.message/${suffix}`, "cipher", Date.now());
+      .run(account, space, account, "new.flock.channel.message", suffix, `at://${account}/new.flock.channel.message/${suffix}`, "cipher", Date.now());
     raw.prepare(`INSERT OR REPLACE INTO space_collection_cursor
       (account_did,space_uri,repo_did,collection,rev,next_cursor,finished,checked_at) VALUES (?,?,?,?,?,?,?,?)`)
-      .run(account, space, account, "org.slack.channel.message", suffix, null, 1, Date.now());
+      .run(account, space, account, "new.flock.channel.message", suffix, null, 1, Date.now());
     raw.prepare("INSERT OR REPLACE INTO sync_cursor (account_did,space_uri,repo_did,rev,updated_at) VALUES (?,?,?,?,?)")
       .run(account, space, account, suffix, Date.now());
   };
@@ -86,19 +86,19 @@ test("markRepoStale resets every account's cursor for one repo in one space and 
   process.env.DATABASE_PATH = join(directory, "stale.db");
   process.env.AUTH_ENCRYPTION_KEY = "34".repeat(32);
   process.env.APP_URL = "http://127.0.0.1:3000";
-  process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_slack_admin";
-  const space = "at://did:plc:owner/space/org.slack.channel/alpha";
-  const otherSpace = "at://did:plc:owner/space/org.slack.channel/beta";
+  process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
+  const space = "at://did:plc:owner/space/new.flock.channel/alpha";
+  const otherSpace = "at://did:plc:owner/space/new.flock.channel/beta";
   const raw = getRawDb();
   const seed = (account: string, spaceUri: string, repo: string, collection: string) => raw.prepare(`INSERT INTO space_collection_cursor
     (account_did,space_uri,repo_did,collection,rev,next_cursor,finished,checked_at) VALUES (?,?,?,?,?,?,?,?)`)
     .run(account, spaceUri, repo, collection, "rev-1", null, 1, 1_000);
   try {
-    seed("did:plc:reader-a", space, "did:plc:author", "org.slack.channel.message");
-    seed("did:plc:reader-a", space, "did:plc:author", "org.slack.channel.reaction");
-    seed("did:plc:reader-b", space, "did:plc:author", "org.slack.channel.message");
-    seed("did:plc:reader-a", space, "did:plc:someone-else", "org.slack.channel.message");
-    seed("did:plc:reader-a", otherSpace, "did:plc:author", "org.slack.channel.message");
+    seed("did:plc:reader-a", space, "did:plc:author", "new.flock.channel.message");
+    seed("did:plc:reader-a", space, "did:plc:author", "new.flock.channel.reaction");
+    seed("did:plc:reader-b", space, "did:plc:author", "new.flock.channel.message");
+    seed("did:plc:reader-a", space, "did:plc:someone-else", "new.flock.channel.message");
+    seed("did:plc:reader-a", otherSpace, "did:plc:author", "new.flock.channel.message");
 
     // #when
     markRepoStale(space, "did:plc:author");
@@ -120,18 +120,18 @@ test("purgeRepoCache drops one writer's cached rows in a space and leaves the ot
   process.env.DATABASE_PATH = join(directory, "cache.db");
   process.env.AUTH_ENCRYPTION_KEY = "33".repeat(32);
   process.env.APP_URL = "http://127.0.0.1:3000";
-  process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_slack_admin";
+  process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
   const account = "did:plc:reader";
-  const channel = "at://did:plc:owner/space/org.slack.channel/alpha";
-  const other = "at://did:plc:owner/space/org.slack.channel/beta";
+  const channel = "at://did:plc:owner/space/new.flock.channel/alpha";
+  const other = "at://did:plc:owner/space/new.flock.channel/beta";
   const raw = getRawDb();
   const seed = (space: string, repo: string) => {
     raw.prepare(`INSERT OR REPLACE INTO channel_record_cache
       (account_did,space_uri,repo_did,collection,rkey,uri,value_cipher,updated_at) VALUES (?,?,?,?,?,?,?,?)`)
-      .run(account, space, repo, "org.slack.channel.message", "r1", `at://${repo}/org.slack.channel.message/r1`, "cipher", Date.now());
+      .run(account, space, repo, "new.flock.channel.message", "r1", `at://${repo}/new.flock.channel.message/r1`, "cipher", Date.now());
     raw.prepare(`INSERT OR REPLACE INTO space_collection_cursor
       (account_did,space_uri,repo_did,collection,rev,next_cursor,finished,checked_at) VALUES (?,?,?,?,?,?,?,?)`)
-      .run(account, space, repo, "org.slack.channel.message", "r1", null, 1, Date.now());
+      .run(account, space, repo, "new.flock.channel.message", "r1", null, 1, Date.now());
     raw.prepare("INSERT OR REPLACE INTO sync_cursor (account_did,space_uri,repo_did,rev,updated_at) VALUES (?,?,?,?,?)")
       .run(account, space, repo, "r1", Date.now());
   };
@@ -168,7 +168,7 @@ function useEmptyCache(): void {
     process.env.DATABASE_PATH = join(mkdtempSync(join(tmpdir(), "slack-cache-lifecycle-test-")), "cache.db");
     process.env.AUTH_ENCRYPTION_KEY = "33".repeat(32);
     process.env.APP_URL = "http://127.0.0.1:3000";
-    process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_slack_admin";
+    process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
   }
   for (const table of CACHE_TABLES) getRawDb().prepare(`DELETE FROM ${table}`).run();
 }
@@ -177,10 +177,10 @@ function seedSpace(account: string, space: string, checkedAtSeconds: number): vo
   const raw = getRawDb();
   raw.prepare(`INSERT OR REPLACE INTO channel_record_cache
     (account_did,space_uri,repo_did,collection,rkey,uri,value_cipher,updated_at) VALUES (?,?,?,?,?,?,?,?)`)
-    .run(account, space, "did:plc:writer", "org.slack.channel.message", "r1", `at://did:plc:writer/org.slack.channel.message/r1`, "cipher", checkedAtSeconds);
+    .run(account, space, "did:plc:writer", "new.flock.channel.message", "r1", `at://did:plc:writer/new.flock.channel.message/r1`, "cipher", checkedAtSeconds);
   raw.prepare(`INSERT OR REPLACE INTO space_collection_cursor
     (account_did,space_uri,repo_did,collection,rev,next_cursor,finished,checked_at) VALUES (?,?,?,?,?,?,?,?)`)
-    .run(account, space, "did:plc:writer", "org.slack.channel.message", "r1", null, 1, checkedAtSeconds);
+    .run(account, space, "did:plc:writer", "new.flock.channel.message", "r1", null, 1, checkedAtSeconds);
   raw.prepare("INSERT OR REPLACE INTO sync_cursor (account_did,space_uri,repo_did,rev,updated_at) VALUES (?,?,?,?,?)")
     .run(account, space, "did:plc:writer", "r1", checkedAtSeconds);
 }
@@ -192,15 +192,15 @@ test("a deleted space is dropped from every account's cache, with its change not
   // #given two accounts that cached a channel the authority then deletes, and a channel that stays
   useEmptyCache();
   const now = Math.floor(Date.now() / 1000);
-  const deleted = "at://did:plc:owner/space/org.slack.channel/doomed";
-  const kept = "at://did:plc:owner/space/org.slack.channel/kept";
+  const deleted = "at://did:plc:owner/space/new.flock.channel/doomed";
+  const kept = "at://did:plc:owner/space/new.flock.channel/kept";
   for (const account of ["did:plc:a", "did:plc:b"]) {
     seedSpace(account, deleted, now);
     seedSpace(account, kept, now);
-    registerWorkspaceChannel(account, "at://did:plc:owner/space/org.slack.workspace/team", deleted);
+    registerWorkspaceChannel(account, "at://did:plc:owner/space/new.flock.workspace/team", deleted);
   }
   getRawDb().prepare("INSERT INTO space_notification (space_uri,repo_did,rev,notified_at) VALUES (?,?,?,?)").run(deleted, "did:plc:writer", "r1", now);
-  getRawDb().prepare("INSERT INTO notification_registration (service_ref,space_uri,expires_at) VALUES (?,?,?)").run("did:web:localhost%3A3000#atproto_slack_admin", deleted, Date.now() + 3_600_000);
+  getRawDb().prepare("INSERT INTO notification_registration (service_ref,space_uri,expires_at) VALUES (?,?,?)").run("did:web:localhost%3A3000#atproto_flock_operator", deleted, Date.now() + 3_600_000);
 
   // #when the authority's deletion notice is applied, twice
   purgeDeletedSpace(deleted);
@@ -217,8 +217,8 @@ test("a deleted space is dropped from every account's cache, with its change not
 test("a deleted workspace takes its channels' cached copies with it", () => {
   useEmptyCache();
   const now = Math.floor(Date.now() / 1000);
-  const workspace = "at://did:plc:owner/space/org.slack.workspace/team";
-  const channel = "at://did:plc:owner/space/org.slack.channel/alpha";
+  const workspace = "at://did:plc:owner/space/new.flock.workspace/team";
+  const channel = "at://did:plc:owner/space/new.flock.channel/alpha";
   seedSpace("did:plc:a", workspace, now);
   seedSpace("did:plc:a", channel, now);
   registerWorkspaceChannel("did:plc:a", workspace, channel);
@@ -233,14 +233,14 @@ test("a copy an account has not read within the retention window is swept, and a
   useEmptyCache();
   const nowMs = Date.now();
   const nowSeconds = Math.floor(nowMs / 1000);
-  const channel = "at://did:plc:owner/space/org.slack.channel/alpha";
-  const other = "at://did:plc:owner/space/org.slack.channel/beta";
+  const channel = "at://did:plc:owner/space/new.flock.channel/alpha";
+  const other = "at://did:plc:owner/space/new.flock.channel/beta";
   seedSpace("did:plc:gone", channel, nowSeconds - 40 * 86_400);
   seedSpace("did:plc:active", channel, nowSeconds - 60);
   seedSpace("did:plc:mixed", channel, nowSeconds - 40 * 86_400);
   seedSpace("did:plc:mixed", other, nowSeconds - 60);
   getRawDb().prepare("INSERT INTO workspace_channel_cache (account_did,workspace_uri,space_uri,updated_at) VALUES (?,?,?,?)")
-    .run("did:plc:gone", "at://did:plc:owner/space/org.slack.workspace/team", channel, nowMs - 40 * 86_400_000);
+    .run("did:plc:gone", "at://did:plc:owner/space/new.flock.workspace/team", channel, nowMs - 40 * 86_400_000);
 
   // #when the cache is swept with a 30-day retention
   const swept = sweepStaleCache(nowMs, 30 * 86_400_000);
@@ -257,7 +257,7 @@ test("a sweep drops at most one batch of abandoned copies, and the next call fin
   useEmptyCache();
   const nowMs = Date.now();
   const old = Math.floor(nowMs / 1000) - 40 * 86_400;
-  for (let index = 0; index < 5; index += 1) seedSpace(`did:plc:gone${index}`, "at://did:plc:owner/space/org.slack.channel/alpha", old);
+  for (let index = 0; index < 5; index += 1) seedSpace(`did:plc:gone${index}`, "at://did:plc:owner/space/new.flock.channel/alpha", old);
 
   assert.equal(sweepStaleCache(nowMs, 30 * 86_400_000, 3), 3);
   assert.equal(sweepStaleCache(nowMs, 30 * 86_400_000, 3), 2);
@@ -268,7 +268,7 @@ test("the occasional sweep runs at most once an hour", () => {
   useEmptyCache();
   const nowMs = Date.now() + 10 * 365 * 86_400_000;
   const old = Math.floor(nowMs / 1000) - 40 * 86_400;
-  const channel = "at://did:plc:owner/space/org.slack.channel/alpha";
+  const channel = "at://did:plc:owner/space/new.flock.channel/alpha";
   seedSpace("did:plc:first", channel, old);
   sweepStaleCacheOccasionally(nowMs);
   assert.deepEqual(cachedSpaces("did:plc:first"), [], "the first call sweeps");
@@ -287,11 +287,11 @@ test("a space is kept while any writer's cursor in it was checked recently, and 
   const nowMs = Date.now();
   const nowSeconds = Math.floor(nowMs / 1000);
   const old = nowSeconds - 40 * 86_400;
-  const channel = "at://did:plc:owner/space/org.slack.channel/alpha";
+  const channel = "at://did:plc:owner/space/new.flock.channel/alpha";
   const raw = getRawDb();
   const cursor = (repo: string, checkedAt: number) => raw.prepare(`INSERT OR REPLACE INTO space_collection_cursor
     (account_did,space_uri,repo_did,collection,rev,next_cursor,finished,checked_at) VALUES (?,?,?,?,?,?,?,?)`)
-    .run("did:plc:reader", channel, repo, "org.slack.channel.message", "r1", null, 1, checkedAt);
+    .run("did:plc:reader", channel, repo, "new.flock.channel.message", "r1", null, 1, checkedAt);
   const syncCursor = (repo: string, updatedAt: number) => raw.prepare("INSERT OR REPLACE INTO sync_cursor (account_did,space_uri,repo_did,rev,updated_at) VALUES (?,?,?,?,?)")
     .run("did:plc:reader", channel, repo, "r1", updatedAt);
   cursor("did:plc:down", old);
@@ -299,7 +299,7 @@ test("a space is kept while any writer's cursor in it was checked recently, and 
   cursor("did:plc:live", nowSeconds - 60);
   syncCursor("did:plc:live", old);
   raw.prepare(`INSERT INTO channel_record_cache (account_did,space_uri,repo_did,collection,rkey,uri,value_cipher,updated_at) VALUES (?,?,?,?,?,?,?,?)`)
-    .run("did:plc:reader", channel, "did:plc:live", "org.slack.channel.message", "r1", "at://x/y/r1", "cipher", old);
+    .run("did:plc:reader", channel, "did:plc:live", "new.flock.channel.message", "r1", "at://x/y/r1", "cipher", old);
 
   // #when the cache is swept with a 30-day retention
   const swept = sweepStaleCache(nowMs, 30 * 86_400_000);
@@ -313,7 +313,7 @@ test("while more than a batch of abandoned copies waits, the occasional sweep co
   useEmptyCache();
   const nowMs = Date.now() + 20 * 365 * 86_400_000;
   const old = Math.floor(nowMs / 1000) - 40 * 86_400;
-  for (let index = 0; index < 101; index += 1) seedSpace(`did:plc:gone${index}`, "at://did:plc:owner/space/org.slack.channel/alpha", old);
+  for (let index = 0; index < 101; index += 1) seedSpace(`did:plc:gone${index}`, "at://did:plc:owner/space/new.flock.channel/alpha", old);
   const remaining = () => (getRawDb().prepare("SELECT count(DISTINCT account_did) AS count FROM space_collection_cursor").get() as { count: number }).count;
 
   sweepStaleCacheOccasionally(nowMs);
@@ -331,8 +331,8 @@ test("the sweep drops change notices older than a week even when no new notice e
   const nowMs = Date.now();
   const nowSeconds = Math.floor(nowMs / 1000);
   const insert = getRawDb().prepare("INSERT INTO space_notification (space_uri,repo_did,rev,notified_at) VALUES (?,?,?,?)");
-  insert.run("at://did:plc:owner/space/org.slack.channel/alpha", "did:plc:writer", "r1", nowSeconds - 8 * 86_400);
-  insert.run("at://did:plc:owner/space/org.slack.channel/alpha", "did:plc:writer", "r2", nowSeconds - 60);
+  insert.run("at://did:plc:owner/space/new.flock.channel/alpha", "did:plc:writer", "r1", nowSeconds - 8 * 86_400);
+  insert.run("at://did:plc:owner/space/new.flock.channel/alpha", "did:plc:writer", "r2", nowSeconds - 60);
 
   sweepStaleCache(nowMs, 30 * 86_400_000);
 

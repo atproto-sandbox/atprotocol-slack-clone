@@ -8,7 +8,7 @@ import { dmConversationUri, dmInboxUri } from "@/protocol/keys";
 import { isNotificationAccepted, recordWriteNotification } from "./notices";
 
 const DIRECTORY = mkdtempSync(join(tmpdir(), "slack-notifications-test-"));
-const SERVICE_REF = "did:web:localhost%3A3000#atproto_slack_admin";
+const SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
 process.env.DATABASE_PATH = join(DIRECTORY, "notifications.db");
 process.env.AUTH_ENCRYPTION_KEY = "33".repeat(32);
 process.env.APP_URL = "http://127.0.0.1:3000";
@@ -18,7 +18,7 @@ after(() => {
   rmSync(DIRECTORY, { recursive: true, force: true });
 });
 
-const CHANNEL = "at://did:plc:owner/space/org.slack.channel/alpha";
+const CHANNEL = "at://did:plc:owner/space/new.flock.channel/alpha";
 const rowCount = (where = "1=1", ...values: unknown[]) => (getRawDb().prepare(`SELECT count(*) AS count FROM space_notification WHERE ${where}`).get(...values) as { count: number }).count;
 const notice = (space: string, index: number) => ({ space, repo: "did:plc:writer", repoRev: `rev-${index}` });
 
@@ -34,8 +34,8 @@ test("a notice is accepted for a space the app registered and refused for one it
 
   // #then only that channel is accepted
   assert.equal(isNotificationAccepted(CHANNEL), true);
-  assert.equal(isNotificationAccepted("at://did:plc:owner/space/org.slack.channel/other"), false);
-  assert.equal(isNotificationAccepted("at://did:plc:stranger/space/org.slack.workspace/team"), false);
+  assert.equal(isNotificationAccepted("at://did:plc:owner/space/new.flock.channel/other"), false);
+  assert.equal(isNotificationAccepted("at://did:plc:stranger/space/new.flock.workspace/team"), false);
 });
 
 test("a registration that ran out is honored for five minutes and then refused", () => {
@@ -55,19 +55,19 @@ test("a DM space is accepted without a server-side registration, because the mem
 test("a space keeps only its newest 1,000 notices", () => {
   // #given 1,010 notices for one space and one for another
   reset();
-  recordWriteNotification(notice("at://did:plc:owner/space/org.slack.channel/beta", 0));
+  recordWriteNotification(notice("at://did:plc:owner/space/new.flock.channel/beta", 0));
   for (let index = 0; index < 1_010; index += 1) recordWriteNotification(notice(CHANNEL, index));
 
   // #then the busy space is capped at its newest, and the other space is untouched
   assert.equal(rowCount("space_uri=?", CHANNEL), 1_000);
-  assert.equal(rowCount("space_uri=?", "at://did:plc:owner/space/org.slack.channel/beta"), 1);
+  assert.equal(rowCount("space_uri=?", "at://did:plc:owner/space/new.flock.channel/beta"), 1);
   const oldest = getRawDb().prepare("SELECT rev FROM space_notification WHERE space_uri=? ORDER BY id LIMIT 1").get(CHANNEL) as { rev: string };
   assert.equal(oldest.rev, "rev-10", "the oldest ten were dropped");
 });
 
 test("one authority keeps at most its newest 5,000 notices across all its spaces", () => {
   reset();
-  for (let index = 0; index < 5_010; index += 1) recordWriteNotification(notice(`at://did:plc:spammer/space/org.slack.channel/c${index % 7}`, index));
+  for (let index = 0; index < 5_010; index += 1) recordWriteNotification(notice(`at://did:plc:spammer/space/new.flock.channel/c${index % 7}`, index));
   recordWriteNotification(notice(CHANNEL, 0));
   assert.equal(rowCount("space_uri LIKE ?", "at://did:plc:spammer/%"), 5_000);
   assert.equal(rowCount("space_uri=?", CHANNEL), 1, "another authority is untouched");
@@ -87,7 +87,7 @@ test("the table keeps only its newest 50,000 notices overall, however many autho
   const insert = getRawDb().prepare("INSERT INTO space_notification (space_uri,repo_did,rev,notified_at) VALUES (?,?,?,?)");
   const now = Math.floor(Date.now() / 1000);
   getRawDb().transaction(() => {
-    for (let index = 0; index < 50_010; index += 1) insert.run(`at://did:plc:a${index}/space/org.slack.dm.inbox/self`, "did:plc:writer", `rev-${index}`, now);
+    for (let index = 0; index < 50_010; index += 1) insert.run(`at://did:plc:a${index}/space/new.flock.dm.inbox/self`, "did:plc:writer", `rev-${index}`, now);
   })();
 
   // #when one more notice arrives
@@ -104,13 +104,13 @@ test("an authority's cap counts exactly its own notices, not those of an authori
   const insert = getRawDb().prepare("INSERT INTO space_notification (space_uri,repo_did,rev,notified_at) VALUES (?,?,?,?)");
   const now = Math.floor(Date.now() / 1000);
   getRawDb().transaction(() => {
-    for (let index = 0; index < 5_400; index += 1) insert.run(`at://did:plc:ab/space/org.slack.channel/c${index % 6}`, "did:plc:writer", `rev-${index}`, now);
-    for (let index = 0; index < 10; index += 1) insert.run("at://did:plc:abc/space/org.slack.channel/x", "did:plc:writer", `rev-${index}`, now);
-    for (let index = 0; index < 10; index += 1) insert.run("at://did:plc:ab0/space/org.slack.channel/x", "did:plc:writer", `rev-${index}`, now);
+    for (let index = 0; index < 5_400; index += 1) insert.run(`at://did:plc:ab/space/new.flock.channel/c${index % 6}`, "did:plc:writer", `rev-${index}`, now);
+    for (let index = 0; index < 10; index += 1) insert.run("at://did:plc:abc/space/new.flock.channel/x", "did:plc:writer", `rev-${index}`, now);
+    for (let index = 0; index < 10; index += 1) insert.run("at://did:plc:ab0/space/new.flock.channel/x", "did:plc:writer", `rev-${index}`, now);
   })();
 
   // #when one more notice arrives for did:plc:ab
-  recordWriteNotification(notice("at://did:plc:ab/space/org.slack.channel/c0", 5_400));
+  recordWriteNotification(notice("at://did:plc:ab/space/new.flock.channel/c0", 5_400));
 
   // #then did:plc:ab is trimmed to exactly its authority cap and did:plc:abc is untouched
   assert.equal(rowCount("space_uri LIKE ?", "at://did:plc:ab/%"), 5_000);

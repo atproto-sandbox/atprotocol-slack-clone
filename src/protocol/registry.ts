@@ -1,19 +1,19 @@
 import { Lexicons, parseLexiconDoc } from "@atproto/lexicon";
-import acceptanceLexicon from "../../lexicons/org/slack/acceptance.json";
-import adminLexicon from "../../lexicons/org/slack/admin.json";
-import channelRosterLexicon from "../../lexicons/org/slack/channel/roster.json";
-import messageLexicon from "../../lexicons/org/slack/channelMessage.json";
-import reactionLexicon from "../../lexicons/org/slack/channelReaction.json";
-import directoryLexicon from "../../lexicons/org/slack/directory.json";
-import dmDeclarationLexicon from "../../lexicons/org/slack/dm/declaration.json";
-import dmHeaderLexicon from "../../lexicons/org/slack/dm/header.json";
-import dmMessageLexicon from "../../lexicons/org/slack/dm/message.json";
-import dmReactionLexicon from "../../lexicons/org/slack/dm/reaction.json";
-import dmRequestLexicon from "../../lexicons/org/slack/dm/request.json";
-import joinDecisionLexicon from "../../lexicons/org/slack/joinDecision.json";
-import joinRequestLexicon from "../../lexicons/org/slack/joinRequest.json";
-import workspaceProfileLexicon from "../../lexicons/org/slack/workspace/profile.json";
-import workspaceRosterLexicon from "../../lexicons/org/slack/workspace/roster.json";
+import acceptanceLexicon from "../../lexicons/new/flock/acceptance.json";
+import adminLexicon from "../../lexicons/new/flock/admin.json";
+import channelRosterLexicon from "../../lexicons/new/flock/channel/roster.json";
+import messageLexicon from "../../lexicons/new/flock/channel/message.json";
+import reactionLexicon from "../../lexicons/new/flock/channel/reaction.json";
+import directoryLexicon from "../../lexicons/new/flock/directory.json";
+import dmDeclarationLexicon from "../../lexicons/new/flock/dm/declaration.json";
+import dmHeaderLexicon from "../../lexicons/new/flock/dm/header.json";
+import dmMessageLexicon from "../../lexicons/new/flock/dm/message.json";
+import dmReactionLexicon from "../../lexicons/new/flock/dm/reaction.json";
+import dmRequestLexicon from "../../lexicons/new/flock/dm/request.json";
+import joinDecisionLexicon from "../../lexicons/new/flock/joinDecision.json";
+import joinRequestLexicon from "../../lexicons/new/flock/joinRequest.json";
+import workspaceProfileLexicon from "../../lexicons/new/flock/workspace/profile.json";
+import workspaceRosterLexicon from "../../lexicons/new/flock/workspace/roster.json";
 import {
   acceptanceRecordKey,
   canonicalParticipants,

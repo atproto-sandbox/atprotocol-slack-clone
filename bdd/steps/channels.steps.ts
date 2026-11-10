@@ -48,7 +48,7 @@ function watchPublication(world: AppWorld, authority: Actor, name: string, space
 }
 
 async function listChannelSpaces(world: AppWorld, authority: Actor): Promise<string[]> {
-  const listed = await world.pdsGet<{ spaces: Array<{ uri: string }> }>(authority, "com.atproto.space.listSpaces", { spaceType: "org.slack.channel", limit: "100" });
+  const listed = await world.pdsGet<{ spaces: Array<{ uri: string }> }>(authority, "com.atproto.space.listSpaces", { spaceType: "new.flock.channel", limit: "100" });
   assert.equal(listed.status, 200, JSON.stringify(listed.body));
   return listed.body.spaces.map((space) => space.uri);
 }

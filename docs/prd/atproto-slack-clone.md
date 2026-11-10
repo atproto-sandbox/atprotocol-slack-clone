@@ -44,11 +44,11 @@ The current proposal's member-list entries have separate `read` and `write` bool
 
 | Space | Type NSID | `publicRead` | `publicWrite` | Read members | Purpose |
 |---|---|---|---|---|---|
-| Workspace | `org.slack.workspace` | `false` | `false` | Current workspace members | Channel directory, workspace roster, admin records, acceptance markers |
-| Channel | `org.slack.channel` | `false` | `false` | Public: all workspace members; private: approved channel members | Messages, replies, reactions, and private roster |
-| Admin inbox | `org.slack.inbox` | `false` | `false` | Read: active admins and workspace authority. Write: all workspace members. | Join requests and authority-authored decisions |
+| Workspace | `new.flock.workspace` | `false` | `false` | Current workspace members | Channel directory, workspace roster, admin records, acceptance markers |
+| Channel | `new.flock.channel` | `false` | `false` | Public: all workspace members; private: approved channel members | Messages, replies, reactions, and private roster |
+| Admin inbox | `new.flock.inbox` | `false` | `false` | Read: active admins and workspace authority. Write: all workspace members. | Join requests and authority-authored decisions |
 
-The authority operator is the only v1 service allowed to mutate membership and authority-owned records. The operator uses a workspace DID session authorized by the owner. It authenticates the acting person's DID, reads the current `org.slack.admin` state from the workspace space, verifies current workspace and inbox membership, rejects inactive/non-admin callers, and then applies the mutation. An admin record by itself does not grant a protocol `manage` scope. The operator stores only an operation journal for retries; current membership and roles are derived from the PDS member list and authority-authored records. It does not answer credential or read-access checks.
+The authority operator is the only v1 service allowed to mutate membership and authority-owned records. The operator uses a workspace DID session authorized by the owner. It authenticates the acting person's DID, reads the current `new.flock.admin` state from the workspace space, verifies current workspace and inbox membership, rejects inactive/non-admin callers, and then applies the mutation. An admin record by itself does not grant a protocol `manage` scope. The operator stores only an operation journal for retries; current membership and roles are derived from the PDS member list and authority-authored records. It does not answer credential or read-access checks.
 
 `putMember` sets a member's current read/write booleans; `removeMember` removes the member. Implementations must map these semantics to the exact method names and lexicons in the pinned PDS revision. All administrative transitions are serialized per workspace. Operations are idempotent and resumable after partial failure. The operator reconciles desired membership from authority records and space member lists; it reports an operation as complete only after all affected spaces agree.
 
@@ -56,7 +56,7 @@ The authority operator is the only v1 service allowed to mutate membership and a
 
 ### Discovery and privacy
 
-The workspace owner or admin shares the workspace URI out of band after the authority operator has granted membership. The invitee opens that URI and writes one `org.slack.acceptance` marker in their own repo. A later app discovers the workspace through the account's spaces index and reads the directory with a workspace credential. Membership begins when the operator completes the invite; acceptance records discovery, and declining is a leave operation.
+The workspace owner or admin shares the workspace URI out of band after the authority operator has granted membership. The invitee opens that URI and writes one `new.flock.acceptance` marker in their own repo. A later app discovers the workspace through the account's spaces index and reads the directory with a workspace credential. Membership begins when the operator completes the invite; acceptance records discovery, and declining is a leave operation.
 
 The directory has one current record per channel, keyed by `skey`, with `name` and `visibility`. It contains no member DIDs. Private names are intentionally visible to workspace members. A private roster has one current authority-authored record per DID, keyed by a stable hash of that DID, with `active: true|false`. Apps show active roster entries only after obtaining the channel credential. They ignore roster records authored by anyone other than the workspace DID.
 
@@ -68,40 +68,40 @@ The inbox member list gives every workspace member `write=true`; ordinary member
 
 All records use stable keys for mutable state so independent apps read the same current value without inventing event-order rules. Timestamp fields are informational; they do not decide which state wins. Hash keys use SHA-256 over UTF-8 bytes, encoded as lowercase RFC 4648 base32 without `=` padding, with `:` between every base32 symbol. The separators keep accidental words in a digest from triggering the pinned PDS's explicit slur check; they are part of the canonical key. Inputs with multiple components join the canonical URI/DID/emoji strings using one NUL byte (`U+0000`). For a DID, `subjectKey` is `d-` plus the delimited hash; a request key is `r-` plus the delimited hash of `channel URI + NUL + requester DID`; an acceptance key is `a-` plus the delimited hash of the workspace URI. A request's fresh `requestId` is a TID. A reaction key is `x-` plus the delimited hash of `message URI + NUL + emoji + NUL + author DID`. A decision key is `q-` plus the delimited hash of the request URI. The private roster uses `subjectKey`; the directory key equals its `skey`. Apps use these exact canonical encodings.
 
-**`org.slack.workspace`**
+**`new.flock.workspace`**
 
-- `org.slack.workspace.profile`: one authority-authored workspace display name, stored at key `self`. It supplies a stable name to independent apps; the workspace space key remains the protocol identity.
-- `org.slack.directory`: one record per channel, `skey`, `name`, `visibility` (`public` | `private` | `transitioning` | `archived`). `transitioning` is excluded from new sync and credential requests by compliant apps.
-- `org.slack.workspace.roster`: one record per DID, `subject`, `active`, `updatedAt`; author must be the workspace DID.
-- `org.slack.admin`: one record per DID, `subject`, `active`, `updatedAt`; author must be the workspace DID. Only active records confer admin status in compatible apps.
-- `org.slack.acceptance`: one marker per workspace in each accepted member's repo, `workspace`, `createdAt`.
+- `new.flock.workspace.profile`: one authority-authored workspace display name, stored at key `self`. It supplies a stable name to independent apps; the workspace space key remains the protocol identity.
+- `new.flock.directory`: one record per channel, `skey`, `name`, `visibility` (`public` | `private` | `transitioning` | `archived`). `transitioning` is excluded from new sync and credential requests by compliant apps.
+- `new.flock.workspace.roster`: one record per DID, `subject`, `active`, `updatedAt`; author must be the workspace DID.
+- `new.flock.admin`: one record per DID, `subject`, `active`, `updatedAt`; author must be the workspace DID. Only active records confer admin status in compatible apps.
+- `new.flock.acceptance`: one marker per workspace in each accepted member's repo, `workspace`, `createdAt`.
 
-**`org.slack.inbox`**
+**`new.flock.inbox`**
 
-- `org.slack.joinRequest`: `channelSkey`, `requestId`, `createdAt`; author is the requester. One stable record key per channel/requester.
-- `org.slack.joinDecision`: `request` URI, `requestId`, `decision` (`approve` | `deny`), `updatedAt`; author must be the workspace DID. One current decision per request URI.
+- `new.flock.joinRequest`: `channelSkey`, `requestId`, `createdAt`; author is the requester. One stable record key per channel/requester.
+- `new.flock.joinDecision`: `request` URI, `requestId`, `decision` (`approve` | `deny`), `updatedAt`; author must be the workspace DID. One current decision per request URI.
 
-**`org.slack.channel`**
+**`new.flock.channel`**
 
-- `org.slack.channel.message`: `text`, `createdAt`, optional `parent` URI. Replies point directly to a top-level message in the same channel; nested replies are invalid.
-- `org.slack.channel.reaction`: `subject` message URI, `emoji`, `createdAt`. One current record per `(author DID, message URI, emoji)`; deleting that record removes the reaction.
-- `org.slack.channel.roster`: one current record per DID, `subject`, `active`, `updatedAt`; used only for private channels and authored by the workspace DID.
+- `new.flock.channel.message`: `text`, `createdAt`, optional `parent` URI. Replies point directly to a top-level message in the same channel; nested replies are invalid.
+- `new.flock.channel.reaction`: `subject` message URI, `emoji`, `createdAt`. One current record per `(author DID, message URI, emoji)`; deleting that record removes the reaction.
+- `new.flock.channel.roster`: one current record per DID, `subject`, `active`, `updatedAt`; used only for private channels and authored by the workspace DID.
 
 Unknown collections, malformed records, records with cross-channel references, and authority-only records with the wrong author are ignored by compliant apps. V1 text is plain text, not HTML, and is limited to 10,000 Unicode code points per message. The UI escapes markup and validates text length before writing. Message/reaction updates and deletes are permitted only for the record's author.
 
 ## Permissions
 
-The OAuth permission sets are scoped to the workspace/channel type, authority DID, `skey` where applicable, collection, and action. The operator's workspace DID session is provisioned with `action=read_self` for owner-only `listMembers`, `action=read` for owner-authorized reads and delegation-token issuance, and `action=read_self` combined with `manage=create` plus `manage=update` for each of the three space types. Combining the management grant with `read_self` avoids the scope grammar's default record actions. It receives create/update/delete only for `org.slack.directory`, `org.slack.workspace.roster`, `org.slack.admin`, `org.slack.joinDecision`, and `org.slack.channel.roster` in their respective space types. `authority=self` resolves to the workspace DID; `skey=*` covers its workspace, inbox, and channels. It has no message or reaction write scope.
+The OAuth permission sets are scoped to the workspace/channel type, authority DID, `skey` where applicable, collection, and action. The operator's workspace DID session is provisioned with `action=read_self` for owner-only `listMembers`, `action=read` for owner-authorized reads and delegation-token issuance, and `action=read_self` combined with `manage=create` plus `manage=update` for each of the three space types. Combining the management grant with `read_self` avoids the scope grammar's default record actions. It receives create/update/delete only for `new.flock.directory`, `new.flock.workspace.roster`, `new.flock.admin`, `new.flock.joinDecision`, and `new.flock.channel.roster` in their respective space types. `authority=self` resolves to the workspace DID; `skey=*` covers its workspace, inbox, and channels. It has no message or reaction write scope.
 
-Human admins authenticate to the operator with short-lived service-auth JWTs. Each admin's OAuth grant includes one RPC permission per method, scoped to the operator's published DID service reference: `org.slack.operator.execute`, `org.slack.operator.getOperation`, and `org.slack.operator.listInboxWriters`. The app calls `com.atproto.server.getServiceAuth` with that exact audience and the method NSID as `lxm`; the operator verifies the JWT signature, `iss`, audience, expiry, and method. The actor DID comes only from verified `iss`, never a request field. The operator rechecks current workspace roster, active admin record, and inbox read membership on every method. It keys idempotency by `(workspace DID, actor DID, operationId)`; a replay with the same canonical request hash returns the existing journal row, and reuse with a different hash is a conflict. `listInboxWriters` returns only current inbox member DIDs with `write=true`, not record data.
+Human admins authenticate to the operator with short-lived service-auth JWTs. Each admin's OAuth grant includes one RPC permission per method, scoped to the operator's published DID service reference: `new.flock.operator.execute`, `new.flock.operator.getOperation`, and `new.flock.operator.listInboxWriters`. The app calls `com.atproto.server.getServiceAuth` with that exact audience and the method NSID as `lxm`; the operator verifies the JWT signature, `iss`, audience, expiry, and method. The actor DID comes only from verified `iss`, never a request field. The operator rechecks current workspace roster, active admin record, and inbox read membership on every method. It keys idempotency by `(workspace DID, actor DID, operationId)`; a replay with the same canonical request hash returns the existing journal row, and reuse with a different hash is a conflict. `listInboxWriters` returns only current inbox member DIDs with `write=true`, not record data.
 
 A normal member requests only:
 
-- Workspace read plus create/update for their own `org.slack.acceptance` record.
-- Inbox create/update/delete for `org.slack.joinRequest`; no inbox read or list permission.
-- Channel read plus create/update/delete for `org.slack.channel.message` and `org.slack.channel.reaction`; no write permission for channel roster, directory, or admin records.
+- Workspace read plus create/update for their own `new.flock.acceptance` record.
+- Inbox create/update/delete for `new.flock.joinRequest`; no inbox read or list permission.
+- Channel read plus create/update/delete for `new.flock.channel.message` and `new.flock.channel.reaction`; no write permission for channel roster, directory, or admin records.
 
-An active admin's app additionally needs an authorized workspace DID session with `manage=update` for member operations and create/update/delete for directory, roster, admin, and join-decision records. The app requests these scopes directly (`src/auth/permission-sets.ts`). The published permission sets `org.slack.permissions.workspaceAuthority` and `org.slack.permissions.member` are for other clients that request them through `include:`: `workspaceAuthority` declares exactly the grants the app requests for a workspace authority (a unit test keeps them equal), and `member` is a broader convenience set (any authority) that the app itself does not use. Implementations must request only the narrow scopes needed for the current operation; the user must be able to deny or revoke those grants.
+An active admin's app additionally needs an authorized workspace DID session with `manage=update` for member operations and create/update/delete for directory, roster, admin, and join-decision records. The app requests these scopes directly (`src/auth/permission-sets.ts`). The published permission sets `new.flock.permissions.workspaceAuthority` and `new.flock.permissions.member` are for other clients that request them through `include:`: `workspaceAuthority` declares exactly the grants the app requests for a workspace authority (a unit test keeps them equal), and `member` is a broader convenience set (any authority) that the app itself does not use. Implementations must request only the narrow scopes needed for the current operation; the user must be able to deny or revoke those grants.
 
 The permission set is an app authorization request, not role-based enforcement against arbitrary clients. A user can use another client or a broader OAuth grant to write records into their own repo. Therefore, authority-owned records count only when the workspace DID authored them, and every compatible app applies the current channel/member rules before displaying content. PDS member lists remain the enforceable read boundary.
 
@@ -148,7 +148,7 @@ An app that has cached private data must stop new sync immediately on transition
 A compatible app:
 
 - Implements the pinned proposal 0016/PDS behavior for read and write policies, credentials, member operations, and writer-set sync.
-- Treats each channel as a separate `org.slack.channel` space and uses the workspace directory to locate it.
+- Treats each channel as a separate `new.flock.channel` space and uses the workspace directory to locate it.
 - Treats `listRepos` as a writer set only; it never infers silent membership from it.
 - Uses PDS member lists as the read gate and validates current workspace-DID-authored roster, admin, directory, and decision records.
 - Shows the workspace roster in public channels and the channel roster only in private channels after credential issuance.

@@ -64,7 +64,7 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
     process.env.NODE_ENV = "test";
     process.env.APP_URL = "http://127.0.0.1:3000";
     process.env.AUTH_ENCRYPTION_KEY = "4b".repeat(32);
-    process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_slack_admin";
+    process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
     process.env.PLC_URL = network.plc.url;
     process.env.DATABASE_PATH = join(directory, "app.db");
 
@@ -86,8 +86,8 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
       const channels = [bootstrap.channel];
       for (let index = 1; index < CHANNELS - 1; index += 1) {
         const skey = `${workspaceSkey}-scale-${String(index).padStart(3, "0")}`;
-        const uri = await ensureMemberListSpace(ownerSession as never, "org.slack.channel", skey);
-        await putAuthorityRecord(ownerSession as never, bootstrap.workspace, "org.slack.directory", skey, {
+        const uri = await ensureMemberListSpace(ownerSession as never, "new.flock.channel", skey);
+        await putAuthorityRecord(ownerSession as never, bootstrap.workspace, "new.flock.directory", skey, {
           skey, name: `scale-${String(index).padStart(3, "0")}`, visibility: index === CHANNELS - 2 ? "private" : "public",
         });
         channels.push(uri);
@@ -114,16 +114,16 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
         memberTasks.push(() => putSpaceMember(ownerSession as never, privateChannel, member.did, true, true));
       }
       await mapLimited(memberTasks, 8, (task) => task());
-      await mapLimited(seededMembers, 8, (member) => putAuthorityRecord(ownerSession as never, bootstrap.workspace, "org.slack.workspace.roster", subjectKey(member.did), {
+      await mapLimited(seededMembers, 8, (member) => putAuthorityRecord(ownerSession as never, bootstrap.workspace, "new.flock.workspace.roster", subjectKey(member.did), {
         subject: member.did, active: true, updatedAt: new Date().toISOString(),
       }).then(() => undefined));
       const membershipSetupMs = elapsed(rosterStartedAt);
       process.stdout.write(`PERFORMANCE_PROGRESS memberAndRosterSetup elapsedMs=${membershipSetupMs}\n`);
-      await mapLimited(seededMembers.slice(0, MEMBERS - 2), 8, (member) => putAuthorityRecord(ownerSession as never, privateChannel, "org.slack.channel.roster", subjectKey(member.did), {
+      await mapLimited(seededMembers.slice(0, MEMBERS - 2), 8, (member) => putAuthorityRecord(ownerSession as never, privateChannel, "new.flock.channel.roster", subjectKey(member.did), {
         subject: member.did, active: true, updatedAt: new Date().toISOString(),
       }).then(() => undefined));
       const privateSkey = privateChannel.split("/").at(-1)!;
-      await putAuthorityRecord(ownerSession as never, bootstrap.workspace, "org.slack.admin", subjectKey(members[0].did), {
+      await putAuthorityRecord(ownerSession as never, bootstrap.workspace, "new.flock.admin", subjectKey(members[0].did), {
         subject: members[0].did, active: true, updatedAt: new Date().toISOString(),
       });
       await putSpaceMember(ownerSession as never, inbox, members[0].did, true, true);
@@ -148,7 +148,7 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
       } as never, tidNow(), { kind: "createChannel", skey: "scale-final", name: "scale-final", visibility: "public" });
       const channelCreateAtEnvelopeMs = elapsed(channelCreateStartedAt);
       assert.equal(channelCreateOperation.state, "completed");
-      channels.push(`at://${owner.did}/space/org.slack.channel/${workspaceSkey}-scale-final`);
+      channels.push(`at://${owner.did}/space/new.flock.channel/${workspaceSkey}-scale-final`);
       assert.equal(channels.length, CHANNELS);
       assert.equal((await listSpaceMembers(ownerSession as never, channels.at(-1)!)).length, MEMBERS - 1);
 
@@ -158,8 +158,8 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
         const requestId = tidNow();
         const rkey = requestRecordKey(privateChannel, requester.did);
         const write = {
-          $type: "com.atproto.space.applyWrites#create", collection: "org.slack.joinRequest", rkey,
-          value: { $type: "org.slack.joinRequest", channelSkey: privateSkey, requestId, createdAt: new Date().toISOString() },
+          $type: "com.atproto.space.applyWrites#create", collection: "new.flock.joinRequest", rkey,
+          value: { $type: "new.flock.joinRequest", channelSkey: privateSkey, requestId, createdAt: new Date().toISOString() },
         };
         await requester.pds.getAgent().com.atproto.space.applyWrites({ space: inbox, repo: requester.did, writes: [write] }, {
           headers: { authorization: `Bearer ${requester.accessJwt}` },
@@ -173,7 +173,7 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
       const recoveredRequests = await mapLimited(inboxWriters.writers, 8, async (repoDid) => {
         const client = inboxCredential.client(await resolvePds(repoDid));
         const page = await client.query<{ records: Array<{ rkey: string }> }>("com.atproto.space.listRecords", {
-          space: inbox, repo: repoDid, collection: "org.slack.joinRequest", limit: 100,
+          space: inbox, repo: repoDid, collection: "new.flock.joinRequest", limit: 100,
         });
         return page.records.length;
       });
@@ -197,8 +197,8 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
             const timestamp = stamps[channelIndex * MESSAGES + sequence]!;
             const rkey = tidNow(timestamp, 0);
             return {
-              $type: "com.atproto.space.applyWrites#create", collection: "org.slack.channel.message", rkey,
-              value: { $type: "org.slack.channel.message", text: `scale channel ${channelIndex} message ${sequence}`, createdAt: new Date(timestamp).toISOString() },
+              $type: "com.atproto.space.applyWrites#create", collection: "new.flock.channel.message", rkey,
+              value: { $type: "new.flock.channel.message", text: `scale channel ${channelIndex} message ${sequence}`, createdAt: new Date(timestamp).toISOString() },
             };
           });
           const response = await actor.pds.getAgent().com.atproto.space.applyWrites({ space: channel, repo: actor.did, writes }, { headers: { authorization: `Bearer ${actor.accessJwt}` } });
@@ -223,14 +223,14 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
           const messageAuthorIndex = sequence % writers.length;
           const timestamp = stamps[channelIndex * MESSAGES + sequence]!;
           const messageRkey = tidNow(timestamp, 0);
-          const messageUri = spaceRecordUri(channel, writers[messageAuthorIndex].did, "org.slack.channel.message", messageRkey);
+          const messageUri = spaceRecordUri(channel, writers[messageAuthorIndex].did, "new.flock.channel.message", messageRkey);
           const rkey = reactionRecordKey(messageUri, "👍", reactionAuthor.did);
           writes.push({
             $type: "com.atproto.space.applyWrites#create",
-            collection: "org.slack.channel.reaction",
+            collection: "new.flock.channel.reaction",
             rkey,
             value: {
-              $type: "org.slack.channel.reaction",
+              $type: "new.flock.channel.reaction",
               subject: messageUri,
               emoji: "👍",
               createdAt: new Date(timestamp).toISOString(),
@@ -386,7 +386,7 @@ async function publishAppLexicons(network: TestNetwork): Promise<void> {
   assert.ok(network.lexiconAuthority, "fixture must expose its lexicon authority");
   const agent = network.pds.getAgent();
   const session = await agent.com.atproto.server.createSession({ identifier: "lex-authority.test", password: "hunter2" });
-  const root = join(process.cwd(), "lexicons/org/slack");
+  const root = join(process.cwd(), "lexicons/new/flock");
   const { readdir, readFile } = await import("node:fs/promises");
   const files = await readdir(root, { recursive: true });
   const published = new Set<string>();

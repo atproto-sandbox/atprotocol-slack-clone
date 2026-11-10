@@ -6,7 +6,7 @@ import { resolve } from "node:path";
 const { loadEnvConfig } = nextEnv;
 loadEnvConfig(process.cwd());
 
-const sourcePath = resolve(process.env.DATABASE_PATH ?? "./data/slack.db");
+const sourcePath = resolve(process.env.DATABASE_PATH ?? "./data/flock.db");
 const destinationArg = process.argv[2];
 if (!destinationArg) {
   throw new Error("Pass a destination outside the application data directory, such as /secure/backups/slack-2026-09-24.db.");

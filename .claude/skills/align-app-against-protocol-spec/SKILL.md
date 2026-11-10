@@ -50,8 +50,8 @@ Diff the PDS areas above and build a table "upstream change → app owner" (see 
 | change notifications (`registerNotify`, `notifyWrite`, `notifySpaceDeleted`) | `src/atproto/notifications.ts`, `write-notification.ts`, `src/app/xrpc/com.atproto.space.notifyWrite/route.ts` |
 | policy object, space methods, record and repo paging | `src/atproto/space-policy.ts`, `space-ops.ts`, `record-pages.ts` |
 | DID and PDS resolution | `src/atproto/identity.ts` |
-| scope grammar, permission sets | `src/auth/permission-sets.ts` |
-| lexicons | `lexicons/**` (the `org.slack.permissions.*` permission sets must keep matching `src/auth/permission-sets.ts`; a unit test checks it), generated `src/lexicons/**` (`pnpm codegen:lex`) |
+| scope grammar, permission sets | `src/protocol/scopes.ts` |
+| lexicons | `lexicons/**` (the `new.flock.permissions.*` permission sets must keep matching `src/protocol/scopes.ts`; a unit test checks it), generated `src/lexicons/**` (`pnpm codegen:lex`) |
 | direct messages and their test double | `src/dm/**` (browser side: `browser-identity.ts`, `browser-session.ts`), `src/dm/testing/fake-pds.ts` (mirror the real PDS) |
 | workspaces, operator journal, independent reader | `src/workspaces/**`, `src/operator/**`, `src/reader/**` |
 

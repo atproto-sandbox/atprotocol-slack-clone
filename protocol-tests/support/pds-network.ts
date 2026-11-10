@@ -63,7 +63,7 @@ export type PdsNetwork = {
   close(): Promise<void>;
 };
 
-export const SPIKE_SERVICE_REF = "did:web:localhost%3A3000#atproto_slack_admin";
+export const SPIKE_SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
 
 export function pinnedCheckout(): string {
   const checkout = process.env.ATPROTO_PINNED_CHECKOUT;
@@ -143,7 +143,7 @@ export async function publishAppLexicons(network: TestNetwork, projectRoot: stri
   if (!network.lexiconAuthority) throw new Error("The fixture must expose its lexicon authority.");
   const agent = network.pds.getAgent();
   const session = await agent.com.atproto.server.createSession({ identifier: "lex-authority.test", password: "hunter2" });
-  const root = join(projectRoot, "lexicons/org/slack");
+  const root = join(projectRoot, "lexicons/new/flock");
   const files = await readdir(root, { recursive: true });
   const published = new Set<string>();
   for (const relative of files.filter((file) => file.endsWith(".json"))) {
@@ -276,21 +276,21 @@ export async function memberSignInScopes(): Promise<readonly string[]> {
   return (await import("@/protocol/scopes")).MEMBER_SIGN_IN_SCOPES;
 }
 
-export const SERVICE_METHODS_TODAY = ["org.slack.operator.execute", "org.slack.operator.getOperation", "org.slack.operator.listInboxWriters"] as const;
+export const SERVICE_METHODS_TODAY = ["new.flock.operator.execute", "new.flock.operator.getOperation", "new.flock.operator.listInboxWriters"] as const;
 // Not built yet: a token must still be issued for them, and verified by whoever serves them.
-export const SERVICE_METHODS_PLANNED = ["org.slack.operator.getChanges", "org.slack.operator.createWorkspace", "org.slack.operator.startAuthorityFlow", "org.slack.operator.listStalledOperations"] as const;
+export const SERVICE_METHODS_PLANNED = ["new.flock.operator.getChanges", "new.flock.operator.createWorkspace", "new.flock.operator.startAuthorityFlow", "new.flock.operator.listStalledOperations"] as const;
 
 /** The member grant of the refactor plan's "Identities and sessions" section plus the browser DM set, as one consent (K3). */
 export async function combinedMemberScopes(serviceRef: string): Promise<string[]> {
   const { DM_BROWSER_SCOPES } = await import("@/protocol/scopes");
   const audience = serviceRef.replaceAll("%", "%25").replace("#", "%23");
   return [
-    "space:org.slack.workspace?authority=*&action=read",
-    "space:org.slack.workspace?authority=*&collection=org.slack.acceptance&action=create&action=update",
-    "space:org.slack.inbox?authority=*&action=read",
-    "space:org.slack.inbox?authority=*&collection=org.slack.joinRequest&action=create&action=update&action=delete",
-    "space:org.slack.channel?authority=*&action=read",
-    "space:org.slack.channel?authority=*&collection=org.slack.channel.message&collection=org.slack.channel.reaction&action=create&action=update&action=delete",
+    "space:new.flock.workspace?authority=*&action=read",
+    "space:new.flock.workspace?authority=*&collection=new.flock.acceptance&action=create&action=update",
+    "space:new.flock.inbox?authority=*&action=read",
+    "space:new.flock.inbox?authority=*&collection=new.flock.joinRequest&action=create&action=update&action=delete",
+    "space:new.flock.channel?authority=*&action=read",
+    "space:new.flock.channel?authority=*&collection=new.flock.channel.message&collection=new.flock.channel.reaction&action=create&action=update&action=delete",
     `rpc?${[...SERVICE_METHODS_TODAY, ...SERVICE_METHODS_PLANNED].map((method) => `lxm=${method}`).join("&")}&aud=${audience}`,
     ...DM_BROWSER_SCOPES.filter((scope) => scope !== "atproto"),
   ];

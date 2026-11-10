@@ -80,11 +80,11 @@ export async function subjectRecordActive(world: AppWorld, owner: Actor, space: 
 
 export async function directory(world: AppWorld, owner: Actor): Promise<ChannelRef[]> {
   const result = await world.pdsGet<{ records?: Array<{ value: { skey: string; name: string; visibility: string } }> }>(
-    owner, "com.atproto.space.listRecords", { space: world.workspaceUri, repo: owner.did, collection: "org.slack.directory", limit: "100" },
+    owner, "com.atproto.space.listRecords", { space: world.workspaceUri, repo: owner.did, collection: "new.flock.directory", limit: "100" },
   );
   assert.equal(result.status, 200, JSON.stringify(result.body));
   return (result.body.records ?? []).map(({ value }) => ({
-    name: value.name, skey: value.skey, visibility: value.visibility, uri: `at://${owner.did}/space/org.slack.channel/${value.skey}`,
+    name: value.name, skey: value.skey, visibility: value.visibility, uri: `at://${owner.did}/space/new.flock.channel/${value.skey}`,
   }));
 }
 
@@ -401,7 +401,7 @@ export async function breakChannelSpace(world: AppWorld, owner: Actor, channel: 
 /** Lifts the fault: the authority creates the channel space again, with the policies the app uses. */
 export async function repairChannelSpace(world: AppWorld, owner: Actor, channel: ChannelRef): Promise<void> {
   const result = await world.pdsPost(owner, "com.atproto.space.createSpace", {
-    spaceType: "org.slack.channel", skey: channel.skey, policy: memberspacePolicy(),
+    spaceType: "new.flock.channel", skey: channel.skey, policy: memberspacePolicy(),
   });
   assert.equal(result.status, 200, JSON.stringify(result.body));
 }
@@ -475,7 +475,7 @@ export async function startOwnApp(world: AppWorld): Promise<OwnApp> {
     PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? tmpdir(), TMPDIR: process.env.TMPDIR ?? tmpdir(),
     NODE_ENV: "production", NEXT_TELEMETRY_DISABLED: "1", ATPROTO_ACCEPTANCE_TEST: "true",
     APP_URL: origin, DATABASE_PATH: databasePath, AUTH_ENCRYPTION_KEY: randomBytes(32).toString("hex"),
-    PLC_URL: world.fixture.plcUrl, OPERATOR_SERVICE_REF: `did:web:localhost%3A${port}#atproto_slack_admin`,
+    PLC_URL: world.fixture.plcUrl, OPERATOR_SERVICE_REF: `did:web:localhost%3A${port}#atproto_flock_operator`,
   };
   let child = await launch(environment, port);
   const app: OwnApp = {
