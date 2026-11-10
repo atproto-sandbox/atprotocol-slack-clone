@@ -2,13 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { verifyJwt } from "@atproto/xrpc-server";
 import {
-  authorityScopes,
   bearerSession,
+  callOperatorMethod,
   combinedMemberScopes,
   SERVICE_METHODS_PLANNED,
   SERVICE_METHODS_TODAY,
   outcome,
   startPdsNetwork,
+  storeAuthorityGrant,
   storeOAuthSession,
   type NetworkActor,
   type Outcome,
@@ -101,13 +102,12 @@ type Workspace = {
 };
 
 async function createWorkspace(pds: PdsNetwork): Promise<Workspace> {
-  const [{ getOAuthClientForSession }, { bootstrapWorkspace }, { requireActiveWorkspaceAdmin }, { executeOperatorOperation }, { tidNow, inboxUri }] = await Promise.all([
-    import("@/auth/oauth"), import("@/workspaces/bootstrap"), import("@/operator/security"), import("@/operator/operations"), import("@/protocol/keys"),
+  const [{ restoreAuthorityGrant }, { bootstrapWorkspace }, { requireActiveWorkspaceAdmin }, { executeOperatorOperation }, { tidNow, inboxUri }] = await Promise.all([
+    import("@/operator/authority-grant"), import("@/workspaces/bootstrap"), import("@/operator/security"), import("@/operator/operations"), import("@/protocol/keys"),
   ]);
   const authority = await pds.createActor("k3owner", 0);
-  await storeOAuthSession(pds.hosts[0], authority.did, await authorityScopes(), "k3-authority-dpop");
-  const session = await (await getOAuthClientForSession(authority.did)).restore(authority.did);
-  const created = await bootstrapWorkspace(session, { name: "Capabilities", operationId: tidNow() });
+  await storeAuthorityGrant(pds.hosts[0], authority.did, "k3-authority-dpop");
+  const created = await bootstrapWorkspace(await restoreAuthorityGrant(authority.did), { name: "Capabilities", operationId: tidNow() });
   assert.equal(created.state, "completed");
   const run = async (request: Record<string, unknown>) => {
     const view = await executeOperatorOperation(await requireActiveWorkspaceAdmin(created.workspace, authority.did), tidNow(), request);
@@ -131,12 +131,10 @@ async function memberGrantOperations(
   workspace: Workspace,
   actors: { member: NetworkActor; admin: NetworkActor; outsider: NetworkActor },
 ): Promise<Record<string, Outcome>> {
-  const [{ getOAuthClientForSession }, { discoverWorkspaceState }, { mintSpaceCredential }, { isAccessLost }, { sessionClient }, { readChannelPage }, { requestOperatorServiceAuth }, keys, { validateSpaceRecord }, { NextRequest }] = await Promise.all([
+  const [{ getOAuthClientForSession }, { discoverWorkspaceState }, { mintSpaceCredential }, { isAccessLost }, { sessionClient }, { readChannelPage }, keys, { validateSpaceRecord }] = await Promise.all([
     import("@/auth/oauth"), import("@/workspaces/read-model"), import("@/atproto/space-credential"), import("@/atproto/space-credential-core"),
-    import("@/atproto/client"), import("@/workspaces/channel-sync"), import("@/auth/permission-sets"),
-    import("@/protocol/keys"), import("@/protocol/records"), import("next/server"),
+    import("@/atproto/client"), import("@/workspaces/channel-sync"), import("@/protocol/keys"), import("@/protocol/records"),
   ]);
-  type NextRequest = InstanceType<typeof NextRequest>;
   const restore = async (actor: NetworkActor) => (await getOAuthClientForSession(actor.did)).restore(actor.did);
   const member = await restore(actors.member);
   const admin = await restore(actors.admin);
@@ -183,22 +181,8 @@ async function memberGrantOperations(
     });
     assert.equal(request.value.channelSkey, workspace.generalSkey);
   });
-  const callOperator = async (method: (typeof SERVICE_METHODS_TODAY)[number], query: Record<string, string>, body?: unknown) => {
-    const token = await requestOperatorServiceAuth(admin, pds.serviceRef, method);
-    const url = new URL(`http://127.0.0.1:3000/xrpc/${method}`);
-    for (const [name, value] of Object.entries(query)) url.searchParams.set(name, value);
-    const route = await import(`@/app/xrpc/${method}/route`) as { GET?: (request: NextRequest) => Promise<Response>; POST?: (request: NextRequest) => Promise<Response> };
-    const handler = body === undefined ? route.GET : route.POST;
-    assert.ok(handler);
-    const response = await handler(new NextRequest(url, {
-      method: body === undefined ? "GET" : "POST",
-      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    }));
-    const answer = await response.json() as Record<string, unknown>;
-    assert.equal(response.status, 200, JSON.stringify(answer));
-    return answer;
-  };
+  const callOperator = (method: (typeof SERVICE_METHODS_TODAY)[number], query: Record<string, string>, body?: unknown) =>
+    callOperatorMethod(admin, pds.serviceRef, method, query, body);
   const operationId = keys.tidNow();
   results["the admin calls org.slack.operator.execute"] = await outcome(async () => {
     const answer = await callOperator("org.slack.operator.execute", {}, {

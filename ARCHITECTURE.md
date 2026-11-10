@@ -2,7 +2,7 @@
 
 ## Runtime boundaries
 
-- **Browser client:** renders channels and records; uses the signed-in member's OAuth session for writes to their own repo and member-authorized space operations. It never stores the workspace authority session.
+- **Browser client:** renders channels and records; uses the signed-in member's OAuth session for writes to their own repo and member-authorized space operations. It never holds the workspace authority grant.
 - **Next.js server:** hosts the application UI, OAuth callback/session integration, authenticated API routes, and the workspace authority operator. Browser input is treated as untrusted.
 - **PDS spaces:** hold the durable interoperable workspace, inbox, channel, roster, request, decision, message, and reaction state. Their member lists enforce reads.
 - **Operator journal:** SQLite persists operation identity, canonical request hash, target state, completed step markers, status, and audit events. It is not a membership or role source. Authority OAuth session material is encrypted at rest with AES-256-GCM using a deployment key.
@@ -10,7 +10,7 @@
 
 ## Data flow
 
-1. A member signs in through atproto OAuth. Their session and refresh state are stored separately from the authority session.
+1. A member signs in through atproto OAuth. Their session and refresh state are stored separately from the workspace authority grant, which only the authority flow (`src/operator/authority-grant.ts`) writes and which signing in or out never touches.
 2. The app requests the narrow operation scopes declared in `src/auth/permission-sets.ts`.
 3. For reads, the signed-in user exchanges a PDS delegation token for a space credential bound to the reader's own signing key (ten minutes by default, one hour at most). Every request made with it carries an HTTP message signature over the credential and its audience. A reader syncs writers and their records from each selected space, validating author, schema, key, and same-channel references.
 4. For admin actions, the client obtains a `com.atproto.server.getServiceAuth` JWT with the operator DID service ref as `aud` and the exact method NSID as `lxm`. The operator verifies all claims and re-reads current authority records and PDS member lists before acting.

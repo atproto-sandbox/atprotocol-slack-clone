@@ -73,7 +73,8 @@ src/
     api/                    Authenticated JSON + SSE routes for the signed-in member.
       workspaces/, channels/*, inbox/requests/, notifications/, notifications/dm/
       operator/*             Admin-only routes that call into src/operator/.
-    oauth/                  Login, callback, and client-metadata routes (workspace + DM).
+    oauth/                  Login, callback, and client-metadata routes (member sign-in + DM).
+    authority/              The workspace authority flow: start, callback, client metadata, JWKS.
     xrpc/                   Server-published XRPC methods: the operator's own RPCs
                              (org.slack.operator.*), com.atproto.space.notifyWrite and com.atproto.space.notifySpaceDeleted.
     dm/callback/            Browser DM OAuth callback page (client component).
@@ -121,6 +122,10 @@ src/
                               DM_BROWSER_SCOPES (asserted disjoint from every server scope).
     session.ts, web-session.ts, oauth.ts, oauth-flow.ts, encrypted-store.ts, encrypted-cache.ts
   operator/               Workspace-authority operator: journaled, idempotent PDS mutations.
+    authority-grant.ts       The one owner of the workspace authority grant: its own OAuth client (confidential
+                              private_key_jwt outside loopback), the ticket -> /authority/start -> PDS consent ->
+                              /authority/callback flow, and the `authority_grant` table. The operator, bootstrap and
+                              the reconcile job restore the grant from here; a member sign-in never writes it.
   workspaces/             Server-side channel/workspace sync, caching, and the read model.
   dm/                     The DM feature. Isomorphic engine + browser-only glue. See below.
   reader/                 Independent second-app readers (no app database, no DM-engine import).
@@ -179,6 +184,7 @@ workspace layers even by accident.
 - `pnpm dev` / `pnpm build` / `pnpm start` — Next.js dev/build/prod (see `package.json`).
 - `pnpm playground` (`scripts/playground.ts`) — a local copy of the whole stack with ready-made accounts, for trying the app by hand (`ATPROTO_PINNED_CHECKOUT` must point at the built pinned checkout).
 - `pnpm reconcile` (`scripts/reconcile-workspaces.ts`) — the scheduled membership-reconciliation job (`docs/operations.md`).
+- `pnpm authority` (`scripts/authority-grant.ts`) — generate an authority client key, or revoke an authority grant.
 - `pnpm backup:db` (`scripts/backup-db.mjs`) — online SQLite backup.
 - `pnpm test` — unit tests (`node --test` over every `src/**/*.test.ts`), plus `bdd/gate.test.ts`, which keeps the Gherkin features honest (below).
 - `pnpm test:bdd` — builds, then runs the executable Gherkin scenarios in `features/` with `@cucumber/cucumber`, driving real browsers against a real pinned PDS network.

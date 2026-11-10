@@ -261,11 +261,11 @@ export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: DmC
     }
   }, [clearChannelView, refreshWorkspaces, selectWorkspace]);
 
-  const grant = useCallback(async (action: string, workspaceUri?: string, skey?: string) => {
+  const grant = useCallback(async (action: string, workspaceUri?: string, skey?: string, workspaceName?: string) => {
     const ref = workspaceUri ? parsePastedWorkspaceUri(workspaceUri) : null;
     const response = await api<{ redirectUrl: string }>("/api/oauth/permission", {
       method: "POST",
-      body: JSON.stringify({ action, workspaceDid: ref?.authorityDid ?? did, ...(ref ? { workspaceSkey: ref.skey } : {}), ...(skey ? { skey } : {}) }),
+      body: JSON.stringify({ action, workspaceDid: ref?.authorityDid ?? did, ...(ref ? { workspaceSkey: ref.skey } : {}), ...(skey ? { skey } : {}), ...(workspaceName ? { workspaceName } : {}) }),
     });
     window.location.assign(response.redirectUrl);
   }, [did]);
@@ -302,7 +302,7 @@ export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: DmC
       sessionStorage.setItem("spaces.pendingWorkspaceName", name);
       sessionStorage.setItem("spaces.autoCreateWorkspace", "1");
       try {
-        await grant("workspaceAuthority");
+        await grant("workspaceAuthority", undefined, undefined, name);
         redirecting = true;
       } catch (grantFailure) {
         sessionStorage.removeItem("spaces.pendingWorkspaceName");
@@ -380,7 +380,10 @@ export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: DmC
       void refreshWorkspaces().catch((caught) => setError(messageOf(caught)));
       const invitedWorkspace = captureInviteLink(window.location.search, sessionStorage) ?? sessionStorage.getItem(INVITE_LINK_KEY);
       if (invitedWorkspace) { setInvitedTo(invitedWorkspace); setInviteUri(invitedWorkspace); }
-      if (window.location.search.includes("invite=")) window.history.replaceState(null, "", window.location.pathname);
+      const authorityFailed = new URLSearchParams(window.location.search).get("authority") === "failed";
+      if (window.location.search.includes("invite=") || window.location.search.includes("authority=")) window.history.replaceState(null, "", window.location.pathname);
+      // A workspace creation that was waiting on the approval reports the outcome itself when it retries.
+      if (authorityFailed && !sessionStorage.getItem("spaces.autoCreateWorkspace")) setError("The workspace authority permission was not approved. Try again from the operation that asked for it.");
       const savedName = sessionStorage.getItem("spaces.pendingWorkspaceName");
       if (savedName) { setWorkspaceName(savedName); sessionStorage.removeItem("spaces.pendingWorkspaceName"); }
       if (sessionStorage.getItem("spaces.autoCreateWorkspace")) {
@@ -561,6 +564,13 @@ export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: DmC
       }
     } catch (caught) {
       const statusCode = httpStatus(caught);
+      if (isAuthorizationRequired(caught)) {
+        // The operator's grant for this workspace lapsed. Only its authority can renew it; the operation stays pending to retry.
+        if (parsePastedWorkspaceUri(workspace)?.authorityDid !== did) { setError(messageOf(caught)); return; }
+        setStatus("Opening the permission screen. Approve it, then retry the pending operation.");
+        await grant("workspaceAuthority").catch((grantFailure) => { setStatus(""); setError(messageOf(grantFailure)); });
+        return;
+      }
       if (request.kind === "leaveWorkspace" || request.kind === "leaveChannel") setNeedOperatorLeave(true);
       setError(statusCode === 401 || statusCode === 403
         ? `${messageOf(caught)} If this is the first admin action, grant the operator method permission below and retry.`

@@ -70,10 +70,17 @@ export async function joinWorkspaceAt(viewer: AppViewer, workspaceUri: string, w
   await viewer.page.goto(inviteLinkFor(viewer.origin, workspaceUri));
   await viewer.page.getByText(/invited to a workspace/).waitFor({ state: "visible" });
   await signInFromLoginFormAt(viewer);
-  await viewer.page.getByRole("region", { name: "Workspace invitation" }).getByRole("button", { name: "Join this workspace" }).click();
-  await completeConsent(viewer);
-  await waitForAppAt(viewer);
-  await viewer.page.getByRole("heading", { name: workspaceName, exact: true }).waitFor({ state: "visible" });
+  // A member joins through the invitation. The workspace's own authority reads its workspace from sign-in, so there is
+  // nothing to join and the workspace opens directly.
+  const join = viewer.page.getByRole("region", { name: "Workspace invitation" }).getByRole("button", { name: "Join this workspace" });
+  const opened = viewer.page.getByRole("heading", { name: workspaceName, exact: true });
+  await join.or(opened).first().waitFor({ state: "visible" });
+  if (await join.isVisible()) {
+    await join.click();
+    await completeConsent(viewer);
+    await waitForAppAt(viewer);
+  }
+  await opened.waitFor({ state: "visible" });
 }
 
 export async function grantAdminControlsAt(viewer: AppViewer, workspaceName: string): Promise<void> {

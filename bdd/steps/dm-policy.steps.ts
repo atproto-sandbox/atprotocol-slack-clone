@@ -782,10 +782,10 @@ Given("the app runs its own server session for workspaces", { timeout: SETUP_TIM
   await alice.page.getByRole("heading", { level: 1 }).or(alice.page.locator(".mono-note").filter({ hasText: "at://" }).first()).waitFor({ state: "visible" });
 
   const sessions = dmpServerSessions(second.databasePath, key);
-  const own = sessions.find((session) => session.did === alice.did);
-  assert.ok(own, "the app server holds an OAuth session for alice");
-  assert.ok(own.scope.some((scope) => scope.startsWith(`space:org.slack.workspace?authority=${alice.did}`) && scope.includes("collection=org.slack.admin")),
-    `the session carries the workspace-authority scopes it was approved for: ${own.scope.join(" ")}`);
+  const own = sessions.filter((session) => session.did === alice.did);
+  assert.ok(own.length > 0, "the app server holds an OAuth session for alice");
+  assert.ok(own.some((session) => session.scope.some((scope) => scope.startsWith(`space:org.slack.workspace?authority=${alice.did}`) && scope.includes("collection=org.slack.admin"))),
+    `one of them is the workspace-authority grant she approved: ${own.map((session) => session.scope.join(" ")).join(" | ")}`);
   this.scratch.set("serverSession", { second, key, dmScopeShown: [], texts: [] } satisfies ServerSession);
 });
 
@@ -814,7 +814,7 @@ When("direct messages are exchanged", { timeout: SETUP_TIMEOUT }, async function
 Then("that session holds no DM scope", function (this: AppWorld) {
   const session = this.scratch.get("serverSession") as ServerSession;
   const held = dmpServerSessions(session.second.databasePath, session.key);
-  assert.deepEqual(held.map((entry) => entry.did).sort(), [actorNamed(this, "alice").did, actorNamed(this, "bob").did].sort(), "the server holds a session for each person who signed in");
+  assert.deepEqual([...new Set(held.map((entry) => entry.did))].sort(), [actorNamed(this, "alice").did, actorNamed(this, "bob").did].sort(), "the server holds sessions only for the people who signed in");
   for (const entry of held) {
     assert.ok(entry.scope.includes("atproto"), "a real, granted session");
     assert.deepEqual(entry.scope.filter((scope) => scope.includes(DM_SPACE_TYPE)), [], `no granted scope names a DM space: ${entry.scope.join(" ")}`);

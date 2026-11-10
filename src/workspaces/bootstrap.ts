@@ -12,11 +12,16 @@ export type BootstrapResult = {
   authorizationRequired?: true;
 };
 
-export async function bootstrapWorkspace(session: OAuthSession, input: { name: string; operationId: string }): Promise<BootstrapResult> {
-  assertAdminMutationsEnabled();
-  if (!/^[A-Za-z0-9][A-Za-z0-9 _.-]{0,59}$/.test(input.name.trim())) {
+/** Refuses a workspace name the app does not create, before anything else is asked of the account. */
+export function assertWorkspaceName(name: string): void {
+  if (!/^[A-Za-z0-9][A-Za-z0-9 _.-]{0,59}$/.test(name.trim())) {
     throw new Error("Workspace name must be 1 to 60 plain-text characters.");
   }
+}
+
+export async function bootstrapWorkspace(session: OAuthSession, input: { name: string; operationId: string }): Promise<BootstrapResult> {
+  assertAdminMutationsEnabled();
+  assertWorkspaceName(input.name);
   if (!/^[234567abcdefghijklmnopqrstuvwxyz]{13}$/.test(input.operationId)) throw new Error("Operation ID must be a protocol TID.");
   return withWorkspaceLock(session.did, (lock) => bootstrapWorkspaceLocked(session, input, lock));
 }

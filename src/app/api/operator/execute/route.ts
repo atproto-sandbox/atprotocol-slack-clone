@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { requireSession } from "@/auth/session";
-import { operatorRemoteHttpStatus, submitOperation } from "@/operator/client";
+import { isAuthorityReauthorizationRequired, operatorRemoteHttpStatus, submitOperation } from "@/operator/client";
+import { AUTHORIZATION_REQUIRED } from "@/lib/api-codes";
 import { requireWorkspaceSummary, workspaceDegradedMessage } from "@/workspaces/read-model";
 import { readRequestJson, RequestJsonError } from "@/lib/bounded-json";
 import { AdminMutationsPausedError } from "@/operator/mutations-paused";
@@ -26,6 +27,13 @@ export async function POST(request: NextRequest) {
     const message = error instanceof Error ? error.message : "Unable to submit the workspace operation.";
     if (error instanceof RequestJsonError) return NextResponse.json({ error: message }, { status: error.status, headers: { "cache-control": "no-store" } });
     if (error instanceof AdminMutationsPausedError) return NextResponse.json({ error: message }, { status: error.status, headers: { "cache-control": "no-store" } });
+    if (isAuthorityReauthorizationRequired(error)) {
+      return NextResponse.json({
+        error: "The workspace authority must approve its permission again before admin changes can run.",
+        code: AUTHORIZATION_REQUIRED,
+        action: "workspaceAuthority",
+      }, { status: 403, headers: { "cache-control": "no-store" } });
+    }
     let status = 400;
     if (error instanceof Error && error.message === "Unauthorized") status = 401;
     else status = operatorRemoteHttpStatus(error) ?? status;

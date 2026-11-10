@@ -479,11 +479,11 @@ export function dmpEverythingTheAppStored(databasePath: string, hexKey: string):
 
 export type DmpSavedServerSession = { did: string; scope: string[]; clientScope: string[] };
 
-/** The OAuth sessions the app server holds, decrypted: the scope each one was actually granted by the PDS. */
+/** The OAuth sessions the app server holds (member sign-ins and authority grants), decrypted: the scope each was actually granted by the PDS. */
 export function dmpServerSessions(databasePath: string, hexKey: string): DmpSavedServerSession[] {
   const db = new Database(databasePath, { readonly: true, fileMustExist: true });
   try {
-    return (db.prepare("SELECT key, value FROM oauth_session").all() as Array<{ key: string; value: string }>).map(({ key, value }) => {
+    return (db.prepare("SELECT key, value FROM oauth_session UNION ALL SELECT key, value FROM authority_grant").all() as Array<{ key: string; value: string }>).map(({ key, value }) => {
       const saved = JSON.parse(dmpDecrypt(hexKey, value)) as { tokenSet: { scope?: string }; oauthClientScope?: string };
       return { did: key, scope: (saved.tokenSet.scope ?? "").split(" ").filter(Boolean), clientScope: (saved.oauthClientScope ?? "").split(" ").filter(Boolean) };
     });

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-test("scheduled reconciliation reports stalled work and a missing authority session while paused", async () => {
+test("scheduled reconciliation reports stalled work and a missing authority grant while paused", async () => {
   const directory = mkdtempSync(join(tmpdir(), "slack-reconcile-"));
   const databasePath = join(directory, "app.db");
   Object.assign(process.env, {
@@ -48,7 +48,7 @@ test("scheduled reconciliation reports stalled work and a missing authority sess
     assert.equal(exitCode, 1);
     assert.match(stdout, /Admin mutations are paused/);
     assert.match(stderr, new RegExp(`ALERT stalled operation ${operationId}`));
-    assert.match(stderr, /authority session is missing/);
+    assert.match(stderr, /authority grant is missing/);
     const operation = db.prepare("SELECT state, updated_at FROM operation WHERE operation_id = ?")
       .get(operationId) as { state: string; updated_at: number };
     assert.deepEqual(operation, { state: "pending", updated_at: updatedAt }, "paused recovery must leave the journal untouched");

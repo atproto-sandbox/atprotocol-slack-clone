@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   DM_BROWSER_SCOPES, memberSpaceScope, operatorMethodScope, permissionScopeFor,
-  SLACK_SPACE_TYPES, WORKSPACE_DISCOVERY_SCOPE, workspaceAuthorityScopes,
+  MEMBER_SIGN_IN_SCOPES, SLACK_SPACE_TYPES, WORKSPACE_DISCOVERY_SCOPE, workspaceAuthorityScopes,
 } from "./permission-sets";
 
 const serviceRef = "did:web:slack.example#atproto_slack_admin";
@@ -100,7 +100,7 @@ test("no server-side scope builder ever grants an org.slack.dm scope", () => {
     ...permissionScopeFor("channelAccess", { workspaceDid: "did:plc:owner", skey: "general" }),
     ...permissionScopeFor("operatorAdmin", { workspaceDid: "did:plc:owner", serviceRef }),
     ...permissionScopeFor("operatorLeave", { workspaceDid: "did:plc:owner", workspaceSkey: "acme", serviceRef }),
-    ...permissionScopeFor("workspaceAuthority", { workspaceDid: "did:plc:owner" }),
+    ...MEMBER_SIGN_IN_SCOPES,
     operatorMethodScope("org.slack.operator.execute", serviceRef),
     "atproto",
   ];
@@ -108,7 +108,21 @@ test("no server-side scope builder ever grants an org.slack.dm scope", () => {
   for (const scope of nonDmScopes) assert.ok(!scope.includes("org.slack.dm"), scope);
 });
 
-test("the server's login scope (src/auth/oauth.ts default + WORKSPACE_DISCOVERY_SCOPE) carries no DM scope", () => {
-  const loginScope = ["atproto", WORKSPACE_DISCOVERY_SCOPE];
-  for (const scope of loginScope) assert.ok(!scope.includes("org.slack.dm"), scope);
+test("the server's sign-in scope carries no DM scope", () => {
+  for (const scope of ["atproto", ...MEMBER_SIGN_IN_SCOPES]) assert.ok(!scope.includes("org.slack.dm"), scope);
+});
+
+test("sign-in reads only the spaces the account is itself the authority of, and never administers them", () => {
+  // given the scopes every sign-in requests
+  const ownSpaceScopes = MEMBER_SIGN_IN_SCOPES.filter((scope) => scope !== WORKSPACE_DISCOVERY_SCOPE);
+
+  // then each is a self-authority read and none can manage a space or write a record
+  assert.equal(ownSpaceScopes.length, 3);
+  for (const scope of ownSpaceScopes) {
+    assert.match(scope, /^space:org\.slack\.(workspace|inbox|channel)\?authority=self&skey=\*&action=read_self&action=read$/);
+  }
+});
+
+test("the workspace authority is no longer a member permission request", () => {
+  assert.throws(() => permissionScopeFor("workspaceAuthority", { workspaceDid: "did:plc:owner" }), /Unknown permission request/);
 });

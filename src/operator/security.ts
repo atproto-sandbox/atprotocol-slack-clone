@@ -1,7 +1,6 @@
 import { verifyJwt } from "@atproto/xrpc-server";
 import type { OAuthSession } from "@atproto/oauth-client-node";
 import type * as GetRecord from "@/lexicons/api/types/com/atproto/space/getRecord";
-import { getOAuthClientForSession } from "@/auth/oauth";
 import { getIdResolver } from "@/atproto/identity";
 import { sessionClient } from "@/atproto/client";
 import { listBoundedMembers } from "@/atproto/record-pages";
@@ -11,6 +10,7 @@ import { getConfig } from "@/lib/config";
 import { channelUri, inboxUri, isDid, isSkey, parseWorkspaceUri, subjectKey } from "@/protocol/keys";
 import { validateSpaceRecord } from "@/protocol/records";
 import { WorkspaceEnvelopeError } from "@/workspaces/read-model";
+import { restoreAuthorityGrant } from "./authority-grant";
 import { OperatorInfrastructureError, isTransientOperatorInfrastructureError } from "./errors";
 
 export type WorkspaceRef = { uri: string; authorityDid: string; skey: string };
@@ -75,8 +75,7 @@ export async function requireActiveWorkspaceAdmin(
   options: { allowDegradedLookup?: boolean } = {},
 ): Promise<OperatorActor> {
   const workspace = parseWorkspaceRef(workspaceUri);
-  const session = await (await getOAuthClientForSession(workspace.authorityDid)).restore(workspace.authorityDid);
-  if (session.did !== workspace.authorityDid) throw new OperatorAuthError("Workspace authority session is unavailable.");
+  const session = await restoreAuthorityGrant(workspace.authorityDid);
   const client = sessionClient(session);
   const [admin, roster] = await Promise.all([
     readOwnerRecord(client, workspace.uri, workspace.authorityDid, "org.slack.admin", subjectKey(actorDid)),
@@ -108,8 +107,7 @@ async function hasCurrentMembership(session: OAuthSession, space: string, did: s
 
 export async function requireWorkspaceActorForOperation(workspaceUri: string, actorDid: string, request: unknown): Promise<OperatorActor> {
   const workspace = parseWorkspaceRef(workspaceUri);
-  const session = await (await getOAuthClientForSession(workspace.authorityDid)).restore(workspace.authorityDid);
-  if (session.did !== workspace.authorityDid) throw new OperatorAuthError("Workspace authority session is unavailable.");
+  const session = await restoreAuthorityGrant(workspace.authorityDid);
   const client = sessionClient(session);
   const [admin, roster, workspaceMembers, inboxMembers] = await Promise.all([
     readOwnerRecord(client, workspace.uri, workspace.authorityDid, "org.slack.admin", subjectKey(actorDid)),

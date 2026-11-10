@@ -34,6 +34,15 @@ export const SLACK_COLLECTIONS = {
 export const WORKSPACE_DISCOVERY_SCOPE =
   `space:${SLACK_SPACE_TYPES.workspace}?authority=*&collection=${SLACK_COLLECTIONS.acceptance}&action=read_self`;
 
+// What every sign-in asks for: discovery across authorities, and reading the spaces this account is itself the authority of
+// (its own workspaces, their inboxes and channels), which it reads as any member reads them. Administering those spaces
+// is the operator's job, with the separate authority grant (src/operator/authority-grant.ts), never with a sign-in.
+export const MEMBER_SIGN_IN_SCOPES: readonly string[] = [
+  WORKSPACE_DISCOVERY_SCOPE,
+  ...[SLACK_SPACE_TYPES.workspace, SLACK_SPACE_TYPES.inbox, SLACK_SPACE_TYPES.channel]
+    .map((spaceType) => `space:${spaceType}?authority=self&skey=*&action=read_self&action=read`),
+];
+
 // The DM permission set requested by a browser-held OAuth session (M3). The
 // server's own OAuth session never requests these: DM tokens live only in the
 // browser (IndexedDB), never on this server, per .ai/plans/direct-messages.md
@@ -157,8 +166,6 @@ export function permissionScopeFor(
     case "operatorLeave":
       if (!input.serviceRef || !input.workspaceSkey) throw new Error("The workspace and operator service reference are required.");
       return OPERATOR_LEAVE_METHODS.map((method) => operatorMethodScope(method, input.serviceRef!));
-    case "workspaceAuthority":
-      return workspaceAuthorityScopes();
     default:
       throw new Error("Unknown permission request.");
   }

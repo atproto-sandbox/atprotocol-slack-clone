@@ -11,44 +11,10 @@ import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { isAccessLost, SPACE_CREDENTIAL_LIFETIME_MS } from "@/atproto/space-credential-core";
 import { createFixtureTempRoot } from "./fixture-temp";
+import { expireStoredSession, memberSignInScopes, storeAuthorityGrant, storeOAuthSession, type TestPds as NetworkPds } from "./support/pds-network";
 
-type TestAgent = {
-  com: { atproto: {
-    server: {
-      createAccount(input: Record<string, unknown>): Promise<{ data: { did: string; accessJwt: string } }>;
-      createSession(input: Record<string, unknown>): Promise<{ data: { accessJwt: string } }>;
-    };
-    repo: { createRecord(input: Record<string, unknown>, options: { headers: { authorization: string } }): Promise<unknown> };
-  } };
-};
 type DidResolver = { resolve(did: string, ...args: unknown[]): Promise<unknown> };
-type TestPds = {
-  url: string;
-  getAgent(): TestAgent;
-  ctx: {
-    cfg: { service: { did: string }; oauth: { issuer: string } };
-    idResolver: { did: DidResolver };
-    oauthProvider?: {
-      tokenManager: {
-        createToken(...args: unknown[]): Promise<{
-          access_token: string;
-          expires_in: number;
-          refresh_token?: string;
-          scope?: string;
-        }>;
-        findToken(token: string): Promise<{ id: unknown } | null>;
-        deleteToken(tokenId: unknown): Promise<void>;
-      };
-      clientManager: {
-        getClient(clientId: string): Promise<{
-          id: string;
-          validateRequest(parameters: Record<string, unknown>): unknown;
-        }>;
-      };
-      accountManager: { getAccount(did: string): Promise<{ account: unknown }> };
-    };
-  };
-};
+type TestPds = NetworkPds & { ctx: NetworkPds["ctx"] & { idResolver: { did: DidResolver } } };
 type TestNetwork = { plc: { url: string }; pds: TestPds; extraPdses: TestPds[]; lexiconAuthority?: { did: string }; close(): Promise<void> };
 type TestActor = { did: string; accessJwt: string; pds: TestPds };
 type Session = { did: string; fetchHandler(path: string, init: RequestInit): Promise<Response> };
@@ -194,11 +160,12 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     assert.deepEqual(discovered[0]?.admins, [owner.did, admin.did].sort());
     assert.ok(discovered[0]?.channels.some((channel) => channel.skey === `${workspace.skey}-team-lobby`));
 
-    const [{ WORKSPACE_DISCOVERY_SCOPE, permissionScopeFor }, { canonicalOAuthScope }, { getOAuthClientForSession }, { discoverWorkspaceState }] = await Promise.all([
+    const [{ permissionScopeFor }, { canonicalOAuthScope }, { getOAuthClientForSession }, { discoverWorkspaceState }] = await Promise.all([
       import("@/auth/permission-sets"), import("@/auth/oauth-scope"), import("@/auth/oauth"), import("@/workspaces/read-model"),
     ]);
-    const discoveryOnlyScope = canonicalOAuthScope(["atproto", WORKSPACE_DISCOVERY_SCOPE]);
-    await storeOAuthSession(network.extraPdses[0], member.did, [WORKSPACE_DISCOVERY_SCOPE], "returning-member-discovery");
+    const signInScopes = await memberSignInScopes();
+    const discoveryOnlyScope = canonicalOAuthScope(["atproto", ...signInScopes]);
+    await storeOAuthSession(network.extraPdses[0], member.did, signInScopes, "returning-member-discovery");
     const discoveryOnlySession = await (await getOAuthClientForSession(member.did)).restore(member.did);
     const needsReadGrant = await discoverWorkspaceState(discoveryOnlySession);
     assert.deepEqual(needsReadGrant.workspaces, []);
@@ -490,16 +457,16 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     // The child recovery process receives that key through its environment,
     // separately from the SQLite backup, and restores the session through the
     // production NodeOAuthClient rather than receiving a bearer JWT.
-    await storeAuthorityOAuthSession(network.pds, owner.did);
-    const encryptedSession = getRawDb().prepare("SELECT value FROM oauth_session WHERE key = ?").get(owner.did) as { value: string } | undefined;
-    assert.ok(encryptedSession?.value.startsWith("v1."));
-    assert.equal(encryptedSession?.value.includes(owner.accessJwt), false, "the OAuth access token is encrypted in the live database");
-    await expireStoredOAuthSession(owner.did);
-    const refreshedAuthoritySession = await (await import("@/auth/oauth")).getOAuthClientForSession(owner.did).then((client) => client.restore(owner.did));
-    assert.equal(refreshedAuthoritySession.did, owner.did, "the expired PDS OAuth session refreshes using its persisted scoped client");
-    await expireStoredOAuthSession(owner.did);
-    await acceptAuthenticatedApiRoute(owner.did);
-    await expireStoredOAuthSession(owner.did);
+    const grant = await storeAuthorityGrant(network.pds, owner.did, "backup-acceptance-dpop");
+    const encryptedGrant = getRawDb().prepare("SELECT value FROM authority_grant WHERE key = ?").get(owner.did) as { value: string } | undefined;
+    assert.ok(encryptedGrant?.value.startsWith("v1."));
+    assert.equal(encryptedGrant?.value.includes(grant.accessToken), false, "the authority grant's access token is encrypted in the live database");
+    await expireStoredSession("authority_grant", owner.did);
+    const refreshedGrant = await (await import("@/operator/authority-grant")).restoreAuthorityGrant(owner.did);
+    assert.equal(refreshedGrant.did, owner.did, "the expired authority grant refreshes using the authority client");
+    await expireStoredSession("authority_grant", owner.did);
+    await acceptAuthenticatedApiRoute(network.pds, owner.did);
+    await expireStoredSession("authority_grant", owner.did);
 
     const backupPath = join(directory, "app-backup.db");
     const restoredPath = join(directory, "app-restored.db");
@@ -530,7 +497,7 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     const restoredDb = new BetterSqlite3(restoredPath, { readonly: true, fileMustExist: true });
     try { assert.equal(restoredDb.pragma("integrity_check", { simple: true }), "ok"); }
     finally { restoredDb.close(); }
-    const resumed = await runRestartRecovery({ databasePath: restoredPath, authorityDid: owner.did, workspace: bootstrap.workspace, memberDid: member.did, operationId: failedOperationId, useStoredOAuthSession: true });
+    const resumed = await runRestartRecovery({ databasePath: restoredPath, authorityDid: owner.did, workspace: bootstrap.workspace, memberDid: member.did, operationId: failedOperationId, useStoredAuthorityGrant: true });
     assert.equal(resumed.state, "completed");
     assert.ok(resumed.discoveredWorkspaces.includes(bootstrap.workspace), "workspace discovery succeeds against the restored database");
     assert.equal(resumed.reconciliationState, "completed", "PDS reconciliation completes after backup restoration");
@@ -590,15 +557,15 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     assert.ok(oauthProvider);
     const revokedCheckDb = new BetterSqlite3(restoredPath);
     const journalBeforeRevokedCheck = revokedCheckDb.prepare("SELECT workspace, actor, operation_id, state, steps_json, updated_at FROM operation ORDER BY workspace, actor, operation_id").all();
-    const encryptedRestoredSession = revokedCheckDb.prepare("SELECT value FROM oauth_session WHERE key = ?").get(owner.did) as { value: string } | undefined;
-    assert.ok(encryptedRestoredSession);
+    const encryptedRestoredGrant = revokedCheckDb.prepare("SELECT value FROM authority_grant WHERE key = ?").get(owner.did) as { value: string } | undefined;
+    assert.ok(encryptedRestoredGrant);
     const { decryptJson } = await import("@/auth/encrypted-store");
-    const restoredOAuthSession = decryptJson<{ tokenSet: { access_token: string } }>(encryptedRestoredSession.value);
-    const storedGrant = await oauthProvider.tokenManager.findToken(restoredOAuthSession.tokenSet.access_token);
+    const restoredGrant = decryptJson<{ tokenSet: { access_token: string } }>(encryptedRestoredGrant.value);
+    const storedGrant = await oauthProvider.tokenManager.findToken(restoredGrant.tokenSet.access_token);
     assert.ok(storedGrant);
     await oauthProvider.tokenManager.deleteToken(storedGrant.id);
     const revokedSessionCheck = await runReconciliation(restoredPath);
-    assert.equal(revokedSessionCheck.exitCode, 1, "reconciliation reports a revoked saved authority session");
+    assert.equal(revokedSessionCheck.exitCode, 1, "reconciliation reports a revoked authority grant");
     assert.match(revokedSessionCheck.stderr, /reconciliation failed/);
     assert.deepEqual(
       revokedCheckDb.prepare("SELECT workspace, actor, operation_id, state, steps_json, updated_at FROM operation ORDER BY workspace, actor, operation_id").all(),
@@ -1131,84 +1098,6 @@ async function writeRecord(client: { procedure<TInput, TOutput>(method: string, 
   return client.procedure<Record<string, unknown>, { uri: string; cid: string }>("com.atproto.space.putRecord", { space, repo, collection, rkey, record });
 }
 
-async function storeAuthorityOAuthSession(pds: TestPds, authorityDid: string): Promise<string> {
-  const { WORKSPACE_DISCOVERY_SCOPE } = await import("@/auth/permission-sets");
-  return storeOAuthSession(pds, authorityDid, [
-    WORKSPACE_DISCOVERY_SCOPE,
-    "space:org.slack.workspace?authority=self&skey=*&action=read_self&action=read&manage=create&manage=update&collection=org.slack.admin&collection=org.slack.directory&collection=org.slack.workspace.profile&collection=org.slack.workspace.roster&action=create&action=update&action=delete",
-    "space:org.slack.inbox?authority=self&skey=*&action=read_self&action=read&manage=create&manage=update&collection=org.slack.joinDecision&action=create&action=update&action=delete",
-    "space:org.slack.channel?authority=self&skey=*&action=read_self&action=read&manage=create&manage=update&collection=org.slack.channel.roster&action=create&action=update&action=delete",
-  ], "backup-acceptance-dpop");
-}
-
-async function storeOAuthSession(pds: TestPds, did: string, requestedScopes: readonly string[], keyLabel: string): Promise<string> {
-  assert.ok(pds.ctx.oauthProvider, "the local PDS test network exposes its OAuth provider");
-  const [{ JoseKey }, { oauthSqliteStore }, { generateCode }, { canonicalOAuthScope }, { getOAuthClient }] = await Promise.all([
-    import("@atproto/jwk-jose"),
-    import("@/auth/encrypted-store"),
-    import(pathToFileURL(join(PINNED_CHECKOUT!, "packages/oauth/oauth-provider/src/request/code.ts")).href),
-    import("@/auth/oauth-scope"),
-    import("@/auth/oauth"),
-  ]);
-  const clientScope = canonicalOAuthScope(["atproto", ...requestedScopes]);
-  const metadata = getOAuthClient(clientScope).clientMetadata;
-  const clientId = metadata.client_id;
-  const redirectUri = metadata.redirect_uris[0];
-  const client = await pds.ctx.oauthProvider.clientManager.getClient(clientId);
-  const authorizationRequest = { client_id: clientId, redirect_uri: redirectUri, response_type: "code", scope: clientScope };
-  assert.doesNotThrow(() => client.validateRequest(authorizationRequest), "the pinned PDS accepts the exact scope advertised by the app client");
-  assert.throws(() => client.validateRequest({ ...authorizationRequest, scope: `${clientScope} space:unadvertised` }), undefined, "the PDS rejects a requested scope that is absent from the dynamic client metadata");
-  const key = await JoseKey.generate(["ES256"], keyLabel);
-  const publicJwk = key.bareJwk;
-  assert.ok(publicJwk && publicJwk.kty === "EC" && publicJwk.crv === "P-256" && publicJwk.x && publicJwk.y);
-  const dpopJkt = createHash("sha256")
-    .update(JSON.stringify({ crv: publicJwk.crv, kty: publicJwk.kty, x: publicJwk.x, y: publicJwk.y }))
-    .digest("base64url");
-  const { account } = await pds.ctx.oauthProvider.accountManager.getAccount(did);
-  const token = await pds.ctx.oauthProvider.tokenManager.createToken(
-    client,
-    { method: "none" },
-    { ipAddress: "127.0.0.1", port: 443 },
-    account,
-    null,
-    {
-      client_id: clientId,
-      redirect_uri: redirectUri,
-      response_type: "code",
-      scope: clientScope,
-      dpop_jkt: dpopJkt,
-    },
-    await generateCode(),
-  );
-  const savedSession = {
-    dpopJwk: key.privateJwk,
-    authMethod: { method: "none" as const },
-    tokenSet: {
-      iss: pds.ctx.cfg.oauth.issuer,
-      sub: did,
-      aud: pds.url,
-      scope: token.scope ?? clientScope,
-      access_token: token.access_token,
-      ...(token.refresh_token ? { refresh_token: token.refresh_token } : {}),
-      token_type: "DPoP" as const,
-      expires_at: new Date(Date.now() + token.expires_in * 1000).toISOString(),
-    },
-  };
-  await oauthSqliteStore("oauth_session").set(did, { ...savedSession, oauthClientScope: clientScope } as never);
-  assert.ok(token.refresh_token, "the refresh-path acceptance requires a real PDS refresh token");
-  return token.access_token;
-}
-
-async function expireStoredOAuthSession(did: string): Promise<void> {
-  const { oauthSqliteStore } = await import("@/auth/encrypted-store");
-  const store = oauthSqliteStore("oauth_session");
-  const saved = await store.get(did);
-  assert.ok(saved && "tokenSet" in saved && saved.tokenSet, "the authority OAuth session is stored");
-  const expired = structuredClone(saved) as unknown as { tokenSet: Record<string, unknown> };
-  expired.tokenSet.expires_at = new Date(Date.now() - 1_000).toISOString();
-  await store.set(did, expired as never);
-}
-
 async function runReconciliation(databasePath: string, mutationsPaused = true): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
   const child = spawn(process.execPath, ["--import", "tsx", "scripts/reconcile-workspaces.ts"], {
     cwd: process.cwd(),
@@ -1226,11 +1115,13 @@ async function runReconciliation(databasePath: string, mutationsPaused = true): 
   return { exitCode, stdout, stderr };
 }
 
-async function acceptAuthenticatedApiRoute(authorityDid: string): Promise<void> {
+async function acceptAuthenticatedApiRoute(pds: TestPds, authorityDid: string): Promise<void> {
   const [{ createWebSession, WEB_SESSION_COOKIE }, { tidNow }] = await Promise.all([
     import("@/auth/web-session"),
     import("@/protocol/keys"),
   ]);
+  // The owner signs in as a member; the route creates the workspace with the separate authority grant, never with that sign-in.
+  await storeOAuthSession(pds, authorityDid, await memberSignInScopes(), "route-owner-sign-in");
   const cookie = await createWebSession(authorityDid);
   const port = await availablePort();
   const serverUrl = `http://127.0.0.1:${port}`;
@@ -1258,10 +1149,11 @@ async function acceptAuthenticatedApiRoute(authorityDid: string): Promise<void> 
     const { getRawDb } = await import("@/lib/db");
     const webSessionExists = Boolean(getRawDb().prepare("SELECT 1 AS found FROM web_session WHERE token_hash = ?")
       .get(createHash("sha256").update(cookie).digest("hex")));
-    const oauthSessionExists = Boolean(getRawDb().prepare("SELECT 1 AS found FROM oauth_session WHERE key = ?").get(authorityDid));
-    assert.equal(authenticated.status, 201, `${responseBody}\n${serverOutput}\nparentDB webSession=${webSessionExists} oauthSession=${oauthSessionExists}`);
+    const signInExists = Boolean(getRawDb().prepare("SELECT 1 AS found FROM oauth_session WHERE key = ?").get(authorityDid));
+    const grantExists = Boolean(getRawDb().prepare("SELECT 1 AS found FROM authority_grant WHERE key = ?").get(authorityDid));
+    assert.equal(authenticated.status, 201, `${responseBody}\n${serverOutput}\nparentDB webSession=${webSessionExists} signIn=${signInExists} grant=${grantExists}`);
     const result = JSON.parse(responseBody) as { state: string; workspace: string };
-    assert.equal(result.state, "completed", "the authenticated route restores its encrypted Node OAuth session and bootstraps against the PDS");
+    assert.equal(result.state, "completed", "the authenticated route restores the encrypted authority grant and bootstraps against the PDS");
     assert.ok(result.workspace.startsWith(`at://${authorityDid}/space/org.slack.workspace/`));
   } finally {
     const closed = waitForChildClose(child);
@@ -1317,7 +1209,7 @@ function waitForChildClose(child: ReturnType<typeof spawn>): Promise<void> {
 }
 
 async function runRestartRecovery(input: {
-  databasePath: string; authorityDid: string; workspace: string; memberDid: string; operationId: string; accessJwt?: string; pdsUrl?: string; resumeAll?: boolean; useStoredOAuthSession?: boolean;
+  databasePath: string; authorityDid: string; workspace: string; memberDid: string; operationId: string; accessJwt?: string; pdsUrl?: string; resumeAll?: boolean; useStoredAuthorityGrant?: boolean;
 }): Promise<{ state: string; completedSteps: string[]; resumedOperationState: string | null; discoveredWorkspaces: string[]; reconciliationState: string }> {
   const child = spawn(process.execPath, ["--import", "tsx", "protocol-tests/recover-pending-operation.ts"], {
     cwd: process.cwd(),
@@ -1331,7 +1223,7 @@ async function runRestartRecovery(input: {
       RECOVERY_PDS_URL: input.pdsUrl ?? "",
       RECOVERY_OPERATION_ID: input.operationId,
       RECOVERY_RESUME_ALL: input.resumeAll ? "true" : "false",
-      RECOVERY_USE_STORED_OAUTH_SESSION: input.useStoredOAuthSession ? "true" : "false",
+      RECOVERY_USE_STORED_AUTHORITY_GRANT: input.useStoredAuthorityGrant ? "true" : "false",
     },
     stdio: ["ignore", "pipe", "pipe"],
   });

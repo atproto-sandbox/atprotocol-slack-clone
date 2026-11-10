@@ -170,27 +170,47 @@ export function bearerSession(actor: { did: string; accessJwt: string; pds: Test
   };
 }
 
+type SessionTable = "oauth_session" | "authority_grant";
+
 /**
- * Mints a real PDS-issued, DPoP-bound OAuth token set for `did` with exactly `scopes` (plus `atproto`) for the app's own
- * loopback client, and stores it where the app's `NodeOAuthClient` restores sessions from. This is what a completed
- * authorization-code flow leaves behind, without driving the consent screen.
+ * Mints a real PDS-issued, DPoP-bound OAuth token set for `did` with exactly `scopes` (plus `atproto`) for the app's member
+ * loopback client, and stores it where the app restores member sessions from. This is what a completed sign-in leaves
+ * behind, without driving the consent screen.
  */
 export async function storeOAuthSession(pds: TestPds, did: string, scopes: readonly string[], keyLabel: string): Promise<{ accessToken: string; clientScope: string }> {
-  assert.ok(pds.ctx.oauthProvider, "the local PDS test network exposes its OAuth provider");
-  const [{ JoseKey }, { oauthSqliteStore }, { generateCode }, { canonicalOAuthScope }, { getOAuthClient }] = await Promise.all([
-    import("@atproto/jwk-jose"),
-    import("@/auth/encrypted-store"),
-    import(pathToFileURL(join(pinnedCheckout(), "packages/oauth/oauth-provider/src/request/code.ts")).href) as Promise<{ generateCode(): Promise<string> }>,
-    import("@/auth/oauth-scope"),
-    import("@/auth/oauth"),
+  const [{ canonicalOAuthScope }, { getOAuthClient }, { oauthSqliteStore }] = await Promise.all([
+    import("@/auth/oauth-scope"), import("@/auth/oauth"), import("@/auth/encrypted-store"),
   ]);
   const clientScope = canonicalOAuthScope(["atproto", ...scopes]);
   const metadata = getOAuthClient(clientScope).clientMetadata;
-  const clientId = metadata.client_id;
-  const redirectUri = metadata.redirect_uris[0];
-  const client = await pds.ctx.oauthProvider.clientManager.getClient(clientId);
+  const { saved, accessToken } = await mintProviderSession(pds, did, { clientId: metadata.client_id, redirectUri: metadata.redirect_uris[0], scope: clientScope }, keyLabel);
+  await oauthSqliteStore("oauth_session").set(did, { ...saved, oauthClientScope: clientScope } as never);
+  return { accessToken, clientScope };
+}
+
+/** The same, for the workspace-authority client: what a completed authority flow leaves in the grant table. */
+export async function storeAuthorityGrant(pds: TestPds, did: string, keyLabel: string): Promise<{ accessToken: string }> {
+  const [{ authorityClientMetadata }, { oauthSqliteStore }] = await Promise.all([import("@/operator/authority-grant"), import("@/auth/encrypted-store")]);
+  const metadata = authorityClientMetadata();
+  const { saved, accessToken } = await mintProviderSession(pds, did, { clientId: metadata.client_id, redirectUri: metadata.redirect_uris[0], scope: metadata.scope }, keyLabel);
+  await oauthSqliteStore("authority_grant").set(did, saved as never);
+  return { accessToken };
+}
+
+async function mintProviderSession(
+  pds: TestPds,
+  did: string,
+  request: { clientId: string; redirectUri: string; scope: string },
+  keyLabel: string,
+): Promise<{ saved: Record<string, unknown>; accessToken: string }> {
+  assert.ok(pds.ctx.oauthProvider, "the local PDS test network exposes its OAuth provider");
+  const [{ JoseKey }, { generateCode }] = await Promise.all([
+    import("@atproto/jwk-jose"),
+    import(pathToFileURL(join(pinnedCheckout(), "packages/oauth/oauth-provider/src/request/code.ts")).href) as Promise<{ generateCode(): Promise<string> }>,
+  ]);
+  const client = await pds.ctx.oauthProvider.clientManager.getClient(request.clientId);
   // What the PDS checks when the authorization request arrives: this client may ask for exactly this scope.
-  client.validateRequest({ client_id: clientId, redirect_uri: redirectUri, response_type: "code", scope: clientScope });
+  client.validateRequest({ client_id: request.clientId, redirect_uri: request.redirectUri, response_type: "code", scope: request.scope });
   const key = await JoseKey.generate(["ES256"], keyLabel);
   const publicJwk = key.bareJwk;
   assert.ok(publicJwk && publicJwk.kty === "EC" && publicJwk.crv === "P-256" && publicJwk.x && publicJwk.y);
@@ -204,25 +224,26 @@ export async function storeOAuthSession(pds: TestPds, did: string, scopes: reado
     { ipAddress: "127.0.0.1", port: 443 },
     account,
     null,
-    { client_id: clientId, redirect_uri: redirectUri, response_type: "code", scope: clientScope, dpop_jkt: dpopJkt },
+    { client_id: request.clientId, redirect_uri: request.redirectUri, response_type: "code", scope: request.scope, dpop_jkt: dpopJkt },
     await generateCode(),
   );
-  await oauthSqliteStore("oauth_session").set(did, {
-    dpopJwk: key.privateJwk,
-    authMethod: { method: "none" as const },
-    tokenSet: {
-      iss: pds.ctx.cfg.oauth.issuer,
-      sub: did,
-      aud: pds.url,
-      scope: token.scope ?? clientScope,
-      access_token: token.access_token,
-      ...(token.refresh_token ? { refresh_token: token.refresh_token } : {}),
-      token_type: "DPoP" as const,
-      expires_at: new Date(Date.now() + token.expires_in * 1000).toISOString(),
+  return {
+    accessToken: token.access_token,
+    saved: {
+      dpopJwk: key.privateJwk,
+      authMethod: { method: "none" as const },
+      tokenSet: {
+        iss: pds.ctx.cfg.oauth.issuer,
+        sub: did,
+        aud: pds.url,
+        scope: token.scope ?? request.scope,
+        access_token: token.access_token,
+        ...(token.refresh_token ? { refresh_token: token.refresh_token } : {}),
+        token_type: "DPoP" as const,
+        expires_at: new Date(Date.now() + token.expires_in * 1000).toISOString(),
+      },
     },
-    oauthClientScope: clientScope,
-  } as never);
-  return { accessToken: token.access_token, clientScope };
+  };
 }
 
 /**
@@ -230,31 +251,29 @@ export async function storeOAuthSession(pds: TestPds, did: string, scopes: reado
  * measures a session's lifetime against, and marks the stored copy's access token expired so the next use refreshes. For
  * a public client, fifteen days is past its two-week lifetime.
  */
-export async function ageOAuthSessionAtProvider(pds: TestPds, did: string, accessToken: string, ageMs: number): Promise<void> {
+export async function ageOAuthSessionAtProvider(pds: TestPds, table: SessionTable, did: string, accessToken: string, ageMs: number): Promise<void> {
   assert.ok(pds.ctx.oauthProvider);
   const found = await pds.ctx.oauthProvider.tokenManager.findToken(accessToken);
   assert.ok(found, "the provider holds the token to age");
   const then = new Date(Date.now() - ageMs).toISOString();
   await pds.ctx.accountManager.db.db.updateTable("token").set({ createdAt: then, updatedAt: then }).where("tokenId", "=", found.id).execute();
+  await expireStoredSession(table, did);
+}
+
+/** Marks the stored copy's access token expired, so its next use refreshes it at the provider. */
+export async function expireStoredSession(table: SessionTable, did: string): Promise<void> {
   const { oauthSqliteStore } = await import("@/auth/encrypted-store");
-  const store = oauthSqliteStore("oauth_session");
+  const store = oauthSqliteStore(table);
   const saved = await store.get(did);
-  assert.ok(saved && "tokenSet" in saved && saved.tokenSet, "the OAuth session is stored");
+  assert.ok(saved && "tokenSet" in saved && saved.tokenSet, `a session is stored in ${table}`);
   const expired = structuredClone(saved) as unknown as { tokenSet: Record<string, unknown> };
   expired.tokenSet.expires_at = new Date(Date.now() - 1_000).toISOString();
   await store.set(did, expired as never);
 }
 
-/** The scopes the app's sign-in requests today (`/api/oauth/login`). */
-export async function loginScopes(): Promise<string[]> {
-  const { WORKSPACE_DISCOVERY_SCOPE } = await import("@/auth/permission-sets");
-  return [WORKSPACE_DISCOVERY_SCOPE];
-}
-
-/** The scopes a creator holds after approving the workspace-authority permission on top of sign-in. */
-export async function authorityScopes(): Promise<string[]> {
-  const { WORKSPACE_DISCOVERY_SCOPE, workspaceAuthorityScopes } = await import("@/auth/permission-sets");
-  return [WORKSPACE_DISCOVERY_SCOPE, ...workspaceAuthorityScopes()];
+/** The scopes every sign-in requests (`/api/oauth/login`). */
+export async function memberSignInScopes(): Promise<readonly string[]> {
+  return (await import("@/auth/permission-sets")).MEMBER_SIGN_IN_SCOPES;
 }
 
 export const SERVICE_METHODS_TODAY = ["org.slack.operator.execute", "org.slack.operator.getOperation", "org.slack.operator.listInboxWriters"] as const;
@@ -275,6 +294,37 @@ export async function combinedMemberScopes(serviceRef: string): Promise<string[]
     `rpc?${[...SERVICE_METHODS_TODAY, ...SERVICE_METHODS_PLANNED].map((method) => `lxm=${method}`).join("&")}&aud=${audience}`,
     ...DM_BROWSER_SCOPES.filter((scope) => scope !== "atproto"),
   ];
+}
+
+type OperatorMethod = (typeof SERVICE_METHODS_TODAY)[number];
+
+/**
+ * Calls one of the operator's XRPC methods through its real route handler, authenticated with a service token the caller's
+ * own session obtains, and returns the parsed answer. Throws with the operator's answer on any status other than 200.
+ */
+export async function callOperatorMethod(
+  session: { did: string; fetchHandler(path: string, init: RequestInit): Promise<Response> },
+  serviceRef: string,
+  method: OperatorMethod,
+  query: Record<string, string>,
+  body?: unknown,
+): Promise<Record<string, unknown>> {
+  const [{ requestOperatorServiceAuth }, { NextRequest }] = await Promise.all([import("@/auth/permission-sets"), import("next/server")]);
+  const token = await requestOperatorServiceAuth(session as never, serviceRef, method);
+  const url = new URL(`http://127.0.0.1:3000/xrpc/${method}`);
+  for (const [name, value] of Object.entries(query)) url.searchParams.set(name, value);
+  type Handler = (request: InstanceType<typeof NextRequest>) => Promise<Response>;
+  const route = await import(`@/app/xrpc/${method}/route`) as { GET?: Handler; POST?: Handler };
+  const handler = body === undefined ? route.GET : route.POST;
+  assert.ok(handler, `${method} has a handler`);
+  const response = await handler(new NextRequest(url, {
+    method: body === undefined ? "GET" : "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  }));
+  const answer = await response.json() as Record<string, unknown>;
+  if (response.status !== 200) throw new Error(`${method} answered ${response.status}: ${JSON.stringify(answer)}`);
+  return answer;
 }
 
 export type Outcome = { ok: true } | { ok: false; error: string };

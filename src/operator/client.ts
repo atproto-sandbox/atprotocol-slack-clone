@@ -91,6 +91,11 @@ export function operatorResponseFailure(
   return null;
 }
 
+/** The operator holds no usable grant for the workspace's authority; only the authority approving again fixes it. */
+export function isAuthorityReauthorizationRequired(error: unknown): boolean {
+  return error instanceof OperatorRemoteError && error.code === "AuthoritySessionUnavailable";
+}
+
 export function operatorRemoteHttpStatus(error: unknown): number | null {
   if (error instanceof OperatorRemoteError) {
     return Number.isInteger(error.status) && error.status >= 400 && error.status <= 599 ? error.status : 502;

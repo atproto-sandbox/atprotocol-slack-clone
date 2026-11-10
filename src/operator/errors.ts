@@ -2,6 +2,7 @@ import { isTransientOAuthInfrastructureError } from "@/auth/oauth-request-lock";
 import { XrpcError } from "@/atproto/xrpc";
 import { UpstreamResponseTooLargeError } from "@/lib/bounded-json";
 import { TokenRefreshError } from "@atproto/oauth-client-node";
+import { AuthorityReauthorizationRequiredError } from "./authority-grant";
 import { isTransientOperationError } from "./journal";
 
 export class OperatorInfrastructureError extends Error {
@@ -36,7 +37,7 @@ export function operatorHttpFailure(error: unknown): { status: 502 | 503; name: 
       message: "A temporary identity, PDS, or session-store failure prevented this request.",
     };
   }
-  if (error instanceof TokenRefreshError) {
+  if (error instanceof AuthorityReauthorizationRequiredError || error instanceof TokenRefreshError) {
     return {
       status: 502,
       name: "AuthoritySessionUnavailable",

@@ -25,6 +25,7 @@
     "test:sync-budget": "node --import tsx protocol-tests/sync-budget.ts",
     "backup:db": "node scripts/backup-db.mjs",
     "reconcile": "node --import tsx scripts/reconcile-workspaces.ts",
+    "authority": "node --import tsx scripts/authority-grant.ts",
     "playground": "node --import tsx scripts/playground.ts"
   },
   "dependencies": {

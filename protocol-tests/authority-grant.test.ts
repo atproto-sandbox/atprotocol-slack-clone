@@ -2,79 +2,65 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import test from "node:test";
 import {
-  authorityScopes,
   ageOAuthSessionAtProvider,
-  loginScopes,
+  callOperatorMethod,
+  memberSignInScopes,
   outcome,
   startPdsNetwork,
+  storeAuthorityGrant,
   storeOAuthSession,
   type NetworkActor,
   type Outcome,
   type PdsNetwork,
 } from "./support/pds-network";
 
-// K1 of `.ai/plans/platform-refactor.md` (finding F1): the operator administers a workspace with its creator's ordinary
-// sign-in session, so the creator signing out, signing in again elsewhere, or letting that session lapse breaks admin
-// operations for every admin of the workspace. The "F1:" subtests pin today's behavior exactly; they are a record of the
-// code before R1 and go away with it. R1 provisions the separate authority grant in this fixture and turns the `todo`
-// subtests, which state what R1 must deliver, into the passing gate.
+// R1's gate (K1 of `.ai/plans/platform-refactor.md`, finding F1). Before R1 the operator administered a workspace with its
+// creator's ordinary sign-in session, so the creator signing out, signing in again elsewhere, or letting that session
+// lapse broke admin operations for every admin (recorded in the plan's R0 results). Now the operator holds a separate
+// authority grant: each scenario changes only the creator's sign-in, and every admin operation keeps working.
 
 type Scenario = "signs out" | "signs in again in a second browser" | "lets the sign-in session pass its lifetime";
 
 const FIFTEEN_DAYS_MS = 15 * 24 * 60 * 60 * 1000;
 
-const R1_PENDING = "fails until R1 separates the workspace authority grant from the creator's sign-in";
-
-test("the workspace authority grant outlives the creator's sign-in session (K1)", async (t) => {
+test("the workspace authority grant outlives the creator's sign-in session", async (t) => {
   const pds = await startPdsNetwork("authority-grant");
   try {
     for (const scenario of ["signs out", "signs in again in a second browser", "lets the sign-in session pass its lifetime"] as const) {
-      // given a workspace created by its authority, with a second admin (outside the expected failure, so a broken setup fails)
-      const workspace = await createWorkspaceWithSecondAdmin(pds, scenario);
+      await t.test(`admin operations keep working after the creator ${scenario}`, async (st) => {
+        // given a workspace created with the authority grant, with a second admin, while its creator is signed in
+        const workspace = await createWorkspaceWithSecondAdmin(pds, scenario);
 
-      // when the creator's sign-in session changes
-      await workspace.creatorEvent(scenario);
-      const results = await adminOperations(pds, workspace);
-      const failed = Object.entries(results).filter(([, result]) => !result.ok);
+        // when the creator's sign-in session changes
+        await workspace.creatorEvent(scenario);
 
-      // then, today, admin operations fail because the operator used that sign-in session (finding F1)
-      await t.test(`F1: after the creator ${scenario}, admin operations fail`, (st) => {
+        // then every admin operation still succeeds
+        const results = await adminOperations(pds, workspace);
         for (const [operation, result] of Object.entries(results)) st.diagnostic(`${operation}: ${result.ok ? "ok" : result.error}`);
-        assert.deepEqual(failed.map(([operation]) => operation), F1_FAILURES[scenario], "exactly these operations fail");
-        assert.ok(failed.every(([, result]) => !result.ok && SESSION_FAILURE.test(result.error)), "every failure is the lost or narrowed authority session");
-      });
-
-      // and after R1 every admin operation succeeds
-      await t.test(`admin operations keep working after the creator ${scenario}`, { todo: R1_PENDING }, () => {
-        assert.deepEqual(failed.map(([operation]) => operation), []);
+        assert.deepEqual(Object.entries(results).filter(([, result]) => !result.ok).map(([operation]) => operation), []);
       });
     }
+
+    await t.test("the authority account creates a second workspace with no further approval", async () => {
+      // given an authority whose grant created one workspace
+      const [{ bootstrapWorkspace }, { restoreAuthorityGrant }, { tidNow }] = await Promise.all([
+        import("@/workspaces/bootstrap"), import("@/operator/authority-grant"), import("@/protocol/keys"),
+      ]);
+      const authority = await pds.createActor("k1second-owner", 0);
+      await storeAuthorityGrant(pds.hosts[0], authority.did, "k1second-grant-dpop");
+      const first = await bootstrapWorkspace(await restoreAuthorityGrant(authority.did), { name: "K1 first", operationId: tidNow() });
+
+      // when it creates another
+      const second = await bootstrapWorkspace(await restoreAuthorityGrant(authority.did), { name: "K1 second", operationId: tidNow() });
+
+      // then both complete on the same grant
+      assert.deepEqual([first.state, second.state], ["completed", "completed"]);
+      assert.notEqual(first.workspace, second.workspace);
+    });
   } finally {
     await pds.close();
   }
 });
-
-const ALL_OPERATIONS = [
-  "second admin passes the operator admin check (execute, getOperation, listInboxWriters)",
-  "second admin creates a channel",
-  "second admin lists inbox writers",
-  "the authority account passes the operator admin check",
-  "the reconcile job verifies the workspace",
-];
-
-/**
- * Which operations F1 breaks in each scenario, as observed at `5d88b414` before R1. After a second sign-in the session still
- * belongs to the authority, so the authority's own admin check and the reconcile job's paused check (which runs only that
- * check) still pass; every operation that reads the inbox for another admin does not.
- */
-const F1_FAILURES: Record<Scenario, string[]> = {
-  "signs out": ALL_OPERATIONS,
-  "signs in again in a second browser": ALL_OPERATIONS.slice(0, 3),
-  "lets the sign-in session pass its lifetime": ALL_OPERATIONS,
-};
-
-/** What F1 looks like from an admin operation: the creator's session is gone, expired, or no longer carries the authority scopes. */
-const SESSION_FAILURE = /session was deleted|Session expired|Missing required scope|authority session is missing/;
 
 type WorkspaceUnderTest = {
   uri: string;
@@ -84,55 +70,74 @@ type WorkspaceUnderTest = {
 };
 
 async function createWorkspaceWithSecondAdmin(pds: PdsNetwork, scenario: Scenario): Promise<WorkspaceUnderTest> {
-  const [{ getOAuthClientForSession }, { bootstrapWorkspace }, { requireActiveWorkspaceAdmin }, { executeOperatorOperation }, { tidNow }] = await Promise.all([
-    import("@/auth/oauth"), import("@/workspaces/bootstrap"), import("@/operator/security"), import("@/operator/operations"), import("@/protocol/keys"),
+  const [{ getOAuthClientForSession }, { bootstrapWorkspace }, { restoreAuthorityGrant }, { requireActiveWorkspaceAdmin }, { executeOperatorOperation }, { tidNow }] = await Promise.all([
+    import("@/auth/oauth"), import("@/workspaces/bootstrap"), import("@/operator/authority-grant"), import("@/operator/security"),
+    import("@/operator/operations"), import("@/protocol/keys"),
   ]);
   const label = { "signs out": "k1out", "signs in again in a second browser": "k1again", "lets the sign-in session pass its lifetime": "k1lapse" }[scenario];
   const authority = await pds.createActor(`${label}-owner`, 0);
   const admin = await pds.createActor(`${label}-admin`, 1);
-  const grant = await storeOAuthSession(pds.hosts[0], authority.did, await authorityScopes(), `${label}-authority-dpop`);
-  const session = await (await getOAuthClientForSession(authority.did)).restore(authority.did);
-  const created = await bootstrapWorkspace(session, { name: `K1 ${label}`, operationId: tidNow() });
+  const { permissionScopeFor } = await import("@/auth/permission-sets");
+  await storeOAuthSession(admin.pds, admin.did, [...await memberSignInScopes(), ...permissionScopeFor("operatorAdmin", { workspaceDid: admin.did, serviceRef: pds.serviceRef })], `${label}-admin-dpop`);
+  // The creator is signed in as a member and has approved the workspace-authority grant, which the authority flow keeps apart.
+  const signIn = await storeOAuthSession(pds.hosts[0], authority.did, await memberSignInScopes(), `${label}-sign-in-dpop`);
+  await storeAuthorityGrant(pds.hosts[0], authority.did, `${label}-grant-dpop`);
+  const created = await bootstrapWorkspace(await restoreAuthorityGrant(authority.did), { name: `K1 ${label}`, operationId: tidNow() });
   assert.equal(created.state, "completed", "the creator sets up the workspace");
   const owner = await requireActiveWorkspaceAdmin(created.workspace, authority.did);
   for (const request of [{ kind: "inviteMember", subject: admin.did }, { kind: "setAdmin", subject: admin.did, active: true }]) {
     const view = await executeOperatorOperation(owner, tidNow(), request);
     assert.equal(view.state, "completed", `${request.kind} completes`);
   }
+  const restoreSignIn = async () => (await getOAuthClientForSession(authority.did)).restore(authority.did);
   return {
     uri: created.workspace,
     authority,
     admin,
     async creatorEvent(event) {
       if (event === "signs out") {
-        // What /api/oauth/logout does with the creator's session.
-        const current = await (await getOAuthClientForSession(authority.did)).restore(authority.did);
-        await current.signOut();
+        // The creator signs out through the real route, holding the web session its sign-in created.
+        const [{ createWebSession, WEB_SESSION_COOKIE }, { POST }, { NextRequest }, { getConfig }] = await Promise.all([
+          import("@/auth/web-session"), import("@/app/api/oauth/logout/route"), import("next/server"), import("@/lib/config"),
+        ]);
+        const cookie = await createWebSession(authority.did);
+        const origin = getConfig().appUrl.origin;
+        const response = await POST(new NextRequest(new URL("/api/oauth/logout", origin), { method: "POST", headers: { origin, cookie: `${WEB_SESSION_COOKIE}=${cookie}` } }));
+        assert.equal(response.status, 200);
+        await assert.rejects(restoreSignIn(), "the creator's sign-in is gone");
         return;
       }
       if (event === "signs in again in a second browser") {
-        // What /oauth/callback stores for a fresh sign-in: the login scopes only, under the same DID-keyed row.
-        await storeOAuthSession(pds.hosts[0], authority.did, await loginScopes(), `${label}-second-browser-dpop`);
+        // What /oauth/callback stores for a fresh sign-in, under the same DID-keyed member row.
+        await storeOAuthSession(pds.hosts[0], authority.did, await memberSignInScopes(), `${label}-second-browser-dpop`);
         return;
       }
-      await ageOAuthSessionAtProvider(pds.hosts[0], authority.did, grant.accessToken, FIFTEEN_DAYS_MS);
+      // The sign-in passes its lifetime, and the web app's next use of it fails and drops it.
+      await ageOAuthSessionAtProvider(pds.hosts[0], "oauth_session", authority.did, signIn.accessToken, FIFTEEN_DAYS_MS);
+      await assert.rejects(restoreSignIn(), /Session expired/);
     },
   };
 }
 
 async function adminOperations(pds: PdsNetwork, workspace: WorkspaceUnderTest): Promise<Record<string, Outcome>> {
-  const [{ requireActiveWorkspaceAdmin }, { executeOperatorOperation, listInboxWriters }, { tidNow }] = await Promise.all([
-    import("@/operator/security"), import("@/operator/operations"), import("@/protocol/keys"),
+  const [{ getOAuthClientForSession }, { requireActiveWorkspaceAdmin }, { tidNow }] = await Promise.all([
+    import("@/auth/oauth"), import("@/operator/security"), import("@/protocol/keys"),
   ]);
-  const channelKey = `k1-${tidNow()}`;
+  // The second admin calls each operator method through its route, with service tokens from its own signed-in session.
+  const admin = await (await getOAuthClientForSession(workspace.admin.did)).restore(workspace.admin.did);
+  const operationId = tidNow();
   return {
-    "second admin passes the operator admin check (execute, getOperation, listInboxWriters)": await outcome(() => requireActiveWorkspaceAdmin(workspace.uri, workspace.admin.did)),
-    "second admin creates a channel": await outcome(async () => {
-      const actor = await requireActiveWorkspaceAdmin(workspace.uri, workspace.admin.did);
-      const view = await executeOperatorOperation(actor, tidNow(), { kind: "createChannel", skey: channelKey, name: "k1", visibility: "public" });
-      assert.equal(view.state, "completed");
+    "second admin creates a channel (execute)": await outcome(async () => {
+      const answer = await callOperatorMethod(admin, pds.serviceRef, "org.slack.operator.execute", {}, {
+        workspace: workspace.uri, operationId, request: { kind: "createChannel", skey: `k1-${operationId}`, name: "k1", visibility: "public" },
+      }) as { operation?: { state?: string } };
+      assert.equal(answer.operation?.state, "completed");
     }),
-    "second admin lists inbox writers": await outcome(async () => listInboxWriters(await requireActiveWorkspaceAdmin(workspace.uri, workspace.admin.did))),
+    "second admin reads that operation (getOperation)": await outcome(async () => {
+      const answer = await callOperatorMethod(admin, pds.serviceRef, "org.slack.operator.getOperation", { workspace: workspace.uri, operationId }) as { operation?: { state?: string } };
+      assert.equal(answer.operation?.state, "completed");
+    }),
+    "second admin lists inbox writers (listInboxWriters)": await outcome(() => callOperatorMethod(admin, pds.serviceRef, "org.slack.operator.listInboxWriters", { workspace: workspace.uri })),
     "the authority account passes the operator admin check": await outcome(() => requireActiveWorkspaceAdmin(workspace.uri, workspace.authority.did)),
     "the reconcile job verifies the workspace": await outcome(() => runReconcileJob(pds, workspace.uri)),
   };
