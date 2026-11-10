@@ -11,10 +11,10 @@ import { memberspacePolicy } from "@/atproto/space-policy";
 
 export const PRIVATE_CHANNEL_NAME = "Private Room";
 
-const JOIN_REQUEST = "org.slack.joinRequest";
-const JOIN_DECISION = "org.slack.joinDecision";
-const CHANNEL_ROSTER = "org.slack.channel.roster";
-const CHANNEL_MESSAGE = "org.slack.channel.message";
+const JOIN_REQUEST = "new.flock.joinRequest";
+const JOIN_DECISION = "new.flock.joinDecision";
+const CHANNEL_ROSTER = "new.flock.channel.roster";
+const CHANNEL_MESSAGE = "new.flock.channel.message";
 
 export type PrivateChannel = { name: string; skey: string; space: string };
 export type Member = { did: string; read: boolean; write: boolean };
@@ -35,7 +35,7 @@ export function inboxOf(world: AppWorld): string {
 }
 
 export function operatorServiceRef(world: AppWorld): string {
-  return `did:web:localhost%3A${world.fixture.appUrl.port}#atproto_slack_admin`;
+  return `did:web:localhost%3A${world.fixture.appUrl.port}#atproto_flock_operator`;
 }
 
 export function requestUriOf(world: AppWorld, channel: PrivateChannel, requester: Actor): string {
@@ -82,7 +82,7 @@ export function accessOf(members: Member[], did: string): { read: boolean; write
 
 export async function privateChannelNamed(world: AppWorld, authority: Actor, name: string): Promise<PrivateChannel> {
   const directory = await world.pdsGet<{ records?: Array<{ value: { skey: string; name: string; visibility: string } }> }>(
-    authority, "com.atproto.space.listRecords", { space: world.workspaceUri, repo: authority.did, collection: "org.slack.directory", limit: "100" },
+    authority, "com.atproto.space.listRecords", { space: world.workspaceUri, repo: authority.did, collection: "new.flock.directory", limit: "100" },
   );
   assert.equal(directory.status, 200, JSON.stringify(directory.body));
   const entry = directory.body.records?.find(({ value }) => value.name === name)?.value;
@@ -215,13 +215,13 @@ export async function writeRequestAsUnlistedWriter(world: AppWorld, authority: A
 
 /** The inbox writers each discovery path can name right now: the operator's current member list and the PDS writer set. */
 export async function inboxWriterSources(world: AppWorld, authority: Actor): Promise<{ operator: string[]; listRepos: string[] }> {
-  const operator = await callOperator(world, authority, "org.slack.operator.listInboxWriters", { workspace: world.workspaceUri });
+  const operator = await callOperator(world, authority, "new.flock.operator.listInboxWriters", { workspace: world.workspaceUri });
   assert.equal(operator.status, 200, operator.text);
   return { operator: (JSON.parse(operator.text) as { writers: string[] }).writers, listRepos: await writerSetOf(await mintCredential(world, authority, inboxOf(world)), authority) };
 }
 
 /** Calls the operator's own XRPC endpoint with a service-auth token minted by the caller's PDS, not through the app's UI routes. */
-export async function callOperator(world: AppWorld, as: Actor, method: "org.slack.operator.listInboxWriters", params: Record<string, string>): Promise<{ status: number; text: string }> {
+export async function callOperator(world: AppWorld, as: Actor, method: "new.flock.operator.listInboxWriters", params: Record<string, string>): Promise<{ status: number; text: string }> {
   const auth = await world.pdsGet<{ token?: string }>(as, "com.atproto.server.getServiceAuth", { aud: operatorServiceRef(world), lxm: method });
   assert.equal(auth.status, 200, `service auth for ${method}: ${JSON.stringify(auth.body)}`);
   assert.ok(auth.body.token, "the PDS issued a service-auth token");

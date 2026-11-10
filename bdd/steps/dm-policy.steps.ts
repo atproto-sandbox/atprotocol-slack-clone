@@ -4,7 +4,7 @@ import { Given, Then, When } from "@cucumber/cucumber";
 import { DM_RENOTIFY_BACKOFF_MS } from "@/dm/backoff";
 import { readIndependentDmConversation } from "@/reader/independent-dm";
 import { dmConversationUri, dmInboxUri, recordKeyHash, stableHash, tidNow } from "@/protocol/keys";
-import { validateDmHeaderMatchesRequest, validateSpaceRecord } from "@/protocol/records";
+import { validateDmHeaderMatchesRequest, validateSpaceRecord } from "@/protocol/registry";
 import type { SecondApp } from "../../protocol-tests/support/app-fixture";
 import { completeConsent, signIn, submitWorkspaceName, uniqueWorkspaceName } from "../support/ui";
 import { PAGE_TIMEOUT_MS, type Actor, type AppWorld } from "../support/world";
@@ -332,18 +332,18 @@ Given("another member stored a record scoped to someone else's half in their own
   const aliceHalf = dmConversationUri(alice.did, convKey);
   const hostile = "HOSTILE record in bob's repo, scoped to alice's half";
   const spoofed = await this.pdsPost(bob, "com.atproto.space.putRecord", {
-    space: aliceHalf, repo: alice.did, collection: "org.slack.dm.message", rkey: tidNow(),
-    record: { $type: "org.slack.dm.message", text: "spoofed as alice", createdAt: new Date().toISOString() },
+    space: aliceHalf, repo: alice.did, collection: "new.flock.dm.message", rkey: tidNow(),
+    record: { $type: "new.flock.dm.message", text: "spoofed as alice", createdAt: new Date().toISOString() },
   });
   assert.equal(spoofed.status, 403, "the PDS itself refuses a write into someone else's repo, so the only reachable hostile write is in the writer's own repo");
   const planted = await this.pdsPost(bob, "com.atproto.space.putRecord", {
-    space: aliceHalf, repo: bob.did, collection: "org.slack.dm.message", rkey: tidNow(Date.now() + 60_000),
-    record: { $type: "org.slack.dm.message", text: hostile, createdAt: new Date().toISOString() },
+    space: aliceHalf, repo: bob.did, collection: "new.flock.dm.message", rkey: tidNow(Date.now() + 60_000),
+    record: { $type: "new.flock.dm.message", text: hostile, createdAt: new Date().toISOString() },
   });
   assert.equal(planted.status, 200, JSON.stringify(planted.body));
-  const inBobsRepo = await this.pdsGet<{ records: Array<{ value: { text: string } }> }>(bob, "com.atproto.space.listRecords", { space: aliceHalf, repo: bob.did, collection: "org.slack.dm.message", limit: "100" });
+  const inBobsRepo = await this.pdsGet<{ records: Array<{ value: { text: string } }> }>(bob, "com.atproto.space.listRecords", { space: aliceHalf, repo: bob.did, collection: "new.flock.dm.message", limit: "100" });
   assert.deepEqual(inBobsRepo.body.records.map((record) => record.value.text), [hostile], "the hostile record really is stored in bob's own repo, scoped to alice's half");
-  const asReader = await probeFor(this, alice).records(aliceHalf, bob, "org.slack.dm.message");
+  const asReader = await probeFor(this, alice).records(aliceHalf, bob, "new.flock.dm.message");
   assert.deepEqual(asReader.map((record) => record.value.text), [hostile], "and a credential holder for alice's half can fetch it from bob's repo");
   this.scratch.set("convKey", convKey);
   this.scratch.set("hostileText", hostile);
@@ -399,7 +399,7 @@ Given("a half header names a different conversation key or participant set", { t
   await dmpWriteHostileHalf(this, halfWithKey);
 
   const headerContext = (owner: Actor) => ({ authorityDid: owner.did, spaceUri: dmConversationUri(owner.did, convKey), repoDid: owner.did, rkey: "self" });
-  assert.equal(validateSpaceRecord("org.slack.dm.header", { $type: "org.slack.dm.header", ...subsetHeader, createdAt: new Date().toISOString() }, headerContext(wrongSet)).valid, true, "the differing participant set is a well-formed header on its own");
+  assert.equal(validateSpaceRecord("new.flock.dm.header", { $type: "new.flock.dm.header", ...subsetHeader, createdAt: new Date().toISOString() }, headerContext(wrongSet)).valid, true, "the differing participant set is a well-formed header on its own");
   assert.equal(validateDmHeaderMatchesRequest(subsetHeader, requested), false, "but it does not match the conversation being read");
   assert.equal(validateDmHeaderMatchesRequest(keyHeader, requested), false, "a header naming another conversation key does not match either");
   this.scratch.set("convKey", convKey);
@@ -418,7 +418,7 @@ Then("that half is ignored", async function (this: AppWorld) {
   for (const half of this.scratch.get("hostileHalves") as DmpHostileHalf[]) {
     const space = dmConversationUri(half.owner.did, half.convKey);
     assert.equal(await probe.credentialOutcome(space), "minted", `alice can mint a credential for ${half.owner.handle}'s half, so ignoring it is the client's decision and not a failed read`);
-    assert.deepEqual((await probe.records(space, half.owner, "org.slack.dm.message")).map((record) => record.value.text), [half.message], `and ${half.owner.handle}'s hostile message is served to her`);
+    assert.deepEqual((await probe.records(space, half.owner, "new.flock.dm.message")).map((record) => record.value.text), [half.message], `and ${half.owner.handle}'s hostile message is served to her`);
   }
   const independent = await readIndependentDmConversation(probeFor(this, alice).deps(), convKey, [alice.did, dana.did, wrongSet.did, wrongKey.did]);
   assert.deepEqual(independent.halves, { [alice.did]: "ok", [dana.did]: "ok", [wrongSet.did]: "missing", [wrongKey.did]: "missing" }, "an independent reader classifies the same halves as ignored");
@@ -431,7 +431,7 @@ type CrossedConversations = { first: { owner: string; convKey: string }; second:
 const TID_ALPHABET = "234567abcdefghijklmnopqrstuvwxyz";
 const RFC4648_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567";
 const SEPARATORS = ["", ",", "|", ":", "+", " ", "\n", "\0"];
-const PREFIXES = ["", "dm:", "org.slack.dm.conversation:", "org.slack.dm.conversation/"];
+const PREFIXES = ["", "dm:", "new.flock.dm.conversation:", "new.flock.dm.conversation/"];
 const DIGESTS = ["sha256", "sha512", "sha1", "md5"] as const;
 
 function encodeBase32(bytes: Uint8Array, alphabet: string): string {
@@ -592,7 +592,7 @@ Then("the same request record is re-put with a new revision", async function (th
   const convKey = this.scratch.get("convKey") as string;
   const ops = await dmpRequestOps(this, sender, recipient);
   assert.equal(ops.length, 1 + DM_RENOTIFY_BACKOFF_MS.length, "one original write and one re-put per backoff step");
-  assert.ok(ops.every((op) => op.collection === "org.slack.dm.request" && op.rkey === convKey), "every write is to the same request record");
+  assert.ok(ops.every((op) => op.collection === "new.flock.dm.request" && op.rkey === convKey), "every write is to the same request record");
   assert.equal(new Set(ops.map((op) => op.cid)).size, 1, "with identical content");
   assert.deepEqual(ops.slice(1).map((op) => op.prev), ops.slice(0, -1).map((op) => op.cid), "each re-put replaces the previous version of that record");
   assert.deepEqual(ops.map((op) => op.rev), [...new Set(ops.map((op) => op.rev))].sort(), "and carries a new, later revision");
@@ -607,7 +607,7 @@ Then("the recipient side treats the repeat as idempotent", async function (this:
   const sender = actorNamed(this, "sender");
   const convKey = this.scratch.get("convKey") as string;
   assert.deepEqual((await probeFor(this, recipient).trackedWriters(recipient)).map((writer) => writer.did), [sender.did], "one tracked writer, however many times it notified");
-  const stored = await probeFor(this, recipient).records(dmInboxUri(recipient.did), sender, "org.slack.dm.request");
+  const stored = await probeFor(this, recipient).records(dmInboxUri(recipient.did), sender, "new.flock.dm.request");
   assert.deepEqual(stored.map((record) => record.rkey), [convKey], "one request record");
   const rows = await dmpReadRequests(recipient);
   assert.deepEqual(rows.map(({ section, sender: from }) => ({ section, sender: from })), [{ section: "others", sender: sender.did }], "and one request in the recipient's folder");
@@ -767,7 +767,7 @@ Then("the other halves are read with freshly minted credentials", { timeout: SET
 
 // --- The app server never holds DM scopes or DM content ---------------------------------------------
 
-const DM_SPACE_TYPE = "org.slack.dm";
+const DM_SPACE_TYPE = "new.flock.dm";
 
 type ServerSession = { second: SecondApp; key: string; dmScopeShown: string[]; texts: string[] };
 
@@ -782,10 +782,10 @@ Given("the app runs its own server session for workspaces", { timeout: SETUP_TIM
   await alice.page.getByRole("heading", { level: 1 }).or(alice.page.locator(".mono-note").filter({ hasText: "at://" }).first()).waitFor({ state: "visible" });
 
   const sessions = dmpServerSessions(second.databasePath, key);
-  const own = sessions.find((session) => session.did === alice.did);
-  assert.ok(own, "the app server holds an OAuth session for alice");
-  assert.ok(own.scope.some((scope) => scope.startsWith(`space:org.slack.workspace?authority=${alice.did}`) && scope.includes("collection=org.slack.admin")),
-    `the session carries the workspace-authority scopes it was approved for: ${own.scope.join(" ")}`);
+  const own = sessions.filter((session) => session.did === alice.did);
+  assert.ok(own.length > 0, "the app server holds an OAuth session for alice");
+  assert.ok(own.some((session) => session.scope.some((scope) => scope.startsWith(`space:new.flock.workspace?authority=${alice.did}`) && scope.includes("collection=new.flock.admin"))),
+    `one of them is the workspace-authority grant she approved: ${own.map((session) => session.scope.join(" ")).join(" | ")}`);
   this.scratch.set("serverSession", { second, key, dmScopeShown: [], texts: [] } satisfies ServerSession);
 });
 
@@ -814,7 +814,7 @@ When("direct messages are exchanged", { timeout: SETUP_TIMEOUT }, async function
 Then("that session holds no DM scope", function (this: AppWorld) {
   const session = this.scratch.get("serverSession") as ServerSession;
   const held = dmpServerSessions(session.second.databasePath, session.key);
-  assert.deepEqual(held.map((entry) => entry.did).sort(), [actorNamed(this, "alice").did, actorNamed(this, "bob").did].sort(), "the server holds a session for each person who signed in");
+  assert.deepEqual([...new Set(held.map((entry) => entry.did))].sort(), [actorNamed(this, "alice").did, actorNamed(this, "bob").did].sort(), "the server holds sessions only for the people who signed in");
   for (const entry of held) {
     assert.ok(entry.scope.includes("atproto"), "a real, granted session");
     assert.deepEqual(entry.scope.filter((scope) => scope.includes(DM_SPACE_TYPE)), [], `no granted scope names a DM space: ${entry.scope.join(" ")}`);

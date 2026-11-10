@@ -3,9 +3,10 @@ import { assertBoundedRecordPage } from "@/atproto/record-pages";
 import { classifyRepoFailure, describeRepoFailure } from "@/atproto/repo-failure";
 import { isMissingXrpcResource, type AtprotoClient } from "@/atproto/xrpc";
 import { channelUri, requestRecordKey, spaceRecordUri } from "@/protocol/keys";
-import { validateSpaceRecord } from "@/protocol/records";
+import { validateSpaceRecord } from "@/protocol/registry";
+import { COLLECTION } from "@/protocol/nsids";
 
-const COLLECTION = "org.slack.joinRequest";
+const REQUEST_COLLECTION = COLLECTION.joinRequest;
 const MAX_REQUESTS_PER_WRITER = 100;
 
 export type InboxJoinRequest = { uri: string; repoDid: string; channelSkey: string; channelName: string; requestId: string; createdAt: string };
@@ -28,12 +29,12 @@ export async function readWriterJoinRequests(input: {
   try {
     const client = await input.clientFor();
     const page = await client.query<ListRecords.OutputSchema>("com.atproto.space.listRecords", {
-      space: inbox, repo: repoDid, collection: COLLECTION, limit: MAX_REQUESTS_PER_WRITER + 1,
+      space: inbox, repo: repoDid, collection: REQUEST_COLLECTION, limit: MAX_REQUESTS_PER_WRITER + 1,
     }).catch((error) => {
       if (isMissingXrpcResource(error)) return { records: [], cursor: undefined };
       throw error;
     });
-    assertBoundedRecordPage(page, { collection: COLLECTION, limit: MAX_REQUESTS_PER_WRITER + 1 });
+    assertBoundedRecordPage(page, { collection: REQUEST_COLLECTION, limit: MAX_REQUESTS_PER_WRITER + 1 });
     if (page.records.length > MAX_REQUESTS_PER_WRITER || page.cursor) {
       return { requests: [], skipped: { did: repoDid, reason: `it has more than ${MAX_REQUESTS_PER_WRITER} current request records` } };
     }
@@ -43,9 +44,9 @@ export async function readWriterJoinRequests(input: {
         const value = record.value;
         if (!value || typeof value.channelSkey !== "string" || !privateChannels.has(value.channelSkey)) return [];
         if (record.rkey !== requestRecordKey(channelUri(authorityDid, value.channelSkey), repoDid)) return [];
-        if (!validateSpaceRecord(COLLECTION, value, { authorityDid, spaceUri: inbox, repoDid, rkey: record.rkey }).valid) return [];
+        if (!validateSpaceRecord(REQUEST_COLLECTION, value, { authorityDid, spaceUri: inbox, repoDid, rkey: record.rkey }).valid) return [];
         return [{
-          uri: spaceRecordUri(inbox, repoDid, COLLECTION, record.rkey),
+          uri: spaceRecordUri(inbox, repoDid, REQUEST_COLLECTION, record.rkey),
           repoDid,
           channelSkey: value.channelSkey,
           channelName: privateChannels.get(value.channelSkey) ?? value.channelSkey,

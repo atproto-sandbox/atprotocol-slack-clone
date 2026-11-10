@@ -12,7 +12,7 @@ test("OAuth scopes are deduplicated and sorted into a stable client identity", (
 
 test("discoverable client scope descriptors are compressed and authenticated", () => {
   const key = Buffer.from("99".repeat(32), "hex");
-  const scope = canonicalOAuthScope(["space:org.slack.workspace?authority=did:plc:alice&skey=workspace&action=read", "atproto"]);
+  const scope = canonicalOAuthScope(["space:new.flock.workspace?authority=did:plc:alice&skey=workspace&action=read", "atproto"]);
   const descriptor = encodeOAuthScopeDescriptor(scope, key);
 
   assert.equal(decodeOAuthScopeDescriptor(descriptor.scope, descriptor.signature, key), scope);

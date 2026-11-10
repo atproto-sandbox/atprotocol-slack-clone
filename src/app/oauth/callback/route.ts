@@ -37,6 +37,7 @@ export async function GET(request: NextRequest) {
       }
       return expireFlowCookie(NextResponse.redirect(appUrl));
     }
+    if (binding.kind !== "login") throw new Error("This callback completes only sign-in and permission flows.");
     const token = await createWebSession(session.did);
     const response = NextResponse.redirect(appUrl);
     response.cookies.set(WEB_SESSION_COOKIE, token, {

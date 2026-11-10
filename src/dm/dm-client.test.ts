@@ -179,7 +179,7 @@ test("startConversation reports noInbox for a recipient whose inbox space exists
   network.createAccount("did:plc:alice", "pds1");
   network.createAccount("did:plc:bob", "pds2");
   await network.clientFor("did:plc:bob").procedure("com.atproto.space.createSpace", {
-    spaceType: "org.slack.dm.inbox", skey: "self", policy: { $type: "com.atproto.memberspace.policy", publicWrite: true },
+    spaceType: "new.flock.dm.inbox", skey: "self", policy: { $type: "com.atproto.memberspace.policy", publicWrite: true },
   });
 
   // #when
@@ -194,10 +194,10 @@ test("enableDms publishes the declaration, and a later enableDms or mode change 
   const { network, client } = harness();
   network.createAccount("did:plc:bob", "pds2");
   const bob = client("did:plc:bob");
-  const read = () => network.clientFor("did:plc:bob").query<{ cid: string; value: { $type: string; createdAt: string } }>("com.atproto.repo.getRecord", { repo: "did:plc:bob", collection: "org.slack.dm.declaration", rkey: "self" });
+  const read = () => network.clientFor("did:plc:bob").query<{ cid: string; value: { $type: string; createdAt: string } }>("com.atproto.repo.getRecord", { repo: "did:plc:bob", collection: "new.flock.dm.declaration", rkey: "self" });
   await bob.enableDms("allowlist");
   const first = await read();
-  assert.equal(first.value.$type, "org.slack.dm.declaration");
+  assert.equal(first.value.$type, "new.flock.dm.declaration");
   assert.ok(Number.isFinite(Date.parse(first.value.createdAt)));
 
   // #when he enables again and changes his request mode later
@@ -218,7 +218,7 @@ test("ensureDeclaration replaces a declaration that is not valid", async () => {
   const bob = client("did:plc:bob");
   await bob.enableDms("everyone");
   await bobRepo.procedure("com.atproto.repo.putRecord", {
-    repo: "did:plc:bob", collection: "org.slack.dm.declaration", rkey: "self", record: { $type: "org.slack.dm.declaration", createdAt: "yesterday" },
+    repo: "did:plc:bob", collection: "new.flock.dm.declaration", rkey: "self", record: { $type: "new.flock.dm.declaration", createdAt: "yesterday" },
   });
   assert.equal((await client("did:plc:alice").startConversation(["did:plc:bob"])).delivery["did:plc:bob"]?.status, "noInbox");
 
@@ -288,6 +288,38 @@ test("accept creates the reader's own half, matches the header, and always allow
   assert.deepEqual(conversations.map((c) => c.convKey), [started.convKey]);
 });
 
+test("an edit keeps a field another app added to the message", async () => {
+  // #given alice's DM client, with every record it writes observed
+  const { network, client } = harness();
+  network.createAccount("did:plc:alice", "pds1");
+  network.createAccount("did:plc:bob", "pds2");
+  const memberClient = network.clientFor("did:plc:alice");
+  const procedure = memberClient.procedure.bind(memberClient);
+  const written: Array<Record<string, unknown>> = [];
+  memberClient.procedure = (async (method: string, input?: unknown) => {
+    if (method === "com.atproto.space.putRecord") written.push((input as { record: Record<string, unknown> }).record);
+    return procedure(method, input);
+  }) as typeof memberClient.procedure;
+  const alice = client("did:plc:alice", "pds1", { memberClient });
+  const bob = client("did:plc:bob");
+  await bob.enableDms("everyone");
+  const started = await alice.startConversation(["did:plc:bob"]);
+  await bob.accept((await bob.listRequests())[0]!);
+  const message = await alice.send(started.convKey, "hello bob");
+
+  // #and another app added a field to that message
+  const half = dmConversationUri("did:plc:alice", started.convKey);
+  await procedure("com.atproto.space.putRecord", {
+    space: half, repo: "did:plc:alice", collection: "new.flock.dm.message", rkey: message.rkey, record: { ...written.at(-1), pinnedBy: "another-app" },
+  });
+
+  // #when alice edits it
+  await alice.edit(message.uri, "hello again bob");
+
+  // #then the edit writes the new text and keeps the other app's field
+  assert.deepEqual(written.at(-1), { $type: "new.flock.dm.message", text: "hello again bob", createdAt: message.createdAt, pinnedBy: "another-app" });
+});
+
 test("send, edit, delete, react and unreact validate locally and only touch the caller's own records", async () => {
   const { network, client } = harness();
   network.createAccount("did:plc:alice", "pds1");
@@ -300,10 +332,10 @@ test("send, edit, delete, react and unreact validate locally and only touch the 
 
   const message = await alice.send(started.convKey, "hello bob");
   assert.equal(message.text, "hello bob");
-  await assert.rejects(alice.send(started.convKey, ""), /Invalid org\.slack\.dm\.message record/, "empty text fails local validation before any write");
+  await assert.rejects(alice.send(started.convKey, ""), /Invalid new\.flock\.dm\.message record/, "empty text fails local validation before any write");
 
   await alice.edit(message.uri, "hello again bob");
-  const forgedUri = spaceRecordUri(dmConversationUri("did:plc:bob", started.convKey), "did:plc:bob", "org.slack.dm.message", "notmine22222");
+  const forgedUri = spaceRecordUri(dmConversationUri("did:plc:bob", started.convKey), "did:plc:bob", "new.flock.dm.message", "notmine22222");
   await assert.rejects(alice.edit(forgedUri, "nope"), /Can only modify your own DM messages/);
   await assert.rejects(bob.delete(message.uri), /Can only modify your own DM messages/);
 
@@ -586,7 +618,7 @@ test("setRequestMode keeps the other settings another client put on the inbox po
   const { network, client } = harness();
   network.createAccount("did:plc:bob", "pds2");
   await network.clientFor("did:plc:bob").procedure("com.atproto.space.createSpace", {
-    spaceType: "org.slack.dm.inbox", skey: "self",
+    spaceType: "new.flock.dm.inbox", skey: "self",
     policy: { $type: "com.atproto.memberspace.policy", publicRead: true, allowedApps: ["https://other.example/client.json"], publishMembers: true },
   });
 
@@ -594,7 +626,7 @@ test("setRequestMode keeps the other settings another client put on the inbox po
   await client("did:plc:bob").setRequestMode("everyone");
 
   // #then only publicWrite changed (and publicRead is forced off)
-  const reported = await network.clientFor("did:plc:bob").query<{ policy: Record<string, unknown> }>("com.atproto.space.getSpace", { space: "at://did:plc:bob/space/org.slack.dm.inbox/self" });
+  const reported = await network.clientFor("did:plc:bob").query<{ policy: Record<string, unknown> }>("com.atproto.space.getSpace", { space: "at://did:plc:bob/space/new.flock.dm.inbox/self" });
   assert.deepEqual(reported.policy, {
     $type: "com.atproto.memberspace.policy", publicRead: false, publicWrite: true,
     allowedApps: ["https://other.example/client.json"], publishMembers: true,
@@ -604,7 +636,7 @@ test("setRequestMode keeps the other settings another client put on the inbox po
 test("setRequestMode refuses to rewrite an inbox governed by another policy type", async () => {
   const { network, client } = harness();
   network.createAccount("did:plc:bob", "pds2");
-  await network.clientFor("did:plc:bob").procedure("com.atproto.space.createSpace", { spaceType: "org.slack.dm.inbox", skey: "self", policy: { $type: "com.atproto.personalspace.policy" } });
+  await network.clientFor("did:plc:bob").procedure("com.atproto.space.createSpace", { spaceType: "new.flock.dm.inbox", skey: "self", policy: { $type: "com.atproto.personalspace.policy" } });
   await assert.rejects(client("did:plc:bob").setRequestMode("everyone"), /unexpected policy/);
 });
 
@@ -613,7 +645,7 @@ test("changing the request mode publishes the declaration an inbox created befor
   const { network, client } = harness();
   network.createAccount("did:plc:alice", "pds1");
   network.createAccount("did:plc:bob", "pds2");
-  await network.clientFor("did:plc:bob").procedure("com.atproto.space.createSpace", { spaceType: "org.slack.dm.inbox", skey: "self", policy: { $type: "com.atproto.memberspace.policy", publicWrite: true } });
+  await network.clientFor("did:plc:bob").procedure("com.atproto.space.createSpace", { spaceType: "new.flock.dm.inbox", skey: "self", policy: { $type: "com.atproto.memberspace.policy", publicWrite: true } });
   assert.equal((await client("did:plc:alice").startConversation(["did:plc:bob"])).delivery["did:plc:bob"]?.status, "noInbox");
 
   // #when bob changes his request mode
@@ -639,8 +671,8 @@ test("enableDms publishes the declaration last, so a failure there leaves the al
   await assert.rejects(bob.enableDms("allowlist", ["did:plc:friend"]), /Missing required scope/);
   assert.deepEqual((await bob.getInbox()).allowlist, ["did:plc:friend"], "the allowlist was seeded before the declaration was attempted");
   await bob.enableDms("allowlist", ["did:plc:friend"]);
-  const declaration = await real.query<{ value: { $type: string } }>("com.atproto.repo.getRecord", { repo: "did:plc:bob", collection: "org.slack.dm.declaration", rkey: "self" });
-  assert.equal(declaration.value.$type, "org.slack.dm.declaration");
+  const declaration = await real.query<{ value: { $type: string } }>("com.atproto.repo.getRecord", { repo: "did:plc:bob", collection: "new.flock.dm.declaration", rkey: "self" });
+  assert.equal(declaration.value.$type, "new.flock.dm.declaration");
 });
 
 test("a 2xx answer that is not the declaration record does not count as one", async () => {
@@ -664,7 +696,7 @@ test("one participant whose header cannot be authenticated reads as a missing ha
   const alice = client("did:plc:alice", "pds1", {
     fetchEndpoint: async (request) => {
       const response = await network.fetchEndpoint(request);
-      if (!request.url.includes("getRecord") || !request.url.includes("org.slack.dm.header") || !request.url.includes("repo=did%3Aplc%3Abob") || !response.ok) return response;
+      if (!request.url.includes("getRecord") || !request.url.includes("new.flock.dm.header") || !request.url.includes("repo=did%3Aplc%3Abob") || !response.ok) return response;
       const body = await response.json() as { value: Record<string, unknown> };
       return new Response(JSON.stringify({ ...body, value: { ...body.value, createdAt: "2000-01-01T00:00:00.000Z" } }), { status: 200, headers: response.headers });
     },
@@ -691,7 +723,7 @@ test("a declaration without its timestamp does not count, so the recipient reads
   await client("did:plc:bob").enableDms("everyone");
   const alice = client("did:plc:alice", "pds1", {
     fetchEndpoint: async (request) => request.url.includes("com.atproto.repo.getRecord")
-      ? new Response(JSON.stringify({ uri: "at://did:plc:bob/org.slack.dm.declaration/self", value: { $type: "org.slack.dm.declaration" } }), { status: 200 })
+      ? new Response(JSON.stringify({ uri: "at://did:plc:bob/new.flock.dm.declaration/self", value: { $type: "new.flock.dm.declaration" } }), { status: 200 })
       : network.fetchEndpoint(request),
   });
   assert.equal((await alice.startConversation(["did:plc:bob"])).delivery["did:plc:bob"]?.status, "noInbox");
@@ -701,13 +733,13 @@ test("ensureDeclaration publishes a missing declaration and leaves an existing o
   const { network, client } = harness();
   network.createAccount("did:plc:alice", "pds1");
   network.createAccount("did:plc:bob", "pds2");
-  await network.clientFor("did:plc:bob").procedure("com.atproto.space.createSpace", { spaceType: "org.slack.dm.inbox", skey: "self", policy: { $type: "com.atproto.memberspace.policy", publicWrite: true } });
+  await network.clientFor("did:plc:bob").procedure("com.atproto.space.createSpace", { spaceType: "new.flock.dm.inbox", skey: "self", policy: { $type: "com.atproto.memberspace.policy", publicWrite: true } });
   const bob = client("did:plc:bob");
   await bob.ensureDeclaration();
-  const first = await network.clientFor("did:plc:bob").query<{ cid: string }>("com.atproto.repo.getRecord", { repo: "did:plc:bob", collection: "org.slack.dm.declaration", rkey: "self" });
+  const first = await network.clientFor("did:plc:bob").query<{ cid: string }>("com.atproto.repo.getRecord", { repo: "did:plc:bob", collection: "new.flock.dm.declaration", rkey: "self" });
   network.advanceClock(60_000);
   await bob.ensureDeclaration();
-  const second = await network.clientFor("did:plc:bob").query<{ cid: string }>("com.atproto.repo.getRecord", { repo: "did:plc:bob", collection: "org.slack.dm.declaration", rkey: "self" });
+  const second = await network.clientFor("did:plc:bob").query<{ cid: string }>("com.atproto.repo.getRecord", { repo: "did:plc:bob", collection: "new.flock.dm.declaration", rkey: "self" });
   assert.equal(second.cid, first.cid, "an existing declaration is not rewritten");
   assert.equal((await client("did:plc:alice").startConversation(["did:plc:bob"])).delivery["did:plc:bob"]?.status, "delivered");
 });
@@ -807,7 +839,7 @@ test("a participant whose account was taken down reads as a missing half too", a
 test("a participant whose host fails while its messages are listed reads as a missing half and none of its messages are shown", async () => {
   // #given bob's host answers the header read but fails the message listing
   const { alice, started } = await conversationWithBob({
-    aliceFetch: async (request, real) => bobsRepo(request, "org.slack.dm.message") ? hostFailure() : real(request),
+    aliceFetch: async (request, real) => bobsRepo(request, "new.flock.dm.message") ? hostFailure() : real(request),
   });
 
   // #when alice reads the conversation
@@ -821,7 +853,7 @@ test("a participant whose host fails while its messages are listed reads as a mi
 test("a participant whose host fails while its reactions are listed is reported as a missing half instead of silently showing none", async () => {
   // #given bob's host answers the header and the messages but fails the reaction listing
   const { alice, started } = await conversationWithBob({
-    aliceFetch: async (request, real) => bobsRepo(request, "org.slack.dm.reaction") ? hostFailure() : real(request),
+    aliceFetch: async (request, real) => bobsRepo(request, "new.flock.dm.reaction") ? hostFailure() : real(request),
   });
 
   // #when alice reads the conversation
@@ -836,7 +868,7 @@ test("a participant whose host fails while its reactions are listed is reported 
 test("a failure reading the caller's own half fails the read instead of marking every half missing", async () => {
   // #given alice's own host fails while her own half's header is read (for example she is offline)
   const { alice, started } = await conversationWithBob({
-    aliceFetch: async (request, real) => request.url.includes("repo=did%3Aplc%3Aalice") && request.url.includes("org.slack.dm.header") ? hostFailure() : real(request),
+    aliceFetch: async (request, real) => request.url.includes("repo=did%3Aplc%3Aalice") && request.url.includes("new.flock.dm.header") ? hostFailure() : real(request),
   });
 
   // #when/#then the read rejects, so the caller sees an error rather than a conversation in which nobody is reachable
@@ -850,7 +882,7 @@ test("a cached credential a participant's host refuses is dropped, so the next r
   const { alice, started } = await conversationWithBob({
     aliceFetch: async (request, real) => {
       if (request.url.includes("getSpaceCredential")) mints += 1;
-      if (refuseBobHeaderOnce && bobsRepo(request, "org.slack.dm.header")) {
+      if (refuseBobHeaderOnce && bobsRepo(request, "new.flock.dm.header")) {
         refuseBobHeaderOnce = false;
         return new Response(JSON.stringify({ error: "InvalidToken", message: "expired" }), { status: 401, headers: { "content-type": "application/json" } });
       }

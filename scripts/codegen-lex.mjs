@@ -39,9 +39,9 @@ const PUBLISHED_RECORD_TYPES = new Set([
 ]);
 
 const inputs = [
-  "lexicons/org/slack/operator/execute.json",
-  "lexicons/org/slack/operator/getOperation.json",
-  "lexicons/org/slack/operator/listInboxWriters.json",
+  "lexicons/new/flock/operator/execute.json",
+  "lexicons/new/flock/operator/getOperation.json",
+  "lexicons/new/flock/operator/listInboxWriters.json",
   "lexicons/com/atproto/space/*.json",
   "lexicons/com/atproto/memberspace/*.json",
   "lexicons/com/atproto/managedspace/*.json",
@@ -76,3 +76,8 @@ if (!source.includes(oldTypeGate)) {
   throw new Error("Pinned Lexicon CLI output changed; review the draft schema type bridge.");
 }
 writeFileSync(generatedLexicons, source.replace(oldTypeGate, newTypeGate));
+
+// The generated XrpcClient class is not used: the app imports the generated types only, and sends requests through its own
+// draft-aware transport (src/atproto/xrpc.ts). Its constructor is typed against @atproto/xrpc's own (release) Lexicon
+// package, which no longer matches the pinned draft Lexicon runtime the app validates records with, so it is not kept.
+rmSync(resolve(root, "src/lexicons/api/index.ts"));

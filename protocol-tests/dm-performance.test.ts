@@ -33,6 +33,7 @@ const TOTAL_MESSAGES = 20_000;
 const MESSAGES_PER_HALF = TOTAL_MESSAGES / PARTICIPANTS;
 const APPLY_WRITES_BATCH = 100;
 const READ_BUDGET_MS = 8_000;
+const READ_RUNS = 10;
 
 test("DM read budget: 100 participants, 20,000 total messages, latest-100 read in <= 8s", { timeout: 10 * 60 * 1000 }, async () => {
   assert.ok(PINNED_CHECKOUT, "set ATPROTO_PINNED_CHECKOUT to the pinned atproto checkout");
@@ -98,16 +99,16 @@ test("DM read budget: 100 participants, 20,000 total messages, latest-100 read i
     const halfSetupStarted = performance.now();
     await mapLimited(participants, 16, async (owner) => {
       const client = rawClientFor(owner);
-      const half = `at://${owner.did}/space/org.slack.dm.conversation/${convKey}`;
+      const half = `at://${owner.did}/space/new.flock.dm.conversation/${convKey}`;
       await client.procedure("com.atproto.space.createSpace", {
-        spaceType: "org.slack.dm.conversation", skey: convKey,
+        spaceType: "new.flock.dm.conversation", skey: convKey,
         policy: memberspacePolicy(),
       });
       await mapLimited(participants.filter((other) => other.did !== owner.did), 16, (other) =>
         client.procedure("com.atproto.memberspace.putMember", { space: half, did: other.did, read: true, write: false }));
       await client.procedure("com.atproto.space.putRecord", {
-        space: half, repo: owner.did, collection: "org.slack.dm.header", rkey: "self",
-        record: { $type: "org.slack.dm.header", convKey, participants: allDids, createdAt },
+        space: half, repo: owner.did, collection: "new.flock.dm.header", rkey: "self",
+        record: { $type: "new.flock.dm.header", convKey, participants: allDids, createdAt },
       });
       return { owner, half, client };
     });
@@ -123,15 +124,15 @@ test("DM read budget: 100 participants, 20,000 total messages, latest-100 read i
     let totalWritten = 0;
     await mapLimited(participants.map((owner, participantIndex) => ({ owner, participantIndex })), 16, async ({ owner, participantIndex }) => {
       const client = rawClientFor(owner);
-      const half = `at://${owner.did}/space/org.slack.dm.conversation/${convKey}`;
+      const half = `at://${owner.did}/space/new.flock.dm.conversation/${convKey}`;
       for (let batchStart = 0; batchStart < MESSAGES_PER_HALF; batchStart += APPLY_WRITES_BATCH) {
         const writes = Array.from({ length: Math.min(APPLY_WRITES_BATCH, MESSAGES_PER_HALF - batchStart) }, (_unused, offset) => {
           const sequence = batchStart + offset;
           const timestamp = stamps[sequence * PARTICIPANTS + participantIndex]!;
           const rkey = tidNow(timestamp, 0);
           return {
-            $type: "com.atproto.space.applyWrites#create", collection: "org.slack.dm.message", rkey,
-            value: { $type: "org.slack.dm.message", text: `from ${owner.did} #${sequence}`, createdAt: new Date(timestamp).toISOString() },
+            $type: "com.atproto.space.applyWrites#create", collection: "new.flock.dm.message", rkey,
+            value: { $type: "new.flock.dm.message", text: `from ${owner.did} #${sequence}`, createdAt: new Date(timestamp).toISOString() },
           };
         });
         const response = await client.procedure<unknown, { results?: unknown[] }>("com.atproto.space.applyWrites", { space: half, repo: owner.did, writes });
@@ -147,6 +148,19 @@ test("DM read budget: 100 participants, 20,000 total messages, latest-100 read i
     const readStarted = performance.now();
     const page = await reader.readConversation(convKey, allDids, { limit: 100 });
     const readMs = performance.now() - readStarted;
+    // The bar for later phases (`.ai/plans/platform-refactor.md`, R0 baseline): the same read repeated by fresh clients,
+    // reported as median and 95th percentile.
+    const readsMs = [Math.round(readMs)];
+    for (let run = 1; run < READ_RUNS; run += 1) {
+      const runStarted = performance.now();
+      const repeat = await new DmClient(depsFor(participants[0]!)).readConversation(convKey, allDids, { limit: 100 });
+      readsMs.push(Math.round(performance.now() - runStarted));
+      // Checked after the timer stops: every timed read returns the same full page.
+      assert.deepEqual(repeat.messages.map((message) => message.uri), page.messages.map((message) => message.uri), "a repeated read returns the same latest-100 page");
+      assert.deepEqual(repeat.halves, page.halves, "a repeated read classifies every half the same way");
+    }
+    readsMs.sort((left, right) => left - right);
+    const percentile = (fraction: number) => readsMs[Math.min(readsMs.length - 1, Math.ceil(fraction * readsMs.length) - 1)]!;
 
     assert.equal(page.messages.length, 100, "the latest-100 page is full");
     assert.equal(Object.keys(page.halves).length, PARTICIPANTS);
@@ -161,6 +175,7 @@ test("DM read budget: 100 participants, 20,000 total messages, latest-100 read i
       halfSetupMs: Math.round(halfSetupMs),
       messageWriteMs: Math.round(messageWriteMs),
       readLatest100Ms: Math.round(readMs),
+      readLatest100Reads: { runs: readsMs.length, medianMs: percentile(0.5), p95Ms: percentile(0.95) },
     };
     process.stdout.write(`DM_PERFORMANCE_ENVELOPE ${JSON.stringify(report)}\n`);
     assert.ok(readMs <= READ_BUDGET_MS, `readConversation took ${Math.round(readMs)}ms, exceeding the ${READ_BUDGET_MS}ms budget`);

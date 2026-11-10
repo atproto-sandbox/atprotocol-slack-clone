@@ -5,26 +5,27 @@ import { join } from "node:path";
 import test from "node:test";
 import { closeDb, getRawDb } from "@/lib/db";
 import { XrpcError } from "@/atproto/xrpc";
-import { getActorOperation, isTransientOperationError, listJournaledWorkspaces, listRecoverableOperations, listStalledOperations, discardEmptyOperationIfWorkspaceLockOwned, persistPendingIfWorkspaceLockOwned, runJournaledOperation, withWorkspaceLock } from "./journal";
-import type { OperatorActor } from "./security";
+import { requestDigest } from "@/protocol/keys";
+import { getActorOperation, isTransientOperationError, listJournaledWorkspaces, listRecoverableOperations, listStalledOperations, discardEmptyOperationIfWorkspaceLockOwned, runJournaledOperation, withWorkspaceLock } from "./journal";
+import type { OperatorActor } from "./actor";
 
 test("journal retry skips completed steps and reuses the same operation", async () => {
   const directory = mkdtempSync(join(tmpdir(), "slack-journal-test-"));
   process.env.DATABASE_PATH = join(directory, "journal.db");
   process.env.AUTH_ENCRYPTION_KEY = "22".repeat(32);
-  process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_slack_admin";
+  process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
   process.env.APP_URL = "http://127.0.0.1:3000";
   const actor = {
     did: "did:plc:admin",
     session: {} as OperatorActor["session"],
-    workspace: { uri: "at://did:plc:owner/space/org.slack.workspace/acme", authorityDid: "did:plc:owner", skey: "acme" },
+    workspace: { uri: "at://did:plc:owner/space/new.flock.workspace/acme", authorityDid: "did:plc:owner", skey: "acme" },
     canRecoverOperations: true,
   } satisfies OperatorActor;
   let first = 0;
   let second = 0;
   let transientAttempts = 0;
   let shouldFail = true;
-  const run = () => runJournaledOperation(actor, "2222222222222", { kind: "testOperation" }, async (context) => {
+  const run = () => runJournaledOperation(actor, "2222222222222", { kind: "testOperation" }, ["first", "transient", "second"], async (context) => {
     await context.step("first", async () => { first += 1; });
     await context.step("transient", async () => {
       transientAttempts += 1;
@@ -48,7 +49,7 @@ test("journal retry skips completed steps and reuses the same operation", async 
     const now = Math.floor(Date.now() / 1000) - 600;
     const rows = [
       { operationId: "2222222222224", workspace: actor.workspace.uri },
-      { operationId: "2222222222225", workspace: "at://did:plc:owner/space/org.slack.workspace/other" },
+      { operationId: "2222222222225", workspace: "at://did:plc:owner/space/new.flock.workspace/other" },
     ];
     for (const row of rows) {
       raw.prepare(`INSERT INTO operation
@@ -63,7 +64,7 @@ test("journal retry skips completed steps and reuses the same operation", async 
     assert.equal(getActorOperation(actor, rows[1].operationId), null);
     assert.deepEqual(listJournaledWorkspaces(), [
       { authorityDid: actor.workspace.authorityDid, uri: actor.workspace.uri },
-      { authorityDid: actor.workspace.authorityDid, uri: "at://did:plc:owner/space/org.slack.workspace/other" },
+      { authorityDid: actor.workspace.authorityDid, uri: "at://did:plc:owner/space/new.flock.workspace/other" },
     ]);
     assert.deepEqual(listRecoverableOperations(actor.workspace.authorityDid, actor.workspace.uri).map((row) => row.operationId), [rows[0].operationId]);
     assert.deepEqual(listStalledOperations(actor.workspace.authorityDid, actor.workspace.uri).operations.map((row) => row.operationId), [rows[0].operationId]);
@@ -86,7 +87,7 @@ test("journal retry skips completed steps and reuses the same operation", async 
     try {
       Date.now = () => fakeNow;
       staleLeaseClock = setTimeout(() => { fakeNow += 91_000; }, 10);
-      holderPromise = runJournaledOperation(actor, "2222222222226", { kind: "staleLeaseTakeover" }, async () => {
+      holderPromise = runJournaledOperation(actor, "2222222222226", { kind: "staleLeaseTakeover" }, [], async () => {
         acquiredExpiresAt = (raw.prepare("SELECT expires_at FROM workspace_lock WHERE workspace=?")
           .get(actor.workspace.authorityDid) as { expires_at: number }).expires_at;
         resolveHolderEntered?.();
@@ -94,7 +95,7 @@ test("journal retry skips completed steps and reuses the same operation", async 
       });
       await holderEntered;
       assert.ok(acquiredExpiresAt > Math.floor(Date.now() / 1000), "a stale-lock takeover must receive a fresh lease");
-      contenderPromise = runJournaledOperation(actor, "2222222222227", { kind: "contender" }, async () => {
+      contenderPromise = runJournaledOperation(actor, "2222222222227", { kind: "contender" }, [], async () => {
         contenderEntered = true;
       });
       await new Promise((resolve) => setTimeout(resolve, 20));
@@ -121,7 +122,7 @@ test("stalled-operation detection includes the exact five-minute cutoff", () => 
   process.env.DATABASE_PATH = join(directory, "stalled.db");
   process.env.AUTH_ENCRYPTION_KEY = "33".repeat(32);
   const workspaceDid = "did:plc:owner";
-  const workspaceUri = "at://did:plc:owner/space/org.slack.workspace/acme";
+  const workspaceUri = "at://did:plc:owner/space/new.flock.workspace/acme";
   const stableNow = Math.floor(Date.now() / 1000) + 60;
   const realDateNow = Date.now;
   Date.now = () => stableNow * 1000;
@@ -158,7 +159,7 @@ test("the shared workspace lock serializes bootstrap and operator work", async (
   const directory = mkdtempSync(join(tmpdir(), "slack-workspace-lock-test-"));
   process.env.DATABASE_PATH = join(directory, "lock.db");
   process.env.AUTH_ENCRYPTION_KEY = "44".repeat(32);
-  process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_slack_admin";
+  process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
   process.env.APP_URL = "http://127.0.0.1:3000";
   const authority = "did:plc:owner";
   let releaseFirst: (() => void) | undefined;
@@ -193,45 +194,80 @@ test("the shared workspace lock serializes bootstrap and operator work", async (
   }
 });
 
-test("pending journal state is persisted only by the current workspace lock owner", async () => {
+test("a runner that lost the workspace lock cannot change its operation's state", async () => {
   const directory = mkdtempSync(join(tmpdir(), "slack-pending-lock-test-"));
   process.env.DATABASE_PATH = join(directory, "pending.db");
   process.env.AUTH_ENCRYPTION_KEY = "55".repeat(32);
-  process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_slack_admin";
+  process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
   process.env.APP_URL = "http://127.0.0.1:3000";
-  const workspace = "did:plc:owner";
-  const actor = workspace;
-  const firstId = "2222222222228";
-  const lostId = "2222222222229";
+  const actor = {
+    did: "did:plc:owner",
+    session: {} as OperatorActor["session"],
+    workspace: { uri: "at://did:plc:owner/space/new.flock.workspace/lost", authorityDid: "did:plc:owner", skey: "lost" },
+    canRecoverOperations: true,
+  } satisfies OperatorActor;
   const raw = getRawDb();
-  const now = Math.floor(Date.now() / 1000);
-  const requestJson = JSON.stringify({ workspace: "at://did:plc:owner/space/org.slack.workspace/retry", request: { kind: "bootstrapWorkspace", name: "Retry" } });
-  const insertRunning = (operationId: string) => raw.prepare(`INSERT INTO operation
-    (workspace,workspace_uri,actor,operation_id,request_hash,request_json,state,steps_json,created_at,updated_at)
-    VALUES (?,?,?,?,?,?,'running','[]',?,?)`).run(workspace, "at://did:plc:owner/space/org.slack.workspace/retry", actor, operationId, `hash-${operationId}`, requestJson, now, now);
   try {
-    await withWorkspaceLock(workspace, async (lock) => {
-      insertRunning(firstId);
-      assert.equal(persistPendingIfWorkspaceLockOwned({
-        workspace, actor, operationId: firstId, requestHash: `hash-${firstId}`, lock,
-        completedSteps: ["workspace-space"], error: new Error("temporary PDS failure"),
-      }), true);
-      const row = raw.prepare("SELECT state,steps_json FROM operation WHERE workspace=? AND actor=? AND operation_id=?")
-        .get(workspace, actor, firstId) as { state: string; steps_json: string };
-      assert.equal(row.state, "pending");
-      assert.deepEqual(JSON.parse(row.steps_json), ["workspace-space"]);
+    // #given a step that fails after another runner took the lock
+    const run = runJournaledOperation(actor, "2222222222252", { kind: "lostLock" }, ["first"], async (context) => {
+      await context.step("first", async () => {
+        raw.prepare("DELETE FROM workspace_lock WHERE workspace=?").run(actor.workspace.authorityDid);
+        throw new Error("temporary PDS failure");
+      });
     });
-    await assert.rejects(withWorkspaceLock(workspace, async (lock) => {
-      insertRunning(lostId);
-      raw.prepare("DELETE FROM workspace_lock WHERE workspace=? AND token=?").run(workspace, lock.token);
-      assert.equal(persistPendingIfWorkspaceLockOwned({
-        workspace, actor, operationId: lostId, requestHash: `hash-${lostId}`, lock,
-        completedSteps: [], error: new Error("lost lock"),
-      }), false);
-      const row = raw.prepare("SELECT state FROM operation WHERE workspace=? AND actor=? AND operation_id=?")
-        .get(workspace, actor, lostId) as { state: string };
-      assert.equal(row.state, "running", "a stale runner cannot change state after another runner may own the lock");
-    }), /Workspace operation lock was lost/);
+
+    // #then the runner stops, and its row is left for the lock's new owner
+    await assert.rejects(run, /Workspace operation lock was lost/);
+    const row = raw.prepare("SELECT state, steps_json FROM operation WHERE operation_id=?").get("2222222222252") as { state: string; steps_json: string };
+    assert.deepEqual(row, { state: "running", steps_json: "[]" }, "a stale runner cannot change state after another runner may own the lock");
+  } finally {
+    closeDb();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a missing scope discards an empty row for its submitter, keeps it on replay, and keeps progress either way", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "slack-scope-test-"));
+  process.env.DATABASE_PATH = join(directory, "scope.db");
+  process.env.AUTH_ENCRYPTION_KEY = "66".repeat(32);
+  process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
+  process.env.APP_URL = "http://127.0.0.1:3000";
+  const actor = {
+    did: "did:plc:admin",
+    session: {} as OperatorActor["session"],
+    workspace: { uri: "at://did:plc:owner/space/new.flock.workspace/scope", authorityDid: "did:plc:owner", skey: "scope" },
+    canRecoverOperations: true,
+  } satisfies OperatorActor;
+  const scopeMissing = () => { throw new XrpcError(403, 'Missing required scope "space:new.flock.channel"', "ScopeMissingError"); };
+  const stateOf = (operationId: string) => (getRawDb().prepare("SELECT state, steps_json FROM operation WHERE operation_id=?").get(operationId) as { state: string; steps_json: string } | undefined);
+  try {
+    // #when a missing scope stops an admin operation before any step, run by its submitter
+    const submitted = await runJournaledOperation(actor, "2222222222253", { kind: "createChannel" }, ["channel-space"], async (context) => {
+      await context.step("channel-space", async () => scopeMissing());
+    });
+    // #then it asks for approval and leaves no row
+    assert.equal(submitted.authorizationRequired, true);
+    assert.equal(stateOf("2222222222253"), undefined);
+
+    // #when the same thing happens while replaying a pending row for its owner
+    getRawDb().prepare(`INSERT INTO operation (workspace,workspace_uri,actor,operation_id,request_hash,request_json,state,steps_json,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,'pending','[]',?,?)`).run("did:plc:owner", actor.workspace.uri, actor.did, "2222222222254",
+      requestDigest({ workspace: actor.workspace.uri, request: { kind: "createChannel" } }), "{}", 1, 1);
+    const replayed = await runJournaledOperation(actor, "2222222222254", { kind: "createChannel" }, ["channel-space"], async (context) => {
+      await context.step("channel-space", async () => scopeMissing());
+    }, { replay: true });
+    // #then the row stays pending for its owner
+    assert.equal(replayed.authorizationRequired, true);
+    assert.deepEqual(stateOf("2222222222254"), { state: "pending", steps_json: "[]" });
+
+    // #when a step had completed before the missing scope
+    const partial = await runJournaledOperation(actor, "2222222222255", { kind: "createChannel" }, ["channel-space", "channel-directory"], async (context) => {
+      await context.step("channel-space", async () => undefined);
+      await context.step("channel-directory", async () => scopeMissing());
+    });
+    // #then progress is kept and approval is still asked for
+    assert.equal(partial.authorizationRequired, true);
+    assert.deepEqual(stateOf("2222222222255"), { state: "pending", steps_json: JSON.stringify(["channel-space"]) });
   } finally {
     closeDb();
     rmSync(directory, { recursive: true, force: true });
@@ -242,11 +278,11 @@ test("discarding an empty operation keeps the catalog entry another operation ne
   const directory = mkdtempSync(join(tmpdir(), "slack-discard-test-"));
   process.env.DATABASE_PATH = join(directory, "discard.db");
   process.env.AUTH_ENCRYPTION_KEY = "66".repeat(32);
-  process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_slack_admin";
+  process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
   process.env.APP_URL = "http://127.0.0.1:3000";
   const workspace = "did:plc:owner";
-  const sharedUri = "at://did:plc:owner/space/org.slack.workspace/shared";
-  const loneUri = "at://did:plc:owner/space/org.slack.workspace/lone";
+  const sharedUri = "at://did:plc:owner/space/new.flock.workspace/shared";
+  const loneUri = "at://did:plc:owner/space/new.flock.workspace/lone";
   const raw = getRawDb();
   const now = Math.floor(Date.now() / 1000);
   const insert = (workspaceUri: string, operationId: string, state: string, steps: string[]) => {

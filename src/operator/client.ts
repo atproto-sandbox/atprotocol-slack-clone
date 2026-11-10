@@ -1,18 +1,21 @@
 import type { OAuthSession } from "@atproto/oauth-client-node";
-import type * as Execute from "@/lexicons/api/types/org/slack/operator/execute";
-import type * as GetOperation from "@/lexicons/api/types/org/slack/operator/getOperation";
-import type * as ListInboxWriters from "@/lexicons/api/types/org/slack/operator/listInboxWriters";
+import type * as Execute from "@/lexicons/api/types/new/flock/operator/execute";
+import type * as GetOperation from "@/lexicons/api/types/new/flock/operator/getOperation";
+import type * as ListInboxWriters from "@/lexicons/api/types/new/flock/operator/listInboxWriters";
 import { assertSafePdsEndpoint, fetchValidatedEndpoint, getIdResolver } from "@/atproto/identity";
-import { OPERATOR_METHODS, requestOperatorServiceAuth } from "@/auth/permission-sets";
+import type * as GetServiceAuth from "@/lexicons/api/types/com/atproto/server/getServiceAuth";
+import { sessionClient } from "@/atproto/client";
+import { OPERATOR_METHODS } from "@/protocol/scopes";
 import { getConfig } from "@/lib/config";
 import { readUpstreamJson } from "@/lib/bounded-json";
 import { operatorHttpFailure } from "./errors";
+import { OPERATOR_METHOD } from "@/protocol/nsids";
 
 export async function submitOperation(
   session: OAuthSession,
   input: Execute.InputSchema,
 ): Promise<Execute.OutputSchema> {
-  return operatorRequest(session, "org.slack.operator.execute", input);
+  return operatorRequest(session, OPERATOR_METHOD.execute, input);
 }
 
 export async function fetchOperation(
@@ -20,11 +23,11 @@ export async function fetchOperation(
   workspace: string,
   operationId: string,
 ): Promise<GetOperation.OutputSchema> {
-  return operatorRequest(session, "org.slack.operator.getOperation", undefined, { workspace, operationId });
+  return operatorRequest(session, OPERATOR_METHOD.getOperation, undefined, { workspace, operationId });
 }
 
 export async function fetchInboxWriters(session: OAuthSession, workspace: string): Promise<ListInboxWriters.OutputSchema> {
-  return operatorRequest(session, "org.slack.operator.listInboxWriters", undefined, { workspace });
+  return operatorRequest(session, OPERATOR_METHOD.listInboxWriters, undefined, { workspace });
 }
 
 async function operatorRequest<TInput, TOutput>(
@@ -74,6 +77,16 @@ async function resolveOperatorEndpoint(serviceRef: string): Promise<URL> {
   return endpoint;
 }
 
+/** A service token from the caller's own session, bound to the operator's service and to exactly one of its methods. */
+export async function requestOperatorServiceAuth(
+  session: OAuthSession,
+  serviceRef: string,
+  method: (typeof OPERATOR_METHODS)[number],
+): Promise<string> {
+  const result = await sessionClient(session).query<GetServiceAuth.OutputSchema>("com.atproto.server.getServiceAuth", { aud: serviceRef, lxm: method });
+  return result.token;
+}
+
 export class OperatorRemoteError extends Error {
   constructor(readonly status: number, readonly code: string, message: string) {
     super(message);
@@ -89,6 +102,11 @@ export function operatorResponseFailure(
   if (body === null) return new OperatorRemoteError(502, "InvalidUpstreamResponse", "Operator service returned invalid JSON.");
   if (!ok) return new OperatorRemoteError(status, body.error ?? "OperatorError", body.message ?? `Operator request failed (${status}).`);
   return null;
+}
+
+/** The operator holds no usable grant for the workspace's authority; only the authority approving again fixes it. */
+export function isAuthorityReauthorizationRequired(error: unknown): boolean {
+  return error instanceof OperatorRemoteError && error.code === "AuthoritySessionUnavailable";
 }
 
 export function operatorRemoteHttpStatus(error: unknown): number | null {

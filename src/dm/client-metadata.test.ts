@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { buildDmClientMetadata } from "./client-metadata";
 
-const scope = "atproto space:org.slack.dm.inbox?authority=*&collection=org.slack.dm.request&action=create";
+const scope = "atproto space:new.flock.dm.inbox?authority=*&collection=new.flock.dm.request&action=create";
 
 test("HTTPS mode builds a discoverable client_id pointing at the DM metadata route", () => {
   const metadata = buildDmClientMetadata({ appUrl: "https://spaces.example.com", scope });

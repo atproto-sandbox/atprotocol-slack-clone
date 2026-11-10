@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getOAuthClient } from "@/auth/oauth";
 import { oauthFlowCookieName, startOAuthFlow } from "@/auth/oauth-flow";
-import { WORKSPACE_DISCOVERY_SCOPE } from "@/auth/permission-sets";
+import { MEMBER_SIGN_IN_SCOPES } from "@/protocol/scopes";
 import { canonicalOAuthScope } from "@/auth/oauth-scope";
 import { classifyOAuthRouteError } from "@/auth/oauth-route-error";
 import { getConfig } from "@/lib/config";
@@ -20,7 +20,7 @@ export async function POST(request: NextRequest) {
     }
     const handle = body.handle.trim().replace(/^@/, "");
     const { appUrl, encryptionKey } = getConfig();
-    const clientScope = canonicalOAuthScope(["atproto", WORKSPACE_DISCOVERY_SCOPE]);
+    const clientScope = canonicalOAuthScope(["atproto", ...MEMBER_SIGN_IN_SCOPES]);
     const flow = await startOAuthFlow(getOAuthClient(clientScope), handle, { scope: clientScope }, { kind: "login", clientScope }, encryptionKey);
     const response = NextResponse.json({ redirectUrl: flow.url.toString() });
     response.cookies.set(oauthFlowCookieName(flow.state), flow.cookieValue, {

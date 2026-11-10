@@ -13,7 +13,7 @@ export async function GET() {
     id,
     service: [{
       id: `${id}#${fragment}`,
-      type: "AtprotoSlackAdmin",
+      type: "AtprotoFlockOperator",
       serviceEndpoint: config.appUrl.origin,
     }],
   }, { headers: { "cache-control": "public, max-age=300" } });

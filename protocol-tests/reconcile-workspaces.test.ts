@@ -5,14 +5,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-test("scheduled reconciliation reports stalled work and a missing authority session while paused", async () => {
+test("scheduled reconciliation reports stalled work and a missing authority grant while paused", async () => {
   const directory = mkdtempSync(join(tmpdir(), "slack-reconcile-"));
   const databasePath = join(directory, "app.db");
   Object.assign(process.env, {
     NODE_ENV: "test",
     APP_URL: "http://127.0.0.1:3000",
     AUTH_ENCRYPTION_KEY: "4c".repeat(32),
-    OPERATOR_SERVICE_REF: "did:web:localhost%3A3000#atproto_slack_admin",
+    OPERATOR_SERVICE_REF: "did:web:localhost%3A3000#atproto_flock_operator",
     DATABASE_PATH: databasePath,
   });
 
@@ -20,7 +20,7 @@ test("scheduled reconciliation reports stalled work and a missing authority sess
     const { getRawDb } = await import("@/lib/db");
     const db = getRawDb();
     const authorityDid = "did:plc:reconcilefixture0001";
-    const workspace = `at://${authorityDid}/space/org.slack.workspace/reconcile-fixture`;
+    const workspace = `at://${authorityDid}/space/new.flock.workspace/reconcile-fixture`;
     const operationId = "2222222222222";
     const updatedAt = Math.floor(Date.now() / 1000) - 301;
     db.prepare(`INSERT INTO operation
@@ -33,7 +33,7 @@ test("scheduled reconciliation reports stalled work and a missing authority sess
 
     const child = spawn(process.execPath, ["--import", "tsx", "scripts/reconcile-workspaces.ts"], {
       cwd: process.cwd(),
-      env: { ...process.env, DATABASE_PATH: databasePath, SLACK_ADMIN_MUTATIONS_PAUSED: "true" },
+      env: { ...process.env, DATABASE_PATH: databasePath, FLOCK_ADMIN_MUTATIONS_PAUSED: "true" },
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";
@@ -48,7 +48,7 @@ test("scheduled reconciliation reports stalled work and a missing authority sess
     assert.equal(exitCode, 1);
     assert.match(stdout, /Admin mutations are paused/);
     assert.match(stderr, new RegExp(`ALERT stalled operation ${operationId}`));
-    assert.match(stderr, /authority session is missing/);
+    assert.match(stderr, /authority grant is missing/);
     const operation = db.prepare("SELECT state, updated_at FROM operation WHERE operation_id = ?")
       .get(operationId) as { state: string; updated_at: number };
     assert.deepEqual(operation, { state: "pending", updated_at: updatedAt }, "paused recovery must leave the journal untouched");

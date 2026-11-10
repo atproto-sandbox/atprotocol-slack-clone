@@ -7,16 +7,16 @@ A Slack-style team workspace built directly on atproto (AT Protocol) permissione
 ```
                          BROWSER                                    NEXT.JS SERVER                          EACH ACCOUNT'S PDS
   ┌──────────────────────────────────────────┐      ┌───────────────────────────────────────┐     ┌───────────────────────────────────┐
-  │ React UI (src/app/ui/**)                   │      │ App Router pages/routes (src/app/**)   │     │ org.slack.workspace / .channel /   │
+  │ React UI (src/app/ui/**)                   │      │ App Router pages/routes (src/app/**)   │     │ new.flock.workspace / .channel /   │
   │  - workspace-manager, sidebar, channel-view│◀────▶│  - page.tsx (entry), layout.tsx        │────▶│   .inbox spaces                    │
-  │  - dm-sidebar/home/requests/settings/      │      │  - api/** authenticated JSON routes    │     │ org.slack.directory/.roster/.admin │
-  │    conversation (src/app/ui/dm-*.tsx)      │      │  - xrpc/** operator + notices           │     │ org.slack.channel.message/.reaction│
+  │  - dm-sidebar/home/requests/settings/      │      │  - api/** authenticated JSON routes    │     │ new.flock.directory/.roster/.admin │
+  │    conversation (src/app/ui/dm-*.tsx)      │      │  - xrpc/** operator + notices           │     │ new.flock.channel.message/.reaction│
   │                                             │      │  - oauth/** login/callback/metadata    │     │ (member-list read/write, open      │
   │ Workspace OAuth session (server-issued)     │      │                                         │     │  app access; member lists ARE the  │
   │  - used for channel/workspace reads+writes  │      │ Workspace authority operator            │     │  read gate)                        │
   │                                             │      │  (src/operator/**)                      │     ├───────────────────────────────────┤
-  │ DM OAuth session (browser-held, M3)         │      │  - signs service-auth JWTs, journals,   │     │ org.slack.dm.inbox (self)          │
-  │  - IndexedDB, non-extractable DPoP keys     │      │    resumes, reconciles PDS membership   │     │ org.slack.dm.conversation/<convKey>│
+  │ DM OAuth session (browser-held, M3)         │      │  - signs service-auth JWTs, journals,   │     │ new.flock.dm.inbox (self)          │
+  │  - IndexedDB, non-extractable DPoP keys     │      │    resumes, reconciles PDS membership   │     │ new.flock.dm.conversation/<convKey>│
   │  - src/dm/browser-session.ts                │      │                                         │     │   header/message/reaction          │
   │  - scopes: DM_BROWSER_SCOPES only            │      │ SQLite (src/lib/db.ts)                  │     │ (member-list; convKey is a TID,    │
   │                                             │      │  - encrypted OAuth/session state,       │◀───▶│  not a secret — DM state lives     │
@@ -45,7 +45,7 @@ Two independent-app proofs exist side by side: `src/reader/independent.ts` (chan
         ▼
  for each participant's conversation half (fan-out 8, src/lib/map-limited.ts):
    - read header, validate convKey + participant set match (validateDmHeaderMatchesRequest)
-   - page org.slack.dm.message / org.slack.dm.reaction, validate every record (validateSpaceRecord)
+   - page new.flock.dm.message / new.flock.dm.reaction, validate every record (validateSpaceRecord)
    - classify a failed mint as missing / deleted / revoked (SpaceCredentialError.code)
         │
         │ 3. merge
@@ -73,9 +73,10 @@ src/
     api/                    Authenticated JSON + SSE routes for the signed-in member.
       workspaces/, channels/*, inbox/requests/, notifications/, notifications/dm/
       operator/*             Admin-only routes that call into src/operator/.
-    oauth/                  Login, callback, and client-metadata routes (workspace + DM).
+    oauth/                  Login, callback, and client-metadata routes (member sign-in + DM).
+    authority/              The workspace authority flow: start, callback, client metadata, JWKS.
     xrpc/                   Server-published XRPC methods: the operator's own RPCs
-                             (org.slack.operator.*), com.atproto.space.notifyWrite and com.atproto.space.notifySpaceDeleted.
+                             (new.flock.operator.*), com.atproto.space.notifyWrite and com.atproto.space.notifySpaceDeleted.
     dm/callback/            Browser DM OAuth callback page (client component).
     .well-known/did.json/   The operator's did:web document (OPERATOR_SERVICE_REF), when the
                              operator DID is hosted as did:web on this app's own origin.
@@ -106,21 +107,46 @@ src/
                               cursor/duplicate/limit assertions; the one listBoundedSpaces and
                               listAllSpaceUris (workspace discovery).
     identity.ts               Server-side DID→PDS resolution (SSRF-guarded; Node-only).
-    notifications.ts         registerNotify bookkeeping; which write/deleted notices are accepted; the
-                              capped write-notice table the change streams read.
     space-ops.ts, valid-channel-messages.ts, client.ts
   protocol/               Pure, isomorphic protocol logic shared by everything above.
     keys.ts                  The one owner of URI and key syntax: parseSpaceUri / parseWorkspaceUri /
                               parseChannelUri / requireSpaceAuthority, isDid / isSkey / isTid, canonical
                               record keys, TID generation, canonicalParticipants. No other module
                               hand-writes an at:// regex.
-    records.ts                validateSpaceRecord: schema + authorship + key-derivation checks
-                              for every org.slack.* and org.slack.dm.* collection.
-  auth/                   Server session, OAuth flow, and scope definitions.
-    permission-sets.ts       Scope builders for workspace/admin/operator sessions and
-                              DM_BROWSER_SCOPES (asserted disjoint from every server scope).
+    nsids.ts                  The one owner of NSIDs: NAMESPACE, SPACE_TYPE, COLLECTION, REPO_COLLECTION,
+                              OPERATOR_METHOD. No other source module spells an NSID
+                              (registry.test.ts enforces it).
+    registry.ts               The one table of space records (REGISTRY): space type, author, key rule, sync
+                              strategy and semantic rule per collection. validateSpaceRecord = shape from the
+                              published lexicons (@atproto/lexicon) + the entry's meaning rule; records are
+                              open (unknown fields kept); MAX_RECORD_BYTES bounds what a reader keeps.
+    scopes.ts                 Scope builders for member, authority and operator sessions, derived from the
+                              registry, and DM_BROWSER_SCOPES (asserted disjoint from every server scope).
+    workspace-summary.ts      What a workspace is, summarized from its authority's records, and the v1
+                              envelope check; the member read model and the operator both use it.
+  auth/                   Server session, OAuth flow.
     session.ts, web-session.ts, oauth.ts, oauth-flow.ts, encrypted-store.ts, encrypted-cache.ts
   operator/               Workspace-authority operator: journaled, idempotent PDS mutations.
+    authority-grant.ts       The one owner of the workspace authority grant: its own OAuth client (confidential
+                              private_key_jwt outside loopback), the ticket -> /authority/start -> PDS consent ->
+                              /authority/callback flow, and the `authority_grant` table. The operator, bootstrap and
+                              the reconcile job restore the grant from here; a member sign-in never writes it.
+    actor.ts                 OperatorActor and WorkspaceRef: who an operation runs for, through which session.
+    journal.ts               runJournaledOperation: the workspace lock, the operation row, declared step names,
+                              resume by name and request hash, and "waiting for the authority's approval".
+    kinds/                   One file per operation kind ({ fields, actor, steps, validate, authorizeMember, run });
+                              kinds/index.ts is the table every request and journal row dispatches through, and
+                              kinds/kinds.test.ts pins every persisted kind, field and step name.
+    operations.ts            Request validation from the kind table, recovery of pending rows, and execution.
+    security.ts              Service-auth verification; authorizeOperationActor decides who may run an operation (an
+                              admin; the authority alone for an authority kind; the member a member kind concerns,
+                              through the kind's authorizeMember, after the request is validated).
+    workspace-state.ts       The operator's reads and writes of rosters, admins and the directory.
+    workspace-envelope.ts    The operator's own envelope check, read with the authority's grant.
+    notices.ts               registerNotify bookkeeping; which write/deleted notices are accepted; the capped
+                              write-notice table the change streams read.
+    testing/fake-authority-pds.ts
+                             In-memory authority PDS for operator unit tests; production code never imports it.
   workspaces/             Server-side channel/workspace sync, caching, and the read model.
   dm/                     The DM feature. Isomorphic engine + browser-only glue. See below.
   reader/                 Independent second-app readers (no app database, no DM-engine import).
@@ -130,7 +156,7 @@ src/
                            map-limited concurrency, security headers, same-origin checks.
   lexicons/api/           Generated lexicon clients (do not hand-edit; see codegen:lex).
 
-lexicons/                 Source NSID lexicon JSON (org.slack.*, org.slack.dm.*).
+lexicons/                 Source NSID lexicon JSON (new.flock.*, new.flock.dm.*).
 protocol-tests/           Backend acceptance/performance against the pinned PDS checkout, plus
                            Playwright browser acceptance (protocol-tests/browser/).
   atproto/                  Protocol conformance suites copied into the pinned checkout to run.
@@ -149,7 +175,7 @@ scripts/                  codegen-lex.mjs, backup-db.mjs, reconcile-workspaces.t
 - `merge.ts` — the pure k-way merge `readConversation` uses (paginate-only-what's-needed).
 - `request-policy.ts` — pure mapping between the inbox memberspace `publicWrite` flag/member state and the
   user-facing mode (`everyone` / `allowlist` / `nobody`).
-- The inbox declaration (`org.slack.dm.declaration`, a public record in the owner's own repo, written by `enableDms`) is how a sender learns a recipient has an inbox: the authority answers a stranger asking for the inbox like a missing space.
+- The inbox declaration (`new.flock.dm.declaration`, a public record in the owner's own repo, written by `enableDms`) is how a sender learns a recipient has an inbox: the authority answers a stranger asking for the inbox like a missing space.
 - `backoff.ts` — the re-notify backoff schedule (1 min, 10 min, 1 h, 1 day, then stop).
 - `browser-session.ts` — `@atproto/oauth-client-browser` wiring: `connectDms`, `restoreDmSession`,
   `disconnectDms`, the well-known-only handle resolver, `DmConfig`.
@@ -179,12 +205,14 @@ workspace layers even by accident.
 - `pnpm dev` / `pnpm build` / `pnpm start` — Next.js dev/build/prod (see `package.json`).
 - `pnpm playground` (`scripts/playground.ts`) — a local copy of the whole stack with ready-made accounts, for trying the app by hand (`ATPROTO_PINNED_CHECKOUT` must point at the built pinned checkout).
 - `pnpm reconcile` (`scripts/reconcile-workspaces.ts`) — the scheduled membership-reconciliation job (`docs/operations.md`).
+- `pnpm authority` (`scripts/authority-grant.ts`) — generate an authority client key, or revoke an authority grant.
 - `pnpm backup:db` (`scripts/backup-db.mjs`) — online SQLite backup.
 - `pnpm test` — unit tests (`node --test` over every `src/**/*.test.ts`), plus `bdd/gate.test.ts`, which keeps the Gherkin features honest (below).
 - `pnpm test:bdd` — builds, then runs the executable Gherkin scenarios in `features/` with `@cucumber/cucumber`, driving real browsers against a real pinned PDS network.
-- `pnpm test:acceptance` — builds, then runs `protocol-tests/{app-acceptance,reconcile-workspaces,dm-acceptance}.test.ts` against a real pinned PDS network (needs `ATPROTO_PINNED_CHECKOUT`).
-- `pnpm test:browser` — builds, then runs Playwright specs in `protocol-tests/browser/` (`--test-concurrency=1`, since both specs start real Next.js server subprocesses).
-- `pnpm test:performance` — `protocol-tests/{performance-envelope,dm-performance}.test.ts` (slow; the channel envelope test is ~30 minutes).
+- `pnpm test:acceptance` — builds, then runs `protocol-tests/{app-acceptance,reconcile-workspaces,dm-acceptance,authority-grant,platform-capabilities}.test.ts` against a real pinned PDS network (needs `ATPROTO_PINNED_CHECKOUT`). The last two hold the platform refactor's capability checks (K1, K3, K7), on the network-only helper `protocol-tests/support/pds-network.ts`.
+- `pnpm test:browser` — builds, then runs Playwright specs in `protocol-tests/browser/` (`--test-concurrency=1`, since the specs start real servers); `cross-origin.spec.ts` (K9) signs in through the real OAuth flow and sends every request from a separate web origin.
+- `pnpm test:performance` — `protocol-tests/{performance-envelope,dm-performance}.test.ts` (slow; the channel envelope test is ~30 minutes); each latest-100 read is repeated ten times and reported as median and p95.
+- `pnpm test:sync-budget` — `protocol-tests/sync-budget.ts` (K4): calls and time of the planned sync at 20, 100 and 200 writers.
 
 ## Executable Gherkin
 
@@ -213,13 +241,15 @@ Run: `pnpm test:bdd` (headless), `pnpm test:bdd:chrome` (visible Google Chrome),
 - Tests are `node:test` + `node:assert/strict`, named `*.test.ts` next to the code they cover.
 - Comments explain *why*, not *what*; the surrounding code is expected to be self-documenting.
 - Every externally supplied DID, AT-URI, record key, and record is validated before use
-  (`src/protocol/keys.ts` parsers/predicates, `src/protocol/records.ts` validators); nothing
+  (`src/protocol/keys.ts` parsers/predicates, `src/protocol/registry.ts` validators); nothing
   parsed from a PDS response is trusted without going through them first.
 - Every PDS list/page fetch goes through the bounded helpers in `src/atproto/record-pages.ts`,
   which assert cursor progress, page-size limits, and no duplicate keys,
   and report `truncated` rather than silently dropping data past a scan cap.
 - Concurrency is `src/lib/map-limited.ts` (fixed fan-out, currently 8 for DM/channel fan-out),
   not ad hoc `Promise.all` over unbounded arrays.
+- Imports point one way: `src/atproto/**` and `src/operator/**` never import `src/workspaces/**` (the member read
+  model) or `src/app/**`; an `eslint.config.mjs` rule enforces it.
 - Server-only code (`@/lib/db`, `@/auth/*`, `@/operator/*`, `@/workspaces/*`, `node:*`,
   `@atproto/oauth-client-node`, `undici`, `@/atproto/identity`) is off-limits to the isomorphic
   protocol/DM layer and to `src/reader/**`; `src/dm/**` is additionally off-limits to everything

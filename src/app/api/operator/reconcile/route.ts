@@ -2,7 +2,8 @@ import { NextResponse, type NextRequest } from "next/server";
 import { requireSession } from "@/auth/session";
 import { submitOperation } from "@/operator/client";
 import { tidNow } from "@/protocol/keys";
-import { requireWorkspaceSummary, workspaceDegradedMessage } from "@/workspaces/read-model";
+import { requireWorkspaceSummary } from "@/workspaces/read-model";
+import { workspaceDegradedMessage } from "@/protocol/workspace-summary";
 import { readRequestJson } from "@/lib/bounded-json";
 import { rejectCrossOriginMutation } from "@/lib/same-origin-mutation";
 

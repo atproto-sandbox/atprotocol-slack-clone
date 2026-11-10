@@ -1,4 +1,5 @@
 import type { FormEvent } from "react";
+import { SPACE_TYPE } from "@/protocol/nsids";
 
 type WorkspaceOnboardingProps = {
   busy: boolean;
@@ -16,6 +17,6 @@ export function WorkspaceOnboarding({ busy, workspaceName, setWorkspaceName, inv
     <div id="workspace-setup" className="starter-card setup-panel"><h2>Create a workspace</h2><p>Sign in with the dedicated workspace identity that will own its spaces and authority records. The first time, you will be asked to approve the permission it needs.</p>
       <form className="inline-form" onSubmit={createWorkspace}><label htmlFor="workspace-name">Workspace name</label><input id="workspace-name" value={workspaceName} onChange={(event) => setWorkspaceName(event.target.value)} required maxLength={60} /><button className="primary-button" disabled={busy}>Create workspace</button></form>
     </div>
-    <div className="starter-card setup-panel"><h2>Accept an invitation</h2><p>Paste the workspace URI shared by an admin. Membership remains enforced by the PDS.</p><form className="inline-form" onSubmit={beginAccept}><label htmlFor="workspace-uri">Workspace URI</label><input id="workspace-uri" value={inviteUri} onChange={(event) => setInviteUri(event.target.value)} placeholder="at://did:.../space/org.slack.workspace/key" required /><button className="primary-button" disabled={busy}>Connect invitation</button></form></div>
+    <div className="starter-card setup-panel"><h2>Accept an invitation</h2><p>Paste the workspace URI shared by an admin. Membership remains enforced by the PDS.</p><form className="inline-form" onSubmit={beginAccept}><label htmlFor="workspace-uri">Workspace URI</label><input id="workspace-uri" value={inviteUri} onChange={(event) => setInviteUri(event.target.value)} placeholder={`at://did:.../space/${SPACE_TYPE.workspace}/key`} required /><button className="primary-button" disabled={busy}>Connect invitation</button></form></div>
   </>;
 }

@@ -1,15 +1,16 @@
 import { getRawDb } from "@/lib/db";
 import { isAccessLost } from "@/atproto/space-credential-core";
-import { purgeExpiredNotificationRegistrations, purgeSpaceNotifications, purgeStaleNotifications } from "@/atproto/notifications";
+import { purgeExpiredNotificationRegistrations, purgeSpaceNotifications, purgeStaleNotifications } from "@/operator/notices";
 import { getConfig } from "@/lib/config";
 import { parseChannelUri, parseSpaceUri, parseWorkspaceUri } from "@/protocol/keys";
+import { SPACE_TYPE } from "@/protocol/nsids";
 
 const isWorkspace = (uri: string): boolean => parseWorkspaceUri(uri) !== null;
 const isChannel = (uri: string): boolean => parseChannelUri(uri) !== null;
 /** The authority of a channel or inbox space, which can belong to a workspace by authority alone. */
 const relatedSpaceAuthority = (uri: string): string | undefined => {
   const parsed = parseSpaceUri(uri);
-  return parsed && (parsed.type === "org.slack.channel" || parsed.type === "org.slack.inbox") ? parsed.authorityDid : undefined;
+  return parsed && (parsed.type === SPACE_TYPE.channel || parsed.type === SPACE_TYPE.inbox) ? parsed.authorityDid : undefined;
 };
 
 /**

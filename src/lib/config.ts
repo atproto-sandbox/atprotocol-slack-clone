@@ -10,6 +10,9 @@ export type AppConfig = {
   cacheRetentionDays: number;
 };
 
+/** A private EC P-256 JWK with its key ID. */
+export type AuthorityClientKey = { kty: "EC"; crv: "P-256"; x: string; y: string; d: string; kid: string };
+
 let cached: AppConfig | undefined;
 
 export function getConfig(): AppConfig {
@@ -41,13 +44,47 @@ export function getConfig(): AppConfig {
 
   cached = {
     appUrl,
-    databasePath: process.env.DATABASE_PATH ?? "./data/slack.db",
+    databasePath: process.env.DATABASE_PATH ?? "./data/flock.db",
     encryptionKey: Buffer.from(rawKey, "hex"),
     plcDirectoryUrl: absoluteUrl("PLC_URL", process.env.PLC_URL ?? "https://plc.directory"),
     operatorServiceRef,
     cacheRetentionDays,
   };
   return cached;
+}
+
+let authorityKeys: readonly AuthorityClientKey[] | undefined;
+
+/**
+ * The workspace-authority OAuth client's private signing keys (ES256), newest first; the first signs and all are published
+ * so a key can be rotated. Only the operator needs them, so they are read on first use. Empty on loopback development, where
+ * the authority client is a public loopback client.
+ */
+export function getAuthorityClientKeys(): readonly AuthorityClientKey[] {
+  if (authorityKeys) return authorityKeys;
+  authorityKeys = getConfig().appUrl.protocol === "http:" ? [] : parseAuthorityClientKeys(process.env.AUTHORITY_CLIENT_PRIVATE_JWKS ?? "");
+  return authorityKeys;
+}
+
+export function parseAuthorityClientKeys(raw: string): AuthorityClientKey[] {
+  const failure = new Error("AUTHORITY_CLIENT_PRIVATE_JWKS must be a JSON JWK set of private EC P-256 keys with unique kids outside loopback development.");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw failure;
+  }
+  const keys = typeof parsed === "object" && parsed !== null && "keys" in parsed ? parsed.keys : undefined;
+  if (!Array.isArray(keys) || keys.length === 0 || !keys.every(isAuthorityClientKey)) throw failure;
+  if (new Set(keys.map((key) => key.kid)).size !== keys.length) throw failure;
+  return keys;
+}
+
+function isAuthorityClientKey(value: unknown): value is AuthorityClientKey {
+  if (typeof value !== "object" || value === null) return false;
+  const key = value as Record<string, unknown>;
+  return key.kty === "EC" && key.crv === "P-256" &&
+    [key.x, key.y, key.d, key.kid].every((part) => typeof part === "string" && part.length > 0);
 }
 
 function absoluteUrl(name: string, input: string): URL {

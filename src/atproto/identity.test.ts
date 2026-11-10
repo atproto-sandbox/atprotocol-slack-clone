@@ -9,7 +9,7 @@ test("PDS endpoints reject HTTP and private address literals in production confi
   Reflect.set(process.env, "NODE_ENV", "production");
   process.env.APP_URL = "http://127.0.0.1:3000";
   process.env.AUTH_ENCRYPTION_KEY = "44".repeat(32);
-  process.env.OPERATOR_SERVICE_REF = "did:web:spaces.example#atproto_slack_admin";
+  process.env.OPERATOR_SERVICE_REF = "did:web:spaces.example#atproto_flock_operator";
   process.env.PLC_URL = "https://plc.directory";
   await assert.rejects(assertSafePdsEndpoint("http://127.0.0.1:2583"), /unsafe PDS endpoint/i);
   await assert.rejects(assertSafePdsEndpoint("https://10.0.0.8:2583"), /non-public address/i);
@@ -25,7 +25,7 @@ test("PDS fetch uses the validated address through its pinned dispatcher", async
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   try {
     const address = server.address() as AddressInfo;
-    const response = await fetchValidatedEndpoint(new Request(`http://127.0.0.1:${address.port}/xrpc/test?space=at%3A%2F%2Fdid%3Aplc%3Aowner%2Fspace%2Forg.slack.channel%2Facme-general`));
+    const response = await fetchValidatedEndpoint(new Request(`http://127.0.0.1:${address.port}/xrpc/test?space=at%3A%2F%2Fdid%3Aplc%3Aowner%2Fspace%2Fnew.flock.channel%2Facme-general`));
     assert.equal(response.status, 200);
     assert.equal(await response.text(), "pinned");
   } finally {

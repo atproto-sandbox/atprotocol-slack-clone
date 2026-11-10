@@ -23,7 +23,7 @@ Where the spec and the pinned PDS disagree, do not pick silently: report it as a
 ## Decisions the owner already made (do not re-raise unless the code or docs contradict what they say)
 1. `listRecords` record bodies are trusted over TLS; MACs are verified only on methods that carry them (`getRecord`, `getLatestCommit`).
 2. A departed member's earlier messages stay, and a from-scratch history rebuild no longer includes them; documented.
-3. There is no declaration-deletion path and no startup reconcile for the `org.slack.dm.declaration` record; documented.
+3. There is no declaration-deletion path and no startup reconcile for the `new.flock.dm.declaration` record; documented.
 4. The DM latest-100 read test budget was raised on purpose.
 5. Not used by design: `getRepo` (STAR), account migration, `clearRecords`, `importRepo`, published policy and member records, `personalspace`/`managedspace`.
 

@@ -55,7 +55,7 @@ test("a participant whose host fails while its reactions are listed is flagged a
   const { started, deps } = await conversationOf(network);
   const failing: DmDeps = {
     ...deps,
-    fetchEndpoint: async (request) => request.url.includes("repo=did%3Aplc%3Abob") && request.url.includes("org.slack.dm.reaction")
+    fetchEndpoint: async (request) => request.url.includes("repo=did%3Aplc%3Abob") && request.url.includes("new.flock.dm.reaction")
       ? new Response(JSON.stringify({ error: "UpstreamFailure", message: "Bad Gateway" }), { status: 502, headers: { "content-type": "application/json" } })
       : network.fetchEndpoint(request),
   };

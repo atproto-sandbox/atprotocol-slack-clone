@@ -1,5 +1,5 @@
 import { redirect } from "next/navigation";
-import { DM_BROWSER_SCOPES } from "@/auth/permission-sets";
+import { DM_BROWSER_SCOPES } from "@/protocol/scopes";
 import { getSession } from "@/auth/session";
 import { getConfig } from "@/lib/config";
 import { DmCallbackClient } from "./dm-callback-client";

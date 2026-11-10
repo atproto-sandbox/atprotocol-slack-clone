@@ -7,12 +7,13 @@ import { sessionClient } from "@/atproto/client";
 import { isMissingXrpcResource } from "@/atproto/xrpc";
 import { resolvePds } from "@/atproto/identity";
 import { parseSpaceRecordUri, reactionRecordKey } from "@/protocol/keys";
-import { validateSpaceRecord } from "@/protocol/records";
+import { validateSpaceRecord } from "@/protocol/registry";
 import { requireCurrentChannelCredential, requireReadableChannel } from "@/workspaces/channels";
 import { markRepoStale, purgeDeniedPermissionCache, purgeSpaceCache } from "@/workspaces/cache";
 import { readRequestJson } from "@/lib/bounded-json";
 import { rejectCrossOriginMutation } from "@/lib/same-origin-mutation";
 import { isAccessLost } from "@/atproto/space-credential-core";
+import { COLLECTION } from "@/protocol/nsids";
 
 export const runtime = "nodejs";
 
@@ -34,7 +35,7 @@ export async function POST(request: NextRequest) {
     }
     const authorityDid = current.authorityDid;
     const space = current.channel;
-    const target = parseSpaceRecordUri(body.subject, space, "org.slack.channel.message");
+    const target = parseSpaceRecordUri(body.subject, space, COLLECTION.message);
     if (!target) return NextResponse.json({ error: "Invalid message URI." }, { status: 400 });
     const credential = await requireCurrentChannelCredential(session, body.workspace, space);
     const rkey = reactionRecordKey(body.subject, body.emoji, session.did);
@@ -42,7 +43,7 @@ export async function POST(request: NextRequest) {
     if (!body.active) {
       try {
         await client.procedure<DeleteRecord.InputSchema, unknown>("com.atproto.space.deleteRecord", {
-          space, repo: session.did, collection: "org.slack.channel.reaction", rkey,
+          space, repo: session.did, collection: COLLECTION.reaction, rkey,
         });
       } catch (error) {
         if (!isMissingXrpcResource(error)) throw error;
@@ -53,19 +54,19 @@ export async function POST(request: NextRequest) {
     try {
       const targetClient = credential.client(await resolvePds(target.repo));
       await targetClient.query<GetRecord.OutputSchema>("com.atproto.space.getRecord", {
-        space, repo: target.repo, collection: "org.slack.channel.message", rkey: target.rkey,
+        space, repo: target.repo, collection: COLLECTION.message, rkey: target.rkey,
       });
     } catch (error) {
       if (isAccessLost(error)) purgeSpaceCache(session.did, space);
       throw error;
     }
-    const record = { $type: "org.slack.channel.reaction", subject: body.subject, emoji: body.emoji, createdAt: new Date().toISOString() };
-    const validation = validateSpaceRecord("org.slack.channel.reaction", record, {
+    const record = { $type: COLLECTION.reaction, subject: body.subject, emoji: body.emoji, createdAt: new Date().toISOString() };
+    const validation = validateSpaceRecord(COLLECTION.reaction, record, {
       authorityDid, spaceUri: space, repoDid: session.did, rkey, knownMessages: new Set([body.subject]),
     });
     if (!validation.valid) return NextResponse.json({ error: validation.reason }, { status: 400 });
     await client.procedure<PutRecord.InputSchema, PutRecord.OutputSchema>("com.atproto.space.putRecord", {
-      space, repo: session.did, collection: "org.slack.channel.reaction", rkey, record,
+      space, repo: session.did, collection: COLLECTION.reaction, rkey, record,
     });
     markRepoStale(space, session.did);
     return NextResponse.json({ active: true, rkey });

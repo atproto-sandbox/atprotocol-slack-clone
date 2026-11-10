@@ -6,11 +6,12 @@ import { isMissingXrpcResource } from "@/atproto/xrpc";
 import { sessionClient } from "@/atproto/client";
 import { inboxUri } from "@/protocol/keys";
 import { channelUri, parseWorkspaceUri, requestRecordKey, tidNow } from "@/protocol/keys";
-import { validateSpaceRecord } from "@/protocol/records";
+import { validateSpaceRecord } from "@/protocol/registry";
 import { requireChannelDirectory } from "@/workspaces/channels";
 import { purgeDeniedPermissionCache } from "@/workspaces/cache";
 import { readRequestJson } from "@/lib/bounded-json";
 import { rejectCrossOriginMutation } from "@/lib/same-origin-mutation";
+import { COLLECTION } from "@/protocol/nsids";
 
 export const runtime = "nodejs";
 
@@ -36,20 +37,20 @@ export async function POST(request: NextRequest) {
     if (body.action === "withdraw") {
       try {
         await sessionClient(session).procedure<DeleteRecord.InputSchema, unknown>("com.atproto.space.deleteRecord", {
-          space, repo: session.did, collection: "org.slack.joinRequest", rkey,
+          space, repo: session.did, collection: COLLECTION.joinRequest, rkey,
         });
       } catch (error) {
         if (!isMissingXrpcResource(error)) throw error;
       }
       return NextResponse.json({ withdrawn: true });
     }
-    const record = { $type: "org.slack.joinRequest", channelSkey: body.skey, requestId: tidNow(), createdAt: new Date().toISOString() };
-    const validation = validateSpaceRecord("org.slack.joinRequest", record, {
+    const record = { $type: COLLECTION.joinRequest, channelSkey: body.skey, requestId: tidNow(), createdAt: new Date().toISOString() };
+    const validation = validateSpaceRecord(COLLECTION.joinRequest, record, {
       authorityDid: current.authorityDid, spaceUri: space, repoDid: session.did, rkey,
     });
     if (!validation.valid) return NextResponse.json({ error: validation.reason }, { status: 400 });
     const result = await sessionClient(session).procedure<PutRecord.InputSchema, PutRecord.OutputSchema>("com.atproto.space.putRecord", {
-      space, repo: session.did, collection: "org.slack.joinRequest", rkey, record,
+      space, repo: session.did, collection: COLLECTION.joinRequest, rkey, record,
     });
     return NextResponse.json({ uri: result.uri, requestId: record.requestId }, { status: 201 });
   } catch (error) {

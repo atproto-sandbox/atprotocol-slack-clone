@@ -60,7 +60,7 @@ When("they enable DMs", async function (this: AppWorld) {
 
 Then("a DM inbox space with the fixed self key exists on their own PDS", async function (this: AppWorld) {
   const user = dmcActor(this, "user");
-  assert.deepEqual(await dmcInboxUris(this, user), [`at://${user.did}/space/org.slack.dm.inbox/self`]);
+  assert.deepEqual(await dmcInboxUris(this, user), [`at://${user.did}/space/new.flock.dm.inbox/self`]);
   const space = await this.pdsGet(user, "com.atproto.space.getSpace", { space: dmcInboxOf(user) });
   assert.equal(space.status, 200, JSON.stringify(space.body));
 });
@@ -262,8 +262,8 @@ Then("only each half's owner can write to it", async function (this: AppWorld) {
     for (const intruder of people.filter((person) => person !== owner)) {
       const text = `intrusion by ${intruder.role} into ${owner.role}`;
       const written = await this.pdsPost(intruder, "com.atproto.space.putRecord", {
-        space: half, repo: intruder.did, collection: "org.slack.dm.message", rkey: tidNow(),
-        record: { $type: "org.slack.dm.message", text, createdAt: new Date().toISOString() },
+        space: half, repo: intruder.did, collection: "new.flock.dm.message", rkey: tidNow(),
+        record: { $type: "new.flock.dm.message", text, createdAt: new Date().toISOString() },
       });
       assert.equal(written.status, 200, `the intruder's own PDS stores the record in the intruder's repo: ${JSON.stringify(written.body)}`);
       assert.deepEqual(await dmcWriters(this, intruder, owner, half), [owner.did], `${owner.role}'s half still tracks only its owner as a writer after ${intruder.role} wrote`);
@@ -369,8 +369,8 @@ Then("a request naming 101 participants is rejected", { timeout: 300_000 }, asyn
   const participants = [initiator.did, ...tooMany].sort();
   assert.equal(participants.length, 101);
   const hostile = await this.pdsPost(initiator, "com.atproto.space.putRecord", {
-    space: dmcInboxOf(recipient), repo: initiator.did, collection: "org.slack.dm.request", rkey: convKey, validate: false,
-    record: { $type: "org.slack.dm.request", convKey, participants, createdAt: new Date().toISOString() },
+    space: dmcInboxOf(recipient), repo: initiator.did, collection: "new.flock.dm.request", rkey: convKey, validate: false,
+    record: { $type: "new.flock.dm.request", convKey, participants, createdAt: new Date().toISOString() },
   });
   assert.equal(hostile.status, 200, `the PDS stores the oversized request when the sender skips lexicon validation: ${JSON.stringify(hostile.body)}`);
   const inSendersRepo = (await dmcRequestsFrom(this, initiator, recipient)).find((request) => request.rkey === convKey);
@@ -453,20 +453,20 @@ Then("another participant cannot edit it because the record lives in its author'
 
   const granted = await this.pdsPost(author, "com.atproto.memberspace.putMember", { space: half, did: reader.did, read: true, write: true });
   assert.equal(granted.status, 200, "the reader is even given write access to the author's half, so only the repo boundary can stop the edit");
-  const forged = { space: half, repo: author.did, collection: "org.slack.dm.message", rkey: message!.rkey };
+  const forged = { space: half, repo: author.did, collection: "new.flock.dm.message", rkey: message!.rkey };
   const edit = await this.pdsPost(reader, "com.atproto.space.putRecord", {
-    ...forged, record: { $type: "org.slack.dm.message", text: "forged edit", createdAt: message!.value.createdAt },
+    ...forged, record: { $type: "new.flock.dm.message", text: "forged edit", createdAt: message!.value.createdAt },
   });
   assert.deepEqual({ status: edit.status, message: edit.body.message }, { status: 403, message: "repo must match authenticated user" });
   const removal = await this.pdsPost(reader, "com.atproto.space.deleteRecord", forged);
   assert.deepEqual({ status: removal.status, message: removal.body.message }, { status: 403, message: "repo must match authenticated user" });
 
   const own = await this.pdsPost(reader, "com.atproto.space.putRecord", {
-    space: half, repo: reader.did, collection: "org.slack.dm.message", rkey: message!.rkey,
-    record: { $type: "org.slack.dm.message", text: "forged edit", createdAt: message!.value.createdAt },
+    space: half, repo: reader.did, collection: "new.flock.dm.message", rkey: message!.rkey,
+    record: { $type: "new.flock.dm.message", text: "forged edit", createdAt: message!.value.createdAt },
   });
   assert.equal(own.status, 200);
-  assert.equal(own.body.uri, `${half}/${reader.did}/org.slack.dm.message/${message!.rkey}`, "the only place the reader can write that key is the reader's own repo");
+  assert.equal(own.body.uri, `${half}/${reader.did}/new.flock.dm.message/${message!.rkey}`, "the only place the reader can write that key is the reader's own repo");
   assert.notEqual(own.body.uri, uri);
   const [after] = await dmcMessagesOf(this, author, convKey);
   assert.deepEqual({ text: after!.value.text, cid: after!.cid }, { text: "edited draft", cid: message!.cid }, "the author's record is untouched");
@@ -486,7 +486,7 @@ Given("a participant reacts to a DM message with an emoji", async function (this
     await dmcCard(replier, text).getByRole("button", { name: "💜 0", exact: true }).click();
     await dmcCard(replier, text).getByRole("button", { name: "💜 1", exact: true }).waitFor({ state: "visible" });
   }
-  const reactions = await dmcRecords<DmcReaction>(this, replier, { space: dmcHalfOf(replier, convKey), repo: replier.did, collection: "org.slack.dm.reaction" });
+  const reactions = await dmcRecords<DmcReaction>(this, replier, { space: dmcHalfOf(replier, convKey), repo: replier.did, collection: "new.flock.dm.reaction" });
   assert.deepEqual(reactions.map((reaction) => reaction.rkey).sort(), [subjects.change, subjects.remove].map((subject) => reactionRecordKey(subject, "💜", replier.did)).sort());
   dmcRemember(this, "convKey", convKey);
   dmcRemember(this, "subjects", subjects);
@@ -500,7 +500,7 @@ When("they change or remove that reaction", async function (this: AppWorld) {
   await engine.react(subjects.change, "👍");
   await engine.unreact(subjects.change, "💜");
   await dmcCard(reader, DMC_REMOVE_TEXT).getByRole("button", { name: "💜 1", exact: true }).click();
-  await dmcUntil(async () => (await dmcRecords<DmcReaction>(this, reader, { space: dmcHalfOf(reader, convKey), repo: reader.did, collection: "org.slack.dm.reaction" })).length === 1, "the removed reaction to leave the reader's repo");
+  await dmcUntil(async () => (await dmcRecords<DmcReaction>(this, reader, { space: dmcHalfOf(reader, convKey), repo: reader.did, collection: "new.flock.dm.reaction" })).length === 1, "the removed reaction to leave the reader's repo");
 });
 
 Then("all readers show only the current reaction record", async function (this: AppWorld) {
@@ -508,7 +508,7 @@ Then("all readers show only the current reaction record", async function (this: 
   const reader = dmcActor(this, "reader");
   const convKey = dmcRecall<string>(this, "convKey");
   const subjects = dmcRecall<{ change: string; remove: string }>(this, "subjects");
-  const stored = await dmcRecords<DmcReaction>(this, reader, { space: dmcHalfOf(reader, convKey), repo: reader.did, collection: "org.slack.dm.reaction" });
+  const stored = await dmcRecords<DmcReaction>(this, reader, { space: dmcHalfOf(reader, convKey), repo: reader.did, collection: "new.flock.dm.reaction" });
   assert.deepEqual(stored.map((reaction) => ({ rkey: reaction.rkey, subject: reaction.value.subject, emoji: reaction.value.emoji })), [
     { rkey: reactionRecordKey(subjects.change, "👍", reader.did), subject: subjects.change, emoji: "👍" },
   ], "the reader's repo holds exactly the current reaction");
@@ -534,12 +534,12 @@ Then("a reaction whose subject is a message in another conversation is ignored",
 
   const half = dmcHalfOf(reader, convKey);
   const putReaction = (subject: string, emoji: string) => this.pdsPost(reader, "com.atproto.space.putRecord", {
-    space: half, repo: reader.did, collection: "org.slack.dm.reaction", rkey: reactionRecordKey(subject, emoji, reader.did),
-    record: { $type: "org.slack.dm.reaction", subject, emoji, createdAt: new Date().toISOString() },
+    space: half, repo: reader.did, collection: "new.flock.dm.reaction", rkey: reactionRecordKey(subject, emoji, reader.did),
+    record: { $type: "new.flock.dm.reaction", subject, emoji, createdAt: new Date().toISOString() },
   });
   assert.equal((await putReaction(foreignMessage.uri, "💜")).status, 200, "the PDS stores the reaction aimed at another conversation");
   assert.equal((await putReaction(subjects.change, "🔥")).status, 200, "a same-shaped reaction aimed at this conversation is stored too");
-  const stored = await dmcRecords<DmcReaction>(this, reader, { space: half, repo: reader.did, collection: "org.slack.dm.reaction" });
+  const stored = await dmcRecords<DmcReaction>(this, reader, { space: half, repo: reader.did, collection: "new.flock.dm.reaction" });
   assert.deepEqual(stored.map((reaction) => reaction.value.subject).sort(), [foreignMessage.uri, subjects.change, subjects.change].sort(), "all three records exist on the reader's PDS");
 
   const page = await dmcClientFor(this, author).readConversation(convKey, [author.did, reader.did].sort());
@@ -696,7 +696,7 @@ Then("the recipient reads the request from the sender's repo", async function (t
   assert.deepEqual(served[0]!.value.participants, [sender.did, recipient.did].sort());
 
   await dmcRequestRow(recipient, sender.did).waitFor({ state: "visible" });
-  const copy = await this.pdsGet(recipient, "com.atproto.space.listRecords", { space: dmcInboxOf(recipient), repo: sender.did, collection: "org.slack.dm.request" });
+  const copy = await this.pdsGet(recipient, "com.atproto.space.listRecords", { space: dmcInboxOf(recipient), repo: sender.did, collection: "new.flock.dm.request" });
   assert.deepEqual({ status: copy.status, error: copy.body.error }, { status: 400, error: "RepoNotFound" }, "the recipient's PDS holds no copy of the request");
 });
 
@@ -710,9 +710,9 @@ Then("no app server is asked for the request", async function (this: AppWorld) {
     ...appCalls.map((request) => `${request.url}\n${request.postData}`),
     ...recipient.calls.map((call) => `${call.path}\n${call.requestBody}\n${call.responseBody}`),
   ].join("\n");
-  for (const needle of [convKey, sender.did, "org.slack.dm.request"]) assert.ok(!exchanged.includes(needle), `no /api exchange of the recipient mentions ${needle}`);
+  for (const needle of [convKey, sender.did, "new.flock.dm.request"]) assert.ok(!exchanged.includes(needle), `no /api exchange of the recipient mentions ${needle}`);
   const stored = dmcAppDatabaseText(this);
-  for (const needle of ["org.slack.dm.request", '"participants"']) assert.ok(!stored.includes(needle), `the app's database holds no request: it contains no ${needle}`);
+  for (const needle of ["new.flock.dm.request", '"participants"']) assert.ok(!stored.includes(needle), `the app's database holds no request: it contains no ${needle}`);
   const mentions = dmcAppDatabaseMentions(this, convKey);
   assert.deepEqual(
     [...new Set(mentions.map(({ table, column }) => `${table}.${column}`))].filter((place) => place !== "space_notification.space_uri"), [],

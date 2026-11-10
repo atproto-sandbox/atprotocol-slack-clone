@@ -1,15 +1,14 @@
-import { getOAuthClientForSession } from "@/auth/oauth";
+import { hasAuthorityGrant, restoreAuthorityGrant } from "@/operator/authority-grant";
 import { requireActiveWorkspaceAdmin } from "@/operator/security";
 import { executeOperatorOperation } from "@/operator/operations";
 import { listJournaledWorkspaces, listStalledOperations } from "@/operator/journal";
-import { getRawDb } from "@/lib/db";
 import { tidNow } from "@/protocol/keys";
-import { resumePendingWorkspaceBootstraps } from "@/workspaces/bootstrap";
-import { assertWorkspaceWithinEnvelope, requireWorkspaceSummary } from "@/workspaces/read-model";
+import { resumePendingWorkspaceBootstraps } from "@/operator/kinds/bootstrap-workspace";
+import { assertOperatorWorkspaceWithinEnvelope } from "@/operator/workspace-envelope";
 
 async function main() {
   let failed = false;
-  const mutationsPaused = process.env.SLACK_ADMIN_MUTATIONS_PAUSED === "true";
+  const mutationsPaused = process.env.FLOCK_ADMIN_MUTATIONS_PAUSED === "true";
   const workspaces = listJournaledWorkspaces();
   for (const workspace of workspaces) {
     const stalledResult = listStalledOperations(workspace.authorityDid, workspace.uri);
@@ -24,10 +23,9 @@ async function main() {
   }
 
   if (mutationsPaused) process.stdout.write("Admin mutations are paused; only read-only authority checks will run.\n");
-  const hasSavedSession = getRawDb().prepare("SELECT 1 FROM oauth_session WHERE key = ?");
   for (const workspace of workspaces) {
-    if (!hasSavedSession.get(workspace.authorityDid)) {
-      process.stderr.write(`ALERT workspace authority session is missing workspace=${workspace.uri}\n`);
+    if (!hasAuthorityGrant(workspace.authorityDid)) {
+      process.stderr.write(`ALERT workspace authority grant is missing workspace=${workspace.uri}\n`);
       failed = true;
       continue;
     }
@@ -37,16 +35,15 @@ async function main() {
         process.stdout.write(`${workspace.uri}: authority session and admin access verified; mutations paused\n`);
         continue;
       }
-      const session = await (await getOAuthClientForSession(workspace.authorityDid)).restore(workspace.authorityDid);
-      if (session.did !== workspace.authorityDid) throw new Error("Restored OAuth session DID does not match workspace authority.");
+      const session = await restoreAuthorityGrant(workspace.authorityDid);
       const bootstrapResults = await resumePendingWorkspaceBootstraps(session, workspace.uri);
       if (bootstrapResults.some((result) => result.state !== "completed")) {
         process.stderr.write(`${workspace.uri}: workspace bootstrap recovery remains pending.\n`);
         failed = true;
         continue;
       }
-      assertWorkspaceWithinEnvelope(await requireWorkspaceSummary(session, workspace.uri));
       const actor = await requireActiveWorkspaceAdmin(workspace.uri, session.did);
+      await assertOperatorWorkspaceWithinEnvelope(actor);
       const operation = await executeOperatorOperation(actor, tidNow(), { kind: "reconcileWorkspace" });
       process.stdout.write(`${workspace.uri}: ${operation.state}\n`);
       if (operation.state !== "completed") failed = true;

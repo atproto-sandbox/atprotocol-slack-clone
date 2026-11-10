@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
-import { OperatorAuthError, authenticateOperatorRequest, requireActiveWorkspaceAdmin } from "./security";
+import { OperatorAuthError } from "./errors";
+import { authenticateOperatorRequest, requireActiveWorkspaceAdmin } from "./security";
 import { OperationBusyError, OperationConflictError } from "./journal";
 import { operatorHttpFailure } from "./errors";
-import { assertWorkspaceWithinEnvelope, requireWorkspaceSummary, WorkspaceEnvelopeError } from "@/workspaces/read-model";
-
-export type OperatorMethod = "org.slack.operator.execute" | "org.slack.operator.getOperation" | "org.slack.operator.listInboxWriters";
+import { assertOperatorWorkspaceWithinEnvelope } from "./workspace-envelope";
+import { WorkspaceEnvelopeError } from "@/protocol/workspace-summary";
+import { OPERATOR_METHOD, type OperatorMethod } from "@/protocol/nsids";
 
 export async function withOperatorActor<T>(
   request: Request,
@@ -14,9 +15,9 @@ export async function withOperatorActor<T>(
 ): Promise<NextResponse> {
   try {
     const did = await authenticateOperatorRequest(request, method);
-    const actor = await requireActiveWorkspaceAdmin(workspace, did, { allowDegradedLookup: method === "org.slack.operator.getOperation" });
-    if (method === "org.slack.operator.execute" || method === "org.slack.operator.listInboxWriters") {
-      assertWorkspaceWithinEnvelope(await requireWorkspaceSummary(actor.session, actor.workspace.uri));
+    const actor = await requireActiveWorkspaceAdmin(workspace, did, { allowDegradedLookup: method === OPERATOR_METHOD.getOperation });
+    if (method === OPERATOR_METHOD.execute || method === OPERATOR_METHOD.listInboxWriters) {
+      await assertOperatorWorkspaceWithinEnvelope(actor);
     }
     const result = await action(actor);
     return NextResponse.json(result, { headers: { "cache-control": "no-store" } });

@@ -5,7 +5,7 @@ import test from "node:test";
 test("HTTPS OAuth metadata resolves the exact signed scope descriptor", async () => {
   process.env.APP_URL = "https://spaces.example.com";
   process.env.AUTH_ENCRYPTION_KEY = "ab".repeat(32);
-  process.env.OPERATOR_SERVICE_REF = "did:web:spaces.example.com#atproto_slack_admin";
+  process.env.OPERATOR_SERVICE_REF = "did:web:spaces.example.com#atproto_flock_operator";
   process.env.PLC_URL = "https://plc.directory";
 
   const [{ canonicalOAuthScope }, { getOAuthClient }, { GET }] = await Promise.all([
@@ -13,7 +13,7 @@ test("HTTPS OAuth metadata resolves the exact signed scope descriptor", async ()
   ]);
   const scope = canonicalOAuthScope([
     "atproto",
-    "space:org.slack.workspace?authority=did:plc:alice&skey=workspace&action=read",
+    "space:new.flock.workspace?authority=did:plc:alice&skey=workspace&action=read",
   ]);
   const clientId = getOAuthClient(scope).clientMetadata.client_id;
   const metadataUrl = new URL(clientId);

@@ -3,7 +3,7 @@ import test from "node:test";
 import { mergeDmHalves, type DmHalfPage, type DmHalfRecord } from "./merge";
 
 function record(ownerDid: string, rkey: string): DmHalfRecord {
-  return { uri: `at://${ownerDid}/space/org.slack.dm.conversation/conv/${ownerDid}/org.slack.dm.message/${rkey}`, rkey, ownerDid, value: { text: `${ownerDid}-${rkey}` } };
+  return { uri: `at://${ownerDid}/space/new.flock.dm.conversation/conv/${ownerDid}/new.flock.dm.message/${rkey}`, rkey, ownerDid, value: { text: `${ownerDid}-${rkey}` } };
 }
 
 test("interleaves two exhausted halves by rkey, newest first", () => {

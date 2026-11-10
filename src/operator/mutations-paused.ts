@@ -8,5 +8,5 @@ export class AdminMutationsPausedError extends Error {
 }
 
 export function assertAdminMutationsEnabled(): void {
-  if (process.env.SLACK_ADMIN_MUTATIONS_PAUSED === "true") throw new AdminMutationsPausedError();
+  if (process.env.FLOCK_ADMIN_MUTATIONS_PAUSED === "true") throw new AdminMutationsPausedError();
 }

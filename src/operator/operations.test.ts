@@ -5,21 +5,43 @@ import { KemKeyError } from "@/atproto/kem-key";
 import { UpstreamResponseTooLargeError } from "@/lib/bounded-json";
 import { XrpcError } from "@/atproto/xrpc";
 import { channelUri, inboxUri, requestRecordKey } from "@/protocol/keys";
-import { assertWorkspaceRosterMatchesPds, readJoinRequestRecord, savedWorkspaceOperations, validateOperatorRequest } from "./operations";
-import type { OperatorActor } from "./security";
+import { savedWorkspaceOperations, validateOperatorRequest } from "./operations";
+import { assertWorkspaceRosterMatchesPds, readJoinRequestRecord } from "./workspace-state";
+import type { OperatorActor } from "./actor";
 
 const actor = { workspace: { authorityDid: "did:plc:owner" } } as OperatorActor;
 
 test("operator accepts only exact self-leave shapes and reconciliation request", () => {
-  assert.deepEqual(validateOperatorRequest({ kind: "leaveWorkspace" }, actor), { kind: "leaveWorkspace" });
-  assert.deepEqual(validateOperatorRequest({ kind: "reconcileWorkspace" }, actor), { kind: "reconcileWorkspace" });
-  assert.throws(() => validateOperatorRequest({ kind: "leaveWorkspace", subject: "did:plc:other" }, actor), /unexpected fields/i);
-  assert.throws(() => validateOperatorRequest({ kind: "leaveChannel", skey: "general", subject: "did:plc:other" }, actor), /unexpected fields/i);
+  assert.deepEqual(validateOperatorRequest({ kind: "leaveWorkspace" }, actor, "execute").request, { kind: "leaveWorkspace" });
+  assert.deepEqual(validateOperatorRequest({ kind: "reconcileWorkspace" }, actor, "execute").request, { kind: "reconcileWorkspace" });
+  assert.throws(() => validateOperatorRequest({ kind: "leaveWorkspace", subject: "did:plc:other" }, actor, "execute"), /unexpected fields/i);
+  assert.throws(() => validateOperatorRequest({ kind: "leaveChannel", skey: "general", subject: "did:plc:other" }, actor, "execute"), /unexpected fields/i);
+});
+
+test("workspace creation is a journaled kind but is never submitted through execute", () => {
+  // #given a bootstrap request, as a client would send it and as its journal row holds it
+  const bootstrap = { kind: "bootstrapWorkspace", name: "Acme" };
+
+  // #then execute refuses it, and journal recovery reads it
+  assert.throws(() => validateOperatorRequest(bootstrap, actor, "execute"), /unsupported operation kind/i);
+  assert.equal(validateOperatorRequest(bootstrap, actor, "journal").kind.kind, "bootstrapWorkspace");
+  assert.throws(() => validateOperatorRequest({ kind: "bootstrapWorkspace", name: "Acme <script>" }, actor, "journal"), /1 to 60 plain-text characters/);
+});
+
+test("a kind outside the table, a wrong lexicon type, or a wrongly typed field is refused", () => {
+  for (const kind of ["deleteWorkspace", "toString", "__proto__", 7]) {
+    assert.throws(() => validateOperatorRequest({ kind }, actor, "execute"), /unsupported operation kind|operation kind is required/i, String(kind));
+  }
+  assert.throws(() => validateOperatorRequest({ kind: "reconcileWorkspace", $type: "org.example.other" }, actor, "execute"), /invalid operation type/i);
+  assert.equal(validateOperatorRequest({ kind: "reconcileWorkspace", $type: "new.flock.operator.execute#operationRequest" }, actor, "execute").kind.kind, "reconcileWorkspace");
+  assert.throws(() => validateOperatorRequest({ kind: "setAdmin", subject: "did:plc:member", active: "yes" }, actor, "execute"), /must be boolean/i);
+  assert.throws(() => validateOperatorRequest({ kind: "inviteMember" }, actor, "execute"), /missing or unexpected fields/i);
+  assert.throws(() => validateOperatorRequest({ kind: "createChannel", skey: "x", name: " ", visibility: "public" }, actor, "execute"), /1 to 80 characters/i);
 });
 
 test("private visibility transitions require a selected member list", () => {
-  assert.throws(() => validateOperatorRequest({ kind: "transitionChannel", skey: "general", visibility: "private" }, actor), /selected member list/i);
-  assert.deepEqual(validateOperatorRequest({ kind: "transitionChannel", skey: "general", visibility: "private", members: ["did:plc:member"] }, actor).members, ["did:plc:member"]);
+  assert.throws(() => validateOperatorRequest({ kind: "transitionChannel", skey: "general", visibility: "private" }, actor, "execute"), /selected member list/i);
+  assert.deepEqual(validateOperatorRequest({ kind: "transitionChannel", skey: "general", visibility: "private", members: ["did:plc:member"] }, actor, "execute").request.members, ["did:plc:member"]);
 });
 
 test("workspace channel grants require the roster and live PDS membership to match", () => {
@@ -48,7 +70,7 @@ test("workspace channel grants require the roster and live PDS membership to mat
 });
 
 test("recovery keeps unreadable journal rows visible instead of silently skipping them", () => {
-  const workspace = "at://did:plc:owner/space/org.slack.workspace/team";
+  const workspace = "at://did:plc:owner/space/new.flock.workspace/team";
   const recoveringActor = { did: "did:plc:admin", workspace: { authorityDid: "did:plc:owner", uri: workspace } } as OperatorActor;
   const rows = [
     { actor: "did:plc:admin", operationId: "current", requestJson: JSON.stringify({ workspace, request: { kind: "reconcileWorkspace" } }) },

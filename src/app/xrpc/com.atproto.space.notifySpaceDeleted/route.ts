@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { OperatorAuthError } from "@/operator/security";
+import { OperatorAuthError } from "@/operator/errors";
 import { authenticateSpaceNotification } from "@/operator/space-notification";
 import { parseSpaceDeletedNotification } from "@/atproto/write-notification";
 import { purgeDeletedSpace } from "@/workspaces/cache";

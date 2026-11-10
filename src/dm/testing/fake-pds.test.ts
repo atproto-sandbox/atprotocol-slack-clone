@@ -18,7 +18,7 @@ type Tamper = (request: Request) => Promise<Request> | Request;
 async function setup(tamper?: Tamper, policy: unknown = PUBLIC_READ) {
   const network = new FakeDmNetwork();
   for (const [did, host] of [[OWNER, "pds1"], [READER, "pds2"], [OUTSIDER, "pds3"]] as const) network.createAccount(did, host);
-  await network.clientFor(OWNER).procedure("com.atproto.space.createSpace", { spaceType: "org.slack.dm.inbox", skey: "self", policy });
+  await network.clientFor(OWNER).procedure("com.atproto.space.createSpace", { spaceType: "new.flock.dm.inbox", skey: "self", policy });
   const minted: SpaceKey[] = [];
   const deps: SpaceCredentialDeps = {
     memberClient: network.clientFor(READER),
@@ -203,30 +203,30 @@ test("a read of one repo is rejected when addressed to the space authority inste
   key = mintedKey;
   const credential = await mintSpaceCredentialWith(deps, SPACE);
   await assert.rejects(
-    credential.client("https://fake-pds.test/pds2").query("com.atproto.space.listRecords", { space: SPACE, repo: READER, collection: "org.slack.dm.request" }),
+    credential.client("https://fake-pds.test/pds2").query("com.atproto.space.listRecords", { space: SPACE, repo: READER, collection: "new.flock.dm.request" }),
     { status: 401, code: "BadSpaceAudience" },
   );
 });
 
 test("a MAC-bearing read without a MAC request is refused with BadSpaceMac", async () => {
   const { network, deps } = await setup();
-  await network.clientFor(OWNER).procedure("com.atproto.space.putRecord", { space: SPACE, repo: OWNER, collection: "org.slack.dm.request", rkey: "a", record: { text: "x" } });
+  await network.clientFor(OWNER).procedure("com.atproto.space.putRecord", { space: SPACE, repo: OWNER, collection: "new.flock.dm.request", rkey: "a", record: { text: "x" } });
   const credential = await mintSpaceCredentialWith(deps, SPACE);
   const unverifiedFetch = deps.fetchEndpoint;
   const bare = new SpaceCredentialAccess(credential, unverifiedFetch);
-  await assert.rejects(bare.getRecord(OWNER, "org.slack.dm.request", "a"), { status: 400, code: "BadSpaceMac" });
+  await assert.rejects(bare.getRecord(OWNER, "new.flock.dm.request", "a"), { status: 400, code: "BadSpaceMac" });
 });
 
 test("an account's own OAuth read of its repo needs no MAC, while the same read with a credential does", async () => {
   const { network, deps } = await setup();
-  await network.clientFor(OWNER).procedure("com.atproto.space.putRecord", { space: SPACE, repo: OWNER, collection: "org.slack.dm.request", rkey: "a", record: { text: "x" } });
+  await network.clientFor(OWNER).procedure("com.atproto.space.putRecord", { space: SPACE, repo: OWNER, collection: "new.flock.dm.request", rkey: "a", record: { text: "x" } });
 
-  const own = await network.clientFor(OWNER).query<{ uri: string; value: { text: string } }>("com.atproto.space.getRecord", { space: SPACE, repo: OWNER, collection: "org.slack.dm.request", rkey: "a" });
+  const own = await network.clientFor(OWNER).query<{ uri: string; value: { text: string } }>("com.atproto.space.getRecord", { space: SPACE, repo: OWNER, collection: "new.flock.dm.request", rkey: "a" });
   assert.equal(own.value.text, "x", "the own read succeeded without asking for a MAC");
 
   const credential = await mintSpaceCredentialWith(deps, SPACE);
-  await assert.rejects(new SpaceCredentialAccess(credential, deps.fetchEndpoint).getRecord(OWNER, "org.slack.dm.request", "a"), { status: 400, code: "BadSpaceMac" });
-  await assert.rejects(network.clientFor(READER).query("com.atproto.space.getRecord", { space: SPACE, repo: OWNER, collection: "org.slack.dm.request", rkey: "a" }), /missing space credential/, "another account's OAuth session is not a credential");
+  await assert.rejects(new SpaceCredentialAccess(credential, deps.fetchEndpoint).getRecord(OWNER, "new.flock.dm.request", "a"), { status: 400, code: "BadSpaceMac" });
+  await assert.rejects(network.clientFor(READER).query("com.atproto.space.getRecord", { space: SPACE, repo: OWNER, collection: "new.flock.dm.request", rkey: "a" }), /missing space credential/, "another account's OAuth session is not a credential");
 });
 
 /** Sends a credentialed getRecord the way a client that forgot the MAC request would. */
@@ -248,7 +248,7 @@ class SpaceCredentialAccess {
 test("createSpace refuses a policy the host does not implement", async () => {
   const { network } = await setup();
   await assert.rejects(
-    network.clientFor(OWNER).procedure("com.atproto.space.createSpace", { spaceType: "org.slack.workspace", skey: "x", policy: { $type: "com.atproto.managedspace.policy", managingApp: "did:web:app.test" } }),
+    network.clientFor(OWNER).procedure("com.atproto.space.createSpace", { spaceType: "new.flock.workspace", skey: "x", policy: { $type: "com.atproto.managedspace.policy", managingApp: "did:web:app.test" } }),
     { code: "UnsupportedPolicy" },
   );
 });
@@ -293,7 +293,7 @@ async function trackedWriters(network: FakeDmNetwork, deps: SpaceCredentialDeps)
 }
 
 async function writeRequest(network: FakeDmNetwork, did: string): Promise<void> {
-  await network.clientFor(did).procedure("com.atproto.space.putRecord", { space: SPACE, repo: did, collection: "org.slack.dm.request", rkey: "r", record: { text: "x" } });
+  await network.clientFor(did).procedure("com.atproto.space.putRecord", { space: SPACE, repo: did, collection: "new.flock.dm.request", rkey: "r", record: { text: "x" } });
 }
 
 test("removeMember and putMember with write:false evict a tracked writer; updateSpace does not", async () => {
@@ -321,8 +321,8 @@ test("a denied credential request surfaces as a SpaceCredentialError with the Sp
 test("an account can list its own repo with its own session and no credential, as on the pinned PDS; anyone else needs a credential", async () => {
   // #given the owner has put a record into a space
   const { network } = await setup();
-  await network.clientFor(OWNER).procedure("com.atproto.space.putRecord", { space: SPACE, repo: OWNER, collection: "org.slack.dm.request", rkey: "a", record: { text: "x" } });
-  const listing = { space: SPACE, repo: OWNER, collection: "org.slack.dm.request" };
+  await network.clientFor(OWNER).procedure("com.atproto.space.putRecord", { space: SPACE, repo: OWNER, collection: "new.flock.dm.request", rkey: "a", record: { text: "x" } });
+  const listing = { space: SPACE, repo: OWNER, collection: "new.flock.dm.request" };
 
   // #when the owner lists it through her own session, and another account tries the same
   const own = await network.clientFor(OWNER).query<{ records: unknown[] }>("com.atproto.space.listRecords", listing);

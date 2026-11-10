@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { OperatorAuthError } from "@/operator/security";
+import { OperatorAuthError } from "@/operator/errors";
 import { authenticateSpaceNotification } from "@/operator/space-notification";
-import { recordWriteNotification } from "@/atproto/notifications";
+import { recordWriteNotification } from "@/operator/notices";
 import { parseWriteNotification } from "@/atproto/write-notification";
 import { markRepoStale } from "@/workspaces/cache";
 import { readRequestJson, RequestJsonError } from "@/lib/bounded-json";

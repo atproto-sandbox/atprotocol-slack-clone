@@ -77,8 +77,8 @@ Given("a member has workspace, inbox, public-channel, and private-channel access
     for (const space of spaces) {
       assert.deepEqual(await memberAccess(this, owner, space.uri, person.did), expectedAccess(space, inboxOf(this)), `${person.role} in ${space.label}`);
     }
-    assert.equal(await subjectRecordActive(this, owner, this.workspaceUri, "org.slack.workspace.roster", person.did), true);
-    assert.equal(await subjectRecordActive(this, owner, privateRoom.uri, "org.slack.channel.roster", person.did), true);
+    assert.equal(await subjectRecordActive(this, owner, this.workspaceUri, "new.flock.workspace.roster", person.did), true);
+    assert.equal(await subjectRecordActive(this, owner, privateRoom.uri, "new.flock.channel.roster", person.did), true);
   }
   remember(this, "privateRoom", privateRoom);
 });
@@ -109,7 +109,7 @@ Then("membership is removed from each applicable space", async function (this: A
     assert.deepEqual(await memberAccess(this, owner, space.uri, bystander.did), expectedAccess(space, inboxOf(this)), `removal left the other member untouched in ${space.label}`);
   }
   const steps = requiredJournalEntry(this, recall<Executed>(this, "removal").operationId).steps;
-  const channels = spaces.filter((space) => space.uri.includes("/org.slack.channel/"));
+  const channels = spaces.filter((space) => space.uri.includes("/new.flock.channel/"));
   assert.ok(steps.includes("remove-inbox-membership"));
   assert.ok(steps.includes("remove-workspace-membership"));
   for (const channel of channels) assert.ok(steps.includes(`remove-channel-${channel.uri.split("/").at(-1)}`), `the journal records removal from ${channel.label}`);
@@ -120,10 +120,10 @@ Then("the workspace and private rosters become inactive", async function (this: 
   const member = actorNamed(this, "member");
   const bystander = actorNamed(this, "bystander");
   const privateRoom = recall<ChannelRef>(this, "privateRoom");
-  assert.equal(await subjectRecordActive(this, owner, this.workspaceUri, "org.slack.workspace.roster", member.did), false);
-  assert.equal(await subjectRecordActive(this, owner, privateRoom.uri, "org.slack.channel.roster", member.did), false);
-  assert.equal(await subjectRecordActive(this, owner, this.workspaceUri, "org.slack.workspace.roster", bystander.did), true);
-  assert.equal(await subjectRecordActive(this, owner, privateRoom.uri, "org.slack.channel.roster", bystander.did), true);
+  assert.equal(await subjectRecordActive(this, owner, this.workspaceUri, "new.flock.workspace.roster", member.did), false);
+  assert.equal(await subjectRecordActive(this, owner, privateRoom.uri, "new.flock.channel.roster", member.did), false);
+  assert.equal(await subjectRecordActive(this, owner, this.workspaceUri, "new.flock.workspace.roster", bystander.did), true);
+  assert.equal(await subjectRecordActive(this, owner, privateRoom.uri, "new.flock.channel.roster", bystander.did), true);
   await showWorkspaceHome(this, owner);
   await owner.page.locator(".roster-row").filter({ hasText: bystander.did }).waitFor({ state: "visible" });
   await owner.page.locator(".roster-row").filter({ hasText: member.did }).waitFor({ state: "hidden" });
@@ -190,7 +190,7 @@ Given("a member holds a space credential with a short maximum lifetime", async f
     assert.ok(claims.exp * 1000 > Date.now(), "it has not expired");
     assert.ok(claims.exp * 1000 <= mintedAt + MAX_CREDENTIAL_LIFETIME_SECONDS * 1000 + 5_000, "it was minted just now, so its expiry is at most the one hour ceiling away");
   }
-  const profile = await readRecordsWith(this, held[0]!, owner.did, "org.slack.workspace.profile");
+  const profile = await readRecordsWith(this, held[0]!, owner.did, "new.flock.workspace.profile");
   assert.equal(profile.length, 1, "before removal the credential reads the workspace");
 });
 
@@ -215,7 +215,7 @@ Then("the old credential works only until its signed expiration", async function
   const claims = claimsOf(workspaceCredential.token);
   assert.ok(claims.exp * 1000 > Date.now(), "the old credential is still inside its signed lifetime");
   assert.ok(claims.exp - claims.iat <= MAX_CREDENTIAL_LIFETIME_SECONDS, "its signed lifetime is at most the one hour ceiling");
-  const profile = (credential: SpaceCredential) => tryReadWith(this, credential, owner.did, "org.slack.workspace.profile");
+  const profile = (credential: SpaceCredential) => tryReadWith(this, credential, owner.did, "new.flock.workspace.profile");
   assert.deepEqual(await profile(workspaceCredential), { records: 1 }, "removal does not revoke a credential that was already issued");
 
   assert.deepEqual(
@@ -251,7 +251,7 @@ Given("a member belongs to a private channel", async function (this: AppWorld) {
   remember(this, "privateRoom", room);
   await joinWorkspaceAs(this, member);
   assert.deepEqual(await memberAccess(this, owner, room.uri, member.did), FULL_ACCESS);
-  assert.equal(await subjectRecordActive(this, owner, room.uri, "org.slack.channel.roster", member.did), true);
+  assert.equal(await subjectRecordActive(this, owner, room.uri, "new.flock.channel.roster", member.did), true);
   assert.equal((await openChannelAs(this, member, "Private Room")).status, 200, recentCalls(member));
   await member.page.getByRole("button", { name: "Leave private channel" }).waitFor({ state: "visible" });
 });
@@ -279,9 +279,9 @@ Then("channel access and the private roster entry are removed", async function (
   const bystander = actorNamed(this, "bystander");
   const room = recall<ChannelRef>(this, "privateRoom");
   assert.equal(await memberAccess(this, owner, room.uri, member.did), undefined);
-  assert.equal(await subjectRecordActive(this, owner, room.uri, "org.slack.channel.roster", member.did), false);
+  assert.equal(await subjectRecordActive(this, owner, room.uri, "new.flock.channel.roster", member.did), false);
   assert.deepEqual(await memberAccess(this, owner, room.uri, bystander.did), FULL_ACCESS, "other members keep the channel");
-  assert.equal(await subjectRecordActive(this, owner, room.uri, "org.slack.channel.roster", bystander.did), true);
+  assert.equal(await subjectRecordActive(this, owner, room.uri, "new.flock.channel.roster", bystander.did), true);
   const outcome = await tryMintAs(this, member, room.uri);
   assert.deepEqual(refusal(outcome), { status: 403, code: "SpaceNotFound" });
   const steps = requiredJournalEntry(this, recall<Executed>(this, "leave").operationId).steps;
@@ -299,7 +299,7 @@ Then("workspace access remains active", async function (this: AppWorld) {
   for (const space of spaces) {
     assert.deepEqual(await memberAccess(this, owner, space.uri, member.did), expectedAccess(space, inboxOf(this)), `still in ${space.label}`);
   }
-  assert.equal(await subjectRecordActive(this, owner, this.workspaceUri, "org.slack.workspace.roster", member.did), true);
+  assert.equal(await subjectRecordActive(this, owner, this.workspaceUri, "new.flock.workspace.roster", member.did), true);
   assert.equal(refusal(await tryMintAs(this, member, this.workspaceUri)), "granted", "they can still mint a workspace credential");
   const listing = await member.page.request.get(`${this.appOrigin}/api/workspaces`);
   const workspaces = (await listing.json() as { workspaces: Array<{ uri: string; members: Array<{ did: string; active: boolean }> }> }).workspaces;
@@ -317,7 +317,7 @@ type Probe = { status: number; error?: string };
 async function readChannel(world: AppWorld, channel: ChannelRef): Promise<ChannelReading> {
   const owner = actorNamed(world, "owner");
   const [entry, members] = await Promise.all([
-    authorityRecord(world, owner, world.workspaceUri, "org.slack.directory", channel.skey),
+    authorityRecord(world, owner, world.workspaceUri, "new.flock.directory", channel.skey),
     membersOf(world, owner, channel.uri),
   ]);
   return { visibility: entry?.visibility as string | undefined, members: members.map((member) => member.did) };
@@ -333,7 +333,7 @@ async function probeSync(world: AppWorld, channel: ChannelRef): Promise<Probe> {
 async function messageRecords(world: AppWorld, viewerRole: string, channel: ChannelRef): Promise<Array<{ rkey: string; text: unknown }>> {
   const owner = actorNamed(world, "owner");
   const credential = await grantedCredential(world, actorNamed(world, viewerRole), channel.uri);
-  return (await readRecordsWith(world, credential, owner.did, "org.slack.channel.message")).map((record) => ({ rkey: record.rkey, text: record.value.text }));
+  return (await readRecordsWith(world, credential, owner.did, "new.flock.channel.message")).map((record) => ({ rkey: record.rkey, text: record.value.text }));
 }
 
 Given("a public channel has current workspace members", async function (this: AppWorld) {
@@ -438,7 +438,7 @@ async function messagesInRepos(world: AppWorld, credential: SpaceCredential): Pr
   const found: MessageRecord[] = [];
   for (const role of ["owner", "author"]) {
     const repo = actorNamed(world, role).did;
-    for (const record of await readRecordsWith(world, credential, repo, "org.slack.channel.message")) found.push({ repo, rkey: record.rkey, text: record.value.text });
+    for (const record of await readRecordsWith(world, credential, repo, "new.flock.channel.message")) found.push({ repo, rkey: record.rkey, text: record.value.text });
   }
   return found.sort((left, right) => left.rkey.localeCompare(right.rkey));
 }
@@ -500,7 +500,7 @@ Then("all channel members are removed before it is marked archived", async funct
   }
   assert.ok(steps.indexOf("channel-archive-verified") < steps.indexOf("channel-archive-final"));
   assert.deepEqual(await membersOf(this, owner, room.uri), [], "the PDS member list is empty");
-  assert.equal((await authorityRecord(this, owner, this.workspaceUri, "org.slack.directory", room.skey))?.visibility, "archived");
+  assert.equal((await authorityRecord(this, owner, this.workspaceUri, "new.flock.directory", room.skey))?.visibility, "archived");
 });
 
 Then("no new channel credentials are issued", async function (this: AppWorld) {
@@ -526,7 +526,7 @@ Then("existing messages remain in their authors' repos", async function (this: A
   assert.deepEqual(await messagesInRepos(this, recall(this, "heldCredential")), before, "the credential issued before the archive still reads every message from both authors' repos");
   assert.deepEqual(await messagesInRepos(this, await grantedCredential(this, actorNamed(this, "owner"), room.uri)), before, "the workspace authority reads the same messages afterwards");
   const own = await this.pdsGet<{ records?: Array<{ rkey: string; value: { text: string } }> }>(author, "com.atproto.space.listRecords", {
-    space: room.uri, repo: author.did, collection: "org.slack.channel.message", limit: "100",
+    space: room.uri, repo: author.did, collection: "new.flock.channel.message", limit: "100",
   });
   assert.equal(own.status, 200, JSON.stringify(own.body));
   assert.deepEqual(own.body.records?.map((record) => record.value.text), ["Message from the author"], "the author's own PDS still holds the author's message");
@@ -788,7 +788,7 @@ Then("it does not execute the pending admin operation as the member", async func
     const expected = space.uri === inboxOf(this) ? INBOX_WRITE_ONLY : FULL_ACCESS;
     assert.deepEqual(await memberAccess(this, owner, space.uri, leaver.did), expected, `the member who asked to leave is still in ${space.label}`);
   }
-  assert.equal(await subjectRecordActive(this, owner, this.workspaceUri, "org.slack.workspace.roster", leaver.did), true);
+  assert.equal(await subjectRecordActive(this, owner, this.workspaceUri, "new.flock.workspace.roster", leaver.did), true);
 });
 
 // --- Recover a partially completed privacy transition (the operator is really restarted) -------------
@@ -819,7 +819,7 @@ Given("a privacy transition failed after any PDS mutation step", async function 
   });
   assert.equal(failed.operation?.state, "pending", JSON.stringify(failed));
   assert.deepEqual(failed.operation?.completedSteps, ["channel-set-transitioning"], "this covers a failure after the first PDS write; failures after later writes are covered by the delegated failure matrix");
-  assert.equal((await authorityRecord(web, owner, web.workspaceUri, "org.slack.directory", roadmap.skey))?.visibility, "transitioning");
+  assert.equal((await authorityRecord(web, owner, web.workspaceUri, "new.flock.directory", roadmap.skey))?.visibility, "transitioning");
   await owner.page.getByText("CHANNEL TRANSITION").waitFor({ state: "visible" });
   assert.equal(requiredJournalEntry(web, failed.operationId).state, "pending");
   remember(this, "recovery", { app, web, roadmap, failed } satisfies TransitionRecovery);
@@ -855,10 +855,10 @@ Then("the journal resumes the desired state", async function (this: AppWorld) {
   const transitions = web.withAppDatabase((db) => (db.prepare("SELECT count(*) AS count FROM operation WHERE request_json LIKE '%transitionChannel%'").get() as { count: number }).count);
   assert.equal(transitions, 1, "recovery resumed the journaled operation instead of starting a second one");
 
-  assert.equal((await authorityRecord(web, owner, web.workspaceUri, "org.slack.directory", roadmap.skey))?.visibility, "private");
+  assert.equal((await authorityRecord(web, owner, web.workspaceUri, "new.flock.directory", roadmap.skey))?.visibility, "private");
   assert.deepEqual(await memberAccess(web, owner, roadmap.uri, kept.did), FULL_ACCESS);
   assert.equal(await memberAccess(web, owner, roadmap.uri, dropped.did), undefined);
-  assert.equal(await subjectRecordActive(web, owner, roadmap.uri, "org.slack.channel.roster", kept.did), true);
+  assert.equal(await subjectRecordActive(web, owner, roadmap.uri, "new.flock.channel.roster", kept.did), true);
 
   await owner.page.reload();
   await channelButton(owner, "Roadmap").waitFor({ state: "visible" });

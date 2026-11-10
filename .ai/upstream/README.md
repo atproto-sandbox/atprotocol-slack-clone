@@ -17,6 +17,7 @@ Drafts for the atproto core team, written from what a Slack-style team app (chan
 | U9 | [Optional hidden spaces](U9-hidden-spaces.md) (resolved for non-members) | Done | Nothing; random unguessable space keys stay as defense in depth |
 | U10 | [Invitation discovery](U10-invitation-discovery.md) | High | Invite links as the only way a member learns they were added |
 | U11 | [Write-target existence](U11-write-target-existence.md) (now blocking: the credential workaround no longer works) | High | A public declaration record per recipient just to learn whether a request can land |
+| U12 | [Oplog reset signal](U12-oplog-reset-signal.md) | Medium | A full set-hash recomputation on every incremental read to detect a reset |
 
 **Related work.** The peer `opensocial.group` draft overlaps U1, U4, U9, U10 and U11; each of those drafts has a "Related work: opensocial.group" section, summarized in [upstream-protocol-requests.md](upstream-protocol-requests.md).
 

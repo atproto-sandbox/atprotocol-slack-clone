@@ -26,8 +26,8 @@ export type DmcTraffic = {
 const MODE_LABELS: Record<DmRequestMode, string> = { everyone: "Everyone", allowlist: "Only people I allow", nobody: "Nobody" };
 const SLOW_UI_MS = 60_000;
 
-export const dmcInboxOf = (account: FixtureAccount): string => `at://${account.did}/space/org.slack.dm.inbox/self`;
-export const dmcHalfOf = (account: FixtureAccount, convKey: string): string => `at://${account.did}/space/org.slack.dm.conversation/${convKey}`;
+export const dmcInboxOf = (account: FixtureAccount): string => `at://${account.did}/space/new.flock.dm.inbox/self`;
+export const dmcHalfOf = (account: FixtureAccount, convKey: string): string => `at://${account.did}/space/new.flock.dm.conversation/${convKey}`;
 
 // --- Facts read straight from a PDS ---------------------------------------------------------------------
 
@@ -47,34 +47,34 @@ export async function dmcMembers(world: AppWorld, owner: FixtureAccount, space: 
 
 /** The conversation halves the account itself hosts. The PDS also lists foreign halves the account has written into. */
 export async function dmcHalfUris(world: AppWorld, as: FixtureAccount): Promise<string[]> {
-  const result = await world.pdsGet<{ spaces?: Array<{ uri: string }> }>(as, "com.atproto.space.listSpaces", { spaceType: "org.slack.dm.conversation", limit: "100" });
+  const result = await world.pdsGet<{ spaces?: Array<{ uri: string }> }>(as, "com.atproto.space.listSpaces", { spaceType: "new.flock.dm.conversation", limit: "100" });
   assert.equal(result.status, 200, `listSpaces: ${JSON.stringify(result.body)}`);
   return (result.body.spaces ?? []).map((space) => space.uri).filter((uri) => uri.startsWith(`at://${as.did}/`)).sort();
 }
 
 export async function dmcInboxUris(world: AppWorld, as: FixtureAccount): Promise<string[]> {
-  const result = await world.pdsGet<{ spaces?: Array<{ uri: string }> }>(as, "com.atproto.space.listSpaces", { spaceType: "org.slack.dm.inbox", limit: "100" });
+  const result = await world.pdsGet<{ spaces?: Array<{ uri: string }> }>(as, "com.atproto.space.listSpaces", { spaceType: "new.flock.dm.inbox", limit: "100" });
   assert.equal(result.status, 200, `listSpaces: ${JSON.stringify(result.body)}`);
   return (result.body.spaces ?? []).map((space) => space.uri);
 }
 
 export async function dmcHeaderOf(world: AppWorld, owner: FixtureAccount, convKey: string): Promise<DmcRecord<DmcHeader>> {
-  const records = await dmcRecords<DmcHeader>(world, owner, { space: dmcHalfOf(owner, convKey), repo: owner.did, collection: "org.slack.dm.header" });
+  const records = await dmcRecords<DmcHeader>(world, owner, { space: dmcHalfOf(owner, convKey), repo: owner.did, collection: "new.flock.dm.header" });
   assert.equal(records.length, 1, `exactly one header in ${owner.did}'s half`);
   assert.equal(records[0]!.rkey, "self");
   return records[0]!;
 }
 
 export async function dmcMessagesOf(world: AppWorld, owner: FixtureAccount, convKey: string): Promise<Array<DmcRecord<DmcMessage>>> {
-  return dmcRecords<DmcMessage>(world, owner, { space: dmcHalfOf(owner, convKey), repo: owner.did, collection: "org.slack.dm.message" });
+  return dmcRecords<DmcMessage>(world, owner, { space: dmcHalfOf(owner, convKey), repo: owner.did, collection: "new.flock.dm.message" });
 }
 
 export async function dmcRequestsFrom(world: AppWorld, sender: FixtureAccount, recipient: FixtureAccount): Promise<Array<DmcRecord<DmcHeader>>> {
-  return dmcRecords<DmcHeader>(world, sender, { space: dmcInboxOf(recipient), repo: sender.did, collection: "org.slack.dm.request" });
+  return dmcRecords<DmcHeader>(world, sender, { space: dmcInboxOf(recipient), repo: sender.did, collection: "new.flock.dm.request" });
 }
 
 export const dmcMessageUri = (owner: FixtureAccount, convKey: string, rkey: string): string =>
-  `${dmcHalfOf(owner, convKey)}/${owner.did}/org.slack.dm.message/${rkey}`;
+  `${dmcHalfOf(owner, convKey)}/${owner.did}/new.flock.dm.message/${rkey}`;
 
 /** Polls an asynchronous read until it returns something truthy, for facts a click has not finished writing yet. */
 export async function dmcUntil<T>(read: () => Promise<T | undefined | null | false>, what: string, timeoutMs = 30_000): Promise<T> {
@@ -131,7 +131,7 @@ export async function dmcRequestsServedTo(world: AppWorld, reader: FixtureAccoun
   const space = dmcInboxOf(reader);
   const credential = await mintSpaceCredentialWith(dmcDeps(world, reader), space);
   const page = await credential.client(writer.pdsUrl).query<{ records: Array<DmcRecord<DmcHeader>> }>("com.atproto.space.listRecords", {
-    space, repo: writer.did, collection: "org.slack.dm.request", limit: "100",
+    space, repo: writer.did, collection: "new.flock.dm.request", limit: "100",
   });
   return page.records;
 }

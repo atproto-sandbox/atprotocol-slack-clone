@@ -5,13 +5,15 @@ import { isMissingXrpcResource } from "@/atproto/xrpc";
 import { requireSession } from "@/auth/session";
 import { resolvePds } from "@/atproto/identity";
 import { mintSpaceCredential } from "@/atproto/space-credential";
-import { registerSpaceNotifications } from "@/atproto/notifications";
+import { registerSpaceNotifications } from "@/operator/notices";
 import { fetchInboxWriters } from "@/operator/client";
 import { decisionRecordKey, inboxUri } from "@/protocol/keys";
-import { validateSpaceRecord } from "@/protocol/records";
+import { validateSpaceRecord } from "@/protocol/registry";
 import { readWriterJoinRequests } from "@/workspaces/inbox-requests";
-import { requireWorkspaceSummary, WorkspaceEnvelopeError, workspaceDegradedMessage } from "@/workspaces/read-model";
+import { requireWorkspaceSummary } from "@/workspaces/read-model";
+import { WorkspaceEnvelopeError, workspaceDegradedMessage } from "@/protocol/workspace-summary";
 import { mapLimited } from "@/lib/map-limited";
+import { COLLECTION } from "@/protocol/nsids";
 
 export const runtime = "nodejs";
 
@@ -43,9 +45,9 @@ export async function GET(request: NextRequest) {
       try {
         const rkey = decisionRecordKey(joinRequest.uri);
         const decision = await authorityClient.query<GetRecord.OutputSchema>("com.atproto.space.getRecord", {
-          space: inbox, repo: summary.authorityDid, collection: "org.slack.joinDecision", rkey,
+          space: inbox, repo: summary.authorityDid, collection: COLLECTION.joinDecision, rkey,
         });
-        const valid = validateSpaceRecord("org.slack.joinDecision", decision.value, {
+        const valid = validateSpaceRecord(COLLECTION.joinDecision, decision.value, {
           authorityDid: summary.authorityDid, spaceUri: inbox, repoDid: summary.authorityDid, rkey,
         }).valid;
         return valid && decision.value.request === joinRequest.uri && decision.value.requestId === joinRequest.requestId

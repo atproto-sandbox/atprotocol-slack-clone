@@ -8,7 +8,7 @@ test("scoped OAuth client cache is bounded and evicted callback clients rebuild 
   const directory = mkdtempSync(join(tmpdir(), "slack-oauth-client-cache-"));
   process.env.APP_URL = "http://127.0.0.1:3000";
   process.env.AUTH_ENCRYPTION_KEY = "ab".repeat(32);
-  process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_slack_admin";
+  process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
   process.env.PLC_URL = "https://plc.directory";
   process.env.DATABASE_PATH = join(directory, "oauth.db");
 
@@ -17,7 +17,7 @@ test("scoped OAuth client cache is bounded and evicted callback clients rebuild 
       import("./oauth"), import("./encrypted-store"), import("@/lib/db"),
     ]);
     assert.throws(() => getOAuthClient(`atproto space:${"&".repeat(100_000)}`), /loopback client ID is too large/);
-    const scope = "atproto space:org.slack.workspace?authority=did:plc:alice&skey=workspace&action=read";
+    const scope = "atproto space:new.flock.workspace?authority=did:plc:alice&skey=workspace&action=read";
     const originalClient = getOAuthClient(scope);
     const appState = "A".repeat(43);
     await oauthSqliteStore("oauth_state").set("oauth-state-cache-eviction", {

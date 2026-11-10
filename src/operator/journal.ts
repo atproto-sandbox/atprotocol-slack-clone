@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
+import { isScopeMissingError } from "@/atproto/xrpc";
 import { getRawDb } from "@/lib/db";
 import { requestDigest, canonicalJson } from "@/protocol/keys";
-import type { OperatorActor } from "./security";
+import type { OperatorActor } from "./actor";
 
 export type OperationState = "queued" | "running" | "pending" | "completed" | "failed" | "paused";
 export type OperationView = {
@@ -11,6 +12,8 @@ export type OperationView = {
   completedSteps: string[];
   error?: string;
   updatedAt: string;
+  /** The PDS refused a step for a scope the authority grant lacks: the authority must approve again, then retry. */
+  authorizationRequired?: true;
 };
 export type OperationContext = {
   operationId: string;
@@ -41,12 +44,22 @@ const MAX_RECOVERABLE_OPERATIONS = 1_000;
 const MAX_STALLED_OPERATIONS = 100;
 const MAX_JOURNALED_WORKSPACES = 10_000;
 
+/**
+ * Runs one journaled operation under the workspace lock. `steps` are the step names the operation may record (`{…}` stands for
+ * a value): a persisted operation is replayed by name, so recording a step under any other name is refused. A step the PDS
+ * refuses for a missing scope marks the operation as needing the authority's approval. When its submitter is running it and no
+ * step had completed, its row is discarded, since there is nothing to recover, and the submitter retries the same operation ID
+ * after approval. A `replay` of someone else's pending row never discards it: the row stays pending for its owner.
+ */
 export async function runJournaledOperation(
   actor: OperatorActor,
   operationId: string,
   request: Record<string, unknown>,
+  steps: readonly string[],
   run: (context: OperationContext) => Promise<void>,
+  options: { replay?: boolean } = {},
 ): Promise<OperationView> {
+  const declared = stepMatcher(steps);
   const workspaceDid = actor.workspace.authorityDid;
   const requestHash = requestDigest({ workspace: actor.workspace.uri, request });
   return withWorkspaceLock(workspaceDid, async (lock) => {
@@ -72,6 +85,7 @@ export async function runJournaledOperation(
 
     const completedSteps = prior ? parseSteps(prior.steps_json) : [];
     const step = async (name: string, action: () => Promise<void>) => {
+      if (!declared(name)) throw new Error(`Step "${name}" is not declared for this operation.`);
       if (completedSteps.includes(name)) return;
       lock.refresh();
       await action();
@@ -104,11 +118,17 @@ export async function runJournaledOperation(
       const message = safeOperationError(error);
       const failed = error instanceof OperationRejectedError;
       const timestamp = unixNow();
+      const authorizationRequired = isScopeMissingError(error) ? { authorizationRequired: true as const } : {};
+      if (authorizationRequired.authorizationRequired && !options.replay && completedSteps.length === 0 && discardEmptyOperationIfWorkspaceLockOwned({
+        workspace: workspaceDid, workspaceUri: actor.workspace.uri, actor: actor.did, operationId, lock, reason: "authorizationRequired",
+      })) {
+        return { ...operationView(operationId, requestHash, "pending", [], message, timestamp), ...authorizationRequired };
+      }
       const state = failed ? "failed" : "pending";
       raw.prepare("UPDATE operation SET state = ?, error = ?, updated_at = ? WHERE workspace = ? AND actor = ? AND operation_id = ?")
         .run(state, message, timestamp, workspaceDid, actor.did, operationId);
       audit(actor, operationId, failed ? "operationFailed" : "operationPending", { error: message });
-      return operationView(operationId, requestHash, state, completedSteps, message, timestamp);
+      return { ...operationView(operationId, requestHash, state, completedSteps, message, timestamp), ...authorizationRequired };
     }
   });
 }
@@ -136,35 +156,6 @@ export async function withWorkspaceLock<T>(workspace: string, run: (lock: Worksp
   } finally {
     clearInterval(heartbeat);
     releaseWorkspaceLock(workspace, acquired.token);
-  }
-}
-
-export function persistPendingIfWorkspaceLockOwned(input: {
-  workspace: string;
-  actor: string;
-  operationId: string;
-  requestHash: string;
-  lock: WorkspaceLock;
-  completedSteps: string[];
-  error: unknown;
-}): boolean {
-  const raw = getRawDb();
-  const message = safeOperationError(input.error);
-  const timestamp = unixNow();
-  try {
-    return raw.transaction(() => {
-      refreshWorkspaceLock(input.workspace, input.lock.token);
-      const result = raw.prepare(`UPDATE operation SET state = 'pending', error = ?, steps_json = ?, updated_at = ?
-        WHERE workspace = ? AND actor = ? AND operation_id = ? AND request_hash = ? AND state = 'running'`)
-        .run(message, JSON.stringify(input.completedSteps), timestamp, input.workspace, input.actor, input.operationId, input.requestHash);
-      if (result.changes !== 1) return false;
-      raw.prepare("INSERT INTO audit_event (workspace, actor, operation_id, event, details_json, created_at) VALUES (?, ?, ?, ?, ?, ?)")
-        .run(input.workspace, input.actor, input.operationId, "operationPending", canonicalJson({ error: message, reason: "runnerFailure" }), timestamp);
-      return true;
-    })();
-  } catch {
-    // A runner that lost its token must not overwrite the new owner's journal row.
-    return false;
   }
 }
 
@@ -312,6 +303,12 @@ function operationView(operationId: string, requestHash: string, state: Operatio
     ...(error ? { error } : {}),
     updatedAt: new Date(updatedAt * 1000).toISOString(),
   };
+}
+
+/** Whether a step name matches one of the declared names, where `{…}` in a declared name stands for any non-empty value. */
+export function stepMatcher(steps: readonly string[]): (name: string) => boolean {
+  const patterns = steps.map((step) => new RegExp(`^${step.split(/\{[^}]+\}/).map((part) => part.replace(/[.*+?^$()|[\]\\]/g, "\\$&")).join(".+")}$`));
+  return (name) => patterns.some((pattern) => pattern.test(name));
 }
 
 function parseSteps(value: string): string[] {

@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { after, before, test } from "node:test";
+import Database from "better-sqlite3";
 import { chromium } from "@playwright/test";
 import { createFixtureTempRoot } from "../fixture-temp";
 
@@ -82,7 +83,7 @@ before(async () => {
     DATABASE_PATH: databasePath,
     AUTH_ENCRYPTION_KEY: encryptionKey,
     PLC_URL: network.plc.url,
-    OPERATOR_SERVICE_REF: `did:web:localhost%3A${port}#atproto_slack_admin`,
+    OPERATOR_SERVICE_REF: `did:web:localhost%3A${port}#atproto_flock_operator`,
   };
   server = spawn(process.execPath, [
     join(projectRoot, "node_modules/next/dist/bin/next"),
@@ -169,11 +170,28 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
     await workspaceForm.getByRole("button", { name: "Create workspace", exact: true }).click();
     assert.equal((await permissionRetry).status(), 200, "a retry after declining can start a new permission request");
     await page.waitForURL(/\/oauth\/authorize\?/, { timeout: 30_000 });
+    // The authority grant has its own OAuth client and callback, separate from the sign-in.
+    const authorityClientId = new URL(new URL(page.url()).searchParams.get("client_id") ?? "");
+    assert.equal(authorityClientId.searchParams.get("redirect_uri"), `${appUrl.origin}/authority/callback`, "the workspace authority approves through the authority flow");
+    const authorityCallbacks: string[] = [];
+    page.on("request", (request) => { if (new URL(request.url()).pathname === "/authority/callback") authorityCallbacks.push(request.url()); });
     await signInIfPrompted(page);
     await page.getByRole("button", { name: "Authorize", exact: true }).waitFor({ state: "visible" });
     await page.getByRole("button", { name: "Authorize", exact: true }).click();
     await page.waitForURL(appUrl.origin, { timeout: 30_000 });
     await page.getByRole("heading", { name: "Browser Acceptance Workspace", exact: true }).waitFor({ state: "visible", timeout: 30_000 });
+
+    // The authority callback is bound to the browser that started the flow: replayed from another browser, it is refused.
+    const approvedCallback = authorityCallbacks.at(-1);
+    assert.ok(approvedCallback, "the approval returned through the authority callback");
+    const strangerContext = await browser.newContext();
+    try {
+      const strangerPage = await strangerContext.newPage();
+      await strangerPage.goto(approvedCallback);
+      assert.match(strangerPage.url(), /[?&]authority=failed/, "a callback without its flow cookie is rejected");
+    } finally {
+      await strangerContext.close();
+    }
     await page.getByText("Grant operator controls to sync private-channel requests.", { exact: false }).waitFor({ state: "visible", timeout: 30_000 }).catch(async (error: unknown) => {
       const state = await page.evaluate(async () => await fetch("/api/workspaces").then((response) => response.json()));
       throw new Error(`Expected the inbox permission prompt after bootstrap. API: ${JSON.stringify(state)}\nPage: ${(await page.locator("body").innerText()).slice(0, 4_000)}\nServer: ${serverOutput}`, { cause: error });
@@ -188,13 +206,13 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
     assert.ok(clientId);
     const requestedScope = new URL(clientId).searchParams.get("scope") ?? "";
     for (const method of ["execute", "getOperation", "listInboxWriters"]) {
-      assert.ok(requestedScope.includes(`lxm=org.slack.operator.${method}`), `client metadata includes operator method ${method}`);
+      assert.ok(requestedScope.includes(`lxm=new.flock.operator.${method}`), `client metadata includes operator method ${method}`);
     }
     await signInIfPrompted(page);
     await page.getByRole("button", { name: "Authorize", exact: true }).waitFor({ state: "visible" });
     const consentScope = await page.evaluate(() => String((window as unknown as { __authorizeData?: { scope?: string } }).__authorizeData?.scope ?? ""));
     for (const method of ["execute", "getOperation", "listInboxWriters"]) {
-      assert.ok(consentScope.includes(`lxm=org.slack.operator.${method}`), `PDS consent includes operator method ${method}`);
+      assert.ok(consentScope.includes(`lxm=new.flock.operator.${method}`), `PDS consent includes operator method ${method}`);
     }
     await page.getByRole("button", { name: "Authorize", exact: true }).click();
     await page.waitForURL(appUrl.origin, { timeout: 30_000 });
@@ -221,7 +239,7 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
       throw new Error(`PDS did not show consent for channel posting. Page: ${(await page.locator("body").innerText()).slice(0, 2_000)}\nServer: ${serverOutput}`, { cause: error });
     });
     const channelConsentScope = await page.evaluate(() => String((window as unknown as { __authorizeData?: { scope?: string } }).__authorizeData?.scope ?? ""));
-    assert.ok(channelConsentScope.includes("org.slack.channel.message") && channelConsentScope.includes("action=create"), "PDS consent includes channel message write scope");
+    assert.ok(channelConsentScope.includes("new.flock.channel.message") && channelConsentScope.includes("action=create"), "PDS consent includes channel message write scope");
     await page.getByRole("button", { name: "Authorize", exact: true }).click();
     await page.waitForURL(appUrl.origin, { timeout: 30_000 }).catch(async (error: unknown) => {
       throw new Error(`Channel consent did not return to the app. URL: ${page.url()} Page: ${(await page.locator("body").innerText()).slice(0, 2_000)}\nServer: ${serverOutput}`, { cause: error });
@@ -268,7 +286,7 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
         DATABASE_PATH: join(scratchDirectory!, "independent-app.db"),
         AUTH_ENCRYPTION_KEY: Buffer.alloc(32, 0x6b).toString("hex"),
         PLC_URL: network!.plc.url,
-        OPERATOR_SERVICE_REF: `did:web:localhost%3A${independentPort}#atproto_slack_admin`,
+        OPERATOR_SERVICE_REF: `did:web:localhost%3A${independentPort}#atproto_flock_operator`,
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -386,7 +404,7 @@ async function publishAppLexicons(fixture: NonNullable<typeof network>): Promise
   assert.ok(fixture.lexiconAuthority, "fixture must expose its lexicon authority");
   const agent = fixture.pds.getAgent();
   const session = await agent.com.atproto.server.createSession({ identifier: "lex-authority.test", password: "hunter2" });
-  const root = join(projectRoot, "lexicons/org/slack");
+  const root = join(projectRoot, "lexicons/new/flock");
   const files = await readdir(root, { recursive: true });
   const published = new Set<string>();
   for (const relative of files.filter((file) => file.endsWith(".json"))) {
@@ -430,6 +448,78 @@ async function signInIfPrompted(
   await passwordInput.fill(accountPassword);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
 }
+
+test("the authority flow runs twice at once in one browser, and a used callback cannot be replayed with its cookie", async () => {
+  assert.ok(appUrl && databasePath);
+  const app = appUrl;
+  const browser = await chromium.launch({ headless: true });
+  const context = await browser.newContext();
+  const grantRow = () => {
+    const db = new Database(databasePath!, { readonly: true, fileMustExist: true });
+    try { return db.prepare("SELECT key, value FROM authority_grant WHERE key = ?").all(ownerDid) as Array<{ key: string; value: string }>; }
+    finally { db.close(); }
+  };
+  try {
+    // given the owner signed in to the app in one browser
+    const page = await context.newPage();
+    page.setDefaultTimeout(30_000);
+    await page.goto(app.origin);
+    await page.getByLabel("Your AT Protocol handle").fill(ownerDid);
+    await page.getByRole("button", { name: /Continue with atproto/i }).click();
+    await completePdsConsentFlow(page, app, "browser-owner.test", password);
+    const startUrl = async () => page.evaluate(async (did) => {
+      const response = await fetch("/api/oauth/permission", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "workspaceAuthority", workspaceDid: did }) });
+      return (await response.json() as { redirectUrl: string }).redirectUrl;
+    }, ownerDid);
+    const approve = async (tab: import("@playwright/test").Page) => {
+      await tab.waitForURL(/\/oauth\/authorize\?/);
+      await signInIfPrompted(tab);
+      await tab.getByRole("button", { name: "Authorize", exact: true }).click();
+      await tab.waitForURL((url) => url.origin === app.origin && !url.pathname.startsWith("/authority"));
+      return tab.url();
+    };
+
+    // when two authority flows are started and both approved, in two tabs of that browser
+    const [first, second] = [await context.newPage(), await context.newPage()];
+    await first.goto(await startUrl());
+    await second.goto(await startUrl());
+    const landed = [await approve(first), await approve(second)];
+
+    // then both complete, and one grant remains
+    for (const url of landed) assert.doesNotMatch(url, /authority=failed/, "each flow completes");
+    assert.equal(grantRow().length, 1, "two approvals leave one grant");
+
+    // and when a third flow completes, its callback replayed with the restored flow cookie is refused. The flow cookie is
+    // taken while the browser is at the consent page (set by /authority/start, cleared by the callback), and the callback
+    // URL from the request event, since a navigation reached through a redirect is not routable.
+    const third = await context.newPage();
+    const callbacks: string[] = [];
+    third.on("request", (request) => { if (new URL(request.url()).pathname === "/authority/callback") callbacks.push(request.url()); });
+    await third.goto(await startUrl());
+    await third.waitForURL(/\/oauth\/authorize\?/);
+    const flowCookies = (await context.cookies()).filter(({ name }) => name.startsWith("spaces_oauth_"));
+    assert.ok(flowCookies.length > 0, "the flow cookie is set while the flow is open");
+    assert.doesNotMatch(await approve(third), /authority=failed/, "the third flow completes");
+    const callbackUrl = callbacks.at(-1);
+    assert.ok(callbackUrl, "the callback was observed");
+    const afterApproval = grantRow();
+    await context.addCookies(flowCookies);
+    await third.goto(callbackUrl);
+    assert.match(third.url(), /[?&]authority=failed/, "a used state is refused even with its cookie");
+    assert.deepEqual(grantRow(), afterApproval, "the refused replay leaves the grant as it was");
+
+    // and the grant that remains works: the app creates a workspace with it
+    const created = await page.evaluate(async () => {
+      const operationId = Array.from(crypto.getRandomValues(new Uint8Array(13)), (byte) => "234567abcdefghijklmnopqrstuvwxyz"[byte % 32]).join("").replace(/^[k-z]/, "a");
+      const response = await fetch("/api/workspaces/bootstrap", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "Grant Survivor", operationId }) });
+      return { status: response.status, body: await response.json() as { state?: string } };
+    });
+    assert.equal(created.status, 201, JSON.stringify(created.body));
+    assert.equal(created.body.state, "completed");
+  } finally {
+    await browser.close();
+  }
+});
 
 async function completePdsConsentFlow(
   page: import("@playwright/test").Page,

@@ -35,16 +35,16 @@ describe('atproto Slack authority OAuth protocol conformance', () => {
       await lexiconAgent.com.atproto.repo.createRecord({
         repo: network.lexiconAuthority!.did,
         collection: 'com.atproto.lexicon.schema',
-        rkey: 'org.slack.workspace',
+        rkey: 'new.flock.workspace',
         record: {
           lexicon: 1,
-          id: 'org.slack.workspace',
+          id: 'new.flock.workspace',
           defs: {
             main: {
               type: 'space',
               key: 'any',
               name: 'Slack workspace',
-              collections: ['org.slack.admin'],
+              collections: ['new.flock.admin'],
             },
           },
         }},
@@ -54,7 +54,7 @@ describe('atproto Slack authority OAuth protocol conformance', () => {
       const authority = await spaces.createActor('alice', network.pds)
       const member = await spaces.createActor('bob', network.extraPdses[0], 'test2')
       const space = await spaces.createSpace(authority, {
-        spaceType: 'org.slack.workspace' as NsidString,
+        spaceType: 'new.flock.workspace' as NsidString,
         skey: 'workspace',
       })
 
@@ -81,10 +81,10 @@ describe('atproto Slack authority OAuth protocol conformance', () => {
       const account = (await oauth.accountManager.getAccount(authority.did)).account
       const scope = [
         'atproto',
-        'space:org.slack.workspace?skey=workspace&action=read_self&manage=update',
-        'space:org.slack.workspace?skey=workspace&collection=org.slack.admin&action=create&action=update&action=delete',
+        'space:new.flock.workspace?skey=workspace&action=read_self&manage=update',
+        'space:new.flock.workspace?skey=workspace&collection=new.flock.admin&action=create&action=update&action=delete',
         ...['execute', 'getOperation', 'listInboxWriters'].map((method) =>
-          `rpc:org.slack.operator.${method}?aud=${network.pds.ctx.cfg.service.did}%23atproto_slack_admin`,
+          `rpc:new.flock.operator.${method}?aud=${network.pds.ctx.cfg.service.did}%23atproto_flock_operator`,
         ),
       ].join(' ')
       const token = await oauth.tokenManager.createToken(
@@ -147,17 +147,17 @@ describe('atproto Slack authority OAuth protocol conformance', () => {
         throw new Error(`${nsid} exhausted DPoP nonce retry`)
       }
 
-      const operatorAudience = `${network.pds.ctx.cfg.service.did}#atproto_slack_admin`
+      const operatorAudience = `${network.pds.ctx.cfg.service.did}#atproto_flock_operator`
       const serviceAuth = await callAsOAuth(
         token.access_token,
         'com.atproto.server.getServiceAuth',
         undefined,
-        { aud: operatorAudience, lxm: 'org.slack.operator.execute' },
+        { aud: operatorAudience, lxm: 'new.flock.operator.execute' },
       ) as { token: string }
       expect(decodeJwt(serviceAuth.token)).toMatchObject({
         iss: authority.did,
         aud: operatorAudience,
-        lxm: 'org.slack.operator.execute',
+        lxm: 'new.flock.operator.execute',
       })
 
       await callAsOAuth(
@@ -173,10 +173,10 @@ describe('atproto Slack authority OAuth protocol conformance', () => {
         {
           space,
           repo: authority.did,
-          collection: 'org.slack.admin' as NsidString,
+          collection: 'new.flock.admin' as NsidString,
           rkey: 'd-authority-admin',
           record: {
-            $type: 'org.slack.admin',
+            $type: 'new.flock.admin',
             subject: authority.did,
             active: true,
             updatedAt: new Date().toISOString(),
@@ -196,7 +196,7 @@ describe('atproto Slack authority OAuth protocol conformance', () => {
           client_id: clientId,
           redirect_uri: 'https://slack.example/callback',
           response_type: 'code',
-          scope: 'atproto space:org.slack.workspace?skey=workspace&action=read',
+          scope: 'atproto space:new.flock.workspace?skey=workspace&action=read',
           dpop_jkt: await calculateJwkThumbprint(key.bareJwk!, 'sha256'),
         },
         await generateCode(),

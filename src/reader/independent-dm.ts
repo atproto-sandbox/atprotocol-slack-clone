@@ -2,8 +2,9 @@ import { listBoundedRecords } from "@/atproto/record-pages";
 import { mintSpaceCredentialWith, SpaceCredentialError, type SpaceCredential, type SpaceCredentialDeps } from "@/atproto/space-credential-core";
 import { XrpcError, type AtprotoClient } from "@/atproto/xrpc";
 import { canonicalParticipants, dmConversationUri, spaceRecordUri } from "@/protocol/keys";
-import { validateDmHeaderMatchesRequest, validateSpaceRecord } from "@/protocol/records";
+import { validateDmHeaderMatchesRequest, validateSpaceRecord } from "@/protocol/registry";
 import { classifyRepoFailure } from "@/atproto/repo-failure";
+import { COLLECTION } from "@/protocol/nsids";
 
 const DEFAULT_LIMIT = 100;
 const MAX_MESSAGES_PER_HALF = 20_000;
@@ -24,7 +25,7 @@ type RawMessage = { uri: string; ownerDid: string; rkey: string; value: Record<s
 /**
  * M6 independence proof: a deliberately separate, minimal reader that proves
  * DM conversations are fully reconstructible from the published
- * `org.slack.dm.*` lexicons alone. It shares only the published-protocol
+ * DM lexicons alone. It shares only the published-protocol
  * layer with `src/dm/dm-client.ts` (`src/protocol/*`, `xrpc.ts`,
  * `record-pages.ts`, `space-credential-core.ts`); it never imports
  * `src/dm/**` and merges every half's own (bounded) full history itself,
@@ -55,22 +56,22 @@ export async function readIndependentDmConversation(
     }
     try {
       const client = credential.client(await deps.resolvePds(ownerDid));
-      const header = await getOptionalRecord(client, half, ownerDid, "org.slack.dm.header", "self");
-      const headerValid = header !== null && validateSpaceRecord("org.slack.dm.header", header, {
+      const header = await getOptionalRecord(client, half, ownerDid, COLLECTION.dmHeader, "self");
+      const headerValid = header !== null && validateSpaceRecord(COLLECTION.dmHeader, header, {
         authorityDid: ownerDid, spaceUri: half, repoDid: ownerDid, rkey: "self",
       }).valid;
       if (header === null || !headerValid || !validateDmHeaderMatchesRequest(header, { convKey, participants: canonical })) {
         halves[ownerDid] = "missing";
         continue;
       }
-      const page = await listBoundedRecords(client, { space: half, repo: ownerDid, collection: "org.slack.dm.message", maxRecords: MAX_MESSAGES_PER_HALF });
+      const page = await listBoundedRecords(client, { space: half, repo: ownerDid, collection: COLLECTION.dmMessage, maxRecords: MAX_MESSAGES_PER_HALF });
       if (page.truncated) throw new Error("Independent DM reader: a half's message history exceeds the bounded scan limit.");
       for (const record of page.records) {
-        const validation = validateSpaceRecord("org.slack.dm.message", record.value, {
+        const validation = validateSpaceRecord(COLLECTION.dmMessage, record.value, {
           authorityDid: ownerDid, spaceUri: half, repoDid: ownerDid, rkey: record.rkey, participants: canonical,
         });
         if (!validation.valid) continue;
-        rawMessages.push({ uri: spaceRecordUri(half, ownerDid, "org.slack.dm.message", record.rkey), ownerDid, rkey: record.rkey, value: record.value });
+        rawMessages.push({ uri: spaceRecordUri(half, ownerDid, COLLECTION.dmMessage, record.rkey), ownerDid, rkey: record.rkey, value: record.value });
       }
       halves[ownerDid] = "ok";
       credentialByOwner.set(ownerDid, credential);
@@ -128,16 +129,16 @@ async function readIndependentDmReactions(
     const half = dmConversationUri(ownerDid, convKey);
     try {
       const client = credential.client(await deps.resolvePds(ownerDid));
-      const page = await listBoundedRecords(client, { space: half, repo: ownerDid, collection: "org.slack.dm.reaction", maxRecords: MAX_REACTIONS_PER_HALF });
+      const page = await listBoundedRecords(client, { space: half, repo: ownerDid, collection: COLLECTION.dmReaction, maxRecords: MAX_REACTIONS_PER_HALF });
       if (page.truncated) throw new Error("Independent DM reader: a half's reaction history exceeds the bounded scan limit.");
       for (const record of page.records) {
-        const validation = validateSpaceRecord("org.slack.dm.reaction", record.value, {
+        const validation = validateSpaceRecord(COLLECTION.dmReaction, record.value, {
           authorityDid: ownerDid, spaceUri: half, repoDid: ownerDid, rkey: record.rkey, participants,
         });
         if (!validation.valid) continue;
         const value = record.value as { subject: string; emoji: string; createdAt: string };
         if (!messageUris.has(value.subject)) continue;
-        reactions.push({ uri: spaceRecordUri(half, ownerDid, "org.slack.dm.reaction", record.rkey), ownerDid, subject: value.subject, emoji: value.emoji, createdAt: value.createdAt });
+        reactions.push({ uri: spaceRecordUri(half, ownerDid, COLLECTION.dmReaction, record.rkey), ownerDid, subject: value.subject, emoji: value.emoji, createdAt: value.createdAt });
       }
     } catch (error) {
       if (!classifyRepoFailure(error)) throw error;

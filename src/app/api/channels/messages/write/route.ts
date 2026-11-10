@@ -9,12 +9,13 @@ import { isMissingXrpcResource } from "@/atproto/xrpc";
 import { resolvePds } from "@/atproto/identity";
 import { mintSpaceCredential } from "@/atproto/space-credential";
 import { parseSpaceRecordUri, tidNow } from "@/protocol/keys";
-import { validateSpaceRecord } from "@/protocol/records";
+import { validateSpaceRecord } from "@/protocol/registry";
 import { requireCurrentChannelCredential, requireReadableChannel } from "@/workspaces/channels";
 import { markRepoStale, purgeDeniedPermissionCache, purgeSpaceCache } from "@/workspaces/cache";
 import { readRequestJson } from "@/lib/bounded-json";
 import { rejectCrossOriginMutation } from "@/lib/same-origin-mutation";
 import { isAccessLost } from "@/atproto/space-credential-core";
+import { COLLECTION } from "@/protocol/nsids";
 
 export const runtime = "nodejs";
 
@@ -40,7 +41,7 @@ export async function POST(request: NextRequest) {
     if (body.action === "create") {
       if (typeof body.text !== "string") return NextResponse.json({ error: "Message text is required." }, { status: 400 });
       const rkey = tidNow();
-      const record: Record<string, unknown> = { $type: "org.slack.channel.message", text: body.text, createdAt: new Date().toISOString() };
+      const record: Record<string, unknown> = { $type: COLLECTION.message, text: body.text, createdAt: new Date().toISOString() };
       const known = new Set<string>();
       if (body.parent !== undefined) {
         if (typeof body.parent !== "string") return NextResponse.json({ error: "Reply target must be an AT URI." }, { status: 400 });
@@ -49,12 +50,12 @@ export async function POST(request: NextRequest) {
         known.add(body.parent);
         record.parent = body.parent;
       }
-      const validation = validateSpaceRecord("org.slack.channel.message", record, {
+      const validation = validateSpaceRecord(COLLECTION.message, record, {
         authorityDid, spaceUri: space, repoDid: session.did, rkey, knownMessages: known, knownTopLevelMessages: known,
       });
       if (!validation.valid) return NextResponse.json({ error: validation.reason }, { status: 400 });
       const result = await client.procedure<CreateRecord.InputSchema, CreateRecord.OutputSchema>("com.atproto.space.createRecord", {
-        space, repo: session.did, collection: "org.slack.channel.message", rkey, record,
+        space, repo: session.did, collection: COLLECTION.message, rkey, record,
       });
       markRepoStale(space, session.did);
       return NextResponse.json({ uri: result.uri, cid: result.cid }, { status: 201 });
@@ -66,7 +67,7 @@ export async function POST(request: NextRequest) {
       if (!target || target.repo !== session.did) return NextResponse.json({ error: "You can change only your own messages." }, { status: 403 });
       if (body.action === "delete") {
         await client.procedure<DeleteRecord.InputSchema, unknown>("com.atproto.space.deleteRecord", {
-          space, repo: session.did, collection: "org.slack.channel.message", rkey: target.rkey,
+          space, repo: session.did, collection: COLLECTION.message, rkey: target.rkey,
         });
         markRepoStale(space, session.did);
         return NextResponse.json({ deleted: true });
@@ -83,12 +84,12 @@ export async function POST(request: NextRequest) {
         knownMessages.add(record.parent);
         knownTopLevelMessages.add(record.parent);
       }
-      const validation = validateSpaceRecord("org.slack.channel.message", record, {
+      const validation = validateSpaceRecord(COLLECTION.message, record, {
         authorityDid, spaceUri: space, repoDid: session.did, rkey: target.rkey, knownMessages, knownTopLevelMessages,
       });
       if (!validation.valid) return NextResponse.json({ error: validation.reason }, { status: 400 });
       const result = await client.procedure<PutRecord.InputSchema, PutRecord.OutputSchema>("com.atproto.space.putRecord", {
-        space, repo: session.did, collection: "org.slack.channel.message", rkey: target.rkey, record,
+        space, repo: session.did, collection: COLLECTION.message, rkey: target.rkey, record,
       });
       markRepoStale(space, session.did);
       return NextResponse.json({ uri: result.uri, cid: result.cid });
@@ -108,7 +109,7 @@ async function readMessage(session: Awaited<ReturnType<typeof requireSession>>, 
     const credential = await mintSpaceCredential(session, space);
     const client = credential.client(await resolvePds(target.repo));
     const record = await client.query<GetRecord.OutputSchema>("com.atproto.space.getRecord", {
-      space, repo: target.repo, collection: "org.slack.channel.message", rkey: target.rkey,
+      space, repo: target.repo, collection: COLLECTION.message, rkey: target.rkey,
     });
     return record.uri === uri ? record : null;
   } catch (error) {
@@ -119,5 +120,5 @@ async function readMessage(session: Awaited<ReturnType<typeof requireSession>>, 
 }
 
 function parseMessageUri(uri: string, space: string): { repo: string; rkey: string } | null {
-  return parseSpaceRecordUri(uri, space, "org.slack.channel.message");
+  return parseSpaceRecordUri(uri, space, COLLECTION.message);
 }

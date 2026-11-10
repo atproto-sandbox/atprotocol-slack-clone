@@ -1,5 +1,6 @@
 import { sha256 } from "@noble/hashes/sha2";
 import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils";
+import { COLLECTION, SPACE_TYPE } from "./nsids";
 
 const BASE32 = "abcdefghijklmnopqrstuvwxyz234567";
 const TID_BASE32 = "234567abcdefghijklmnopqrstuvwxyz";
@@ -55,34 +56,32 @@ export function spaceUri(authorityDid: string, type: string, skey: string): stri
 }
 
 export function workspaceUri(authorityDid: string, skey = "workspace"): string {
-  return spaceUri(authorityDid, "org.slack.workspace", skey);
+  return spaceUri(authorityDid, SPACE_TYPE.workspace, skey);
 }
 
 export function inboxUri(authorityDid: string, skey = "workspace"): string {
-  return spaceUri(authorityDid, "org.slack.inbox", skey);
+  return spaceUri(authorityDid, SPACE_TYPE.inbox, skey);
 }
 
 export function channelUri(authorityDid: string, skey: string): string {
-  return spaceUri(authorityDid, "org.slack.channel", skey);
+  return spaceUri(authorityDid, SPACE_TYPE.channel, skey);
 }
 
 export function dmInboxUri(ownerDid: string): string {
   if (!isDid(ownerDid)) throw new TypeError("Invalid DM inbox owner DID.");
-  return `at://${ownerDid}/space/org.slack.dm.inbox/${DM_INBOX_SKEY}`;
+  return spaceUri(ownerDid, SPACE_TYPE.dmInbox, DM_INBOX_SKEY);
 }
 
 export function dmConversationUri(ownerDid: string, convKey: string): string {
   if (!isDid(ownerDid)) throw new TypeError("Invalid DM conversation owner DID.");
   if (!isTid(convKey)) throw new TypeError("Invalid DM conversation key.");
-  return `at://${ownerDid}/space/org.slack.dm.conversation/${convKey}`;
+  return spaceUri(ownerDid, SPACE_TYPE.dmConversation, convKey);
 }
 
 export function parseDmInboxUri(uri: string): { ownerDid: string } | null {
-  const match = /^at:\/\/(did:[^/\s]+)\/space\/org\.slack\.dm\.inbox\/([A-Za-z0-9._~:-]{1,128})$/.exec(uri);
-  if (!match) return null;
-  const [, ownerDid, skey] = match;
-  if (!isDid(ownerDid) || skey !== DM_INBOX_SKEY) return null;
-  return dmInboxUri(ownerDid) === uri ? { ownerDid } : null;
+  const parsed = parseSpaceUri(uri);
+  if (parsed?.type !== SPACE_TYPE.dmInbox || parsed.skey !== DM_INBOX_SKEY) return null;
+  return dmInboxUri(parsed.authorityDid) === uri ? { ownerDid: parsed.authorityDid } : null;
 }
 
 /** Accepts exactly the two DM space kinds (inbox or conversation half); everything else is rejected. */
@@ -95,26 +94,19 @@ export function parseDmSpaceUri(uri: string): { kind: "inbox"; ownerDid: string 
 }
 
 export function parseDmConversationUri(uri: string): { ownerDid: string; convKey: string } | null {
-  const match = /^at:\/\/(did:[^/\s]+)\/space\/org\.slack\.dm\.conversation\/([A-Za-z0-9._~:-]{1,128})$/.exec(uri);
-  if (!match) return null;
-  const [, ownerDid, convKey] = match;
-  if (!isDid(ownerDid) || !isTid(convKey)) return null;
-  return dmConversationUri(ownerDid, convKey) === uri ? { ownerDid, convKey } : null;
+  const parsed = parseSpaceUri(uri);
+  if (parsed?.type !== SPACE_TYPE.dmConversation || !isTid(parsed.skey)) return null;
+  return dmConversationUri(parsed.authorityDid, parsed.skey) === uri ? { ownerDid: parsed.authorityDid, convKey: parsed.skey } : null;
 }
 
 export function parseDmMessageUri(value: unknown): { ownerDid: string; convKey: string; repo: string; rkey: string } | null {
   if (typeof value !== "string") return null;
-  const match = /^at:\/\/(did:[^/\s]+)\/space\/org\.slack\.dm\.conversation\/([A-Za-z0-9._~:-]{1,128})\/(did:[^/\s]+)\/org\.slack\.dm\.message\/([A-Za-z0-9._~:-]{1,128})$/.exec(value);
-  if (!match) return null;
-  const [, ownerDid, convKey, repo, rkey] = match;
-  if (repo !== ownerDid || !isTid(convKey) || !isTid(rkey)) return null;
-  try {
-    return spaceRecordUri(dmConversationUri(ownerDid, convKey), repo, "org.slack.dm.message", rkey) === value
-      ? { ownerDid, convKey, repo, rkey }
-      : null;
-  } catch {
-    return null;
-  }
+  const match = /^(at:\/\/[^/\s]+\/space\/[^/\s]+\/[^/\s]+)\/[^/\s]+\/[^/\s]+\/[^/\s]+$/.exec(value);
+  const conversation = match ? parseDmConversationUri(match[1]!) : null;
+  if (!match || !conversation) return null;
+  const record = parseSpaceRecordUri(value, match[1]!, COLLECTION.dmMessage);
+  if (!record || record.repo !== conversation.ownerDid || !isTid(record.rkey)) return null;
+  return { ...conversation, ...record };
 }
 
 export function canonicalParticipants(dids: readonly string[]): string[] {
@@ -145,13 +137,13 @@ export function requireSpaceAuthority(space: string): Did {
 /** A workspace space URI's authority and skey, or null for any other URI. */
 export function parseWorkspaceUri(uri: string): { authorityDid: Did; skey: string } | null {
   const parsed = parseSpaceUri(uri);
-  return parsed?.type === "org.slack.workspace" ? { authorityDid: parsed.authorityDid, skey: parsed.skey } : null;
+  return parsed?.type === SPACE_TYPE.workspace ? { authorityDid: parsed.authorityDid, skey: parsed.skey } : null;
 }
 
 /** A channel space URI's authority and skey, or null for any other URI. */
 export function parseChannelUri(uri: string): { authorityDid: Did; skey: string } | null {
   const parsed = parseSpaceUri(uri);
-  return parsed?.type === "org.slack.channel" ? { authorityDid: parsed.authorityDid, skey: parsed.skey } : null;
+  return parsed?.type === SPACE_TYPE.channel ? { authorityDid: parsed.authorityDid, skey: parsed.skey } : null;
 }
 
 export function spaceRecordUri(spaceUri: string, repoDid: string, collection: string, rkey: string): string {

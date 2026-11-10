@@ -3,10 +3,17 @@ import type { NodeOAuthClient } from "@atproto/oauth-client-node";
 import { isDid } from "@/protocol/keys";
 import { canonicalOAuthScope } from "./oauth-scope";
 
+/** Why a workspace-authority flow runs: to create a named workspace, or only to renew the grant. */
+export type AuthorityFlowPurpose = { kind: "createWorkspace"; name: string } | { kind: "reauthorize" };
+
 export type OAuthFlowBinding =
   | { kind: "login"; appState: string }
-  | { kind: "permission"; expectedDid: string; appState: string; flowLockToken: string };
-type OAuthFlowIntent = { kind: "login"; clientScope: string } | { kind: "permission"; expectedDid: string; clientScope: string; flowLockToken: string };
+  | { kind: "permission"; expectedDid: string; appState: string; flowLockToken: string }
+  | { kind: "authority"; expectedDid: string; initiatorDid: string; purpose: AuthorityFlowPurpose; expiresAt: number; appState: string };
+type OAuthFlowIntent =
+  | { kind: "login"; clientScope: string }
+  | { kind: "permission"; expectedDid: string; clientScope: string; flowLockToken: string }
+  | { kind: "authority"; expectedDid: string; initiatorDid: string; purpose: AuthorityFlowPurpose; expiresAt: number; clientScope: string };
 
 const APP_STATE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const OAUTH_STATE_PATTERN = /^[A-Za-z0-9_-]{22,128}$/;
@@ -107,14 +114,23 @@ export async function startOAuthFlow(
   if (!state || !OAUTH_STATE_PATTERN.test(state) || (returnedState !== null && returnedState !== state)) {
     throw new Error("OAuth authorization did not produce a matching protocol state.");
   }
-  const flowBinding: OAuthFlowBinding = binding.kind === "login"
-    ? { kind: "login", appState }
-    : { kind: "permission", expectedDid: binding.expectedDid, appState, flowLockToken: binding.flowLockToken };
+  const flowBinding = bindingFor(binding, appState);
   return { url, state, binding: flowBinding, cookieValue: createOAuthFlowCookieValue(state, flowBinding, key) };
 }
 
 export function assertOAuthFlowAppState(binding: OAuthFlowBinding, appState: string | null): void {
   if (appState !== binding.appState) throw new Error("OAuth callback state does not match this browser flow.");
+}
+
+function bindingFor(intent: OAuthFlowIntent, appState: string): OAuthFlowBinding {
+  switch (intent.kind) {
+    case "login":
+      return { kind: "login", appState };
+    case "permission":
+      return { kind: "permission", expectedDid: intent.expectedDid, appState, flowLockToken: intent.flowLockToken };
+    case "authority":
+      return { kind: "authority", expectedDid: intent.expectedDid, initiatorDid: intent.initiatorDid, purpose: intent.purpose, expiresAt: intent.expiresAt, appState };
+  }
 }
 
 function sign(state: string, payload: string, key: Buffer): string {
@@ -125,8 +141,21 @@ function isBinding(value: unknown): value is OAuthFlowBinding {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const binding = value as Record<string, unknown>;
   if (binding.kind === "login") return Object.keys(binding).length === 2 && typeof binding.appState === "string" && APP_STATE_PATTERN.test(binding.appState);
+  if (binding.kind === "authority") {
+    return Object.keys(binding).length === 6 && isDid(binding.expectedDid) && isDid(binding.initiatorDid) &&
+      isAuthorityFlowPurpose(binding.purpose) && Number.isSafeInteger(binding.expiresAt) &&
+      typeof binding.appState === "string" && APP_STATE_PATTERN.test(binding.appState);
+  }
   return binding.kind === "permission" && Object.keys(binding).length === 4 &&
     isDid(binding.expectedDid) &&
     typeof binding.appState === "string" && APP_STATE_PATTERN.test(binding.appState) &&
     typeof binding.flowLockToken === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(binding.flowLockToken);
+}
+
+export function isAuthorityFlowPurpose(value: unknown): value is AuthorityFlowPurpose {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const purpose = value as Record<string, unknown>;
+  if (purpose.kind === "reauthorize") return Object.keys(purpose).length === 1;
+  return purpose.kind === "createWorkspace" && Object.keys(purpose).length === 2 &&
+    typeof purpose.name === "string" && purpose.name.length >= 1 && purpose.name.length <= 60;
 }

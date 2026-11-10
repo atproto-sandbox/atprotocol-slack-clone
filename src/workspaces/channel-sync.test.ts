@@ -30,15 +30,15 @@ test("reaction backfill pages split the remaining cap across writer repos withou
 });
 
 const ACCOUNT = "did:plc:reader";
-const SPACE = "at://did:plc:owner/space/org.slack.channel/alpha";
-const MESSAGES = "org.slack.channel.message";
+const SPACE = "at://did:plc:owner/space/new.flock.channel/alpha";
+const MESSAGES = "new.flock.channel.message";
 
 // The configuration is read once per process, so every test in this file shares one database and starts from empty cache tables.
 const DIRECTORY = mkdtempSync(join(tmpdir(), "slack-channel-sync-test-"));
 process.env.DATABASE_PATH = join(DIRECTORY, "sync.db");
 process.env.AUTH_ENCRYPTION_KEY = "33".repeat(32);
 process.env.APP_URL = "http://127.0.0.1:3000";
-process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_slack_admin";
+process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
 after(() => {
   closeDb();
   rmSync(DIRECTORY, { recursive: true, force: true });

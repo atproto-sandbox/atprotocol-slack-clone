@@ -24,7 +24,7 @@ test("other failures are left to the generic handler", () => {
 });
 
 test("declining the join permission is explained instead of surfacing a raw scope error", () => {
-  const failure = acceptFailure(new XrpcError(403, 'Missing required scope "space:org.slack.workspace?authority=x"', "ScopeMissingError"));
+  const failure = acceptFailure(new XrpcError(403, 'Missing required scope "space:new.flock.workspace?authority=x"', "ScopeMissingError"));
   assert.equal(failure?.code, "permission_not_granted");
   assert.doesNotMatch(failure?.error ?? "", /Missing required scope/);
   assert.equal(acceptFailure(new XrpcError(403, "Denied.", "SomethingElse")), null);

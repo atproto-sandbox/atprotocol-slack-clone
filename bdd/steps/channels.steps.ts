@@ -48,7 +48,7 @@ function watchPublication(world: AppWorld, authority: Actor, name: string, space
 }
 
 async function listChannelSpaces(world: AppWorld, authority: Actor): Promise<string[]> {
-  const listed = await world.pdsGet<{ spaces: Array<{ uri: string }> }>(authority, "com.atproto.space.listSpaces", { spaceType: "org.slack.channel", limit: "100" });
+  const listed = await world.pdsGet<{ spaces: Array<{ uri: string }> }>(authority, "com.atproto.space.listSpaces", { spaceType: "new.flock.channel", limit: "100" });
   assert.equal(listed.status, 200, JSON.stringify(listed.body));
   return listed.body.spaces.map((space) => space.uri);
 }
@@ -260,6 +260,29 @@ Given("a member authored a channel message", async function (this: AppWorld) {
     bob.page.once("dialog", (dialog) => void dialog.accept());
     await messageCard(bob, dropped).getByRole("button", { name: "Delete", exact: true }).click();
   });
+});
+
+// Records are open: a field another app writes is kept by every reader, and written back by this app's edit.
+const ANOTHER_APPS_FIELD = { name: "pinnedBy", value: { app: "another-client", at: "2026-11-01T12:00:00.000Z" } };
+
+Given("another app added a field this app does not know to that message", async function (this: AppWorld) {
+  const people = roster(this);
+  const alice = people.sessions.get("alice")!;
+  const message = (await ownRecords(this, alice, people.general.uri, messageCollection)).find((record) => record.uri === this.scratch.get("keptUri"));
+  assert.ok(message, "the member's message is on their PDS");
+  const result = await this.pdsPost(alice, "com.atproto.space.putRecord", {
+    space: people.general.uri, repo: alice.did, collection: messageCollection, rkey: message.rkey,
+    record: { ...message.value, [ANOTHER_APPS_FIELD.name]: ANOTHER_APPS_FIELD.value },
+  });
+  assert.equal(result.status, 200, `putRecord: ${JSON.stringify(result.body)}`);
+});
+
+Then("the field the other app added is still on the edited message", async function (this: AppWorld) {
+  const people = roster(this);
+  const alice = people.sessions.get("alice")!;
+  const [edited] = await ownRecords(this, alice, people.general.uri, messageCollection);
+  assert.equal(edited?.value.text, this.scratch.get("edited"), "this is the edited record");
+  assert.deepEqual(edited?.value[ANOTHER_APPS_FIELD.name], ANOTHER_APPS_FIELD.value, "the edit wrote the other app's field back");
 });
 
 Then("the change is visible to every authorized app", async function (this: AppWorld) {
@@ -489,14 +512,14 @@ Then("all apps show only the current reaction record", async function (this: App
 
 const EMOJI = "\u{1F600}";
 
-Given("a message contains more than 10000 Unicode code points", async function (this: AppWorld) {
+Given("a message contains more than 10000 graphemes", async function (this: AppWorld) {
   const people = await setUpRoster(this, [{ role: "alice", host: 1, app: 1 }]);
   this.scratch.set("roster", people);
   const atLimit = EMOJI.repeat(10_000);
   const overlong = EMOJI.repeat(10_001);
   assert.equal(Array.from(overlong).length, 10_001);
   assert.equal(Array.from(atLimit).length, 10_000);
-  assert.ok(atLimit.length > 10_000, "the accepted text is longer than 10000 UTF-16 units, so only a code point count admits it");
+  assert.ok(atLimit.length > 10_000, "the accepted text is longer than 10000 UTF-16 units, so only a grapheme count admits it");
   this.scratch.set("atLimit", atLimit);
   this.scratch.set("overlong", overlong);
 });
@@ -532,7 +555,8 @@ Then("the message is rejected", async function (this: AppWorld) {
   assert.deepEqual(this.scratch.get("composer"), { codePoints: 10_000, counter: "10000/10,000" }, "the composer cannot hold more than 10000 code points");
   const forged = this.scratch.get("forged") as { status: number; body: string };
   assert.equal(forged.status, 400, forged.body);
-  assert.match(forged.body, /1 to 10000 Unicode code points/);
+  // 10,001 four-byte emoji exceed both of the lexicon's limits (10,000 graphemes, 40,000 UTF-8 bytes); the byte limit is reported first.
+  assert.match(forged.body, /text must not be longer than 40000 characters/);
 
   const stored = await ownRecords(this, alice, people.general.uri, messageCollection);
   const lengths = new Map(stored.map((record) => [record.rkey, Array.from(String(record.value.text)).length]));

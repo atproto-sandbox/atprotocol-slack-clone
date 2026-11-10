@@ -6,7 +6,7 @@ import Database from "better-sqlite3";
 import { Given, Then, When } from "@cucumber/cucumber";
 import { expect, type Locator } from "@playwright/test";
 import { canonicalJson, channelUri, decisionRecordKey, inboxUri, requestDigest, spaceRecordUri, subjectKey, tidNow } from "@/protocol/keys";
-import { validateSpaceRecord } from "@/protocol/records";
+import { validateSpaceRecord } from "@/protocol/registry";
 import type { SecondApp } from "../../protocol-tests/support/app-fixture";
 import {
   createChannelAs, grantAdminControlsAt, grantWorkspaceAuthorityAt, insertJournalRow, joinWorkspaceAt, listWriters, observeWorkspace, onPrimaryApp, openChannelAndRead, openViewer,
@@ -37,7 +37,7 @@ const activeSubjects = (records: PdsRecord[]): string[] =>
   records.filter((record) => record.value.active === true).map((record) => record.value.subject as string).sort();
 
 async function directoryOf(world: AppWorld, authority: Actor): Promise<Directory> {
-  const records = await recordsOf(world, authority, world.workspaceUri, "org.slack.directory");
+  const records = await recordsOf(world, authority, world.workspaceUri, "new.flock.directory");
   return records.map(({ value }) => ({ skey: value.skey as string, name: value.name as string, visibility: value.visibility as string }))
     .filter((entry) => entry.visibility !== "archived").sort((left, right) => left.name.localeCompare(right.name));
 }
@@ -49,7 +49,7 @@ async function channelMessageTexts(world: AppWorld, authority: Actor, writers: A
   for (const did of listed) {
     const writer = writers.find((candidate) => candidate.did === did);
     assert.ok(writer, `unexpected writer ${did} in ${space}`);
-    records.push(...await recordsOf(world, writer, space, "org.slack.channel.message"));
+    records.push(...await recordsOf(world, writer, space, "new.flock.channel.message"));
   }
   return records.sort((left, right) => right.rkey.localeCompare(left.rkey)).map((record) => record.value.text as string);
 }
@@ -68,7 +68,7 @@ async function publishedLexiconIds(world: AppWorld): Promise<string[]> {
 }
 
 async function localLexiconIds(): Promise<string[]> {
-  const root = join(process.cwd(), "lexicons/org/slack");
+  const root = join(process.cwd(), "lexicons/new/flock");
   const files = (await readdir(root, { recursive: true })).filter((file) => file.endsWith(".json"));
   return [...new Set(await Promise.all(files.map(async (file) => (JSON.parse(await readFile(join(root, file), "utf8")) as { id: string }).id)))];
 }
@@ -127,12 +127,12 @@ Then("both show the same directory, roster, messages, and private roster", async
   assert.deepEqual(second.privateRosters, first.privateRosters, "private channel roster");
 
   const directory = await directoryOf(this, owner);
-  const roster = activeSubjects(await recordsOf(this, owner, this.workspaceUri, "org.slack.workspace.roster"));
-  const admins = activeSubjects(await recordsOf(this, owner, this.workspaceUri, "org.slack.admin"));
+  const roster = activeSubjects(await recordsOf(this, owner, this.workspaceUri, "new.flock.workspace.roster"));
+  const admins = activeSubjects(await recordsOf(this, owner, this.workspaceUri, "new.flock.admin"));
   const vault = directory.find((entry) => entry.name === "Vault");
   const general = directory.find((entry) => entry.name === "general");
   assert.ok(vault && general, "the directory records name the general and Vault channels");
-  const vaultRoster = activeSubjects(await recordsOf(this, owner, channelUri(owner.did, vault.skey), "org.slack.channel.roster"));
+  const vaultRoster = activeSubjects(await recordsOf(this, owner, channelUri(owner.did, vault.skey), "new.flock.channel.roster"));
   const generalTexts = await channelMessageTexts(this, owner, [owner, member], general.skey);
   const vaultTexts = await channelMessageTexts(this, owner, [owner, member], vault.skey);
 
@@ -231,15 +231,15 @@ Given("a member writes an admin, decision, or roster record in their own repo", 
   const vault = directory.find((entry) => entry.name === "Vault");
   assert.ok(vault, "the Vault channel is in the directory");
   const inbox = inboxUri(owner.did, workspaceSkeyOf(this));
-  const requests = await recordsOf(this, member, inbox, "org.slack.joinRequest");
+  const requests = await recordsOf(this, member, inbox, "new.flock.joinRequest");
   assert.equal(requests.length, 1, "the member has one real pending request");
   const request = requests[0]!;
-  const requestUri = spaceRecordUri(inbox, member.did, "org.slack.joinRequest", request.rkey);
+  const requestUri = spaceRecordUri(inbox, member.did, "new.flock.joinRequest", request.rkey);
   const updatedAt = new Date().toISOString();
 
-  await writeAsMember(this, member, this.workspaceUri, "org.slack.admin", subjectKey(member.did), { subject: member.did, active: true, updatedAt });
-  await writeAsMember(this, member, this.workspaceUri, "org.slack.workspace.roster", subjectKey(outsider.did), { subject: outsider.did, active: true, updatedAt });
-  await writeAsMember(this, member, inbox, "org.slack.joinDecision", decisionRecordKey(requestUri), {
+  await writeAsMember(this, member, this.workspaceUri, "new.flock.admin", subjectKey(member.did), { subject: member.did, active: true, updatedAt });
+  await writeAsMember(this, member, this.workspaceUri, "new.flock.workspace.roster", subjectKey(outsider.did), { subject: outsider.did, active: true, updatedAt });
+  await writeAsMember(this, member, inbox, "new.flock.joinDecision", decisionRecordKey(requestUri), {
     request: requestUri, requestId: request.value.requestId, decision: "approve", updatedAt,
   });
   this.scratch.set("vaultSkey", vault.skey);
@@ -309,8 +309,8 @@ Then("the app ignores the record because the workspace DID did not author it", {
   const vaultSkey = this.scratch.get("vaultSkey") as string;
 
   const spoofs = [
-    { space: this.workspaceUri, collection: "org.slack.admin", subject: member.did },
-    { space: this.workspaceUri, collection: "org.slack.workspace.roster", subject: outsider.did },
+    { space: this.workspaceUri, collection: "new.flock.admin", subject: member.did },
+    { space: this.workspaceUri, collection: "new.flock.workspace.roster", subject: outsider.did },
   ];
   for (const spoof of spoofs) {
     const [written] = await recordsOf(this, member, spoof.space, spoof.collection);
@@ -324,12 +324,12 @@ Then("the app ignores the record because the workspace DID did not author it", {
     const authored = (await recordsOf(this, owner, spoof.space, spoof.collection)).filter((record) => record.value.subject === spoof.subject && record.value.active === true);
     assert.deepEqual(authored, [], `the workspace DID wrote no active ${spoof.collection} record for ${spoof.subject}`);
   }
-  const [decision] = await recordsOf(this, member, inbox, "org.slack.joinDecision");
+  const [decision] = await recordsOf(this, member, inbox, "new.flock.joinDecision");
   assert.ok(decision, "the spoofed decision exists in the member's repo");
   const decisionContext = { authorityDid: owner.did, spaceUri: inbox, rkey: decision.rkey };
-  assert.deepEqual(validateSpaceRecord("org.slack.joinDecision", decision.value, { ...decisionContext, repoDid: member.did }), { valid: false, reason: "authority record has the wrong author" });
-  assert.deepEqual(validateSpaceRecord("org.slack.joinDecision", decision.value, { ...decisionContext, repoDid: owner.did }), { valid: true });
-  assert.deepEqual(await recordsOf(this, owner, inbox, "org.slack.joinDecision"), [], "the authority recorded no decision");
+  assert.deepEqual(validateSpaceRecord("new.flock.joinDecision", decision.value, { ...decisionContext, repoDid: member.did }), { valid: false, reason: "authority record has the wrong author" });
+  assert.deepEqual(validateSpaceRecord("new.flock.joinDecision", decision.value, { ...decisionContext, repoDid: owner.did }), { valid: true });
+  assert.deepEqual(await recordsOf(this, owner, inbox, "new.flock.joinDecision"), [], "the authority recorded no decision");
 
   assert.deepEqual(views.rosterRows, [owner.did, member.did].sort(), "the roster the admin sees is unchanged");
   assert.equal(views.ownerSummary, "2 active members · 2 channels");
@@ -371,7 +371,7 @@ async function authorityWritesWhatTheMemberForged(world: AppWorld, owner: AppVie
   assert.equal(authored.memberHasWorkspaceControls, true);
   assert.equal(authored.memberStalled.status, 200, "and the admin-only operator read is then answered");
   assert.equal(authored.pendingRequestShown, false, "a decision authored by the workspace DID does settle the request");
-  assert.equal((await recordsOf(world, owner, inbox, "org.slack.joinDecision")).length, 1);
+  assert.equal((await recordsOf(world, owner, inbox, "new.flock.joinDecision")).length, 1);
 }
 
 // --- Do not infer membership from the writer set ----------------------------------------------------
@@ -566,8 +566,8 @@ async function runProtocolReconcile(world: AppWorld): Promise<ChildRun> {
   const environment: NodeJS.ProcessEnv = {
     PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", NODE_ENV: "production", ATPROTO_ACCEPTANCE_TEST: "true",
     APP_URL: world.appOrigin, DATABASE_PATH: world.fixture.databasePath, AUTH_ENCRYPTION_KEY: "7".repeat(64),
-    PLC_URL: world.fixture.plcUrl, OPERATOR_SERVICE_REF: `did:web:localhost%3A${world.fixture.appUrl.port}#atproto_slack_admin`,
-    SLACK_ADMIN_MUTATIONS_PAUSED: "true",
+    PLC_URL: world.fixture.plcUrl, OPERATOR_SERVICE_REF: `did:web:localhost%3A${world.fixture.appUrl.port}#atproto_flock_operator`,
+    FLOCK_ADMIN_MUTATIONS_PAUSED: "true",
   };
   return runNode(["--import", "tsx", "scripts/reconcile-workspaces.ts"], { env: environment, timeoutMs: RECONCILE_TIMEOUT_MS, what: "the scheduled reconcile job" });
 }
@@ -577,7 +577,7 @@ async function runProtocolReconcile(world: AppWorld): Promise<ChildRun> {
 const PAUSED_MESSAGE = "Workspace admin mutations are paused.";
 
 async function pdsSnapshot(world: AppWorld, owner: Actor): Promise<unknown> {
-  const channels = await world.pdsGet<{ spaces: Array<{ uri: string }> }>(owner, "com.atproto.space.listSpaces", { spaceType: "org.slack.channel", limit: "100" });
+  const channels = await world.pdsGet<{ spaces: Array<{ uri: string }> }>(owner, "com.atproto.space.listSpaces", { spaceType: "new.flock.channel", limit: "100" });
   const spaces = [world.workspaceUri, inboxUri(owner.did, workspaceSkeyOf(world)), ...channels.body.spaces.map((space) => space.uri)].sort();
   const memberLists: Record<string, string[]> = {};
   for (const space of spaces) {
@@ -586,7 +586,7 @@ async function pdsSnapshot(world: AppWorld, owner: Actor): Promise<unknown> {
     memberLists[space] = (listed.body.members ?? []).map((entry) => `${entry.did} read=${entry.read} write=${entry.write}`).sort();
   }
   const records: Record<string, PdsRecord[]> = {};
-  for (const collection of ["org.slack.workspace.profile", "org.slack.directory", "org.slack.workspace.roster", "org.slack.admin"]) {
+  for (const collection of ["new.flock.workspace.profile", "new.flock.directory", "new.flock.workspace.roster", "new.flock.admin"]) {
     records[collection] = (await recordsOf(world, owner, world.workspaceUri, collection)).sort((left, right) => left.rkey.localeCompare(right.rkey));
   }
   return { memberLists, records };
@@ -601,7 +601,7 @@ Given("the owner has paused admin mutations", { timeout: 900_000 }, async functi
   await inviteMemberAs(owner, member.did);
   this.scratch.set("snapshotBefore", await pdsSnapshot(this, owner));
 
-  const paused = await this.fixture.startSecondApp({ env: { SLACK_ADMIN_MUTATIONS_PAUSED: "true" } });
+  const paused = await this.fixture.startSecondApp({ env: { FLOCK_ADMIN_MUTATIONS_PAUSED: "true" } });
   this.scratch.set("pausedApp", paused);
   const onPaused = await openViewer(this, owner, paused.appUrl.origin, "owner@paused-app");
   await joinWorkspaceAt(onPaused, this.workspaceUri, this.workspaceName);
