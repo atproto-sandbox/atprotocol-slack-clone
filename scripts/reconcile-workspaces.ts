@@ -3,8 +3,8 @@ import { requireActiveWorkspaceAdmin } from "@/operator/security";
 import { executeOperatorOperation } from "@/operator/operations";
 import { listJournaledWorkspaces, listStalledOperations } from "@/operator/journal";
 import { tidNow } from "@/protocol/keys";
-import { resumePendingWorkspaceBootstraps } from "@/workspaces/bootstrap";
-import { assertWorkspaceWithinEnvelope, requireWorkspaceSummary } from "@/workspaces/read-model";
+import { resumePendingWorkspaceBootstraps } from "@/operator/kinds/bootstrap-workspace";
+import { assertOperatorWorkspaceWithinEnvelope } from "@/operator/workspace-envelope";
 
 async function main() {
   let failed = false;
@@ -42,8 +42,8 @@ async function main() {
         failed = true;
         continue;
       }
-      assertWorkspaceWithinEnvelope(await requireWorkspaceSummary(session, workspace.uri));
       const actor = await requireActiveWorkspaceAdmin(workspace.uri, session.did);
+      await assertOperatorWorkspaceWithinEnvelope(actor);
       const operation = await executeOperatorOperation(actor, tidNow(), { kind: "reconcileWorkspace" });
       process.stdout.write(`${workspace.uri}: ${operation.state}\n`);
       if (operation.state !== "completed") failed = true;

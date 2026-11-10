@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assertWorkspaceWithinEnvelope, WorkspaceEnvelopeError } from "./read-model";
+import { assertWorkspaceWithinEnvelope, WorkspaceEnvelopeError } from "./workspace-summary";
 
 test("workspace envelope checks reject degraded state for operator mutations and inbox recovery", () => {
   assert.doesNotThrow(() => assertWorkspaceWithinEnvelope({ degradedReasons: [] }));

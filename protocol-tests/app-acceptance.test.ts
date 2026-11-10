@@ -65,7 +65,7 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
       "org.slack.workspace.profile", "org.slack.directory", "org.slack.workspace.roster", "org.slack.admin", "org.slack.acceptance",
     ], "the pinned OAuth provider resolves the app's published workspace space declaration");
     const [{ bootstrapWorkspace, resumePendingWorkspaceBootstraps }, { executeOperatorOperation, listInboxWriters }, { parseWorkspaceRef }, { mintSpaceCredential }, { sessionClient }, { discoverWorkspaces }, { listIndependentWorkspaces, readIndependentChannelPage, readIndependentPrivateRoster }, { validateSpaceRecord }, { acceptanceRecordKey, channelUri, decisionRecordKey, inboxUri, reactionRecordKey, requestRecordKey, subjectKey, tidNow }, { readChannelPage }, { getRawDb }] = await Promise.all([
-      import("@/workspaces/bootstrap"), import("@/operator/operations"), import("@/operator/security"), import("@/atproto/space-credential"), import("@/atproto/client"), import("@/workspaces/read-model"), import("@/reader/independent"), import("@/protocol/records"), import("@/protocol/keys"), import("@/workspaces/channel-sync"), import("@/lib/db"),
+      import("@/operator/kinds/bootstrap-workspace"), import("@/operator/operations"), import("@/operator/actor"), import("@/atproto/space-credential"), import("@/atproto/client"), import("@/workspaces/read-model"), import("@/reader/independent"), import("@/protocol/registry"), import("@/protocol/keys"), import("@/workspaces/channel-sync"), import("@/lib/db"),
     ]);
     const { readSpaceRecords } = await import("@/atproto/space-ops");
 
@@ -90,12 +90,12 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     const workspace = parseWorkspaceRef(bootstrap.workspace);
     const operatorActor = { did: owner.did, session: ownerSession, workspace, canRecoverOperations: true };
 
+    // The outage outlasts the runner's own retries of a transient failure, so the first attempt is left pending.
     let rejectBootstrapSpaceCreate = true;
     const flakyBootstrapSession = {
       ...ownerSession,
       fetchHandler: async (path: string, init: RequestInit) => {
         if (rejectBootstrapSpaceCreate && path.includes("com.atproto.space.createSpace")) {
-          rejectBootstrapSpaceCreate = false;
           return new Response(JSON.stringify({ error: "ServiceUnavailable", message: "injected bootstrap outage" }), {
             status: 503, headers: { "content-type": "application/json" },
           });
@@ -104,6 +104,7 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
       },
     };
     const pendingBootstrap = await bootstrapWorkspace(flakyBootstrapSession as never, { name: "Retry Workspace", operationId: tidNow() });
+    rejectBootstrapSpaceCreate = false;
     assert.equal(pendingBootstrap.state, "pending");
     const retryActor = { ...operatorActor, workspace: parseWorkspaceRef(pendingBootstrap.workspace) };
     const recoveredBootstrapOperation = await executeOperatorOperation(retryActor as never, tidNow(), { kind: "inviteMember", subject: member.did });
@@ -117,7 +118,6 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
       ...ownerSession,
       fetchHandler: async (path: string, init: RequestInit) => {
         if (rejectScheduledBootstrap && path.includes("com.atproto.space.createSpace")) {
-          rejectScheduledBootstrap = false;
           return new Response(JSON.stringify({ error: "ServiceUnavailable", message: "injected pre-admin bootstrap outage" }), {
             status: 503, headers: { "content-type": "application/json" },
           });
@@ -128,6 +128,7 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     const pendingScheduledBootstrap = await bootstrapWorkspace(schedulerFlakySession as never, {
       name: "Scheduled Retry Workspace", operationId: tidNow(),
     });
+    rejectScheduledBootstrap = false;
     assert.equal(pendingScheduledBootstrap.state, "pending");
     assert.deepEqual(pendingScheduledBootstrap.completedSteps, [], "the failure is before workspace creation and the initial admin record");
     const scheduledBootstrapRecovery = await resumePendingWorkspaceBootstraps(ownerSession as never, pendingScheduledBootstrap.workspace);
@@ -161,7 +162,7 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     assert.ok(discovered[0]?.channels.some((channel) => channel.skey === `${workspace.skey}-team-lobby`));
 
     const [{ permissionScopeFor }, { canonicalOAuthScope }, { getOAuthClientForSession }, { discoverWorkspaceState }] = await Promise.all([
-      import("@/auth/permission-sets"), import("@/auth/oauth-scope"), import("@/auth/oauth"), import("@/workspaces/read-model"),
+      import("@/protocol/scopes"), import("@/auth/oauth-scope"), import("@/auth/oauth"), import("@/workspaces/read-model"),
     ]);
     const signInScopes = await memberSignInScopes();
     const discoveryOnlyScope = canonicalOAuthScope(["atproto", ...signInScopes]);

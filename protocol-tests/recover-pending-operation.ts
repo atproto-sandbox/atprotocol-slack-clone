@@ -1,5 +1,5 @@
 import { executeOperatorOperation } from "@/operator/operations";
-import { parseWorkspaceRef } from "@/operator/security";
+import { parseWorkspaceRef } from "@/operator/actor";
 import { discoverWorkspaces } from "@/workspaces/read-model";
 import { tidNow } from "@/protocol/keys";
 import { getRawDb } from "@/lib/db";

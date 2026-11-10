@@ -1,9 +1,16 @@
 import { isTransientOAuthInfrastructureError } from "@/auth/oauth-request-lock";
-import { XrpcError } from "@/atproto/xrpc";
+import { isScopeMissingError, XrpcError } from "@/atproto/xrpc";
 import { UpstreamResponseTooLargeError } from "@/lib/bounded-json";
 import { TokenRefreshError } from "@atproto/oauth-client-node";
 import { AuthorityReauthorizationRequiredError } from "./authority-grant";
 import { isTransientOperationError } from "./journal";
+
+export class OperatorAuthError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "OperatorAuthError";
+  }
+}
 
 export class OperatorInfrastructureError extends Error {
   constructor(message = "A temporary identity or PDS failure prevented this request.") {
@@ -17,6 +24,13 @@ export function isTransientOperatorInfrastructureError(error: unknown): boolean 
     isTransientOperationError(error) ||
     isTransientOAuthInfrastructureError(error);
 }
+
+/** What an operator method answers when the authority's grant lacks a scope an operation needs: the app asks the authority to approve again. */
+export const AUTHORITY_APPROVAL_REQUIRED = {
+  status: 502,
+  name: "AuthoritySessionUnavailable",
+  message: "The workspace authority must approve its permission again before this operation can run.",
+} as const;
 
 export function operatorInfrastructureHttpStatus(error: unknown): 502 | 503 | null {
   return operatorHttpFailure(error)?.status ?? null;
@@ -37,6 +51,7 @@ export function operatorHttpFailure(error: unknown): { status: 502 | 503; name: 
       message: "A temporary identity, PDS, or session-store failure prevented this request.",
     };
   }
+  if (isScopeMissingError(error)) return AUTHORITY_APPROVAL_REQUIRED;
   if (error instanceof AuthorityReauthorizationRequiredError || error instanceof TokenRefreshError) {
     return {
       status: 502,

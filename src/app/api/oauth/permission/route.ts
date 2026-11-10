@@ -4,7 +4,7 @@ import { getOAuthClient } from "@/auth/oauth";
 import { requireSession } from "@/auth/session";
 import { acquireOAuthPermissionFlowLock, releaseOAuthPermissionFlowLock } from "@/auth/oauth-request-lock";
 import { classifyOAuthRouteError } from "@/auth/oauth-route-error";
-import { permissionScopeFor } from "@/auth/permission-sets";
+import { permissionScopeFor } from "@/protocol/scopes";
 import { canonicalOAuthScope } from "@/auth/oauth-scope";
 import { oauthFlowCookieName, startOAuthFlow } from "@/auth/oauth-flow";
 import { getConfig } from "@/lib/config";

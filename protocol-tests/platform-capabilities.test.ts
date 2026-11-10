@@ -103,7 +103,7 @@ type Workspace = {
 
 async function createWorkspace(pds: PdsNetwork): Promise<Workspace> {
   const [{ restoreAuthorityGrant }, { bootstrapWorkspace }, { requireActiveWorkspaceAdmin }, { executeOperatorOperation }, { tidNow, inboxUri }] = await Promise.all([
-    import("@/operator/authority-grant"), import("@/workspaces/bootstrap"), import("@/operator/security"), import("@/operator/operations"), import("@/protocol/keys"),
+    import("@/operator/authority-grant"), import("@/operator/kinds/bootstrap-workspace"), import("@/operator/security"), import("@/operator/operations"), import("@/protocol/keys"),
   ]);
   const authority = await pds.createActor("k3owner", 0);
   await storeAuthorityGrant(pds.hosts[0], authority.did, "k3-authority-dpop");
@@ -133,7 +133,7 @@ async function memberGrantOperations(
 ): Promise<Record<string, Outcome>> {
   const [{ getOAuthClientForSession }, { discoverWorkspaceState }, { mintSpaceCredential }, { isAccessLost }, { sessionClient }, { readChannelPage }, keys, { validateSpaceRecord }] = await Promise.all([
     import("@/auth/oauth"), import("@/workspaces/read-model"), import("@/atproto/space-credential"), import("@/atproto/space-credential-core"),
-    import("@/atproto/client"), import("@/workspaces/channel-sync"), import("@/protocol/keys"), import("@/protocol/records"),
+    import("@/atproto/client"), import("@/workspaces/channel-sync"), import("@/protocol/keys"), import("@/protocol/registry"),
   ]);
   const restore = async (actor: NetworkActor) => (await getOAuthClientForSession(actor.did)).restore(actor.did);
   const member = await restore(actors.member);

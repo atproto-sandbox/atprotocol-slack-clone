@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { bootstrapWorkspace } from "@/workspaces/bootstrap";
+import { bootstrapWorkspace } from "@/operator/kinds/bootstrap-workspace";
 import { executeOperatorOperation } from "./operations";
 import { AdminMutationsPausedError } from "./mutations-paused";
 

@@ -4,7 +4,7 @@ import type { SpaceCredential } from "@/atproto/space-credential";
 import { getConfig } from "@/lib/config";
 import { getRawDb } from "@/lib/db";
 import { parseDmSpaceUri, requireSpaceAuthority } from "@/protocol/keys";
-import type { WriteNotification } from "./write-notification";
+import type { WriteNotification } from "@/atproto/write-notification";
 
 const RENEW_BEFORE_MS = 60 * 60 * 1000;
 /** A notice can arrive a little after the registration it belongs to ran out on the app's clock. */

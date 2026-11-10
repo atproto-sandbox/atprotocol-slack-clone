@@ -16,19 +16,20 @@ import {
   spaceRecordUri,
   tidNow,
 } from "@/protocol/keys";
-import { validateDmDeclaration, validateDmHeaderMatchesRequest, validateSpaceRecord } from "@/protocol/records";
+import { validateDmDeclaration, validateDmHeaderMatchesRequest, validateSpaceRecord } from "@/protocol/registry";
 import { advanceRenotifyState, isRenotifyDue, type DmRenotifyState } from "./backoff";
 import { mergeDmHalves, type DmHalfPage } from "./merge";
 import { classifyRepoFailure } from "@/atproto/repo-failure";
 import { memberspacePolicy, readMemberspacePolicy, withPublicWrite } from "@/atproto/space-policy";
 import { isSenderAllowedUnderMode, modeForInboxPolicy, publicWriteForMode, type DmRequestMode } from "./request-policy";
+import { COLLECTION, REPO_COLLECTION, SPACE_TYPE } from "@/protocol/nsids";
 
 export type { DmRequestMode } from "./request-policy";
 
 const FANOUT = 8;
 const DEFAULT_PAGE = 100;
 const MAX_PARTICIPANTS = 100;
-const DM_DECLARATION_COLLECTION = "org.slack.dm.declaration";
+const DM_DECLARATION_COLLECTION = REPO_COLLECTION.dmDeclaration;
 const MAX_ALLOWLIST = 1_000;
 const MAX_INBOX_SCAN = 10_000;
 const EMPTY_SENDER_TTL_MS = 5 * 60_000;
@@ -109,7 +110,7 @@ export class DmClient {
   async enableDms(mode: DmRequestMode, allowlist: readonly string[] = []): Promise<void> {
     try {
       await this.deps.memberClient.procedure("com.atproto.space.createSpace", {
-        spaceType: "org.slack.dm.inbox", skey: DM_INBOX_SKEY,
+        spaceType: SPACE_TYPE.dmInbox, skey: DM_INBOX_SKEY,
         policy: memberspacePolicy({ publicWrite: publicWriteForMode(mode) }),
       });
     } catch (error) {
@@ -229,7 +230,7 @@ export class DmClient {
       try {
         const writerClient = credential.client(await this.deps.resolvePds(repo.did));
         page = await listBoundedRecords(writerClient, {
-          space: inboxSpace, repo: repo.did, collection: "org.slack.dm.request", maxRecords: maxRequestsPerWriter,
+          space: inboxSpace, repo: repo.did, collection: COLLECTION.dmRequest, maxRecords: maxRequestsPerWriter,
         });
       } catch (error) {
         if (isMissingXrpcResource(error)) { // an allowlisted sender who has not written has no repo yet
@@ -246,10 +247,10 @@ export class DmClient {
       if (page.records.length === 0) this.emptySenders.set(senderDid, now + EMPTY_SENDER_TTL_MS);
       const requests: DmRequest[] = [];
       for (const record of page.records) {
-        const uri = spaceRecordUri(inboxSpace, repo.did, "org.slack.dm.request", record.rkey);
+        const uri = spaceRecordUri(inboxSpace, repo.did, COLLECTION.dmRequest, record.rkey);
         const hidden = await this.deps.store.get(hiddenRequestKey(uri));
         if (hidden) continue;
-        const validation = validateSpaceRecord("org.slack.dm.request", record.value, {
+        const validation = validateSpaceRecord(COLLECTION.dmRequest, record.value, {
           authorityDid: this.deps.did, spaceUri: inboxSpace, repoDid: repo.did, rkey: record.rkey,
         });
         if (!validation.valid) continue;
@@ -263,7 +264,7 @@ export class DmClient {
   }
 
   async listConversations(): Promise<DmConversationSummary[]> {
-    const halves = await listBoundedSpaces(this.deps.memberClient, { spaceType: "org.slack.dm.conversation", maxSpaces: MAX_OWN_CONVERSATIONS });
+    const halves = await listBoundedSpaces(this.deps.memberClient, { spaceType: SPACE_TYPE.dmConversation, maxSpaces: MAX_OWN_CONVERSATIONS });
     if (halves.truncated) throw new Error("Own DM conversation count exceeds the bounded scan limit.");
     const own = await mapLimited(halves.spaces, FANOUT, async (space): Promise<DmConversationSummary | null> => {
       const parsed = parseDmConversationUri(space.uri);
@@ -290,7 +291,7 @@ export class DmClient {
     await mapLimited(others, FANOUT, (did) =>
       this.deps.memberClient.procedure("com.atproto.memberspace.putMember", { space: half, did, read: true, write: false }));
     const createdAt = new Date(this.now()).toISOString();
-    await this.putValidated(half, "org.slack.dm.header", "self", { convKey, participants, createdAt });
+    await this.putValidated(half, COLLECTION.dmHeader, "self", { convKey, participants, createdAt });
 
     const delivery: Record<string, DmDelivery> = {};
     await mapLimited(others, FANOUT, async (recipient) => {
@@ -306,7 +307,7 @@ export class DmClient {
     await mapLimited(others, FANOUT, (did) =>
       this.deps.memberClient.procedure("com.atproto.memberspace.putMember", { space: half, did, read: true, write: false }));
     const createdAt = new Date(this.now()).toISOString();
-    await this.putValidated(half, "org.slack.dm.header", "self", { convKey: request.convKey, participants: request.participants, createdAt });
+    await this.putValidated(half, COLLECTION.dmHeader, "self", { convKey: request.convKey, participants: request.participants, createdAt });
 
     // §3.6: replying always allows the sender, regardless of the inbox's
     // current mode, so a later switch to "allowlist" does not lock out
@@ -325,25 +326,24 @@ export class DmClient {
     const rkey = tidNow(this.now());
     const createdAt = new Date(this.now()).toISOString();
     const record: Record<string, unknown> = parent ? { text, createdAt, parent } : { text, createdAt };
-    await this.putValidated(half, "org.slack.dm.message", rkey, record);
-    return { uri: spaceRecordUri(half, this.deps.did, "org.slack.dm.message", rkey), ownerDid: this.deps.did, rkey, text, createdAt, parent };
+    await this.putValidated(half, COLLECTION.dmMessage, rkey, record);
+    return { uri: spaceRecordUri(half, this.deps.did, COLLECTION.dmMessage, rkey), ownerDid: this.deps.did, rkey, text, createdAt, parent };
   }
 
   async edit(uri: string, text: string): Promise<void> {
     const target = requireOwnMessage(uri, this.deps.did);
     const half = dmConversationUri(target.ownerDid, target.convKey);
-    const existing = await this.getOwnRecord(half, "org.slack.dm.message", target.rkey);
+    const existing = await this.getOwnRecord(half, COLLECTION.dmMessage, target.rkey);
     const createdAt = typeof existing?.createdAt === "string" ? existing.createdAt : new Date(this.now()).toISOString();
-    const parent = typeof existing?.parent === "string" ? existing.parent : undefined;
-    const record: Record<string, unknown> = parent ? { text, createdAt, parent } : { text, createdAt };
-    await this.putValidated(half, "org.slack.dm.message", target.rkey, record);
+    // Records are open: fields another app added to the message are written back with the new text.
+    await this.putValidated(half, COLLECTION.dmMessage, target.rkey, { ...existing, text, createdAt });
   }
 
   async delete(uri: string): Promise<void> {
     const target = requireOwnMessage(uri, this.deps.did);
     const half = dmConversationUri(target.ownerDid, target.convKey);
     await this.deps.memberClient.procedure("com.atproto.space.deleteRecord", {
-      space: half, repo: this.deps.did, collection: "org.slack.dm.message", rkey: target.rkey,
+      space: half, repo: this.deps.did, collection: COLLECTION.dmMessage, rkey: target.rkey,
     });
   }
 
@@ -353,7 +353,7 @@ export class DmClient {
     const half = dmConversationUri(this.deps.did, target.convKey);
     const rkey = reactionRecordKey(subject, emoji, this.deps.did);
     const createdAt = new Date(this.now()).toISOString();
-    await this.putValidated(half, "org.slack.dm.reaction", rkey, { subject, emoji, createdAt });
+    await this.putValidated(half, COLLECTION.dmReaction, rkey, { subject, emoji, createdAt });
   }
 
   async unreact(subject: string, emoji: string): Promise<void> {
@@ -362,7 +362,7 @@ export class DmClient {
     const half = dmConversationUri(this.deps.did, target.convKey);
     const rkey = reactionRecordKey(subject, emoji, this.deps.did);
     await this.deps.memberClient.procedure("com.atproto.space.deleteRecord", {
-      space: half, repo: this.deps.did, collection: "org.slack.dm.reaction", rkey,
+      space: half, repo: this.deps.did, collection: COLLECTION.dmReaction, rkey,
     });
   }
 
@@ -392,7 +392,7 @@ export class DmClient {
       }
       let header: Record<string, unknown> | null;
       try {
-        header = await this.readRecord(credential.client(await this.deps.resolvePds(ownerDid)), half, ownerDid, "org.slack.dm.header", "self");
+        header = await this.readRecord(credential.client(await this.deps.resolvePds(ownerDid)), half, ownerDid, COLLECTION.dmHeader, "self");
       } catch (error) {
         // Another participant whose repo cannot be read (deactivated, taken down, unauthenticated, or on a host that is down) is an
         // unreadable half, not a reason to hide the other halves. A failure reading the caller's own half is the caller's own
@@ -402,7 +402,7 @@ export class DmClient {
         halves[ownerDid] = "missing";
         return;
       }
-      const headerValidation = header && validateSpaceRecord("org.slack.dm.header", header, {
+      const headerValidation = header && validateSpaceRecord(COLLECTION.dmHeader, header, {
         authorityDid: ownerDid, spaceUri: half, repoDid: ownerDid, rkey: "self",
       });
       if (!header) {
@@ -434,17 +434,17 @@ export class DmClient {
           if (cursor && usedCursors.has(cursor)) throw new Error("PDS record pagination did not advance.");
           if (cursor) usedCursors.add(cursor);
           const page = await client.query<{ cursor?: string; records: Array<{ rkey: string; value?: Record<string, unknown> }> }>(
-            "com.atproto.space.listRecords", { space: half, repo: ownerDid, collection: "org.slack.dm.message", cursor, limit: perHalfLimit },
+            "com.atproto.space.listRecords", { space: half, repo: ownerDid, collection: COLLECTION.dmMessage, cursor, limit: perHalfLimit },
           );
-          assertBoundedRecordPage(page, { collection: "org.slack.dm.message", limit: perHalfLimit, cursor, seenCursors: usedCursors });
+          assertBoundedRecordPage(page, { collection: COLLECTION.dmMessage, limit: perHalfLimit, cursor, seenCursors: usedCursors });
           const existing = pages.get(ownerDid)!;
           const validRecords = page.records.flatMap((record) => {
             if (!record.value) return [];
-            const validation = validateSpaceRecord("org.slack.dm.message", record.value, {
+            const validation = validateSpaceRecord(COLLECTION.dmMessage, record.value, {
               authorityDid: ownerDid, spaceUri: half, repoDid: ownerDid, rkey: record.rkey, participants: canonical,
             });
             if (!validation.valid) return [];
-            return [{ uri: spaceRecordUri(half, ownerDid, "org.slack.dm.message", record.rkey), rkey: record.rkey, ownerDid, value: record.value }];
+            return [{ uri: spaceRecordUri(half, ownerDid, COLLECTION.dmMessage, record.rkey), rkey: record.rkey, ownerDid, value: record.value }];
           });
           pages.set(ownerDid, { ownerDid, records: [...existing.records, ...validRecords], exhausted: !page.cursor });
           cursors.set(ownerDid, page.cursor);
@@ -489,7 +489,7 @@ export class DmClient {
   // --- Re-notify (§3.3 step 7) ---
 
   async renotifyPending(): Promise<void> {
-    const halves = await listBoundedSpaces(this.deps.memberClient, { spaceType: "org.slack.dm.conversation", maxSpaces: MAX_OWN_CONVERSATIONS });
+    const halves = await listBoundedSpaces(this.deps.memberClient, { spaceType: SPACE_TYPE.dmConversation, maxSpaces: MAX_OWN_CONVERSATIONS });
     if (halves.truncated) throw new Error("Own DM conversation count exceeds the bounded scan limit.");
     await mapLimited(halves.spaces, FANOUT, async (space) => {
       const header = await this.getValidatedOwnHeader(space.uri);
@@ -567,7 +567,7 @@ export class DmClient {
   private async createHalf(convKey: string): Promise<void> {
     try {
       await this.deps.memberClient.procedure("com.atproto.space.createSpace", {
-        spaceType: "org.slack.dm.conversation", skey: convKey,
+        spaceType: SPACE_TYPE.dmConversation, skey: convKey,
         policy: memberspacePolicy(),
       });
     } catch (error) {
@@ -595,8 +595,8 @@ export class DmClient {
    */
   private async sendRequest(recipientDid: string, convKey: string, participants: readonly string[], createdAt: string): Promise<DmDelivery> {
     const inbox = dmInboxUri(recipientDid);
-    const record = { $type: "org.slack.dm.request", convKey, participants, createdAt };
-    const validation = validateSpaceRecord("org.slack.dm.request", record, {
+    const record = { $type: COLLECTION.dmRequest, convKey, participants, createdAt };
+    const validation = validateSpaceRecord(COLLECTION.dmRequest, record, {
       authorityDid: recipientDid, spaceUri: inbox, repoDid: this.deps.did, rkey: convKey,
     });
     if (!validation.valid) return { status: "failed", message: validation.reason };
@@ -607,7 +607,7 @@ export class DmClient {
     }
     try {
       await this.deps.memberClient.procedure("com.atproto.space.putRecord", {
-        space: inbox, repo: this.deps.did, collection: "org.slack.dm.request", rkey: convKey, record,
+        space: inbox, repo: this.deps.did, collection: COLLECTION.dmRequest, rkey: convKey, record,
       });
       return { status: "delivered" };
     } catch (error) {
@@ -657,7 +657,7 @@ export class DmClient {
   }
 
   private async findExistingHalf(participants: readonly string[]): Promise<string | null> {
-    const halves = await listBoundedSpaces(this.deps.memberClient, { spaceType: "org.slack.dm.conversation", maxSpaces: MAX_OWN_CONVERSATIONS });
+    const halves = await listBoundedSpaces(this.deps.memberClient, { spaceType: SPACE_TYPE.dmConversation, maxSpaces: MAX_OWN_CONVERSATIONS });
     if (halves.truncated) throw new Error("Own DM conversation count exceeds the bounded scan limit.");
     for (const space of halves.spaces) {
       const header = await this.getValidatedOwnHeader(space.uri);
@@ -668,9 +668,9 @@ export class DmClient {
 
   /** Fetches the caller's own header for `space` and validates it, returning `null` for a missing or invalid record. */
   private async getValidatedOwnHeader(space: string): Promise<{ convKey: string; participants: string[]; createdAt: string } | null> {
-    const header = await this.getOwnRecord(space, "org.slack.dm.header", "self");
+    const header = await this.getOwnRecord(space, COLLECTION.dmHeader, "self");
     if (!header) return null;
-    const validation = validateSpaceRecord("org.slack.dm.header", header, {
+    const validation = validateSpaceRecord(COLLECTION.dmHeader, header, {
       authorityDid: this.deps.did, spaceUri: space, repoDid: this.deps.did, rkey: "self",
     });
     if (!validation.valid) return null;
@@ -679,7 +679,7 @@ export class DmClient {
   }
 
   private async ownConversationKeys(): Promise<Set<string>> {
-    const halves = await listBoundedSpaces(this.deps.memberClient, { spaceType: "org.slack.dm.conversation", maxSpaces: MAX_OWN_CONVERSATIONS });
+    const halves = await listBoundedSpaces(this.deps.memberClient, { spaceType: SPACE_TYPE.dmConversation, maxSpaces: MAX_OWN_CONVERSATIONS });
     if (halves.truncated) throw new Error("Own DM conversation count exceeds the bounded scan limit.");
     return new Set(halves.spaces.flatMap((space) => {
       const parsed = parseDmConversationUri(space.uri);
@@ -722,17 +722,17 @@ export class DmClient {
       const half = dmConversationUri(ownerDid, convKey);
       try {
         const client = credential.client(await this.deps.resolvePds(ownerDid));
-        const page = await listBoundedRecords(client, { space: half, repo: ownerDid, collection: "org.slack.dm.reaction", maxRecords: MAX_REACTIONS_PER_HALF });
+        const page = await listBoundedRecords(client, { space: half, repo: ownerDid, collection: COLLECTION.dmReaction, maxRecords: MAX_REACTIONS_PER_HALF });
         if (page.truncated) throw new Error("DM reaction history exceeds the bounded scan limit.");
         const reactions: DmReaction[] = [];
         for (const record of page.records) {
-          const validation = validateSpaceRecord("org.slack.dm.reaction", record.value, {
+          const validation = validateSpaceRecord(COLLECTION.dmReaction, record.value, {
             authorityDid: ownerDid, spaceUri: half, repoDid: ownerDid, rkey: record.rkey, participants,
           });
           if (!validation.valid) continue;
           const value = record.value as { subject: string; emoji: string; createdAt: string };
           if (!messageUris.has(value.subject)) continue;
-          reactions.push({ uri: spaceRecordUri(half, ownerDid, "org.slack.dm.reaction", record.rkey), ownerDid, subject: value.subject, emoji: value.emoji, createdAt: value.createdAt });
+          reactions.push({ uri: spaceRecordUri(half, ownerDid, COLLECTION.dmReaction, record.rkey), ownerDid, subject: value.subject, emoji: value.emoji, createdAt: value.createdAt });
         }
         return reactions;
       } catch (error) {

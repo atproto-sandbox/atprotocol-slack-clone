@@ -10,11 +10,11 @@ import { resolvePds } from "./identity";
 import { sessionClient, serviceClient } from "./client";
 import { mintSpaceCredential } from "./space-credential";
 import { isMemberListOnly, memberspacePolicy } from "./space-policy";
-import { validateSpaceRecord } from "@/protocol/records";
+import { validateSpaceRecord } from "@/protocol/registry";
 import { assertBoundedRecordPage, listBoundedMembers } from "./record-pages";
 import { isSpaceAlreadyExists } from "./xrpc";
 import { requireSpaceAuthority, spaceRecordUri, spaceUri } from "@/protocol/keys";
-import { WorkspaceEnvelopeError } from "@/workspaces/read-model";
+import { WorkspaceEnvelopeError } from "@/protocol/workspace-summary";
 
 export async function ensureMemberListSpace(
   session: OAuthSession,

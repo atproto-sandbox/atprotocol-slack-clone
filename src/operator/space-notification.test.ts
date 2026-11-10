@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test, { after } from "node:test";
 import { closeDb, getRawDb } from "@/lib/db";
 import { dmInboxUri } from "@/protocol/keys";
-import { OperatorAuthError } from "./security";
+import { OperatorAuthError } from "./errors";
 import { authenticateSpaceNotification } from "./space-notification";
 
 const DIRECTORY = mkdtempSync(join(tmpdir(), "slack-space-notification-test-"));

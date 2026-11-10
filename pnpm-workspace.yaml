@@ -7,9 +7,12 @@ allowBuilds:
   unrs-resolver: true
 minimumReleaseAgeExclude:
   - '@atproto/car@0.0.0-spaces-alpha-20261029171913'
+  - '@atproto/common-web@0.0.0-spaces-alpha-20261029171913'
   - '@atproto/crypto@0.0.0-spaces-alpha-20261029171913'
   - '@atproto/lex-cbor@0.0.0-spaces-alpha-20261029171913'
   - '@atproto/lex-data@0.0.0-spaces-alpha-20261029171913'
+  - '@atproto/lexicon@0.0.0-spaces-alpha-20261029171913'
+  - '@atproto/lex-json@0.0.0-spaces-alpha-20261029171913'
   - '@atproto/space@0.0.0-spaces-alpha-20261029171913'
   - '@atproto/syntax@0.0.0-spaces-alpha-20261029171913'
 onlyBuiltDependencies:
@@ -18,8 +21,10 @@ onlyBuiltDependencies:
   - esbuild
   - sharp
   - unrs-resolver
-# The alpha snapshots depend on "^0.0.0-spaces-alpha-<stamp>" ranges. That range also matches the stray
-# 0.0.0 releases of lex-cbor and lex-data, which still list "workspace:*" dependencies and cannot install.
+# The alpha snapshots depend on "^0.0.0-spaces-alpha-<stamp>" ranges. That range also matches stray 0.0.0 releases
+# (lex-cbor and lex-data list "workspace:*" dependencies and cannot install), so every alpha range is pinned to the snapshot.
 overrides:
+  "@atproto/common-web@^0.0.0-spaces-alpha-20261029171913": "0.0.0-spaces-alpha-20261029171913"
   "@atproto/lex-cbor@^0.0.0-spaces-alpha-20261029171913": "0.0.0-spaces-alpha-20261029171913"
   "@atproto/lex-data@^0.0.0-spaces-alpha-20261029171913": "0.0.0-spaces-alpha-20261029171913"
+  "@atproto/lex-json@^0.0.0-spaces-alpha-20261029171913": "0.0.0-spaces-alpha-20261029171913"

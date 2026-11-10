@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
-import { OPERATOR_METHODS, SLACK_COLLECTIONS, SLACK_SPACE_TYPES, workspaceAuthorityScopes } from "./permission-sets";
+import { COLLECTION, SPACE_TYPE } from "./nsids";
+import { OPERATOR_METHODS, workspaceAuthorityScopes } from "./scopes";
 
 type LexPermission = { type: "permission"; resource: "space" | "rpc"; spaceType?: string; authority?: string; skey?: string; collection?: string[]; action?: string[]; manage?: string[]; lxm?: string[] };
 
@@ -53,8 +54,8 @@ test("the published workspaceAuthority permission set grants the operator method
 });
 
 test("every space type and collection a published permission set names is one this app defines", () => {
-  const spaceTypes = new Set<string>(Object.values(SLACK_SPACE_TYPES));
-  const collections = new Set<string>(Object.values(SLACK_COLLECTIONS));
+  const spaceTypes = new Set<string>(Object.values(SPACE_TYPE));
+  const collections = new Set<string>(Object.values(COLLECTION));
   for (const name of ["member", "workspaceAuthority"]) {
     for (const permission of readPermissionSet(name).filter((entry) => entry.resource === "space")) {
       assert.ok(spaceTypes.has(permission.spaceType!), `${name}: unknown space type ${permission.spaceType}`);

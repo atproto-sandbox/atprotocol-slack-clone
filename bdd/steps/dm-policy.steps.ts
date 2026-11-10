@@ -4,7 +4,7 @@ import { Given, Then, When } from "@cucumber/cucumber";
 import { DM_RENOTIFY_BACKOFF_MS } from "@/dm/backoff";
 import { readIndependentDmConversation } from "@/reader/independent-dm";
 import { dmConversationUri, dmInboxUri, recordKeyHash, stableHash, tidNow } from "@/protocol/keys";
-import { validateDmHeaderMatchesRequest, validateSpaceRecord } from "@/protocol/records";
+import { validateDmHeaderMatchesRequest, validateSpaceRecord } from "@/protocol/registry";
 import type { SecondApp } from "../../protocol-tests/support/app-fixture";
 import { completeConsent, signIn, submitWorkspaceName, uniqueWorkspaceName } from "../support/ui";
 import { PAGE_TIMEOUT_MS, type Actor, type AppWorld } from "../support/world";

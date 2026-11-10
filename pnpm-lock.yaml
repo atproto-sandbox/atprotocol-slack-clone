@@ -5,8 +5,10 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
+  '@atproto/common-web@^0.0.0-spaces-alpha-20261029171913': 0.0.0-spaces-alpha-20261029171913
   '@atproto/lex-cbor@^0.0.0-spaces-alpha-20261029171913': 0.0.0-spaces-alpha-20261029171913
   '@atproto/lex-data@^0.0.0-spaces-alpha-20261029171913': 0.0.0-spaces-alpha-20261029171913
+  '@atproto/lex-json@^0.0.0-spaces-alpha-20261029171913': 0.0.0-spaces-alpha-20261029171913
 
 importers:
 
@@ -31,8 +33,8 @@ importers:
         specifier: 0.2.7
         version: 0.2.7
       '@atproto/lexicon':
-        specifier: 0.7.14
-        version: 0.7.14
+        specifier: 0.0.0-spaces-alpha-20261029171913
+        version: 0.0.0-spaces-alpha-20261029171913
       '@atproto/oauth-client-browser':
         specifier: 0.5.7
         version: 0.5.7
@@ -152,6 +154,10 @@ packages:
     resolution: {integrity: sha512-u+ovuQjAJkTAjEEld2LAuN+vEvQadLH2UAGHhydeWTDpBZb1lcjtP2IZZ1eYtXRIsc0YCriqyych/XLCJ+cQiQ==}
     engines: {node: '>=22'}
 
+  '@atproto/common-web@0.0.0-spaces-alpha-20261029171913':
+    resolution: {integrity: sha512-IGpEO/gAoz79lVy7HnNJ9tzElDLXJ0k9GZfKP0e9PV7JYnMBTcXX1LZYAqbcdUP205U8ZY/JYaXuPlDERbD9CA==}
+    engines: {node: '>=22'}
+
   '@atproto/common-web@0.5.12':
     resolution: {integrity: sha512-FumNnUOUsk68gP+jU0sXY2wY2piqFV9/qU2YaoQq/IZknhJBlLYCzjQXXCN0FCzxAZWD0YUzgydeyuRvFoAxfA==}
     engines: {node: '>=22'}
@@ -213,12 +219,20 @@ packages:
     resolution: {integrity: sha512-kW/dPLqo/WgCLV+XESR4JKwV6c1rZWJGOfuPupZGTjEDAKoBbKXdaEzX9/1vKQYbZ9U3j0DS/n7OFFK7wBugyQ==}
     engines: {node: '>=22'}
 
+  '@atproto/lex-json@0.0.0-spaces-alpha-20261029171913':
+    resolution: {integrity: sha512-fcZQCIkzMbl+5MFM7peaskOW06PAeLkgLXIlirbJdax87ES+QRbGzN6l/5GlRh74C4+es8mDTK4rCgeUiYC9Dw==}
+    engines: {node: '>=22'}
+
   '@atproto/lex-json@0.1.6':
     resolution: {integrity: sha512-mvrAd0lbyuecIHjyld8QN6MN6CBf4j0GCxLzegsvLh0SvDf+GbYWklkcQqmITL44yFQOwmA/QNIQj0Uvh7+R/g==}
     engines: {node: '>=22'}
 
   '@atproto/lex-schema@0.2.7':
     resolution: {integrity: sha512-K+Ce0SyFPcP19tSo4AhLLEOYnJzKh6sVzhGuB4ZCSto9tHgaVZ3iTQT895IPviZSPjd3+XIRA/rpqWSA2wPGEg==}
+    engines: {node: '>=22'}
+
+  '@atproto/lexicon@0.0.0-spaces-alpha-20261029171913':
+    resolution: {integrity: sha512-JKwbXW2/iXTZqzTzYj5D+p842nQ0+E7Xu2EJ9D2MwSfE43A6ToAf3SaEAnMXYL1INuWe++TS2Pb14cElNoMH0g==}
     engines: {node: '>=22'}
 
   '@atproto/lexicon@0.7.14':
@@ -3038,6 +3052,13 @@ snapshots:
       tslib: 2.8.1
       varint: 6.0.0
 
+  '@atproto/common-web@0.0.0-spaces-alpha-20261029171913':
+    dependencies:
+      '@atproto/lex-data': 0.0.0-spaces-alpha-20261029171913
+      '@atproto/lex-json': 0.0.0-spaces-alpha-20261029171913
+      '@atproto/syntax': 0.0.0-spaces-alpha-20261029171913
+      zod: 3.25.76
+
   '@atproto/common-web@0.5.12':
     dependencies:
       '@atproto/lex-data': 0.1.7
@@ -3133,6 +3154,11 @@ snapshots:
       tslib: 2.8.1
       unicode-segmenter: 0.14.5
 
+  '@atproto/lex-json@0.0.0-spaces-alpha-20261029171913':
+    dependencies:
+      '@atproto/lex-data': 0.0.0-spaces-alpha-20261029171913
+      tslib: 2.8.1
+
   '@atproto/lex-json@0.1.6':
     dependencies:
       '@atproto/lex-data': 0.1.7
@@ -3144,6 +3170,13 @@ snapshots:
       '@atproto/syntax': 0.7.6
       '@standard-schema/spec': 1.1.0
       tslib: 2.8.1
+
+  '@atproto/lexicon@0.0.0-spaces-alpha-20261029171913':
+    dependencies:
+      '@atproto/common-web': 0.0.0-spaces-alpha-20261029171913
+      '@atproto/syntax': 0.0.0-spaces-alpha-20261029171913
+      multiformats: 13.4.2
+      zod: 3.25.76
 
   '@atproto/lexicon@0.7.14':
     dependencies:

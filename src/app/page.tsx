@@ -1,5 +1,5 @@
 import { getSession } from "@/auth/session";
-import { DM_BROWSER_SCOPES } from "@/auth/permission-sets";
+import { DM_BROWSER_SCOPES } from "@/protocol/scopes";
 import { getConfig } from "@/lib/config";
 import { headers } from "next/headers";
 import Link from "next/link";

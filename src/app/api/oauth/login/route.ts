@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getOAuthClient } from "@/auth/oauth";
 import { oauthFlowCookieName, startOAuthFlow } from "@/auth/oauth-flow";
-import { MEMBER_SIGN_IN_SCOPES } from "@/auth/permission-sets";
+import { MEMBER_SIGN_IN_SCOPES } from "@/protocol/scopes";
 import { canonicalOAuthScope } from "@/auth/oauth-scope";
 import { classifyOAuthRouteError } from "@/auth/oauth-route-error";
 import { getConfig } from "@/lib/config";

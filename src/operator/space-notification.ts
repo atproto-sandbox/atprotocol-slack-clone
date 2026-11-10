@@ -1,6 +1,7 @@
-import { isNotificationAccepted } from "@/atproto/notifications";
+import { isNotificationAccepted } from "@/operator/notices";
 import { requireSpaceAuthority } from "@/protocol/keys";
-import { authenticateOperatorRequest, OperatorAuthError, unverifiedBearerIssuer } from "./security";
+import { OperatorAuthError } from "./errors";
+import { authenticateOperatorRequest, unverifiedBearerIssuer } from "./security";
 
 /**
  * Authenticates a notice from a space authority (`notifyWrite`, `notifySpaceDeleted`): the app must have registered for the space,

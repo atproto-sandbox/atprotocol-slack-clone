@@ -288,6 +288,38 @@ test("accept creates the reader's own half, matches the header, and always allow
   assert.deepEqual(conversations.map((c) => c.convKey), [started.convKey]);
 });
 
+test("an edit keeps a field another app added to the message", async () => {
+  // #given alice's DM client, with every record it writes observed
+  const { network, client } = harness();
+  network.createAccount("did:plc:alice", "pds1");
+  network.createAccount("did:plc:bob", "pds2");
+  const memberClient = network.clientFor("did:plc:alice");
+  const procedure = memberClient.procedure.bind(memberClient);
+  const written: Array<Record<string, unknown>> = [];
+  memberClient.procedure = (async (method: string, input?: unknown) => {
+    if (method === "com.atproto.space.putRecord") written.push((input as { record: Record<string, unknown> }).record);
+    return procedure(method, input);
+  }) as typeof memberClient.procedure;
+  const alice = client("did:plc:alice", "pds1", { memberClient });
+  const bob = client("did:plc:bob");
+  await bob.enableDms("everyone");
+  const started = await alice.startConversation(["did:plc:bob"]);
+  await bob.accept((await bob.listRequests())[0]!);
+  const message = await alice.send(started.convKey, "hello bob");
+
+  // #and another app added a field to that message
+  const half = dmConversationUri("did:plc:alice", started.convKey);
+  await procedure("com.atproto.space.putRecord", {
+    space: half, repo: "did:plc:alice", collection: "org.slack.dm.message", rkey: message.rkey, record: { ...written.at(-1), pinnedBy: "another-app" },
+  });
+
+  // #when alice edits it
+  await alice.edit(message.uri, "hello again bob");
+
+  // #then the edit writes the new text and keeps the other app's field
+  assert.deepEqual(written.at(-1), { $type: "org.slack.dm.message", text: "hello again bob", createdAt: message.createdAt, pinnedBy: "another-app" });
+});
+
 test("send, edit, delete, react and unreact validate locally and only touch the caller's own records", async () => {
   const { network, client } = harness();
   network.createAccount("did:plc:alice", "pds1");

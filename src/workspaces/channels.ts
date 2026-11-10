@@ -2,14 +2,15 @@ import type { OAuthSession } from "@atproto/oauth-client-node";
 import type * as GetRecord from "@/lexicons/api/types/com/atproto/space/getRecord";
 import { resolvePds } from "@/atproto/identity";
 import { mintSpaceCredential } from "@/atproto/space-credential";
-import { registerSpaceNotifications } from "@/atproto/notifications";
+import { registerSpaceNotifications } from "@/operator/notices";
 import { listBoundedRecords } from "@/atproto/record-pages";
 import { isMissingXrpcResource } from "@/atproto/xrpc";
 import { channelUri, isSkey, parseWorkspaceUri } from "@/protocol/keys";
-import { validateSpaceRecord } from "@/protocol/records";
-import { WorkspaceEnvelopeError } from "./read-model";
+import { validateSpaceRecord } from "@/protocol/registry";
+import { WorkspaceEnvelopeError } from "@/protocol/workspace-summary";
 import { purgeDeniedPermissionCache, purgeSpaceCache, purgeWorkspaceCache, registerWorkspaceChannel, unregisterWorkspaceChannel } from "./cache";
 import { isAccessLost } from "@/atproto/space-credential-core";
+import { COLLECTION } from "@/protocol/nsids";
 
 const MAX_SUPPORTED_MEMBERS = 200;
 const MAX_PRIVATE_ROSTER_SCAN = 1_000;
@@ -24,13 +25,13 @@ export async function requireChannelDirectory(session: OAuthSession, workspace: 
   let result: GetRecord.OutputSchema | null;
   try {
     result = await directoryClient.query<GetRecord.OutputSchema>("com.atproto.space.getRecord", {
-      space: workspace, repo: authorityDid, collection: "org.slack.directory", rkey: skey,
+      space: workspace, repo: authorityDid, collection: COLLECTION.directory, rkey: skey,
     });
   } catch (error) {
     if (isMissingXrpcResource(error)) result = null;
     else throw error;
   }
-  if (!result || !validateSpaceRecord("org.slack.directory", result.value, {
+  if (!result || !validateSpaceRecord(COLLECTION.directory, result.value, {
     authorityDid, spaceUri: workspace, repoDid: authorityDid, rkey: skey,
   }).valid) {
     unregisterWorkspaceChannel(session.did, workspace, channelUri(authorityDid, skey));
@@ -74,9 +75,9 @@ export async function readPrivateChannelRoster(session: OAuthSession, workspace:
     await registerSpaceNotifications(credential, current.channel);
     const client = credential.client(await resolvePds(current.authorityDid));
     const roster = await listBoundedRecords(client, {
-      space: current.channel, repo: current.authorityDid, collection: "org.slack.channel.roster", maxRecords: MAX_PRIVATE_ROSTER_SCAN,
+      space: current.channel, repo: current.authorityDid, collection: COLLECTION.channelRoster, maxRecords: MAX_PRIVATE_ROSTER_SCAN,
     });
-    const members = new Set(roster.records.flatMap((record) => validateSpaceRecord("org.slack.channel.roster", record.value, {
+    const members = new Set(roster.records.flatMap((record) => validateSpaceRecord(COLLECTION.channelRoster, record.value, {
       authorityDid: current.authorityDid, spaceUri: current.channel, repoDid: current.authorityDid, rkey: record.rkey,
     }).valid && record.value.active === true && typeof record.value.subject === "string" ? [record.value.subject] : []));
     if (roster.truncated) throw new WorkspaceEnvelopeError(`Private-channel roster exceeds the ${MAX_PRIVATE_ROSTER_SCAN}-record scan limit; the roster may be incomplete.`);

@@ -5,7 +5,7 @@ import type * as ListRecords from "@/lexicons/api/types/com/atproto/space/listRe
 import type * as ListRepos from "@/lexicons/api/types/com/atproto/space/listRepos";
 import { decryptCachedValue, encryptCachedValue, type CachedRecordContext } from "@/auth/encrypted-cache";
 import { resolvePds } from "@/atproto/identity";
-import { registerSpaceNotifications } from "@/atproto/notifications";
+import { registerSpaceNotifications } from "@/operator/notices";
 import { assertBoundedRecordPage, listBoundedRepos } from "@/atproto/record-pages";
 import { selectValidChannelMessages } from "@/atproto/valid-channel-messages";
 import { mintSpaceCredential, type SpaceCredential } from "@/atproto/space-credential";
@@ -13,11 +13,12 @@ import { AtprotoClient } from "@/atproto/xrpc";
 import { getRawDb } from "@/lib/db";
 import { mapLimited } from "@/lib/map-limited";
 import { channelUri, parseSpaceUri, spaceRecordUri } from "@/protocol/keys";
-import { validateSpaceRecord } from "@/protocol/records";
+import { validateSpaceRecord } from "@/protocol/registry";
 import { ChannelUnavailableError, requireReadableChannel } from "./channels";
 import { purgeRepoCache, purgeSpaceCache, purgeWorkspaceCache, sweepStaleCacheOccasionally } from "./cache";
 import { classifyRepoFailure, describeRepoFailure, MAX_LISTED_SET_ASIDE } from "@/atproto/repo-failure";
 import { isAccessLost } from "@/atproto/space-credential-core";
+import { COLLECTION, SPACE_TYPE } from "@/protocol/nsids";
 
 const PAGE = 100;
 const BACKFILL_PAGE = 1_000;
@@ -32,7 +33,7 @@ export async function readChannelPage(session: OAuthSession, workspace: string, 
     readable = await requireReadableChannel(session, workspace, skey);
   } catch (error) {
     const parsed = parseSpaceUri(workspace);
-    if (parsed?.type === "org.slack.workspace" && skey) {
+    if (parsed?.type === SPACE_TYPE.workspace && skey) {
       const space = channelUri(parsed.authorityDid, skey);
       if (isAccessLost(error)) purgeWorkspaceCache(session.did, workspace);
       else if (error instanceof ChannelUnavailableError && error.visibility === "archived") purgeSpaceCache(session.did, space);
@@ -67,10 +68,10 @@ export async function readChannelPage(session: OAuthSession, workspace: string, 
     const aside = new SetAsideRepos(session.did, space);
     const readable = await aside.refresh(repos, REPO_CONCURRENCY, async (repo) => {
       const client = await clientFor(repo.did);
-      await refresh(session.did, space, repo.did, client, "org.slack.channel.message");
-      await refresh(session.did, space, repo.did, client, "org.slack.channel.reaction");
+      await refresh(session.did, space, repo.did, client, COLLECTION.message);
+      await refresh(session.did, space, repo.did, client, COLLECTION.reaction);
     });
-    const collection = "org.slack.channel.message";
+    const collection = COLLECTION.message;
     const required = Math.min(offset + PAGE + 1, MAX_HISTORY + 1);
     let scanTarget = Math.min(required, MAX_HISTORY);
     let selected = await selectValidChannelMessages([], {
@@ -99,12 +100,12 @@ export async function readChannelPage(session: OAuthSession, workspace: string, 
       if (nextTarget <= scanTarget) break;
       scanTarget = nextTarget;
     }
-    await fillOlder(session.did, space, readable, clientFor, "org.slack.channel.reaction", MAX_HISTORY, aside);
+    await fillOlder(session.did, space, readable, clientFor, COLLECTION.reaction, MAX_HISTORY, aside);
     const messages = selected.messages.slice(offset, offset + PAGE);
     const messageUris = new Set(messages.map((item) => item.uri));
     const knownMessages = new Set(messages.map((item) => item.uri));
-    const reactions = cached(session.did, space, "org.slack.channel.reaction").filter((item) =>
-      typeof item.value.subject === "string" && messageUris.has(item.value.subject) && validateSpaceRecord("org.slack.channel.reaction", item.value, {
+    const reactions = cached(session.did, space, COLLECTION.reaction).filter((item) =>
+      typeof item.value.subject === "string" && messageUris.has(item.value.subject) && validateSpaceRecord(COLLECTION.reaction, item.value, {
         authorityDid, spaceUri: space, repoDid: item.repo, rkey: item.rkey, knownMessages,
       }).valid,
     ).sort((left, right) => left.uri.localeCompare(right.uri));
@@ -117,8 +118,8 @@ export async function readChannelPage(session: OAuthSession, workspace: string, 
     if (total >= MAX_HISTORY && hasMoreCursor(session.did, space, collection, aside)) {
       degradedReasons.push(`Message history exceeds the ${MAX_HISTORY}-record channel sync limit.`);
     }
-    const reactionCount = cachedCount(session.did, space, "org.slack.channel.reaction");
-    if (reactionCount >= MAX_HISTORY && hasMoreCursor(session.did, space, "org.slack.channel.reaction", aside)) {
+    const reactionCount = cachedCount(session.did, space, COLLECTION.reaction);
+    if (reactionCount >= MAX_HISTORY && hasMoreCursor(session.did, space, COLLECTION.reaction, aside)) {
       degradedReasons.push(`Reaction history exceeds the ${MAX_HISTORY}-record channel sync limit.`);
     }
     return {
@@ -242,7 +243,7 @@ export async function fillLatest(
   aside: SetAsideRepos,
 ): Promise<void> {
   const raw = getRawDb();
-  const collection = "org.slack.channel.message";
+  const collection = COLLECTION.message;
   const goal = Math.min(target, MAX_HISTORY);
   const limit = Math.max(1, Math.min(PAGE, Math.floor(PAGE / Math.max(1, repos.length))));
   const seenCursors = new Map<string, Set<string>>();

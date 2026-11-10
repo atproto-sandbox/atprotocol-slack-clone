@@ -4,11 +4,12 @@ import { requireSession } from "@/auth/session";
 import { sessionClient } from "@/atproto/client";
 import { mintSpaceCredential } from "@/atproto/space-credential";
 import { acceptanceRecordKey, parseWorkspaceUri } from "@/protocol/keys";
-import { validateSpaceRecord } from "@/protocol/records";
+import { validateSpaceRecord } from "@/protocol/registry";
 import { purgeDeniedPermissionCache } from "@/workspaces/cache";
 import { readRequestJson } from "@/lib/bounded-json";
 import { rejectCrossOriginMutation } from "@/lib/same-origin-mutation";
 import { acceptFailure } from "@/workspaces/accept-errors";
+import { COLLECTION } from "@/protocol/nsids";
 
 export const runtime = "nodejs";
 
@@ -22,9 +23,9 @@ export async function POST(request: NextRequest) {
     const parsedWorkspace = parseWorkspaceUri(body.workspace);
     if (!parsedWorkspace) return NextResponse.json({ error: "Invalid workspace URI." }, { status: 400 });
     const { authorityDid } = parsedWorkspace;
-    const record = { $type: "org.slack.acceptance", workspace: body.workspace, createdAt: new Date().toISOString() };
+    const record = { $type: COLLECTION.acceptance, workspace: body.workspace, createdAt: new Date().toISOString() };
     const rkey = acceptanceRecordKey(body.workspace);
-    const validation = validateSpaceRecord("org.slack.acceptance", record, {
+    const validation = validateSpaceRecord(COLLECTION.acceptance, record, {
       authorityDid, spaceUri: body.workspace, repoDid: session.did, rkey,
     });
     if (!validation.valid) return NextResponse.json({ error: validation.reason }, { status: 400 });
@@ -37,7 +38,7 @@ export async function POST(request: NextRequest) {
     }
     const result = await sessionClient(session).procedure<PutRecord.InputSchema, PutRecord.OutputSchema>(
       "com.atproto.space.putRecord",
-      { space: body.workspace, repo: session.did, collection: "org.slack.acceptance", rkey, record },
+      { space: body.workspace, repo: session.did, collection: COLLECTION.acceptance, rkey, record },
     );
     return NextResponse.json({ workspace: body.workspace, marker: result.uri }, { status: 201 });
   } catch (error) {

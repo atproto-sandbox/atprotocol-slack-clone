@@ -1,7 +1,8 @@
 import dynamic from "next/dynamic";
 import { LogoutButton } from "./logout-button";
 import { messageOf, type ChannelSelection, type Grant } from "./client-api";
-import type { WorkspaceCandidate, WorkspaceSummary } from "@/workspaces/read-model";
+import type { WorkspaceCandidate } from "@/workspaces/read-model";
+import type { WorkspaceSummary } from "@/protocol/workspace-summary";
 
 // The DM tree touches IndexedDB and WebCrypto and must never render (or even
 // load its module graph, which pulls in @atproto/oauth-client-browser) during

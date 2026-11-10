@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { SPACE_TYPE } from "./nsids";
 import {
   DM_BROWSER_SCOPES, memberSpaceScope, operatorMethodScope, permissionScopeFor,
-  MEMBER_SIGN_IN_SCOPES, SLACK_SPACE_TYPES, WORKSPACE_DISCOVERY_SCOPE, workspaceAuthorityScopes,
-} from "./permission-sets";
+  MEMBER_SIGN_IN_SCOPES, WORKSPACE_DISCOVERY_SCOPE, workspaceAuthorityScopes,
+} from "./scopes";
 
 const serviceRef = "did:web:slack.example#atproto_slack_admin";
 
@@ -79,7 +80,7 @@ test("DM_BROWSER_SCOPES is the exact browser-session grant (M3)", () => {
 });
 
 test("memberSpaceScope refuses to mint a scope for either DM space type", () => {
-  for (const spaceType of [SLACK_SPACE_TYPES.dmInbox, SLACK_SPACE_TYPES.dmConversation]) {
+  for (const spaceType of [SPACE_TYPE.dmInbox, SPACE_TYPE.dmConversation]) {
     assert.throws(() => memberSpaceScope({
       spaceType, authorityDid: "did:plc:owner", skey: "self", action: "read",
     }), /DM space types are never granted/);

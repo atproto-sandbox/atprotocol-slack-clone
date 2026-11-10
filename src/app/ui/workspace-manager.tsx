@@ -10,7 +10,9 @@ import { Sidebar } from "./sidebar";
 import { WorkspaceHome } from "./workspace-home";
 import { WorkspaceOnboarding } from "./workspace-onboarding";
 import type { DmConfig } from "@/dm/browser-session";
-import type { WorkspaceCandidate, WorkspaceSummary } from "@/workspaces/read-model";
+import { SPACE_TYPE } from "@/protocol/nsids";
+import type { WorkspaceCandidate } from "@/workspaces/read-model";
+import type { WorkspaceSummary } from "@/protocol/workspace-summary";
 
 // The DM stage renders only client-side; see the note in sidebar.tsx.
 const DmStage = dynamic(() => import("./dm-stage").then((mod) => mod.DmStage), { ssr: false });
@@ -486,7 +488,7 @@ export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: DmC
     // A double-click must not start two permission requests; the guard lapses by itself so a cancelled navigation cannot stick.
     if (joiningRef.current) return;
     const ref = parsePastedWorkspaceUri(uri);
-    if (!ref) { setError("Paste a workspace URI in the form at://DID/space/org.slack.workspace/key."); return; }
+    if (!ref) { setError(`Paste a workspace URI in the form at://DID/space/${SPACE_TYPE.workspace}/key.`); return; }
     joiningRef.current = true;
     window.setTimeout(() => { joiningRef.current = false; }, 3_000);
     setError(""); setStatus("Opening the permission screen…");

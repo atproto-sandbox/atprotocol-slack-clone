@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { DM_BROWSER_SCOPES } from "@/auth/permission-sets";
+import { DM_BROWSER_SCOPES } from "@/protocol/scopes";
 import { buildDmClientMetadata } from "@/dm/client-metadata";
 import { getConfig } from "@/lib/config";
 

@@ -44,7 +44,7 @@ test("the workspace authority grant outlives the creator's sign-in session", asy
     await t.test("the authority account creates a second workspace with no further approval", async () => {
       // given an authority whose grant created one workspace
       const [{ bootstrapWorkspace }, { restoreAuthorityGrant }, { tidNow }] = await Promise.all([
-        import("@/workspaces/bootstrap"), import("@/operator/authority-grant"), import("@/protocol/keys"),
+        import("@/operator/kinds/bootstrap-workspace"), import("@/operator/authority-grant"), import("@/protocol/keys"),
       ]);
       const authority = await pds.createActor("k1second-owner", 0);
       await storeAuthorityGrant(pds.hosts[0], authority.did, "k1second-grant-dpop");
@@ -71,13 +71,13 @@ type WorkspaceUnderTest = {
 
 async function createWorkspaceWithSecondAdmin(pds: PdsNetwork, scenario: Scenario): Promise<WorkspaceUnderTest> {
   const [{ getOAuthClientForSession }, { bootstrapWorkspace }, { restoreAuthorityGrant }, { requireActiveWorkspaceAdmin }, { executeOperatorOperation }, { tidNow }] = await Promise.all([
-    import("@/auth/oauth"), import("@/workspaces/bootstrap"), import("@/operator/authority-grant"), import("@/operator/security"),
+    import("@/auth/oauth"), import("@/operator/kinds/bootstrap-workspace"), import("@/operator/authority-grant"), import("@/operator/security"),
     import("@/operator/operations"), import("@/protocol/keys"),
   ]);
   const label = { "signs out": "k1out", "signs in again in a second browser": "k1again", "lets the sign-in session pass its lifetime": "k1lapse" }[scenario];
   const authority = await pds.createActor(`${label}-owner`, 0);
   const admin = await pds.createActor(`${label}-admin`, 1);
-  const { permissionScopeFor } = await import("@/auth/permission-sets");
+  const { permissionScopeFor } = await import("@/protocol/scopes");
   await storeOAuthSession(admin.pds, admin.did, [...await memberSignInScopes(), ...permissionScopeFor("operatorAdmin", { workspaceDid: admin.did, serviceRef: pds.serviceRef })], `${label}-admin-dpop`);
   // The creator is signed in as a member and has approved the workspace-authority grant, which the authority flow keeps apart.
   const signIn = await storeOAuthSession(pds.hosts[0], authority.did, await memberSignInScopes(), `${label}-sign-in-dpop`);

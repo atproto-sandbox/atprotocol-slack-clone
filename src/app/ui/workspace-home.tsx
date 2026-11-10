@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { inviteLinkFor, makeShortId, splitDids, toSlug, type Grant, type InboxRequest, type RunOperation } from "./client-api";
-import type { WorkspaceSummary } from "@/workspaces/read-model";
+import type { WorkspaceSummary } from "@/protocol/workspace-summary";
 
 type WorkspaceHomeProps = {
   did: string;

@@ -1,5 +1,6 @@
-import { validateSpaceRecord } from "@/protocol/records";
+import { validateSpaceRecord } from "@/protocol/registry";
 import { parseSpaceRecordUri, spaceRecordUri } from "@/protocol/keys";
+import { COLLECTION } from "@/protocol/nsids";
 
 export type ChannelMessageRecord = {
   uri: string;
@@ -22,7 +23,7 @@ export async function selectValidChannelMessages(
   if (!Number.isSafeInteger(input.limit) || input.limit < 1) throw new RangeError("Message selection limit must be a positive safe integer.");
   const ordered = records.filter((record) => {
     try {
-      return record.uri === spaceRecordUri(input.spaceUri, record.repo, "org.slack.channel.message", record.rkey);
+      return record.uri === spaceRecordUri(input.spaceUri, record.repo, COLLECTION.message, record.rkey);
     } catch {
       return false;
     }
@@ -32,7 +33,7 @@ export async function selectValidChannelMessages(
   const validTopLevelMessages = new Set<string>();
   for (const record of ordered) {
     if (!isObject(record.value) || record.value.parent !== undefined) continue;
-    if (validateSpaceRecord("org.slack.channel.message", record.value, {
+    if (validateSpaceRecord(COLLECTION.message, record.value, {
       authorityDid: input.authorityDid,
       spaceUri: input.spaceUri,
       repoDid: record.repo,
@@ -54,13 +55,13 @@ export async function selectValidChannelMessages(
       const parentUri = record.value.parent;
       if (typeof parentUri === "string" && !knownTopLevelMessages.has(parentUri) && !attemptedParents.has(parentUri)) {
         attemptedParents.add(parentUri);
-        const target = parseSpaceRecordUri(parentUri, input.spaceUri, "org.slack.channel.message");
+        const target = parseSpaceRecordUri(parentUri, input.spaceUri, COLLECTION.message);
         if (target) {
           const { repo, rkey } = target;
           try {
             const parent = await input.getParent(repo, rkey);
             if (parent?.uri === parentUri && isObject(parent.value) && parent.value.parent === undefined &&
-              validateSpaceRecord("org.slack.channel.message", parent.value, {
+              validateSpaceRecord(COLLECTION.message, parent.value, {
                 authorityDid: input.authorityDid,
                 spaceUri: input.spaceUri,
                 repoDid: repo,
@@ -72,7 +73,7 @@ export async function selectValidChannelMessages(
           } catch { /* Missing, unreadable, or invalid parents make replies nonconforming. */ }
         }
       }
-      if (validateSpaceRecord("org.slack.channel.message", record.value, {
+      if (validateSpaceRecord(COLLECTION.message, record.value, {
         authorityDid: input.authorityDid,
         spaceUri: input.spaceUri,
         repoDid: record.repo,

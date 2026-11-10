@@ -2,7 +2,7 @@
 
 import { useState, type FormEvent } from "react";
 import { messageOf, splitDids, threadMessages, TRANSITIONING_STATUS, type ChannelSelection, type Grant, type Message, type RunOperation } from "./client-api";
-import type { WorkspaceSummary } from "@/workspaces/read-model";
+import type { WorkspaceSummary } from "@/protocol/workspace-summary";
 
 type ChannelViewProps = {
   did: string;

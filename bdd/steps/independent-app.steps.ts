@@ -6,7 +6,7 @@ import Database from "better-sqlite3";
 import { Given, Then, When } from "@cucumber/cucumber";
 import { expect, type Locator } from "@playwright/test";
 import { canonicalJson, channelUri, decisionRecordKey, inboxUri, requestDigest, spaceRecordUri, subjectKey, tidNow } from "@/protocol/keys";
-import { validateSpaceRecord } from "@/protocol/records";
+import { validateSpaceRecord } from "@/protocol/registry";
 import type { SecondApp } from "../../protocol-tests/support/app-fixture";
 import {
   createChannelAs, grantAdminControlsAt, grantWorkspaceAuthorityAt, insertJournalRow, joinWorkspaceAt, listWriters, observeWorkspace, onPrimaryApp, openChannelAndRead, openViewer,

@@ -11,7 +11,7 @@
         "properties": {
           "request": { "type": "string", "format": "at-uri" },
           "requestId": { "type": "string", "format": "tid" },
-          "decision": { "type": "string", "knownValues": ["approve", "deny"] },
+          "decision": { "type": "string", "enum": ["approve", "deny"] },
           "updatedAt": { "type": "string", "format": "datetime" }
         }
       }

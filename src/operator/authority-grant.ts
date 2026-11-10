@@ -23,7 +23,7 @@ import {
 } from "@/auth/oauth-flow";
 import { oauthSqliteRequestLock } from "@/auth/oauth-request-lock";
 import { canonicalOAuthScope } from "@/auth/oauth-scope";
-import { workspaceAuthorityScopes } from "@/auth/permission-sets";
+import { workspaceAuthorityScopes } from "@/protocol/scopes";
 import { getAuthorityClientKeys, getConfig, type AuthorityClientKey } from "@/lib/config";
 import { getRawDb } from "@/lib/db";
 import { isDid } from "@/protocol/keys";

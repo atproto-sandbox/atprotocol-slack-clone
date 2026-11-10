@@ -71,7 +71,7 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
     try {
       await publishAppLexicons(network);
       const [{ bootstrapWorkspace }, { ensureMemberListSpace, listSpaceMembers, putAuthorityRecord, putSpaceMember }, { executeOperatorOperation, listInboxWriters }, { mintSpaceCredential }, { readIndependentChannelPage }, { inboxUri, reactionRecordKey, requestRecordKey, spaceRecordUri, subjectKey, tidNow }, { readChannelPage }, { parseWorkspaceRef }, { getRawDb }, { resolvePds }] = await Promise.all([
-        import("@/workspaces/bootstrap"), import("@/atproto/space-ops"), import("@/operator/operations"), import("@/atproto/space-credential"), import("@/reader/independent"), import("@/protocol/keys"), import("@/workspaces/channel-sync"), import("@/operator/security"), import("@/lib/db"), import("@/atproto/identity"),
+        import("@/operator/kinds/bootstrap-workspace"), import("@/atproto/space-ops"), import("@/operator/operations"), import("@/atproto/space-credential"), import("@/reader/independent"), import("@/protocol/keys"), import("@/workspaces/channel-sync"), import("@/operator/actor"), import("@/lib/db"), import("@/atproto/identity"),
       ]);
       const owner = await createActor(network.pds, "scaleowner", "test");
       const ownerSession = sessionFor(owner);

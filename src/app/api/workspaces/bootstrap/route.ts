@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { requireSession } from "@/auth/session";
-import { assertWorkspaceName, bootstrapWorkspace, type BootstrapResult } from "@/workspaces/bootstrap";
+import { assertWorkspaceName, bootstrapWorkspace, type BootstrapResult } from "@/operator/kinds/bootstrap-workspace";
 import { readRequestJson } from "@/lib/bounded-json";
 import { AuthorityReauthorizationRequiredError, restoreAuthorityGrant } from "@/operator/authority-grant";
 import { assertAdminMutationsEnabled } from "@/operator/mutations-paused";

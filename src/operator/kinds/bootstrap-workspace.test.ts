@@ -5,7 +5,10 @@ import { join } from "node:path";
 import test, { after, before } from "node:test";
 import type { OAuthSession } from "@atproto/oauth-client-node";
 import { closeDb, getRawDb } from "@/lib/db";
-import { bootstrapWorkspace } from "./bootstrap";
+import { workspaceUri } from "@/protocol/keys";
+import { parseWorkspaceRef, type OperatorActor } from "../actor";
+import { runJournaledOperation } from "../journal";
+import { bootstrapWorkspace, bootstrapWorkspaceKind } from "./bootstrap-workspace";
 
 const OWNER = "did:plc:owner";
 let directory = "";
@@ -113,4 +116,19 @@ test("a missing permission after some steps keeps the journal row, still signals
   assert.equal(retry.authorizationRequired, true);
   assert.equal(stateOf("4444444444444")?.state, "pending");
   assert.equal(catalogCount(first.workspace), 1, "the partially created workspace stays catalogued for recovery");
+});
+
+test("a bootstrap replayed into a workspace whose key its name does not derive fails instead of building there", async () => {
+  // #given a journaled bootstrap for "Delta" being run against some other workspace key
+  const actor: OperatorActor = {
+    did: OWNER, session: sessionWith(created), workspace: parseWorkspaceRef(workspaceUri(OWNER, "not-deltas-key")), canRecoverOperations: true,
+  };
+
+  // #when the runner replays it
+  const view = await runJournaledOperation(actor, "5555555555555", { kind: "bootstrapWorkspace", name: "Delta" }, bootstrapWorkspaceKind.steps,
+    (context) => bootstrapWorkspaceKind.run(actor, context, { kind: "bootstrapWorkspace", name: "Delta" }));
+
+  // #then it fails before creating anything
+  assert.equal(view.state, "failed");
+  assert.deepEqual(view.completedSteps, []);
 });

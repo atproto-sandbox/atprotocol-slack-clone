@@ -9,7 +9,7 @@
         "type": "object",
         "required": ["text", "createdAt"],
         "properties": {
-          "text": { "type": "string", "minLength": 1, "maxLength": 10000 },
+          "text": { "type": "string", "minLength": 1, "maxLength": 40000, "maxGraphemes": 10000 },
           "createdAt": { "type": "string", "format": "datetime" },
           "parent": { "type": "string", "format": "at-uri" }
         }

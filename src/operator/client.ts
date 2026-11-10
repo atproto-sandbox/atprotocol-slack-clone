@@ -3,16 +3,19 @@ import type * as Execute from "@/lexicons/api/types/org/slack/operator/execute";
 import type * as GetOperation from "@/lexicons/api/types/org/slack/operator/getOperation";
 import type * as ListInboxWriters from "@/lexicons/api/types/org/slack/operator/listInboxWriters";
 import { assertSafePdsEndpoint, fetchValidatedEndpoint, getIdResolver } from "@/atproto/identity";
-import { OPERATOR_METHODS, requestOperatorServiceAuth } from "@/auth/permission-sets";
+import type * as GetServiceAuth from "@/lexicons/api/types/com/atproto/server/getServiceAuth";
+import { sessionClient } from "@/atproto/client";
+import { OPERATOR_METHODS } from "@/protocol/scopes";
 import { getConfig } from "@/lib/config";
 import { readUpstreamJson } from "@/lib/bounded-json";
 import { operatorHttpFailure } from "./errors";
+import { OPERATOR_METHOD } from "@/protocol/nsids";
 
 export async function submitOperation(
   session: OAuthSession,
   input: Execute.InputSchema,
 ): Promise<Execute.OutputSchema> {
-  return operatorRequest(session, "org.slack.operator.execute", input);
+  return operatorRequest(session, OPERATOR_METHOD.execute, input);
 }
 
 export async function fetchOperation(
@@ -20,11 +23,11 @@ export async function fetchOperation(
   workspace: string,
   operationId: string,
 ): Promise<GetOperation.OutputSchema> {
-  return operatorRequest(session, "org.slack.operator.getOperation", undefined, { workspace, operationId });
+  return operatorRequest(session, OPERATOR_METHOD.getOperation, undefined, { workspace, operationId });
 }
 
 export async function fetchInboxWriters(session: OAuthSession, workspace: string): Promise<ListInboxWriters.OutputSchema> {
-  return operatorRequest(session, "org.slack.operator.listInboxWriters", undefined, { workspace });
+  return operatorRequest(session, OPERATOR_METHOD.listInboxWriters, undefined, { workspace });
 }
 
 async function operatorRequest<TInput, TOutput>(
@@ -72,6 +75,16 @@ async function resolveOperatorEndpoint(serviceRef: string): Promise<URL> {
   endpoint.search = "";
   endpoint.hash = "";
   return endpoint;
+}
+
+/** A service token from the caller's own session, bound to the operator's service and to exactly one of its methods. */
+export async function requestOperatorServiceAuth(
+  session: OAuthSession,
+  serviceRef: string,
+  method: (typeof OPERATOR_METHODS)[number],
+): Promise<string> {
+  const result = await sessionClient(session).query<GetServiceAuth.OutputSchema>("com.atproto.server.getServiceAuth", { aud: serviceRef, lxm: method });
+  return result.token;
 }
 
 export class OperatorRemoteError extends Error {

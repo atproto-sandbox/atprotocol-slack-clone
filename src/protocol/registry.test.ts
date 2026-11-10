@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { channelUri, dmConversationUri, dmInboxUri, reactionRecordKey, requestRecordKey, spaceRecordUri, subjectKey } from "./keys";
-import { validateDmHeaderMatchesRequest, validateSpaceRecord } from "./records";
+import { validateDmHeaderMatchesRequest, validateSpaceRecord } from "./registry";
 
 const authorityDid = "did:plc:owner";
 const memberDid = "did:plc:member";
@@ -90,7 +90,7 @@ test("DM requests bind the inbox space, the conversation key, and both parties",
   assert.equal(validateSpaceRecord("org.slack.dm.request", { ...request, participants: hundred }, context).valid, true);
   assert.equal(validateSpaceRecord("org.slack.dm.request", { ...request, participants: [...hundred, "did:plc:zzz"].sort() }, context).valid, false);
   assert.equal(validateSpaceRecord("org.slack.dm.request", { ...request, createdAt: "yesterday" }, context).valid, false);
-  assert.equal(validateSpaceRecord("org.slack.dm.request", { ...request, note: "extra" }, context).valid, false);
+  assert.equal(validateSpaceRecord("org.slack.dm.request", { ...request, note: "extra" }, context).valid, true, "an unknown field is kept and ignored");
 });
 
 test("DM headers must be authored by the half owner", () => {
@@ -108,7 +108,7 @@ test("DM headers must be authored by the half owner", () => {
   assert.equal(validateSpaceRecord("org.slack.dm.header", { ...header, participants: ["did:plc:alice", "did:plc:member"] }, context).valid, false);
   assert.equal(validateSpaceRecord("org.slack.dm.header", { ...header, participants: ["did:plc:member"] }, context).valid, false);
   assert.equal(validateSpaceRecord("org.slack.dm.header", { ...header, createdAt: "yesterday" }, context).valid, false);
-  assert.equal(validateSpaceRecord("org.slack.dm.header", { ...header, note: "extra" }, context).valid, false);
+  assert.equal(validateSpaceRecord("org.slack.dm.header", { ...header, note: "extra" }, context).valid, true, "an unknown field is kept and ignored");
 });
 
 test("DM messages require the half owner, trimmed text, and a resolvable parent", () => {
@@ -137,7 +137,7 @@ test("DM messages require the half owner, trimmed text, and a resolvable parent"
   assert.equal(validateSpaceRecord("org.slack.dm.message", { text: "hello", createdAt: now, parent }, { ...baseContext, participants: ["did:plc:owner", "did:plc:third"] }).valid, false);
   assert.equal(validateSpaceRecord("org.slack.dm.message", { text: "hello", createdAt: now, parent }, { ...baseContext, participants: undefined }).valid, true);
   assert.equal(validateSpaceRecord("org.slack.dm.message", { text: "hello", createdAt: "yesterday" }, baseContext).valid, false);
-  assert.equal(validateSpaceRecord("org.slack.dm.message", { text: "hello", createdAt: now, note: "extra" }, baseContext).valid, false);
+  assert.equal(validateSpaceRecord("org.slack.dm.message", { text: "hello", createdAt: now, note: "extra" }, baseContext).valid, true, "an unknown field is kept and ignored");
 });
 
 test("DM reactions key on a message in the same conversation", () => {
@@ -161,7 +161,7 @@ test("DM reactions key on a message in the same conversation", () => {
   assert.equal(validateSpaceRecord("org.slack.dm.reaction", { ...reaction, emoji: "" }, context).valid, false);
   assert.equal(validateSpaceRecord("org.slack.dm.reaction", { ...reaction, emoji: "x".repeat(33) }, context).valid, false);
   assert.equal(validateSpaceRecord("org.slack.dm.reaction", { ...reaction, createdAt: "yesterday" }, context).valid, false);
-  assert.equal(validateSpaceRecord("org.slack.dm.reaction", { ...reaction, note: "extra" }, context).valid, false);
+  assert.equal(validateSpaceRecord("org.slack.dm.reaction", { ...reaction, note: "extra" }, context).valid, true, "an unknown field is kept and ignored");
   assert.equal(validateSpaceRecord("org.slack.dm.reaction", reaction, { ...context, participants: [authorityDid, memberDid] }).valid, true);
   assert.equal(validateSpaceRecord("org.slack.dm.reaction", reaction, { ...context, participants: [authorityDid, "did:plc:third"] }).valid, false);
 });
@@ -177,4 +177,21 @@ test("DM headers match requests only with identical keys and participants", () =
   assert.equal(validateDmHeaderMatchesRequest({ convKey }, request), false);
   assert.equal(validateDmHeaderMatchesRequest(null, request), false);
   assert.equal(validateDmHeaderMatchesRequest(request, null), false);
+});
+
+test("no source module spells an NSID: every one comes from the NSID module", async () => {
+  // given every non-test source file outside the NSID module and the generated lexicon client
+  const { readdirSync, readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { NAMESPACE } = await import("./nsids");
+  const roots = ["src", "scripts"];
+  const files = roots.flatMap((root) => readdirSync(root, { recursive: true, encoding: "utf8" }).map((file) => join(root, file)))
+    .filter((file) => /\.tsx?$/.test(file) && !/\.test\.tsx?$/.test(file))
+    .filter((file) => file !== join("src", "protocol", "nsids.ts") && !file.startsWith(join("src", "lexicons", "api")));
+
+  // when they are searched for the namespace
+  const offenders = files.filter((file) => readFileSync(file, "utf8").includes(`${NAMESPACE}.`));
+
+  // then none contains it
+  assert.deepEqual(offenders, []);
 });

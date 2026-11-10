@@ -1,18 +1,20 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { executeOperatorOperation } from "@/operator/operations";
 import { OperationBusyError, OperationConflictError } from "@/operator/journal";
-import { authenticateOperatorRequest, OperatorAuthError, requireWorkspaceActorForOperation } from "@/operator/security";
-import { operatorHttpFailure } from "@/operator/errors";
+import { authenticateOperatorRequest, requireWorkspaceActorForOperation } from "@/operator/security";
+import { AUTHORITY_APPROVAL_REQUIRED, OperatorAuthError, operatorHttpFailure } from "@/operator/errors";
 import { operatorError } from "@/operator/http";
 import { AdminMutationsPausedError, assertAdminMutationsEnabled } from "@/operator/mutations-paused";
-import { assertWorkspaceWithinEnvelope, requireWorkspaceSummary, WorkspaceEnvelopeError } from "@/workspaces/read-model";
+import { assertOperatorWorkspaceWithinEnvelope } from "@/operator/workspace-envelope";
+import { WorkspaceEnvelopeError } from "@/protocol/workspace-summary";
 import { readRequestJson, RequestJsonError } from "@/lib/bounded-json";
+import { OPERATOR_METHOD } from "@/protocol/nsids";
 
 export const runtime = "nodejs";
 
 export async function POST(request: NextRequest) {
   try {
-    const did = await authenticateOperatorRequest(request, "org.slack.operator.execute");
+    const did = await authenticateOperatorRequest(request, OPERATOR_METHOD.execute);
     assertAdminMutationsEnabled();
     const body = await readRequestJson<Record<string, unknown>>(request, 256 * 1024);
     if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).some((key) => !["workspace", "operationId", "request"].includes(key))) {
@@ -22,8 +24,11 @@ export async function POST(request: NextRequest) {
       return operatorError(400, "InvalidRequest", "Workspace URI and protocol TID operation ID are required.");
     }
     const actor = await requireWorkspaceActorForOperation(body.workspace, did, body.request);
-    assertWorkspaceWithinEnvelope(await requireWorkspaceSummary(actor.session, actor.workspace.uri));
+    await assertOperatorWorkspaceWithinEnvelope(actor);
     const operation = await executeOperatorOperation(actor, body.operationId, body.request);
+    if (operation.authorizationRequired) {
+      return operatorError(AUTHORITY_APPROVAL_REQUIRED.status, AUTHORITY_APPROVAL_REQUIRED.name, AUTHORITY_APPROVAL_REQUIRED.message);
+    }
     return NextResponse.json({ operation }, { headers: { "cache-control": "no-store" } });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Operator request failed.";

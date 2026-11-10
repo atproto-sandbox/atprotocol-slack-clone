@@ -273,7 +273,7 @@ export async function expireStoredSession(table: SessionTable, did: string): Pro
 
 /** The scopes every sign-in requests (`/api/oauth/login`). */
 export async function memberSignInScopes(): Promise<readonly string[]> {
-  return (await import("@/auth/permission-sets")).MEMBER_SIGN_IN_SCOPES;
+  return (await import("@/protocol/scopes")).MEMBER_SIGN_IN_SCOPES;
 }
 
 export const SERVICE_METHODS_TODAY = ["org.slack.operator.execute", "org.slack.operator.getOperation", "org.slack.operator.listInboxWriters"] as const;
@@ -282,7 +282,7 @@ export const SERVICE_METHODS_PLANNED = ["org.slack.operator.getChanges", "org.sl
 
 /** The member grant of the refactor plan's "Identities and sessions" section plus the browser DM set, as one consent (K3). */
 export async function combinedMemberScopes(serviceRef: string): Promise<string[]> {
-  const { DM_BROWSER_SCOPES } = await import("@/auth/permission-sets");
+  const { DM_BROWSER_SCOPES } = await import("@/protocol/scopes");
   const audience = serviceRef.replaceAll("%", "%25").replace("#", "%23");
   return [
     "space:org.slack.workspace?authority=*&action=read",
@@ -309,7 +309,7 @@ export async function callOperatorMethod(
   query: Record<string, string>,
   body?: unknown,
 ): Promise<Record<string, unknown>> {
-  const [{ requestOperatorServiceAuth }, { NextRequest }] = await Promise.all([import("@/auth/permission-sets"), import("next/server")]);
+  const [{ requestOperatorServiceAuth }, { NextRequest }] = await Promise.all([import("@/operator/client"), import("next/server")]);
   const token = await requestOperatorServiceAuth(session as never, serviceRef, method);
   const url = new URL(`http://127.0.0.1:3000/xrpc/${method}`);
   for (const [name, value] of Object.entries(query)) url.searchParams.set(name, value);

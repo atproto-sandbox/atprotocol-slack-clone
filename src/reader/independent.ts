@@ -9,8 +9,9 @@ import { assertBoundedRecordPage, listAllSpaceUris, listBoundedRecords, listBoun
 import { selectValidChannelMessages } from "@/atproto/valid-channel-messages";
 import { classifyRepoFailure, describeRepoFailure, MAX_LISTED_SET_ASIDE } from "@/atproto/repo-failure";
 import { channelUri, parseWorkspaceUri, spaceRecordUri } from "@/protocol/keys";
-import { validateSpaceRecord } from "@/protocol/records";
+import { validateSpaceRecord } from "@/protocol/registry";
 import { mapLimited } from "@/lib/map-limited";
+import { COLLECTION, SPACE_TYPE } from "@/protocol/nsids";
 
 export type IndependentWorkspace = {
   uri: string;
@@ -47,7 +48,7 @@ export type IndependentChannelPage = {
  * does not import the primary app's database, sync cache, or web-session layer.
  */
 export async function listIndependentWorkspaces(session: OAuthSession): Promise<IndependentWorkspace[]> {
-  const spaces = await listAllSpaceUris(sessionClient(session), { spaceType: "org.slack.workspace", maxSpaces: MAX_DISCOVERABLE_WORKSPACES });
+  const spaces = await listAllSpaceUris(sessionClient(session), { spaceType: SPACE_TYPE.workspace, maxSpaces: MAX_DISCOVERABLE_WORKSPACES });
   const summaries = await mapLimited(spaces, 8, async (uri) => {
     try { return await readIndependentWorkspace(session, uri); }
     catch (error) {
@@ -65,23 +66,23 @@ export async function readIndependentWorkspace(session: OAuthSession, uri: strin
   const credential = await mintSpaceCredential(session, uri);
   const client = credential.client(await resolvePds(authorityDid));
   const [profile, directories, roster, adminRecords] = await Promise.all([
-    listBoundedRecords(client, { space: uri, repo: authorityDid, collection: "org.slack.workspace.profile", maxRecords: 1 }),
-    listBoundedRecords(client, { space: uri, repo: authorityDid, collection: "org.slack.directory", maxRecords: MAX_AUTHORITY_RECORD_SCAN }),
-    listBoundedRecords(client, { space: uri, repo: authorityDid, collection: "org.slack.workspace.roster", maxRecords: MAX_AUTHORITY_RECORD_SCAN }),
-    listBoundedRecords(client, { space: uri, repo: authorityDid, collection: "org.slack.admin", maxRecords: MAX_AUTHORITY_RECORD_SCAN }),
+    listBoundedRecords(client, { space: uri, repo: authorityDid, collection: COLLECTION.workspaceProfile, maxRecords: 1 }),
+    listBoundedRecords(client, { space: uri, repo: authorityDid, collection: COLLECTION.directory, maxRecords: MAX_AUTHORITY_RECORD_SCAN }),
+    listBoundedRecords(client, { space: uri, repo: authorityDid, collection: COLLECTION.workspaceRoster, maxRecords: MAX_AUTHORITY_RECORD_SCAN }),
+    listBoundedRecords(client, { space: uri, repo: authorityDid, collection: COLLECTION.admin, maxRecords: MAX_AUTHORITY_RECORD_SCAN }),
   ]);
-  const validProfile = profile.records.find((record) => validateSpaceRecord("org.slack.workspace.profile", record.value, {
+  const validProfile = profile.records.find((record) => validateSpaceRecord(COLLECTION.workspaceProfile, record.value, {
     authorityDid, spaceUri: uri, repoDid: authorityDid, rkey: record.rkey,
   }).valid);
   if (typeof validProfile?.value.name !== "string") return null;
-  const members = roster.records.flatMap((record) => validateSpaceRecord("org.slack.workspace.roster", record.value, {
+  const members = roster.records.flatMap((record) => validateSpaceRecord(COLLECTION.workspaceRoster, record.value, {
     authorityDid, spaceUri: uri, repoDid: authorityDid, rkey: record.rkey,
   }).valid && record.value.active === true && typeof record.value.subject === "string" ? [record.value.subject] : []).sort();
-  const admins = adminRecords.records.flatMap((record) => validateSpaceRecord("org.slack.admin", record.value, {
+  const admins = adminRecords.records.flatMap((record) => validateSpaceRecord(COLLECTION.admin, record.value, {
     authorityDid, spaceUri: uri, repoDid: authorityDid, rkey: record.rkey,
   }).valid && record.value.active === true && typeof record.value.subject === "string" ? [record.value.subject] : []).sort();
   const channels = directories.records.flatMap((record) => {
-    if (!validateSpaceRecord("org.slack.directory", record.value, { authorityDid, spaceUri: uri, repoDid: authorityDid, rkey: record.rkey }).valid) return [];
+    if (!validateSpaceRecord(COLLECTION.directory, record.value, { authorityDid, spaceUri: uri, repoDid: authorityDid, rkey: record.rkey }).valid) return [];
     const value = record.value;
     if (typeof value.skey !== "string" || typeof value.name !== "string" || typeof value.visibility !== "string" || value.visibility === "archived") return [];
     return [{ uri: channelUri(authorityDid, value.skey), skey: value.skey, name: value.name, visibility: value.visibility }];
@@ -103,8 +104,8 @@ export async function readIndependentPrivateRoster(session: OAuthSession, worksp
   if (!summary || !channel) throw new Error("Private channel is unavailable.");
   const credential = await mintSpaceCredential(session, channel.uri);
   const client = credential.client(await resolvePds(summary.authorityDid));
-  const roster = await listBoundedRecords(client, { space: channel.uri, repo: summary.authorityDid, collection: "org.slack.channel.roster", maxRecords: MAX_AUTHORITY_RECORD_SCAN });
-  const members = roster.records.flatMap((record) => validateSpaceRecord("org.slack.channel.roster", record.value, {
+  const roster = await listBoundedRecords(client, { space: channel.uri, repo: summary.authorityDid, collection: COLLECTION.channelRoster, maxRecords: MAX_AUTHORITY_RECORD_SCAN });
+  const members = roster.records.flatMap((record) => validateSpaceRecord(COLLECTION.channelRoster, record.value, {
     authorityDid: summary.authorityDid, spaceUri: channel.uri, repoDid: summary.authorityDid, rkey: record.rkey,
   }).valid && record.value.active === true && typeof record.value.subject === "string" ? [record.value.subject] : []).sort();
   if (roster.truncated) throw new Error(`Private-channel roster exceeds the ${MAX_AUTHORITY_RECORD_SCAN}-record scan limit; the roster is incomplete.`);
@@ -163,12 +164,12 @@ export async function readIndependentChannelPage(
   const records: IndependentMessage[] = [];
   const parentReads = new Map<string, Promise<{ uri: string; value: Record<string, unknown> } | null>>();
   const getParent = (repo: string, rkey: string) => {
-    const uri = spaceRecordUri(channel.uri, repo, "org.slack.channel.message", rkey);
+    const uri = spaceRecordUri(channel.uri, repo, COLLECTION.message, rkey);
     let result = parentReads.get(uri);
     if (!result) {
       result = (async () => {
         const parent = await credential.client(await resolvePds(repo)).query<GetRecord.OutputSchema>("com.atproto.space.getRecord", {
-          space: channel.uri, repo, collection: "org.slack.channel.message", rkey,
+          space: channel.uri, repo, collection: COLLECTION.message, rkey,
         });
         return { uri: parent.uri, value: parent.value };
       })().catch(() => null);
@@ -198,9 +199,9 @@ export async function readIndependentChannelPage(
       const lookahead = (await mapLimited(candidates, 8, (state) => readWriter(state.repo.did, async () => {
         if (state.cursor) state.seenCursors.add(state.cursor);
         const page = await credential.client(await resolvePds(state.repo.did)).query<ListRecords.OutputSchema>("com.atproto.space.listRecords", {
-          space: channel.uri, repo: state.repo.did, collection: "org.slack.channel.message", cursor: state.cursor, limit: 1,
+          space: channel.uri, repo: state.repo.did, collection: COLLECTION.message, cursor: state.cursor, limit: 1,
         });
-        assertBoundedRecordPage(page, { collection: "org.slack.channel.message", limit: 1, cursor: state.cursor, seenCursors: state.seenCursors });
+        assertBoundedRecordPage(page, { collection: COLLECTION.message, limit: 1, cursor: state.cursor, seenCursors: state.seenCursors });
         return { state, page };
       }).then((read) => { if (!read) state.finished = true; return read; }))).flatMap((read) => read ? [read] : []);
       const lookaheadRecordCount = lookahead.reduce((count, { page }) => count + page.records.length, 0);
@@ -211,7 +212,7 @@ export async function readIndependentChannelPage(
           if (state.seenRkeys.has(record.rkey)) throw new Error("PDS record pagination returned a duplicate record key.");
           state.seenRkeys.add(record.rkey);
           records.push({
-            uri: spaceRecordUri(channel.uri, state.repo.did, "org.slack.channel.message", record.rkey),
+            uri: spaceRecordUri(channel.uri, state.repo.did, COLLECTION.message, record.rkey),
             rkey: record.rkey,
             repo: state.repo.did,
             value: record.value,
@@ -231,9 +232,9 @@ export async function readIndependentChannelPage(
     const pages = (await mapLimited(candidates, 8, (state) => readWriter(state.repo.did, async () => {
       if (state.cursor) state.seenCursors.add(state.cursor);
       const page = await credential.client(await resolvePds(state.repo.did)).query<ListRecords.OutputSchema>("com.atproto.space.listRecords", {
-        space: channel.uri, repo: state.repo.did, collection: "org.slack.channel.message", cursor: state.cursor, limit: pageLimit,
+        space: channel.uri, repo: state.repo.did, collection: COLLECTION.message, cursor: state.cursor, limit: pageLimit,
       });
-      assertBoundedRecordPage(page, { collection: "org.slack.channel.message", limit: pageLimit, cursor: state.cursor, seenCursors: state.seenCursors });
+      assertBoundedRecordPage(page, { collection: COLLECTION.message, limit: pageLimit, cursor: state.cursor, seenCursors: state.seenCursors });
       return { state, page };
     }).then((read) => { if (!read) state.finished = true; return read; }))).flatMap((read) => read ? [read] : []);
     for (const { state, page } of pages) {
@@ -242,7 +243,7 @@ export async function readIndependentChannelPage(
         if (state.seenRkeys.has(record.rkey)) throw new Error("PDS record pagination returned a duplicate record key.");
         state.seenRkeys.add(record.rkey);
         records.push({
-          uri: spaceRecordUri(channel.uri, state.repo.did, "org.slack.channel.message", record.rkey),
+          uri: spaceRecordUri(channel.uri, state.repo.did, COLLECTION.message, record.rkey),
           rkey: record.rkey,
           repo: state.repo.did,
           value: record.value,
@@ -284,9 +285,9 @@ async function readIndependentReactions(
       const limit = Math.min(100, remaining > 0 ? remaining + 1 : 1);
       const page = await readWriter(repo.did, async () => {
         const read = await credential.client(await resolvePds(repo.did)).query<ListRecords.OutputSchema>("com.atproto.space.listRecords", {
-          space, repo: repo.did, collection: "org.slack.channel.reaction", cursor, limit,
+          space, repo: repo.did, collection: COLLECTION.reaction, cursor, limit,
         });
-        assertBoundedRecordPage(read, { collection: "org.slack.channel.reaction", limit, cursor, seenCursors });
+        assertBoundedRecordPage(read, { collection: COLLECTION.reaction, limit, cursor, seenCursors });
         return read;
       });
       if (!page) break;
@@ -298,9 +299,9 @@ async function readIndependentReactions(
         if (!record.value) throw new Error("PDS record page contains a malformed reaction.");
         if (repoRkeys.has(record.rkey)) throw new Error("PDS reaction pagination returned a duplicate record key.");
         repoRkeys.add(record.rkey);
-        const uri = spaceRecordUri(space, repo.did, "org.slack.channel.reaction", record.rkey);
+        const uri = spaceRecordUri(space, repo.did, COLLECTION.reaction, record.rkey);
         if (typeof record.value.subject !== "string" || !knownMessages.has(record.value.subject)) continue;
-        if (!validateSpaceRecord("org.slack.channel.reaction", record.value, {
+        if (!validateSpaceRecord(COLLECTION.reaction, record.value, {
           authorityDid, spaceUri: space, repoDid: repo.did, rkey: record.rkey, knownMessages,
         }).valid) continue;
         reactions.push({ uri, rkey: record.rkey, repo: repo.did, value: record.value });

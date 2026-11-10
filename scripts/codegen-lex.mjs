@@ -76,3 +76,8 @@ if (!source.includes(oldTypeGate)) {
   throw new Error("Pinned Lexicon CLI output changed; review the draft schema type bridge.");
 }
 writeFileSync(generatedLexicons, source.replace(oldTypeGate, newTypeGate));
+
+// The generated XrpcClient class is not used: the app imports the generated types only, and sends requests through its own
+// draft-aware transport (src/atproto/xrpc.ts). Its constructor is typed against @atproto/xrpc's own (release) Lexicon
+// package, which no longer matches the pinned draft Lexicon runtime the app validates records with, so it is not kept.
+rmSync(resolve(root, "src/lexicons/api/index.ts"));

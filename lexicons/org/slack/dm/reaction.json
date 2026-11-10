@@ -10,7 +10,7 @@
         "required": ["subject", "emoji", "createdAt"],
         "properties": {
           "subject": { "type": "string", "format": "at-uri" },
-          "emoji": { "type": "string", "minLength": 1, "maxLength": 32 },
+          "emoji": { "type": "string", "minLength": 1, "maxLength": 128, "maxGraphemes": 32 },
           "createdAt": { "type": "string", "format": "datetime" }
         }
       }

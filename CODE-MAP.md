@@ -107,25 +107,46 @@ src/
                               cursor/duplicate/limit assertions; the one listBoundedSpaces and
                               listAllSpaceUris (workspace discovery).
     identity.ts               Server-side DID→PDS resolution (SSRF-guarded; Node-only).
-    notifications.ts         registerNotify bookkeeping; which write/deleted notices are accepted; the
-                              capped write-notice table the change streams read.
     space-ops.ts, valid-channel-messages.ts, client.ts
   protocol/               Pure, isomorphic protocol logic shared by everything above.
     keys.ts                  The one owner of URI and key syntax: parseSpaceUri / parseWorkspaceUri /
                               parseChannelUri / requireSpaceAuthority, isDid / isSkey / isTid, canonical
                               record keys, TID generation, canonicalParticipants. No other module
                               hand-writes an at:// regex.
-    records.ts                validateSpaceRecord: schema + authorship + key-derivation checks
-                              for every org.slack.* and org.slack.dm.* collection.
-  auth/                   Server session, OAuth flow, and scope definitions.
-    permission-sets.ts       Scope builders for workspace/admin/operator sessions and
-                              DM_BROWSER_SCOPES (asserted disjoint from every server scope).
+    nsids.ts                  The one owner of NSIDs: NAMESPACE, SPACE_TYPE, COLLECTION, REPO_COLLECTION,
+                              OPERATOR_METHOD. No other source module spells an NSID
+                              (registry.test.ts enforces it).
+    registry.ts               The one table of space records (REGISTRY): space type, author, key rule, sync
+                              strategy and semantic rule per collection. validateSpaceRecord = shape from the
+                              published lexicons (@atproto/lexicon) + the entry's meaning rule; records are
+                              open (unknown fields kept); MAX_RECORD_BYTES bounds what a reader keeps.
+    scopes.ts                 Scope builders for member, authority and operator sessions, derived from the
+                              registry, and DM_BROWSER_SCOPES (asserted disjoint from every server scope).
+    workspace-summary.ts      What a workspace is, summarized from its authority's records, and the v1
+                              envelope check; the member read model and the operator both use it.
+  auth/                   Server session, OAuth flow.
     session.ts, web-session.ts, oauth.ts, oauth-flow.ts, encrypted-store.ts, encrypted-cache.ts
   operator/               Workspace-authority operator: journaled, idempotent PDS mutations.
     authority-grant.ts       The one owner of the workspace authority grant: its own OAuth client (confidential
                               private_key_jwt outside loopback), the ticket -> /authority/start -> PDS consent ->
                               /authority/callback flow, and the `authority_grant` table. The operator, bootstrap and
                               the reconcile job restore the grant from here; a member sign-in never writes it.
+    actor.ts                 OperatorActor and WorkspaceRef: who an operation runs for, through which session.
+    journal.ts               runJournaledOperation: the workspace lock, the operation row, declared step names,
+                              resume by name and request hash, and "waiting for the authority's approval".
+    kinds/                   One file per operation kind ({ fields, actor, steps, validate, authorizeMember, run });
+                              kinds/index.ts is the table every request and journal row dispatches through, and
+                              kinds/kinds.test.ts pins every persisted kind, field and step name.
+    operations.ts            Request validation from the kind table, recovery of pending rows, and execution.
+    security.ts              Service-auth verification; authorizeOperationActor decides who may run an operation (an
+                              admin; the authority alone for an authority kind; the member a member kind concerns,
+                              through the kind's authorizeMember, after the request is validated).
+    workspace-state.ts       The operator's reads and writes of rosters, admins and the directory.
+    workspace-envelope.ts    The operator's own envelope check, read with the authority's grant.
+    notices.ts               registerNotify bookkeeping; which write/deleted notices are accepted; the capped
+                              write-notice table the change streams read.
+    testing/fake-authority-pds.ts
+                             In-memory authority PDS for operator unit tests; production code never imports it.
   workspaces/             Server-side channel/workspace sync, caching, and the read model.
   dm/                     The DM feature. Isomorphic engine + browser-only glue. See below.
   reader/                 Independent second-app readers (no app database, no DM-engine import).
@@ -220,13 +241,15 @@ Run: `pnpm test:bdd` (headless), `pnpm test:bdd:chrome` (visible Google Chrome),
 - Tests are `node:test` + `node:assert/strict`, named `*.test.ts` next to the code they cover.
 - Comments explain *why*, not *what*; the surrounding code is expected to be self-documenting.
 - Every externally supplied DID, AT-URI, record key, and record is validated before use
-  (`src/protocol/keys.ts` parsers/predicates, `src/protocol/records.ts` validators); nothing
+  (`src/protocol/keys.ts` parsers/predicates, `src/protocol/registry.ts` validators); nothing
   parsed from a PDS response is trusted without going through them first.
 - Every PDS list/page fetch goes through the bounded helpers in `src/atproto/record-pages.ts`,
   which assert cursor progress, page-size limits, and no duplicate keys,
   and report `truncated` rather than silently dropping data past a scan cap.
 - Concurrency is `src/lib/map-limited.ts` (fixed fan-out, currently 8 for DM/channel fan-out),
   not ad hoc `Promise.all` over unbounded arrays.
+- Imports point one way: `src/atproto/**` and `src/operator/**` never import `src/workspaces/**` (the member read
+  model) or `src/app/**`; an `eslint.config.mjs` rule enforces it.
 - Server-only code (`@/lib/db`, `@/auth/*`, `@/operator/*`, `@/workspaces/*`, `node:*`,
   `@atproto/oauth-client-node`, `undici`, `@/atproto/identity`) is off-limits to the isomorphic
   protocol/DM layer and to `src/reader/**`; `src/dm/**` is additionally off-limits to everything

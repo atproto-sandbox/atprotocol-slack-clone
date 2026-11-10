@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test, { after } from "node:test";
 import { closeDb, getRawDb } from "@/lib/db";
 import { dmConversationUri, dmInboxUri } from "@/protocol/keys";
-import { isNotificationAccepted, recordWriteNotification } from "./notifications";
+import { isNotificationAccepted, recordWriteNotification } from "./notices";
 
 const DIRECTORY = mkdtempSync(join(tmpdir(), "slack-notifications-test-"));
 const SERVICE_REF = "did:web:localhost%3A3000#atproto_slack_admin";
