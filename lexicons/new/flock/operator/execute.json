@@ -32,7 +32,7 @@
         "subject": { "type": "string", "format": "did" },
         "active": { "type": "boolean" },
         "skey": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 320, "maxGraphemes": 80 },
         "visibility": { "type": "string", "knownValues": ["public", "private"] },
         "members": { "type": "array", "items": { "type": "string", "format": "did" }, "maxLength": 200 },
         "request": { "type": "string", "format": "at-uri" },

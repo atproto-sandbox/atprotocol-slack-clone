@@ -4,6 +4,7 @@ import { TokenRefreshError } from "@atproto/oauth-client-node";
 import { OAuthRequestLockError } from "@/auth/oauth-request-lock";
 import { XrpcError } from "@/atproto/xrpc";
 import { OperatorInfrastructureError, isTransientOperatorInfrastructureError, operatorHttpFailure, operatorInfrastructureHttpStatus } from "./errors";
+import { isTransientOperationError } from "./journal";
 
 test("operator infrastructure failures are distinct from authorization and validation errors", () => {
   assert.equal(isTransientOperatorInfrastructureError(new OperatorInfrastructureError()), true);
@@ -28,6 +29,12 @@ test("operator infrastructure failures are distinct from authorization and valid
     message: "The workspace authority session was rejected and must be reauthorized.",
   });
   assert.equal(operatorHttpFailure(new XrpcError(503, "unavailable", "ServiceUnavailable"))?.name, "UpstreamUnavailable");
+});
+
+test("a request that ran out of time is a temporary upstream failure, and is not run again in a loop under the workspace lock", () => {
+  const timedOut = new DOMException("The operation was aborted due to timeout", "TimeoutError");
+  assert.equal(operatorHttpFailure(timedOut)?.name, "UpstreamUnavailable");
+  assert.equal(isTransientOperationError(timedOut), false);
 });
 
 test("a scope the authority's grant lacks asks the authority to approve again, wherever the PDS refuses it", () => {

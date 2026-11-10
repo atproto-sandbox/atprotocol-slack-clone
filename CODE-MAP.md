@@ -106,7 +106,9 @@ src/
     record-pages.ts          Bounded listRepos/listRecords/listMembers/listSpaces paging with
                               cursor/duplicate/limit assertions; the one listBoundedSpaces and
                               listAllSpaceUris (workspace discovery).
-    identity.ts               Server-side DID→PDS resolution (SSRF-guarded; Node-only).
+    identity.ts               Server-side DID→PDS resolution (SSRF-guarded; Node-only), and fetchValidatedEndpoint:
+                              the one outbound fetch path, which ends every request at its time limit (30 s unless
+                              the caller asks for longer; only the operator client's execute call does).
     space-ops.ts, valid-channel-messages.ts, client.ts
   protocol/               Pure, isomorphic protocol logic shared by everything above.
     keys.ts                  The one owner of URI and key syntax: parseSpaceUri / parseWorkspaceUri /
@@ -133,14 +135,18 @@ src/
                               the reconcile job restore the grant from here; a member sign-in never writes it.
     actor.ts                 OperatorActor and WorkspaceRef: who an operation runs for, through which session.
     journal.ts               runJournaledOperation: the workspace lock, the operation row, declared step names,
-                              resume by name and request hash, and "waiting for the authority's approval".
-    kinds/                   One file per operation kind ({ fields, actor, steps, validate, authorizeMember, run });
+                              resume by name and request hash, "waiting for the authority's approval", and the
+                              time limit after which a run starts no further step.
+    kinds/                   One file per operation kind ({ fields, actor, steps, validate, authorizeMember,
+                              endsOwnRole, run });
                               kinds/index.ts is the table every request and journal row dispatches through, and
                               kinds/kinds.test.ts pins every persisted kind, field and step name.
     operations.ts            Request validation from the kind table, recovery of pending rows, and execution.
     security.ts              Service-auth verification; authorizeOperationActor decides who may run an operation (an
                               admin; the authority alone for an authority kind; the member a member kind concerns,
                               through the kind's authorizeMember, after the request is validated).
+                              authorizeSubmittedOperation adds the one exception: a submitter that current state
+                              refuses may send again a journaled operation whose kind says it ends their own role.
     workspace-state.ts       The operator's reads and writes of rosters, admins and the directory.
     workspace-envelope.ts    The operator's own envelope check, read with the authority's grant.
     notices.ts               registerNotify bookkeeping; which write/deleted notices are accepted; the capped
@@ -194,7 +200,9 @@ scripts/                  codegen-lex.mjs, backup-db.mjs, reconcile-workspaces.t
 - `dm-client.ts` — `DmClient`: the isomorphic DM engine (inbox/policy, discovery, start/accept,
   messages/reactions, `readConversation`'s k-way merge, leave/delete, re-notify). Constructed
   with injected transports (`memberClient`, `resolvePds`, `fetchEndpoint`, `generateKey`,
-  `store`), so the same class runs in the browser and in Node tests/acceptance.
+  `store`), so the same class runs in the browser and in Node tests/acceptance. `leave` removes
+  the other participants from the caller's half and hides the conversation in the local store
+  (off the list, not re-announced); starting a conversation with the same people readmits them.
 - `request-policy.ts` — pure mapping between the inbox memberspace `publicWrite` flag/member state and the
   user-facing mode (`everyone` / `allowlist` / `nobody`).
 - The inbox declaration (`new.flock.dm.declaration`, a public record in the owner's own repo, written by `enableDms`) is how a sender learns a recipient has an inbox: the authority answers a stranger asking for the inbox like a missing space.

@@ -407,6 +407,77 @@ test("leave revokes the leaver's half for the other participant, and deleteEvery
   assert.equal(afterDelete.halves["did:plc:alice"], "deleted");
 });
 
+test("leaving takes the conversation off this device's list and stops announcing it again", async () => {
+  // #given alice in a conversation carol has not answered
+  const { network, client } = harness();
+  network.createAccount("did:plc:alice", "pds1");
+  network.createAccount("did:plc:carol", "pds2");
+  const store = createStore();
+  const alice = client("did:plc:alice", "pds1", { store });
+  await client("did:plc:carol").enableDms("everyone");
+  const started = await alice.startConversation(["did:plc:carol"]);
+
+  // #when she leaves it and the interval for announcing it again passes
+  await alice.leave(started.convKey);
+  network.advanceClock(10 * 60_000);
+  await alice.renotifyPending();
+
+  // #then it is off her list and no request was sent again
+  assert.deepEqual(await alice.listConversations(), []);
+  assert.equal(await store.get(`renotify:${started.convKey}:did:plc:carol`), null);
+});
+
+test("starting a conversation again after leaving it readmits the others, lists it again, and asks again only whoever never answered", async () => {
+  // #given a conversation bob accepted and carol never answered, which alice then left
+  const { network, client } = harness();
+  network.createAccount("did:plc:alice", "pds1");
+  network.createAccount("did:plc:bob", "pds2");
+  network.createAccount("did:plc:carol", "pds2");
+  const alice = client("did:plc:alice");
+  const bob = client("did:plc:bob");
+  await bob.enableDms("everyone");
+  await client("did:plc:carol").enableDms("everyone");
+  const started = await alice.startConversation(["did:plc:bob", "did:plc:carol"]);
+  await alice.send(started.convKey, "hello");
+  await bob.accept((await bob.listRequests())[0]!);
+  await alice.leave(started.convKey);
+  assert.equal((await bob.readConversation(started.convKey, started.participants)).halves["did:plc:alice"], "missing");
+
+  // #when alice starts a conversation with the same people
+  const again = await alice.startConversation(["did:plc:carol", "did:plc:bob"]);
+
+  // #then it is the same conversation, on her list again, with her half readable again, and only carol is asked again
+  assert.equal(again.convKey, started.convKey);
+  assert.deepEqual((await alice.listConversations()).map((conversation) => conversation.convKey), [started.convKey]);
+  const asBob = await bob.readConversation(started.convKey, started.participants);
+  assert.equal(asBob.halves["did:plc:alice"], "ok");
+  assert.deepEqual(asBob.messages.map((message) => message.text), ["hello"]);
+  assert.deepEqual(again.delivery, { "did:plc:carol": { status: "delivered" } });
+});
+
+test("starting a conversation again uses the half still in use, not one that was left", async () => {
+  // #given alice holding two halves with bob, because each started a conversation with the other, and having left her own
+  const { network, client } = harness();
+  network.createAccount("did:plc:alice", "pds1");
+  network.createAccount("did:plc:bob", "pds2");
+  const alice = client("did:plc:alice");
+  const bob = client("did:plc:bob");
+  await alice.enableDms("everyone");
+  await bob.enableDms("everyone");
+  const hers = await alice.startConversation(["did:plc:bob"]);
+  network.advanceClock(1_000);
+  const his = await bob.startConversation(["did:plc:alice"]);
+  await alice.accept((await alice.listRequests())[0]!);
+  await alice.leave(hers.convKey);
+
+  // #when she starts a conversation with bob
+  const again = await alice.startConversation(["did:plc:bob"]);
+
+  // #then she gets the one still in use, and the one she left stays off her list
+  assert.equal(again.convKey, his.convKey);
+  assert.deepEqual((await alice.listConversations()).map((conversation) => conversation.convKey), [his.convKey]);
+});
+
 test("a half deleted after its credential was cached is reported as deleted, not as a participant who has not replied", async () => {
   // #given bob already holds a credential for alice's half
   const { network, client } = harness();

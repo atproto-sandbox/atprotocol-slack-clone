@@ -19,6 +19,7 @@ export const leaveChannelKind: OperationKind = {
     const members = await listSpaceMembers(actor.session, channelUri(actor.workspace.authorityDid, request.skey as string));
     if (!members.some((member) => member.did === actor.did && member.read && member.write)) throw new OperatorAuthError("Actor is not a member of this channel.");
   },
+  endsOwnRole: () => true,
   run: (actor, context, request) => leaveChannel(actor, context, request.skey as string),
 };
 

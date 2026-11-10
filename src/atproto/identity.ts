@@ -49,7 +49,14 @@ export async function assertSafePdsEndpoint(endpoint: string): Promise<void> {
   await resolveSafePdsEndpoint(endpoint);
 }
 
-export async function fetchValidatedEndpoint(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+/**
+ * How long one outbound request may take, from connecting to the last byte of its answer, unless its caller knows the answer
+ * takes longer. Every remote host is someone else's: one that accepts a connection and then stalls, or sends its answer a
+ * byte at a time, must not hold the request open.
+ */
+export const OUTBOUND_REQUEST_TIMEOUT_MS = 30_000;
+
+export async function fetchValidatedEndpoint(input: RequestInfo | URL, init?: RequestInit, timeoutMs = OUTBOUND_REQUEST_TIMEOUT_MS): Promise<Response> {
   const request = input instanceof Request ? input : new Request(input, init);
   const requestUrl = new URL(request.url);
   if (requestUrl.username || requestUrl.password || requestUrl.hash) {
@@ -63,7 +70,7 @@ export async function fetchValidatedEndpoint(input: RequestInfo | URL, init?: Re
     headers: request.headers as unknown as HeadersInit,
     ...(body ? { body } : {}),
     redirect: "error",
-    signal: request.signal,
+    signal: AbortSignal.any([request.signal, AbortSignal.timeout(timeoutMs)]),
     dispatcher,
   });
   return new Response(response.body as unknown as BodyInit, {
@@ -161,6 +168,10 @@ function getPinnedAgent(url: URL, addresses: Array<{ address: string; family: nu
   const agent = new Agent({
     connect: { lookup: lookupPinned },
     connectTimeout: 10_000,
+    // Every request through this agent carries its own time limit (fetchValidatedEndpoint), which is the one that applies:
+    // the transport's fixed five-minute limits would cut short a caller that asked for longer.
+    headersTimeout: 0,
+    bodyTimeout: 0,
     autoSelectFamily: true,
     keepAliveTimeout: 10_000,
     keepAliveMaxTimeout: 10_000,

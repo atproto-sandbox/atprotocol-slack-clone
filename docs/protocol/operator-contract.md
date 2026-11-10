@@ -27,6 +27,8 @@ The operator also requires:
 
 The authority DID session performs owner-only checks. A role record cannot replace protocol management scope or PDS membership.
 
+One exception keeps a retry possible. Four requests take away the role that let their caller start them: `leaveWorkspace`, `leaveChannel`, `removeMember` naming the caller, and `setAdmin` demoting the caller. If one of them stops part-way, current state can refuse its caller. The operator therefore also accepts such a request from a caller it would otherwise refuse when the journal already holds that caller's operation under the same key and request hash. A journal row is written only after its caller passed the checks above. The caller can then finish or read back that one operation; they cannot start another or recover anyone else's. Every other request is decided by current state alone.
+
 ## XRPC methods
 
 All requests carry the `workspace` URI and `operationId` where applicable. The workspace URI must parse as `at://<authority-did>/space/new.flock.workspace/<workspace-skey>`.
@@ -89,9 +91,11 @@ Parameter: `workspace`. Returns all current inbox member-list DIDs with `write=t
 
 ## Idempotency, ordering, and journal
 
-The operation key is `(workspace authority DID, verified actor DID, operationId)`. The operator computes the request hash over canonical JSON bytes for the validated `{ workspace, request }` object, then SHA-256. Replaying the same key and hash returns the current journal status. Reusing the key with a different hash returns `409 OperationIdConflict` and makes no PDS calls.
+The operation key is `(workspace authority DID, verified actor DID, operationId)`. The operator computes the request hash over canonical JSON bytes for the validated `{ workspace, request }` object, then SHA-256. Replaying the same key and hash returns the current journal status, including for a caller whose own operation, one of the four above, has since removed their role. Reusing the key with a different hash returns `409 OperationIdConflict` and makes no PDS calls.
 
 The operator serializes mutations per workspace. Each journal row stores the operation key, canonical request hash, desired state, ordered PDS steps, completed steps, status, last error, and timestamps. It stores no message content, join-request body, OAuth token, service JWT, or space credential. Periodic reconciliation first resumes incomplete journaled operations, then compares stable authority records with PDS member lists. The journal is retry metadata, never the membership or role source of truth. The admin view alerts after five minutes without progress.
+
+One run of an operation starts no step once it has held the workspace's lock for three minutes. The operation is then answered as `pending`, with a time-limit error and the steps it completed, and sending it again continues it. A caller waits up to 100 seconds for the lock. A client should therefore allow about five minutes for an `execute` answer. That is a budget, not a bound: the step in flight at the limit still ends, and earlier pending operations are resumed first, each with its own wait and run. A client that gives up earlier loses nothing, because the operator carries on and the same operation sent again returns its state.
 
 ## OAuth scopes
 

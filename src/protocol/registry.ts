@@ -183,6 +183,11 @@ export function validateRecordShape(collection: string, value: unknown): RecordV
   return result.success ? VALID : invalid(result.error.message);
 }
 
+/** Whether `name` fits the directory record that names a channel. The lexicon owns the limits; nothing else repeats them. */
+export function fitsDirectoryName(name: string): boolean {
+  return validateRecordShape(COLLECTION.directory, { skey: "self", name, visibility: "public" }).valid;
+}
+
 export function validateSpaceRecord(collection: string, value: unknown, context: RecordContext): RecordValidation {
   if (!isPlainObject(value)) return invalid("record must be an object");
   if (value.$type !== undefined && value.$type !== collection) return invalid("record type does not match its collection");

@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { requireSession } from "@/auth/session";
 import { isAuthorityReauthorizationRequired, operatorRemoteHttpStatus, submitOperation } from "@/operator/client";
 import { AUTHORIZATION_REQUIRED } from "@/lib/api-codes";
+import { isAccessLost } from "@/atproto/space-credential-core";
 import { requireWorkspaceSummary } from "@/workspaces/read-model";
 import { workspaceDegradedMessage } from "@/protocol/workspace-summary";
 import { readRequestJson, RequestJsonError } from "@/lib/bounded-json";
@@ -18,8 +19,13 @@ export async function POST(request: NextRequest) {
     const session = await requireSession();
     const body = await readRequestJson<Execute.InputSchema>(request, 256 * 1024);
     if (typeof body.workspace !== "string") return NextResponse.json({ error: "Workspace URI is required." }, { status: 400 });
-    const summary = await requireWorkspaceSummary(session, body.workspace);
-    if (summary.degradedReasons.length > 0) {
+    // The operator decides who may run an operation. An account that can no longer read the workspace is not stopped here:
+    // a leave that stopped part-way has already taken that access, and it has to be sent again to finish.
+    const summary = await requireWorkspaceSummary(session, body.workspace).catch((error: unknown) => {
+      if (isAccessLost(error)) return null;
+      throw error;
+    });
+    if (summary && summary.degradedReasons.length > 0) {
       return NextResponse.json({ error: workspaceDegradedMessage(summary.degradedReasons) }, { status: 409, headers: { "cache-control": "no-store" } });
     }
     const result = await submitOperation(session, body);

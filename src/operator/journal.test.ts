@@ -6,7 +6,7 @@ import test from "node:test";
 import { closeDb, getRawDb } from "@/lib/db";
 import { XrpcError } from "@/atproto/xrpc";
 import { requestDigest } from "@/protocol/keys";
-import { getActorOperation, isTransientOperationError, listJournaledWorkspaces, listRecoverableOperations, listStalledOperations, discardEmptyOperationIfWorkspaceLockOwned, runJournaledOperation, withWorkspaceLock } from "./journal";
+import { getActorOperation, isTransientOperationError, listJournaledWorkspaces, listRecoverableOperations, listStalledOperations, discardEmptyOperationIfWorkspaceLockOwned, OperationRejectedError, runJournaledOperation, withWorkspaceLock } from "./journal";
 import type { OperatorActor } from "./actor";
 
 test("journal retry skips completed steps and reuses the same operation", async () => {
@@ -189,6 +189,62 @@ test("the shared workspace lock serializes bootstrap and operator work", async (
     releaseFirst?.();
     await first?.catch(() => undefined);
     await second?.catch(() => undefined);
+    closeDb();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("an operation past its time limit starts no further step, is left pending, and continues when sent again", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "slack-time-limit-test-"));
+  process.env.DATABASE_PATH = join(directory, "limit.db");
+  process.env.AUTH_ENCRYPTION_KEY = "44".repeat(32);
+  process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
+  process.env.APP_URL = "http://127.0.0.1:3000";
+  const actor = {
+    did: "did:plc:owner",
+    session: {} as OperatorActor["session"],
+    workspace: { uri: "at://did:plc:owner/space/new.flock.workspace/slow", authorityDid: "did:plc:owner", skey: "slow" },
+    canRecoverOperations: true,
+  } satisfies OperatorActor;
+  const realDateNow = Date.now;
+  const ran: string[] = [];
+  let slow = true;
+  const run = () => runJournaledOperation(actor, "2222222222262", { kind: "slow" }, ["first", "second", "third"], async (context) => {
+    await context.step("first", async () => { ran.push("first"); });
+    await context.step("second", async () => {
+      ran.push("second");
+      if (slow) Date.now = () => realDateNow() + 4 * 60_000;
+    });
+    await context.step("third", async () => { ran.push("third"); });
+  });
+  try {
+    // #given an operation whose second step ends four minutes after it took the lock
+    const stopped = await run();
+    Date.now = realDateNow;
+    slow = false;
+
+    // #then the step that ended is recorded, the third never started, and the workspace is free for another runner
+    assert.deepEqual([stopped.state, stopped.completedSteps], ["pending", ["first", "second"]]);
+    assert.match(stopped.error ?? "", /time limit/);
+    await withWorkspaceLock(actor.workspace.authorityDid, async (lock) => lock.refresh());
+
+    // #when it is sent again
+    const finished = await run();
+
+    // #then only the step that never started runs
+    assert.equal(finished.state, "completed");
+    assert.deepEqual(ran, ["first", "second", "third"]);
+
+    // #when another operation is rejected after its time limit has passed
+    const rejected = await runJournaledOperation(actor, "2222222222272", { kind: "late" }, ["only"], async (context) => {
+      await context.step("only", async () => { Date.now = () => realDateNow() + 4 * 60_000; });
+      throw new OperationRejectedError("The workspace refuses this.");
+    });
+
+    // #then it is recorded as that rejection, not as a pause
+    assert.deepEqual([rejected.state, rejected.error], ["failed", "The workspace refuses this."]);
+  } finally {
+    Date.now = realDateNow;
     closeDb();
     rmSync(directory, { recursive: true, force: true });
   }

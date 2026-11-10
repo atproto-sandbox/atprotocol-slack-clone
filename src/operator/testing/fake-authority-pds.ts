@@ -7,7 +7,7 @@ export type FakeMember = { did: string; read: boolean; write: boolean };
 
 export type FakeAuthorityPds = {
   session: OAuthSession;
-  /** Every write, in order, as `createSpace <uri>`, `putRecord <space> <collection>/<rkey>` or `putMember <space> <did>`. */
+  /** Every write, in order, as `createSpace <uri>`, `putRecord <space> <collection>/<rkey>`, `putMember <space> <did>` or `removeMember <space> <did>`. */
   writes: string[];
   /** Every request, in order, as `<method> <space> [<collection>]`. */
   calls: string[];
@@ -76,6 +76,10 @@ export function fakeAuthorityPds(did: string, options: FakeAuthorityPdsOptions =
         case "com.atproto.memberspace.putMember":
           write(`putMember ${body!.space} ${body!.did}`);
           membersOf(body!.space).set(body!.did, { did: body!.did, read: body!.read, write: body!.write });
+          return Response.json({});
+        case "com.atproto.memberspace.removeMember":
+          write(`removeMember ${body!.space} ${body!.did}`);
+          membersOf(body!.space).delete(body!.did);
           return Response.json({});
         default:
           throw new Error(`unexpected request: ${path}`);
