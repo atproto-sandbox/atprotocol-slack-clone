@@ -44,16 +44,16 @@ test("OAuth state store prunes abandoned flows and retries deletion after a SQLi
   let releaseTimer: NodeJS.Timeout | undefined;
   try {
     const raw = getRawDb();
-    const stateStore = oauthSqliteStore<NodeSavedState>("oauth_state");
+    const stateStore = oauthSqliteStore<NodeSavedState>("authority_grant_state");
     const staleUpdatedAt = Date.now() - 40 * 60 * 1000;
-    const insertStaleState = raw.prepare("INSERT INTO oauth_state (key,value,updated_at) VALUES (?,?,?)");
+    const insertStaleState = raw.prepare("INSERT INTO authority_grant_state (key,value,updated_at) VALUES (?,?,?)");
     insertStaleState.run("expired-on-read", "stale-ciphertext", staleUpdatedAt);
     assert.equal(await stateStore.get("expired-on-read"), undefined);
-    assert.equal(raw.prepare("SELECT 1 FROM oauth_state WHERE key=?").get("expired-on-read"), undefined);
+    assert.equal(raw.prepare("SELECT 1 FROM authority_grant_state WHERE key=?").get("expired-on-read"), undefined);
     insertStaleState.run("expired-on-write", "stale-ciphertext", staleUpdatedAt);
     await stateStore.set("current-state", {} as NodeSavedState);
-    assert.equal(raw.prepare("SELECT 1 FROM oauth_state WHERE key=?").get("expired-on-write"), undefined);
-    assert.ok(raw.prepare("SELECT 1 FROM oauth_state WHERE key=?").get("current-state"));
+    assert.equal(raw.prepare("SELECT 1 FROM authority_grant_state WHERE key=?").get("expired-on-write"), undefined);
+    assert.ok(raw.prepare("SELECT 1 FROM authority_grant_state WHERE key=?").get("current-state"));
 
     raw.pragma("busy_timeout=1");
     blocker = new BetterSqlite3(databasePath);

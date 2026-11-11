@@ -1,9 +1,9 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { OperatorAuthError } from "@/operator/errors";
 import { dropMemberList } from "@/operator/member-access";
+import { purgeSpaceNotifications } from "@/operator/notices";
 import { authenticateSpaceNotification } from "@/operator/space-notification";
 import { parseSpaceDeletedNotification } from "@/atproto/write-notification";
-import { purgeDeletedSpace } from "@/workspaces/cache";
 import { readRequestJson, RequestJsonError } from "@/lib/bounded-json";
 
 export const runtime = "nodejs";
@@ -18,7 +18,7 @@ export async function POST(request: NextRequest) {
     const notification = parseSpaceDeletedNotification(await readRequestJson<unknown>(request, 8 * 1024));
     if (!notification) return xrpcError(400, "InvalidRequest", "Invalid space deletion notification.");
     await authenticateSpaceNotification(request, "com.atproto.space.notifySpaceDeleted", notification.space);
-    purgeDeletedSpace(notification.space);
+    purgeSpaceNotifications(notification.space);
     dropMemberList(notification.space);
     return NextResponse.json({}, { headers: { "cache-control": "no-store" } });
   } catch (error) {

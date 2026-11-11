@@ -9,7 +9,7 @@ import { mintSpaceCredentialWith, SpaceCredentialError, type SpaceCredential, ty
 import { AtprotoClient } from "@/atproto/xrpc";
 import { dmConversationUri, dmInboxUri, parseDmConversationUri, tidNow } from "@/protocol/keys";
 import type { FixtureAccount } from "../../protocol-tests/support/app-fixture";
-import { completeConsent, connectBrowser, waitForOrigin } from "./ui";
+import { signInFromLoginFormAt, waitForOrigin } from "./ui";
 import type { Actor, AppWorld } from "./world";
 import { memberspacePolicy } from "@/atproto/space-policy";
 
@@ -33,17 +33,12 @@ export async function dmpPoll<T>(read: () => Promise<T | undefined | null | fals
 // --- Signing in and connecting direct messages ------------------------------------------------------
 
 /**
- * Signs in to the app served at `origin` with the actor's DID, approves the PDS consent screen, and connects this browser's
- * session (one more consent: workspaces, channels, DMs and the operator). Returns the scopes that second consent listed.
+ * Signs in to the app served at `origin` with the actor's DID and approves its one grant (workspaces, channels, DMs and the
+ * operator). Returns the scopes the consent screen listed.
  */
 export async function dmpSignInAt(actor: Actor, origin: string): Promise<string[]> {
   await actor.page.goto(origin);
-  await actor.page.getByLabel("Your AT Protocol handle").fill(actor.did);
-  await actor.page.getByRole("button", { name: /Continue with atproto/i }).click();
-  await actor.page.locator("input[name=password]").waitFor({ state: "visible" });
-  await completeConsent(actor);
-  await dmpWaitForOrigin(actor, origin);
-  return connectBrowser(actor, origin);
+  return signInFromLoginFormAt(actor, origin);
 }
 
 export async function dmpWaitForOrigin(actor: Actor, origin: string): Promise<void> {
@@ -459,15 +454,15 @@ export function dmpEverythingTheAppStored(databasePath: string, hexKey: string):
   }
 }
 
-export type DmpSavedServerSession = { did: string; scope: string[]; clientScope: string[] };
+export type DmpAuthorityGrant = { did: string; scope: string[] };
 
-/** The OAuth sessions the app server holds (member sign-ins and authority grants), decrypted: the scope each was actually granted by the PDS. */
-export function dmpServerSessions(databasePath: string, hexKey: string): DmpSavedServerSession[] {
+/** The OAuth grants the app server holds, decrypted: only workspace authorities' grants to its operator, each with its scope. */
+export function dmpAuthorityGrants(databasePath: string, hexKey: string): DmpAuthorityGrant[] {
   const db = new Database(databasePath, { readonly: true, fileMustExist: true });
   try {
-    return (db.prepare("SELECT key, value FROM oauth_session UNION ALL SELECT key, value FROM authority_grant").all() as Array<{ key: string; value: string }>).map(({ key, value }) => {
-      const saved = JSON.parse(dmpDecrypt(hexKey, value)) as { tokenSet: { scope?: string }; oauthClientScope?: string };
-      return { did: key, scope: (saved.tokenSet.scope ?? "").split(" ").filter(Boolean), clientScope: (saved.oauthClientScope ?? "").split(" ").filter(Boolean) };
+    return (db.prepare("SELECT key, value FROM authority_grant").all() as Array<{ key: string; value: string }>).map(({ key, value }) => {
+      const saved = JSON.parse(dmpDecrypt(hexKey, value)) as { tokenSet: { scope?: string } };
+      return { did: key, scope: (saved.tokenSet.scope ?? "").split(" ").filter(Boolean) };
     });
   } finally {
     db.close();
@@ -479,7 +474,7 @@ export function dmpFilesContain(databasePath: string, needle: string): boolean {
   return ["", "-wal", "-shm"].some((suffix) => existsSync(`${databasePath}${suffix}`) && readFileSync(`${databasePath}${suffix}`).includes(Buffer.from(needle)));
 }
 
-const APP_DATA_TABLES = ["operation", "operation_workspace_catalog", "audit_event", "sync_cursor", "channel_record_cache", "workspace_channel_cache", "space_collection_cursor"];
+const APP_DATA_TABLES = ["operation", "operation_workspace_catalog", "audit_event"];
 
 /** How many rows of workspace, channel or operation data an app's database holds (zero for a database that was never written). */
 export function dmpAppDataRowCount(databasePath: string): number {

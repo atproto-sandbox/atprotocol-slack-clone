@@ -13,7 +13,7 @@ const MODES: Array<{ value: DmRequestMode; label: string }> = [
 ];
 
 export function DmSettings() {
-  const { did, client, inbox, workspaces, labels, disconnect, setError, refresh } = useDmContext();
+  const { did, client, inbox, workspaces, labels, refresh } = useDmContext();
   const [modeOverride, setModeOverride] = useState<DmRequestMode | null>(null);
   const [addEntry, setAddEntry] = useState("");
   const [localError, setLocalError] = useState("");
@@ -129,11 +129,6 @@ export function DmSettings() {
             )}
         </div>
       )}
-      <div className="starter-card lifecycle-card">
-        <h3>Disconnect</h3>
-        <p>Revokes this browser’s session with your account: workspaces, channels and direct messages stop loading here until you connect it again. Everything stays on your PDS.</p>
-        <button className="text-button danger" disabled={busy} onClick={() => void disconnect().catch((caught) => setError(messageOf(caught)))}>Disconnect this browser</button>
-      </div>
     </>
   );
 }

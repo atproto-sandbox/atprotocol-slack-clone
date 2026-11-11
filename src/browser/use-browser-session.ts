@@ -6,8 +6,13 @@ import type { ClientTransport } from "@/client/transport";
 import { LiveSpaces, Snapshots } from "@/client/views";
 import { DmClient } from "@/dm/dm-client";
 import { createBrowserDmStore, type BrowserDmStore } from "@/dm/browser-store";
+import { within } from "@/lib/within";
+import { ERASE_WITHIN_MS, signOutAccount, type SignOutResult } from "./sign-out";
 import { resolveKemKey, resolvePds } from "./identity";
 import type { BrowserSessionConfig } from "./session";
+
+/** How long a space stays in the browser store without being opened: the retention the server's cache had (30 days). */
+const STORE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 export type BrowserSessionStatus = "disconnected" | "connecting" | "ready" | "error";
 
@@ -21,7 +26,7 @@ export type BrowserSessionState = {
   live: LiveSpaces | null;
   error: string;
   connect: () => void;
-  disconnect: () => Promise<void>;
+  signOut: () => Promise<SignOutResult>;
 };
 
 type Built = { client: DmClient; store: BrowserDmStore; engine: Engine; snapshots: Snapshots; live: LiveSpaces; syncStore: IndexedDbStore };
@@ -50,7 +55,7 @@ export function useBrowserSession(did: string, config: BrowserSessionConfig): Br
         if (epoch.current !== run) return;
         setStatus("connecting");
         setError("");
-        const session = await restoreSession(did, { appUrl, plcUrl, scope, serviceRef, loopback });
+        const session = await restoreSession({ appUrl, plcUrl, scope, serviceRef, loopback });
         if (epoch.current !== run) return;
         if (!session) {
           setStatus("disconnected");
@@ -65,8 +70,9 @@ export function useBrowserSession(did: string, config: BrowserSessionConfig): Br
           fetchEndpoint: (request) => fetch(request, { redirect: "error" }),
           generateKey: generateSpaceKey,
         };
-        // A store another account left behind (a crash before its sign-out) goes before this account's opens.
-        await IndexedDbStore.deleteOtherAccounts(did);
+        // A store another account left behind (a crash before its sign-out, or one another tab held at its sign-out) goes before
+        // this account's opens. One a tab still holds open is not waited for: a later start deletes it.
+        await within(IndexedDbStore.deleteOtherAccounts(did), ERASE_WITHIN_MS).catch(() => undefined);
         const syncStore = await IndexedDbStore.open(did, indexedDB, () => {
           if (epoch.current !== run) return;
           // What was built on the closed store goes, so nothing keeps reading it.
@@ -74,10 +80,12 @@ export function useBrowserSession(did: string, config: BrowserSessionConfig): Br
           made?.live.stop();
           if (builtRef.current === made) builtRef.current = null;
           setBuilt(null);
-          setError("Another account started in this browser in another tab. Connect this browser again to continue here.");
+          setError("Another tab of this app signed out, or started another account, and closed this account's store. Reload to continue here.");
           setStatus("error");
         });
         const engine = createEngine(transport, { store: syncStore, operator: { serviceRef, endpoint: appUrl } });
+        // Spaces not opened for the retention period go, which bounds what is kept for spaces an account no longer reads.
+        await engine.lifecycle.sweep(STORE_RETENTION_MS);
         const snapshots = new Snapshots();
         const live = new LiveSpaces(snapshots, { operator: engine.operator!, credentials: engine.credentials });
         const store = createBrowserDmStore(did);
@@ -109,8 +117,12 @@ export function useBrowserSession(did: string, config: BrowserSessionConfig): Br
     setError("");
     void (async () => {
       try {
-        const { connectSession } = await import("./session");
-        await connectSession(did, { appUrl, plcUrl, scope, serviceRef, loopback });
+        const { signIn, signOut: revoke } = await import("./session");
+        // The session lacks a scope the app asks for. It is revoked first, so if another account is chosen at the host,
+        // nothing of this one is left behind. The library forgets it here even when its host cannot be told, and consent
+        // replaces it, so that failure does not stop the reconnect.
+        await revoke({ appUrl, plcUrl, scope, serviceRef, loopback }).catch(() => undefined);
+        await signIn(did, { appUrl, plcUrl, scope, serviceRef, loopback });
       } catch (caught) {
         setError(caught instanceof Error ? caught.message : "Could not connect.");
         setStatus("error");
@@ -118,24 +130,21 @@ export function useBrowserSession(did: string, config: BrowserSessionConfig): Br
     })();
   }, [did, appUrl, plcUrl, scope, serviceRef, loopback]);
 
-  const disconnect = useCallback(async () => {
+  /** Sign-out: what was built on the session stops and lets go of the store, then the account is signed out. */
+  const signOut = useCallback(async () => {
     setError("");
-    try {
-      const { disconnectSession } = await import("./session");
-      await disconnectSession({ appUrl, plcUrl, scope, serviceRef, loopback });
-    } finally {
-      epoch.current += 1;
-      const current = builtRef.current;
-      builtRef.current = null;
-      current?.live.stop();
-      current?.syncStore.close();
-      setBuilt(null);
-      setStatus("disconnected");
-    }
-  }, [appUrl, plcUrl, scope, serviceRef, loopback]);
+    epoch.current += 1;
+    const current = builtRef.current;
+    builtRef.current = null;
+    current?.live.stop();
+    current?.syncStore.close();
+    setBuilt(null);
+    setStatus("disconnected");
+    return signOutAccount(did, async () => (await import("./session")).signOut({ appUrl, plcUrl, scope, serviceRef, loopback }));
+  }, [did, appUrl, plcUrl, scope, serviceRef, loopback]);
 
   return {
-    status, error, connect, disconnect,
+    status, error, connect, signOut,
     client: built?.client ?? null, store: built?.store ?? null,
     engine: built?.engine ?? null, snapshots: built?.snapshots ?? null, live: built?.live ?? null,
   };

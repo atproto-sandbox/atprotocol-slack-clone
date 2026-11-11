@@ -1,12 +1,8 @@
 "use client";
 
-import { clearAccountScopedState } from "./client-api";
+import { useSignOut } from "./session-context";
 
 export function LogoutButton() {
-  async function logout() {
-    await fetch("/api/oauth/logout", { method: "POST" });
-    clearAccountScopedState(sessionStorage);
-    window.location.assign("/");
-  }
-  return <button className="profile-menu" onClick={logout} aria-label="Sign out">⋯</button>;
+  const signOut = useSignOut();
+  return <button className="profile-menu" onClick={() => void signOut()} aria-label="Sign out">⋯</button>;
 }

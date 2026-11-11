@@ -40,8 +40,4 @@ export class Lifecycle {
     for (const state of await this.store.listSpaces()) if (state.lastOpenedAt < cutoff) await this.store.purgeSpace(state.space);
   }
 
-  /** Sign-out: the account's store goes. */
-  async signOut(): Promise<void> {
-    await this.store.clear();
-  }
 }

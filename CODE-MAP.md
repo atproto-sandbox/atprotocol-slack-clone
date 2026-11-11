@@ -9,24 +9,23 @@ A Slack-style team workspace built directly on atproto (AT Protocol) permissione
   ┌──────────────────────────────────────────┐      ┌───────────────────────────────────────┐     ┌───────────────────────────────────┐
   │ React UI (src/app/ui/**)                   │      │ App Router pages/routes (src/app/**)   │     │ new.flock.workspace / .channel /   │
   │  - workspace-manager, sidebar, channel-view│◀────▶│  - page.tsx (entry), layout.tsx        │────▶│   .inbox spaces                    │
-  │  - dm-sidebar/home/requests/settings/      │      │  - api/** authenticated JSON routes    │     │ new.flock.directory/.roster/.admin │
-  │    conversation (src/app/ui/dm-*.tsx)      │      │  - xrpc/** operator + notices           │     │ new.flock.channel.message/.reaction│
-  │                                             │      │  - oauth/** login/callback/metadata    │     │ (member-list read/write, open      │
-  │ Workspace OAuth session (server-issued)     │      │                                         │     │  app access; member lists ARE the  │
-  │  - sign-in and sign-out only (until R6c)    │      │ Workspace authority operator            │     │  read gate)                        │
-  │                                             │      │  (src/operator/**)                      │     ├───────────────────────────────────┤
-  │ Browser OAuth session (one grant: member    │      │  - signs service-auth JWTs, journals,   │     │ new.flock.dm.inbox (self)          │
-  │  set, operator rpc, DM set), IndexedDB,     │      │    resumes, reconciles PDS membership   │     │ new.flock.dm.conversation/<convKey>│
-  │  non-extractable keys; src/browser/**       │      │                                         │     │   header/message/reaction          │
-  │  - engine (src/client) reads spaces itself  │      │ SQLite (src/lib/db.ts)                  │     │ (member-list; convKey is a TID,    │
-  │                                             │      │  - encrypted OAuth/session state,       │◀───▶│  not a secret — DM state lives     │
-  │ DmClient (src/dm/dm-client.ts)              │──────┼─▶  sync cursors, channel-message cache,│     │  only here, per participant)       │
-  │  isomorphic engine; runs unmodified here    │ mint │    operator journal, audit,             │     └───────────────────────────────────┘
-  │  and in Node tests/acceptance               │ space│    space_notification (write pings)     │                 ▲
-  │                                             │ cred.│  - NEVER a DM table, NEVER DM content   │                 │ mint space credential,
-  │ Independent readers (proof of no lock-in)   │──────┼─▶ /api/notifications/dm: content-free   │  register notify│ read/write records directly
-  │  src/reader/independent.ts (channels)       │ SSE  │   SSE — only a change cursor, no        │─────────────────┘
-  │  src/reader/independent-dm.ts (DMs)         │◀─────┼── record reads, no credential minted    │
+  │  - dm-sidebar/home/requests/settings/      │      │  - xrpc/** operator + notices           │     │ new.flock.directory/.roster/.admin │
+  │    conversation (src/app/ui/dm-*.tsx)      │      │  - authority/** the authority flow      │     │ new.flock.channel.message/.reaction│
+  │                                             │      │  - oauth/callback (a client page) and   │     │ (member-list read/write, open      │
+  │ Browser OAuth session: sign-in itself (one  │      │    the browser client's metadata        │     │  app access; member lists ARE the  │
+  │  grant: member set, operator rpc, DM set),  │      │                                         │     │  read gate)                        │
+  │  IndexedDB, non-extractable keys;           │      │ Workspace authority operator            │     ├───────────────────────────────────┤
+  │  src/browser/**                             │      │  (src/operator/**)                      │     │ new.flock.dm.inbox (self)          │
+  │  - engine (src/client) reads spaces itself  │      │  - signs service-auth JWTs, journals,   │     │ new.flock.dm.conversation/<convKey>│
+  │  - operator calls with service tokens       │─────▶│    resumes, reconciles PDS membership   │     │   header/message/reaction          │
+  │                                             │      │                                         │     │ (member-list; convKey is a TID,    │
+  │ DmClient (src/dm/dm-client.ts)              │      │ SQLite (src/lib/db.ts)                  │◀───▶│  not a secret — DM state lives     │
+  │  isomorphic engine; runs unmodified here    │ mint │  - authority grants, operator journal,  │     │  only here, per participant)       │
+  │  and in Node tests/acceptance               │ space│    audit, space_notification (pings)    │     └───────────────────────────────────┘
+  │                                             │ cred.│  - NO member session, token or record;  │                 ▲
+  │ Independent readers (proof of no lock-in)   │──────┼─▶   NEVER a DM table, NEVER DM content  │  register notify│ mint space credential,
+  │  src/reader/independent.ts (channels)       │ feed │ getChanges: cursors only, no record     │─────────────────┘ read/write records directly
+  │  src/reader/independent-dm.ts (DMs)         │◀─────┼── reads, no credential minted           │
   └──────────────────────────────────────────┘      └───────────────────────────────────────┘
 ```
 
@@ -67,17 +66,14 @@ Writes follow the mirror path: the engine validates a record locally with `valid
 ```
 src/
   app/                    Next.js App Router (server): pages, layouts, and route handlers.
-    page.tsx                Entry point: resolves the server session, builds dmConfig, renders
-                             LoginForm or WorkspaceManager.
+    page.tsx                Entry point: builds the browser session config and renders the client gate
+                             (ui/account-gate.tsx), which restores the browser session and shows the app or the sign-in form.
     layout.tsx               Root HTML shell, security headers wiring.
-    api/                    Authenticated JSON + SSE routes for the signed-in member.
-      workspaces/, channels/*, inbox/requests/, notifications/, notifications/dm/
-      operator/*             Admin-only routes that call into src/operator/.
-    oauth/                  Login, callback, and client-metadata routes (member sign-in + DM).
+    oauth/                  The browser sign-in's callback page (client-only; the code stays in the fragment) and the
+                             browser client's metadata. The server has no member routes and no member session.
     authority/              The workspace authority flow: start, callback, client metadata, JWKS.
     xrpc/                   Server-published XRPC methods: the operator's own RPCs
                              (new.flock.operator.*), com.atproto.space.notifyWrite and com.atproto.space.notifySpaceDeleted.
-    dm/callback/            Browser DM OAuth callback page (client component).
     .well-known/did.json/   The operator's did:web document (OPERATOR_SERVICE_REF), when the
                              operator DID is hosted as did:web on this app's own origin.
     ui/                     React components (client + server). workspace-manager.tsx is the
@@ -129,9 +125,9 @@ src/
                               registry, DM_BROWSER_SCOPES (asserted disjoint from every server scope), and
                               memberGrantScopes: the browser's one grant (member set, operator rpc, DM set).
     workspace-summary.ts      What a workspace is, summarized from its authority's records, and the v1
-                              envelope check; the member read model and the operator both use it.
-  auth/                   Server session, OAuth flow.
-    session.ts, web-session.ts, oauth.ts, oauth-flow.ts, encrypted-store.ts, encrypted-cache.ts
+                              envelope check; the engine and the operator both use it.
+  auth/                   OAuth plumbing for the authority grant: the flow binding (oauth-flow.ts), the encrypted
+                             SQLite stores (encrypted-store.ts), the cross-process refresh lock, scope canonicalization.
   operator/               Workspace-authority operator: journaled, idempotent PDS mutations.
     authority-grant.ts       The one owner of the workspace authority grant: its own OAuth client (confidential
                               private_key_jwt outside loopback), the ticket -> /authority/start -> PDS consent ->
@@ -165,7 +161,6 @@ src/
                               reset, read by the change feed and the SSE streams.
     testing/fake-authority-pds.ts
                              In-memory authority PDS for operator unit tests; production code never imports it.
-  workspaces/             Server-side channel/workspace sync, caching, and the read model.
   client/                 The engine (isomorphic, under the same lint boundary as src/dm; the SDK from R7). One owner each:
     transport.ts             ClientTransport: what the engine needs from its host (own client, DID resolution, fetch, keys).
     credentials.ts           CredentialCache: one space credential per space; a refused mint drops the space (onAccessLost).
@@ -181,7 +176,7 @@ src/
     sync.ts                  SyncCore: the writer set (full listRepos per session and truth interval, hints between),
                               bracketed refresh, backfill, set-aside writers, bounds, completeness.
     lifecycle.ts             When held copies stop being served: lost access, deletion, unlisted workspaces, archived
-                              channels, retention sweep, sign-out.
+                              channels, the retention sweep (sign-out deletes the whole store: src/browser/sign-out.ts).
     channel-client.ts, workspace-client.ts, operator-client.ts
                              The member's operations, each rule of the route table owned here; engine.ts wires them.
                               operator-client.ts calls every operator method, reusing one long-poll token for getChanges.
@@ -196,8 +191,10 @@ src/
                              Accept refusal codes, one writer's join requests, ChannelUnavailableError.
   testing/                Test-only: fake-network.ts (the in-memory multi-host PDS network for every engine and DM
                            test), engine-fixture.ts (channels and workspaces on it), store-contract.ts.
-  browser/                The account's browser session (R6a): one OAuth grant (member set, operator rpc, DM set) through
-                           @atproto/oauth-client-browser (session.ts), browser identity resolution (identity.ts), the
+  browser/                The account's browser session, and its sign-in (R6a, R6c): one OAuth grant (member set, operator
+                           rpc, DM set) through @atproto/oauth-client-browser (session.ts: one client and one init per
+                           page, signIn, signOut), sign-out (sign-out.ts: the one procedure, which deletes the account's store and DM state and
+                           revokes the session), browser identity resolution (identity.ts), the
                            client metadata builder (client-metadata.ts), and useBrowserSession, which builds the DM
                            client and the engine over the account's IndexedDB store with its live views. The page's
                            and callback's config has one owner: src/app/browser-session-config.ts; the UI reads the
@@ -205,10 +202,10 @@ src/
   dm/                     The DM feature. Isomorphic engine + browser-only glue. See below.
   reader/                 Independent second-app readers (no app database, no DM-engine import).
     independent.ts           Channels/workspaces; takes injected transports (sessionCredentialDeps builds them from a
-                              server session), so it runs on the fake network too.
+                              session), so it runs on the fake network too.
     independent-dm.ts        DMs (M6 independence proof).
   lib/                    Cross-cutting utilities: config, db, bounded-json parsing,
-                           map-limited concurrency, security headers, same-origin checks.
+                           map-limited concurrency, security headers.
   lexicons/api/           Generated lexicon clients (do not hand-edit; see codegen:lex).
 
 lexicons/                 Source NSID lexicon JSON (new.flock.*, new.flock.dm.*).
@@ -241,9 +238,8 @@ scripts/                  codegen-lex.mjs, backup-db.mjs, reconcile-workspaces.t
 
 Every module above except the `*.test.ts` files is covered by an `eslint.config.mjs`
 `no-restricted-imports` rule forbidding `node:*`, `@/lib/db`, `@/lib/config`, `@/auth/*`,
-`@/operator/*`, `@/workspaces/*`, `@atproto/oauth-client-node`, `undici`, and
-`@/atproto/identity` — the DM engine cannot reach the server's session, database, operator, or
-workspace layers even by accident.
+`@/operator/*`, `@atproto/oauth-client-node`, `undici`, and `@/atproto/identity` — the DM engine
+cannot reach the server's database, operator or OAuth layers even by accident.
 
 ## Entry points
 
@@ -297,12 +293,12 @@ Run: `pnpm test:bdd` (headless), `pnpm test:bdd:chrome` (visible Google Chrome),
   and report `truncated` rather than silently dropping data past a scan cap.
 - Concurrency is `src/lib/map-limited.ts` (fixed fan-out, currently 8 for DM/channel fan-out),
   not ad hoc `Promise.all` over unbounded arrays.
-- Imports point one way: `src/atproto/**` and `src/operator/**` never import `src/workspaces/**` (the member read
-  model) or `src/app/**`; an `eslint.config.mjs` rule enforces it.
-- Server-only code (`@/lib/db`, `@/auth/*`, `@/operator/*`, `@/workspaces/*`, `node:*`,
+- Imports point one way: `src/atproto/**` and `src/operator/**` never import `src/app/**`; an `eslint.config.mjs` rule
+  enforces it.
+- Server-only code (`@/lib/db`, `@/auth/*`, `@/operator/*`, `node:*`,
   `@atproto/oauth-client-node`, `undici`, `@/atproto/identity`) is off-limits to the isomorphic
-  protocol/DM layer and to `src/reader/**`; `src/dm/**` is additionally off-limits to everything
-  under `src/app/api/**`. All three boundaries are `eslint.config.mjs` rules, not just convention.
+  protocol/DM layer and to `src/reader/**`; `src/dm/**` is additionally off-limits to every server
+  route handler (`src/app/**/route.ts`). All three boundaries are `eslint.config.mjs` rules, not just convention.
 - DM invariants (no server session, no server cache, no app-decided access, independent-app
   parity) are treated as architectural constraints, not defaults to be revisited later; see
   `SPEC.md`'s "Direct-message invariants" and `.ai/plans/direct-messages.md` §1–§2.

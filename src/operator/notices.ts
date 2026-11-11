@@ -99,6 +99,15 @@ export function purgeExpiredNotificationRegistrations(before: number): void {
   getRawDb().prepare("DELETE FROM notification_registration WHERE expires_at < ?").run(before);
 }
 
+/** How long a registration that ran out is kept, so the admin screen and the reconcile job keep reporting it. */
+const EXPIRED_REGISTRATION_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** The periodic prune, which the reconcile job runs: notices older than a week, and registrations that ran out a month ago. */
+export function pruneNotices(now = Date.now()): void {
+  purgeStaleNotifications(Math.floor(now / 1000));
+  purgeExpiredNotificationRegistrations(now - EXPIRED_REGISTRATION_RETENTION_MS);
+}
+
 /** A notice's space type, under which the per-type cap and floor count it. */
 function spaceTypeOf(space: string): string {
   return parseSpaceUri(space)?.type ?? "unknown";

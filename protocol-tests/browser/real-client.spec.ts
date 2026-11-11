@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { chromium, type Browser, type BrowserContext, type Page } from "@playwright/test";
 import { availablePort, startAppServer, type AppServer } from "../support/app-server";
-import { openChannel, signInAndConnect as connectPage } from "../support/browser-app";
+import { openChannel, signIn as signInPage } from "../support/browser-app";
 import { countByOrigin, watchPreflights, type Preflight } from "../support/browser-network";
 import { actorTransport, bearerSession, startPdsNetwork, type NetworkActor, type PdsNetwork } from "../support/pds-network";
 
@@ -17,7 +17,11 @@ const REMOTE_NOTE = "k9 from the unreachable host";
 const BROWSER_NOTE = "k9 from the browser";
 
 type Seen = { method: string; url: URL; status: number; requestBody: string; headers: Record<string, string>; requestHeaders: Record<string, string>; body?: string };
-type Side = { actor: NetworkActor; context: BrowserContext; page: Page; preflights: Preflight[]; failures: string[]; seen: Seen[] };
+/** A request the page sent to the app's own origin, of any kind (navigations too), as it left the browser. */
+type ToApp = { method: string; url: URL; headers: Record<string, string>; body: string };
+type Side = { actor: NetworkActor; context: BrowserContext; page: Page; preflights: Preflight[]; failures: string[]; seen: Seen[]; toApp: ToApp[] };
+
+const OPERATOR_PATH = "/xrpc/new.flock.operator.";
 
 test("the app's own browser client reaches the PDS hosts and the operator directly (K9, R6a)", { timeout: 600_000 }, async (t) => {
   const appPort = await availablePort();
@@ -32,7 +36,7 @@ test("the app's own browser client reaches the PDS hosts and the operator direct
     browser = await chromium.launch({ headless: true });
 
     // given a member who reads a channel one of whose writers lives on a host the browser cannot reach
-    const member = await signInAndConnect(browser, app.url, fixture.member, { unreachable });
+    const member = await signInFrom(browser, app.url, fixture.member, { unreachable });
     // when the member opens the channel, refreshes the workspace (a credential minted again) and opens it once more
     await openChannel(member.page, "general");
     await member.page.getByText(AUTHORITY_NOTE, { exact: true }).waitFor({ state: "visible" });
@@ -48,7 +52,7 @@ test("the app's own browser client reaches the PDS hosts and the operator direct
     await member.page.locator(".message-card > p").filter({ hasText: BROWSER_NOTE }).waitFor({ state: "visible" });
 
     // and an outsider, a workspace member not on the private channel's member list, opens that channel
-    const outsider = await signInAndConnect(browser, app.url, fixture.outsider, {});
+    const outsider = await signInFrom(browser, app.url, fixture.outsider, {});
     await openChannel(outsider.page, "vault");
     await outsider.page.getByText("You are not on this channel’s active roster.").waitFor({ state: "visible" });
 
@@ -74,6 +78,15 @@ test("the app's own browser client reaches the PDS hosts and the operator direct
         && await outsider.page.locator(".form-error").count() === 0,
       "the unreachable writer host fails as a network error, and the rest of the channel is shown": member.failures.some((failure) => failure.includes(unreachable))
         && await member.page.getByText(AUTHORITY_NOTE, { exact: true }).isVisible(),
+      // The app's server holds no member session: what reaches its origin carries neither a member token nor a record.
+      "the sign-in's authorization code never reaches the app's server": [member, outsider].every((side) => side.toApp.some((request) => request.url.pathname === "/oauth/callback")
+        && side.toApp.every((request) => !request.url.searchParams.has("code") && !request.url.searchParams.has("state"))),
+      "no request to the app's origin carries a member token, a DPoP proof or a cookie": [member, outsider].every((side) => side.toApp.length > 0
+        && side.toApp.every((request) => !/^DPoP /i.test(request.headers.authorization ?? "") && request.headers.dpop === undefined && request.headers.cookie === undefined
+          && (request.headers.authorization === undefined || request.url.pathname.startsWith(OPERATOR_PATH)))),
+      "the operator gets service tokens only, and no request to the app's origin carries a record's content": [member, outsider].every((side) => side.toApp.every((request) =>
+        (!request.url.pathname.startsWith(OPERATOR_PATH) || /^Bearer /.test(request.headers.authorization ?? ""))
+        && ![BROWSER_NOTE, AUTHORITY_NOTE].some((text) => request.body.includes(text) || decodeURIComponent(request.url.href).includes(text)))),
     };
 
     const preflights = [...member.preflights, ...outsider.preflights];
@@ -86,6 +99,22 @@ test("the app's own browser client reaches the PDS hosts and the operator direct
     assert.deepEqual(Object.entries(results).filter(([, ok]) => !ok).map(([step]) => step), []);
     assert.deepEqual(failedPreflights, [], "every preflight the browser sent succeeded");
     assert.deepEqual(failures, [], "only the unreachable host fails in the browser");
+
+    // and when the member signs out (with a DM state key of its own kept, as hiding a request keeps one), what the account
+    // kept in this browser goes with its session
+    await member.page.evaluate((did) => localStorage.setItem(`dm:${did}:hidden-request:at://probe`, "1"), fixture.member.did);
+    const handleField = member.page.getByLabel("Your AT Protocol handle");
+    await member.page.getByRole("button", { name: "Sign out", exact: true }).click();
+    await handleField.waitFor({ state: "visible" });
+    const kept = await member.page.evaluate(async (did) => ({
+      databases: (await indexedDB.databases()).map((database) => database.name ?? ""),
+      dmKeys: Object.keys(localStorage).filter((key) => key.startsWith(`dm:${did}:`)),
+    }), fixture.member.did);
+    assert.ok(!kept.databases.includes(`flock-sync-${fixture.member.did}`), `the account's store is deleted: ${kept.databases.join(", ")}`);
+    assert.deepEqual(kept.dmKeys, [], "its DM state is forgotten");
+    await member.page.reload();
+    await handleField.waitFor({ state: "visible" });
+    assert.equal(await member.page.locator(".app-frame").count(), 0, "after a reload nobody is signed in here");
   } finally {
     await browser?.close();
     await app?.stop();
@@ -132,13 +161,22 @@ async function provision(pds: PdsNetwork) {
   return { member, outsider, remote, workspace, channel, vault };
 }
 
-/** A browser context for `actor`, recording what its page sends and what fails, signed in and connected on the app. */
-async function signInAndConnect(browser: Browser, appUrl: string, actor: NetworkActor, options: { unreachable?: string }): Promise<Side> {
+/** A browser context for `actor`, recording what its page sends and what fails, signed in on the app. */
+async function signInFrom(browser: Browser, appUrl: string, actor: NetworkActor, options: { unreachable?: string }): Promise<Side> {
   const context = await browser.newContext();
   if (options.unreachable) await context.route(`${options.unreachable}/**`, (route) => route.abort("connectionrefused"));
   const page = await context.newPage();
   page.setDefaultTimeout(60_000);
-  const side: Side = { actor, context, page, preflights: await watchPreflights(page), failures: [], seen: [] };
+  const side: Side = { actor, context, page, preflights: await watchPreflights(page), failures: [], seen: [], toApp: [] };
+  const appOrigin = new URL(appUrl).origin;
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (url.origin !== appOrigin) return;
+    void request.allHeaders().then(
+      (headers) => side.toApp.push({ method: request.method(), url, headers, body: request.postData() ?? "" }),
+      (error: unknown) => side.failures.push(`unrecorded request ${url.href} (${String(error)})`),
+    );
+  });
   page.on("requestfailed", (request) => side.failures.push(`${request.method()} ${request.url()} (${request.failure()?.errorText})`));
   page.on("response", (response) => {
     const request = response.request();
@@ -150,7 +188,7 @@ async function signInAndConnect(browser: Browser, appUrl: string, actor: Network
       side.seen.push({ method: request.method(), url, status: response.status(), requestBody: request.postData() ?? "", headers, requestHeaders, body: text });
     }, (error: unknown) => side.failures.push(`unrecorded response ${url.href} (${String(error)})`));
   });
-  await connectPage(page, appUrl, actor, WORKSPACE_NAME);
+  await signInPage(page, appUrl, actor, WORKSPACE_NAME);
   return side;
 }
 

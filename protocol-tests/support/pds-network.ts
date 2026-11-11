@@ -5,6 +5,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { asAtprotoDid, asAtprotoOAuthScope, jwkSchema, NodeOAuthClient, oauthClientMetadataSchema, type NodeSavedSession, type NodeSavedState, type OAuthSession } from "@atproto/oauth-client-node";
 import { kemKeyFromDidDocument } from "@/atproto/kem-key";
 import { generateSpaceKey } from "@/atproto/space-key";
 import { AtprotoClient } from "@/atproto/xrpc";
@@ -178,30 +179,54 @@ export function bearerSession(actor: { did: string; accessJwt: string; pds: Test
   };
 }
 
-type SessionTable = "oauth_session" | "authority_grant";
+type SessionTable = "authority_grant";
+
+/** The member's OAuth session as the browser holds it: restored through the OAuth client over in-memory stores. */
+export type BrowserSession = {
+  session: OAuthSession;
+  /** The access token the provider issued, which is how a test finds (and ages or revokes) the session at the provider. */
+  accessToken: string;
+  /** Restores the stored session again; `refresh: true` makes it refresh at the provider, which a lapsed or revoked session refuses. */
+  restore(refresh?: boolean): Promise<OAuthSession>;
+};
 
 /**
- * Mints a real PDS-issued, DPoP-bound OAuth token set for `did` with exactly `scopes` (plus `atproto`) for the app's member
- * loopback client, and stores it where the app restores member sessions from. This is what a completed sign-in leaves
- * behind, without driving the consent screen.
+ * Mints a real PDS-issued, DPoP-bound OAuth token set for `did` with exactly `scopes` (plus `atproto`) for the browser's own
+ * OAuth client (`buildBrowserClientMetadata` over the app's browser config), and restores it with `NodeOAuthClient` over
+ * in-memory stores, as the browser restores its session. This is what a completed browser sign-in leaves behind, without
+ * driving the consent screen.
  */
-export async function storeOAuthSession(pds: TestPds, did: string, scopes: readonly string[], keyLabel: string): Promise<{ accessToken: string; clientScope: string }> {
-  const [{ canonicalOAuthScope }, { getOAuthClient }, { oauthSqliteStore }] = await Promise.all([
-    import("@/auth/oauth-scope"), import("@/auth/oauth"), import("@/auth/encrypted-store"),
-  ]);
-  const clientScope = canonicalOAuthScope(["atproto", ...scopes]);
-  const metadata = getOAuthClient(clientScope).clientMetadata;
-  const { saved, accessToken } = await mintProviderSession(pds, did, { clientId: metadata.client_id, redirectUri: metadata.redirect_uris[0], scope: clientScope }, keyLabel);
-  await oauthSqliteStore("oauth_session").set(did, { ...saved, oauthClientScope: clientScope } as never);
-  return { accessToken, clientScope };
+export async function mintBrowserSession(pds: TestPds, did: string, scopes: readonly string[], keyLabel: string): Promise<BrowserSession> {
+  const [{ browserSessionConfig }, { buildBrowserClientMetadata }] = await Promise.all([import("@/app/browser-session-config"), import("@/browser/client-metadata")]);
+  const { appUrl, plcUrl } = browserSessionConfig();
+  const metadata = buildBrowserClientMetadata({ appUrl, scope: ["atproto", ...scopes.filter((scope) => scope !== "atproto")].join(" ") });
+  const { saved, accessToken } = await mintProviderSession(pds, did, { clientId: metadata.client_id, redirectUri: metadata.redirect_uris[0], scope: metadata.scope }, keyLabel);
+  const client = new NodeOAuthClient({
+    clientMetadata: oauthClientMetadataSchema.parse(metadata),
+    stateStore: inMemoryStore<NodeSavedState>(),
+    sessionStore: inMemoryStore<NodeSavedSession>(new Map([[did, saved]])),
+    plcDirectoryUrl: plcUrl,
+    allowHttp: true,
+    requestLock: (_name, run) => run(),
+  });
+  const restore = (refresh?: boolean) => client.restore(did, refresh);
+  return { accessToken, restore, session: await restore() };
 }
 
-/** The same, for the workspace-authority client: what a completed authority flow leaves in the grant table. */
+function inMemoryStore<V>(entries = new Map<string, V>()) {
+  return {
+    get: async (key: string) => entries.get(key),
+    set: async (key: string, value: V) => { entries.set(key, value); },
+    del: async (key: string) => { entries.delete(key); },
+  };
+}
+
+/** Mints the same kind of session for the workspace-authority client and stores it in the grant table, as a completed authority flow does. */
 export async function storeAuthorityGrant(pds: TestPds, did: string, keyLabel: string): Promise<{ accessToken: string }> {
   const [{ authorityClientMetadata }, { oauthSqliteStore }] = await Promise.all([import("@/operator/authority-grant"), import("@/auth/encrypted-store")]);
   const metadata = authorityClientMetadata();
   const { saved, accessToken } = await mintProviderSession(pds, did, { clientId: metadata.client_id, redirectUri: metadata.redirect_uris[0], scope: metadata.scope }, keyLabel);
-  await oauthSqliteStore("authority_grant").set(did, saved as never);
+  await oauthSqliteStore("authority_grant").set(did, saved);
   return { accessToken };
 }
 
@@ -210,7 +235,7 @@ async function mintProviderSession(
   did: string,
   request: { clientId: string; redirectUri: string; scope: string },
   keyLabel: string,
-): Promise<{ saved: Record<string, unknown>; accessToken: string }> {
+): Promise<{ saved: NodeSavedSession; accessToken: string }> {
   assert.ok(pds.ctx.oauthProvider, "the local PDS test network exposes its OAuth provider");
   const [{ JoseKey }, { generateCode }] = await Promise.all([
     import("@atproto/jwk-jose"),
@@ -238,13 +263,13 @@ async function mintProviderSession(
   return {
     accessToken: token.access_token,
     saved: {
-      dpopJwk: key.privateJwk,
+      dpopJwk: jwkSchema.parse(key.privateJwk),
       authMethod: { method: "none" as const },
       tokenSet: {
         iss: pds.ctx.cfg.oauth.issuer,
-        sub: did,
+        sub: asAtprotoDid(did),
         aud: pds.url,
-        scope: token.scope ?? request.scope,
+        scope: asAtprotoOAuthScope(token.scope ?? request.scope),
         access_token: token.access_token,
         ...(token.refresh_token ? { refresh_token: token.refresh_token } : {}),
         token_type: "DPoP" as const,
@@ -256,15 +281,19 @@ async function mintProviderSession(
 
 /**
  * Ages the provider-side session behind `accessToken` by `ageMs` (creation and last refresh), which is what the provider
- * measures a session's lifetime against, and marks the stored copy's access token expired so the next use refreshes. For
- * a public client, fifteen days is past its two-week lifetime.
+ * measures a session's lifetime against. For a public client, fifteen days is past its two-week lifetime.
  */
-export async function ageOAuthSessionAtProvider(pds: TestPds, table: SessionTable, did: string, accessToken: string, ageMs: number): Promise<void> {
+export async function ageProviderSession(pds: TestPds, accessToken: string, ageMs: number): Promise<void> {
   assert.ok(pds.ctx.oauthProvider);
   const found = await pds.ctx.oauthProvider.tokenManager.findToken(accessToken);
   assert.ok(found, "the provider holds the token to age");
   const then = new Date(Date.now() - ageMs).toISOString();
   await pds.ctx.accountManager.db.db.updateTable("token").set({ createdAt: then, updatedAt: then }).where("tokenId", "=", found.id).execute();
+}
+
+/** The same, for a session the app stores: the stored copy's access token is also marked expired so the next use refreshes. */
+export async function ageOAuthSessionAtProvider(pds: TestPds, table: SessionTable, did: string, accessToken: string, ageMs: number): Promise<void> {
+  await ageProviderSession(pds, accessToken, ageMs);
   await expireStoredSession(table, did);
 }
 
@@ -278,12 +307,6 @@ export async function expireStoredSession(table: SessionTable, did: string): Pro
   expired.tokenSet.expires_at = new Date(Date.now() - 1_000).toISOString();
   await store.set(did, expired as never);
 }
-
-/** The scopes every sign-in requests (`/api/oauth/login`). */
-export async function memberSignInScopes(): Promise<readonly string[]> {
-  return (await import("@/protocol/scopes")).MEMBER_SIGN_IN_SCOPES;
-}
-
 
 /** The one browser grant (R6), from the app's own builder: the member set, the operator methods and the DM set (K3). */
 export async function combinedMemberScopes(serviceRef: string): Promise<string[]> {
@@ -301,8 +324,9 @@ export async function callOperatorMethod(
   query: Record<string, string>,
   body?: unknown,
 ): Promise<Record<string, unknown>> {
-  const [{ requestOperatorServiceAuth }, { NextRequest }] = await Promise.all([import("@/operator/client"), import("next/server")]);
-  const token = await requestOperatorServiceAuth(session as never, serviceRef, method);
+  const [{ sessionClient }, { NextRequest }] = await Promise.all([import("@/atproto/client"), import("next/server")]);
+  // A service token from the caller's own session, bound to the operator's service and to exactly this method.
+  const { token } = await sessionClient(session as never).query<{ token: string }>("com.atproto.server.getServiceAuth", { aud: serviceRef, lxm: method });
   const url = new URL(`http://127.0.0.1:3000/xrpc/${method}`);
   for (const [name, value] of Object.entries(query)) url.searchParams.set(name, value);
   type Handler = (request: InstanceType<typeof NextRequest>) => Promise<Response>;

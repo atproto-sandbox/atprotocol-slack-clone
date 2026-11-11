@@ -92,6 +92,13 @@ export function clearAccountScopedState(storage: Pick<Storage, "length" | "key" 
 
 export const INVITE_LINK_KEY = "spaces.inviteLink";
 
+/** Set on the sign-in page after a sign-out that did not fully hold: `?signout=` the parts that did not, comma-separated. */
+export const SIGN_OUT_PARAM = "signout";
+/** The account's host could not be told: its session ends when it expires. */
+export const SIGN_OUT_UNREVOKED = "unrevoked";
+/** What the account kept in this browser could not all be deleted (another tab held its store). */
+export const SIGN_OUT_KEPT = "kept";
+
 /** A link an admin can send: opening it signs the recipient in and offers to join the workspace. */
 export function inviteLinkFor(origin: string, workspaceUri: string): string {
   return `${origin}/?invite=${encodeURIComponent(workspaceUri)}`;

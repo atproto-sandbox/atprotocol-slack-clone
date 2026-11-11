@@ -11,8 +11,9 @@ import { PAGE_TIMEOUT_MS, type Actor, type AppWorld } from "../support/world";
 import {
   DmpProbe, type DmpHostileHalf, type DmpMintedCredential, dmpAcceptRequestFrom, dmpAllowlistDids, dmpAllowDid, dmpChooseMode, dmpConnectDms, dmpEnableDms, dmpMessageTexts, dmpOpenConversationWith,
   dmpOwnConvKeys, dmpOwnHeader, dmpOwnMessages, dmpParticipantRows, dmpPoll, dmpReadRequests, dmpReadRequestsScanned, dmpReload, dmpRequestCount, dmpSend, dmpSidebarConversationLabels,
-  dmpAppDataRowCount, dmpEverythingTheAppStored, dmpFilesContain, dmpServerSessions, dmpWaitForOrigin, dmpJwtClaims, dmpLatestCommitRev, dmpOpenRequests, dmpOpenSettings, dmpRequestSenders, dmpSignInAt, dmpWatchCredentials, dmpRenotifyState, dmpReloadThroughCycle, dmpRequestOps, dmpSetRenotifyElapsed, dmpStartConversation, dmpSync, dmpWriteHostileHalf,
+  dmpAppDataRowCount, dmpEverythingTheAppStored, dmpFilesContain, dmpAuthorityGrants, dmpWaitForOrigin, dmpJwtClaims, dmpLatestCommitRev, dmpOpenRequests, dmpOpenSettings, dmpRequestSenders, dmpSignInAt, dmpWatchCredentials, dmpRenotifyState, dmpReloadThroughCycle, dmpRequestOps, dmpSetRenotifyElapsed, dmpStartConversation, dmpSync, dmpWriteHostileHalf,
 } from "../support/dm-policy-ui";
+import { memberSessionTablesIn } from "../support/app-database";
 
 const SETUP_TIMEOUT = 300_000;
 
@@ -692,7 +693,7 @@ When("a participant signs in with any conforming OAuth client", { timeout: SETUP
   await context.route("**/xrpc/new.flock.operator.getChanges", (route) => { changeFeedAttempts.push(route.request().url()); return route.abort("connectionrefused"); });
   const page = await context.newPage();
   page.setDefaultTimeout(PAGE_TIMEOUT_MS);
-  const elsewhere: Actor = { ...alice, role: "alice-elsewhere", context, page, calls: [], xrpc: [] };
+  const elsewhere: Actor = { ...alice, role: "alice-elsewhere", context, page, xrpc: [] };
   this.actors.set(elsewhere.role, elsewhere);
   this.scratch.set("rebuiltCredentials", dmpWatchCredentials(page));
   this.scratch.set("rebuildRequests", requested);
@@ -770,9 +771,9 @@ Then("the other halves are read with freshly minted credentials", { timeout: SET
 
 const DM_SPACE_TYPE = "new.flock.dm";
 
-type ServerSession = { second: SecondApp; key: string; dmScopeShown: string[]; texts: string[] };
+type AppUnderTest = { second: SecondApp; key: string; dmScopeShown: string[]; texts: string[] };
 
-Given("the app runs its own server session for workspaces", { timeout: SETUP_TIMEOUT }, async function (this: AppWorld) {
+Given("people sign in to an app with its own database and create a workspace there", { timeout: SETUP_TIMEOUT }, async function (this: AppWorld) {
   const key = randomBytes(32).toString("hex");
   const second = await this.fixture.startSecondApp({ env: { AUTH_ENCRYPTION_KEY: key } });
   const alice = await this.actor("alice", 0);
@@ -780,18 +781,12 @@ Given("the app runs its own server session for workspaces", { timeout: SETUP_TIM
   await submitWorkspaceName(alice, uniqueWorkspaceName());
   await completeConsent(alice);
   await dmpWaitForOrigin(alice, second.appUrl.origin);
-  await alice.page.getByRole("heading", { level: 1 }).or(alice.page.locator(".mono-note").filter({ hasText: "at://" }).first()).waitFor({ state: "visible" });
-
-  const sessions = dmpServerSessions(second.databasePath, key);
-  const own = sessions.filter((session) => session.did === alice.did);
-  assert.ok(own.length > 0, "the app server holds an OAuth session for alice");
-  assert.ok(own.some((session) => session.scope.some((scope) => scope.startsWith(`space:new.flock.workspace?authority=${alice.did}`) && scope.includes("collection=new.flock.admin"))),
-    `one of them is the workspace-authority grant she approved: ${own.map((session) => session.scope.join(" ")).join(" | ")}`);
-  this.scratch.set("serverSession", { second, key, dmScopeShown: aliceScopes, texts: [] } satisfies ServerSession);
+  await alice.page.locator(".mono-note").filter({ hasText: "at://" }).first().waitFor({ state: "visible" });
+  this.scratch.set("appUnderTest", { second, key, dmScopeShown: aliceScopes, texts: [] } satisfies AppUnderTest);
 });
 
 When("direct messages are exchanged", { timeout: SETUP_TIMEOUT }, async function (this: AppWorld) {
-  const session = this.scratch.get("serverSession") as ServerSession;
+  const session = this.scratch.get("appUnderTest") as AppUnderTest;
   const origin = session.second.appUrl.origin;
   const alice = actorNamed(this, "alice");
   const bob = await this.actor("bob", 1);
@@ -810,60 +805,39 @@ When("direct messages are exchanged", { timeout: SETUP_TIMEOUT }, async function
   session.texts.push(...secrets);
 });
 
-Then("that session holds no DM scope", function (this: AppWorld) {
-  const session = this.scratch.get("serverSession") as ServerSession;
-  const held = dmpServerSessions(session.second.databasePath, session.key);
-  assert.deepEqual([...new Set(held.map((entry) => entry.did))].sort(), [actorNamed(this, "alice").did, actorNamed(this, "bob").did].sort(), "the server holds sessions only for the people who signed in");
-  for (const entry of held) {
-    assert.ok(entry.scope.includes("atproto"), "a real, granted session");
-    assert.deepEqual(entry.scope.filter((scope) => scope.includes(DM_SPACE_TYPE)), [], `no granted scope names a DM space: ${entry.scope.join(" ")}`);
-    assert.deepEqual(entry.clientScope.filter((scope) => scope.includes(DM_SPACE_TYPE)), [], "nor does the scope its OAuth client requested");
+Then("the app server holds no member session and no member token", async function (this: AppWorld) {
+  const session = this.scratch.get("appUnderTest") as AppUnderTest;
+  const alice = actorNamed(this, "alice");
+  const bob = actorNamed(this, "bob");
+  assert.deepEqual(memberSessionTablesIn(session.second.databasePath), [], "the app's database has nowhere to keep a member session");
+  for (const actor of [alice, bob]) {
+    assert.deepEqual(await actor.context.cookies(session.second.appUrl.origin), [], "the app sets no session cookie: the browser holds the session");
   }
-  assert.ok(session.dmScopeShown.some((scope) => scope.includes(`space:${DM_SPACE_TYPE}.conversation`)), "the DM permission does exist: it was asked of, and approved at the PDS by, the browser-held session");
+  // What the server does hold: the workspace authority's grant to its operator, which alice approved when she created a workspace.
+  const grants = dmpAuthorityGrants(session.second.databasePath, session.key);
+  assert.deepEqual(grants.map((grant) => grant.did), [alice.did], "the only grant is the workspace authority's; bob, who only exchanged DMs, has none");
+  for (const grant of grants) {
+    assert.ok(grant.scope.some((scope) => scope.startsWith(`space:new.flock.workspace?authority=${alice.did}`) && scope.includes("collection=new.flock.admin")), `it is the workspace-authority grant: ${grant.scope.join(" ")}`);
+    assert.deepEqual(grant.scope.filter((scope) => scope.includes(DM_SPACE_TYPE)), [], `it names no DM space: ${grant.scope.join(" ")}`);
+  }
+  assert.ok(session.dmScopeShown.some((scope) => scope.includes(`space:${DM_SPACE_TYPE}.conversation`)), "the DM permission does exist: it was asked of, and approved at the PDS by, the browser's session");
 });
 
 Then("no server route stores or returns DM content", async function (this: AppWorld) {
-  const session = this.scratch.get("serverSession") as ServerSession;
+  const session = this.scratch.get("appUnderTest") as AppUnderTest;
   const alice = actorNamed(this, "alice");
   const bob = actorNamed(this, "bob");
   assert.equal(session.texts.length, 2);
   const appOrigin = session.second.appUrl.origin;
-  const everyCall = [alice, bob].flatMap((actor) => [...actor.calls, ...actor.xrpc.filter((call) => call.origin === appOrigin)]);
+  const everyCall = [alice, bob].flatMap((actor) => actor.xrpc.filter((call) => call.origin === appOrigin));
   assert.ok(everyCall.length > 0, "the people's browsers did talk to the app server");
-  const stream = await readStream(`${session.second.appUrl.origin}/api/notifications/dm?space=${encodeURIComponent(dmInboxUri(alice.did))}&after=0`, await cookieHeader(alice));
   const stored = dmpEverythingTheAppStored(session.second.databasePath, session.key);
-  assert.ok(stored.some((value) => value.includes(alice.did)), "the scan of the database sees what the app does keep: accounts and sessions");
+  assert.ok(stored.some((value) => value.includes(alice.did)), "the scan of the database sees what the app does keep: the authority's grant and its operations");
   for (const text of session.texts) {
-    assert.equal(everyCall.some((call) => call.requestBody.includes(text) || call.responseBody.includes(text) || call.path.includes(text)), false, `no /api or operator request or response carries "${text}"`);
-    assert.equal(stream.includes(text), false, "nor does the notification stream");
+    assert.equal(everyCall.some((call) => call.requestBody.includes(text) || call.responseBody.includes(text) || call.path.includes(text)), false, `no request to the app's origin, nor its answer, carries "${text}"`);
     assert.equal(dmpFilesContain(session.second.databasePath, text), false, "nor do the database files");
     assert.equal(stored.some((value) => value.includes(text)), false, "nor any value in it, once decrypted");
     assert.equal(session.second.serverOutput().includes(text), false, "nor the server's own output");
   }
-  assert.match(stream, /^(: keepalive|id: \d+\nevent: change\ndata: \{"cursor":\d+\})/m, "the stream is the content-free change feed");
 });
 
-async function cookieHeader(actor: Actor): Promise<string> {
-  return (await actor.context.cookies()).map((cookie) => `${cookie.name}=${cookie.value}`).join("; ");
-}
-
-async function readStream(url: string, cookie: string): Promise<string> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 3_000);
-  let received = "";
-  try {
-    const response = await fetch(url, { headers: { cookie, accept: "text/event-stream" }, signal: controller.signal });
-    assert.equal(response.status, 200);
-    const reader = response.body!.getReader();
-    for (;;) {
-      const chunk = await reader.read();
-      if (chunk.done) break;
-      received += Buffer.from(chunk.value).toString("utf8");
-    }
-  } catch (error) {
-    if (!(error instanceof Error) || error.name !== "AbortError") throw error;
-  } finally {
-    clearTimeout(timer);
-  }
-  return received;
-}

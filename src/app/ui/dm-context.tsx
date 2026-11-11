@@ -23,7 +23,6 @@ export type DmContextValue = {
   status: BrowserSessionStatus;
   client: DmClient | null;
   store: BrowserDmStore | null;
-  disconnect: () => Promise<void>;
   conversations: DmConversationSummary[];
   requests: DmRequest[];
   skippedNote: string;
@@ -60,14 +59,14 @@ type DmProviderProps = {
 
 /**
  * Owns the shared DM state tree: the browser-held session, conversation and
- * request lists, display labels, and the content-free real-time fan-in (inbox
- * SSE, 60-second fallback poll, and re-notify backoff runs). Conversation
+ * request lists, display labels, and the content-free real-time fan-in (the
+ * operator's change feed, 60-second fallback poll, and re-notify backoff runs). Conversation
  * content lives in `dm-conversation.tsx`; `WorkspaceManager` keeps only the
  * single active DM view selector handed in as `view`.
  */
 export function DmProvider({ did, dmConfig, workspaces, activeWorkspace, view, openView, children }: DmProviderProps) {
   const session = useBrowserSessionContext();
-  const { status, client, store, live, disconnect } = session;
+  const { status, client, store, live } = session;
   const [conversations, setConversations] = useState<DmConversationSummary[]>([]);
   const [requests, setRequests] = useState<DmRequest[]>([]);
   const [skippedNote, setSkippedNote] = useState("");
@@ -176,7 +175,6 @@ export function DmProvider({ did, dmConfig, workspaces, activeWorkspace, view, o
     status,
     client,
     store,
-    disconnect,
     conversations: client ? conversations : [],
     requests: client ? requests : [],
     skippedNote: client ? skippedNote : "",
@@ -197,7 +195,7 @@ export function DmProvider({ did, dmConfig, workspaces, activeWorkspace, view, o
         setError(messageOf(caught));
       }
     },
-  }), [did, dmConfig, status, client, store, disconnect, conversations, requests, skippedNote, inbox, labels, workspaces, activeWorkspace, showAll, view, openView, error, refresh]);
+  }), [did, dmConfig, status, client, store, conversations, requests, skippedNote, inbox, labels, workspaces, activeWorkspace, showAll, view, openView, error, refresh]);
 
   return (
     <DmContext.Provider value={value}>

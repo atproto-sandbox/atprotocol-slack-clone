@@ -12,7 +12,7 @@ export type BrowserClientMetadata = {
 };
 
 /** Where the app serves the browser client's metadata (its client id outside loopback development). */
-export const BROWSER_CLIENT_METADATA_PATH = "/oauth/dm-client-metadata.json";
+export const BROWSER_CLIENT_METADATA_PATH = "/oauth/client-metadata.json";
 
 /**
  * Pure OAuth client metadata for the browser-held member session (the member grant and the DM set, R6). Isomorphic:
@@ -24,7 +24,7 @@ export function buildBrowserClientMetadata(options: { appUrl: string; scope: str
   const appUrl = new URL(options.appUrl);
   const loopback = isLoopbackHostname(appUrl.hostname) && appUrl.protocol === "http:";
   const redirectOrigin = loopback ? `http://127.0.0.1${appUrl.port ? `:${appUrl.port}` : ""}` : appUrl.origin;
-  const redirectUri = `${redirectOrigin}/dm/callback`;
+  const redirectUri = `${redirectOrigin}/oauth/callback`;
   const clientId = loopback
     ? `http://localhost?${new URLSearchParams({ redirect_uri: redirectUri, scope: options.scope }).toString()}`
     : `${appUrl.origin}${BROWSER_CLIENT_METADATA_PATH}`;

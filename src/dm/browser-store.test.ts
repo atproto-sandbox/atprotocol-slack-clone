@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
-import { createBrowserDmStore } from "./browser-store";
+import { createBrowserDmStore, forgetBrowserDmStore } from "./browser-store";
 
 type StorageLike = {
+  readonly length: number;
+  key(index: number): string | null;
   getItem(key: string): string | null;
   setItem(key: string, value: string): void;
   removeItem(key: string): void;
@@ -13,6 +15,13 @@ let raw: Map<string, string>;
 let failing: boolean;
 
 const fakeStorage: StorageLike = {
+  get length(): number {
+    if (failing) throw new Error("storage denied");
+    return raw.size;
+  },
+  key(index: number): string | null {
+    return [...raw.keys()][index] ?? null;
+  },
   getItem(key: string): string | null {
     if (failing) throw new Error("storage denied");
     return raw.has(key) ? raw.get(key)! : null;
@@ -97,4 +106,21 @@ test("unavailable storage is detected up front and still serves every operation 
   assert.equal(await store.get("k"), "v");
   await store.delete("k");
   assert.equal(await store.get("k"), null);
+});
+
+test("signing out forgets this account's DM state and leaves another account's", async () => {
+  // #given alice's and bob's DM state in this browser
+  await createBrowserDmStore("did:plc:alice").set("hidden-request:at://x", "1");
+  await createBrowserDmStore("did:plc:bob").set("hidden-request:at://y", "1");
+
+  // #when alice signs out
+  forgetBrowserDmStore("did:plc:alice");
+
+  // #then only bob's state is left
+  assert.deepEqual([...raw.keys()], ["dm:did:plc:bob:hidden-request:at://y"]);
+});
+
+test("forgetting DM state with storage unavailable is a no-op, since nothing could have been kept there", () => {
+  failing = true;
+  assert.doesNotThrow(() => forgetBrowserDmStore("did:plc:alice"));
 });

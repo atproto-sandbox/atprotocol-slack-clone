@@ -15,7 +15,7 @@ export function securityHeaderRule() {
   };
 }
 
-// The browser DM session (M3) talks to PDS and PLC hosts directly, so
+// The browser session (sign-in, the engine and DMs) talks to PDS, PLC and handle hosts directly, so
 // connect-src must allow any HTTPS host. Loopback development additionally
 // needs the HTTP loopback origins, mirroring the loopback check in
 // src/lib/config.ts (APP_URL is HTTPS everywhere else, so this is exact).

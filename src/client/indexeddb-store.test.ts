@@ -41,3 +41,21 @@ test("an account's store left open in another tab does not hold up the next acco
   assert.equal(told, true, "the tab holding alice's store is told it was closed");
   assert.deepEqual((await factory.databases()).map((database) => database.name), ["flock-sync-did:plc:bob"]);
 });
+
+test("signing out deletes the account's store and leaves another account's", async () => {
+  // #given alice's store with a space in it, closed as sign-out closes it, and bob's
+  const factory = new IDBFactory();
+  const alice = await IndexedDbStore.open("did:plc:alice", factory);
+  await alice.putSpace({ space: "at://did:plc:a/space/new.flock.channel/one", spaceRev: null, writers: [], writersListedAt: null, workspace: null, lastOpenedAt: 1 });
+  alice.close();
+  (await IndexedDbStore.open("did:plc:bob", factory)).close();
+
+  // #when alice signs out
+  await IndexedDbStore.deleteAccount("did:plc:alice", factory);
+
+  // #then her database is gone, and opening it again finds nothing
+  assert.deepEqual((await factory.databases()).map((database) => database.name), ["flock-sync-did:plc:bob"]);
+  const reopened = await IndexedDbStore.open("did:plc:alice", factory);
+  assert.deepEqual(await reopened.listSpaces(), []);
+  reopened.close();
+});

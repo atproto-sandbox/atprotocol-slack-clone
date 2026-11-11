@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { OAuthSession } from "@atproto/oauth-client-node";
 import { verifyJwt } from "@atproto/xrpc-server";
 import {
+  actorTransport,
   bearerSession,
   callOperatorMethod,
   combinedMemberScopes,
+  mintBrowserSession,
   outcome,
   startPdsNetwork,
   storeAuthorityGrant,
-  storeOAuthSession,
   type NetworkActor,
   type Outcome,
   type PdsNetwork,
@@ -16,8 +18,8 @@ import {
 
 // K3 and K7 of `.ai/plans/platform-refactor.md`: capability checks against the pinned PDS that the browser member session
 // (R5, R6) and the first bot (R9) depend on. K7 found that an app password cannot mint a space credential, so the bot path
-// is proven with the bot's own OAuth session. They exercise the protocol and today's server-side code paths with the
-// final grant shape, under today's `new.flock.*` names (R3 renames them).
+// is proven with the bot's own OAuth session. Each account holds the browser's own OAuth client with the final grant shape
+// (`mintBrowserSession`), and a member acts through the engine, as its browser does.
 
 test("platform capabilities at the pinned PDS (K3, K7)", async (t) => {
   const pds = await startPdsNetwork("platform-capabilities");
@@ -30,13 +32,15 @@ test("platform capabilities at the pinned PDS (K3, K7)", async (t) => {
       const member = await pds.createActor("k3member", 1);
       const admin = await pds.createActor("k3admin", 1);
       const outsider = await pds.createActor("k3outsider", 0);
-      for (const actor of [member, admin, outsider]) await storeOAuthSession(actor.pds, actor.did, scopes, `k3-${actor.handle}`);
+      const [memberGrant, adminGrant, outsiderGrant] = await Promise.all([member, admin, outsider].map((actor) => mintBrowserSession(actor.pds, actor.did, scopes, `k3-${actor.handle}`)));
       await workspace.invite(member.did);
       await workspace.invite(admin.did);
       await workspace.promote(admin.did);
 
       // when each operation runs with that grant
-      const results = await memberGrantOperations(pds, workspace, { member, admin, outsider });
+      const results = await memberGrantOperations(pds, workspace, [
+        { actor: member, session: memberGrant!.session }, { actor: admin, session: adminGrant!.session }, { actor: outsider, session: outsiderGrant!.session },
+      ]);
 
       // then every operation succeeds
       for (const [operation, result] of Object.entries(results)) st.diagnostic(`${operation}: ${result.ok ? "ok" : result.error}`);
@@ -74,11 +78,11 @@ test("platform capabilities at the pinned PDS (K3, K7)", async (t) => {
     await t.test("a bot with its own OAuth session reads, writes, calls the operator and loses access on removal (K7)", async (st) => {
       // given a bot account holding the member grant through OAuth, invited to the workspace
       const bot = await pds.createActor("k7bot", 1);
-      await storeOAuthSession(bot.pds, bot.did, await combinedMemberScopes(pds.serviceRef), "k7-bot-dpop");
+      const grant = await mintBrowserSession(bot.pds, bot.did, await combinedMemberScopes(pds.serviceRef), "k7-bot-dpop");
       await workspace.invite(bot.did);
 
       // when it uses only that session
-      const results = await botOperations(pds, workspace, bot);
+      const results = await botOperations(pds, workspace, bot, grant.session);
 
       // then each step behaves as the platform needs
       for (const [operation, result] of Object.entries(results)) st.diagnostic(`${operation}: ${result.ok ? "ok" : result.error}`);
@@ -124,47 +128,34 @@ async function createWorkspace(pds: PdsNetwork): Promise<Workspace> {
   };
 }
 
-async function memberGrantOperations(
-  pds: PdsNetwork,
-  workspace: Workspace,
-  actors: { member: NetworkActor; admin: NetworkActor; outsider: NetworkActor },
-): Promise<Record<string, Outcome>> {
-  const [{ getOAuthClientForSession }, { discoverWorkspaceState }, { mintSpaceCredential }, { isAccessLost }, { sessionClient }, { readChannelPage }, keys, { validateSpaceRecord }] = await Promise.all([
-    import("@/auth/oauth"), import("@/workspaces/read-model"), import("@/atproto/space-credential"), import("@/atproto/space-credential-core"),
-    import("@/atproto/client"), import("@/workspaces/channel-sync"), import("@/protocol/keys"), import("@/protocol/registry"),
+type GrantHolder = { actor: NetworkActor; session: OAuthSession };
+
+async function memberGrantOperations(pds: PdsNetwork, workspace: Workspace, holders: [GrantHolder, GrantHolder, GrantHolder]): Promise<Record<string, Outcome>> {
+  const [{ createEngine }, { isAccessLost }, { sessionClient }, keys, { validateSpaceRecord }] = await Promise.all([
+    import("@/client/engine"), import("@/atproto/space-credential-core"), import("@/atproto/client"), import("@/protocol/keys"), import("@/protocol/registry"),
   ]);
-  const restore = async (actor: NetworkActor) => (await getOAuthClientForSession(actor.did)).restore(actor.did);
-  const member = await restore(actors.member);
-  const admin = await restore(actors.admin);
-  const outsider = await restore(actors.outsider);
+  // The engine as the account's browser runs it: its own requests go out with the OAuth session.
+  const engineFor = ({ actor, session }: GrantHolder) => createEngine({ ...actorTransport(pds, actor), memberClient: sessionClient(session) });
+  const [memberHolder, adminHolder, outsiderHolder] = holders;
+  const [member, admin] = [memberHolder.session, adminHolder.session];
+  const [memberEngine, adminEngine, outsiderEngine] = [engineFor(memberHolder), engineFor(adminHolder), engineFor(outsiderHolder)];
   const authorityDid = keys.parseWorkspaceUri(workspace.uri)!.authorityDid;
+  const general = { workspace: workspace.uri, skey: workspace.generalSkey };
 
   const results: Record<string, Outcome> = {};
   results["accepting the invitation writes the acceptance record"] = await outcome(async () => {
-    const rkey = keys.acceptanceRecordKey(workspace.uri);
-    const record = { $type: "new.flock.acceptance", workspace: workspace.uri, createdAt: new Date().toISOString() };
-    assert.ok(validateSpaceRecord("new.flock.acceptance", record, { authorityDid, spaceUri: workspace.uri, repoDid: member.did, rkey }).valid);
-    await mintSpaceCredential(member, workspace.uri);
-    await sessionClient(member).procedure("com.atproto.space.putRecord", { space: workspace.uri, repo: member.did, collection: "new.flock.acceptance", rkey, record });
+    const accepted = await memberEngine.workspaces.accept(workspace.uri);
+    assert.equal(accepted.marker, `${workspace.uri}/${member.did}/new.flock.acceptance/${keys.acceptanceRecordKey(workspace.uri)}`);
   });
   // Discovery finds a workspace through the member's own acceptance record (the protocol has no "spaces I was added to").
   results["discovery lists the accepted workspace"] = await outcome(async () => {
-    const found = await discoverWorkspaceState(member);
+    const found = await memberEngine.workspaces.discover();
     assert.ok(found.workspaces.some((entry) => entry.uri === workspace.uri), "the accepted workspace is listed");
   });
-  results["writing a channel message"] = await outcome(async () => {
-    await mintSpaceCredential(member, workspace.general);
-    const record = { $type: "new.flock.channel.message", text: "k3 hello", createdAt: new Date().toISOString() };
-    await sessionClient(member).procedure("com.atproto.space.createRecord", { space: workspace.general, repo: member.did, collection: "new.flock.channel.message", rkey: keys.tidNow(), record });
-  });
+  results["writing a channel message"] = await outcome(() => memberEngine.channels.send(general, "k3 hello"));
   results["reading the channel page"] = await outcome(async () => {
-    // The authority lists a writer once its host has delivered the write notice, which is asynchronous.
-    for (let attempt = 0; ; attempt += 1) {
-      const page = await readChannelPage(member, workspace.uri, workspace.generalSkey);
-      if (page.messages.some((message) => message.value.text === "k3 hello")) return;
-      assert.ok(attempt < 20, "the member's own message is read back");
-      await new Promise((resolve) => setTimeout(resolve, 250));
-    }
+    const page = await memberEngine.channels.readPage(general);
+    assert.ok(page.messages.some((message) => message.value.text === "k3 hello"), "the member's own message is read back");
   });
   const requestKey = keys.requestRecordKey(workspace.general, member.did);
   results["a member files a join request in the inbox"] = await outcome(async () => {
@@ -173,8 +164,8 @@ async function memberGrantOperations(
     await sessionClient(member).procedure("com.atproto.space.putRecord", { space: workspace.inbox, repo: member.did, collection: "new.flock.joinRequest", rkey: requestKey, record });
   });
   results["an admin reads that request from the inbox (MAC-verified)"] = await outcome(async () => {
-    const credential = await mintSpaceCredential(admin, workspace.inbox);
-    const request = await credential.client(actors.member.pds.url).query<{ value: { channelSkey?: string } }>("com.atproto.space.getRecord", {
+    const client = await adminEngine.credentials.clientFor(workspace.inbox, member.did);
+    const request = await client.query<{ value: { channelSkey?: string } }>("com.atproto.space.getRecord", {
       space: workspace.inbox, repo: member.did, collection: "new.flock.joinRequest", rkey: requestKey,
     });
     assert.equal(request.value.channelSkey, workspace.generalSkey);
@@ -216,7 +207,7 @@ async function memberGrantOperations(
     assert.match(refusal instanceof Error ? refusal.message : "", /answered 403: .*AuthorizationRequired/, "the token was accepted; only the grant is missing");
   });
   results["a non-member holding the grant is refused a credential"] = await outcome(async () => {
-    const refusal = await mintSpaceCredential(outsider, workspace.uri).then(() => null, (error: unknown) => error);
+    const refusal = await outsiderEngine.credentials.fresh(workspace.uri).then(() => null, (error: unknown) => error);
     assert.ok(refusal && isAccessLost(refusal), "the authority refuses a credential to an account outside the member list");
   });
   results["direct messages: enable, start, accept, send, read"] = await outcome(async () => {
@@ -235,11 +226,10 @@ async function memberGrantOperations(
   return results;
 }
 
-async function botOperations(pds: PdsNetwork, workspace: Workspace, bot: NetworkActor): Promise<Record<string, Outcome>> {
-  const [{ getOAuthClientForSession }, { mintSpaceCredential }, { isAccessLost }, { sessionClient }, { resolvePds }, keys] = await Promise.all([
-    import("@/auth/oauth"), import("@/atproto/space-credential"), import("@/atproto/space-credential-core"), import("@/atproto/client"), import("@/atproto/identity"), import("@/protocol/keys"),
+async function botOperations(pds: PdsNetwork, workspace: Workspace, bot: NetworkActor, session: OAuthSession): Promise<Record<string, Outcome>> {
+  const [{ mintSpaceCredential }, { isAccessLost }, { sessionClient }, { resolvePds }, keys] = await Promise.all([
+    import("@/atproto/space-credential"), import("@/atproto/space-credential-core"), import("@/atproto/client"), import("@/atproto/identity"), import("@/protocol/keys"),
   ]);
-  const session = await (await getOAuthClientForSession(bot.did)).restore(bot.did);
   const results: Record<string, Outcome> = {};
   let messageUri = "";
   results["mints a channel credential (getDelegationToken, getSpaceCredential)"] = await outcome(() => mintSpaceCredential(session, workspace.general));

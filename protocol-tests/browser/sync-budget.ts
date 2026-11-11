@@ -1,6 +1,6 @@
 import { chromium, type Browser, type Page } from "@playwright/test";
 import { availablePort, startAppServer, type AppServer } from "../support/app-server";
-import { signInAndConnect } from "../support/browser-app";
+import { signIn } from "../support/browser-app";
 import { actorTransport, bearerSession, startPdsNetwork, type NetworkActor, type PdsNetwork } from "../support/pds-network";
 import { createChannel, deleteMessage, MESSAGES_PER_WRITER, percentile, Probe, provision, writeMessage, WRITER_COUNTS } from "../support/sync-dataset";
 import { BROWSER_CLIENT_METADATA_PATH } from "@/browser/client-metadata";
@@ -37,7 +37,7 @@ async function main(): Promise<void> {
     const page = await context.newPage();
     page.setDefaultTimeout(120_000);
     const sent = await recordRequests(page);
-    await signInAndConnect(page, app.url, reader, WORKSPACE_NAME);
+    await signIn(page, app.url, reader, WORKSPACE_NAME);
     const appOrigin = new URL(app.url).origin;
 
     const rows: Array<{ writers: number; phase: Phase; calls: number; preflights: number; median: number; p95: number; byMethod: Record<string, number> }> = [];

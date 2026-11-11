@@ -6,6 +6,7 @@ import { tidNow } from "@/protocol/keys";
 import { resumePendingWorkspaceBootstraps } from "@/operator/kinds/bootstrap-workspace";
 import { assertOperatorWorkspaceWithinEnvelope } from "@/operator/workspace-envelope";
 import { registrationDeps, registrationProblems, sweepRegistrations } from "@/operator/registrations";
+import { pruneNotices } from "@/operator/notices";
 import { adminMutationsPaused } from "@/operator/mutations-paused";
 
 async function main() {
@@ -56,6 +57,9 @@ async function main() {
       failed = true;
     }
   }
+  // Local only, so it runs while mutations are paused too, and before the sweep, which can throw: week-old notices, and
+  // registrations that ran out a month ago.
+  pruneNotices();
   // Notice registrations: backfilled and renewed at most every 30 minutes, whichever process gets there first, and not while
   // mutations are paused. A space without one gets no change ticks, so its clients fall back to their hourly check: worth a
   // warning and the admin screen, not a failed run.

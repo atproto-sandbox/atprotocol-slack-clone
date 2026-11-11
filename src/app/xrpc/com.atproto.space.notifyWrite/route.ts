@@ -3,7 +3,6 @@ import { OperatorAuthError } from "@/operator/errors";
 import { authenticateSpaceNotification } from "@/operator/space-notification";
 import { recordWriteNotification } from "@/operator/notices";
 import { parseWriteNotification } from "@/atproto/write-notification";
-import { markRepoStale } from "@/workspaces/cache";
 import { readRequestJson, RequestJsonError } from "@/lib/bounded-json";
 
 export const runtime = "nodejs";
@@ -14,7 +13,6 @@ export async function POST(request: NextRequest) {
     if (!notification) return xrpcError(400, "InvalidRequest", "Invalid space write notification.");
     await authenticateSpaceNotification(request, "com.atproto.space.notifyWrite", notification.space);
     recordWriteNotification(notification);
-    markRepoStale(notification.space, notification.repo);
     return NextResponse.json({}, { headers: { "cache-control": "no-store" } });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Notification rejected.";

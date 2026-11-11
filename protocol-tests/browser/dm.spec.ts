@@ -11,11 +11,11 @@ import { chromium, type Page } from "@playwright/test";
 import { createFixtureTempRoot } from "../fixture-temp";
 
 // M5 browser acceptance (.ai/plans/dm-tasks/m5.md): two accounts on two PDS
-// hosts complete a full DM round trip through the real browser OAuth flow
-// (both the app's own session and the separate browser-held DM session),
-// then one side revokes and the other loses access after reload. Alongside
-// the UI assertions, every /api/* request made by either page is captured so
-// the test can prove message text never reaches this app's own server.
+// hosts complete a full DM round trip through the real browser OAuth flow (the
+// one browser-held session, which signing in creates), then one side revokes
+// and the other loses access after reload. Alongside the UI assertions, every
+// request either page sends to the app's own origin is captured so the test
+// can prove message text never reaches this app's server.
 
 const projectRoot = process.cwd();
 const pinnedCheckout = process.env.ATPROTO_PINNED_CHECKOUT;
@@ -48,8 +48,8 @@ let aliceDid = "";
 let bobDid = "";
 let serverOutput = "";
 
-type ApiRequestRecord = { actor: string; method: string; url: string; body: string };
-const apiRequests: ApiRequestRecord[] = [];
+type AppRequestRecord = { actor: string; method: string; url: string; body: string };
+const appRequests: AppRequestRecord[] = [];
 const macResponses: Array<Promise<{ actor: string; url: string; headers: Record<string, string> }>> = [];
 
 before(async () => {
@@ -121,13 +121,13 @@ test("real browsers complete a DM round trip across two PDS hosts, then a leave 
     const bobPage = await bobContext.newPage();
     alicePage.setDefaultTimeout(30_000);
     bobPage.setDefaultTimeout(30_000);
-    recordApiRequests("alice", alicePage);
-    recordApiRequests("bob", bobPage);
+    recordAppRequests("alice", alicePage, appUrl);
+    recordAppRequests("bob", bobPage, appUrl);
     recordMacResponses("alice", alicePage);
     recordMacResponses("bob", bobPage);
 
-    await loginAndConnectDms(alicePage, appUrl, aliceDid, "dm-alice.test", alicePassword);
-    await loginAndConnectDms(bobPage, appUrl, bobDid, "dm-bob.test2", bobPassword);
+    await signInForDms(alicePage, appUrl, aliceDid, alicePassword);
+    await signInForDms(bobPage, appUrl, bobDid, bobPassword);
 
     // Bob enables DMs (default "Only people I allow") then switches to
     // "Everyone" so alice's request is tracked without needing a prior allowlist entry.
@@ -194,9 +194,9 @@ test("real browsers complete a DM round trip across two PDS hosts, then a leave 
     await alicePage.getByText("hasn't replied or removed your access", { exact: true }).waitFor({ state: "visible" });
     assert.equal(await alicePage.getByText(bobReply, { exact: true }).count(), 0, "bob's messages disappear once his half is revoked");
 
-    const forbiddenBodies = apiRequests.filter((entry) => entry.body.includes(aliceMessage) || entry.body.includes(bobReply));
-    assert.deepEqual(forbiddenBodies, [], `no /api/* request body may contain DM message text: ${JSON.stringify(forbiddenBodies)}`);
-    assert.ok(apiRequests.length > 0, "sanity check: /api/* traffic was actually observed during the flow");
+    const forbidden = appRequests.filter((entry) => [aliceMessage, bobReply].some((text) => entry.body.includes(text) || decodeURIComponent(entry.url).includes(text)));
+    assert.deepEqual(forbidden, [], `no request to the app's origin may carry DM message text: ${JSON.stringify(forbidden)}`);
+    assert.ok(appRequests.length > 0, "sanity check: traffic to the app's origin was actually observed during the flow");
   } finally {
     await bobContext.close();
     await aliceContext.close();
@@ -213,16 +213,16 @@ function recordMacResponses(actor: string, page: Page): void {
   });
 }
 
-function recordApiRequests(actor: string, page: Page): void {
+function recordAppRequests(actor: string, page: Page, app: URL): void {
   page.on("request", (request) => {
     const url = new URL(request.url());
-    if (!url.pathname.startsWith("/api/")) return;
+    if (url.origin !== app.origin) return;
     const body = request.postData() ?? "";
-    apiRequests.push({ actor, method: request.method(), url: request.url(), body });
+    appRequests.push({ actor, method: request.method(), url: request.url(), body });
   });
 }
 
-async function loginAndConnectDms(page: Page, app: URL, did: string, handle: string, password: string): Promise<void> {
+async function signInForDms(page: Page, app: URL, did: string, password: string): Promise<void> {
   await page.goto(app.origin);
   await page.getByLabel("Your AT Protocol handle").fill(did);
   await page.getByRole("button", { name: /Continue with atproto/i }).click();
@@ -231,27 +231,9 @@ async function loginAndConnectDms(page: Page, app: URL, did: string, handle: str
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page.getByRole("button", { name: "Authorize", exact: true }).waitFor({ state: "visible" });
   await page.getByRole("button", { name: "Authorize", exact: true }).click();
-  await page.waitForURL(app.origin, { timeout: 30_000 });
-
-  await page.getByRole("button", { name: "Connect this browser →" }).click();
-  await page.waitForURL(/\/oauth\/authorize\?/, { timeout: 30_000 }).catch(async (error: unknown) => {
-    throw new Error(`Connecting the browser did not redirect to PDS authorize. URL: ${page.url()} Page: ${(await page.locator("body").innerText()).slice(0, 2_000)}`, { cause: error });
-  });
-  await signInIfPrompted(page, handle, password);
-  await page.getByRole("button", { name: "Authorize", exact: true }).waitFor({ state: "visible" });
-  await page.getByRole("button", { name: "Authorize", exact: true }).click();
-  await page.waitForURL(`${app.origin}/dm/callback**`, { timeout: 30_000 });
+  await page.waitForURL(`${app.origin}/oauth/callback**`, { timeout: 30_000 });
   await page.waitForURL(app.origin, { timeout: 30_000 });
   await page.getByRole("button", { name: /New message/ }).waitFor({ state: "visible" });
-}
-
-async function signInIfPrompted(page: Page, handle: string, password: string): Promise<void> {
-  const passwordInput = page.locator("input[name=password]");
-  if (!await passwordInput.isVisible().catch(() => false)) return;
-  const usernameInput = page.locator("input[name=username]");
-  if (await usernameInput.isVisible().catch(() => false) && !await usernameInput.inputValue()) await usernameInput.fill(handle);
-  await passwordInput.fill(password);
-  await page.getByRole("button", { name: "Sign in", exact: true }).click();
 }
 
 async function publishAppLexicons(fixture: TestNetwork): Promise<void> {

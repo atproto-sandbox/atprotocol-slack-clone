@@ -1,13 +1,16 @@
 import assert from "node:assert/strict";
 import BetterSqlite3 from "better-sqlite3";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { closeDb, getRawDb } from "@/lib/db";
 import { listJournaledWorkspaces, listRecoverableOperations } from "./journal";
 
-test("journal migration indexes legacy operation rows by workspace URI", () => {
+const MEMBER_TOKEN = "member-access-token-sentinel";
+const CHANNEL_CONTENT = "channel-content-sentinel";
+
+test("journal migration indexes legacy operation rows by workspace URI; an older database keeps nothing of the member session", () => {
   const directory = mkdtempSync(join(tmpdir(), "slack-journal-migration-test-"));
   const databasePath = join(directory, "legacy.db");
   const workspaceDid = "did:plc:legacyowner";
@@ -54,12 +57,15 @@ test("journal migration indexes legacy operation rows by workspace URI", () => {
       updated_at INTEGER NOT NULL,
       PRIMARY KEY (account_did, workspace_uri, space_uri)
     );
+    CREATE TABLE oauth_session (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL);
+    CREATE TABLE oauth_state (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL);
+    CREATE TABLE web_session (token_hash TEXT PRIMARY KEY, did TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL);
   `);
   const account = "did:plc:legacyreader";
   const channel = `at://${workspaceDid}/space/new.flock.channel/general`;
   legacy.prepare(`INSERT INTO channel_record_cache
     (account_did,space_uri,repo_did,collection,rkey,uri,value_cipher,updated_at) VALUES (?,?,?,?,?,?,?,?)`)
-    .run(account, channel, account, "new.flock.channel.message", "2222222222299", `at://${account}/new.flock.channel.message/2222222222299`, "v1.unbound", now);
+    .run(account, channel, account, "new.flock.channel.message", "2222222222299", `at://${account}/new.flock.channel.message/2222222222299`, CHANNEL_CONTENT, now);
   legacy.prepare(`INSERT INTO space_collection_cursor
     (account_did,space_uri,repo_did,collection,rev,next_cursor,finished,checked_at) VALUES (?,?,?,?,?,?,?,?)`)
     .run(account, channel, account, "new.flock.channel.message", "rev", null, 1, now);
@@ -67,6 +73,9 @@ test("journal migration indexes legacy operation rows by workspace URI", () => {
     .run(account, channel, account, "rev", now);
   legacy.prepare("INSERT INTO workspace_channel_cache (account_did,workspace_uri,space_uri,updated_at) VALUES (?,?,?,?)")
     .run(account, workspaceUri, channel, now);
+  legacy.prepare("INSERT INTO oauth_session (key,value,updated_at) VALUES (?,?,?)").run(account, JSON.stringify({ access_token: MEMBER_TOKEN }), now);
+  legacy.prepare("INSERT INTO oauth_state (key,value,updated_at) VALUES (?,?,?)").run("state", MEMBER_TOKEN, now);
+  legacy.prepare("INSERT INTO web_session (token_hash,did,created_at,expires_at) VALUES (?,?,?,?)").run(MEMBER_TOKEN, account, now, now + 3600);
   legacy.close();
   try {
     const raw = getRawDb();
@@ -74,11 +83,14 @@ test("journal migration indexes legacy operation rows by workspace URI", () => {
     assert.equal(migrated.workspace_uri, workspaceUri);
     assert.deepEqual(listJournaledWorkspaces(), [{ authorityDid: workspaceDid, uri: workspaceUri }]);
     assert.equal(listRecoverableOperations(workspaceDid, workspaceUri).length, 1);
-    for (const table of ["channel_record_cache", "space_collection_cursor", "sync_cursor"]) {
-      assert.equal((raw.prepare(`SELECT count(*) AS count FROM ${table}`).get() as { count: number }).count, 0, `${table} is cleared`);
+    const tables = (raw.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map(({ name }) => name);
+    for (const table of ["oauth_state", "oauth_session", "web_session", "sync_cursor", "channel_record_cache", "workspace_channel_cache", "space_collection_cursor"]) {
+      assert.ok(!tables.includes(table), `${table} is dropped`);
     }
-    assert.equal((raw.prepare("SELECT count(*) AS count FROM workspace_channel_cache").get() as { count: number }).count, 1);
-    assert.ok(raw.prepare("SELECT 1 FROM schema_migration WHERE version = 2").get());
+    // Nothing of what they held survives in the file's free pages.
+    const file = Buffer.concat([databasePath, `${databasePath}-wal`].filter(existsSync).map((path) => readFileSync(path)));
+    assert.equal(file.includes(MEMBER_TOKEN), false, "no member token is left in the database file");
+    assert.equal(file.includes(CHANNEL_CONTENT), false, "no channel content is left in the database file");
   } finally {
     closeDb();
     rmSync(directory, { recursive: true, force: true });

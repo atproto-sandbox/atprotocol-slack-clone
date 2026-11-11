@@ -33,8 +33,8 @@ export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: Bro
 }
 
 function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessionConfig }) {
-  // Reads, writes and operator calls all go through the engine on the browser session; only sign-in and sign-out stay on the
-  // server until R6c.
+  // Sign-in, reads, writes and operator calls all go through the browser session and its engine; the server holds no member
+  // session.
   const session = useBrowserSessionContext();
   const { engine, live, status: sessionStatus, error: sessionError, connect: connectSession } = session;
   /** The workspace and channel a person chose; what is shown follows the workspaces as last discovered. */

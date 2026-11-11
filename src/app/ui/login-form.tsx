@@ -2,21 +2,24 @@
 
 import { FormEvent, useEffect, useState } from "react";
 import Link from "next/link";
-import { captureInviteLink, clearAccountScopedState, INVITE_LINK_KEY } from "./client-api";
+import { signIn, type BrowserSessionConfig } from "@/browser/session";
+import { captureInviteLink, clearAccountScopedState, INVITE_LINK_KEY, messageOf, SIGN_OUT_KEPT, SIGN_OUT_PARAM, SIGN_OUT_UNREVOKED } from "./client-api";
 
-export function LoginForm() {
+/** Signs in with the browser's one OAuth client: the account's host asks for consent and sends the browser back. */
+export function LoginForm({ config, ended = "" }: { config: BrowserSessionConfig; ended?: string }) {
   const [handle, setHandle] = useState("");
-  const [error, setError] = useState("");
+  const [error, setError] = useState(ended);
   const [busy, setBusy] = useState(false);
   const [invited, setInvited] = useState(false);
+  const [signOutUnheld, setSignOutUnheld] = useState<string[]>([]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
       clearAccountScopedState(sessionStorage, [INVITE_LINK_KEY]);
-      if (captureInviteLink(window.location.search, sessionStorage)) {
-        setInvited(true);
-        window.history.replaceState(null, "", window.location.pathname);
-      }
+      const search = window.location.search;
+      if (captureInviteLink(search, sessionStorage)) setInvited(true);
+      setSignOutUnheld((new URLSearchParams(search).get(SIGN_OUT_PARAM) ?? "").split(",").filter(Boolean));
+      if (search) window.history.replaceState(null, "", window.location.pathname);
     }, 0);
     return () => window.clearTimeout(timer);
   }, []);
@@ -26,16 +29,9 @@ export function LoginForm() {
     setError("");
     setBusy(true);
     try {
-      const response = await fetch("/api/oauth/login", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ handle }),
-      });
-      const result = (await response.json()) as { redirectUrl?: string; error?: string };
-      if (!response.ok || !result.redirectUrl) throw new Error(result.error ?? "Unable to start sign in.");
-      window.location.assign(result.redirectUrl);
+      await signIn(handle.trim().replace(/^@/, ""), config);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Unable to start sign in.");
+      setError(messageOf(caught));
       setBusy(false);
     }
   }
@@ -57,6 +53,8 @@ export function LoginForm() {
           <h1>Good work happens<br /><em>together.</em></h1>
           <p className="welcome-description">A calmer place for your team’s conversations. Your workspace, your data, your people.</p>
           {invited && <p className="status-note" role="status">You&rsquo;ve been invited to a workspace. Sign in with your account to join it.</p>}
+          {signOutUnheld.includes(SIGN_OUT_UNREVOKED) && <p className="status-note" role="status">You are signed out of this browser. Your account&rsquo;s host could not be reached to end the session there, so it ends when it expires.</p>}
+          {signOutUnheld.includes(SIGN_OUT_KEPT) && <p className="status-note" role="status">What this browser held for your account could not all be deleted now (another tab of this app may hold it open). Close the app&rsquo;s other tabs and sign in and out again, or it goes when another account signs in here.</p>}
           <form className="signin-form" onSubmit={submit}>
             <label htmlFor="handle">Your AT Protocol handle</label>
             <div className="handle-input"><span>@</span><input id="handle" autoComplete="username" placeholder="you.bsky.social" value={handle} onChange={(event) => setHandle(event.target.value)} required /></div>

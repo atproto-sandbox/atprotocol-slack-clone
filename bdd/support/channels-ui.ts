@@ -8,7 +8,7 @@ import { inviteLinkFor } from "@/app/ui/client-api";
 import type { SecondApp } from "../../protocol-tests/support/app-fixture";
 import { PAGE_TIMEOUT_MS, type Actor, type ApiCall, type AppWorld } from "./world";
 import { browserRecords } from "./browser-store";
-import { waitForAdminControls, completeConsent, connectBrowser, createWorkspaceAs, eventually, inviteMemberAs, waitForOrigin } from "./ui";
+import { waitForAdminControls, createWorkspaceAs, eventually, inviteMemberAs, signInFromLoginFormAt } from "./ui";
 
 export type ChannelRef = { skey: string; name: string; uri: string; visibility: string };
 export type Member = { did: string; read: boolean; write: boolean };
@@ -108,17 +108,13 @@ export type Site = { origin: string };
 export const primarySite = (world: AppWorld): Site => ({ origin: world.appOrigin });
 export const siteOf = (app: SecondApp): Site => ({ origin: app.appUrl.origin });
 
-export async function waitForSite(site: Site, actor: Actor): Promise<void> {
-  await waitForOrigin(actor, site.origin);
-}
-
 /** The same account in another browser context, signed in to a different app. Registered so the scenario closes it. */
 export async function startSessionOn(world: AppWorld, actor: Actor, site: Site, label: string): Promise<Actor> {
   const role = `${actor.role}@${label}`;
   const context = await world.newContext(role);
   const page = await context.newPage();
   page.setDefaultTimeout(PAGE_TIMEOUT_MS);
-  const session: Actor = { ...actor, role, context, page, calls: [], xrpc: [] };
+  const session: Actor = { ...actor, role, context, page, xrpc: [] };
   world.recordCalls(session);
   world.actors.set(role, session);
   await page.goto(site.origin);
@@ -126,19 +122,11 @@ export async function startSessionOn(world: AppWorld, actor: Actor, site: Site, 
 }
 
 
-async function signInFromLoginFormOn(site: Site, actor: Actor): Promise<void> {
-  await actor.page.getByLabel("Your AT Protocol handle").fill(actor.did);
-  await actor.page.getByRole("button", { name: /Continue with atproto/i }).click();
-  await actor.page.locator("input[name=password]").waitFor({ state: "visible" });
-  await completeConsent(actor);
-  await waitForSite(site, actor);
-  await connectBrowser(actor, site.origin);
-}
 
 export async function joinWorkspaceOn(site: Site, actor: Actor, inviteLink: string): Promise<void> {
   await actor.page.goto(inviteLink);
   await actor.page.getByText(/invited to a workspace/).waitFor({ state: "visible" });
-  await signInFromLoginFormOn(site, actor);
+  await signInFromLoginFormAt(actor, site.origin);
   await actor.page.getByRole("region", { name: "Workspace invitation" }).getByRole("button", { name: "Join this workspace" }).click();
 }
 

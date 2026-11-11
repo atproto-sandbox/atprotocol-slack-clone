@@ -150,8 +150,8 @@ Feature: Direct messages
       Then their conversations are rebuilt from their own spaces, halves, and inbox
       And the other halves are read with freshly minted credentials
 
-    Scenario: The app server never holds DM scopes or DM content
-      Given the app runs its own server session for workspaces
+    Scenario: The app server holds no member session, no member token and no DM content
+      Given people sign in to an app with its own database and create a workspace there
       When direct messages are exchanged
-      Then that session holds no DM scope
+      Then the app server holds no member session and no member token
       And no server route stores or returns DM content

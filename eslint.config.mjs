@@ -23,14 +23,14 @@ const ISOMORPHIC_PROTOCOL_MODULES = [
 const ISOMORPHIC_PROTOCOL_TEST_FILES = ["src/browser/**/*.test.{ts,tsx}", "src/client/**/*.test.{ts,tsx}", "src/dm/**/*.test.{ts,tsx}", "src/protocol/**/*.test.{ts,tsx}"];
 const APP_LAYER_BOUNDARY = {
   group: [
-    "@/lib/db", "@/lib/config", "@/auth/*", "@/operator/*", "@/workspaces/*",
+    "@/lib/db", "@/lib/config", "@/auth/*", "@/operator/*",
     "@atproto/oauth-client-node", "undici", "@/atproto/identity",
   ],
   message: "Isomorphic engine, DM and protocol modules must not depend on the server-only session, database, or SSRF-guarded fetch layer.",
 };
 const ONE_WAY_IMPORTS = {
-  group: ["@/workspaces", "@/workspaces/*", "@/app", "@/app/*"],
-  message: "Imports point one way: the atproto and operator layers must not depend on the member read model (src/workspaces) or the app.",
+  group: ["@/app", "@/app/*"],
+  message: "Imports point one way: the atproto and operator layers must not depend on the app.",
 };
 const MEMBER_LIST_WRITES = {
   name: "@/atproto/space-ops",
@@ -92,9 +92,10 @@ export default defineConfig([
     },
   },
   {
-    // M6: DMs never touch server routes, tables, or cache. No handler under
-    // `src/app/api/**` may import the DM engine.
-    files: ["src/app/api/**/*.{ts,tsx}"],
+    // M6: DMs never touch server routes, tables, or cache. No server route
+    // handler (the operator's XRPC methods, the authority flow, metadata) may
+    // import the DM engine.
+    files: ["src/app/**/route.{ts,tsx}"],
     rules: {
       "no-restricted-imports": ["error", { patterns: [NO_DM_IMPORT] }],
     },

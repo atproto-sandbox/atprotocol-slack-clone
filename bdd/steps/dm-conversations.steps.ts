@@ -704,13 +704,16 @@ Then("no app server is asked for the request", async function (this: AppWorld) {
   const sender = dmcActor(this, "sender");
   const recipient = dmcActor(this, "recipient");
   const convKey = dmcRecall<string>(this, "convKey");
-  const appCalls = dmcTrafficOf(this, recipient).requests.filter((request) => new URL(request.url).origin === this.appOrigin && new URL(request.url).pathname.startsWith("/api/"));
+  // Everything the recipient's browser sent to the app's origin (pages, assets, the operator's methods), and the operator's
+  // answers where they are recorded (a held change-feed poll is headers-only): the app's server has no member routes, so this
+  // is all it was asked.
+  const appCalls = dmcTrafficOf(this, recipient).requests.filter((request) => new URL(request.url).origin === this.appOrigin);
   assert.ok(appCalls.length > 0, "the recipient's browser did talk to the app server");
   const exchanged = [
     ...appCalls.map((request) => `${request.url}\n${request.postData}`),
-    ...recipient.calls.map((call) => `${call.path}\n${call.requestBody}\n${call.responseBody}`),
+    ...recipient.xrpc.filter((call) => call.origin === this.appOrigin).map((call) => `${call.path}\n${call.requestBody}\n${call.responseBody}`),
   ].join("\n");
-  for (const needle of [convKey, sender.did, "new.flock.dm.request"]) assert.ok(!exchanged.includes(needle), `no /api exchange of the recipient mentions ${needle}`);
+  for (const needle of [convKey, sender.did, "new.flock.dm.request"]) assert.ok(!exchanged.includes(needle), `nothing the recipient exchanged with the app's origin mentions ${needle}`);
   const stored = dmcAppDatabaseText(this);
   for (const needle of ["new.flock.dm.request", '"participants"']) assert.ok(!stored.includes(needle), `the app's database holds no request: it contains no ${needle}`);
   const mentions = dmcAppDatabaseMentions(this, convKey);

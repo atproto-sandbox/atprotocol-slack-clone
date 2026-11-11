@@ -7,7 +7,7 @@ import { pinnedCheckoutPath } from "../../protocol-tests/support/app-fixture";
 import { COLLECTION } from "@/protocol/nsids";
 import { parseWorkspaceUri } from "@/protocol/keys";
 import { listingCalls, openChannel, workspaceChannels } from "./channels-ui";
-import { completeConsent, connectBrowser, escapeRegExp, eventually, waitForOrigin } from "./ui";
+import { escapeRegExp, eventually, signInFromLoginFormAt, waitForOrigin } from "./ui";
 import { PAGE_TIMEOUT_MS, type Actor, type AppWorld } from "./world";
 
 // Helpers for scenarios that compare, attack or stress the app from outside: a second app instance viewed through
@@ -42,7 +42,7 @@ export async function openViewer(world: AppWorld, account: Actor, origin: string
   const context = await world.newContext(role);
   const page = await context.newPage();
   page.setDefaultTimeout(PAGE_TIMEOUT_MS);
-  const viewer: AppViewer = { ...account, role, context, page, calls: [], xrpc: [], origin, requestUrls: [] };
+  const viewer: AppViewer = { ...account, role, context, page, xrpc: [], origin, requestUrls: [] };
   page.on("request", (request) => viewer.requestUrls.push(request.url()));
   world.recordCalls(viewer);
   world.actors.set(role, viewer);
@@ -53,25 +53,17 @@ export async function waitForAppAt(viewer: AppViewer): Promise<void> {
   await waitForOrigin(viewer, viewer.origin);
 }
 
-async function signInFromLoginFormAt(viewer: AppViewer): Promise<void> {
-  await viewer.page.getByLabel("Your AT Protocol handle").fill(viewer.did);
-  await viewer.page.getByRole("button", { name: /Continue with atproto/i }).click();
-  await viewer.page.locator("input[name=password]").waitFor({ state: "visible" });
-  await completeConsent(viewer);
-  await waitForAppAt(viewer);
-  await connectBrowser(viewer, viewer.origin);
-}
 
 export async function signInAt(viewer: AppViewer): Promise<void> {
   await viewer.page.goto(viewer.origin);
-  await signInFromLoginFormAt(viewer);
+  await signInFromLoginFormAt(viewer, viewer.origin);
 }
 
 /** Opens the invite link as a person without a session would, signs in from it, and joins the workspace it names. */
 export async function joinWorkspaceAt(viewer: AppViewer, workspaceUri: string, workspaceName: string): Promise<void> {
   await viewer.page.goto(inviteLinkFor(viewer.origin, workspaceUri));
   await viewer.page.getByText(/invited to a workspace/).waitFor({ state: "visible" });
-  await signInFromLoginFormAt(viewer);
+  await signInFromLoginFormAt(viewer, viewer.origin);
   // A member joins through the invitation. The workspace's own authority reads its workspace from sign-in, so there is
   // nothing to join and the workspace opens directly.
   const join = viewer.page.getByRole("region", { name: "Workspace invitation" }).getByRole("button", { name: "Join this workspace" });

@@ -10,6 +10,10 @@ import { after, before, test } from "node:test";
 import Database from "better-sqlite3";
 import { chromium, type Response as PageResponse } from "@playwright/test";
 import { createFixtureTempRoot } from "../fixture-temp";
+import { actorTransport } from "../support/pds-network";
+import { createEngine } from "@/client/engine";
+import type { OperatorClient } from "@/client/operator-client";
+import { tidNow } from "@/protocol/keys";
 
 const projectRoot = process.cwd();
 const pinnedCheckout = process.env.ATPROTO_PINNED_CHECKOUT;
@@ -131,23 +135,19 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
     await page.getByRole("button", { name: "Sign in", exact: true }).click();
     await page.getByRole("button", { name: "Authorize", exact: true }).waitFor({ state: "visible" });
     assert.match(await page.locator("body").innerText(), /Access permissioned spaces/);
+    // Signing in is the browser's own session: one grant on the PDS for reading and writing the account's spaces, the
+    // operator's methods and direct messages.
+    const browserScope = await page.evaluate(() => String((window as unknown as { __authorizeData?: { scope?: string } }).__authorizeData?.scope ?? ""));
     await page.getByRole("button", { name: "Authorize", exact: true }).click();
 
     await page.waitForURL(appUrl.origin, { timeout: 30_000 });
     await page.getByText("No workspaces yet").waitFor({ state: "visible" });
-    // The browser's own session: one grant on the PDS for reading and writing the account's spaces, the operator's methods
-    // and direct messages.
-    const browserScope = await connectThisBrowser(page, appUrl, "browser-owner.test", password);
     for (const expected of ["space:new.flock.channel?", "new.flock.channel.message", "lxm=new.flock.operator.getChanges", "lxm=new.flock.operator.listInboxWriters", "lxm=new.flock.operator.execute", "lxm=new.flock.operator.createWorkspace", "lxm=new.flock.operator.startAuthorityFlow", "lxm=new.flock.operator.listStalledOperations", "space:new.flock.dm.conversation"]) {
       assert.ok(browserScope.includes(expected), `the browser's grant includes ${expected}`);
     }
     await page.getByText("Create a shared workspace or accept an invitation.").waitFor({ state: "visible" });
 
-    const cookies = await context.cookies(appUrl.origin);
-    const webSession = cookies.find(({ name }) => name === "spaces_session");
-    assert.ok(webSession, "OAuth callback sets the app web-session cookie");
-    assert.equal(webSession.httpOnly, true);
-    assert.equal(cookies.some(({ name }) => name.startsWith("spaces_oauth_")), false, "OAuth state-binding cookie is cleared after callback");
+    assert.deepEqual(await context.cookies(appUrl.origin), [], "signing in sets no cookie on the app: the browser holds the session");
 
     // First-time creation: one click. The operator answers that the authority's approval is required, the app sends the
     // user to the PDS consent screen on its own, and creation resumes after approval.
@@ -270,7 +270,6 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
     await memberPage.getByRole("button", { name: "Authorize", exact: true }).click();
     await memberPage.waitForURL(secondaryAppUrl.origin, { timeout: 30_000 });
     await memberPage.getByText("No workspaces yet").waitFor({ state: "visible" });
-    await connectThisBrowser(memberPage, secondaryAppUrl, "browser-member.test", memberPassword);
 
     await memberPage.getByLabel("Workspace URI").fill(workspaceUri);
     const acceptForm = memberPage.locator("form").filter({ has: memberPage.getByLabel("Workspace URI") });
@@ -390,17 +389,15 @@ test("the authority flow runs twice at once in one browser, and a used callback 
     finally { db.close(); }
   };
   try {
-    // given the owner signed in to the app in one browser
+    // given the owner signed in to the app in one browser, and the operator called as the owner's browser calls it
     const page = await context.newPage();
     page.setDefaultTimeout(30_000);
     await page.goto(app.origin);
     await page.getByLabel("Your AT Protocol handle").fill(ownerDid);
     await page.getByRole("button", { name: /Continue with atproto/i }).click();
     await completePdsConsentFlow(page, app, "browser-owner.test", password);
-    const startUrl = async () => page.evaluate(async (did) => {
-      const response = await fetch("/api/oauth/permission", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "workspaceAuthority", workspaceDid: did }) });
-      return (await response.json() as { redirectUrl: string }).redirectUrl;
-    }, ownerDid);
+    const operator = await ownerOperator(app);
+    const startUrl = async () => new URL((await operator.startAuthorityFlow({ purpose: "reauthorize" })).url, app.origin).href;
     const approve = async (tab: import("@playwright/test").Page) => {
       await tab.waitForURL(/\/oauth\/authorize\?/);
       await signInIfPrompted(tab);
@@ -438,31 +435,23 @@ test("the authority flow runs twice at once in one browser, and a used callback 
     assert.match(third.url(), /[?&]authority=failed/, "a used state is refused even with its cookie");
     assert.deepEqual(grantRow(), afterApproval, "the refused replay leaves the grant as it was");
 
-    // and the grant that remains works: the app creates a workspace with it
-    const created = await page.evaluate(async () => {
-      const operationId = Array.from(crypto.getRandomValues(new Uint8Array(13)), (byte) => "234567abcdefghijklmnopqrstuvwxyz"[byte % 32]).join("").replace(/^[k-z]/, "a");
-      const response = await fetch("/api/workspaces/bootstrap", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "Grant Survivor", operationId }) });
-      return { status: response.status, body: await response.json() as { state?: string } };
-    });
-    assert.equal(created.status, 201, JSON.stringify(created.body));
-    assert.equal(created.body.state, "completed");
+    // and the grant that remains works: the operator creates a workspace with it
+    const created = await operator.createWorkspace({ name: "Grant Survivor", operationId: tidNow() });
+    assert.equal(created.state, "completed", JSON.stringify(created));
   } finally {
     await browser.close();
   }
 });
 
-/** Connects the page's browser session through the PDS consent screen and returns the scope that screen asked for. */
-async function connectThisBrowser(page: import("@playwright/test").Page, app: URL, handle: string, accountPassword: string): Promise<string> {
-  await page.getByRole("button", { name: "Connect this browser →" }).click();
-  await page.waitForURL(/\/oauth\/authorize\?/, { timeout: 30_000 });
-  await signInIfPrompted(page, handle, accountPassword);
-  await page.getByRole("button", { name: "Authorize", exact: true }).waitFor({ state: "visible" });
-  const scope = await page.evaluate(() => String((window as unknown as { __authorizeData?: { scope?: string } }).__authorizeData?.scope ?? ""));
-  await page.getByRole("button", { name: "Authorize", exact: true }).click();
-  await page.waitForURL(app.origin, { timeout: 30_000 });
-  // The prompt stays (as "Connecting this browser…") until the session is restored and the app reads through it.
-  await page.locator(".permission-box").filter({ hasText: /Connect this browser|Connecting this browser/ }).waitFor({ state: "detached", timeout: 30_000 });
-  return scope;
+/** The operator as the owner's browser calls it: each method with a service token the owner's own host issues. */
+async function ownerOperator(app: URL): Promise<OperatorClient> {
+  assert.ok(network);
+  const { data } = await network.pds.getAgent().com.atproto.server.createSession({ identifier: ownerDid, password });
+  const engine = createEngine(actorTransport({ plcUrl: network.plc.url }, { did: ownerDid, accessJwt: data.accessJwt, pds: { url: network.pds.url } }), {
+    operator: { serviceRef: `did:web:localhost%3A${app.port}#atproto_flock_operator`, endpoint: app.origin },
+  });
+  assert.ok(engine.operator);
+  return engine.operator;
 }
 
 async function completePdsConsentFlow(

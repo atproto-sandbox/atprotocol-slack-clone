@@ -5,8 +5,8 @@ import { getRawDb } from "@/lib/db";
 
 type OAuthRow = { key: string; value: string; updated_at: number };
 type OAuthValue = NodeSavedSession | NodeSavedState;
-type OAuthTable = "oauth_state" | "oauth_session" | "authority_grant_state" | "authority_grant";
-const STATE_TABLES: ReadonlySet<OAuthTable> = new Set(["oauth_state", "authority_grant_state"]);
+type OAuthTable = "authority_grant_state" | "authority_grant";
+const STATE_TABLES: ReadonlySet<OAuthTable> = new Set(["authority_grant_state"]);
 const SQLITE_WRITE_RETRY_DELAYS_MS = [100, 250] as const;
 const OAUTH_STATE_RETENTION_MS = 30 * 60 * 1000;
 type Store<T> = {

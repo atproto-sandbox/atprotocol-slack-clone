@@ -3,7 +3,6 @@ import type { RuntimeLock } from "@atproto/oauth-client-node";
 import { getRawDb } from "@/lib/db";
 
 const LEASE_SECONDS = 90;
-const PERMISSION_FLOW_LEASE_SECONDS = 20 * 60;
 const HEARTBEAT_MS = 20_000;
 const ACQUIRE_TIMEOUT_MS = 120_000;
 const POLL_MS = 50;
@@ -19,14 +18,6 @@ export class OAuthRequestLockError extends Error {
   }
 }
 
-/**
- * Keep one permission reauthorization active per DID until its callback arrives.
- * The lease outlives the 15-minute browser cookie so abandoned flows recover.
- */
-export function acquireOAuthPermissionFlowLock(did: string, token: string): boolean {
-  return claimLease(permissionFlowLockName(did), token, PERMISSION_FLOW_LEASE_SECONDS);
-}
-
 /** Claims the lease `name` for `leaseSeconds`, unless another holder's lease on it is still running. */
 export function claimLease(name: string, token: string, leaseSeconds: number, now = unixNow()): boolean {
   const result = getRawDb().prepare(`
@@ -35,10 +26,6 @@ export function claimLease(name: string, token: string, leaseSeconds: number, no
     WHERE oauth_request_lock.expires_at <= ?
   `).run(name, token, now + leaseSeconds, now);
   return result.changes === 1;
-}
-
-export function releaseOAuthPermissionFlowLock(did: string, token: string): void {
-  release(permissionFlowLockName(did), token);
 }
 
 export function isTransientOAuthInfrastructureError(error: unknown): boolean {
@@ -117,10 +104,6 @@ function release(name: string, token: string): void {
 
 function unixNow(): number {
   return Math.floor(Date.now() / 1000);
-}
-
-function permissionFlowLockName(did: string): string {
-  return `@spaces-permission-flow-${did}`;
 }
 
 function delay(ms: number): Promise<void> {

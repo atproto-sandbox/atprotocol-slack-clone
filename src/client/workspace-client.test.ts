@@ -140,7 +140,7 @@ test("the operator client sends a service token bound to the operator and to eac
   assert.deepEqual(seen, [OPERATOR_METHOD.getOperation, OPERATOR_METHOD.listInboxWriters, OPERATOR_METHOD.execute]);
 });
 
-test("spaces not opened for the retention period are swept, and sign-out clears the store", async () => {
+test("spaces not opened for the retention period are swept", async () => {
   const network = new FakeNetwork();
   const fixture = await createWorkspace(network, { members: [ALICE, BOB], channels: [{ skey: "general", visibility: "public" }, { skey: "quiet", visibility: "public" }] });
   await writeMessage(network, BOB, fixture.channels.general!, 1);
@@ -152,8 +152,6 @@ test("spaces not opened for the retention period are swept, and sign-out clears 
   await alice.lifecycle.sweep(30 * 24 * 60 * 60 * 1000);
   assert.deepEqual(await alice.sync.store.records(fixture.channels.quiet!, COLLECTION.message), []);
   assert.equal((await alice.sync.store.records(fixture.channels.general!, COLLECTION.message)).length, 1);
-  await alice.lifecycle.signOut();
-  assert.deepEqual(await alice.sync.store.listSpaces(), []);
 });
 
 test("inboxRequests is refused while the workspace is degraded", async () => {

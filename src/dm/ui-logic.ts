@@ -1,7 +1,7 @@
 import { isDid } from "@/protocol/keys";
 import type { DmClient, DmHalfStatus, DmRequestMode, DmSkippedSenders } from "./dm-client";
 
-/** The workspace surface DM UI needs; `@/workspaces/*` stays server-only for `src/dm/**`. */
+/** The workspace surface the DM UI needs. */
 export type UiWorkspace = { uri: string; name: string; members: ReadonlyArray<{ did: string; active: boolean }> };
 
 export type ParticipantInput = { dids: string[]; invalid: string[] };

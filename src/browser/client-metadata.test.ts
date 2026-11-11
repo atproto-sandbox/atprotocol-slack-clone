@@ -6,9 +6,9 @@ const scope = "atproto space:new.flock.dm.inbox?authority=*&collection=new.flock
 
 test("HTTPS mode builds a discoverable client_id pointing at the DM metadata route", () => {
   const metadata = buildBrowserClientMetadata({ appUrl: "https://spaces.example.com", scope });
-  assert.equal(metadata.client_id, "https://spaces.example.com/oauth/dm-client-metadata.json");
+  assert.equal(metadata.client_id, "https://spaces.example.com/oauth/client-metadata.json");
   assert.equal(metadata.client_uri, "https://spaces.example.com");
-  assert.deepEqual(metadata.redirect_uris, ["https://spaces.example.com/dm/callback"]);
+  assert.deepEqual(metadata.redirect_uris, ["https://spaces.example.com/oauth/callback"]);
   assert.equal(metadata.scope, scope);
   assert.equal(metadata.application_type, "web");
   assert.equal(metadata.token_endpoint_auth_method, "none");
@@ -18,20 +18,20 @@ test("HTTPS mode builds a discoverable client_id pointing at the DM metadata rou
 test("loopback HTTP mode embeds the redirect_uri and scope in the client_id itself", () => {
   const metadata = buildBrowserClientMetadata({ appUrl: "http://127.0.0.1:3000", scope });
   assert.equal(metadata.client_uri, undefined);
-  assert.deepEqual(metadata.redirect_uris, ["http://127.0.0.1:3000/dm/callback"]);
+  assert.deepEqual(metadata.redirect_uris, ["http://127.0.0.1:3000/oauth/callback"]);
   const clientId = new URL(metadata.client_id);
   assert.equal(clientId.protocol, "http:");
   assert.equal(clientId.hostname, "localhost");
-  assert.equal(clientId.searchParams.get("redirect_uri"), "http://127.0.0.1:3000/dm/callback");
+  assert.equal(clientId.searchParams.get("redirect_uri"), "http://127.0.0.1:3000/oauth/callback");
   assert.equal(clientId.searchParams.get("scope"), scope);
 });
 
 test("a loopback appUrl given as 'localhost' still redirects on the 127.0.0.1 IP literal", () => {
   const metadata = buildBrowserClientMetadata({ appUrl: "http://localhost:3000", scope });
-  assert.deepEqual(metadata.redirect_uris, ["http://127.0.0.1:3000/dm/callback"]);
+  assert.deepEqual(metadata.redirect_uris, ["http://127.0.0.1:3000/oauth/callback"]);
 });
 
 test("HTTPS is never treated as loopback even on a loopback hostname", () => {
   const metadata = buildBrowserClientMetadata({ appUrl: "https://127.0.0.1:3000", scope });
-  assert.equal(metadata.client_id, "https://127.0.0.1:3000/oauth/dm-client-metadata.json");
+  assert.equal(metadata.client_id, "https://127.0.0.1:3000/oauth/client-metadata.json");
 });

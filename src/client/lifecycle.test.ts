@@ -55,8 +55,3 @@ test("the sweep drops spaces not opened within the retention period", async () =
   assert.deepEqual(await held(store), [WORKSPACE, GENERAL, INBOX, OTHER_WORKSPACE].sort());
 });
 
-test("sign-out clears the store", async () => {
-  const store = await storeWithSpaces();
-  await new Lifecycle(store, () => 2_000).signOut();
-  assert.deepEqual(await held(store), []);
-});

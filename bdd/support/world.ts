@@ -20,11 +20,10 @@ export type ApiCall = {
   origin: string;
 };
 /**
- * `calls` holds what the browser asked of the app's own server (/api); `xrpc` holds the XRPC calls the browser made itself,
- * to PDS hosts and to the operator. Leak scans of the app server read `calls` only: `xrpc` legitimately carries the
- * account's own content, read straight from the hosts.
+ * `xrpc` holds the XRPC calls the browser made itself, to PDS hosts and to the operator (at the app's origin until R7). The
+ * app's server has no member routes, so a leak scan of it reads the calls whose `origin` is the app's.
  */
-export type Actor = FixtureAccount & { role: string; context: BrowserContext; page: Page; calls: ApiCall[]; xrpc: ApiCall[] };
+export type Actor = FixtureAccount & { role: string; context: BrowserContext; page: Page; xrpc: ApiCall[] };
 
 let sequence = 0;
 const VIDEO_SIZE = { width: 1280, height: 720 };
@@ -73,7 +72,7 @@ export class AppWorld extends World {
     await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: this.appOrigin });
     const page = await context.newPage();
     page.setDefaultTimeout(PAGE_TIMEOUT_MS);
-    const actor: Actor = { ...account, role, context, page, calls: [], xrpc: [] };
+    const actor: Actor = { ...account, role, context, page, xrpc: [] };
     this.recordCalls(actor);
     this.actors.set(role, actor);
     return actor;
@@ -89,8 +88,8 @@ export class AppWorld extends World {
   }
 
   /**
-   * Records every /api call the actor's page makes into `actor.calls`, and every XRPC call it makes itself to a PDS host or
-   * the operator into `actor.xrpc`, in the order their bodies finish. The one recorder
+   * Records every XRPC call the actor's page makes itself to a PDS host or the operator into `actor.xrpc`, in the order their
+   * bodies finish. The one recorder
    * for every browser session of a scenario, including sessions on a second app. A body that cannot be read fails the
    * scenario when it ends, except where `ApiCall.body` says the call is recorded headers-only (and a redirect has no body).
    */
@@ -105,7 +104,7 @@ export class AppWorld extends World {
 
   private async record(actor: Actor, response: PlaywrightResponse): Promise<void> {
     const url = new URL(response.url());
-    if (!url.pathname.startsWith("/api/") && !url.pathname.startsWith("/xrpc/")) return;
+    if (!url.pathname.startsWith("/xrpc/")) return;
     const request = response.request();
     if (request.method() === "OPTIONS") return;
     const status = response.status();
@@ -124,11 +123,7 @@ export class AppWorld extends World {
         call.body = "navigated-away";
       }
     }
-    (url.pathname.startsWith("/api/") ? actor.calls : actor.xrpc).push(call);
-  }
-
-  callsTo(actor: Actor, path: string): ApiCall[] {
-    return actor.calls.filter((call) => call.path === path);
+    actor.xrpc.push(call);
   }
 
   /** Read-only view of the app's own database, for facts only the app records (operation journal, audit trail). */

@@ -59,20 +59,21 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
     const { TestNetworkNoAppView } = await import(pathToFileURL(join(PINNED_CHECKOUT, "packages/dev-env/src/index.ts")).href) as {
       TestNetworkNoAppView: { create(options: { extraPdses: number; lexiconAuthority: boolean; pds?: { rateLimitsEnabled?: boolean } }): Promise<TestNetwork> };
     };
-    network = await TestNetworkNoAppView.create({ extraPdses: 1, lexiconAuthority: true, pds: { rateLimitsEnabled: false } });
+    const fixture = await TestNetworkNoAppView.create({ extraPdses: 1, lexiconAuthority: true, pds: { rateLimitsEnabled: false } });
+    network = fixture;
     process.stdout.write("PERFORMANCE_PROGRESS two-PDS fixture ready\n");
     const directory = mkdtempSync(join(fixtureTemp.path, "slack-performance-"));
-    process.env.NODE_ENV = "test";
+    Object.assign(process.env, { NODE_ENV: "test" });
     process.env.APP_URL = "http://127.0.0.1:3000";
     process.env.AUTH_ENCRYPTION_KEY = "4b".repeat(32);
     process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
-    process.env.PLC_URL = network.plc.url;
+    process.env.PLC_URL = fixture.plc.url;
     process.env.DATABASE_PATH = join(directory, "app.db");
 
     try {
-      await publishAppLexicons(network);
-      const [{ bootstrapWorkspace }, { ensureMemberListSpace, listSpaceMembers, putAuthorityRecord, putSpaceMember }, { executeOperatorOperation, listInboxWriters }, { mintSpaceCredential, sessionCredentialDeps }, { readIndependentChannelPage }, { inboxUri, reactionRecordKey, requestRecordKey, spaceRecordUri, subjectKey, tidNow }, { readChannelPage }, { parseWorkspaceRef }, { getRawDb }, { resolvePds }, { createEngine }] = await Promise.all([
-        import("@/operator/kinds/bootstrap-workspace"), import("@/atproto/space-ops"), import("@/operator/operations"), import("@/atproto/space-credential"), import("@/reader/independent"), import("@/protocol/keys"), import("@/workspaces/channel-sync"), import("@/operator/actor"), import("@/lib/db"), import("@/atproto/identity"),
+      await publishAppLexicons(fixture);
+      const [{ bootstrapWorkspace }, { ensureMemberListSpace, listSpaceMembers, putAuthorityRecord, putSpaceMember }, { executeOperatorOperation, listInboxWriters }, { mintSpaceCredential, sessionCredentialDeps }, { readIndependentChannelPage }, { inboxUri, reactionRecordKey, requestRecordKey, spaceRecordUri, subjectKey, tidNow }, { parseWorkspaceRef }, { getRawDb }, { resolvePds }, { createEngine }] = await Promise.all([
+        import("@/operator/kinds/bootstrap-workspace"), import("@/atproto/space-ops"), import("@/operator/operations"), import("@/atproto/space-credential"), import("@/reader/independent"), import("@/protocol/keys"), import("@/operator/actor"), import("@/lib/db"), import("@/atproto/identity"),
         import("@/client/engine"),
       ]);
       const owner = await createActor(network.pds, "scaleowner", "test");
@@ -98,7 +99,7 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
       const accountStartedAt = performance.now();
       const members = await mapLimited(Array.from({ length: MEMBERS - 1 }, (_, index) => index), 8, async (index) => {
         const extra = index % 2 === 0;
-        return createActor(extra ? network.extraPdses[0] : network.pds, `scale${String(index).padStart(3, "0")}`, extra ? "test2" : "test");
+        return createActor(extra ? fixture.extraPdses[0] : fixture.pds, `scale${String(index).padStart(3, "0")}`, extra ? "test2" : "test");
       });
       const accountMs = elapsed(accountStartedAt);
       process.stdout.write(`PERFORMANCE_PROGRESS accounts=${MEMBERS} elapsedMs=${accountMs}\n`);
@@ -270,45 +271,16 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
       assert.equal(independentPage.reactions.length, 100, "every message on the latest page has its supported-size reaction");
       assert.equal(independentPage.degraded, false, "exactly 20,000 reactions per channel stays within the supported envelope");
 
-      const primaryStartedAt = performance.now();
-      const primaryPage = await readChannelPage(ownerSession as never, bootstrap.workspace, `${workspaceSkey}-general`);
-      const primaryReadMs = elapsed(primaryStartedAt);
-      assert.equal(primaryPage.messages.length, 100);
-      assert.equal(primaryPage.messages[0]?.value.text, `scale channel 0 message ${MESSAGES - 1}`);
-      assert.equal(primaryPage.reactions.length, 100, "the primary reader returns reactions for the full latest page");
-      assert.equal(primaryPage.degraded, false, "the primary reader does not mark an exact-cap reaction history degraded");
+      // The bar for later phases (`.ai/plans/platform-refactor.md`, R0 baseline and R4 gate): each latest-100 read repeated,
+      // reported as median and 95th percentile. The independent reader always reads from scratch; the engine is timed from an
+      // empty store (a first open) and with a warm one (a reopen). The readers take turns, so load from elsewhere on the machine
+      // falls on both alike.
+      const channelSkey = `${workspaceSkey}-general`;
       const normalized = (records: Array<{ uri: string; value: Record<string, unknown> }>) => records
         .map(({ uri, value }) => ({ uri, value }))
         .sort((left, right) => left.uri.localeCompare(right.uri));
-      assert.deepEqual(normalized(independentPage.messages), normalized(primaryPage.messages), "the two readers return the same latest-100 URI and content set");
-      assert.deepEqual(independentPage.reactions, primaryPage.reactions, "the two readers return the same latest-100 reaction records");
-
-      // The bar for later phases (`.ai/plans/platform-refactor.md`, R0 baseline and R4 gate): each latest-100 read repeated,
-      // reported as median and 95th percentile. The independent reader always reads from scratch; the primary reader and the
-      // engine are timed from an empty cache or store (a first open) and with a warm one (a reopen). The readers take turns, so
-      // load from elsewhere on the machine falls on all of them alike.
-      const channelSkey = `${workspaceSkey}-general`;
-      const loadAverageBeforeReads = loadavg()[0]!;
-      const independentReadsMs = [independentReadMs];
-      const primaryColdReadsMs = [primaryReadMs];
-      const primaryWarmReadsMs: number[] = [];
-      // Every timed read must return the page the first, fully checked reads returned; it is checked after its timer stops.
-      const assertSamePage = (page: { messages: Array<{ uri: string; value: Record<string, unknown> }>; reactions: unknown[]; degraded: boolean }, what: string) => {
-        assert.deepEqual(normalized(page.messages), normalized(primaryPage.messages), `${what} returns the same latest-100 messages`);
-        assert.deepEqual(page.reactions, primaryPage.reactions, `${what} returns the same reactions`);
-        assert.equal(page.degraded, false, `${what} is not degraded`);
-      };
-      // R4 gate: the latest-100 read through the engine: a fresh engine with an empty store (a first open) and the last one
-      // again within the truth interval (a reopen), with the same checks on every page.
       const engineRef = { workspace: bootstrap.workspace, skey: channelSkey };
       const engineTransport = { did: owner.did, ...sessionCredentialDeps(ownerSession as never) };
-      const assertSameEnginePage = (page: Awaited<ReturnType<ReturnType<typeof createEngine>["channels"]["readPage"]>>, what: string) => {
-        assert.deepEqual(normalized(page.messages), normalized(primaryPage.messages), `${what} returns the same latest-100 messages`);
-        assert.deepEqual(normalized(page.reactions), normalized(primaryPage.reactions as Array<{ uri: string; value: Record<string, unknown> }>), `${what} returns the same reactions`);
-        assert.equal(page.reactions.length, 100, `${what} has every reaction on the latest page`);
-        assert.deepEqual(page.degradedReasons, [], `${what} is not degraded`);
-        assert.equal(page.complete, true, `${what} is complete`);
-      };
       const engineColdReadsMs: number[] = [];
       const engineWarmReadsMs: number[] = [];
       let warmEngine = createEngine(engineTransport);
@@ -317,28 +289,40 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
         const coldRun = performance.now();
         const coldPage = await warmEngine.channels.readPage(engineRef);
         engineColdReadsMs.push(elapsed(coldRun));
-        assertSameEnginePage(coldPage, "an engine read from an empty store");
+        return coldPage;
       };
-      await engineColdRead();
+      const enginePage = await engineColdRead();
+      assert.equal(enginePage.messages.length, 100);
+      assert.equal(enginePage.messages[0]?.value.text, `scale channel 0 message ${MESSAGES - 1}`);
+      assert.equal(enginePage.reactions.length, 100, "the engine returns reactions for the full latest page");
+      assert.deepEqual(enginePage.degradedReasons, [], "the engine does not mark an exact-cap reaction history degraded");
+      assert.equal(enginePage.complete, true, "the engine's first read is complete");
+      assert.deepEqual(normalized(independentPage.messages), normalized(enginePage.messages), "the two readers return the same latest-100 URI and content set");
+      assert.deepEqual(normalized(independentPage.reactions), normalized(enginePage.reactions), "the two readers return the same latest-100 reaction records");
+
+      const loadAverageBeforeReads = loadavg()[0]!;
+      const independentReadsMs = [independentReadMs];
+      // Every timed read must return the page the first, fully checked reads returned; it is checked after its timer stops.
+      const assertSameIndependentPage = (page: { messages: Array<{ uri: string; value: Record<string, unknown> }>; reactions: Array<{ uri: string; value: Record<string, unknown> }>; degraded: boolean }, what: string) => {
+        assert.deepEqual(normalized(page.messages), normalized(enginePage.messages), `${what} returns the same latest-100 messages`);
+        assert.deepEqual(normalized(page.reactions), normalized(enginePage.reactions), `${what} returns the same reactions`);
+        assert.equal(page.degraded, false, `${what} is not degraded`);
+      };
+      const assertSameEnginePage = (page: Awaited<ReturnType<ReturnType<typeof createEngine>["channels"]["readPage"]>>, what: string) => {
+        assert.deepEqual(normalized(page.messages), normalized(enginePage.messages), `${what} returns the same latest-100 messages`);
+        assert.deepEqual(normalized(page.reactions), normalized(enginePage.reactions), `${what} returns the same reactions`);
+        assert.equal(page.reactions.length, 100, `${what} has every reaction on the latest page`);
+        assert.deepEqual(page.degradedReasons, [], `${what} is not degraded`);
+        assert.equal(page.complete, true, `${what} is complete`);
+      };
       for (let run = 1; run < READ_RUNS; run += 1) {
         const independentRun = performance.now();
         const independentRepeat = await readIndependentChannelPage(sessionCredentialDeps(ownerSession as never), bootstrap.workspace, channelSkey);
         independentReadsMs.push(elapsed(independentRun));
-        assertSamePage(independentRepeat, "a repeated independent read");
-        for (const table of ["channel_record_cache", "space_collection_cursor", "sync_cursor"]) {
-          getRawDb().prepare(`DELETE FROM ${table} WHERE account_did = ?`).run(owner.did);
-        }
-        const coldRun = performance.now();
-        const coldPage = await readChannelPage(ownerSession as never, bootstrap.workspace, channelSkey);
-        primaryColdReadsMs.push(elapsed(coldRun));
-        assertSamePage(coldPage, "a primary read from an empty cache");
-        await engineColdRead();
+        assertSameIndependentPage(independentRepeat, "a repeated independent read");
+        assertSameEnginePage(await engineColdRead(), "an engine read from an empty store");
       }
       for (let run = 0; run < READ_RUNS; run += 1) {
-        const warmRun = performance.now();
-        const warmPage = await readChannelPage(ownerSession as never, bootstrap.workspace, channelSkey);
-        primaryWarmReadsMs.push(elapsed(warmRun));
-        assertSamePage(warmPage, "a warm primary read");
         const engineWarmRun = performance.now();
         const engineWarmPage = await warmEngine.channels.readPage(engineRef);
         engineWarmReadsMs.push(elapsed(engineWarmRun));
@@ -392,10 +376,7 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
         privateRequestWriteMs: requestWriteMs,
         inboxWriterReconciliationMs,
         independentLatest100ReadMs: independentReadMs,
-        primaryLatest100ReadMs: primaryReadMs,
         independentLatest100Reads: summary(independentReadsMs),
-        primaryLatest100ColdReads: summary(primaryColdReadsMs),
-        primaryLatest100WarmReads: summary(primaryWarmReadsMs),
         engineLatest100ColdReads: summary(engineColdReadsMs),
         engineLatest100WarmReads: summary(engineWarmReadsMs),
         // The machine's one-minute load average around the timed reads, this test's own work included.

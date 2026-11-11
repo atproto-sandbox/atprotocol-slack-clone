@@ -247,3 +247,29 @@ b2 notes (2026-11-11):
 - Start-up discovers twice, not once (as R6a did): the first discovery finds the workspace to show, and following its
   space takes the feed head and then discovers again, which is what loses no change. One discovery would need the
   workspace spaces listed before the head is taken, a split of `WorkspaceClient.discover` left out of R6b.
+
+## R6c plan (2026-11-11)
+
+Sign-in moves to the browser; then everything the server member session owned goes.
+- c1 Sign-in in the browser. The one browser OAuth client signs in (`signInRedirect` with what the person typed: a DID, a
+  handle the browser can resolve over HTTPS `.well-known`, or their host's URL) and its callback is the app's only member
+  callback (`/oauth/callback`, a client page; its metadata at `/oauth/client-metadata.json`). `page.tsx` resolves no server
+  session: a client entry restores the browser session (`init`) and renders the app for its DID, or the sign-in form. A
+  session missing a scope of the grant goes back through consent. Sign-out revokes the session and deletes the account's
+  stores. "Connect this browser" goes: signing in is connecting.
+- c2 Delete: `/api/channels/*`, `/api/workspaces/*`, `/api/inbox/*`, `/api/notifications/*`, `/api/operator/*` (the cookie
+  forwards the table gives to `OperatorClient`), `/api/oauth/{login,logout,permission}`, the server `/oauth/callback` route,
+  `src/workspaces/**`, `src/auth/{session,web-session,encrypted-cache,oauth}.ts` (all of `oauth.ts` is the member client), and
+  the tables `oauth_session`, `web_session`, `channel_record_cache`, `workspace_channel_cache`, `space_collection_cursor`,
+  `sync_cursor` (dropped where an older database has them). `notifyWrite` and `notifySpaceDeleted` keep feeding the change
+  feed only.
+- c3 Tests off the member session: `app-acceptance`, `platform-capabilities`, `authority-grant` and `pds-network` act as
+  members through the engine; BDD and the OAuth spec sign in through the browser client; steps that read the dropped tables
+  assert they are gone; OAuth spec test 4 moves to `createWorkspace` / `startAuthorityFlow`.
+- c4 Hardening: the CSP's connect targets reviewed; a browser test that no member token and no record content reaches the
+  app's origin (operator calls excluded); one account's store unreadable to another; the DM scenario strengthened to "The
+  app server holds no member session, no member token and no DM content"; `SPEC.md`'s DM invariants restated for one
+  session.
+- c5 Gate, review, outcome, commit (its own commit: the point of no return).
+
+R6c done (2026-11-11): c1 to c5 as planned; outcome in the plan, "### R6c". R6 is complete.

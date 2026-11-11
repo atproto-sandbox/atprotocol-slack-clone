@@ -1,16 +1,14 @@
 import type { Page } from "@playwright/test";
 import type { NetworkActor } from "./pds-network";
 
-// Driving this app's own pages in a real browser, for the specs and measurements that need the real client: signing in,
-// connecting the browser's session, and opening a channel.
+// Driving this app's own pages in a real browser, for the specs and measurements that need the real client: signing in with
+// the browser's one grant, and opening a channel.
 
-/** Signs in on the app (its own session), then connects the browser (the real client's grant), both through the PDS's pages. */
-export async function signInAndConnect(page: Page, appUrl: string, actor: NetworkActor, workspaceName: string): Promise<void> {
+/** Signs in on the app with the real browser client, through the PDS's pages, and waits for the workspace to show. */
+export async function signIn(page: Page, appUrl: string, actor: NetworkActor, workspaceName: string): Promise<void> {
   await page.goto(appUrl);
   await page.getByLabel("Your AT Protocol handle").fill(actor.did);
   await page.getByRole("button", { name: /Continue with atproto/i }).click();
-  await consent(page, actor);
-  await page.getByRole("button", { name: "Connect this browser →" }).click();
   await consent(page, actor);
   await page.getByRole("heading", { name: workspaceName, exact: true }).waitFor({ state: "visible" });
 }

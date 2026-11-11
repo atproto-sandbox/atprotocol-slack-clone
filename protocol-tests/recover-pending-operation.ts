@@ -1,9 +1,7 @@
 import { executeOperatorOperation } from "@/operator/operations";
 import { parseWorkspaceRef } from "@/operator/actor";
-import { discoverWorkspaces } from "@/workspaces/read-model";
 import { tidNow } from "@/protocol/keys";
 import { getRawDb } from "@/lib/db";
-import { getOAuthClientForSession } from "@/auth/oauth";
 import { restoreAuthorityGrant } from "@/operator/authority-grant";
 
 const authorityDid = process.env.RECOVERY_AUTHORITY_DID;
@@ -41,14 +39,10 @@ try {
     : await executeOperatorOperation(actor, operationId, { kind: "removeMember", subject: memberDid });
   const resumed = getRawDb().prepare("SELECT state FROM operation WHERE workspace = ? AND operation_id = ? ORDER BY created_at LIMIT 1")
     .get(actor.workspace.authorityDid, operationId) as { state: string } | undefined;
-  // Discovery is what a member does, with the owner's own sign-in restored from the same database, not with the grant.
-  const memberSession = useStoredAuthorityGrant ? await (await getOAuthClientForSession(authorityDid)).restore(authorityDid) : session;
-  const discoveredWorkspaces = (await discoverWorkspaces(memberSession as never)).map(({ uri }) => uri);
   const reconciliation = resumeAll ? result : await executeOperatorOperation(actor, tidNow(), { kind: "reconcileWorkspace" });
   process.stdout.write(JSON.stringify({
     ...result,
     resumedOperationState: resumed?.state ?? null,
-    discoveredWorkspaces,
     reconciliationState: reconciliation.state,
   }));
   if (result.state !== "completed" || resumed?.state !== "completed" || reconciliation.state !== "completed") process.exitCode = 1;

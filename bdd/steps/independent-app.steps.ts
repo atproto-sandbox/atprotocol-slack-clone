@@ -20,6 +20,7 @@ import { OperatorRemoteError, type StalledWork } from "@/client/operator-client"
 import { credentialCalls, credentialOutcome, openChannel, postMessage } from "../support/channels-ui";
 import { waitForAdminControls, createWorkspaceAs, eventually, inviteMemberAs } from "../support/ui";
 import type { Actor, AppWorld } from "../support/world";
+import { memberSessionTablesIn } from "../support/app-database";
 
 type PdsRecord = { uri: string; rkey: string; value: Record<string, unknown> };
 type Directory = Array<{ skey: string; name: string; visibility: string }>;
@@ -167,12 +168,6 @@ Then("both show the same directory, roster, messages, and private roster", async
   assert.deepEqual(independent.vaultRoster, first.privateRosters.Vault);
 });
 
-function sessionDids(databasePath: string): string[] {
-  const db = new Database(databasePath, { readonly: true, fileMustExist: true });
-  try { return (db.prepare("SELECT DISTINCT did FROM web_session").all() as Array<{ did: string }>).map((row) => row.did).sort(); }
-  finally { db.close(); }
-}
-
 /** The channel records an app's engine holds for the account in that app's browser, by space, writer, collection and key. */
 async function heldRecordKeys(viewer: AppViewer): Promise<string[]> {
   return (await browserStore(viewer)).records.filter((record) => record.collection.startsWith("new.flock.channel."))
@@ -181,15 +176,11 @@ async function heldRecordKeys(viewer: AppViewer): Promise<string[]> {
 
 Then("neither app reads the other's database or private cache", async function (this: AppWorld) {
   const second = this.scratch.get("secondApp") as SecondApp;
-  const member = actorNamed(this, "member");
-  const owner = actorNamed(this, "owner");
   assert.notEqual(second.databasePath, this.fixture.databasePath, "the apps run on different database files");
   assert.ok(existsSync(second.databasePath) && existsSync(this.fixture.databasePath));
 
-  const firstSignedIn = sessionDids(this.fixture.databasePath);
-  assert.deepEqual(sessionDids(second.databasePath), [member.did], "the second app knows only the account that signed in to it");
-  assert.ok(firstSignedIn.includes(owner.did) && firstSignedIn.includes(member.did), "the first app knows the sign-ins made to it");
-  assert.equal(sessionDids(second.databasePath).includes(owner.did), false, "the owner, who only ever used the first app, is unknown to the second");
+  // Neither server knows who signed in to it: each browser holds its own session, in its own origin's store.
+  for (const databasePath of [this.fixture.databasePath, second.databasePath]) assert.deepEqual(memberSessionTablesIn(databasePath), []);
 
   const secondViewer = actorNamed(this, "member@second-app") as AppViewer;
   const firstViewer = viewerNamed(this, "member");

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test, { after } from "node:test";
 import { closeDb, getRawDb } from "@/lib/db";
 import { dmConversationUri, dmInboxUri } from "@/protocol/keys";
-import { isNotificationAccepted, purgeSpaceNotifications, readNotices, recordWriteNotification } from "./notices";
+import { isNotificationAccepted, pruneNotices, purgeSpaceNotifications, readNotices, recordWriteNotification } from "./notices";
 
 const DIRECTORY = mkdtempSync(join(tmpdir(), "slack-notifications-test-"));
 const SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
@@ -80,6 +80,29 @@ test("notices older than a week are dropped when a new one arrives", () => {
   recordWriteNotification(notice(CHANNEL, 1), now - 8 * 86_400);
   recordWriteNotification(notice(CHANNEL, 2), now);
   assert.equal(rowCount("space_uri=?", CHANNEL), 1);
+});
+
+test("the periodic prune drops week-old notices on a quiet instance, and registrations that ran out a month ago", () => {
+  // #given a notice a week and a day old, a fresh one, a registration that ran out 31 days ago and one that ran out yesterday
+  reset();
+  const now = Date.now();
+  const seconds = Math.floor(now / 1000);
+  // (the old notice is written straight to the table: a notice arriving would itself prune it, which is not what is tested)
+  recordWriteNotification(notice("at://did:plc:owner/space/new.flock.channel/beta", 2), seconds);
+  getRawDb().prepare("INSERT INTO space_notification (space_uri,space_type,type_seq,repo_did,rev,notified_at) VALUES (?,?,?,?,?,?)")
+    .run(CHANNEL, "new.flock.channel", 999_999, "did:plc:writer", "rev-old", seconds - 8 * 86_400);
+  const register = getRawDb().prepare("INSERT INTO notification_registration (service_ref,space_uri,expires_at) VALUES (?,?,?)");
+  register.run(SERVICE_REF, CHANNEL, now - 31 * 86_400_000);
+  register.run(SERVICE_REF, "at://did:plc:owner/space/new.flock.channel/beta", now - 86_400_000);
+
+  // #when the reconcile job prunes, with no new notice arriving
+  pruneNotices(now);
+
+  // #then only the fresh notice and the recently lapsed registration remain
+  assert.equal(rowCount("space_uri=?", CHANNEL), 0);
+  assert.equal(rowCount(), 1);
+  assert.deepEqual((getRawDb().prepare("SELECT space_uri FROM notification_registration").all() as Array<{ space_uri: string }>).map((row) => row.space_uri),
+    ["at://did:plc:owner/space/new.flock.channel/beta"]);
 });
 
 test("a space type keeps only its newest 50,000 notices, however many authorities file them, and another type keeps its own", () => {

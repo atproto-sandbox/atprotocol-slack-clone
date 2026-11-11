@@ -26,24 +26,27 @@ export async function waitForApp(world: AppWorld, actor: Actor): Promise<void> {
 }
 
 export async function waitForOrigin(actor: Actor, origin: string): Promise<void> {
-  await actor.page.waitForURL((url) => url.origin === origin && !url.pathname.startsWith("/oauth") && !url.pathname.startsWith("/dm/callback"), { timeout: 30_000 });
+  await actor.page.waitForURL((url) => url.origin === origin && !url.pathname.startsWith("/oauth"), { timeout: 30_000 });
 }
 
 /**
- * Grants this browser the account's one session (its workspaces, channels and DMs, and the operator's methods), as the app
- * asks right after sign-in, and waits until the app reads through it. Returns the scopes the PDS consent screen listed.
+ * From the sign-in form of the app at `origin`: enters the actor's DID, signs in at its host and approves the app's one grant
+ * (its workspaces, channels and DMs, and the operator's methods), then waits until the app reads through the browser's
+ * session. Returns the scopes the consent screen listed.
  */
-export async function connectBrowser(actor: Actor, origin: string): Promise<string[]> {
-  const prompt = actor.page.locator(".permission-box").filter({ hasText: /Connect this browser|Connecting this browser/ });
-  await actor.page.getByRole("button", { name: "Connect this browser →" }).click();
+export async function signInFromLoginFormAt(actor: Actor, origin: string): Promise<string[]> {
+  await actor.page.getByLabel("Your AT Protocol handle").fill(actor.did);
+  await actor.page.getByRole("button", { name: /Continue with atproto/i }).click();
   await actor.page.waitForURL(/\/oauth\/authorize\?/, { timeout: 30_000 });
-  await signInIfPrompted(actor);
   const authorize = actor.page.getByRole("button", { name: "Authorize", exact: true });
+  await actor.page.locator("input[name=password]").or(authorize).first().waitFor({ state: "visible" });
+  await signInIfPrompted(actor);
   await authorize.waitFor({ state: "visible" });
   const shown = await actor.page.evaluate(() => (window as unknown as { __authorizeData?: { scope?: string } }).__authorizeData?.scope ?? "");
   await authorize.click();
   await waitForOrigin(actor, origin);
-  await prompt.waitFor({ state: "detached", timeout: 60_000 });
+  await actor.page.locator(".app-frame").waitFor({ state: "attached", timeout: 60_000 });
+  await actor.page.locator(".permission-box").filter({ hasText: /Connect this browser|Connecting this browser/ }).waitFor({ state: "detached", timeout: 60_000 });
   return shown.split(" ").filter(Boolean);
 }
 
@@ -65,14 +68,9 @@ export async function completeConsent(actor: Actor, decision: "authorize" | "den
   await button.click();
 }
 
-/** From the app's sign-in page: enter the DID and approve the PDS's first-time consent. */
+/** From the app's sign-in page: enter the DID and approve the app's one grant at the account's host. */
 export async function signInFromLoginForm(world: AppWorld, actor: Actor): Promise<void> {
-  await actor.page.getByLabel("Your AT Protocol handle").fill(actor.did);
-  await actor.page.getByRole("button", { name: /Continue with atproto/i }).click();
-  await actor.page.locator("input[name=password]").waitFor({ state: "visible" });
-  await completeConsent(actor);
-  await waitForApp(world, actor);
-  await connectBrowser(actor, world.appOrigin);
+  await signInFromLoginFormAt(actor, world.appOrigin);
 }
 
 export async function signIn(world: AppWorld, actor: Actor): Promise<void> {

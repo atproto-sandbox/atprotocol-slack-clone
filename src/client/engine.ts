@@ -21,7 +21,8 @@ export type Engine = {
 /**
  * The engine for one account's workspace, inbox and channel spaces: one credential cache and one store under every client, so
  * a refused credential drops the space for all of them. `DmClient` keeps its own cache over a memory store (D10). Start-up
- * (`lifecycle.sweep`, `IndexedDbStore.deleteOtherAccounts`) and sign-out (`lifecycle.signOut`) are the host app's to call.
+ * (`lifecycle.sweep`, `IndexedDbStore.deleteOtherAccounts`) and sign-out (`signOutAccount` in src/browser/sign-out.ts, which
+ * deletes the account's store) are the host app's to call.
  */
 export function createEngine(host: ClientTransport, input: { store?: SyncStore; options?: Partial<SyncOptions>; operator?: OperatorService } = {}): Engine {
   const store = input.store ?? new MemoryStore();

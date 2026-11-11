@@ -1,7 +1,7 @@
 import dynamic from "next/dynamic";
 import { LogoutButton } from "./logout-button";
 import type { ChannelSelection } from "./client-api";
-import type { WorkspaceCandidate } from "@/workspaces/read-model";
+import type { WorkspaceCandidate } from "@/client/workspace-client";
 import type { WorkspaceSummary } from "@/protocol/workspace-summary";
 import { NO_WORKSPACE } from "./selection";
 

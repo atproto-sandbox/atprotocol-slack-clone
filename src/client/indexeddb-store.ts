@@ -34,6 +34,11 @@ export class IndexedDbStore implements SyncStore {
     return new IndexedDbStore(db);
   }
 
+  /** Sign-out: deletes the account's store, records and all. Close an open store on it first, or this waits for it. */
+  static async deleteAccount(did: string, factory: Factory = indexedDB): Promise<void> {
+    await settle(factory.deleteDatabase(databaseName(did)));
+  }
+
   /** Deletes the stores of every other account on this device: one left behind by a crash before its sign-out. */
   static async deleteOtherAccounts(did: string, factory: Factory = indexedDB): Promise<void> {
     const own = databaseName(did);

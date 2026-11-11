@@ -52,6 +52,24 @@ export function createBrowserDmStore(did: string): BrowserDmStore {
   };
 }
 
+/** Sign-out: everything this account's DM client kept in this browser goes. */
+export function forgetBrowserDmStore(did: string): void {
+  const prefix = `dm:${did}:`;
+  let keys: string[];
+  try {
+    keys = [];
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index);
+      if (key?.startsWith(prefix)) keys.push(key);
+    }
+  } catch {
+    // Storage that cannot be read is storage the DM client could not write either: it ran in memory, and kept nothing here.
+    return;
+  }
+  // Removal that fails (storage gone meanwhile) is the caller's to report.
+  for (const key of keys) localStorage.removeItem(key);
+}
+
 function storageWritable(prefix: string): boolean {
   try {
     const probe = `${prefix}__probe__`;

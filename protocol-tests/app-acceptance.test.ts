@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import BetterSqlite3 from "better-sqlite3";
 import { spawn } from "node:child_process";
 import { mkdtempSync, statSync } from "node:fs";
@@ -10,8 +9,7 @@ import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { isAccessLost, SPACE_CREDENTIAL_LIFETIME_MS } from "@/atproto/space-credential-core";
 import { createFixtureTempRoot } from "./fixture-temp";
-import { expireStoredSession, memberSignInScopes, storeAuthorityGrant, storeOAuthSession, type TestPds as NetworkPds } from "./support/pds-network";
-import { availablePort, waitForChildClose, waitForClientMetadata } from "./support/app-server";
+import { actorTransport, callOperatorMethod, expireStoredSession, storeAuthorityGrant, type TestPds as NetworkPds } from "./support/pds-network";
 
 type DidResolver = { resolve(did: string, ...args: unknown[]): Promise<unknown> };
 type TestPds = NetworkPds & { ctx: NetworkPds["ctx"] & { idResolver: { did: DidResolver } } };
@@ -36,7 +34,7 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
   }
   const directory = mkdtempSync(join(tmpdir(), "slack-app-acceptance-"));
   const databasePath = join(directory, "app.db");
-  process.env.NODE_ENV = "test";
+  Object.assign(process.env, { NODE_ENV: "test" });
   process.env.ATPROTO_ACCEPTANCE_TEST = "true";
   process.env.APP_URL = "http://127.0.0.1:3000";
   process.env.AUTH_ENCRYPTION_KEY = "4a".repeat(32);
@@ -64,8 +62,8 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     assert.deepEqual(appSpaceTypes.get("new.flock.workspace")?.collections, [
       "new.flock.workspace.profile", "new.flock.directory", "new.flock.workspace.roster", "new.flock.admin", "new.flock.acceptance",
     ], "the pinned OAuth provider resolves the app's published workspace space declaration");
-    const [{ bootstrapWorkspace, resumePendingWorkspaceBootstraps }, { executeOperatorOperation, listInboxWriters }, { parseWorkspaceRef }, { mintSpaceCredential, sessionCredentialDeps }, { sessionClient }, { discoverWorkspaces }, { listIndependentWorkspaces, readIndependentChannelPage, readIndependentPrivateRoster }, { validateSpaceRecord }, { acceptanceRecordKey, channelUri, decisionRecordKey, inboxUri, reactionRecordKey, requestRecordKey, subjectKey, tidNow }, { readChannelPage }, { getRawDb }] = await Promise.all([
-      import("@/operator/kinds/bootstrap-workspace"), import("@/operator/operations"), import("@/operator/actor"), import("@/atproto/space-credential"), import("@/atproto/client"), import("@/workspaces/read-model"), import("@/reader/independent"), import("@/protocol/registry"), import("@/protocol/keys"), import("@/workspaces/channel-sync"), import("@/lib/db"),
+    const [{ bootstrapWorkspace, resumePendingWorkspaceBootstraps }, { executeOperatorOperation, listInboxWriters }, { parseWorkspaceRef }, { mintSpaceCredential }, { sessionClient }, { createEngine }, { listIndependentWorkspaces, readIndependentChannelPage, readIndependentPrivateRoster }, { validateSpaceRecord }, { acceptanceRecordKey, channelUri, decisionRecordKey, inboxUri, reactionRecordKey, requestRecordKey, subjectKey, tidNow }, { getRawDb }] = await Promise.all([
+      import("@/operator/kinds/bootstrap-workspace"), import("@/operator/operations"), import("@/operator/actor"), import("@/atproto/space-credential"), import("@/atproto/client"), import("@/client/engine"), import("@/reader/independent"), import("@/protocol/registry"), import("@/protocol/keys"), import("@/lib/db"),
     ]);
     const { readSpaceRecords } = await import("@/atproto/space-ops");
 
@@ -77,6 +75,11 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     const memberSession = sessionFor(member);
     const adminSession = sessionFor(admin);
     const outsiderSession = sessionFor(outsider);
+    // Each account's engine, as its browser runs it. The member's clock can be moved past a truth interval, so a writer is checked at its host again.
+    let memberClockOffsetMs = 0;
+    const memberEngine = createEngine(actorTransport({ plcUrl: network.plc.url }, member, { now: () => Date.now() + memberClockOffsetMs }));
+    const adminEngine = createEngine(actorTransport({ plcUrl: network.plc.url }, admin, { fetchVia: fetchWithOperatorInProcess }), { operator: { serviceRef, endpoint: OPERATOR_ORIGIN } });
+    const independentDeps = (actor: TestActor) => actorTransport({ plcUrl: network.plc.url }, actor);
 
     const bootstrap = await bootstrapWorkspace(ownerSession as never, { name: "Pilot Workspace", operationId: tidNow() });
     assert.equal(bootstrap.state, "completed");
@@ -153,47 +156,27 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
       $type: "new.flock.acceptance", workspace: bootstrap.workspace, createdAt: new Date().toISOString(),
     });
 
-    const discovered = await discoverWorkspaces(memberSession as never);
-    const independent = await listIndependentWorkspaces(sessionCredentialDeps(memberSession as never));
+    const { workspaces: discovered } = await memberEngine.workspaces.discover();
+    const independent = await listIndependentWorkspaces(independentDeps(member));
     assert.deepEqual(independent, discovered.map(({ uri, authorityDid, name, members, admins, channels, degradedReasons }) => ({ uri, authorityDid, name, members: members.map(({ did }) => did).sort(), admins: admins.sort(), channels, degradedReasons })));
     assert.equal(discovered[0]?.name, "Pilot Workspace");
     assert.deepEqual(discovered[0]?.members.map(({ did }) => did).sort(), [owner.did, member.did, admin.did].sort());
     assert.deepEqual(discovered[0]?.admins, [owner.did, admin.did].sort());
     assert.ok(discovered[0]?.channels.some((channel) => channel.skey === `${workspace.skey}-team-lobby`));
 
-    const [{ permissionScopeFor }, { canonicalOAuthScope }, { getOAuthClientForSession }, { discoverWorkspaceState }] = await Promise.all([
-      import("@/protocol/scopes"), import("@/auth/oauth-scope"), import("@/auth/oauth"), import("@/workspaces/read-model"),
-    ]);
-    const signInScopes = await memberSignInScopes();
-    const discoveryOnlyScope = canonicalOAuthScope(["atproto", ...signInScopes]);
-    await storeOAuthSession(network.extraPdses[0], member.did, signInScopes, "returning-member-discovery");
-    const discoveryOnlySession = await (await getOAuthClientForSession(member.did)).restore(member.did);
-    const needsReadGrant = await discoverWorkspaceState(discoveryOnlySession);
-    assert.deepEqual(needsReadGrant.workspaces, []);
-    assert.deepEqual(needsReadGrant.candidates, [{ uri: bootstrap.workspace, authorityDid: owner.did, skey: workspace.skey }], "an accepted workspace remains visible as a candidate when its read grant is missing");
-
-    const workspaceReadScopes = permissionScopeFor("workspaceRead", { workspaceDid: owner.did, workspaceSkey: workspace.skey });
-    const expandedScope = canonicalOAuthScope([...discoveryOnlyScope.split(" "), ...workspaceReadScopes]);
-    await storeOAuthSession(network.extraPdses[0], member.did, expandedScope.split(" "), "returning-member-workspace-read");
-    const readAuthorizedSession = await (await getOAuthClientForSession(member.did)).restore(member.did);
-    const restoredWorkspace = await discoverWorkspaceState(readAuthorizedSession);
-    assert.ok(restoredWorkspace.workspaces.some(({ uri }) => uri === bootstrap.workspace), "the targeted workspaceRead grant makes the accepted workspace loadable");
-    assert.deepEqual(restoredWorkspace.candidates, []);
-
     let failWorkspaceCredential = true;
-    const temporarilyUnavailableSession = {
-      ...readAuthorizedSession,
-      fetchHandler: async (path: string, init: RequestInit) => {
-        if (failWorkspaceCredential && path.includes("/xrpc/com.atproto.space.getDelegationToken?")) {
+    const temporarilyUnavailableEngine = createEngine(actorTransport({ plcUrl: network.plc.url }, member, {
+      fetchVia: async (request) => {
+        if (failWorkspaceCredential && request.url.includes("/xrpc/com.atproto.space.getDelegationToken?")) {
           failWorkspaceCredential = false;
           return new Response(JSON.stringify({ error: "ServiceUnavailable", message: "injected workspace discovery outage" }), {
             status: 503, headers: { "content-type": "application/json" },
           });
         }
-        return readAuthorizedSession.fetchHandler(path, init);
+        return fetch(request);
       },
-    };
-    await assert.rejects(discoverWorkspaceState(temporarilyUnavailableSession as never), (error: unknown) =>
+    }));
+    await assert.rejects(temporarilyUnavailableEngine.workspaces.discover(), (error: unknown) =>
       Boolean(error && typeof error === "object" && "status" in error && error.status === 503),
       "a transient workspace summary failure must surface instead of returning an incomplete successful list",
     );
@@ -206,7 +189,8 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     assert.equal(validateSpaceRecord("new.flock.admin", { $type: "new.flock.admin", subject: member.did, active: true, updatedAt: new Date().toISOString() }, {
       authorityDid: owner.did, spaceUri: bootstrap.workspace, repoDid: member.did, rkey: subjectKey(member.did),
     }).valid, false);
-    assert.deepEqual((await listIndependentWorkspaces(sessionCredentialDeps(memberSession as never)))[0]?.admins, [owner.did, admin.did].sort());
+    assert.deepEqual((await listIndependentWorkspaces(independentDeps(member)))[0]?.admins, [owner.did, admin.did].sort());
+    assert.deepEqual((await memberEngine.workspaces.discover()).workspaces[0]?.admins, [owner.did, admin.did].sort(), "the engine reads the admins from the authority's own repo");
 
     const messageSpace = channelUri(owner.did, `${workspace.skey}-team-lobby`);
     getRawDb().prepare("INSERT INTO notification_registration (service_ref,space_uri,expires_at) VALUES (?,?,?)").run(serviceRef, messageSpace, Date.now() + 2 * 60 * 60 * 1000);
@@ -240,11 +224,12 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
       $type: "new.flock.channel.reaction", subject: latestMessageUri, emoji: "💜", createdAt: new Date().toISOString(),
     });
     assert.equal(latestReaction.uri, `${messageSpace}/${member.did}/new.flock.channel.reaction/${reactionRecordKey(latestMessageUri, "💜", member.did)}`);
-    const primaryPage = await readChannelPage(memberSession as never, bootstrap.workspace, `${workspace.skey}-team-lobby`);
+    const lobby = { workspace: bootstrap.workspace, skey: `${workspace.skey}-team-lobby` };
+    const primaryPage = await memberEngine.channels.readPage(lobby);
     assert.equal(primaryPage.messages.length, 100, "the app's initial history page is capped at 100 messages");
     assert.equal(primaryPage.messages[0]?.value.text, "latest second PDS message");
-    const memberView = await readIndependentChannelPage(sessionCredentialDeps(memberSession as never), bootstrap.workspace, `${workspace.skey}-team-lobby`);
-    const adminView = await readIndependentChannelPage(sessionCredentialDeps(adminSession as never), bootstrap.workspace, `${workspace.skey}-team-lobby`);
+    const memberView = await readIndependentChannelPage(independentDeps(member), bootstrap.workspace, lobby.skey);
+    const adminView = await readIndependentChannelPage(independentDeps(admin), bootstrap.workspace, lobby.skey);
     assert.equal(memberView.messages.length, 100);
     assert.equal(adminView.messages.length, 100);
     assert.deepEqual(memberView.messages.map((message) => message.uri).sort(), adminView.messages.map((message) => message.uri).sort());
@@ -256,40 +241,22 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     assert.deepEqual(memberView.reactions, primaryPage.reactions, "the independent reader returns the same latest-page reaction records");
     assert.deepEqual(adminView.reactions, primaryPage.reactions, "reaction records agree across independent accounts");
 
-    const { encryptCachedValue } = await import("@/auth/encrypted-cache");
-    const legacyMessageUri = `at://${member.did}/new.flock.channel.message/${latestMessageRkey}`;
-    const legacyMessageCipher = encryptCachedValue(latestMessageValue, {
-      accountDid: member.did, spaceUri: messageSpace, repoDid: member.did, collection: "new.flock.channel.message",
-      rkey: latestMessageRkey, uri: legacyMessageUri,
-    });
-    getRawDb().prepare(`UPDATE channel_record_cache SET uri=?,value_cipher=?
-      WHERE account_did=? AND space_uri=? AND repo_did=? AND collection=? AND rkey=?`).run(
-      legacyMessageUri, legacyMessageCipher, member.did, messageSpace, member.did, "new.flock.channel.message", latestMessageRkey,
-    );
-    await readChannelPage(memberSession as never, bootstrap.workspace, `${workspace.skey}-team-lobby`);
-    const migratedMessageUri = (getRawDb().prepare(`SELECT uri FROM channel_record_cache
-      WHERE account_did=? AND space_uri=? AND repo_did=? AND collection=? AND rkey=?`).get(
-      member.did, messageSpace, member.did, "new.flock.channel.message", latestMessageRkey,
-    ) as { uri: string }).uri;
-    assert.equal(migratedMessageUri, latestMessageUri, "legacy encrypted cache values migrate to the PDS-canonical URI without data loss");
-
     // One writer whose account is deactivated must not make the channel unreadable for everyone else: the pinned PDS refuses every other
     // account's read of its repo with RepoDeactivated while the authority still issues it credentials.
     const accountCall = (method: string, jwt: string, body?: string) => fetch(new URL(`/xrpc/${method}`, admin.pds.url), {
       method: "POST", headers: { authorization: `Bearer ${jwt}`, ...(body ? { "content-type": "application/json" } : {}) }, body,
     });
-    const lobby = `${workspace.skey}-team-lobby`;
     assert.equal((await accountCall("com.atproto.server.deactivateAccount", admin.accessJwt, "{}")).status, 200, "the admin's host deactivates the account");
     let activated: Response | undefined;
     try {
-      // The app re-checks a writer at most once a minute unless a write notice marks it stale, as one would here.
-      (await import("@/workspaces/cache")).markRepoStale(messageSpace, admin.did);
-      const appPage = await readChannelPage(memberSession as never, bootstrap.workspace, lobby);
-      assert.equal(appPage.degraded, true);
+      // The engine checks a writer at its host again once a truth interval has passed, as it would an hour on.
+      memberClockOffsetMs += memberEngine.sync.options.truthIntervalMs;
+      const appPage = await memberEngine.channels.readPage(lobby);
+      assert.ok(appPage.degradedReasons.length > 0);
       assert.ok(appPage.degradedReasons.some((reason) => reason.includes(admin.did) && reason.includes("its account is deactivated")), "the app names the deactivated writer");
       assert.ok(appPage.messages.some((message) => message.value.text === "latest second PDS message"), "the app still reads the other writers");
       assert.ok(!appPage.messages.some((message) => message.repo === admin.did), "the app serves nothing from the deactivated writer");
-      const independentPage = await readIndependentChannelPage(sessionCredentialDeps(memberSession as never), bootstrap.workspace, lobby);
+      const independentPage = await readIndependentChannelPage(independentDeps(member), bootstrap.workspace, lobby.skey);
       assert.equal(independentPage.degraded, true);
       assert.ok(independentPage.degradedReasons.some((reason) => reason.includes(admin.did) && reason.includes("its account is deactivated")), "the independent reader names the deactivated writer");
       assert.ok(independentPage.messages.some((message) => message.value.text === "latest second PDS message"), "the independent reader still reads the other writers");
@@ -303,24 +270,17 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
       }
     }
     assert.equal(activated?.status, 200, `the admin's account is active again: ${await activated?.clone().text()}`);
-    const restoredPage = await readChannelPage(memberSession as never, bootstrap.workspace, lobby);
+    memberClockOffsetMs += memberEngine.sync.options.truthIntervalMs;
+    const restoredPage = await memberEngine.channels.readPage(lobby);
     assert.ok(restoredPage.messages.some((message) => message.value.text === "admin host message"), "the writer's messages return once the account is active");
     assert.ok(!restoredPage.degradedReasons.some((reason) => reason.includes(admin.did)), "and the writer is no longer reported");
-    const restoredIndependent = await readIndependentChannelPage(sessionCredentialDeps(memberSession as never), bootstrap.workspace, lobby);
+    const restoredIndependent = await readIndependentChannelPage(independentDeps(member), bootstrap.workspace, lobby.skey);
     assert.ok(restoredIndependent.messages.some((message) => message.value.text === "admin host message"), "the independent reader sees the writer again too");
     assert.ok(!restoredIndependent.degradedReasons.some((reason) => reason.includes(admin.did)), "and no longer reports it");
 
-    // The authority's space-deleted notice drops every account's copy, through the real route with a token the authority's PDS signed.
+    // The authority's space-deleted notice drops the space's notices and registration, through the real route with a token the authority's PDS signed.
     const doomedSpace = channelUri(owner.did, "doomed-by-notice");
-    const seedCopy = (account: string) => {
-      getRawDb().prepare(`INSERT INTO channel_record_cache (account_did,space_uri,repo_did,collection,rkey,uri,value_cipher,updated_at) VALUES (?,?,?,?,?,?,?,?)`)
-        .run(account, doomedSpace, owner.did, "new.flock.channel.message", "r1", `${doomedSpace}/${owner.did}/new.flock.channel.message/r1`, "cipher", Math.floor(Date.now() / 1000));
-      getRawDb().prepare(`INSERT INTO space_collection_cursor (account_did,space_uri,repo_did,collection,rev,next_cursor,finished,checked_at) VALUES (?,?,?,?,?,?,?,?)`)
-        .run(account, doomedSpace, owner.did, "new.flock.channel.message", "r1", null, 1, Math.floor(Date.now() / 1000));
-    };
-    const copies = () => (getRawDb().prepare("SELECT count(*) AS count FROM channel_record_cache WHERE space_uri=?").get(doomedSpace) as { count: number }).count;
-    seedCopy(member.did);
-    seedCopy(admin.did);
+    const registrations = () => (getRawDb().prepare("SELECT count(*) AS count FROM notification_registration WHERE space_uri=?").get(doomedSpace) as { count: number }).count;
     getRawDb().prepare("INSERT INTO notification_registration (service_ref,space_uri,expires_at) VALUES (?,?,?)").run(serviceRef, doomedSpace, Date.now() + 2 * 60 * 60 * 1000);
     const serviceToken = async (actor: TestActor, lxm = "com.atproto.space.notifySpaceDeleted"): Promise<string> => {
       const response = await fetch(new URL(`/xrpc/com.atproto.server.getServiceAuth?aud=${encodeURIComponent(serviceRef)}&lxm=${lxm}`, actor.pds.url), {
@@ -339,10 +299,9 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     assert.equal((await notice(await serviceToken(member), doomedSpace)).status, 403, "a token from someone who is not the space's authority");
     assert.equal((await notice(await serviceToken(owner), channelUri(owner.did, "never-registered"))).status, 403, "a space the app never registered");
     assert.equal((await notice(await serviceToken(owner, "com.atproto.space.notifyWrite"), doomedSpace)).status, 403, "the authority's token, but minted for another method");
-    assert.equal(copies(), 2, "nothing was dropped by a refused notice");
+    assert.equal(registrations(), 1, "nothing was dropped by a refused notice");
     assert.equal((await notice(await serviceToken(owner), doomedSpace)).status, 200, "the authority's own token is accepted");
-    assert.equal(copies(), 0, "every account's copy of the deleted space is gone");
-    assert.equal((getRawDb().prepare("SELECT count(*) AS count FROM notification_registration WHERE space_uri=?").get(doomedSpace) as { count: number }).count, 0, "and so is its notify registration");
+    assert.equal(registrations(), 0, "the deleted space's notify registration is gone");
 
     const inbox = inboxUri(owner.did, workspace.skey);
     const privateSkey = `${workspace.skey}-team-private`;
@@ -372,6 +331,14 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     assert.ok(!inboxRepos.repos.some(({ did }) => did === member.did), "a dropped PDS notification leaves the writer absent from listRepos");
     const candidates = await listInboxWriters(operatorActor as never);
     assert.ok(candidates.writers.includes(member.did), "operator returns the owner-authorized writer candidate");
+    // The operator lists the inbox writers for an admin with the authority's own grant.
+    await storeAuthorityGrant(network.pds, owner.did, "inbox-writers-grant-dpop");
+    const adminOperator = adminEngine.operator;
+    assert.ok(adminOperator, "the admin's engine reaches the operator");
+    const inboxRequests = () => adminEngine.workspaces.inboxRequests(bootstrap.workspace, adminOperator);
+    assert.deepEqual((await inboxRequests()).requests.map(({ uri, requestId, channelSkey, channelName }) => ({ uri, requestId, channelSkey, channelName })),
+      [{ uri: memberRequestUri, requestId: memberRequestId, channelSkey: privateSkey, channelName: "team-private" }],
+      "the admin's engine lists the member's request, found through the operator's writer list");
     const requestPage = await adminInbox.client(network.extraPdses[0].url).query<{ records: Array<{ value?: { requestId?: string } }> }>("com.atproto.space.listRecords", {
       space: inbox, repo: member.did, collection: "new.flock.joinRequest",
     });
@@ -386,11 +353,13 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     });
     assert.equal(denialRecord.records[0]?.value?.requestId, memberRequestId);
     assert.equal(denialRecord.records[0]?.value?.decision, "deny");
+    assert.deepEqual((await inboxRequests()).requests, [], "a request with a current decision is not offered again");
 
     const replacementRequestId = tidNow();
     await writeRecord(sessionClient(memberSession as never), inbox, member.did, "new.flock.joinRequest", memberRequestKey, {
       $type: "new.flock.joinRequest", channelSkey: privateSkey, requestId: replacementRequestId, createdAt: new Date().toISOString(),
     });
+    assert.deepEqual((await inboxRequests()).requests.map(({ requestId }) => requestId), [replacementRequestId], "a resubmitted request is open again");
     const staleApproval = await executeOperatorOperation(operatorActor as never, tidNow(), {
       kind: "decideJoinRequest", request: memberRequestUri, requestId: memberRequestId, decision: "approve",
     });
@@ -405,15 +374,17 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     await writeRecord(sessionClient(memberSession as never), privateSpace, member.did, "new.flock.channel.message", privateMessage, {
       $type: "new.flock.channel.message", text: "approved private message", createdAt: new Date().toISOString(),
     });
-    assert.deepEqual(await readIndependentPrivateRoster(sessionCredentialDeps(memberSession as never), bootstrap.workspace, privateSkey), [admin.did, member.did].sort());
-    assert.equal((await readIndependentChannelPage(sessionCredentialDeps(memberSession as never), bootstrap.workspace, privateSkey)).messages[0]?.value.text, "approved private message");
-    const { requireCurrentChannelCredential } = await import("@/workspaces/channels");
+    const privateRef = { workspace: bootstrap.workspace, skey: privateSkey };
+    assert.deepEqual(await readIndependentPrivateRoster(independentDeps(member), bootstrap.workspace, privateSkey), [admin.did, member.did].sort());
+    assert.deepEqual(await memberEngine.channels.roster(privateRef), [admin.did, member.did].sort(), "the engine's roster is the independent reader's");
+    assert.equal((await readIndependentChannelPage(independentDeps(member), bootstrap.workspace, privateSkey)).messages[0]?.value.text, "approved private message");
+    assert.equal((await memberEngine.channels.readPage(privateRef)).messages[0]?.value.text, "approved private message", "the engine reads the private channel the approval opened");
     const { putSpaceMember, removeSpaceMember } = await import("@/atproto/space-ops");
     await removeSpaceMember(ownerSession as never, privateSpace, member.did);
     await assert.rejects(
-      requireCurrentChannelCredential(memberSession as never, bootstrap.workspace, privateSpace),
+      memberEngine.channels.send(privateRef, "after removal"),
       (error: unknown) => isAccessLost(error),
-      "a removed private-channel member cannot pass the app's fresh credential gate for writes",
+      "a removed private-channel member cannot pass the engine's fresh credential gate for writes",
     );
     await putSpaceMember(ownerSession as never, privateSpace, member.did, true, true);
     const preRemovalCredential = await mintSpaceCredential(memberSession as never, bootstrap.workspace);
@@ -424,13 +395,7 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     assert.equal(issued.cnf.kid, preRemovalCredential.key.did(), "the credential is bound to the key that signs its requests");
     assert.ok(issued.jti.length > 0);
 
-    const cache = getRawDb();
-    cache.prepare(`INSERT OR REPLACE INTO channel_record_cache (account_did,space_uri,repo_did,collection,rkey,uri,value_cipher,updated_at)
-      VALUES (?,?,?,?,?,?,?,?)`).run(member.did, messageSpace, member.did, "new.flock.channel.message", "stale", `at://${member.did}/new.flock.channel.message/stale`, "encrypted-stale-value", Date.now());
-    cache.prepare(`INSERT OR REPLACE INTO space_collection_cursor (account_did,space_uri,repo_did,collection,rev,next_cursor,finished,checked_at)
-      VALUES (?,?,?,?,?,?,?,?)`).run(member.did, messageSpace, member.did, "new.flock.channel.message", "stale-rev", null, 1, Date.now());
-    cache.prepare("INSERT OR REPLACE INTO sync_cursor (account_did,space_uri,repo_did,rev,updated_at) VALUES (?,?,?,?,?)")
-      .run(member.did, messageSpace, member.did, "stale-rev", Date.now());
+    assert.ok((await memberEngine.sync.store.records(messageSpace, "new.flock.channel.message")).length > 0, "the member's engine holds a copy of the channel it read");
 
     // Seed an unfinished operation after its first remote mutation, then
     // resume its restored journal in a new Node process against the same PDSes.
@@ -466,7 +431,7 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     const refreshedGrant = await (await import("@/operator/authority-grant")).restoreAuthorityGrant(owner.did);
     assert.equal(refreshedGrant.did, owner.did, "the expired authority grant refreshes using the authority client");
     await expireStoredSession("authority_grant", owner.did);
-    await acceptAuthenticatedApiRoute(network.pds, owner.did);
+    await acceptOperatorCreateWorkspace(ownerSession, serviceRef, owner.did);
     await expireStoredSession("authority_grant", owner.did);
 
     const backupPath = join(directory, "app-backup.db");
@@ -496,11 +461,15 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
       backupDb.close();
     }
     const restoredDb = new BetterSqlite3(restoredPath, { readonly: true, fileMustExist: true });
-    try { assert.equal(restoredDb.pragma("integrity_check", { simple: true }), "ok"); }
-    finally { restoredDb.close(); }
+    try {
+      assert.equal(restoredDb.pragma("integrity_check", { simple: true }), "ok");
+      const tables = (restoredDb.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map(({ name }) => name);
+      for (const removed of (await import("@/lib/db")).MEMBER_SESSION_TABLES) {
+        assert.ok(!tables.includes(removed), `the server database holds no member session, cursor or channel content: ${removed} is gone`);
+      }
+    } finally { restoredDb.close(); }
     const resumed = await runRestartRecovery({ databasePath: restoredPath, authorityDid: owner.did, workspace: bootstrap.workspace, memberDid: member.did, operationId: failedOperationId, useStoredAuthorityGrant: true });
     assert.equal(resumed.state, "completed");
-    assert.ok(resumed.discoveredWorkspaces.includes(bootstrap.workspace), "workspace discovery succeeds against the restored database");
     assert.equal(resumed.reconciliationState, "completed", "PDS reconciliation completes after backup restoration");
     const restoredStateDb = new BetterSqlite3(restoredPath);
     try {
@@ -519,18 +488,12 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     } finally {
       restoredStateDb.close();
     }
-    const afterRemoval = await discoverWorkspaces(memberSession as never);
-    assert.equal(afterRemoval.length, 0);
-    const countRows = (table: string) => (cache.prepare(`SELECT count(*) AS count FROM ${table} WHERE account_did=? AND space_uri=?`).get(member.did, messageSpace) as { count: number }).count;
-    assert.equal(countRows("channel_record_cache"), 0);
-    assert.equal(countRows("space_collection_cursor"), 0);
-    assert.equal(countRows("sync_cursor"), 0);
-    cache.prepare(`INSERT INTO channel_record_cache (account_did,space_uri,repo_did,collection,rkey,uri,value_cipher,updated_at)
-      VALUES (?,?,?,?,?,?,?,?)`).run(member.did, messageSpace, member.did, "new.flock.channel.message", "stale-after-list", `at://${member.did}/new.flock.channel.message/stale-after-list`, "encrypted-stale-value", Date.now());
-    await assert.rejects(readChannelPage(memberSession as never, bootstrap.workspace, `${workspace.skey}-team-lobby`), (error: unknown) => isAccessLost(error));
-    assert.equal(countRows("channel_record_cache"), 0, "a failed workspace credential renewal purges the local channel cache");
+    const afterRemoval = await memberEngine.workspaces.discover();
+    assert.equal(afterRemoval.workspaces.length, 0);
+    assert.equal((await memberEngine.sync.store.records(messageSpace, "new.flock.channel.message")).length, 0, "a refused workspace credential renewal purges the engine's held copy");
+    await assert.rejects(memberEngine.channels.readPage(lobby), (error: unknown) => isAccessLost(error));
     await assert.rejects(mintSpaceCredential(memberSession as never, bootstrap.workspace), (error: unknown) => isAccessLost(error));
-    assert.equal((await listIndependentWorkspaces(sessionCredentialDeps(memberSession as never))).length, 0, "the independent reader drops a stale acceptance marker after access is revoked");
+    assert.equal((await listIndependentWorkspaces(independentDeps(member))).length, 0, "the independent reader drops a stale acceptance marker after access is revoked");
     const existingCredentialStillWorks = await preRemovalCredential.client(network.pds.url).query<{ records: Array<{ rkey: string }> }>("com.atproto.space.listRecords", {
       space: bootstrap.workspace, repo: owner.did, collection: "new.flock.workspace.profile",
     });
@@ -1116,56 +1079,36 @@ async function runReconciliation(databasePath: string, mutationsPaused = true): 
   return { exitCode, stdout, stderr };
 }
 
-async function acceptAuthenticatedApiRoute(pds: TestPds, authorityDid: string): Promise<void> {
-  const [{ createWebSession, WEB_SESSION_COOKIE }, { tidNow }] = await Promise.all([
-    import("@/auth/web-session"),
-    import("@/protocol/keys"),
+const OPERATOR_ORIGIN = "http://127.0.0.1:3000";
+
+/** What a browser's fetch does for the operator, with its routes served in this process: requests to its origin reach the route handler, others go out. */
+async function fetchWithOperatorInProcess(request: Request): Promise<Response> {
+  const url = new URL(request.url);
+  if (url.origin !== OPERATOR_ORIGIN) return fetch(request);
+  const [{ NextRequest }, route] = await Promise.all([import("next/server"), import(`@/app${url.pathname}/route`) as Promise<Record<string, (request: InstanceType<typeof import("next/server").NextRequest>) => Promise<Response>>>]);
+  const handler = route[request.method];
+  assert.ok(handler, `${url.pathname} has a ${request.method} handler`);
+  return handler(new NextRequest(request));
+}
+
+async function acceptOperatorCreateWorkspace(session: Session, serviceRef: string, authorityDid: string): Promise<void> {
+  const [{ NextRequest }, { POST }, { tidNow }] = await Promise.all([
+    import("next/server"), import("@/app/xrpc/new.flock.operator.createWorkspace/route"), import("@/protocol/keys"),
   ]);
-  // The owner signs in as a member; the route creates the workspace with the separate authority grant, never with that sign-in.
-  await storeOAuthSession(pds, authorityDid, await memberSignInScopes(), "route-owner-sign-in");
-  const cookie = await createWebSession(authorityDid);
-  const port = await availablePort();
-  const serverUrl = `http://127.0.0.1:${port}`;
-  const child = spawn(process.execPath, ["node_modules/next/dist/bin/next", "start", "--hostname", "127.0.0.1", "--port", String(port)], {
-    cwd: process.cwd(),
-    env: { ...process.env },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  let serverOutput = "";
-  child.stdout.setEncoding("utf8").on("data", (chunk: string) => { serverOutput = `${serverOutput}${chunk}`.slice(-20_000); });
-  child.stderr.setEncoding("utf8").on("data", (chunk: string) => { serverOutput = `${serverOutput}${chunk}`.slice(-20_000); });
-  try {
-    await waitForClientMetadata(serverUrl, child);
-    const body = JSON.stringify({ name: "Authenticated API Workspace", operationId: tidNow() });
-    const anonymous = await fetch(`${serverUrl}/api/workspaces/bootstrap`, {
-      method: "POST", headers: { "content-type": "application/json", origin: process.env.APP_URL! }, body,
-    });
-    assert.equal(anonymous.status, 401, "the API route rejects a request without the browser web-session cookie");
-    const authenticated = await fetch(`${serverUrl}/api/workspaces/bootstrap`, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie: `${WEB_SESSION_COOKIE}=${cookie}`, origin: process.env.APP_URL! },
-      body,
-    });
-    const responseBody = await authenticated.text();
-    const { getRawDb } = await import("@/lib/db");
-    const webSessionExists = Boolean(getRawDb().prepare("SELECT 1 AS found FROM web_session WHERE token_hash = ?")
-      .get(createHash("sha256").update(cookie).digest("hex")));
-    const signInExists = Boolean(getRawDb().prepare("SELECT 1 AS found FROM oauth_session WHERE key = ?").get(authorityDid));
-    const grantExists = Boolean(getRawDb().prepare("SELECT 1 AS found FROM authority_grant WHERE key = ?").get(authorityDid));
-    assert.equal(authenticated.status, 201, `${responseBody}\n${serverOutput}\nparentDB webSession=${webSessionExists} signIn=${signInExists} grant=${grantExists}`);
-    const result = JSON.parse(responseBody) as { state: string; workspace: string };
-    assert.equal(result.state, "completed", "the authenticated route restores the encrypted authority grant and bootstraps against the PDS");
-    assert.ok(result.workspace.startsWith(`at://${authorityDid}/space/new.flock.workspace/`));
-  } finally {
-    const closed = waitForChildClose(child);
-    if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
-    await closed;
-  }
+  // The owner asks as a member, with a service token from their own host; the operator creates the workspace with the separate authority grant.
+  const body = { name: "Authenticated Operator Workspace", operationId: tidNow() };
+  const anonymous = await POST(new NextRequest(`${OPERATOR_ORIGIN}/xrpc/new.flock.operator.createWorkspace`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  }));
+  assert.equal(anonymous.status, 403, "the operator refuses a request without a service token");
+  const result = await callOperatorMethod(session, serviceRef, "new.flock.operator.createWorkspace", {}, body) as { state: string; workspace: string };
+  assert.equal(result.state, "completed", "the operator restores the encrypted authority grant and bootstraps against the PDS");
+  assert.ok(result.workspace.startsWith(`at://${authorityDid}/space/new.flock.workspace/`));
 }
 
 async function runRestartRecovery(input: {
   databasePath: string; authorityDid: string; workspace: string; memberDid: string; operationId: string; accessJwt?: string; pdsUrl?: string; resumeAll?: boolean; useStoredAuthorityGrant?: boolean;
-}): Promise<{ state: string; completedSteps: string[]; resumedOperationState: string | null; discoveredWorkspaces: string[]; reconciliationState: string }> {
+}): Promise<{ state: string; completedSteps: string[]; resumedOperationState: string | null; reconciliationState: string }> {
   const child = spawn(process.execPath, ["--import", "tsx", "protocol-tests/recover-pending-operation.ts"], {
     cwd: process.cwd(),
     env: {
@@ -1195,7 +1138,6 @@ async function runRestartRecovery(input: {
     state: string;
     completedSteps: string[];
     resumedOperationState: string | null;
-    discoveredWorkspaces: string[];
     reconciliationState: string;
   };
 }
