@@ -22,3 +22,22 @@ test("a store is per account, and starting as another account deletes the stores
   assert.deepEqual((await factory.databases()).map((database) => database.name), ["flock-sync-did:plc:bob"]);
   bob.close();
 });
+
+test("an account's store left open in another tab does not hold up the next account's start", async () => {
+  // #given alice's store still open, as in a tab left behind
+  const factory = new IDBFactory();
+  let told = false;
+  const alice = await IndexedDbStore.open("did:plc:alice", factory, () => { told = true; });
+
+  // #when bob starts and deletes the stores that are not his
+  await IndexedDbStore.open("did:plc:bob", factory);
+  const deleted = IndexedDbStore.deleteOtherAccounts("did:plc:bob", factory);
+  const outcome = await Promise.race([deleted.then(() => "deleted"), new Promise((resolve) => setTimeout(() => resolve("still waiting"), 1_000))]);
+  alice.close();
+  await deleted;
+
+  // #then alice's open store had let go of its database by itself, said so, and it was deleted
+  assert.equal(outcome, "deleted");
+  assert.equal(told, true, "the tab holding alice's store is told it was closed");
+  assert.deepEqual((await factory.databases()).map((database) => database.name), ["flock-sync-did:plc:bob"]);
+});

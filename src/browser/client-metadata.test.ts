@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildDmClientMetadata } from "./client-metadata";
+import { buildBrowserClientMetadata } from "./client-metadata";
 
 const scope = "atproto space:new.flock.dm.inbox?authority=*&collection=new.flock.dm.request&action=create";
 
 test("HTTPS mode builds a discoverable client_id pointing at the DM metadata route", () => {
-  const metadata = buildDmClientMetadata({ appUrl: "https://spaces.example.com", scope });
+  const metadata = buildBrowserClientMetadata({ appUrl: "https://spaces.example.com", scope });
   assert.equal(metadata.client_id, "https://spaces.example.com/oauth/dm-client-metadata.json");
   assert.equal(metadata.client_uri, "https://spaces.example.com");
   assert.deepEqual(metadata.redirect_uris, ["https://spaces.example.com/dm/callback"]);
@@ -16,7 +16,7 @@ test("HTTPS mode builds a discoverable client_id pointing at the DM metadata rou
 });
 
 test("loopback HTTP mode embeds the redirect_uri and scope in the client_id itself", () => {
-  const metadata = buildDmClientMetadata({ appUrl: "http://127.0.0.1:3000", scope });
+  const metadata = buildBrowserClientMetadata({ appUrl: "http://127.0.0.1:3000", scope });
   assert.equal(metadata.client_uri, undefined);
   assert.deepEqual(metadata.redirect_uris, ["http://127.0.0.1:3000/dm/callback"]);
   const clientId = new URL(metadata.client_id);
@@ -27,11 +27,11 @@ test("loopback HTTP mode embeds the redirect_uri and scope in the client_id itse
 });
 
 test("a loopback appUrl given as 'localhost' still redirects on the 127.0.0.1 IP literal", () => {
-  const metadata = buildDmClientMetadata({ appUrl: "http://localhost:3000", scope });
+  const metadata = buildBrowserClientMetadata({ appUrl: "http://localhost:3000", scope });
   assert.deepEqual(metadata.redirect_uris, ["http://127.0.0.1:3000/dm/callback"]);
 });
 
 test("HTTPS is never treated as loopback even on a loopback hostname", () => {
-  const metadata = buildDmClientMetadata({ appUrl: "https://127.0.0.1:3000", scope });
+  const metadata = buildBrowserClientMetadata({ appUrl: "https://127.0.0.1:3000", scope });
   assert.equal(metadata.client_id, "https://127.0.0.1:3000/oauth/dm-client-metadata.json");
 });

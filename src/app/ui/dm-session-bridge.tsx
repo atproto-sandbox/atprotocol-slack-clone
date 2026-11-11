@@ -1,17 +1,17 @@
 "use client";
 
 import { useEffect } from "react";
-import type { DmConfig } from "@/dm/browser-session";
-import { useDmClient, type DmClientState } from "@/dm/use-dm-client";
+import type { BrowserSessionConfig } from "@/browser/session";
+import { useBrowserSession, type BrowserSessionState } from "@/browser/use-browser-session";
 
 export type DmSessionBridgeProps = {
   did: string;
-  dmConfig: DmConfig;
-  onSession: (session: DmClientState) => void;
+  dmConfig: BrowserSessionConfig;
+  onSession: (session: BrowserSessionState) => void;
 };
 
 /**
- * The only module that statically imports `@/dm/use-dm-client` (and, through
+ * The only module that statically imports `@/browser/use-browser-session` (and, through
  * it, dynamically loads `@atproto/oauth-client-browser`). `dm-context.tsx` renders this component through
  * `next/dynamic(..., { ssr: false })` so that reachability never enters any
  * server bundle: `DmProvider` itself must render its non-DM children
@@ -21,9 +21,9 @@ export type DmSessionBridgeProps = {
  * reported up to `DmProvider` through `onSession`.
  */
 export function DmSessionBridge({ did, dmConfig, onSession }: DmSessionBridgeProps) {
-  const { status, client, store, error, connect, disconnect } = useDmClient(did, dmConfig);
+  const { status, client, store, engine, snapshots, live, error, connect, disconnect } = useBrowserSession(did, dmConfig);
   useEffect(() => {
-    onSession({ status, client, store, error, connect, disconnect });
-  }, [status, client, store, error, connect, disconnect, onSession]);
+    onSession({ status, client, store, engine, snapshots, live, error, connect, disconnect });
+  }, [status, client, store, engine, snapshots, live, error, connect, disconnect, onSession]);
   return null;
 }

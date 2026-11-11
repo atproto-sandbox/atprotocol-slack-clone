@@ -4,8 +4,11 @@ import Database from "better-sqlite3";
 import type { OAuthSession } from "@atproto/oauth-client-node";
 import { inviteLinkFor } from "@/app/ui/client-api";
 import { pinnedCheckoutPath } from "../../protocol-tests/support/app-fixture";
-import { completeConsent, escapeRegExp, eventually } from "./ui";
-import { PAGE_TIMEOUT_MS, type Actor, type ApiCall, type AppWorld } from "./world";
+import { COLLECTION } from "@/protocol/nsids";
+import { parseWorkspaceUri } from "@/protocol/keys";
+import { listingCalls, openChannel, workspaceChannels } from "./channels-ui";
+import { completeConsent, connectBrowser, escapeRegExp, eventually, waitForOrigin } from "./ui";
+import { PAGE_TIMEOUT_MS, type Actor, type AppWorld } from "./world";
 
 // Helpers for scenarios that compare, attack or stress the app from outside: a second app instance viewed through
 // its own browser context, journal rows only an outage could leave behind, and the delegated launch-envelope run.
@@ -13,19 +16,17 @@ import { PAGE_TIMEOUT_MS, type Actor, type ApiCall, type AppWorld } from "./worl
 /** One account signed in to one specific app instance, in its own browser context. */
 export type AppViewer = Actor & { origin: string; requestUrls: string[] };
 
-export type WorkspaceState = {
-  uri: string;
-  name: string;
-  isAdmin: boolean;
-  members: Array<{ did: string }>;
-  admins: string[];
-  channels: Array<{ skey: string; name: string; visibility: string }>;
-};
+/** The workspace's roster, admins and channel directory as an app's page read them for itself. */
+export type WorkspaceRead = { members: string[]; admins: string[]; channels: Array<{ skey: string; name: string; visibility: string }> };
 
+/**
+ * What a person sees of one workspace on one app (its summary line, its sidebar directory, and each channel opened), and the
+ * roster and admins the page read to show it.
+ */
 export type WorkspaceObservation = {
   summary: string;
-  directory: string[];
-  state: { members: string[]; admins: string[]; channels: Array<{ skey: string; name: string; visibility: string }> };
+  state: WorkspaceRead;
+  directory: Array<{ name: string; visibility: "public" | "private" }>;
   messages: Record<string, string[]>;
   privateRosters: Record<string, string[]>;
 };
@@ -41,7 +42,7 @@ export async function openViewer(world: AppWorld, account: Actor, origin: string
   const context = await world.newContext(role);
   const page = await context.newPage();
   page.setDefaultTimeout(PAGE_TIMEOUT_MS);
-  const viewer: AppViewer = { ...account, role, context, page, calls: [], origin, requestUrls: [] };
+  const viewer: AppViewer = { ...account, role, context, page, calls: [], xrpc: [], origin, requestUrls: [] };
   page.on("request", (request) => viewer.requestUrls.push(request.url()));
   world.recordCalls(viewer);
   world.actors.set(role, viewer);
@@ -49,7 +50,7 @@ export async function openViewer(world: AppWorld, account: Actor, origin: string
 }
 
 export async function waitForAppAt(viewer: AppViewer): Promise<void> {
-  await viewer.page.waitForURL((url) => url.origin === viewer.origin && !url.pathname.startsWith("/oauth"), { timeout: 30_000 });
+  await waitForOrigin(viewer, viewer.origin);
 }
 
 async function signInFromLoginFormAt(viewer: AppViewer): Promise<void> {
@@ -58,6 +59,7 @@ async function signInFromLoginFormAt(viewer: AppViewer): Promise<void> {
   await viewer.page.locator("input[name=password]").waitFor({ state: "visible" });
   await completeConsent(viewer);
   await waitForAppAt(viewer);
+  await connectBrowser(viewer, viewer.origin);
 }
 
 export async function signInAt(viewer: AppViewer): Promise<void> {
@@ -119,122 +121,75 @@ export async function createChannelAs(viewer: AppViewer, name: string, options: 
 }
 
 function channelButton(viewer: AppViewer, name: string) {
-  return viewer.page.locator(".channel-nav-item").filter({ hasText: new RegExp(`^\\W*${escapeRegExp(name)}$`) });
-}
-
-async function callSince(viewer: AppViewer, since: number, path: string, skey?: string): Promise<ApiCall> {
-  const forChannel = (call: ApiCall) => skey === undefined || new URLSearchParams(call.query).get("skey") === skey;
-  return eventually(() => viewer.calls.slice(since).find((call) => call.path === path && forChannel(call)), { what: `${path} to be called${skey ? ` for ${skey}` : ""}` });
-}
-
-/** The channel key the app itself listed for this channel name, so a read in flight for the previously open channel is never mistaken for this one. */
-async function channelSkeyOf(viewer: AppViewer, name: string): Promise<string> {
-  return eventually(() => {
-    for (const call of [...viewer.calls].reverse()) {
-      if (call.path !== "/api/workspaces" || call.status !== 200 || !call.responseBody) continue;
-      const listed = (JSON.parse(call.responseBody) as { workspaces: Array<{ channels: Array<{ skey: string; name: string }> }> }).workspaces
-        .flatMap((workspace) => workspace.channels).find((channel) => channel.name === name);
-      if (listed) return listed.skey;
-    }
-    return undefined;
-  }, { what: `the app to list channel ${name}` });
-}
-
-/**
- * Opens a channel and waits for its first read, approving the PDS read permission when the app asks for it. Returns the
- * private roster the app fetched, or null for a public channel.
- */
-export async function openChannelAndRead(viewer: AppViewer, name: string): Promise<string[] | null> {
-  const button = channelButton(viewer, name);
-  const isPrivate = (await button.innerText()).trim().startsWith("▣");
-  const skey = await channelSkeyOf(viewer, name);
-  const read = async (): Promise<{ failure?: ApiCall; roster: string[] | null }> => {
-    const since = viewer.calls.length;
-    await button.click();
-    const messages = await callSince(viewer, since, "/api/channels/messages", skey);
-    if (messages.status !== 200) return { failure: messages, roster: null };
-    const delivered = (JSON.parse(messages.responseBody) as { messages: unknown[] }).messages.length;
-    if (delivered > 0) await viewer.page.locator(".message-card").nth(delivered - 1).waitFor();
-    if (!isPrivate) return { roster: null };
-    const roster = await callSince(viewer, since, "/api/channels/roster", skey);
-    if (roster.status !== 200) return { failure: roster, roster: null };
-    return { roster: (JSON.parse(roster.responseBody) as { members: string[] }).members };
-  };
-  let result = await read();
-  if (result.failure) {
-    await viewer.page.getByRole("button", { name: "Grant channel read →" }).click();
-    await completeConsent(viewer);
-    await waitForAppAt(viewer);
-    result = await read();
-  }
-  assert.equal(result.failure, undefined, `${name} could not be read: ${result.failure?.path} ${result.failure?.status} ${result.failure?.responseBody}`);
-  return result.roster;
+  return workspaceChannels(viewer.page).filter({ hasText: new RegExp(`^\\W*${escapeRegExp(name)}$`) });
 }
 
 /** A member who is not on a private channel's roster asks for access, approving the write-only inbox permission on the way. */
 export async function requestPrivateAccess(viewer: AppViewer, channelName: string): Promise<void> {
   const page = viewer.page;
+  const offRoster = page.getByText("You are not on this channel’s active roster.");
   await channelButton(viewer, channelName).click();
-  await page.getByText(/Grant workspace\/channel read scope/).waitFor({ state: "visible" });
+  await offRoster.waitFor({ state: "visible" });
   await page.getByRole("button", { name: "Request private access →" }).last().click();
   await page.getByText(/Grant write-only inbox access/).waitFor({ state: "visible" });
   await page.getByRole("button", { name: "Grant request access →" }).click();
   await completeConsent(viewer);
   await waitForAppAt(viewer);
-  await page.getByText(/Grant workspace\/channel read scope/).waitFor({ state: "visible" });
+  await offRoster.waitFor({ state: "visible" });
   await page.getByRole("button", { name: "Request private access →" }).last().click();
   await page.getByText("Your access request is in the workspace inbox.", { exact: true }).waitFor({ state: "visible" });
 }
 
-export async function postMessage(viewer: AppViewer, text: string): Promise<void> {
-  const page = viewer.page;
-  const box = page.getByPlaceholder("Write a message…");
-  const grant = page.getByRole("button", { name: "Grant message posting →" });
-  const posted = page.locator(".message-card > p").filter({ hasText: text });
-  await box.fill(text);
-  await page.getByRole("button", { name: "Send", exact: true }).click();
-  await grant.or(posted).first().waitFor();
-  if (await grant.isVisible()) {
-    await grant.click();
-    await completeConsent(viewer);
-    await waitForAppAt(viewer);
-    await box.fill(text);
-    await page.getByRole("button", { name: "Send", exact: true }).click();
-  }
-  await posted.waitFor();
-}
-
-export async function workspaceStateFor(viewer: AppViewer, workspaceName: string): Promise<WorkspaceState> {
-  const listing = await viewer.page.evaluate(async () => (await fetch("/api/workspaces")).json()) as { workspaces: WorkspaceState[] };
-  const found = listing.workspaces.find((workspace) => workspace.name === workspaceName);
-  if (!found) throw new Error(`${viewer.origin} does not list ${workspaceName}`);
-  return found;
-}
 
 /** What a person sees on this app: workspace home, the channel directory, and each named channel's messages and private roster. */
 export async function observeWorkspace(viewer: AppViewer, workspaceName: string, channels: string[]): Promise<WorkspaceObservation> {
   const page = viewer.page;
+  const since = viewer.xrpc.length;
   await page.goto(viewer.origin);
   await page.getByRole("heading", { name: workspaceName, exact: true }).waitFor({ state: "visible" });
   const summary = (await page.locator(".welcome-banner p").first().innerText()).trim();
-  const directory = (await page.locator(".channel-nav-item").allInnerTexts()).map((entry) => entry.trim()).sort();
-  const state = await workspaceStateFor(viewer, workspaceName);
+  const workspaceUri = (await page.locator(".welcome-banner .mono-note").first().innerText()).trim();
+  const state = await eventually(() => workspaceRead(viewer, workspaceUri, since), { what: `${viewer.origin} to read the workspace's roster and admins` });
+  const directory = (await workspaceChannels(page).allInnerTexts()).map((entry) => entry.trim())
+    .map((entry) => ({ name: entry.slice(1).trim(), visibility: entry.startsWith("▣") ? "private" as const : "public" as const }))
+    .sort((left, right) => left.name.localeCompare(right.name));
   const messages: Record<string, string[]> = {};
   const privateRosters: Record<string, string[]> = {};
   for (const channel of channels) {
-    const fetchedRoster = await openChannelAndRead(viewer, channel);
+    await openChannel(viewer, channel);
     const roster = page.locator(".private-roster p");
-    if (fetchedRoster?.length) await roster.waitFor();
     messages[channel] = await page.locator(".message-card > p").allInnerTexts();
     privateRosters[channel] = await roster.count() === 0 ? [] : (await roster.innerText()).split(" · ").sort();
   }
+  return { summary, state, directory, messages, privateRosters };
+}
+
+/**
+ * The workspace's roster, admins and directory as the account's page read them since `since` (an index into its XRPC calls),
+ * from the newest complete listing of each the browser made itself: active subjects, and the channels not archived;
+ * undefined until it has made one of each. Asserts the page listed them only from the authority's own repo.
+ */
+export function workspaceRead(viewer: Actor, workspaceUri: string, since = 0): WorkspaceRead | undefined {
+  const authority = parseWorkspaceUri(workspaceUri)?.authorityDid;
+  type Listed = { value: Record<string, unknown> };
+  const read = (collection: string): Listed[] | undefined => {
+    const listings = listingCalls(viewer, collection, since).filter(({ call, query }) => call.status === 200 && call.body === "recorded" && query.get("space") === workspaceUri);
+    const start = listings.map(({ query }) => query.get("cursor")).lastIndexOf(null);
+    if (start < 0) return undefined;
+    const pages = listings.slice(start).map(({ call, query }) => ({ query, body: JSON.parse(call.responseBody) as { cursor?: string; records: Listed[] } }));
+    if (pages.at(-1)?.body.cursor !== undefined) return undefined;
+    assert.deepEqual([...new Set(pages.map(({ query }) => query.get("repo")))], [authority], `the app read ${collection} only from the workspace authority's repo`);
+    return pages.flatMap(({ body }) => body.records);
+  };
+  const activeSubjects = (records: Listed[]) => records.filter((record) => record.value.active === true).map((record) => String(record.value.subject)).sort();
+  const [roster, adminRecords, directory] = [read(COLLECTION.workspaceRoster), read(COLLECTION.admin), read(COLLECTION.directory)];
+  if (!roster || !adminRecords || !directory) return undefined;
   return {
-    summary, directory, messages, privateRosters,
-    state: {
-      members: state.members.map((member) => member.did).sort(),
-      admins: [...state.admins].sort(),
-      channels: state.channels.map(({ skey, name, visibility }) => ({ skey, name, visibility })).sort((left, right) => left.name.localeCompare(right.name)),
-    },
+    members: activeSubjects(roster),
+    admins: activeSubjects(adminRecords),
+    channels: directory.filter((record) => record.value.visibility !== "archived")
+      .map(({ value }) => ({ skey: String(value.skey), name: String(value.name), visibility: String(value.visibility) }))
+      .sort((left, right) => left.name.localeCompare(right.name)),
   };
 }
 

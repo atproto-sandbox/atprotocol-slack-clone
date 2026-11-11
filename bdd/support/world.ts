@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { World, type IWorldOptions } from "@cucumber/cucumber";
 import Database from "better-sqlite3";
-import { resolveKemKey } from "../../src/dm/browser-identity";
+import { resolveKemKey } from "../../src/browser/identity";
 import type { Browser, BrowserContext, Page, Response as PlaywrightResponse } from "@playwright/test";
 import type { AppFixture, FixtureAccount } from "../../protocol-tests/support/app-fixture";
 
@@ -16,8 +16,15 @@ export const PAGE_TIMEOUT_MS = 90_000;
 export type ApiCall = {
   method: string; path: string; query: string; status: number; requestBody: string; responseBody: string;
   body: "recorded" | "streamed" | "navigated-away";
+  /** Where the call went: the app's own origin for /api, or a PDS host or the operator for an XRPC call the browser made itself. */
+  origin: string;
 };
-export type Actor = FixtureAccount & { role: string; context: BrowserContext; page: Page; calls: ApiCall[] };
+/**
+ * `calls` holds what the browser asked of the app's own server (/api); `xrpc` holds the XRPC calls the browser made itself,
+ * to PDS hosts and to the operator. Leak scans of the app server read `calls` only: `xrpc` legitimately carries the
+ * account's own content, read straight from the hosts.
+ */
+export type Actor = FixtureAccount & { role: string; context: BrowserContext; page: Page; calls: ApiCall[]; xrpc: ApiCall[] };
 
 let sequence = 0;
 const VIDEO_SIZE = { width: 1280, height: 720 };
@@ -61,7 +68,7 @@ export class AppWorld extends World {
     await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: this.appOrigin });
     const page = await context.newPage();
     page.setDefaultTimeout(PAGE_TIMEOUT_MS);
-    const actor: Actor = { ...account, role, context, page, calls: [] };
+    const actor: Actor = { ...account, role, context, page, calls: [], xrpc: [] };
     this.recordCalls(actor);
     this.actors.set(role, actor);
     return actor;
@@ -77,7 +84,8 @@ export class AppWorld extends World {
   }
 
   /**
-   * Records every /api call the actor's page makes into `actor.calls`, in the order their bodies finish. The one recorder
+   * Records every /api call the actor's page makes into `actor.calls`, and every XRPC call it makes itself to a PDS host or
+   * the operator into `actor.xrpc`, in the order their bodies finish. The one recorder
    * for every browser session of a scenario, including sessions on a second app. A body that cannot be read fails the
    * scenario when it ends, except where `ApiCall.body` says the call is recorded headers-only (and a redirect has no body).
    */
@@ -92,12 +100,16 @@ export class AppWorld extends World {
 
   private async record(actor: Actor, response: PlaywrightResponse): Promise<void> {
     const url = new URL(response.url());
-    if (!url.pathname.startsWith("/api/")) return;
+    if (!url.pathname.startsWith("/api/") && !url.pathname.startsWith("/xrpc/")) return;
     const request = response.request();
+    if (request.method() === "OPTIONS") return;
     const status = response.status();
+    // A held change-feed poll can be cut off when its page closes, so only its headers are recorded.
+    const heldPoll = url.pathname === "/xrpc/new.flock.operator.getChanges";
     const call: ApiCall = {
       method: request.method(), path: url.pathname, query: url.search, status, requestBody: request.postData() ?? "", responseBody: "",
-      body: (response.headers()["content-type"] ?? "").startsWith("text/event-stream") ? "streamed" : "recorded",
+      body: heldPoll || (response.headers()["content-type"] ?? "").startsWith("text/event-stream") ? "streamed" : "recorded",
+      origin: url.origin,
     };
     if (call.body === "recorded" && !(status >= 300 && status < 400)) {
       try {
@@ -107,7 +119,7 @@ export class AppWorld extends World {
         call.body = "navigated-away";
       }
     }
-    actor.calls.push(call);
+    (url.pathname.startsWith("/api/") ? actor.calls : actor.xrpc).push(call);
   }
 
   callsTo(actor: Actor, path: string): ApiCall[] {

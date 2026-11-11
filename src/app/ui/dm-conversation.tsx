@@ -6,11 +6,13 @@ import type { DmHalfStatus, DmMessage, DmReaction } from "@/dm/dm-client";
 import { conversationLabel, halfChip, participantLabel, retainAfterRefresh } from "@/dm/ui-logic";
 import { messageOf } from "./client-api";
 import { useDmContext } from "./dm-context";
+import { useBrowserSessionContext } from "./session-context";
 
 type ReactionChip = { emoji: string; count: number; active: boolean };
 
 export function DmConversation({ convKey, participants }: { convKey: string; participants: string[] }) {
   const { did, client, dmConfig, labels, openView, setError, refresh } = useDmContext();
+  const { live } = useBrowserSessionContext();
   const [messages, setMessages] = useState<DmMessage[]>([]);
   const [reactions, setReactions] = useState<DmReaction[]>([]);
   const [halves, setHalves] = useState<Record<string, DmHalfStatus>>({});
@@ -47,7 +49,7 @@ export function DmConversation({ convKey, participants }: { convKey: string; par
   useEffect(() => {
     if (!client) return;
     let cancelled = false;
-    let sources: EventSource[] = [];
+    let stopWatching: (() => void) | undefined;
     let subscribed = "";
     const watchAndSubscribe = async (knownHalves: Record<string, DmHalfStatus>) => {
       const spaces = [
@@ -59,23 +61,15 @@ export function DmConversation({ convKey, participants }: { convKey: string; par
       } catch {
         // Registration is best-effort: the 60-second poll keeps the view correct.
       }
-      if (cancelled) return;
+      if (cancelled || !live) return;
       const subscription = spaces.join("|");
-      if (subscription === subscribed && sources.every((source) => source.readyState !== EventSource.CLOSED)) return;
+      if (subscription === subscribed) return;
       subscribed = subscription;
-      for (const source of sources) source.close();
-      sources = spaces.map((space) => {
-        const query = new URLSearchParams({ space, after: "0" });
-        const events = new EventSource(`/api/notifications/dm?${query}`);
-        const reload = () => {
-          void loadPage().catch((caught) => setError(messageOf(caught)));
-        };
-        events.addEventListener("change", reload);
-        events.addEventListener("error", () => {
-          if (events.readyState === EventSource.CLOSED) reload();
-        });
-        return events;
-      });
+      stopWatching?.();
+      // The operator's change feed says when one of the halves changed; the page is read again then.
+      const unwatch = await live.watch(`dm:conversation:${convKey}`, spaces, () => loadPage());
+      if (cancelled) unwatch();
+      else stopWatching = unwatch;
     };
     void (async () => {
       const page = await loadPage();
@@ -96,9 +90,9 @@ export function DmConversation({ convKey, participants }: { convKey: string; par
     return () => {
       cancelled = true;
       window.clearInterval(timer);
-      for (const source of sources) source.close();
+      stopWatching?.();
     };
-  }, [client, did, convKey, dmConfig.serviceRef, loadPage, setError]);
+  }, [client, live, did, convKey, dmConfig.serviceRef, loadPage, setError]);
 
   async function send(event: FormEvent) {
     event.preventDefault();

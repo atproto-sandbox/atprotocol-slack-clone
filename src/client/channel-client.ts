@@ -1,6 +1,7 @@
 import { listBoundedRecords } from "@/atproto/record-pages";
 import { MAX_LISTED_SET_ASIDE } from "@/atproto/repo-failure";
 import { selectValidChannelMessages } from "@/atproto/valid-channel-messages";
+import { isAccessLost } from "@/atproto/space-credential-core";
 import { isMissingXrpcResource } from "@/atproto/xrpc";
 import { channelUri, inboxUri, isSkey, parseSpaceRecordUri, parseWorkspaceUri, reactionRecordKey, requestRecordKey, spaceRecordUri, tidNow } from "@/protocol/keys";
 import { COLLECTION } from "@/protocol/nsids";
@@ -14,7 +15,8 @@ import type { StoredRecord } from "./store";
 import type { SetAside, SyncCore } from "./sync";
 import { transportNow, type ClientTransport } from "./transport";
 
-const PAGE = 100;
+/** A channel page's size when the reader does not ask for another: the latest 100 messages first. */
+export const CHANNEL_PAGE = 100;
 const MAX_SUPPORTED_MEMBERS = 200;
 const MAX_PRIVATE_ROSTER_SCAN = 1_000;
 
@@ -67,6 +69,20 @@ export class ChannelClient {
     return { authorityDid, space, visibility };
   }
 
+  /**
+   * After the account leaves the channel: its credential is minted again now, and the authority's refusal drops the cached
+   * credential and the held copy at once rather than when the credential would have been renewed.
+   */
+  async left(ref: ChannelRef): Promise<void> {
+    const workspace = parseWorkspaceUri(ref.workspace);
+    if (!workspace || !isSkey(ref.skey)) throw new Error("Invalid workspace or channel reference.");
+    try {
+      await this.deps.credentials.fresh(channelUri(workspace.authorityDid, ref.skey));
+    } catch (error) {
+      if (!isAccessLost(error)) throw error;
+    }
+  }
+
   /** A channel that can be read and written now: neither transitioning nor archived. */
   async readable(ref: ChannelRef): Promise<{ authorityDid: string; space: string; visibility: "public" | "private" }> {
     const current = await this.directory(ref);
@@ -76,7 +92,7 @@ export class ChannelClient {
   }
 
   async readPage(ref: ChannelRef, options: { before?: string; limit?: number } = {}): Promise<ChannelPage> {
-    const limit = options.limit ?? PAGE;
+    const limit = options.limit ?? CHANNEL_PAGE;
     const { authorityDid, space } = await this.readable(ref);
     const writers = await this.deps.sync.writers(space, { workspace: ref.workspace });
     const sources = writers.map((writer) => ({ space, repo: writer.did }));

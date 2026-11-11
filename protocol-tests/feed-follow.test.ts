@@ -34,7 +34,7 @@ test("a member session alone follows a channel live through the change feed", { 
     const engine = createEngine(actorTransport(pds, reader), { operator });
     let page = await engine.channels.readPage(ref);
     const follower = new ChangeFollower({ operator: engine.operator!, credentials: engine.credentials, sync: async () => { page = await engine.channels.readPage(ref); } });
-    await follower.follow(created.channel);
+    await follower.follow([created.channel]);
 
     const sent = await createEngine(actorTransport(pds, writer)).channels.send(ref, "written while the reader was following");
     const started = performance.now();

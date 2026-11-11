@@ -1,6 +1,6 @@
 import { getSession } from "@/auth/session";
-import { DM_BROWSER_SCOPES } from "@/protocol/scopes";
 import { getConfig } from "@/lib/config";
+import { browserSessionConfig } from "./browser-session-config";
 import { headers } from "next/headers";
 import Link from "next/link";
 import { LoginForm } from "./ui/login-form";
@@ -10,14 +10,8 @@ import { redirect } from "next/navigation";
 export const dynamic = "force-dynamic";
 
 export default async function HomePage() {
-  const { appUrl, plcDirectoryUrl, operatorServiceRef } = getConfig();
-  const dmConfig = {
-    appUrl: appUrl.origin,
-    plcUrl: plcDirectoryUrl.toString(),
-    scope: DM_BROWSER_SCOPES.join(" "),
-    serviceRef: operatorServiceRef,
-    loopback: appUrl.protocol === "http:",
-  };
+  const { appUrl } = getConfig();
+  const dmConfig = browserSessionConfig();
   const requestHost = (await headers()).get("host");
   if (appUrl.protocol === "http:" && requestHost && requestHost.toLowerCase() !== appUrl.host.toLowerCase()) {
     redirect(appUrl.origin);

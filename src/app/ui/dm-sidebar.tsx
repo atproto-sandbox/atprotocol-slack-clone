@@ -4,7 +4,7 @@ import { conversationLabel, conversationVisible } from "@/dm/ui-logic";
 import { useDmContext } from "./dm-context";
 
 export function DmSidebar() {
-  const { did, status, store, connect, conversations, requests, labels, activeWorkspace, showAll, setShowAll, view, openView, error } = useDmContext();
+  const { did, status, store, conversations, requests, labels, activeWorkspace, showAll, setShowAll, view, openView, error } = useDmContext();
   const memberDids = activeWorkspace ? activeWorkspace.members.map((member) => member.did) : null;
   const visible = conversations.filter((entry) => conversationVisible({ participants: entry.participants, viewerDid: did, memberDids, showAll }));
 
@@ -13,9 +13,8 @@ export function DmSidebar() {
       <div className="section-label"><span>DIRECT MESSAGES</span></div>
       {error && <p className="form-error" role="alert">{error}</p>}
       {status !== "ready" ? (
-        <button className="sidebar-action" disabled={status === "connecting"} onClick={connect}>
-          <span>+</span> {status === "connecting" ? "Connecting…" : "Connect direct messages"}
-        </button>
+        // The browser session is connected from the main stage, once, for workspaces and direct messages alike.
+        <p className="status-note">{status === "connecting" ? "Connecting…" : "Connect this browser to read your direct messages."}</p>
       ) : (
         <>
           {store && !store.persistent && <p className="status-note">Browser storage is unavailable; DM state lasts only until this tab closes.</p>}

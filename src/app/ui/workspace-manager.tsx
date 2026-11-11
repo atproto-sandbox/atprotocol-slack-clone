@@ -6,21 +6,59 @@ import { ChannelView } from "./channel-view";
 import { api, captureInviteLink, httpStatus, INVITE_LINK_KEY, isAccessFailure, isAuthorizationRequired, makeTid, WORKSPACE_OPERATION_KEY, workspaceOperationIdFor, mergeMessages, messageOf, parsePastedWorkspaceUri, TRANSITIONING_STATUS, withReactions, type ChannelSelection, type InboxRequest, type Message, type PendingOperation, type Reaction, type StalledOperation } from "./client-api";
 import { DmProvider, type DmView } from "./dm-context";
 import { InviteBanner } from "./invite-banner";
+import { SessionProvider, useBrowserSessionContext } from "./session-context";
 import { Sidebar } from "./sidebar";
 import { WorkspaceHome } from "./workspace-home";
 import { WorkspaceOnboarding } from "./workspace-onboarding";
-import type { DmConfig } from "@/dm/browser-session";
+import type { BrowserSessionConfig } from "@/browser/session";
 import { SPACE_TYPE } from "@/protocol/nsids";
-import type { WorkspaceCandidate } from "@/workspaces/read-model";
+import { CHANNEL_PAGE } from "@/client/channel-client";
+import type { LiveSpaces } from "@/client/views";
+import type { WorkspaceCandidate } from "@/client/workspace-client";
+import { channelUri, inboxUri, parseWorkspaceUri } from "@/protocol/keys";
 import type { WorkspaceSummary } from "@/protocol/workspace-summary";
 
 // The DM stage renders only client-side; see the note in sidebar.tsx.
 const DmStage = dynamic(() => import("./dm-stage").then((mod) => mod.DmStage), { ssr: false });
 
-type RefreshSelectedChannel = (selected: ChannelSelection, reloadContent?: boolean) => Promise<void>;
+type RefreshSelectedChannel = (selected: ChannelSelection) => Promise<void>;
 
-export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: DmConfig }) {
+/** The live view key of one open channel. */
+function channelKey(channel: { workspace: string; skey: string }): string {
+  return `channel:${channel.workspace} ${channel.skey}`;
+}
+
+/** The live view key of one workspace's admin inbox. */
+function inboxKey(workspace: string): string {
+  return `inbox:${workspace}`;
+}
+
+/** Keeps `key` live through the engine's change feed while an effect runs; the returned function stops it. */
+function followLive(live: LiveSpaces, key: string, spaces: string[], load: () => Promise<unknown>, report: (message: string) => void): () => void {
+  let stop: (() => void) | undefined;
+  let stopped = false;
+  void live.watch(key, spaces, load).then(
+    (unwatch) => { if (stopped) unwatch(); else stop = unwatch; },
+    (caught) => report(messageOf(caught)),
+  );
+  return () => { stopped = true; stop?.(); };
+}
+
+/** The signed-in account's app: its browser session restored once, and the workspace, channel and DM views on top of it. */
+export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: BrowserSessionConfig }) {
+  return (
+    <SessionProvider did={did} config={dmConfig}>
+      <WorkspaceShell did={did} dmConfig={dmConfig} />
+    </SessionProvider>
+  );
+}
+
+function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessionConfig }) {
+  // Reads come from the engine on the browser session; writes and operator calls still go through the server (R6a).
+  const { engine, live, status: sessionStatus, error: sessionError, connect: connectSession } = useBrowserSessionContext();
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
+  /** The last discovery's workspaces, as of now rather than as of the last render, for loads that land later. */
+  const workspacesRef = useRef<WorkspaceSummary[]>([]);
   const [workspaceCandidates, setWorkspaceCandidates] = useState<WorkspaceCandidate[]>([]);
   const [inboxLoaded, setInboxLoaded] = useState(false);
   const [inboxPermissionMissing, setInboxPermissionMissing] = useState(false);
@@ -42,23 +80,27 @@ export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: DmC
   const [needOperatorLeave, setNeedOperatorLeave] = useState(false);
   const [pendingOperation, setPendingOperation] = useState<PendingOperation | null>(null);
   const [operatorReady, setOperatorReady] = useState(false);
-  const [nextOffset, setNextOffset] = useState(0);
+  const [nextCursor, setNextCursor] = useState<string | undefined>(undefined);
   const [hasMore, setHasMore] = useState(false);
-  const [needChannelRead, setNeedChannelRead] = useState(false);
-  const [needChannelWrite, setNeedChannelWrite] = useState(false);
   const [needJoinWrite, setNeedJoinWrite] = useState(false);
+  const [channelReading, setChannelReading] = useState(false);
+  /** The channel whose first load the view waits for, so it shows as busy from the click on. */
+  const [awaitingChannel, setAwaitingChannel] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const channelDataEpoch = useRef(0);
+  const channelReads = useRef(0);
+  /** How many messages the open channel shows, so a reload reads as many. */
+  const shownRef = useRef<{ key: string | null; count: number }>({ key: null, count: 0 });
   const operatorDataEpoch = useRef(0);
   const workspaceRefreshEpoch = useRef(0);
   const activeUriRef = useRef(activeUri);
   const activeChannelRef = useRef<ChannelSelection | null>(null);
   const refreshSelectedChannelRef = useRef<RefreshSelectedChannel | null>(null);
   const inboxPermissionMissingRef = useRef(false);
-  const inboxRequestInFlightRef = useRef(false);
   const joiningRef = useRef(false);
+  const resumedRef = useRef(false);
 
   const activeWorkspace = useMemo(() => workspaces.find((workspace) => workspace.uri === activeUri) ?? null, [activeUri, workspaces]);
   const workspaceDegraded = Boolean(activeWorkspace?.degradedReasons.length);
@@ -85,8 +127,7 @@ export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: DmC
    * leaving the channel clears it.
    */
   const resetChannelContent = useCallback((options: { keepRequestAccess?: boolean } = {}) => {
-    setMessages([]); setPrivateRoster([]); setHasMore(false); setNextOffset(0); setReplyTo(""); setMessageText("");
-    setNeedChannelRead(false); setNeedChannelWrite(false);
+    setMessages([]); setPrivateRoster([]); setHasMore(false); setNextCursor(undefined); setReplyTo(""); setMessageText("");
     if (!options.keepRequestAccess) { setNeedJoinWrite(false); setRequestSubmitted(false); }
   }, []);
 
@@ -107,21 +148,21 @@ export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: DmC
     if (statusCode !== 401 && statusCode !== 403 && statusCode !== 409) return false;
     channelDataEpoch.current += 1;
     resetChannelContent({ keepRequestAccess: true });
-    setNeedChannelRead(statusCode === 401 || statusCode === 403);
     const selected = activeChannelRef.current;
-    if (selected) void refreshSelectedChannelRef.current?.(selected, false).catch((error) => setError(messageOf(error)));
+    if (selected) void refreshSelectedChannelRef.current?.(selected).catch((error) => setError(messageOf(error)));
     return true;
   }, [resetChannelContent]);
 
   const refreshWorkspaces = useCallback(async () => {
     const requestEpoch = ++workspaceRefreshEpoch.current;
-    operatorDataEpoch.current += 1;
     try {
-      const result = await api<{ workspaces: WorkspaceSummary[]; candidates: WorkspaceCandidate[] }>("/api/workspaces");
+      if (!engine) return null;
+      const result = await engine.workspaces.discover();
       if (workspaceRefreshEpoch.current !== requestEpoch) return null;
       setWorkspaceCandidates(result.candidates);
       const current = activeUriRef.current;
       const selectedStillExists = current !== "" && result.workspaces.some((workspace) => workspace.uri === current);
+      workspacesRef.current = result.workspaces;
       setWorkspaces(result.workspaces);
       setWorkspacesLoaded(true);
       // Already a member: the invitation has been used, so do not keep offering it.
@@ -148,7 +189,10 @@ export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: DmC
             if (channel.visibility === "transitioning") setStatus(TRANSITIONING_STATUS);
           } else if (channel.name !== selectedChannel.name) selectChannel({ ...selectedChannel, name: channel.name });
         }
+        // Inbox and operator results still on their way are dropped only when the account is no longer this workspace's
+        // admin; a discovery that changed nothing for them leaves them be.
         if (!result.workspaces.find((workspace) => workspace.uri === current)?.isAdmin) {
+          operatorDataEpoch.current += 1;
           setInbox([]);
           setStalledOperations([]);
         }
@@ -156,6 +200,7 @@ export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: DmC
       return result.workspaces;
     } catch (caught) {
       if (workspaceRefreshEpoch.current !== requestEpoch) return null;
+      workspacesRef.current = [];
       setWorkspaces([]);
       setWorkspaceCandidates([]);
       selectWorkspace("");
@@ -163,81 +208,117 @@ export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: DmC
       setInbox([]); setStalledOperations([]);
       throw caught;
     }
-  }, [clearChannelView, resetChannelContent, selectChannel, selectWorkspace]);
+  }, [engine, clearChannelView, resetChannelContent, selectChannel, selectWorkspace]);
 
-  const loadMessages = useCallback(async (channel: ChannelSelection, offset = 0, append = false) => {
+  /** Runs a read of the open channel; the channel shows as busy until every read in flight has settled. */
+  const readingChannel = useCallback(async <T,>(read: () => Promise<T>): Promise<T> => {
+    channelReads.current += 1;
+    setChannelReading(true);
+    try { return await read(); }
+    finally {
+      channelReads.current -= 1;
+      if (channelReads.current === 0) setChannelReading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    shownRef.current = { key: activeChannel ? channelKey(activeChannel) : null, count: messages.length };
+  }, [activeChannel, messages]);
+
+  /**
+   * Reads a page of the open channel: older than `before` to append, else the newest, as many as the view already shows (a
+   * reload keeps the older pages a person loaded).
+   */
+  const loadMessages = useCallback((channel: ChannelSelection, before?: string, append = false) => readingChannel(async () => {
     const selectedChannel = activeChannelRef.current;
-    if (!selectedChannel || selectedChannel.workspace !== channel.workspace || selectedChannel.skey !== channel.skey) return false;
+    if (!engine || !selectedChannel || selectedChannel.workspace !== channel.workspace || selectedChannel.skey !== channel.skey) return false;
     const requestEpoch = channelDataEpoch.current;
-    const query = new URLSearchParams({ workspace: channel.workspace, skey: channel.skey, offset: String(offset) });
-    let result: { messages: Array<Omit<Message, "reactions">>; reactions: Reaction[]; nextOffset: number; hasMore: boolean; degraded: boolean; degradedReasons?: string[] };
+    const shown = shownRef.current.key === channelKey(channel) ? shownRef.current.count : 0;
+    let page: Awaited<ReturnType<typeof engine.channels.readPage>>;
     try {
-      result = await api(`/api/channels/messages?${query}`);
+      page = await engine.channels.readPage({ workspace: channel.workspace, skey: channel.skey }, before !== undefined ? { before } : { limit: Math.max(CHANNEL_PAGE, shown) });
     } catch (caught) {
       if (channelDataEpoch.current === requestEpoch) handleChannelReadFailure(caught);
       throw caught;
     }
     if (channelDataEpoch.current !== requestEpoch) return false;
-    const messages = withReactions(result.messages, result.reactions, did);
+    const messages = withReactions(page.messages as Array<Omit<Message, "reactions">>, page.reactions as Reaction[], did);
     setMessages((current) => mergeMessages(current, messages, append));
-    setNextOffset(result.nextOffset);
-    setHasMore(result.hasMore);
-    setNeedChannelRead(false);
-    if (result.degraded) setStatus(`${(result.degradedReasons ?? ["Channel history exceeded its sync limit."]).join(" ")} Older records need operator review.`);
+    setNextCursor(page.next);
+    setHasMore(page.next !== undefined);
+    if (page.degradedReasons.length) setStatus(`${page.degradedReasons.join(" ")} Older records need operator review.`);
     else setStatus("");
     return true;
-  }, [did, handleChannelReadFailure]);
+  }), [engine, did, handleChannelReadFailure, readingChannel]);
 
-  const refreshPrivateRoster = useCallback(async (channel: ChannelSelection) => {
+  const refreshPrivateRoster = useCallback((channel: ChannelSelection) => readingChannel(async () => {
     const selectedChannel = activeChannelRef.current;
     if (!selectedChannel || selectedChannel.workspace !== channel.workspace || selectedChannel.skey !== channel.skey) return;
+    if (!engine) return;
     const requestEpoch = channelDataEpoch.current;
-    const query = new URLSearchParams({ workspace: channel.workspace, skey: channel.skey });
-    let result: { members: string[] };
+    let members: string[];
     try {
-      result = await api(`/api/channels/roster?${query}`);
+      members = await engine.channels.roster({ workspace: channel.workspace, skey: channel.skey });
     } catch (caught) {
       if (channelDataEpoch.current === requestEpoch) handleChannelReadFailure(caught);
       throw caught;
     }
     if (channelDataEpoch.current !== requestEpoch) return;
-    setPrivateRoster(result.members);
-  }, [handleChannelReadFailure]);
+    setPrivateRoster(members);
+  }), [engine, handleChannelReadFailure, readingChannel]);
 
-  const refreshSelectedChannel = useCallback(async (requested: ChannelSelection, reloadContent = true) => {
+  /**
+   * The open channel's page and, for a private channel, its roster: what the channel's live watch loads when it starts and
+   * whenever the change feed names the channel. A private channel this account is not on answers with a refusal, and its
+   * roster card offers to request access.
+   */
+  const loadChannelContent = useCallback(async () => {
+    const selected = activeChannelRef.current;
+    try {
+      if (!selected || selected.visibility === "transitioning") return;
+      await readingChannel(async () => {
+        if (!await loadMessages(selected)) return;
+        if (selected.visibility === "private") await refreshPrivateRoster(selected);
+      });
+    } catch (caught) {
+      if (selected?.visibility !== "private" || !isAccessFailure(caught)) setError(messageOf(caught));
+    } finally {
+      if (selected) setAwaitingChannel((current) => (current === channelKey(selected) ? null : current));
+    }
+  }, [loadMessages, refreshPrivateRoster, readingChannel]);
+
+  /**
+   * The open channel's name and visibility as `workspaces` list them: a channel gone from the directory closes, and one in
+   * transition empties. Its content is the channel's live watch's to load.
+   */
+  const followSelection = useCallback((workspaces: WorkspaceSummary[], requested: ChannelSelection) => {
+    const latest = activeChannelRef.current;
+    if (!latest || latest.workspace !== requested.workspace || latest.skey !== requested.skey || activeUriRef.current !== requested.workspace) return;
+    const channel = workspaces.find((entry) => entry.uri === requested.workspace)?.channels.find((entry) => entry.skey === requested.skey);
+    if (!channel) { clearChannelView(); return; }
+    if (latest.name !== channel.name || latest.visibility !== channel.visibility) {
+      selectChannel({ workspace: requested.workspace, skey: channel.skey, name: channel.name, visibility: channel.visibility });
+    }
+    if (channel.visibility === "transitioning") {
+      channelDataEpoch.current += 1;
+      resetChannelContent();
+      setStatus(TRANSITIONING_STATUS);
+    }
+  }, [clearChannelView, resetChannelContent, selectChannel]);
+
+  /** Reads the workspaces again and has the open channel follow what they list. */
+  const refreshSelectedChannel = useCallback(async (requested: ChannelSelection) => {
     const selected = activeChannelRef.current;
     if (!selected || selected.workspace !== requested.workspace || selected.skey !== requested.skey || activeUriRef.current !== requested.workspace) return;
     const current = await refreshWorkspaces();
-    if (!current) return;
-    const latest = activeChannelRef.current;
-    if (!latest || latest.workspace !== requested.workspace || latest.skey !== requested.skey || activeUriRef.current !== requested.workspace) return;
-    const workspace = current.find((entry) => entry.uri === requested.workspace);
-    const channel = workspace?.channels.find((entry) => entry.skey === requested.skey);
-    if (!channel) { clearChannelView(); return; }
-    const selection = { workspace: requested.workspace, skey: channel.skey, name: channel.name, visibility: channel.visibility };
-    if (latest.name !== selection.name || latest.visibility !== selection.visibility) selectChannel(selection);
-    const currentSelection = latest.name === selection.name && latest.visibility === selection.visibility ? latest : selection;
-    channelDataEpoch.current += 1;
-    if (channel.visibility === "transitioning") {
-      resetChannelContent();
-      setStatus(TRANSITIONING_STATUS);
-      return;
-    }
-    if (!reloadContent) return;
-    if (channel.visibility !== "private") setPrivateRoster([]);
-    void loadMessages(currentSelection).catch((caught) => {
-      if (!isAccessFailure(caught)) setError(messageOf(caught));
-    });
-    if (channel.visibility === "private") void refreshPrivateRoster(currentSelection).catch((caught) => {
-      if (!isAccessFailure(caught)) setError(messageOf(caught));
-    });
-  }, [clearChannelView, loadMessages, refreshPrivateRoster, refreshWorkspaces, resetChannelContent, selectChannel]);
+    if (current) followSelection(current, requested);
+  }, [followSelection, refreshWorkspaces]);
   useEffect(() => { refreshSelectedChannelRef.current = refreshSelectedChannel; }, [refreshSelectedChannel]);
 
   const recheckChannelAfterAccessFailure = useCallback((caught: unknown) => {
     if (!isAccessFailure(caught)) return;
     const selected = activeChannelRef.current;
-    if (selected) void refreshSelectedChannel(selected, false).catch((error) => setError(messageOf(error)));
+    if (selected) void refreshSelectedChannel(selected).catch((error) => setError(messageOf(error)));
   }, [refreshSelectedChannel]);
 
   const acceptWorkspace = useCallback(async (workspace: string) => {
@@ -315,20 +396,21 @@ export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: DmC
     } finally { if (!redirecting) setBusy(false); }
   }, [clearChannelView, grant, refreshWorkspaces, selectWorkspace]);
 
-  const loadInbox = useCallback(async () => {
-    if (!activeWorkspace || activeWorkspace.degradedReasons.length || inboxPermissionMissingRef.current || inboxRequestInFlightRef.current) return;
-    const workspaceUri = activeWorkspace.uri;
+  /** The admin inbox of `workspaceUri`, while it is the selected workspace and this account is its admin. */
+  const loadInboxFor = useCallback(async (workspaceUri: string) => {
+    // Every inbox load goes through the inbox's live view, which runs one at a time per workspace.
+    const summary = workspacesRef.current.find((workspace) => workspace.uri === workspaceUri);
+    if (activeUriRef.current !== workspaceUri || !summary?.isAdmin || summary.degradedReasons.length || inboxPermissionMissingRef.current) return;
     const requestEpoch = operatorDataEpoch.current;
-    inboxRequestInFlightRef.current = true;
     try {
-      const result = await api<{ requests: InboxRequest[]; skipped?: Array<{ did: string; reason: string }> }>(`/api/inbox/requests?workspace=${encodeURIComponent(workspaceUri)}`);
+      if (!engine?.operator) return;
+      const result: { requests: InboxRequest[]; skipped?: Array<{ did: string; reason: string }> } = await engine.workspaces.inboxRequests(workspaceUri, engine.operator);
       if (operatorDataEpoch.current !== requestEpoch || activeUriRef.current !== workspaceUri) return;
       setInbox(result.requests);
       if (result.skipped?.length) setStatus(`Join requests from ${result.skipped.map(({ did, reason }) => `${did} (${reason})`).join("; ")} could not be read.`);
       setInboxLoaded(true);
       setInboxPermissionMissing(false);
       inboxPermissionMissingRef.current = false;
-      setError("");
     } catch (caught) {
       if (operatorDataEpoch.current !== requestEpoch || activeUriRef.current !== workspaceUri) return;
       setInbox([]);
@@ -336,18 +418,16 @@ export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: DmC
       if (httpStatus(caught) === 401 || httpStatus(caught) === 403) {
         setInboxPermissionMissing(true);
         inboxPermissionMissingRef.current = true;
-        setError("");
         return;
       }
       setError(messageOf(caught));
-    } finally {
-      inboxRequestInFlightRef.current = false;
     }
-  }, [activeWorkspace]);
+  }, [engine]);
 
-  const loadStalledOperations = useCallback(async () => {
-    if (!activeWorkspace?.isAdmin) return;
-    const workspaceUri = activeWorkspace.uri;
+  /** The stalled operations of `workspaceUri`, while it is the selected workspace and this account is its admin. */
+  const loadStalledOperationsFor = useCallback(async (workspaceUri: string) => {
+    const summary = workspacesRef.current.find((workspace) => workspace.uri === workspaceUri);
+    if (activeUriRef.current !== workspaceUri || !summary?.isAdmin) return;
     const requestEpoch = operatorDataEpoch.current;
     try {
       const result = await api<{ operations: StalledOperation[]; truncated: boolean }>(`/api/operator/stalled?workspace=${encodeURIComponent(workspaceUri)}`);
@@ -360,7 +440,7 @@ export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: DmC
       setStalledOperationsTruncated(false);
       setError(messageOf(caught));
     }
-  }, [activeWorkspace]);
+  }, []);
 
   useEffect(() => {
     // Back from the permission screen restores this page as it was left. The resume flags must not
@@ -378,14 +458,28 @@ export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: DmC
   }, []);
 
   useEffect(() => {
+    // What arrives in the URL is taken before the browser session is ready, since connecting it leaves the page.
     const timer = window.setTimeout(() => {
-      void refreshWorkspaces().catch((caught) => setError(messageOf(caught)));
-      const invitedWorkspace = captureInviteLink(window.location.search, sessionStorage) ?? sessionStorage.getItem(INVITE_LINK_KEY);
+      const search = window.location.search;
+      const invitedWorkspace = captureInviteLink(search, sessionStorage) ?? sessionStorage.getItem(INVITE_LINK_KEY);
+      const authorityFailed = new URLSearchParams(search).get("authority") === "failed";
+      if (search.includes("invite=") || search.includes("authority=")) window.history.replaceState(null, "", window.location.pathname);
       if (invitedWorkspace) { setInvitedTo(invitedWorkspace); setInviteUri(invitedWorkspace); }
-      const authorityFailed = new URLSearchParams(window.location.search).get("authority") === "failed";
-      if (window.location.search.includes("invite=") || window.location.search.includes("authority=")) window.history.replaceState(null, "", window.location.pathname);
       // A workspace creation that was waiting on the approval reports the outcome itself when it retries.
-      if (authorityFailed && !sessionStorage.getItem("spaces.autoCreateWorkspace")) setError("The workspace authority permission was not approved. Try again from the operation that asked for it.");
+      if (authorityFailed && !sessionStorage.getItem("spaces.autoCreateWorkspace")) {
+        setError("The workspace authority permission was not approved. Try again from the operation that asked for it.");
+      }
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  useEffect(() => {
+    // Everything this resumes reads through the engine, so it waits for the browser session, and runs once.
+    if (!engine) return;
+    const timer = window.setTimeout(() => {
+      if (resumedRef.current) return;
+      resumedRef.current = true;
+      void refreshWorkspaces().catch((caught) => setError(messageOf(caught)));
       const savedName = sessionStorage.getItem("spaces.pendingWorkspaceName");
       if (savedName) { setWorkspaceName(savedName); sessionStorage.removeItem("spaces.pendingWorkspaceName"); }
       if (sessionStorage.getItem("spaces.autoCreateWorkspace")) {
@@ -406,34 +500,36 @@ export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: DmC
           const channel = JSON.parse(pendingChannel) as ChannelSelection;
           channelDataEpoch.current += 1;
           selectWorkspace(channel.workspace); selectChannel(channel);
-          if (channel.visibility !== "transitioning") {
-            void loadMessages(channel).catch((caught) => setError(messageOf(caught)));
-            if (channel.visibility === "private") void refreshPrivateRoster(channel).catch((caught) => { if (!isAccessFailure(caught)) setError(messageOf(caught)); });
-          }
+          setAwaitingChannel(channel.visibility !== "transitioning" ? channelKey(channel) : null);
         } catch { setError("Could not restore the channel selection."); }
       }
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [acceptWorkspace, createWorkspaceNamed, loadMessages, refreshPrivateRoster, refreshWorkspaces, selectChannel, selectWorkspace]);
+  }, [engine, acceptWorkspace, createWorkspaceNamed, refreshWorkspaces, selectChannel, selectWorkspace]);
 
   useEffect(() => {
     if (!activeChannel) return;
+    // Once a minute the open channel is read again with its workspace, whatever the change feed said.
     const timer = window.setInterval(() => {
-      void refreshSelectedChannel(activeChannel).catch((caught) => setError(messageOf(caught)));
+      void refreshSelectedChannel(activeChannel).then(() => live?.reload(channelKey(activeChannel))).catch((caught) => setError(messageOf(caught)));
     }, 60_000);
     return () => window.clearInterval(timer);
-  }, [activeChannel, refreshSelectedChannel]);
+  }, [activeChannel, live, refreshSelectedChannel]);
 
   useEffect(() => {
-    if (!activeWorkspace?.isAdmin) return;
-    const timer = window.setTimeout(() => { void loadInbox(); void loadStalledOperations(); }, 0);
-    const interval = window.setInterval(() => { void loadInbox(); void loadStalledOperations(); }, 60_000);
-    const query = new URLSearchParams({ workspace: activeWorkspace.uri, inbox: "1", after: "0" });
-    const events = new EventSource(`/api/notifications?${query}`);
-    events.addEventListener("change", () => void loadInbox());
-    events.addEventListener("error", () => { if (events.readyState === EventSource.CLOSED) void loadInbox(); });
-    return () => { window.clearTimeout(timer); window.clearInterval(interval); events.close(); };
-  }, [activeWorkspace?.uri, activeWorkspace?.isAdmin, loadInbox, loadStalledOperations]);
+    if (!activeWorkspace?.isAdmin || !live) return;
+    const workspace = parseWorkspaceUri(activeWorkspace.uri);
+    if (!workspace) return;
+    // Stalled operations come from the operator through the server (R6a): read now and every minute. The inbox's join
+    // requests are read again whenever the change feed says the inbox changed, and every minute regardless: a request whose
+    // notification was dropped reaches no feed, and only the sweep's union of inbox writers finds it.
+    const workspaceUri = activeWorkspace.uri;
+    const key = inboxKey(workspaceUri);
+    const timer = window.setTimeout(() => void loadStalledOperationsFor(workspaceUri), 0);
+    const interval = window.setInterval(() => { void loadStalledOperationsFor(workspaceUri); void live.reload(key); }, 60_000);
+    const stopInbox = followLive(live, key, [inboxUri(workspace.authorityDid, workspace.skey)], () => loadInboxFor(workspaceUri), setError);
+    return () => { window.clearTimeout(timer); window.clearInterval(interval); stopInbox(); };
+  }, [activeWorkspace?.uri, activeWorkspace?.isAdmin, live, loadInboxFor, loadStalledOperationsFor]);
 
   useEffect(() => {
     if (!activeWorkspace?.isAdmin || activeWorkspace.degradedReasons.length || !operatorReady) return;
@@ -450,34 +546,29 @@ export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: DmC
   }, [activeWorkspace?.uri, activeWorkspace?.isAdmin, activeWorkspace?.degradedReasons.length, operatorReady]);
 
   useEffect(() => {
-    if (!activeChannel) {
-      if (!activeWorkspace?.uri) return;
-      const workspaceUri = activeWorkspace.uri;
-      const query = new URLSearchParams({ workspace: workspaceUri, after: "0" });
-      const events = new EventSource(`/api/notifications?${query}`);
-      const refresh = () => {
-        if (activeUriRef.current !== workspaceUri) return;
-        void refreshWorkspaces().catch((caught) => setError(messageOf(caught)));
-      };
-      events.addEventListener("change", refresh);
-      events.addEventListener("error", () => { if (events.readyState === EventSource.CLOSED) refresh(); });
-      const interval = window.setInterval(refresh, 60_000);
-      return () => { window.clearInterval(interval); events.close(); };
-    }
-    const workspaceQuery = new URLSearchParams({ workspace: activeChannel.workspace, after: "0" });
-    const channelQuery = new URLSearchParams({ workspace: activeChannel.workspace, skey: activeChannel.skey, after: "0" });
-    const channelEvents = activeChannel.visibility === "transitioning" ? null : new EventSource(`/api/notifications?${channelQuery}`);
-    const workspaceEvents = new EventSource(`/api/notifications?${workspaceQuery}`);
-    const refresh = () => {
-      void refreshSelectedChannel(activeChannel).catch((caught) => setError(messageOf(caught)));
+    if (!live || !activeWorkspace?.uri) return;
+    const workspaceUri = activeWorkspace.uri;
+    // The workspace's directory, roster and admins: with a channel open, its name and visibility follow them.
+    const refresh = async () => {
+      if (activeUriRef.current !== workspaceUri) return;
+      const selected = activeChannelRef.current;
+      const settled = selected?.workspace === workspaceUri ? refreshSelectedChannel(selected) : refreshWorkspaces();
+      await settled.catch((caught) => setError(messageOf(caught)));
     };
-    const refreshWhenClosed = (source: EventSource) => () => { if (source.readyState === EventSource.CLOSED) refresh(); };
-    channelEvents?.addEventListener("change", refresh);
-    if (channelEvents) channelEvents.addEventListener("error", refreshWhenClosed(channelEvents));
-    workspaceEvents.addEventListener("change", refresh);
-    workspaceEvents.addEventListener("error", refreshWhenClosed(workspaceEvents));
-    return () => { channelEvents?.close(); workspaceEvents.close(); };
-  }, [activeChannel, activeWorkspace?.uri, refreshSelectedChannel, refreshWorkspaces]);
+    // The workspace space through the change feed; discovery itself every minute while no channel is open (an open channel
+    // refreshes every minute on its own), since a new invitation reaches no space this account already follows.
+    const stop = followLive(live, `workspace:${workspaceUri}`, [workspaceUri], refresh, setError);
+    const interval = window.setInterval(() => { if (!activeChannelRef.current) void refresh(); }, 60_000);
+    return () => { window.clearInterval(interval); stop(); };
+  }, [activeWorkspace?.uri, live, refreshSelectedChannel, refreshWorkspaces]);
+
+  const openChannelKey = activeChannel && activeChannel.visibility !== "transitioning" ? channelKey(activeChannel) : null;
+  useEffect(() => {
+    const workspace = activeChannelRef.current && parseWorkspaceUri(activeChannelRef.current.workspace);
+    if (!live || !openChannelKey || !workspace || !activeChannelRef.current) return;
+    // The channel's content is loaded by this watch alone: when it starts, and whenever the change feed names the channel.
+    return followLive(live, openChannelKey, [channelUri(workspace.authorityDid, activeChannelRef.current.skey)], loadChannelContent, setError);
+  }, [openChannelKey, activeChannel?.visibility, live, loadChannelContent]);
 
   async function createWorkspace(event: FormEvent) {
     event.preventDefault();
@@ -536,34 +627,16 @@ export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: DmC
         sessionStorage.removeItem("spaces.pendingOperatorOperation");
       }
       const currentWorkspaces = await refreshWorkspaces();
-      const refreshedWorkspace = currentWorkspaces?.find((entry) => entry.uri === workspace);
       if (request.kind === "leaveChannel" && operation.state === "completed") {
         clearChannelView(); setNeedOperatorLeave(false);
+        await engine?.channels.left({ workspace, skey: String(request.skey) }).catch((caught) => setError(messageOf(caught)));
       } else if (currentWorkspaces && activeChannel?.workspace === workspace) {
-        const selectionEpoch = ++channelDataEpoch.current;
-        const refreshedChannel = refreshedWorkspace?.channels.find((entry) => entry.skey === activeChannel.skey);
-        if (!refreshedChannel) {
-          clearChannelView();
-        }
-        else {
-          const selection = { workspace, skey: refreshedChannel.skey, name: refreshedChannel.name, visibility: refreshedChannel.visibility };
-          selectChannel(selection);
-          if (refreshedChannel.visibility === "transitioning") {
-            resetChannelContent();
-            setStatus(TRANSITIONING_STATUS);
-          } else {
-            if (refreshedChannel.visibility === "private") {
-              await refreshPrivateRoster(selection).catch((caught) => {
-                if (!isAccessFailure(caught)) setError(messageOf(caught));
-              });
-            } else setPrivateRoster([]);
-            if (channelDataEpoch.current !== selectionEpoch) return;
-            await loadMessages(selection).catch((caught) => {
-              if (!isAccessFailure(caught)) setError(messageOf(caught));
-            });
-          }
-        }
+        followSelection(currentWorkspaces, activeChannel);
+        await live?.reload(channelKey(activeChannel));
       }
+      // What an operation changes for an admin: the inbox's requests and the stalled operations.
+      void live?.reload(inboxKey(workspace));
+      void loadStalledOperationsFor(workspace);
     } catch (caught) {
       const statusCode = httpStatus(caught);
       if (isAuthorizationRequired(caught)) {
@@ -583,21 +656,18 @@ export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: DmC
   async function openChannel(channel: WorkspaceSummary["channels"][number]) {
     if (!activeWorkspace) return;
     const selected = { workspace: activeWorkspace.uri, skey: channel.skey, name: channel.name, visibility: channel.visibility };
+    const reopened = activeChannelRef.current !== null && channelKey(activeChannelRef.current) === channelKey(selected)
+      && activeChannelRef.current.visibility === selected.visibility;
     channelDataEpoch.current += 1;
     setDmView(null);
     selectChannel(selected); resetChannelContent(); setError("");
-    try {
-      if (selected.visibility === "transitioning") {
-        setStatus(TRANSITIONING_STATUS);
-        return;
-      }
-      if (!await loadMessages(selected)) return;
-      if (selected.visibility === "private") await refreshPrivateRoster(selected);
+    if (selected.visibility === "transitioning") {
+      setStatus(TRANSITIONING_STATUS);
+      return;
     }
-    catch (caught) {
-      setError(messageOf(caught));
-      if (httpStatus(caught) === 403 || httpStatus(caught) === 401) setNeedChannelRead(true);
-    }
+    // The channel's live watch loads it; the same channel opened again keeps its watch, which is asked to load it now.
+    setAwaitingChannel(channelKey(selected));
+    if (reopened) await live?.reload(channelKey(selected));
   }
 
   async function authorizeCurrentChannel(action: string) {
@@ -607,19 +677,18 @@ export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: DmC
     catch (caught) { sessionStorage.removeItem("spaces.pendingChannel"); setError(messageOf(caught)); }
   }
 
+  // Messages and reactions are written by the engine to the account's own repo, with the browser session's grant; the
+  // engine keeps an own write in view until the authority lists it.
   async function sendMessage(event: FormEvent) {
     event.preventDefault();
-    if (!activeChannel || activeChannel.visibility === "transitioning" || !messageText.trim()) return;
+    if (!engine || !activeChannel || activeChannel.visibility === "transitioning" || !messageText.trim()) return;
     setBusy(true); setError("");
     try {
-      await api("/api/channels/messages/write", { method: "POST", body: JSON.stringify({
-        workspace: activeChannel.workspace, skey: activeChannel.skey, action: "create", text: messageText, ...(replyTo ? { parent: replyTo } : {}),
-      }) });
+      await engine.channels.send(activeChannel, messageText, replyTo || undefined);
       setMessageText(""); setReplyTo("");
-      await loadMessages(activeChannel);
+      await live?.reload(channelKey(activeChannel));
     } catch (caught) {
       setError(messageOf(caught));
-      if (httpStatus(caught) === 401 || httpStatus(caught) === 403) setNeedChannelWrite(true);
       recheckChannelAfterAccessFailure(caught);
     } finally { setBusy(false); }
   }
@@ -650,11 +719,15 @@ export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: DmC
 
   function switchWorkspace(uri: string) {
     setDmView(null);
-    selectWorkspace(uri); clearChannelView(); setInbox([]); setStalledOperations([]);
+    clearChannelView();
+    // The selected workspace chosen again only returns to its home; its inbox and operator state stay.
+    if (uri !== activeUriRef.current) selectWorkspace(uri);
   }
 
   function syncInbox() {
-    inboxPermissionMissingRef.current = false; setInboxPermissionMissing(false); setInboxLoaded(false); void loadInbox();
+    if (!activeWorkspace) return;
+    inboxPermissionMissingRef.current = false; setInboxPermissionMissing(false); setInboxLoaded(false);
+    void live?.reload(inboxKey(activeWorkspace.uri));
   }
 
   return (
@@ -666,14 +739,17 @@ export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: DmC
         <div className="overview-content">
           {error && <p className="form-error" role="alert">{error}</p>}
           {status && !(activeChannel?.visibility === "transitioning" && status === TRANSITIONING_STATUS) && <p className="status-note" role="status">{status}</p>}
+          {sessionStatus !== "ready" && <div className="starter-card permission-box" role="status"><p>{sessionStatus === "connecting" ? "Connecting this browser to your account…" : "Allow this browser to read your workspaces, channels and messages, and to send your messages, with one approval on your account’s own server."}</p>{sessionError && <p className="form-error" role="alert">{sessionError}</p>}{sessionStatus !== "connecting" && <button className="text-button" onClick={connectSession}>Connect this browser →</button>}</div>}
           {activeWorkspace && activeWorkspace.degradedReasons.length > 0 && <div className="envelope-alert" role="alert"><strong>Workspace is in degraded mode.</strong><ul>{activeWorkspace.degradedReasons.map((reason) => <li key={reason}>{reason}</li>)}</ul><p>Admin changes and inbox reconciliation are paused until the workspace is within the supported v1 limits.</p></div>}
           {pendingOperation && <p className="status-note">Operation {pendingOperation.operationId} is still pending. <button className="text-button" disabled={busy || workspaceDegraded} onClick={() => void runOperation(pendingOperation.request, pendingOperation.workspace, pendingOperation.operationId)}>Retry same operation ↻</button></p>}
           {stalledOperations.length > 0 && <div className="operation-alert" role="alert"><strong>{stalledOperations.length} operation(s) have had no progress for at least five minutes.{stalledOperationsTruncated ? " Showing the oldest 100; more stalled operations exist." : ""}</strong>{stalledOperations.map((operation) => <p key={`${operation.actor}:${operation.operationId}`}>{operation.operationId} · {operation.actor} · {operation.error ?? operation.state}</p>)}</div>}
+          {sessionStatus === "ready" && <>
           {!dmView && workspacesLoaded && invitedTo && !workspaces.some((workspace) => workspace.uri === invitedTo) && <InviteBanner workspace={invitedTo} busy={busy} join={() => void connectInvitation(invitedTo)} dismiss={dismissInvitation} />}
           {!dmView && !activeWorkspace && <WorkspaceOnboarding busy={busy} workspaceName={workspaceName} setWorkspaceName={setWorkspaceName} inviteUri={inviteUri} setInviteUri={setInviteUri} createWorkspace={createWorkspace} beginAccept={beginAccept} />}
           {!dmView && activeWorkspace && (!activeChannel || activeChannel.workspace !== activeUri) && <WorkspaceHome did={did} activeWorkspace={activeWorkspace} busy={busy} workspaceDegraded={workspaceDegraded} needOperatorLeave={needOperatorLeave} inbox={inbox} inboxLoaded={inboxLoaded} inboxPermissionMissing={inboxPermissionMissing} runOperation={runOperation} grant={grant} leaveWorkspace={leaveWorkspace} syncInbox={syncInbox} setStatus={setStatus} setError={setError} />}
-          {!dmView && activeChannel?.workspace === activeUri && <ChannelView did={did} activeChannel={activeChannel} activeWorkspace={activeWorkspace} busy={busy} workspaceDegraded={workspaceDegraded} needOperatorLeave={needOperatorLeave} needChannelRead={needChannelRead} needChannelWrite={needChannelWrite} needJoinWrite={needJoinWrite} requestSubmitted={requestSubmitted} privateRoster={privateRoster} messages={messages} hasMore={hasMore} nextOffset={nextOffset} messageText={messageText} setMessageText={setMessageText} replyTo={replyTo} setReplyTo={setReplyTo} loadMessages={loadMessages} runOperation={runOperation} grant={grant} leaveChannel={leaveChannel} requestPrivateAccess={requestPrivateAccess} authorizeCurrentChannel={authorizeCurrentChannel} sendMessage={sendMessage} toggleReaction={toggleReaction} editMessage={editMessage} deleteMessage={deleteMessage} setError={setError} />}
+          {!dmView && activeChannel?.workspace === activeUri && <ChannelView did={did} activeChannel={activeChannel} activeWorkspace={activeWorkspace} busy={busy} workspaceDegraded={workspaceDegraded} needOperatorLeave={needOperatorLeave} needJoinWrite={needJoinWrite} requestSubmitted={requestSubmitted} privateRoster={privateRoster} reading={channelReading || (activeChannel !== null && awaitingChannel === channelKey(activeChannel))} messages={messages} hasMore={hasMore} nextCursor={nextCursor} messageText={messageText} setMessageText={setMessageText} replyTo={replyTo} setReplyTo={setReplyTo} loadMessages={loadMessages} runOperation={runOperation} grant={grant} leaveChannel={leaveChannel} requestPrivateAccess={requestPrivateAccess} authorizeCurrentChannel={authorizeCurrentChannel} sendMessage={sendMessage} toggleReaction={toggleReaction} editMessage={editMessage} deleteMessage={deleteMessage} setError={setError} />}
           {dmView && <DmStage />}
+          </>}
           <div className="data-note"><span className="note-icon">◈</span><span><strong>Your conversations belong to you.</strong><small>Records remain in their authors’ AT Protocol accounts. Workspace access is enforced by PDS member lists.</small></span><a href="https://atproto.com" target="_blank" rel="noreferrer">How it works ↗</a></div>
         </div>
       </section>
@@ -682,28 +758,31 @@ export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: DmC
   );
 
   async function toggleReaction(subject: string, emoji: string, active: boolean) {
-    if (!activeChannel || activeChannel.visibility === "transitioning") return;
+    if (!engine || !activeChannel || activeChannel.visibility === "transitioning") return;
     try {
-      await api("/api/channels/reactions", { method: "POST", body: JSON.stringify({ workspace: activeChannel.workspace, skey: activeChannel.skey, subject, emoji, active: !active }) });
-      await loadMessages(activeChannel);
-    } catch (caught) { setError(messageOf(caught)); if (httpStatus(caught) === 403) setNeedChannelWrite(true); recheckChannelAfterAccessFailure(caught); }
+      if (active) await engine.channels.unreact(activeChannel, subject, emoji);
+      else await engine.channels.react(activeChannel, subject, emoji);
+      await live?.reload(channelKey(activeChannel));
+    } catch (caught) { setError(messageOf(caught)); recheckChannelAfterAccessFailure(caught); }
   }
 
   async function editMessage(message: Message) {
     if (!activeChannel || activeChannel.visibility === "transitioning") return;
     const text = window.prompt("Edit message", message.value.text ?? "");
     if (text === null) return;
+    if (!engine) return;
     try {
-      await api("/api/channels/messages/write", { method: "POST", body: JSON.stringify({ workspace: activeChannel.workspace, skey: activeChannel.skey, action: "edit", uri: message.uri, text }) });
-      await loadMessages(activeChannel);
-    } catch (caught) { setError(messageOf(caught)); if (httpStatus(caught) === 403) setNeedChannelWrite(true); recheckChannelAfterAccessFailure(caught); }
+      await engine.channels.edit(activeChannel, message.uri, text);
+      await live?.reload(channelKey(activeChannel));
+    } catch (caught) { setError(messageOf(caught)); recheckChannelAfterAccessFailure(caught); }
   }
 
   async function deleteMessage(uri: string) {
     if (!activeChannel || activeChannel.visibility === "transitioning" || !window.confirm("Delete this message from your repo?")) return;
+    if (!engine) return;
     try {
-      await api("/api/channels/messages/write", { method: "POST", body: JSON.stringify({ workspace: activeChannel.workspace, skey: activeChannel.skey, action: "delete", uri }) });
-      await loadMessages(activeChannel);
+      await engine.channels.delete(activeChannel, uri);
+      await live?.reload(channelKey(activeChannel));
     } catch (caught) { setError(messageOf(caught)); recheckChannelAfterAccessFailure(caught); }
   }
 

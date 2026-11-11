@@ -7,7 +7,7 @@ import type { WorkspaceSummary } from "@/protocol/workspace-summary";
 // The DM tree touches IndexedDB and WebCrypto and must never render (or even
 // load its module graph, which pulls in @atproto/oauth-client-browser) during
 // server-side rendering: ssr:false keeps that whole dependency out of every
-// server bundle. See dm-sidebar.tsx, dm-stage.tsx, and dm/use-dm-client.ts.
+// server bundle. See dm-sidebar.tsx, dm-stage.tsx, and browser/use-browser-session.ts.
 const DmSidebar = dynamic(() => import("./dm-sidebar").then((mod) => mod.DmSidebar), { ssr: false });
 
 type SidebarProps = {

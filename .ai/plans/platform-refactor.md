@@ -343,6 +343,8 @@ Gate: a Node script with no cookie, holding only a member session, follows a cha
 
 Before this phase starts I will show the owner the UI data-flow approach and wait for a yes: the engine exposes snapshots and a subscribe function per space, components read them through `useSyncExternalStore`, and `workspace-manager.tsx` loses its fetch and refresh state. Logic only; no styling changes.
 
+Owner sign-off (2026-11-10): the data-flow approach is approved as written; the scenario changes are approved as "remove and rewrite" (the declined-join-permission scenario is deleted, the per-channel access steps are rewritten to the one-grant sign-in, every other scenario keeps its wording); and "The app server never holds DM scopes or DM content" (`features/direct-messages.feature:153-157`) is strengthened at R6c to "The app server holds no member session, no member token and no DM content").
+
 - **R6a.** The browser client requests the member set and the DM set in one grant and replaces the DM-only browser session. Workspace discovery and channel reads come from the engine. Writes and operator calls still go through the server. Gate for this step: K9 repeated with the real client.
 - **R6b.** Writes and operator calls go through the engine: browser to PDS, and browser to operator with a service token.
 - **R6c.** Delete what "What is deleted" lists. `page.tsx` no longer resolves a server session; sign-in is the browser OAuth flow.
@@ -708,3 +710,119 @@ Review: Codex was not run (the configured model is the one rejected in R1; the o
   - pruning the member-list cache at most once a minute.
 
   All three were done. The fixes after round 3 were not reviewed again.
+
+### R6a (2026-11-11)
+
+Done:
+- **One browser grant.** The browser holds one OAuth grant: the member set, the operator's methods as one `rpc` scope, and the DM set (`memberGrantScopes` in `src/protocol/scopes.ts`, pinned to `lexicons/new/flock/permissions/member.json` by a test). It is made through `@atproto/oauth-client-browser`, in `src/browser/` (moved from `src/dm/`), and replaces the DM-only session. The server sign-in stays until R6c, and the app asks once for "Connect this browser".
+- **The engine runs in the browser** over the account's IndexedDB store, with the operator at the app's own origin until R7.
+- **Live views.** `src/client/views.ts` has `Snapshots` (one immutable snapshot per key, with subscriptions, for `useSyncExternalStore`) and `LiveSpaces`. `LiveSpaces` binds each watched key's loader to the spaces it reads and loads it again when the change feed names one.
+- **What reads through the engine:**
+  - workspace discovery;
+  - the channel page, with cursor paging;
+  - the private roster;
+  - the admin inbox, which is also swept every minute;
+  - the DM inbox and conversations. Their notification streams are now `LiveSpaces` watches.
+
+Departures:
+- **Channel writes moved into R6a.** These are messages, edits, deletions and reactions. The plan had them in R6b. The server's message and reaction routes checked membership with the server session's per-channel read scope. Only the removed "Grant channel read" step gave that scope, so every post failed. The UI now writes through `engine.channels`, under the rules R4 moved there, and the "Grant message posting" box is gone. Operator calls, accepting invitations and join requests stay on the server until R6b. `/api/channels/messages/write` and `/api/channels/reactions` have no caller left; R6c deletes them.
+- **The UI keeps its imperative state.** The component's state moves onto snapshots in R6b, which reaches the approved data flow by the end of R6. Each view has one loader, its live watch, and a content reload goes through it.
+- **K9 is repeated through the app itself**, not a harness page: `protocol-tests/browser/real-client.spec.ts`, in `test:browser`. The app's pages sign in and connect with the real client. Then, through the UI:
+  - the member opens a channel whose second writer's host the browser cannot reach;
+  - refreshes the workspace, which mints its credential again;
+  - posts;
+  - an outsider opens a private channel.
+
+  The spec checks the page's own requests and its preflights, through the DevTools protocol:
+  - PAR and the token exchange at the member's host;
+  - DID documents from the PLC;
+  - credentials minted and minted again;
+  - a `getRecord` after the renewal whose MAC header the page can read;
+  - `listRepos`;
+  - `getChanges` with a service token;
+  - a DPoP `createRecord`;
+  - the outsider's refusal (HTTP 400 `SpaceNotFound`, read by the page);
+  - the unreachable host failing at the network level.
+
+  Every preflight passed, apart from the blocked host's.
+- **The DM sidebar no longer offers its own connect button.** "Disconnect this browser" says that it revokes the one session.
+- **The inbox permission prompt** now offers to connect the browser again, since the inbox is read with the browser's grant.
+
+Found and fixed in the engine and the UI on the way, each with tests where the code is testable:
+- `ChannelClient.left` mints the credential afresh after the account leaves a channel. Before, a cached credential kept reading the channel for up to ten minutes; the server had minted per read.
+- `LiveSpaces` behavior:
+  - It loads a key while the operator is unreachable, and follows the key's spaces once the operator answers.
+  - Its stop is identity-checked.
+  - It follows a key's new spaces from one head with one load.
+  - It restarts a held poll when it follows a new space.
+- `ChangeFollower` behavior:
+  - A space the operator denies while the account can still read it is followed again only after `REFOLLOW_DELAY_MS` (60 s). It was re-minted and reloaded every five seconds.
+  - Per-follow tokens and per-space generations keep work begun before an unfollow from following the space again.
+  - A poll ignores answers for spaces unfollowed while it was held.
+- The IndexedDB store closes, and tells its tab, when another tab deletes it. Another account's start used to wait on it.
+- In the shell:
+  - a workspace tick no longer discards an in-flight channel read;
+  - a reload keeps the older pages a person loaded;
+  - the invite link is taken before the session is ready;
+  - inbox results are bound to their workspace and its admin standing, and a discovery that changes nothing no longer drops them;
+  - the one-minute inbox sweep, dropped by mistake at first, is back.
+
+BDD: reads that went through `/api` are asserted where they now happen:
+- in what the page shows;
+- in the browser's own XRPC calls, recorded into `actor.xrpc`, apart from the app server's `/api` calls;
+- in the account's IndexedDB store (`bdd/support/browser-store.ts`);
+- in the engine run in Node as one account (`bdd/support/engine.ts`), for probes that race an operation and for writes made around the page.
+
+The two-app and spoofed-record scenarios compare the roster, admins and channel keys from the authority listings the page made itself. They assert that it listed them only from the authority's repo. The sign-in helpers connect the browser. The "Declining the join permission" scenario stays until R6b, since joining still asks the server's grant.
+
+K4, the real client in a browser (`protocol-tests/browser/sync-budget.ts`, `test:sync-budget:browser`):
+- Setup: K4's dataset, ten runs per phase, the change feed blocked, and each measurement started once the page was quiet.
+- Requests are counted from the DevTools protocol, with CORS preflights counted apart.
+- Time runs in the page, from the click to the message list leaving `aria-busy`.
+
+| writers | phase | requests | preflights | median | p95 |
+|---|---|---|---|---|---|
+| 20 | first open | 105 | 85 | 768 ms | 797 ms |
+| 20 | reopen | 2 | 2 | 31 ms | 35 ms |
+| 20 | one new message | 6 | 6 | 73 ms | 80 ms |
+| 100 | first open | 505 | 405 | 3,510 ms | 8,061 ms |
+| 100 | reopen | 2 | 2 | 36 ms | 41 ms |
+| 100 | one new message | 6 | 6 | 77 ms | 82 ms |
+| 200 | first open | 1,005 | 805 | 6,805 ms | 6,941 ms |
+| 200 | reopen | 2 | 2 | 46 ms | 49 ms |
+| 200 | one new message | 6 | 6 | 85 ms | 89 ms |
+
+What the table shows:
+- **Shape.** A first open is K4's shape (one credential, one DID resolution and four calls per writer), plus a second `listRepos` and the directory's `getRecord`. That `getRecord` is the channel-state check every read makes, so a reopen is two requests and one new message is six; K4 had one and five. Nothing in the counts grows with the writer count except the first open.
+- **Preflights** add about four round trips per writer on a first open: the revision reads and listings carry headers a browser must ask about first. DID documents need none.
+- **Time.** The real client is faster than K4's Node emulation on a first open (768 ms against 855 ms, 6,805 ms against 7,962 ms), and slower on a reopen (tens of ms against 8 ms; IndexedDB and React rendering).
+- **The 100-writer p95** is one run of 8 s. As K4 noted, first-open time is sensitive to host load.
+- An earlier run without the quiet start counted a few more requests, because the start-up discovery overlapped the click.
+
+Residuals, recorded for R6b:
+- A second discovery runs at start-up: the resume's, then the workspace watch's first load. R6b makes discovery one keyed view.
+- `LiveSpaces` treats any follow or poll failure as "operator unreachable" and retries. It has no reporting path until R6b's snapshots carry errors.
+- `Snapshots.get/subscribe/forget` wait for R6b's consumers.
+
+Gate:
+- **Unit:** 588 of 588. Typecheck and lint are clean. The one lint warning predates R4. The changed and new protocol-test files typecheck under a temporary config; the root config excludes `protocol-tests`.
+- **Acceptance:** 14 of 14.
+- **Browser:** 5 of 5, including K9 repeated with the real client and the OAuth flow brought onto the connected browser session. The OAuth flow now also shows the server's admin grant is still needed for operations: one made before it is refused for want of the `execute` scope.
+- **BDD:**
+  - The full run on the final code was 64 of 66. Two checks read what they assert before it was there:
+    - the recorder files the workspace-creation retry after the page shows the workspace;
+    - the DM sender persists its re-send count after the PDS shows the re-send.
+  - Both now wait, and both pass.
+  - The full run before the last UI changes was 65 of 66. Its one failure, a reaction step that clicked a button the engine's immediate update had already replaced, was rewritten and passes.
+  - "Open a channel at the latest 100 messages", the flake carried since R4, passed in every full run: the server path behind it is gone.
+- **K9 and K4:** as above.
+
+Review: Codex was not run (the configured model is the one rejected in R1; the owner said to continue). Sonnet subagents reviewed under the code-review procedure:
+- **Round 1, reviewer and critic (converged).** Two important findings:
+  - a stale watch stop could remove a newer watch of the same key;
+  - a workspace tick discarded an in-flight channel read.
+
+  Also found: a poll not asked again when a space was followed, the roster check weakened to a count, a second loader of channel content, and minor races, leaks and copy. All were fixed with tests or recorded.
+- **Round 2, the fix delta.** The OAuth spec's connect wait passed while still connecting. Unfollows still raced awaits. Listener leaks, an unannounced closed store, and a dev StrictMode regression. All fixed.
+- **Round 3.** Approved with follow-ups, all taken: per-follow tokens and generations, tearing down a closed store's engine, the registration order, and stronger tests.
+- **Gate after round 3.** 39 BDD scenarios timed out on the admin inbox: every discovery discarded an inbox load in flight. A focused review confirmed the fix and found three more inbox gaps, which were fixed. A last focused review found the inbox loader took its workspace at call time without an admin check. The loaders are now bound to their workspace. Fixes after that last review were covered by the final gate but not reviewed again.

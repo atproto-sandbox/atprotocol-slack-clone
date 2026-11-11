@@ -285,20 +285,9 @@ export async function memberSignInScopes(): Promise<readonly string[]> {
 }
 
 
-/** The member grant of the refactor plan's "Identities and sessions" section plus the browser DM set, as one consent (K3). */
+/** The one browser grant (R6), from the app's own builder: the member set, the operator methods and the DM set (K3). */
 export async function combinedMemberScopes(serviceRef: string): Promise<string[]> {
-  const { DM_BROWSER_SCOPES, OPERATOR_METHODS } = await import("@/protocol/scopes");
-  const audience = serviceRef.replaceAll("%", "%25").replace("#", "%23");
-  return [
-    "space:new.flock.workspace?authority=*&action=read",
-    "space:new.flock.workspace?authority=*&collection=new.flock.acceptance&action=create&action=update",
-    "space:new.flock.inbox?authority=*&action=read",
-    "space:new.flock.inbox?authority=*&collection=new.flock.joinRequest&action=create&action=update&action=delete",
-    "space:new.flock.channel?authority=*&action=read",
-    "space:new.flock.channel?authority=*&collection=new.flock.channel.message&collection=new.flock.channel.reaction&action=create&action=update&action=delete",
-    `rpc?${OPERATOR_METHODS.map((method) => `lxm=${method}`).join("&")}&aud=${audience}`,
-    ...DM_BROWSER_SCOPES.filter((scope) => scope !== "atproto"),
-  ];
+  return (await import("@/protocol/scopes")).memberGrantScopes(serviceRef).filter((scope) => scope !== "atproto");
 }
 
 /**
@@ -350,8 +339,8 @@ export async function outcome(run: () => Promise<unknown>): Promise<Outcome> {
  * requests; `now` lets a test move the engine's clock past a truth interval.
  */
 export function actorTransport(
-  network: PdsNetwork,
-  actor: NetworkActor,
+  network: Pick<PdsNetwork, "plcUrl">,
+  actor: Pick<NetworkActor, "did" | "accessJwt"> & { pds: { url: string } },
   options: { now?: () => number; fetchVia?: (request: Request) => Promise<Response> } = {},
 ): import("@/client/transport").ClientTransport {
   const send = options.fetchVia ?? ((request: Request) => fetch(request));

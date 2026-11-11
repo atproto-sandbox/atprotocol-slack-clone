@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { generateSpaceKey } from "@/atproto/space-key";
 import type { Locator, Page, Response as PlaywrightResponse } from "@playwright/test";
-import { inviteLinkFor, type InboxRequest } from "@/app/ui/client-api";
+import { inviteLinkFor } from "@/app/ui/client-api";
 import { mintSpaceCredentialWith, SpaceCredentialError, type SpaceCredential } from "@/atproto/space-credential-core";
 import { AtprotoClient } from "@/atproto/xrpc";
 import { channelUri, decisionRecordKey, inboxUri, parseSpaceUri, requestRecordKey, spaceRecordUri, tidNow } from "@/protocol/keys";
 import type { Actor, AppWorld } from "./world";
+import { listingCalls } from "./channels-ui";
 import { approveAdminControls, completeConsent, createWorkspaceAs, inviteMemberAs, joinFromInvitation, openInviteLinkAndSignIn, waitForApp } from "./ui";
 import { memberspacePolicy } from "@/atproto/space-policy";
 
@@ -288,7 +289,7 @@ export async function onboardMember(world: AppWorld, owner: Actor, role: string,
 
 async function openPrivateChannel(member: Actor, channel: PrivateChannel): Promise<void> {
   await member.page.locator(".channel-nav-item").filter({ hasText: channel.name }).click();
-  await member.page.getByText(/Grant workspace\/channel read scope/).waitFor({ state: "visible" });
+  await member.page.getByText("You are not on this channel’s active roster.").waitFor({ state: "visible" });
 }
 
 async function clickRequestAccess(member: Actor): Promise<SubmittedRequest> {
@@ -309,7 +310,7 @@ export async function requestPrivateAccessAs(world: AppWorld, member: Actor, cha
   await page.getByRole("button", { name: "Grant request access →" }).click();
   await completeConsent(member);
   await waitForApp(world, member);
-  await page.getByText(/Grant workspace\/channel read scope/).waitFor({ state: "visible" });
+  await page.getByText("You are not on this channel’s active roster.").waitFor({ state: "visible" });
   return clickRequestAccess(member);
 }
 
@@ -338,11 +339,21 @@ export async function decideInUi(admin: Actor, row: Locator, decision: "Approve"
   return outcomeOf(response);
 }
 
-/** What the admin UI last learned from `/api/inbox/requests`, as the app reported it. */
-export function inboxRequestsSeen(world: AppWorld, admin: Actor, from = 0): InboxRequest[][] {
-  return world.callsTo(admin, "/api/inbox/requests").slice(from)
-    .filter((call) => call.status === 200)
-    .map((call) => (JSON.parse(call.responseBody) as { requests: InboxRequest[] }).requests);
+const INBOX_WRITERS = "/xrpc/new.flock.operator.listInboxWriters";
+
+/** The inbox sweeps the admin's app started since `from` (an index into its XRPC calls): each asks the operator for the inbox writers. */
+export function inboxSweepsSince(admin: Actor, from: number): number {
+  return admin.xrpc.slice(from).filter((call) => call.path === INBOX_WRITERS && call.status === 200).length;
+}
+
+/** The join requests the admin's browser read from the inbox writers' repos since `from` (an index into its XRPC calls). */
+export function inboxRequestsSeen(admin: Actor, inbox: string, from: number): Array<{ repoDid: string; requestId: string; uri: string }> {
+  return listingCalls(admin, "new.flock.joinRequest", from).filter(({ call, query }) => call.status === 200 && query.get("space") === inbox)
+    .flatMap(({ call, query }) => {
+      const repoDid = query.get("repo") ?? "";
+      return (JSON.parse(call.responseBody) as { records: Array<{ rkey: string; value: { requestId?: unknown } }> }).records
+        .map((record) => ({ repoDid, requestId: String(record.value.requestId), uri: spaceRecordUri(inbox, repoDid, "new.flock.joinRequest", record.rkey) }));
+    });
 }
 
 /** An operator operation submitted through the admin's own signed-in browser session, exactly as the UI's Approve/Deny buttons do. */
@@ -357,25 +368,6 @@ export async function submitOperationAs(page: Page, workspace: string, request: 
   };
 }
 
-export async function postMessageAs(world: AppWorld, member: Actor, text: string): Promise<void> {
-  const page = member.page;
-  await page.getByPlaceholder("Write a message…").fill(text);
-  await page.getByRole("button", { name: "Send", exact: true }).click();
-  await page.getByRole("button", { name: "Grant message posting →" }).click();
-  await completeConsent(member);
-  await waitForApp(world, member);
-  await page.getByPlaceholder("Write a message…").fill(text);
-  await page.getByRole("button", { name: "Send", exact: true }).click();
-  await page.getByText(text, { exact: true }).waitFor({ state: "visible" });
-}
-
-export async function grantChannelReadAs(world: AppWorld, member: Actor, channel: PrivateChannel): Promise<void> {
-  await member.page.locator(".channel-nav-item").filter({ hasText: channel.name }).click();
-  await member.page.getByRole("button", { name: "Grant channel read →" }).click();
-  await completeConsent(member);
-  await waitForApp(world, member);
-  await member.page.getByPlaceholder("Write a message…").waitFor({ state: "visible" });
-}
 
 export async function openChannelRoster(member: Actor, channel: PrivateChannel): Promise<string[]> {
   await member.page.locator(".channel-nav-item").filter({ hasText: channel.name }).click();

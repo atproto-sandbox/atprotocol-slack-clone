@@ -37,6 +37,7 @@ After(async function (this: AppWorld, scenario) {
     for (const actor of this.actors.values()) {
       this.attach(await actor.page.screenshot({ fullPage: true, timeout: 10_000 }).catch(() => Buffer.from("")), "image/png");
       this.attach(`[${actor.role}] ${actor.page.url()}\n${(await actor.page.locator("body").innerText({ timeout: 10_000 }).catch(() => "")).slice(0, 4_000)}`, "text/plain");
+      this.attach(`[${actor.role}] the browser's own XRPC calls, latest last:\n${actor.xrpc.slice(-40).map((call) => `${call.method} ${call.origin}${call.path}${call.query} -> ${call.status}`).join("\n")}`, "text/plain");
     }
     this.attach(`App server output (tail):\n${this.fixture.serverOutput().slice(-4_000)}`, "text/plain");
   }

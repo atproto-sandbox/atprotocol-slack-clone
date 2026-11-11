@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { Given, Then, When } from "@cucumber/cucumber";
 import { inboxUri } from "@/protocol/keys";
-import { withIndependentReader, type WorkspaceState } from "../support/independent-app-ui";
+import { withIndependentReader } from "../support/independent-app-ui";
+import { workspaceChannels } from "../support/channels-ui";
 import type { AppWorld, Actor } from "../support/world";
 import {
   approveAdminControls, completeConsent, copyInviteLink, createWorkspaceAs, escapeRegExp, eventually, inviteMemberAs,
@@ -9,6 +10,10 @@ import {
 } from "../support/ui";
 
 type Member = { did: string; read: boolean; write: boolean };
+
+/** The browser's own listings of the account's workspaces, from its PDS. */
+const workspaceListings = (actor: Actor) => actor.xrpc.filter((call) => call.path === "/xrpc/com.atproto.space.listSpaces" && call.status === 200
+  && new URLSearchParams(call.query).get("spaceType") === "new.flock.workspace");
 
 const owner = (world: AppWorld): Actor => {
   const actor = world.actors.get("owner");
@@ -79,8 +84,9 @@ Then("after approval the same operation ID is retried and the workspace is creat
   await waitForApp(this, actor);
   await actor.page.getByRole("heading", { name: this.workspaceName, exact: true }).waitFor({ state: "visible" });
   const operationId = this.scratch.get("operationId") as string;
-  const retried = this.callsTo(actor, "/api/workspaces/bootstrap").filter((call) => (JSON.parse(call.requestBody) as { operationId: string }).operationId === operationId);
-  assert.ok(retried.length >= 2, "the same operation ID was submitted again after approval");
+  // The page shows the workspace as soon as the retry answered; the recorder files that answer a moment later.
+  await eventually(() => this.callsTo(actor, "/api/workspaces/bootstrap").filter((call) => (JSON.parse(call.requestBody) as { operationId: string }).operationId === operationId).length >= 2,
+    { what: "the same operation ID to be submitted again after approval" });
   const journal = this.withAppDatabase((db) => db.prepare("SELECT state FROM operation WHERE operation_id = ?").get(operationId) as { state: string } | undefined);
   assert.equal(journal?.state, "completed");
 });
@@ -101,7 +107,8 @@ Given("the account returns from the permission screen without the required permi
 When("the app resumes the setup once", async function (this: AppWorld) {
   const actor = owner(this);
   await eventually(() => this.callsTo(actor, "/api/workspaces/bootstrap").length >= 2, { what: "the setup to resume after returning" });
-  await actor.page.waitForLoadState("networkidle");
+  // The resumed attempt ends in the refusal shown to the person; nothing runs after it.
+  await actor.page.getByText(/Permission was not granted/).waitFor({ state: "visible" });
   assert.equal(this.callsTo(actor, "/api/workspaces/bootstrap").length, 2, "setup was attempted once at submit and resumed exactly once");
 });
 
@@ -233,10 +240,8 @@ Then("the app says the account has not been added to the workspace", async funct
 Then("the workspace does not appear in that account's dashboard", async function (this: AppWorld) {
   const stranger = actorNamed(this, "stranger");
   const page = stranger.page;
-  await page.waitForLoadState("networkidle");
-  const listing = this.callsTo(stranger, "/api/workspaces").at(-1);
-  assert.ok(listing, "the dashboard asked the server for this account's workspaces");
-  assert.deepEqual((JSON.parse(listing.responseBody) as { workspaces: Array<{ uri: string }> }).workspaces.map((entry) => entry.uri), [], "the server lists no workspace for this account");
+  const listing = await eventually(() => workspaceListings(stranger).at(-1), { what: "the app to list this account's workspaces" });
+  assert.deepEqual((JSON.parse(listing.responseBody) as { spaces: Array<{ uri: string }> }).spaces.map((entry) => entry.uri), [], "the account's own PDS lists no workspace to the app");
   assert.equal(await page.getByRole("heading", { name: this.workspaceName, exact: true }).count(), 0);
   assert.equal(await page.locator(".sidebar").getByRole("button", { name: new RegExp(escapeRegExp(this.workspaceName)) }).count(), 0);
 });
@@ -272,16 +277,11 @@ Then("a second app reads the same directory and workspace roster", async functio
     (await reader.listIndependentWorkspaces(deps)).find((entry) => entry.uri === this.workspaceUri));
   assert.ok(seen, "the second app finds the workspace from the invitee's credentials alone");
 
-  const { workspaces } = await invitee.page.evaluate(async () => (await fetch("/api/workspaces")).json()) as { workspaces: WorkspaceState[] };
-  const primary = workspaces.find((entry) => entry.uri === this.workspaceUri);
-  assert.ok(primary, "the app the invitee joined through lists the workspace");
-  assert.ok(primary.members.length > 0 && primary.channels.length > 0, "the first app shows a roster and a directory to compare with");
-
-  const directory = (channels: Array<{ skey: string; name: string; visibility: string }>) =>
-    channels.map(({ skey, name, visibility }) => ({ skey, name, visibility })).sort((left, right) => left.name.localeCompare(right.name));
-  assert.deepEqual([...seen.members].sort(), primary.members.map((member) => member.did).sort(), "the second app's roster is the first app's");
-  assert.deepEqual([...seen.admins].sort(), [...primary.admins].sort(), "the second app's admins are the first app's");
-  assert.deepEqual(directory(seen.channels), directory(primary.channels), "the second app's directory is the first app's");
+  const summary = (await invitee.page.locator(".welcome-banner p").first().innerText()).trim();
+  const directory = (await workspaceChannels(invitee.page).allInnerTexts()).map((entry) => entry.slice(1).trim()).sort();
+  assert.ok(directory.length > 0, "the first app shows a directory to compare with");
+  assert.equal(summary, `${seen.members.length} active members · ${seen.channels.length} channels`, "the second app's roster is the one the first app shows");
+  assert.deepEqual(seen.channels.map((channel) => channel.name).sort(), directory, "the second app's directory is the first app's");
 });
 
 // --- Administration ---------------------------------------------------------------------------------

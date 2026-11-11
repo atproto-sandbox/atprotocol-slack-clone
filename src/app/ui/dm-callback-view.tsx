@@ -2,27 +2,27 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { restoreDmSession, type DmConfig } from "@/dm/browser-session";
+import { restoreSession, type BrowserSessionConfig } from "@/browser/session";
 
-export type DmCallbackViewProps = { expectedDid: string; dmConfig: DmConfig };
+export type DmCallbackViewProps = { expectedDid: string; dmConfig: BrowserSessionConfig };
 
 export function DmCallbackView({ expectedDid, dmConfig }: DmCallbackViewProps) {
   const router = useRouter();
   const [error, setError] = useState("");
 
   useEffect(() => {
-    restoreDmSession(expectedDid, dmConfig)
+    restoreSession(expectedDid, dmConfig)
       .then((session) => {
         if (session) router.replace("/");
-        else setError("Direct messages were not connected: the sign-in did not complete or did not grant every permission they need. Try connecting again.");
+        else setError("This browser was not connected: the sign-in did not complete or did not grant every permission the app needs. Try connecting again.");
       })
-      .catch((caught: unknown) => setError(caught instanceof Error ? caught.message : "Could not finish connecting direct messages."));
+      .catch((caught: unknown) => setError(caught instanceof Error ? caught.message : "Could not finish connecting this browser."));
   }, [expectedDid, dmConfig, router]);
 
   return (
     <main className="welcome-page">
       <section className="welcome-panel">
-        {error ? <p className="form-error" role="alert">{error}</p> : <p className="status-note" role="status">Connecting direct messages…</p>}
+        {error ? <p className="form-error" role="alert">{error}</p> : <p className="status-note" role="status">Connecting this browser…</p>}
       </section>
     </main>
   );

@@ -15,8 +15,8 @@ import { inboxUri, subjectKey } from "@/protocol/keys";
 import type { Actor, AppWorld } from "./world";
 import { memberspacePolicy } from "@/atproto/space-policy";
 import {
-  approveAdminControls, completeConsent, createWorkspaceAs, escapeRegExp, eventually, inviteMemberAs,
-  joinFromInvitation, openInviteLinkAndSignIn, waitForApp,
+  approveAdminControls, createWorkspaceAs, escapeRegExp, eventually, inviteMemberAs,
+  joinFromInvitation, openInviteLinkAndSignIn,
 } from "./ui";
 
 // Helpers for the membership, privacy and archive lifecycle scenarios: what a person does in the app, plus the
@@ -205,10 +205,6 @@ export async function eventuallyAsync<T>(read: () => Promise<T | undefined | nul
   }
 }
 
-export function recentCalls(actor: Actor, count = 12): string {
-  return actor.calls.slice(-count).map((call) => `${call.method} ${call.path} -> ${call.status} ${call.responseBody.slice(0, 120)}`).join("\n");
-}
-
 // --- Driving the app ---------------------------------------------------------------------------------
 
 export async function workspaceWithAdmin(world: AppWorld): Promise<Actor> {
@@ -266,45 +262,6 @@ export async function joinWorkspaceAs(world: AppWorld, member: Actor): Promise<v
   await member.page.getByRole("heading", { name: world.workspaceName, exact: true }).waitFor({ state: "visible" });
 }
 
-/**
- * Opens a channel from the sidebar, approving the one-time channel-read permission if the app asks for it.
- * After approving, the page comes back on the channel with its messages but without the private roster, so a person
- * opens the channel once more to see it in full.
- */
-export async function openChannelAs(world: AppWorld, actor: Actor, name: string): Promise<{ status: number }> {
-  const before = world.callsTo(actor, "/api/channels/messages").length;
-  await channelButton(actor, name).click();
-  const first = await eventually(() => world.callsTo(actor, "/api/channels/messages")[before], { what: `the first sync of ${name}` });
-  if (first.status !== 401 && first.status !== 403) return { status: first.status };
-  await actor.page.getByRole("button", { name: "Grant channel read →" }).click();
-  await completeConsent(actor);
-  await waitForApp(world, actor);
-  await actor.page.getByRole("heading", { name: new RegExp(`${escapeRegExp(name)}$`) }).waitFor({ state: "visible" });
-  const reopened = world.callsTo(actor, "/api/channels/messages").length;
-  await channelButton(actor, name).click();
-  const again = await eventually(() => world.callsTo(actor, "/api/channels/messages")[reopened], { what: `the sync of ${name} after approval`, timeoutMs: 60_000 });
-  return { status: again.status };
-}
-
-export async function postMessageAs(world: AppWorld, actor: Actor, text: string): Promise<void> {
-  const composer = actor.page.getByPlaceholder("Write a message…");
-  await composer.fill(text);
-  await actor.page.getByRole("button", { name: "Send", exact: true }).click();
-  const grant = actor.page.getByRole("button", { name: "Grant message posting →" });
-  const posted = actor.page.locator(".message-card").filter({ hasText: text });
-  await Promise.race([grant.waitFor({ state: "visible" }), posted.waitFor({ state: "visible" })]);
-  if (await grant.isVisible()) {
-    await grant.click();
-    await completeConsent(actor);
-    await waitForApp(world, actor);
-    await composer.waitFor({ state: "visible" });
-    await composer.fill(text);
-    await actor.page.getByRole("button", { name: "Send", exact: true }).click();
-  }
-  await posted.waitFor({ state: "visible" }).catch((error: unknown) => {
-    throw new Error(`The message "${text}" never appeared. Recent app calls:\n${recentCalls(actor)}`, { cause: error });
-  });
-}
 
 /** An invited member's first visit: sign in from the invite link and join. */
 export async function inviteAndJoin(world: AppWorld, owner: Actor, member: Actor): Promise<void> {
@@ -341,13 +298,6 @@ export function auditTrail(world: AppWorld, operationId: string): AuditEvent[] {
 
 export function journalRowsFor(world: AppWorld, actorDid: string): number {
   return world.withAppDatabase((db) => (db.prepare("SELECT count(*) AS count FROM operation WHERE actor = ?").get(actorDid) as { count: number }).count);
-}
-
-export function cachedRows(world: AppWorld, accountDid: string): { records: number; cursors: number; syncs: number } {
-  return world.withAppDatabase((db) => {
-    const count = (table: string) => (db.prepare(`SELECT count(*) AS count FROM ${table} WHERE account_did = ?`).get(accountDid) as { count: number }).count;
-    return { records: count("channel_record_cache"), cursors: count("space_collection_cursor"), syncs: count("sync_cursor") };
-  });
 }
 
 // --- Sampling a live operation -----------------------------------------------------------------------

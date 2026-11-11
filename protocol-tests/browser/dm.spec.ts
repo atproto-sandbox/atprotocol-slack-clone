@@ -233,9 +233,9 @@ async function loginAndConnectDms(page: Page, app: URL, did: string, handle: str
   await page.getByRole("button", { name: "Authorize", exact: true }).click();
   await page.waitForURL(app.origin, { timeout: 30_000 });
 
-  await page.getByRole("button", { name: /Connect direct messages/ }).click();
+  await page.getByRole("button", { name: "Connect this browser →" }).click();
   await page.waitForURL(/\/oauth\/authorize\?/, { timeout: 30_000 }).catch(async (error: unknown) => {
-    throw new Error(`DM connect did not redirect to PDS authorize. URL: ${page.url()} Page: ${(await page.locator("body").innerText()).slice(0, 2_000)}`, { cause: error });
+    throw new Error(`Connecting the browser did not redirect to PDS authorize. URL: ${page.url()} Page: ${(await page.locator("body").innerText()).slice(0, 2_000)}`, { cause: error });
   });
   await signInIfPrompted(page, handle, password);
   await page.getByRole("button", { name: "Authorize", exact: true }).waitFor({ state: "visible" });

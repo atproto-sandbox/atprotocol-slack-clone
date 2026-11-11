@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
 import { P256Keypair } from "@atproto/crypto";
-import { clearBrowserIdentityCache, resolveHandle, resolveKemKey, resolvePds, type BrowserIdentityConfig } from "./browser-identity";
+import { clearBrowserIdentityCache, resolveHandle, resolveKemKey, resolvePds, type BrowserIdentityConfig } from "./identity";
 
 type FetchCall = { url: string; redirect: string | undefined };
 

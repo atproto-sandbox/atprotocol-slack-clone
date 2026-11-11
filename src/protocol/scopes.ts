@@ -1,6 +1,6 @@
 import { isSkey } from "./keys";
 import { COLLECTION, OPERATOR_METHOD, REPO_COLLECTION, SPACE_TYPE } from "./nsids";
-import { authorityCollections } from "./registry";
+import { authorityCollections, memberCollections } from "./registry";
 
 // The OAuth scopes the app asks for, built from the registry: the member sign-in, the per-space member permissions, the
 // operator methods, the browser DM set, and the workspace authority grant.
@@ -90,6 +90,23 @@ export function workspaceAuthorityScopes(): string[] {
 
 export const OPERATOR_METHODS = Object.values(OPERATOR_METHOD);
 
+/**
+ * The one grant a person gives the app in the browser (R6), requested once at sign-in: read every workspace, inbox and
+ * channel of any authority, with each space's member list as the gate (D5); write the collections a member writes there;
+ * call the operator's methods; and the DM set. Built from the registry, so a collection added there is asked for here.
+ */
+export function memberGrantScopes(serviceRef: string): string[] {
+  return [
+    ...DM_BROWSER_SCOPES,
+    ...[SPACE_TYPE.workspace, SPACE_TYPE.inbox, SPACE_TYPE.channel].flatMap((spaceType) => [
+      `space:${spaceType}?authority=*&action=read`,
+      // An acceptance is never withdrawn; a join request, a message and a reaction are.
+      `space:${spaceType}?authority=*&collection=${memberCollections(spaceType).join("&collection=")}&action=create&action=update${spaceType === SPACE_TYPE.workspace ? "" : "&action=delete"}`,
+    ]),
+    operatorMethodsScope(OPERATOR_METHODS, serviceRef),
+  ];
+}
+
 export const OPERATOR_LEAVE_METHODS = [OPERATOR_METHOD.execute] as const;
 
 export function permissionScopeFor(
@@ -136,7 +153,7 @@ export function permissionScopeFor(
   }
 }
 
-function operatorMethodsScope(methods: readonly string[], serviceRef: string): string {
+export function operatorMethodsScope(methods: readonly string[], serviceRef: string): string {
   const audience = serviceRef.replaceAll("%", "%25").replace("#", "%23");
   return `rpc?${methods.map((method) => `lxm=${method}`).join("&")}&aud=${audience}`;
 }

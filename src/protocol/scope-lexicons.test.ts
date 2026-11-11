@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { COLLECTION, SPACE_TYPE } from "./nsids";
-import { OPERATOR_METHODS, workspaceAuthorityScopes } from "./scopes";
+import { DM_BROWSER_SCOPES, memberGrantScopes, OPERATOR_METHODS, workspaceAuthorityScopes } from "./scopes";
 
 type LexPermission = { type: "permission"; resource: "space" | "rpc"; spaceType?: string; authority?: string; skey?: string; collection?: string[]; action?: string[]; manage?: string[]; lxm?: string[] };
 
@@ -62,4 +62,13 @@ test("every space type and collection a published permission set names is one th
       for (const collection of permission.collection ?? []) assert.ok(collections.has(collection), `${name}: unknown collection ${collection}`);
     }
   }
+});
+
+test("the published member permission set grants exactly the member part of the browser grant, and the operator methods", () => {
+  const permissions = readPermissionSet("member");
+  const published = permissions.filter((permission) => permission.resource === "space").map((permission) => normalized({ ...permission, type: permission.spaceType })).sort();
+  const requested = memberGrantScopes("did:web:operator.test#atproto_flock_operator")
+    .filter((scope) => scope.startsWith("space:") && !DM_BROWSER_SCOPES.includes(scope)).map(fromScopeString).sort();
+  assert.deepEqual(published, requested);
+  assert.deepEqual([...permissions.find((permission) => permission.resource === "rpc")!.lxm!].sort(), [...OPERATOR_METHODS].sort());
 });

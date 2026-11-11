@@ -5,6 +5,7 @@ import test from "node:test";
 import { chromium, type Browser, type Page } from "@playwright/test";
 import { NodeOAuthClient, type NodeSavedSession, type NodeSavedState, type OAuthSession } from "@atproto/oauth-client-node";
 import { verifyJwt } from "@atproto/xrpc-server";
+import { countByOrigin, watchPreflights, type Preflight } from "../support/browser-network";
 import { combinedMemberScopes, outcome, startPdsNetwork, type NetworkActor, type Outcome, type PdsNetwork } from "../support/pds-network";
 
 // K9 of `.ai/plans/platform-refactor.md`: can a page on the web app's origin talk to the protocol hosts directly? The web
@@ -17,7 +18,6 @@ import { combinedMemberScopes, outcome, startPdsNetwork, type NetworkActor, type
 const OPERATOR_METHOD = "new.flock.operator.getChanges";
 
 type BrowserFailure = { method: string; url: string; error: string };
-type Preflight = { url: string; outcome: string };
 type BrowserMember = {
   actor: NetworkActor; page: Page; session: OAuthSession; browserFetch(request: Request): Promise<Response>; failures: BrowserFailure[]; preflights: Preflight[];
 };
@@ -162,48 +162,6 @@ async function signInThroughBrowser(browser: Browser, webOrigin: string, pds: Pd
   const { session } = await client.callback(new URL(page.url()).searchParams);
   assert.equal(session.did, actor.did);
   return { actor, page, session, browserFetch, failures, preflights };
-}
-
-/**
- * Every CORS preflight the browser sends for this page and how it ended, observed through the DevTools protocol, so a
- * preflight that fails is seen even when a later request succeeds. A preflight is settled only when loading finishes or
- * fails: an OPTIONS answer can arrive with a 2xx status and still fail the browser's CORS check. Any request the browser
- * refuses on CORS grounds (the preflight itself or the request it guarded) is reported as a failed preflight too.
- */
-async function watchPreflights(page: Page): Promise<Preflight[]> {
-  const cdp = await page.context().newCDPSession(page);
-  await cdp.send("Network.enable");
-  const urls = new Map<string, string>();
-  const pending = new Map<string, { url: string; status?: number }>();
-  const preflights: Preflight[] = [];
-  cdp.on("Network.requestWillBeSent", (event) => {
-    urls.set(event.requestId, event.request.url);
-    if (event.type === "Preflight" || event.request.method === "OPTIONS") pending.set(event.requestId, { url: event.request.url });
-  });
-  cdp.on("Network.responseReceived", (event) => {
-    const preflight = pending.get(event.requestId);
-    if (preflight) preflight.status = event.response.status;
-  });
-  cdp.on("Network.loadingFinished", (event) => {
-    const preflight = pending.get(event.requestId);
-    if (!preflight) return;
-    pending.delete(event.requestId);
-    preflights.push({ url: preflight.url, outcome: String(preflight.status ?? "no response") });
-  });
-  cdp.on("Network.loadingFailed", (event) => {
-    const preflight = pending.get(event.requestId);
-    pending.delete(event.requestId);
-    const outcome = event.corsErrorStatus ? `CORS ${event.corsErrorStatus.corsError}` : event.errorText;
-    if (preflight) preflights.push({ url: preflight.url, outcome });
-    else if (event.corsErrorStatus) preflights.push({ url: urls.get(event.requestId) ?? "unknown", outcome });
-  });
-  return preflights;
-}
-
-function countByOrigin(preflights: Preflight[]): Record<string, number> {
-  const counts: Record<string, number> = {};
-  for (const { url } of preflights) counts[new URL(url).origin] = (counts[new URL(url).origin] ?? 0) + 1;
-  return counts;
 }
 
 async function provision(pds: PdsNetwork): Promise<{ authority: NetworkActor; member: NetworkActor; outsider: NetworkActor; channel: string; rkey: string }> {

@@ -3,9 +3,9 @@ import { generateSpaceKey } from "@/atproto/space-key";
 import type { Locator } from "@playwright/test";
 import { mintSpaceCredentialWith, SpaceCredentialError } from "@/atproto/space-credential-core";
 import { AtprotoClient } from "@/atproto/xrpc";
-import { resolvePds } from "@/dm/browser-identity";
+import { resolvePds } from "@/browser/identity";
 import { DmClient, type DmDeps, type DmRequestMode } from "@/dm/dm-client";
-import { escapeRegExp, completeConsent, signIn } from "./ui";
+import { escapeRegExp, signIn } from "./ui";
 import type { FixtureAccount } from "../../protocol-tests/support/app-fixture";
 import type { Actor, AppWorld } from "./world";
 
@@ -235,12 +235,10 @@ export function dmcTrafficOf(world: AppWorld, actor: Actor): DmcTraffic {
 
 // --- What a person does in the DM UI --------------------------------------------------------------------
 
-/** Signs in to the app, then connects the browser's own direct-message session (a second PDS consent). */
+/** Signs in, which also connects this browser's session, the one that holds the DM permission. */
 export async function dmcConnect(world: AppWorld, actor: Actor): Promise<void> {
   recordTraffic(world, actor);
   await signIn(world, actor);
-  await actor.page.getByRole("button", { name: /Connect direct messages/ }).click();
-  await completeConsent(actor);
   await actor.page.getByRole("button", { name: /New message/ }).waitFor({ state: "visible", timeout: SLOW_UI_MS });
 }
 

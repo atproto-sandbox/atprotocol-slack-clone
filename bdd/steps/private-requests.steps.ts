@@ -3,10 +3,11 @@ import { Given, Then, When } from "@cucumber/cucumber";
 import { requestRecordKey } from "@/protocol/keys";
 import { eventually, inviteMemberAs } from "../support/ui";
 import type { Actor, AppWorld } from "../support/world";
+import { listingCalls, openChannel, postMessage } from "../support/channels-ui";
 import {
   PRIVATE_CHANNEL_NAME, accessOf, activeRosterOf, assertCredentialRefused, callOperator, createPrivateChannelAs, decideInUi, decisionFor,
-  grantChannelReadAs, inboxOf, inboxRequestsSeen, inboxRow, joinWorkspaceAs, leaveChannelForWorkspaceHome, membersOf, messagesOf,
-  inboxWriterSources, mintCredential, onboardMember, openChannelRoster, ownerWithAdminControls, postMessageAs, requestPrivateAccessAs, requestsReadByOwner,
+  inboxOf, inboxRequestsSeen, inboxRow, inboxSweepsSince, joinWorkspaceAs, leaveChannelForWorkspaceHome, membersOf, messagesOf,
+  inboxWriterSources, mintCredential, onboardMember, openChannelRoster, ownerWithAdminControls, requestPrivateAccessAs, requestsReadByOwner,
   requestsReadWithCredential, resubmitRequestAs, snapshotOfDecisionWrites, submitOperationAs, syncInbox, unregisterAppNotifications,
   watchDecisionWrites, withdrawRequestAs, workspaceWithPrivateChannel, writeRequestAsUnlistedWriter, writeRequestDirectly, writerSetOf, operatorServiceRef,
   type OperationOutcome, type PrivateChannel, type SubmittedRequest, type WriteSnapshot,
@@ -55,8 +56,8 @@ function notificationsFor(world: AppWorld, requester: Actor): number {
   return row.total;
 }
 
-function sweepsSince(world: AppWorld, count: number): number {
-  return world.callsTo(actorNamed(world, "owner"), "/api/inbox/requests").length - count;
+function sweepsSince(world: AppWorld, from: number): number {
+  return inboxSweepsSince(actorNamed(world, "owner"), from);
 }
 
 async function waitForNextSweep(world: AppWorld): Promise<void> {
@@ -67,7 +68,7 @@ async function waitForNextSweep(world: AppWorld): Promise<void> {
 async function sweepFinding(world: AppWorld, requester: Actor) {
   const before = need(stateOf(world).sweepsBefore, "inbox sweep baseline");
   return eventually(
-    () => inboxRequestsSeen(world, actorNamed(world, "owner"), before).flat().find((entry) => entry.repoDid === requester.did),
+    () => inboxRequestsSeen(actorNamed(world, "owner"), inboxOf(world), before).find((entry) => entry.repoDid === requester.did),
     { timeoutMs: RECONCILIATION_WINDOW_MS, what: "an inbox sweep that lists the request" },
   );
 }
@@ -78,10 +79,10 @@ async function adminHoldsCurrentRequest(world: AppWorld): Promise<void> {
   const requester = await onboardMember(world, owner, "requester", 1);
   await assertCredentialRefused(world, requester, channel.space, "before approval the requester has no channel access");
   const submitted = await requestPrivateAccessAs(world, requester, channel);
-  const sweepsBefore = world.callsTo(owner, "/api/inbox/requests").length;
+  const sweepsBefore = owner.xrpc.length;
   await syncInbox(owner);
   const listed = await eventually(
-    () => inboxRequestsSeen(world, owner, sweepsBefore).flat().find((entry) => entry.repoDid === requester.did),
+    () => inboxRequestsSeen(owner, inboxOf(world), sweepsBefore).find((entry) => entry.repoDid === requester.did),
     { what: "a sync that lists the request" },
   );
   await inboxRow(owner, requester, channel).waitFor({ state: "visible", timeout: 60_000 });
@@ -158,7 +159,7 @@ Given("a request write reached the authority PDS writer set", LONG_SETUP, async 
   await unregisterAppNotifications(this, owner);
   const state = stateOf(this);
   state.channel = channel;
-  state.sweepsBefore = this.callsTo(owner, "/api/inbox/requests").length;
+  state.sweepsBefore = owner.xrpc.length;
   state.request = await writeRequestAsUnlistedWriter(this, owner, requester, channel);
   const writers = await writerSetOf(await mintCredential(this, owner, inboxOf(this)), owner);
   assert.ok(writers.includes(requester.did), "the authority PDS lists the requester among the inbox writers");
@@ -188,7 +189,7 @@ Given("the PDS-to-authority notifyWrite was dropped", LONG_SETUP, async function
   assert.equal(accessOf(await membersOf(this, owner, inboxOf(this)), requester.did)?.write, true, "the requester is now a current inbox write member");
   const writers = await writerSetOf(await mintCredential(this, owner, inboxOf(this)), owner);
   assert.equal(writers.includes(requester.did), false, "the authority PDS never learned of the write");
-  stateOf(this).sweepsBefore = this.callsTo(owner, "/api/inbox/requests").length;
+  stateOf(this).sweepsBefore = owner.xrpc.length;
 });
 
 When("the admin inbox performs its next 60 second reconciliation", async function (this: AppWorld) {
@@ -372,10 +373,10 @@ Then("the new request remains pending", async function (this: AppWorld) {
   assert.equal((await activeRosterOf(this, owner, channel)).includes(requester.did), false);
   const [stored] = await requestsReadByOwner(this, requester, inboxOf(this));
   assert.equal(stored?.requestId, request.id, "the requester's repo still holds the fresh generation");
-  const sweepsBefore = this.callsTo(owner, "/api/inbox/requests").length;
+  const sweepsBefore = owner.xrpc.length;
   await syncInbox(owner);
   const listed = await eventually(
-    () => inboxRequestsSeen(this, owner, sweepsBefore).flat().find((entry) => entry.repoDid === requester.did && entry.requestId === request.id),
+    () => inboxRequestsSeen(owner, inboxOf(this), sweepsBefore).find((entry) => entry.repoDid === requester.did && entry.requestId === request.id),
     { what: "a sync that lists the fresh generation as pending" },
   );
   assert.equal(listed.uri, request.uri);
@@ -399,8 +400,8 @@ Given("a member has an authorized private-channel credential", LONG_SETUP, async
   const approval = await decideInUi(owner, inboxRow(owner, gamma, channel), "Approve");
   assert.equal(approval.state, "completed", approval.error);
 
-  await grantChannelReadAs(this, alpha, channel);
-  await postMessageAs(this, alpha, "alpha is the only one who posts here");
+  await openChannel(alpha, channel.name);
+  await postMessage(alpha, "alpha is the only one who posts here");
   await leaveChannelForWorkspaceHome(this, alpha);
   const credential = await mintCredential(this, alpha, channel.space);
   assert.equal(credential.space, channel.space, "alpha holds a credential for the private channel");
@@ -409,9 +410,9 @@ Given("a member has an authorized private-channel credential", LONG_SETUP, async
 
 When("they open the channel roster", async function (this: AppWorld) {
   const alpha = actorNamed(this, "alpha");
-  const before = this.callsTo(alpha, "/api/channels/roster").length;
+  const since = alpha.xrpc.length;
   stateOf(this).rosterShown = await openChannelRoster(alpha, channelOf(this));
-  await eventually(() => this.callsTo(alpha, "/api/channels/roster").length > before, { what: "the roster request" });
+  assert.ok(listingCalls(alpha, "new.flock.channel.roster", since).some(({ call, query }) => call.status === 200 && query.get("space") === channelOf(this).space), "the app read the roster from the authority's records");
 });
 
 Then("it includes every active member, including members who have never posted", async function (this: AppWorld) {

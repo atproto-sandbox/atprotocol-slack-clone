@@ -1,32 +1,15 @@
 "use client";
 
-import dynamic from "next/dynamic";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { dmInboxUri } from "@/protocol/keys";
-import type { DmConfig } from "@/dm/browser-session";
+import type { BrowserSessionConfig } from "@/browser/session";
 import type { DmClient, DmConversationSummary, DmInboxState, DmRequest } from "@/dm/dm-client";
-import { resolveHandle } from "@/dm/browser-identity";
+import { resolveHandle } from "@/browser/identity";
 import type { BrowserDmStore } from "@/dm/browser-store";
-import type { DmClientState, DmClientStatus } from "@/dm/use-dm-client";
+import type { BrowserSessionStatus } from "@/browser/use-browser-session";
 import { applyAllowlistEdit, coMemberDids, describeSkippedSenders, runDmCycle, type UiWorkspace } from "@/dm/ui-logic";
 import { messageOf } from "./client-api";
-
-// `DmProvider` must keep rendering its non-DM children (`Sidebar`, the
-// workspace stage) normally during SSR, which a `next/dynamic(ssr:false)`
-// component cannot do for content passed to it as `children`. The DM session
-// hook itself (and, through it, the browser-only OAuth/WebCrypto modules) is
-// therefore isolated in a childless bridge component instead; see the note
-// there for why this is the only path that may import `@/dm/use-dm-client`.
-const DmSessionBridge = dynamic(() => import("./dm-session-bridge").then((mod) => mod.DmSessionBridge), { ssr: false });
-
-const DISCONNECTED_SESSION: DmClientState = {
-  status: "connecting",
-  client: null,
-  store: null,
-  error: "",
-  connect: () => {},
-  disconnect: async () => {},
-};
+import { useBrowserSessionContext } from "./session-context";
 
 export type DmView =
   | { kind: "home" }
@@ -36,11 +19,10 @@ export type DmView =
 
 export type DmContextValue = {
   did: string;
-  dmConfig: DmConfig;
-  status: DmClientStatus;
+  dmConfig: BrowserSessionConfig;
+  status: BrowserSessionStatus;
   client: DmClient | null;
   store: BrowserDmStore | null;
-  connect: () => void;
   disconnect: () => Promise<void>;
   conversations: DmConversationSummary[];
   requests: DmRequest[];
@@ -68,7 +50,7 @@ export function useDmContext(): DmContextValue {
 
 type DmProviderProps = {
   did: string;
-  dmConfig: DmConfig;
+  dmConfig: BrowserSessionConfig;
   workspaces: UiWorkspace[];
   activeWorkspace: UiWorkspace | null;
   view: DmView | null;
@@ -84,8 +66,8 @@ type DmProviderProps = {
  * single active DM view selector handed in as `view`.
  */
 export function DmProvider({ did, dmConfig, workspaces, activeWorkspace, view, openView, children }: DmProviderProps) {
-  const [session, setSession] = useState<DmClientState>(DISCONNECTED_SESSION);
-  const { status, client, store, connect, disconnect } = session;
+  const session = useBrowserSessionContext();
+  const { status, client, store, live, disconnect } = session;
   const [conversations, setConversations] = useState<DmConversationSummary[]>([]);
   const [requests, setRequests] = useState<DmRequest[]>([]);
   const [skippedNote, setSkippedNote] = useState("");
@@ -145,18 +127,16 @@ export function DmProvider({ did, dmConfig, workspaces, activeWorkspace, view, o
 
   const inboxExists = Boolean(inbox?.exists);
   useEffect(() => {
-    if (!client || !inboxExists) return;
-    const query = new URLSearchParams({ space: dmInboxUri(did), after: "0" });
-    const events = new EventSource(`/api/notifications/dm?${query}`);
-    const reload = () => {
-      void refresh().catch((caught) => setError(messageOf(caught)));
-    };
-    events.addEventListener("change", reload);
-    events.addEventListener("error", () => {
-      if (events.readyState === EventSource.CLOSED) reload();
-    });
-    return () => events.close();
-  }, [client, did, inboxExists, refresh]);
+    if (!client || !live || !inboxExists) return;
+    let stop: (() => void) | undefined;
+    let stopped = false;
+    // The operator's change feed says when the inbox changed; the DM client reads it again then.
+    void live.watch(`dm:inbox:${did}`, [dmInboxUri(did)], () => refresh()).then(
+      (unwatch) => { if (stopped) unwatch(); else stop = unwatch; },
+      (caught) => setError(messageOf(caught)),
+    );
+    return () => { stopped = true; stop?.(); };
+  }, [client, live, did, inboxExists, refresh]);
 
   useEffect(() => {
     const targets = new Set<string>();
@@ -196,7 +176,6 @@ export function DmProvider({ did, dmConfig, workspaces, activeWorkspace, view, o
     status,
     client,
     store,
-    connect,
     disconnect,
     conversations: client ? conversations : [],
     requests: client ? requests : [],
@@ -218,11 +197,10 @@ export function DmProvider({ did, dmConfig, workspaces, activeWorkspace, view, o
         setError(messageOf(caught));
       }
     },
-  }), [did, dmConfig, status, client, store, connect, disconnect, conversations, requests, skippedNote, inbox, labels, workspaces, activeWorkspace, showAll, view, openView, error, refresh]);
+  }), [did, dmConfig, status, client, store, disconnect, conversations, requests, skippedNote, inbox, labels, workspaces, activeWorkspace, showAll, view, openView, error, refresh]);
 
   return (
     <DmContext.Provider value={value}>
-      <DmSessionBridge did={did} dmConfig={dmConfig} onSession={setSession} />
       {children}
     </DmContext.Provider>
   );

@@ -131,8 +131,8 @@ export function DmSettings() {
       )}
       <div className="starter-card lifecycle-card">
         <h3>Disconnect</h3>
-        <p>Revokes this browser’s direct-message session. Your conversations and inbox stay on your PDS.</p>
-        <button className="text-button danger" disabled={busy} onClick={() => void disconnect().catch((caught) => setError(messageOf(caught)))}>Disconnect direct messages</button>
+        <p>Revokes this browser’s session with your account: workspaces, channels and direct messages stop loading here until you connect it again. Everything stays on your PDS.</p>
+        <button className="text-button danger" disabled={busy} onClick={() => void disconnect().catch((caught) => setError(messageOf(caught)))}>Disconnect this browser</button>
       </div>
     </>
   );

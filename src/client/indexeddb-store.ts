@@ -12,8 +12,11 @@ type Factory = Pick<IDBFactory, "open" | "deleteDatabase" | "databases">;
 export class IndexedDbStore implements SyncStore {
   private constructor(private readonly db: IDBDatabase) {}
 
-  /** Opens (creating if needed) the account's database. */
-  static async open(did: string, factory: Factory = indexedDB): Promise<IndexedDbStore> {
+  /**
+   * Opens (creating if needed) the account's database. Another tab deleting it (another account starting there) is not kept
+   * waiting: this store closes, and `onClosedElsewhere` says so, since every later operation on it fails.
+   */
+  static async open(did: string, factory: Factory = indexedDB, onClosedElsewhere?: () => void): Promise<IndexedDbStore> {
     const opening = factory.open(databaseName(did), VERSION);
     opening.onupgradeneeded = () => {
       const db = opening.result;
@@ -23,7 +26,12 @@ export class IndexedDbStore implements SyncStore {
       db.createObjectStore("meta", { keyPath: "key" });
       db.createObjectStore("identities", { keyPath: ["kind", "did"] });
     };
-    return new IndexedDbStore(await settle(opening));
+    const db = await settle(opening);
+    db.onversionchange = () => {
+      db.close();
+      onClosedElsewhere?.();
+    };
+    return new IndexedDbStore(db);
   }
 
   /** Deletes the stores of every other account on this device: one left behind by a crash before its sign-out. */
@@ -171,7 +179,8 @@ export class IndexedDbStore implements SyncStore {
 type StoreName = "spaces" | "writers" | "records" | "meta" | "identities";
 type Stores = Partial<Record<StoreName, IDBObjectStore>>;
 
-function databaseName(did: string): string {
+/** The account's database name on this device. */
+export function databaseName(did: string): string {
   return `${DATABASE_PREFIX}${did}`;
 }
 

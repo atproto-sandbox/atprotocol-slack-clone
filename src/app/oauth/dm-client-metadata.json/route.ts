@@ -1,13 +1,13 @@
 import { NextResponse } from "next/server";
-import { DM_BROWSER_SCOPES } from "@/protocol/scopes";
-import { buildDmClientMetadata } from "@/dm/client-metadata";
+import { memberGrantScopes } from "@/protocol/scopes";
+import { buildBrowserClientMetadata } from "@/browser/client-metadata";
 import { getConfig } from "@/lib/config";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const { appUrl } = getConfig();
-  const metadata = buildDmClientMetadata({ appUrl: appUrl.origin, scope: DM_BROWSER_SCOPES.join(" ") });
+  const { appUrl, operatorServiceRef } = getConfig();
+  const metadata = buildBrowserClientMetadata({ appUrl: appUrl.origin, scope: memberGrantScopes(operatorServiceRef).join(" ") });
   return NextResponse.json(metadata, { headers: { "cache-control": "public, max-age=300" } });
 }

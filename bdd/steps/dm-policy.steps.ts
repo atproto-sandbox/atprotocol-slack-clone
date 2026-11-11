@@ -11,7 +11,7 @@ import { PAGE_TIMEOUT_MS, type Actor, type AppWorld } from "../support/world";
 import {
   DmpProbe, type DmpHostileHalf, type DmpMintedCredential, dmpAcceptRequestFrom, dmpAllowlistDids, dmpAllowDid, dmpChooseMode, dmpConnectDms, dmpEnableDms, dmpMessageTexts, dmpOpenConversationWith,
   dmpOwnConvKeys, dmpOwnHeader, dmpOwnMessages, dmpParticipantRows, dmpPoll, dmpReadRequests, dmpReadRequestsScanned, dmpReload, dmpRequestCount, dmpSend, dmpSidebarConversationLabels,
-  dmpAppDataRowCount, dmpConnectDmsReadingScope, dmpEverythingTheAppStored, dmpFilesContain, dmpServerSessions, dmpWaitForOrigin, dmpJwtClaims, dmpLatestCommitRev, dmpOpenRequests, dmpOpenSettings, dmpRequestSenders, dmpSignInAt, dmpWatchCredentials, dmpRenotifyState, dmpReloadThroughCycle, dmpRequestOps, dmpSetRenotifyElapsed, dmpStartConversation, dmpSync, dmpWriteHostileHalf,
+  dmpAppDataRowCount, dmpEverythingTheAppStored, dmpFilesContain, dmpServerSessions, dmpWaitForOrigin, dmpJwtClaims, dmpLatestCommitRev, dmpOpenRequests, dmpOpenSettings, dmpRequestSenders, dmpSignInAt, dmpWatchCredentials, dmpRenotifyState, dmpReloadThroughCycle, dmpRequestOps, dmpSetRenotifyElapsed, dmpStartConversation, dmpSync, dmpWriteHostileHalf,
 } from "../support/dm-policy-ui";
 
 const SETUP_TIMEOUT = 300_000;
@@ -576,7 +576,8 @@ When("the sender's re-notify backoff elapses", { timeout: 900_000 }, async funct
 
   for (let attempts = 1; attempts < DM_RENOTIFY_BACKOFF_MS.length; attempts += 1) {
     const backoff = DM_RENOTIFY_BACKOFF_MS[attempts]!;
-    assert.equal((await dmpRenotifyState(sender, convKey, recipient))?.attempts, attempts, "the sender persisted how many re-sends it has made");
+    // The re-send reaches the PDS before the sender's page records it, so the count is waited for.
+    await dmpPoll(async () => (await dmpRenotifyState(sender, convKey, recipient))?.attempts === attempts, { what: `the sender to persist ${attempts} re-send(s)` });
     await dmpSetRenotifyElapsed(sender, convKey, recipient, backoff - 2 * ONE_MINUTE);
     await dmpReloadThroughCycle(sender);
     assert.equal(await opCount(), attempts + 1, `${backoff - 2 * ONE_MINUTE} ms is not enough for a ${backoff} ms step`);
@@ -685,17 +686,17 @@ When("a participant signs in with any conforming OAuth client", { timeout: SETUP
   const second = this.scratch.get("secondApp") as SecondApp;
   const context = await this.newContext("alice-elsewhere");
   const requested: string[] = [];
-  const notificationStreamAttempts: string[] = [];
+  const changeFeedAttempts: string[] = [];
   context.on("request", (request) => { requested.push(request.url()); });
   await context.route(`${this.appOrigin}/**`, (route) => route.abort("connectionrefused"));
-  await context.route("**/api/notifications/dm**", (route) => { notificationStreamAttempts.push(route.request().url()); return route.abort("connectionrefused"); });
+  await context.route("**/xrpc/new.flock.operator.getChanges", (route) => { changeFeedAttempts.push(route.request().url()); return route.abort("connectionrefused"); });
   const page = await context.newPage();
   page.setDefaultTimeout(PAGE_TIMEOUT_MS);
-  const elsewhere: Actor = { ...alice, role: "alice-elsewhere", context, page, calls: [] };
+  const elsewhere: Actor = { ...alice, role: "alice-elsewhere", context, page, calls: [], xrpc: [] };
   this.actors.set(elsewhere.role, elsewhere);
   this.scratch.set("rebuiltCredentials", dmpWatchCredentials(page));
   this.scratch.set("rebuildRequests", requested);
-  this.scratch.set("notificationStreamAttempts", notificationStreamAttempts);
+  this.scratch.set("changeFeedAttempts", changeFeedAttempts);
   this.scratch.set("rebuildStartedAt", Date.now());
   await dmpSignInAt(elsewhere, second.appUrl.origin);
   await dmpConnectDms(elsewhere);
@@ -729,7 +730,7 @@ Then("their conversations are rebuilt from their own spaces, halves, and inbox",
   assert.deepEqual(contacted.filter((origin) => isLocal(origin) && !localServers.includes(origin)), [], "of the servers on this machine the rebuild contacted only the replacement app, the PDS hosts, and the PLC directory");
   assert.deepEqual(contacted.filter((origin) => !isLocal(origin) && !outsideServers.includes(origin)), [], "and beyond them only web fonts and handle-domain lookups");
   assert.equal(contacted.includes(this.appOrigin), false, "so nothing in it so much as tried the original app server");
-  assert.ok((this.scratch.get("notificationStreamAttempts") as string[]).length > 0, "the notification stream was tried and refused while the conversations were rebuilt anyway");
+  assert.ok((this.scratch.get("changeFeedAttempts") as string[]).length > 0, "the operator's change feed was tried and refused while the conversations were rebuilt anyway");
   assert.equal(dmpAppDataRowCount(second.databasePath), 0, "and the replacement app, which only ever saw a sign-in, holds no workspace or channel data");
   assert.equal(dmpFilesContain(second.databasePath, "alice to bob"), false, "or any conversation text");
 });
@@ -775,7 +776,7 @@ Given("the app runs its own server session for workspaces", { timeout: SETUP_TIM
   const key = randomBytes(32).toString("hex");
   const second = await this.fixture.startSecondApp({ env: { AUTH_ENCRYPTION_KEY: key } });
   const alice = await this.actor("alice", 0);
-  await dmpSignInAt(alice, second.appUrl.origin);
+  const aliceScopes = await dmpSignInAt(alice, second.appUrl.origin);
   await submitWorkspaceName(alice, uniqueWorkspaceName());
   await completeConsent(alice);
   await dmpWaitForOrigin(alice, second.appUrl.origin);
@@ -786,7 +787,7 @@ Given("the app runs its own server session for workspaces", { timeout: SETUP_TIM
   assert.ok(own.length > 0, "the app server holds an OAuth session for alice");
   assert.ok(own.some((session) => session.scope.some((scope) => scope.startsWith(`space:new.flock.workspace?authority=${alice.did}`) && scope.includes("collection=new.flock.admin"))),
     `one of them is the workspace-authority grant she approved: ${own.map((session) => session.scope.join(" ")).join(" | ")}`);
-  this.scratch.set("serverSession", { second, key, dmScopeShown: [], texts: [] } satisfies ServerSession);
+  this.scratch.set("serverSession", { second, key, dmScopeShown: aliceScopes, texts: [] } satisfies ServerSession);
 });
 
 When("direct messages are exchanged", { timeout: SETUP_TIMEOUT }, async function (this: AppWorld) {
@@ -794,9 +795,7 @@ When("direct messages are exchanged", { timeout: SETUP_TIMEOUT }, async function
   const origin = session.second.appUrl.origin;
   const alice = actorNamed(this, "alice");
   const bob = await this.actor("bob", 1);
-  session.dmScopeShown.push(...await dmpConnectDmsReadingScope(alice));
-  await dmpSignInAt(bob, origin);
-  session.dmScopeShown.push(...await dmpConnectDmsReadingScope(bob));
+  session.dmScopeShown.push(...await dmpSignInAt(bob, origin));
   await dmpEnableDms(bob);
   await dmpChooseMode(bob, "Everyone");
 
@@ -820,7 +819,7 @@ Then("that session holds no DM scope", function (this: AppWorld) {
     assert.deepEqual(entry.scope.filter((scope) => scope.includes(DM_SPACE_TYPE)), [], `no granted scope names a DM space: ${entry.scope.join(" ")}`);
     assert.deepEqual(entry.clientScope.filter((scope) => scope.includes(DM_SPACE_TYPE)), [], "nor does the scope its OAuth client requested");
   }
-  assert.ok(session.dmScopeShown.some((scope) => scope.includes(`space:${DM_SPACE_TYPE}.conversation`)), "the DM permission does exist: it was asked of, and approved at the PDS by, the separate browser-held session");
+  assert.ok(session.dmScopeShown.some((scope) => scope.includes(`space:${DM_SPACE_TYPE}.conversation`)), "the DM permission does exist: it was asked of, and approved at the PDS by, the browser-held session");
 });
 
 Then("no server route stores or returns DM content", async function (this: AppWorld) {
@@ -828,13 +827,14 @@ Then("no server route stores or returns DM content", async function (this: AppWo
   const alice = actorNamed(this, "alice");
   const bob = actorNamed(this, "bob");
   assert.equal(session.texts.length, 2);
-  const everyCall = [alice, bob].flatMap((actor) => actor.calls);
+  const appOrigin = session.second.appUrl.origin;
+  const everyCall = [alice, bob].flatMap((actor) => [...actor.calls, ...actor.xrpc.filter((call) => call.origin === appOrigin)]);
   assert.ok(everyCall.length > 0, "the people's browsers did talk to the app server");
   const stream = await readStream(`${session.second.appUrl.origin}/api/notifications/dm?space=${encodeURIComponent(dmInboxUri(alice.did))}&after=0`, await cookieHeader(alice));
   const stored = dmpEverythingTheAppStored(session.second.databasePath, session.key);
   assert.ok(stored.some((value) => value.includes(alice.did)), "the scan of the database sees what the app does keep: accounts and sessions");
   for (const text of session.texts) {
-    assert.equal(everyCall.some((call) => call.requestBody.includes(text) || call.responseBody.includes(text) || call.path.includes(text)), false, `no /api request or response carries "${text}"`);
+    assert.equal(everyCall.some((call) => call.requestBody.includes(text) || call.responseBody.includes(text) || call.path.includes(text)), false, `no /api or operator request or response carries "${text}"`);
     assert.equal(stream.includes(text), false, "nor does the notification stream");
     assert.equal(dmpFilesContain(session.second.databasePath, text), false, "nor do the database files");
     assert.equal(stored.some((value) => value.includes(text)), false, "nor any value in it, once decrypted");

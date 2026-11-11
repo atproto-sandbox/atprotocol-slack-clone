@@ -146,6 +146,19 @@ test("losing access to a channel drops its copy", async () => {
   assert.deepEqual(await alice.sync.store.records(space, COLLECTION.message), []);
 });
 
+test("after the account leaves a channel its cached credential and held copy go at once; a channel it can still read is kept", async () => {
+  const { network, fixture, alice, ref } = await workspace();
+  const space = fixture.channels.general!;
+  await writeMessage(network, BOB, space, 1);
+  await alice.channels.readPage(ref());
+  await alice.channels.left(ref());
+  assert.equal((await alice.sync.store.records(space, COLLECTION.message)).length, 1, "a channel the account can still read is kept");
+  await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMember", { space, did: ALICE });
+  await alice.channels.left(ref());
+  assert.deepEqual(await alice.sync.store.records(space, COLLECTION.message), [], "the held copy was dropped");
+  await assert.rejects(alice.channels.readPage(ref()), "no cached credential reads the channel any longer");
+});
+
 test("paging a channel where two writers share keys at a page boundary shows every message once, in merge order", async () => {
   const { network, fixture, alice, ref } = await workspace();
   const space = fixture.channels.general!;

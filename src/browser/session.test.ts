@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
 import type { AtprotoDid } from "@atproto/oauth-client-browser";
 import { UpstreamResponseTooLargeError } from "@/lib/bounded-json";
-import { missingScopes, wellKnownHandleResolver } from "./browser-session";
+import { missingScopes, wellKnownHandleResolver } from "./session";
 
 const realFetch = globalThis.fetch;
 let responder: (url: string) => Response;

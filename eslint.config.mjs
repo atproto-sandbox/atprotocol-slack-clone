@@ -3,6 +3,7 @@ import nextVitals from "eslint-config-next/core-web-vitals";
 import nextTs from "eslint-config-next/typescript";
 
 const ISOMORPHIC_PROTOCOL_MODULES = [
+  "src/browser/**/*.{ts,tsx}",
   "src/client/**/*.{ts,tsx}",
   "src/dm/**/*.{ts,tsx}",
   "src/protocol/**/*.{ts,tsx}",
@@ -19,7 +20,7 @@ const ISOMORPHIC_PROTOCOL_MODULES = [
 // Test files for the above run under Node's own test runner (`node --test`),
 // so they need `node:*` imports even though the modules they exercise must
 // stay browser-safe. They still may not reach into server-only app layers.
-const ISOMORPHIC_PROTOCOL_TEST_FILES = ["src/client/**/*.test.{ts,tsx}", "src/dm/**/*.test.{ts,tsx}", "src/protocol/**/*.test.{ts,tsx}"];
+const ISOMORPHIC_PROTOCOL_TEST_FILES = ["src/browser/**/*.test.{ts,tsx}", "src/client/**/*.test.{ts,tsx}", "src/dm/**/*.test.{ts,tsx}", "src/protocol/**/*.test.{ts,tsx}"];
 const APP_LAYER_BOUNDARY = {
   group: [
     "@/lib/db", "@/lib/config", "@/auth/*", "@/operator/*", "@/workspaces/*",

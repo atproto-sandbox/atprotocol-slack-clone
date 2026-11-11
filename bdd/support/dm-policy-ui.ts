@@ -9,7 +9,7 @@ import { mintSpaceCredentialWith, SpaceCredentialError, type SpaceCredential, ty
 import { AtprotoClient } from "@/atproto/xrpc";
 import { dmConversationUri, dmInboxUri, parseDmConversationUri, tidNow } from "@/protocol/keys";
 import type { FixtureAccount } from "../../protocol-tests/support/app-fixture";
-import { completeConsent, signInIfPrompted } from "./ui";
+import { completeConsent, connectBrowser, waitForOrigin } from "./ui";
 import type { Actor, AppWorld } from "./world";
 import { memberspacePolicy } from "@/atproto/space-policy";
 
@@ -32,45 +32,27 @@ export async function dmpPoll<T>(read: () => Promise<T | undefined | null | fals
 
 // --- Signing in and connecting direct messages ------------------------------------------------------
 
-/** Signs in to the app served at `origin` with the actor's DID and approves the PDS consent screen. */
-export async function dmpSignInAt(actor: Actor, origin: string): Promise<void> {
+/**
+ * Signs in to the app served at `origin` with the actor's DID, approves the PDS consent screen, and connects this browser's
+ * session (one more consent: workspaces, channels, DMs and the operator). Returns the scopes that second consent listed.
+ */
+export async function dmpSignInAt(actor: Actor, origin: string): Promise<string[]> {
   await actor.page.goto(origin);
   await actor.page.getByLabel("Your AT Protocol handle").fill(actor.did);
   await actor.page.getByRole("button", { name: /Continue with atproto/i }).click();
   await actor.page.locator("input[name=password]").waitFor({ state: "visible" });
   await completeConsent(actor);
   await dmpWaitForOrigin(actor, origin);
+  return connectBrowser(actor, origin);
 }
 
 export async function dmpWaitForOrigin(actor: Actor, origin: string): Promise<void> {
-  await actor.page.waitForURL((url) => url.origin === origin && !url.pathname.startsWith("/oauth"), { timeout: 30_000 });
+  await waitForOrigin(actor, origin);
 }
 
-/** Clicks the sidebar's connect button; when it never shows, says what the sidebar showed instead, so a rare miss can be diagnosed. */
-async function clickConnectDms(actor: Actor): Promise<void> {
-  await actor.page.getByRole("button", { name: /Connect direct messages/ }).click().catch(async (error: unknown) => {
-    const sidebar = await actor.page.locator(".channel-nav").first().innerText({ timeout: 2_000 }).catch(() => "(no sidebar)");
-    throw new Error(`The "Connect direct messages" button never appeared at ${actor.page.url()}; the sidebar showed: ${sidebar.replace(/\s+/g, " ")}`, { cause: error });
-  });
-}
-
-/** The separate, browser-held DM sign-in: its own consent screen, its own OAuth client. */
+/** Direct messages run on the browser session connected at sign-in: this only waits for them to be ready. */
 export async function dmpConnectDms(actor: Actor): Promise<void> {
-  await clickConnectDms(actor);
-  await completeConsent(actor);
   await dmpWaitForDmReady(actor);
-}
-
-/** Like `dmpConnectDms`, and reports the scopes the PDS consent screen listed for this separate DM sign-in. */
-export async function dmpConnectDmsReadingScope(actor: Actor): Promise<string[]> {
-  await clickConnectDms(actor);
-  await actor.page.waitForURL(/\/oauth\/authorize\?/, { timeout: 30_000 });
-  await signInIfPrompted(actor);
-  await actor.page.getByRole("button", { name: "Authorize", exact: true }).waitFor({ state: "visible" });
-  const shown = await actor.page.evaluate(() => (window as unknown as { __authorizeData?: { scope?: string } }).__authorizeData?.scope ?? "");
-  await actor.page.getByRole("button", { name: "Authorize", exact: true }).click();
-  await dmpWaitForDmReady(actor);
-  return shown.split(" ").filter(Boolean);
 }
 
 export async function dmpWaitForDmReady(actor: Actor): Promise<void> {

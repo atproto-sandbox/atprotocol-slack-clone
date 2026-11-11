@@ -2,18 +2,24 @@ import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { statSync } from "node:fs";
 import { After, Given, Then, When } from "@cucumber/cucumber";
+import { expect } from "@playwright/test";
 import type { SpaceCredential } from "@/atproto/space-credential-core";
 import { requestDigest } from "@/protocol/keys";
 import type { Actor, AppWorld } from "../support/world";
 import { completeConsent, escapeRegExp, eventually, inviteMemberAs, waitForApp } from "../support/ui";
 import {
   MAX_CREDENTIAL_LIFETIME_SECONDS, actorNamed, allSpaces, auditTrail, channelButton, claimsOf, createChannelAs, grantedCredential,
-  inboxOf, journalEntry, joinWorkspaceAs, memberAccess, openChannelAs, readRecordsWith, recall, recentCalls, refusal, remember, removeMemberViaRoster,
+  inboxOf, journalEntry, joinWorkspaceAs, memberAccess, readRecordsWith, recall, refusal, remember, removeMemberViaRoster,
   requiredJournalEntry, sampleWhile, showWorkspaceHome, submitAndWait, subjectRecordActive, tryMintAs, workspaceWithAdmin,
-  authorityRecord, breakChannelSpace, cachedRows, eventuallyAsync, tryReadWith, withSignedExpiry, journalRowsFor, repairChannelSpace, decodeExecuted, membersOf, postMessageAs, sampleTimed, channelNamed,
+  authorityRecord, breakChannelSpace, eventuallyAsync, tryReadWith, withSignedExpiry, journalRowsFor, repairChannelSpace, decodeExecuted, membersOf, sampleTimed, channelNamed,
   startOwnApp, runReconcileJob, withExtendedExpiry, withFinalReading, worldOn,
   type ChannelRef, type Executed, type JournalEntry, type OwnApp, type ReconcileRun, type Timed,
 } from "../support/lifecycle-ui";
+import { browserStore, browserStoreAt, type BrowserStore } from "../support/browser-store";
+import { credentialCalls, credentialOutcome, openChannel, postMessage, sidebarChannel } from "../support/channels-ui";
+import { engineAs, probeChannelRead, type ReadProbe } from "../support/engine";
+import { workspaceRead } from "../support/independent-app-ui";
+import { BROWSER_CLIENT_METADATA_PATH } from "@/browser/client-metadata";
 
 type Space = { label: string; uri: string };
 type RemovalSample = { state: string | undefined; present: Record<string, boolean> };
@@ -252,7 +258,7 @@ Given("a member belongs to a private channel", async function (this: AppWorld) {
   await joinWorkspaceAs(this, member);
   assert.deepEqual(await memberAccess(this, owner, room.uri, member.did), FULL_ACCESS);
   assert.equal(await subjectRecordActive(this, owner, room.uri, "new.flock.channel.roster", member.did), true);
-  assert.equal((await openChannelAs(this, member, "Private Room")).status, 200, recentCalls(member));
+  await openChannel(member, "Private Room");
   await member.page.getByRole("button", { name: "Leave private channel" }).waitFor({ state: "visible" });
 });
 
@@ -286,10 +292,12 @@ Then("channel access and the private roster entry are removed", async function (
   assert.deepEqual(refusal(outcome), { status: 403, code: "SpaceNotFound" });
   const steps = requiredJournalEntry(this, recall<Executed>(this, "leave").operationId).steps;
   assert.deepEqual(steps, ["leave-channel-membership", "leave-channel-roster", "leave-channel-verified"]);
-  const before = this.callsTo(member, "/api/channels/messages").length;
-  await channelButton(member, "Private Room").click();
-  const reopened = await eventually(() => this.callsTo(member, "/api/channels/messages")[before], { what: "the member's next look at the channel" });
-  assert.ok([401, 403].includes(reopened.status), `the app no longer syncs the channel for them (${reopened.status})`);
+  const since = member.xrpc.length;
+  await openChannel(member, "Private Room");
+  const reopened = await eventually(() => credentialCalls(member, room.uri, since).length > 0 && credentialCalls(member, room.uri, since), { what: "the member's next look at the channel" });
+  assert.deepEqual([...new Set(reopened.map(credentialOutcome))], ["SpaceNotFound"], "the app no longer syncs the channel for them: the PDS refuses its credential");
+  await member.page.getByText("You are not on this channel’s active roster.").waitFor({ state: "visible" });
+  assert.equal(await member.page.locator(".message-card").count(), 0, "none of the channel's messages are shown");
 });
 
 Then("workspace access remains active", async function (this: AppWorld) {
@@ -301,18 +309,17 @@ Then("workspace access remains active", async function (this: AppWorld) {
   }
   assert.equal(await subjectRecordActive(this, owner, this.workspaceUri, "new.flock.workspace.roster", member.did), true);
   assert.equal(refusal(await tryMintAs(this, member, this.workspaceUri)), "granted", "they can still mint a workspace credential");
-  const listing = await member.page.request.get(`${this.appOrigin}/api/workspaces`);
-  const workspaces = (await listing.json() as { workspaces: Array<{ uri: string; members: Array<{ did: string; active: boolean }> }> }).workspaces;
-  const seen = workspaces.find((workspace) => workspace.uri === this.workspaceUri);
-  assert.ok(seen, "the workspace is still in the member's dashboard");
-  assert.ok(seen.members.some((entry) => entry.did === member.did && entry.active));
+  const since = member.xrpc.length;
+  await member.page.goto(this.appOrigin);
+  await member.page.getByRole("heading", { name: this.workspaceName, exact: true }).waitFor({ state: "visible" });
+  const read = await eventually(() => workspaceRead(member, this.workspaceUri, since), { what: "the member's app to read the roster" });
+  assert.ok(read.members.includes(member.did), "the member's app reads them on the workspace roster");
   assert.equal(journalEntry(this, recall<Executed>(this, "leave").operationId)?.request.kind, "leaveChannel", "only the channel was left, not the workspace");
 });
 
 // --- Make a public channel private -------------------------------------------------------------------
 
 type ChannelReading = { visibility: string | undefined; members: string[] };
-type Probe = { status: number; error?: string };
 
 async function readChannel(world: AppWorld, channel: ChannelRef): Promise<ChannelReading> {
   const owner = actorNamed(world, "owner");
@@ -323,12 +330,6 @@ async function readChannel(world: AppWorld, channel: ChannelRef): Promise<Channe
   return { visibility: entry?.visibility as string | undefined, members: members.map((member) => member.did) };
 }
 
-async function probeSync(world: AppWorld, channel: ChannelRef): Promise<Probe> {
-  const query = new URLSearchParams({ workspace: world.workspaceUri, skey: channel.skey, offset: "0" });
-  const response = await actorNamed(world, "owner").page.request.get(`${world.appOrigin}/api/channels/messages?${query}`);
-  const body = await response.json() as { error?: string };
-  return { status: response.status(), error: body.error };
-}
 
 async function messageRecords(world: AppWorld, viewerRole: string, channel: ChannelRef): Promise<Array<{ rkey: string; text: unknown }>> {
   const owner = actorNamed(world, "owner");
@@ -344,8 +345,8 @@ Given("a public channel has current workspace members", async function (this: Ap
   await showWorkspaceHome(this, owner);
   await inviteMemberAs(owner, kept.did);
   await inviteMemberAs(owner, dropped.did);
-  assert.equal((await openChannelAs(this, owner, "Roadmap")).status, 200);
-  await postMessageAs(this, owner, "Roadmap kickoff");
+  await openChannel(owner, "Roadmap");
+  await postMessage(owner, "Roadmap kickoff");
   for (const person of [kept, dropped]) {
     assert.deepEqual(await memberAccess(this, owner, roadmap.uri, person.did), FULL_ACCESS, `${person.role} is a current channel member`);
     assert.equal(refusal(await tryMintAs(this, person, roadmap.uri)), "granted", `${person.role} can mint a credential before the transition`);
@@ -358,9 +359,12 @@ When("an admin starts a private transition for selected members", async function
   const owner = actorNamed(this, "owner");
   const kept = actorNamed(this, "kept");
   const roadmap = recall<ChannelRef>(this, "roadmap");
-  remember(this, "syncBefore", await probeSync(this, roadmap));
+  // The owner's app syncing the channel throughout, as the engine in the owner's browser would.
+  const ownerApp = engineAs(this, owner);
+  const probeSync = () => probeChannelRead(ownerApp, { workspace: this.workspaceUri, skey: roadmap.skey });
+  remember(this, "syncBefore", await probeSync());
   const sampler = sampleTimed(() => readChannel(this, roadmap));
-  const probers = [1, 2, 3].map(() => sampleTimed(() => probeSync(this, roadmap)));
+  const probers = [1, 2, 3].map(() => sampleTimed(probeSync));
   const executed = await submitAndWait(this, owner, async () => {
     await owner.page.getByLabel("Selected members when making this channel private").fill(kept.did);
     await owner.page.getByRole("button", { name: "Make private", exact: true }).click();
@@ -368,7 +372,7 @@ When("an admin starts a private transition for selected members", async function
   const readings = await withFinalReading(await sampler.stop(), () => readChannel(this, roadmap));
   const probes = (await Promise.all(probers.map((prober) => prober.stop()))).flat();
   assert.equal(executed.operation?.state, "completed", JSON.stringify(executed));
-  remember(this, "syncAfter", await probeSync(this, roadmap));
+  remember(this, "syncAfter", await probeSync());
   remember(this, "transition", executed);
   remember(this, "channelReadings", readings);
   remember(this, "syncProbes", probes);
@@ -395,7 +399,7 @@ Then("the directory shows transitioning while membership changes", function (thi
 
 Then("compliant apps stop new syncs during the transition", function (this: AppWorld) {
   const readings = recall<Array<Timed<ChannelReading>>>(this, "channelReadings");
-  const probes = recall<Array<Timed<Probe>>>(this, "syncProbes");
+  const probes = recall<Array<Timed<ReadProbe>>>(this, "syncProbes");
   const transitioning = readings.filter((reading) => reading.value.visibility === "transitioning");
   const windowStart = transitioning[0]!.finishedAt;
   const windowEnd = transitioning.at(-1)!.startedAt;
@@ -406,8 +410,8 @@ Then("compliant apps stop new syncs during the transition", function (this: AppW
   assert.ok(during.length > 0, "at least one sync attempt fell wholly inside the transition window");
   assert.deepEqual(during.filter((probe) => probe.value.status !== 409), [], "no sync attempt that fell wholly inside the transition succeeded");
   assert.deepEqual(probes.filter((probe) => probe.value.status !== 409 && probe.value.status !== 200), [], "every other attempt synced normally");
-  assert.equal(recall<Probe>(this, "syncBefore").status, 200, "before the transition the channel synced");
-  assert.equal(recall<Probe>(this, "syncAfter").status, 200, "once the transition is complete the channel syncs again");
+  assert.equal(recall<ReadProbe>(this, "syncBefore").status, 200, "before the transition the channel synced");
+  assert.equal(recall<ReadProbe>(this, "syncAfter").status, 200, "once the transition is complete the channel syncs again");
 });
 
 Then("the same channel URI and the messages of the remaining members remain after completion", async function (this: AppWorld) {
@@ -415,10 +419,7 @@ Then("the same channel URI and the messages of the remaining members remain afte
   const roadmap = recall<ChannelRef>(this, "roadmap");
   const entry = await channelNamed(this, "Roadmap");
   assert.deepEqual({ skey: entry.skey, uri: entry.uri, visibility: entry.visibility }, { skey: roadmap.skey, uri: roadmap.uri, visibility: "private" });
-  const listing = await owner.page.request.get(`${this.appOrigin}/api/workspaces`);
-  const seen = (await listing.json() as { workspaces: Array<{ uri: string; channels: Array<{ uri: string; visibility: string }> }> }).workspaces
-    .find((workspace) => workspace.uri === this.workspaceUri)?.channels.find((channel) => channel.uri === roadmap.uri);
-  assert.equal(seen?.visibility, "private", "the app lists the same channel URI, now private");
+  await expect(sidebarChannel(owner, "Roadmap")).toHaveText(/^▣/, { timeout: 60_000 });
   assert.deepEqual(await messageRecords(this, "kept", roadmap), recall(this, "messagesBefore"), "the same message records are readable after the transition");
   await owner.page.locator(".message-card").filter({ hasText: "Roadmap kickoff" }).waitFor({ state: "visible" });
 });
@@ -452,10 +453,10 @@ Given("a channel contains messages", async function (this: AppWorld) {
   await inviteMemberAs(owner, author.did);
   await inviteMemberAs(owner, reader.did);
   await joinWorkspaceAs(this, author);
-  assert.equal((await openChannelAs(this, author, "Archive Room")).status, 200, recentCalls(author));
-  await postMessageAs(this, author, "Message from the author");
-  assert.equal((await openChannelAs(this, owner, "Archive Room")).status, 200);
-  await postMessageAs(this, owner, "Message from the owner");
+  await openChannel(author, "Archive Room");
+  await postMessage(author, "Message from the author");
+  await openChannel(owner, "Archive Room");
+  await postMessage(owner, "Message from the owner");
   const held = await grantedCredential(this, reader, room.uri);
   const before = await messagesInRepos(this, held);
   assert.deepEqual(before.map((record) => record.text).sort(), ["Message from the author", "Message from the owner"]);
@@ -510,11 +511,10 @@ Then("no new channel credentials are issued", async function (this: AppWorld) {
     const outcome = await tryMintAs(this, actorNamed(this, role), room.uri);
     assert.deepEqual(refusal(outcome), { status: 403, code: "SpaceNotFound" }, `${role} is refused a credential for the archived channel`);
   }
-  const query = new URLSearchParams({ workspace: this.workspaceUri, skey: room.skey, offset: "0" });
   for (const role of ["owner", "author"]) {
-    const response = await actorNamed(this, role).page.request.get(`${this.appOrigin}/api/channels/messages?${query}`);
-    assert.equal(response.status(), 409, `${role}: the app does not sync an archived channel`);
-    assert.match((await response.json() as { error: string }).error, /Archived channels are unavailable/);
+    const probe = await probeChannelRead(engineAs(this, actorNamed(this, role)), { workspace: this.workspaceUri, skey: room.skey });
+    assert.equal(probe.status, 409, `${role}: the app does not sync an archived channel`);
+    assert.match(probe.error ?? "", /Archived channels are unavailable/);
   }
   await channelButton(owner, "Archive Room").waitFor({ state: "hidden" });
 });
@@ -621,18 +621,19 @@ Given("an app cached private-channel data", async function (this: AppWorld) {
   await inviteMemberAs(owner, member.did);
   const vault = await createChannelAs(this, owner, "Vault", "private", [member.did]);
   await joinWorkspaceAs(this, member);
-  assert.equal((await openChannelAs(this, member, "Vault")).status, 200, recentCalls(member));
-  await postMessageAs(this, member, "Private note");
-  const cached = cachedRows(this, member.did);
-  assert.ok(cached.records > 0 && cached.cursors > 0 && cached.syncs > 0, `the app cached the private channel for the member: ${JSON.stringify(cached)}`);
+  await openChannel(member, "Vault");
+  await postMessage(member, "Private note");
+  const held = heldCopy(await browserStoreAt(member, this.appOrigin), vault.uri);
+  assert.ok(held.records > 0 && held.space, `the app holds the private channel for the member in their browser: ${JSON.stringify(held)}`);
   remember(this, "vault", vault);
 });
 
 When("the credential can no longer be renewed", async function (this: AppWorld) {
   const member = actorNamed(this, "member");
   const vault = recall<ChannelRef>(this, "vault");
-  // An open page refreshes on its own after the removal, is refused and purges the cache before this scenario's own sync can.
-  await member.page.goto("about:blank");
+  // An open app refreshes on its own after the removal, is refused and purges its copy before this scenario looks; the page
+  // stays on an app-free page of the origin (left there by the look above) until the app is opened again.
+  assert.equal(new URL(member.page.url()).pathname, BROWSER_CLIENT_METADATA_PATH);
   const executed = await removeMemberViaRoster(this, actorNamed(this, "owner"), member.did);
   assert.equal(executed.operation?.state, "completed", JSON.stringify(executed));
   for (const space of [vault.uri, this.workspaceUri]) {
@@ -641,21 +642,29 @@ When("the credential can no longer be renewed", async function (this: AppWorld) 
   }
 });
 
+/** What the account's browser store holds of one space. */
+function heldCopy(store: BrowserStore, space: string): { records: number; space: boolean } {
+  return { records: store.records.filter((record) => record.space === space).length, space: store.spaces.includes(space) };
+}
+
 Then("the app stops syncing and purges its cached copy", async function (this: AppWorld) {
   const member = actorNamed(this, "member");
   const vault = recall<ChannelRef>(this, "vault");
-  const query = new URLSearchParams({ workspace: this.workspaceUri, skey: vault.skey, offset: "0" });
-  const cached = cachedRows(this, member.did);
-  assert.ok(cached.records > 0 && cached.cursors > 0 && cached.syncs > 0, `revoking access alone left the cached copy in place, so only the app's refused sync can purge it: ${JSON.stringify(cached)}`);
-  for (let attempt = 1; attempt <= 2; attempt += 1) {
-    const sync = await member.page.request.get(`${this.appOrigin}/api/channels/messages?${query}`);
-    assert.ok([401, 403].includes(sync.status()), `sync attempt ${attempt} is refused (${sync.status()})`);
-    assert.doesNotMatch(await sync.text(), /Private note/, "the refusal does not leak the cached message");
-    assert.deepEqual(cachedRows(this, member.did), { records: 0, cursors: 0, syncs: 0 }, `after attempt ${attempt} the app holds no cached copy`);
-  }
+  const before = heldCopy(await browserStoreAt(member, this.appOrigin), vault.uri);
+  assert.ok(before.records > 0 && before.space, `revoking access alone left the browser's copy in place, so only the app's refused sync can purge it: ${JSON.stringify(before)}`);
+  const since = member.xrpc.length;
   await member.page.goto(this.appOrigin);
+  await eventuallyAsync(async () => {
+    const held = heldCopy(await browserStore(member), vault.uri);
+    return held.records === 0 && !held.space;
+  }, { what: "the reopened app to purge its copy of the private channel" });
   await member.page.getByText("No workspaces yet").waitFor({ state: "visible" });
   assert.equal(await member.page.locator(".message-card").count(), 0, "reopening the app shows none of the private messages");
+  const reads = member.xrpc.slice(since);
+  assert.deepEqual(reads.filter((call) => call.status === 200 && new URLSearchParams(call.query).get("space") === vault.uri).map((call) => call.path), [], "the app stopped syncing the private channel");
+  assert.equal([...credentialCalls(member, this.workspaceUri, since), ...credentialCalls(member, vault.uri, since)].map(credentialOutcome).includes("granted"), false, "the PDS renewed no credential for the workspace or the channel");
+  for (const call of reads) assert.doesNotMatch(call.responseBody, /Private note/, "no refused sync leaked the cached message");
+  assert.deepEqual(heldCopy(await browserStoreAt(member, this.appOrigin), vault.uri), { records: 0, space: false }, "the app holds no cached copy once it has closed");
 });
 
 // --- Pending admin work: recovered by admins first, never resumed by a member's leave ----------------
@@ -811,7 +820,7 @@ Given("a privacy transition failed after any PDS mutation step", async function 
   await inviteMemberAs(owner, dropped.did);
   const roadmap = await createChannelAs(web, owner, "Roadmap", "public");
   assert.deepEqual(await memberAccess(web, owner, roadmap.uri, dropped.did), FULL_ACCESS);
-  assert.equal((await openChannelAs(web, owner, "Roadmap")).status, 200);
+  await openChannel(owner, "Roadmap");
   await breakChannelSpace(web, owner, roadmap);
   const failed = await submitAndWait(web, owner, async () => {
     await owner.page.getByLabel("Selected members when making this channel private").fill(kept.did);

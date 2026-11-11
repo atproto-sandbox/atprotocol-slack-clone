@@ -1,22 +1,22 @@
 import type { AtprotoDid, HandleResolver, OAuthSession } from "@atproto/oauth-client-browser";
-import { buildDmClientMetadata } from "./client-metadata";
+import { buildBrowserClientMetadata } from "./client-metadata";
 import { AtprotoClient } from "@/atproto/xrpc";
 import { readUpstreamText } from "@/lib/bounded-json";
 
-export type DmConfig = { appUrl: string; plcUrl: string; scope: string; serviceRef: string; loopback: boolean };
+export type BrowserSessionConfig = { appUrl: string; plcUrl: string; scope: string; serviceRef: string; loopback: boolean };
 
 const MAX_WELL_KNOWN_DID_BYTES = 512;
 
-export class DmAccountMismatchError extends Error {
+export class AccountMismatchError extends Error {
   constructor() {
     super("The direct-message session belongs to a different account than the signed-in session.");
-    this.name = "DmAccountMismatchError";
+    this.name = "AccountMismatchError";
   }
 }
 
-async function loadDmClient(config: DmConfig) {
+async function loadClient(config: BrowserSessionConfig) {
   const { BrowserOAuthClient, asResolvedHandle } = await import("@atproto/oauth-client-browser");
-  const metadata = buildDmClientMetadata({ appUrl: config.appUrl, scope: config.scope });
+  const metadata = buildBrowserClientMetadata({ appUrl: config.appUrl, scope: config.scope });
   return BrowserOAuthClient.load({
     clientId: metadata.client_id,
     plcDirectoryUrl: config.plcUrl,
@@ -27,7 +27,7 @@ async function loadDmClient(config: DmConfig) {
 
 /**
  * `BrowserOAuthClientOptions` requires a `handleResolver` (the browser cannot
- * do DNS lookups itself), but `connectDms`/`restoreDmSession` always sign in
+ * do DNS lookups itself), but `connectSession`/`restoreSession` always sign in
  * with a DID from the already-established server session, never a raw
  * handle, so this path only exists to satisfy that requirement. It implements
  * just the official HTTP "well-known" strategy
@@ -57,8 +57,8 @@ export function wellKnownHandleResolver(asResolvedHandle: (value: string) => nul
 }
 
 /** Redirects the browser to the user's PDS to authorize the DM scope set. Never returns normally. */
-export async function connectDms(did: string, config: DmConfig): Promise<void> {
-  const client = await loadDmClient(config);
+export async function connectSession(did: string, config: BrowserSessionConfig): Promise<void> {
+  const client = await loadClient(config);
   await client.signInRedirect(did);
 }
 
@@ -69,13 +69,13 @@ export async function connectDms(did: string, config: DmConfig): Promise<void> {
  * so one browser profile can never hold DM permissions for a different
  * account than the one the server session is signed in as.
  */
-export async function restoreDmSession(expectedDid: string, config: DmConfig): Promise<OAuthSession | null> {
-  const client = await loadDmClient(config);
+export async function restoreSession(expectedDid: string, config: BrowserSessionConfig): Promise<OAuthSession | null> {
+  const client = await loadClient(config);
   const result = await client.init();
   if (!result) return null;
   if (result.session.did !== expectedDid) {
     await client.revoke(result.session.sub);
-    throw new DmAccountMismatchError();
+    throw new AccountMismatchError();
   }
   // A session granted before a scope was added cannot use what that scope is for, so it is not reported as connected: the
   // user goes back through consent and the new grant replaces it.
@@ -94,12 +94,12 @@ export function missingScopes(granted: string, required: string): string[] {
   return required.split(/\s+/).filter((token) => token !== "" && !token.startsWith("space:")).filter((token) => !have.has(token));
 }
 
-export async function disconnectDms(config: DmConfig): Promise<void> {
-  const client = await loadDmClient(config);
+export async function disconnectSession(config: BrowserSessionConfig): Promise<void> {
+  const client = await loadClient(config);
   const result = await client.initRestore();
   if (result) await client.revoke(result.session.sub);
 }
 
-export function dmXrpcClient(session: OAuthSession): AtprotoClient {
+export function sessionXrpcClient(session: OAuthSession): AtprotoClient {
   return new AtprotoClient((path, init) => session.fetchHandler(path, init));
 }

@@ -20,9 +20,31 @@ export function uniqueWorkspaceName(): string {
   return `Team ${Math.random().toString(36).slice(2, 8)}`;
 }
 
-/** Waits until the browser is back on the app (not on the PDS consent screen or an OAuth route). */
+/** Waits until the browser is back on the app (not on the PDS consent screen, an OAuth route or the browser session's callback). */
 export async function waitForApp(world: AppWorld, actor: Actor): Promise<void> {
-  await actor.page.waitForURL((url) => url.origin === world.appOrigin && !url.pathname.startsWith("/oauth"), { timeout: 30_000 });
+  await waitForOrigin(actor, world.appOrigin);
+}
+
+export async function waitForOrigin(actor: Actor, origin: string): Promise<void> {
+  await actor.page.waitForURL((url) => url.origin === origin && !url.pathname.startsWith("/oauth") && !url.pathname.startsWith("/dm/callback"), { timeout: 30_000 });
+}
+
+/**
+ * Grants this browser the account's one session (its workspaces, channels and DMs, and the operator's methods), as the app
+ * asks right after sign-in, and waits until the app reads through it. Returns the scopes the PDS consent screen listed.
+ */
+export async function connectBrowser(actor: Actor, origin: string): Promise<string[]> {
+  const prompt = actor.page.locator(".permission-box").filter({ hasText: /Connect this browser|Connecting this browser/ });
+  await actor.page.getByRole("button", { name: "Connect this browser →" }).click();
+  await actor.page.waitForURL(/\/oauth\/authorize\?/, { timeout: 30_000 });
+  await signInIfPrompted(actor);
+  const authorize = actor.page.getByRole("button", { name: "Authorize", exact: true });
+  await authorize.waitFor({ state: "visible" });
+  const shown = await actor.page.evaluate(() => (window as unknown as { __authorizeData?: { scope?: string } }).__authorizeData?.scope ?? "");
+  await authorize.click();
+  await waitForOrigin(actor, origin);
+  await prompt.waitFor({ state: "detached", timeout: 60_000 });
+  return shown.split(" ").filter(Boolean);
 }
 
 export async function signInIfPrompted(actor: Actor): Promise<void> {
@@ -50,6 +72,7 @@ export async function signInFromLoginForm(world: AppWorld, actor: Actor): Promis
   await actor.page.locator("input[name=password]").waitFor({ state: "visible" });
   await completeConsent(actor);
   await waitForApp(world, actor);
+  await connectBrowser(actor, world.appOrigin);
 }
 
 export async function signIn(world: AppWorld, actor: Actor): Promise<void> {

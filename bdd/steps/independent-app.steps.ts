@@ -9,10 +9,12 @@ import { canonicalJson, channelUri, decisionRecordKey, inboxUri, requestDigest, 
 import { validateSpaceRecord } from "@/protocol/registry";
 import type { SecondApp } from "../../protocol-tests/support/app-fixture";
 import {
-  createChannelAs, grantAdminControlsAt, grantWorkspaceAuthorityAt, insertJournalRow, joinWorkspaceAt, listWriters, observeWorkspace, onPrimaryApp, openChannelAndRead, openViewer,
-  postMessage, requestPrivateAccess, runNode, runProtocolTest, withIndependentReader, workspaceStateFor, type ChildRun,
-  type AppViewer, type WorkspaceObservation, type WorkspaceState,
+  createChannelAs, grantAdminControlsAt, grantWorkspaceAuthorityAt, insertJournalRow, joinWorkspaceAt, listWriters, observeWorkspace, onPrimaryApp, openViewer,
+  requestPrivateAccess, runNode, runProtocolTest, withIndependentReader, type ChildRun,
+  type AppViewer, type WorkspaceObservation, type WorkspaceRead, workspaceRead,
 } from "../support/independent-app-ui";
+import { browserStore } from "../support/browser-store";
+import { credentialCalls, credentialOutcome, openChannel, postMessage } from "../support/channels-ui";
 import { approveAdminControls, createWorkspaceAs, eventually, inviteMemberAs } from "../support/ui";
 import type { Actor, AppWorld } from "../support/world";
 
@@ -99,9 +101,9 @@ Given("two apps use published lexicons, OAuth, and space credentials", { timeout
   await postMessage(owner, OWNER_NOTE);
 
   await joinWorkspaceAt(member, this.workspaceUri, this.workspaceName);
-  await openChannelAndRead(member, "general");
+  await openChannel(member, "general");
   await postMessage(member, MEMBER_NOTE);
-  await openChannelAndRead(member, "Vault");
+  await openChannel(member, "Vault");
   await postMessage(member, VAULT_NOTE);
 });
 
@@ -121,7 +123,7 @@ Then("both show the same directory, roster, messages, and private roster", async
   const member = actorNamed(this, "member");
 
   assert.deepEqual(second.directory, first.directory, "directory as listed in the sidebar");
-  assert.deepEqual(second.state, first.state, "roster, admins and channels the apps hold for this workspace");
+  assert.deepEqual(second.state, first.state, "roster and admins the apps read for this workspace");
   assert.deepEqual(second.summary, first.summary);
   assert.deepEqual(second.messages, first.messages, "messages of every channel, newest first");
   assert.deepEqual(second.privateRosters, first.privateRosters, "private channel roster");
@@ -136,9 +138,10 @@ Then("both show the same directory, roster, messages, and private roster", async
   const generalTexts = await channelMessageTexts(this, owner, [owner, member], general.skey);
   const vaultTexts = await channelMessageTexts(this, owner, [owner, member], vault.skey);
 
-  assert.deepEqual(first.state.members, roster, "roster equals the authority's roster records on the PDS");
-  assert.deepEqual(first.state.admins, admins);
-  assert.deepEqual(first.state.channels, directory, "directory equals the authority's directory records on the PDS");
+  assert.deepEqual(first.directory, directory.map(({ name, visibility }) => ({ name, visibility })), "directory equals the authority's directory records on the PDS");
+  assert.deepEqual(first.state.members, roster, "the roster the app read is the authority's roster records on the PDS");
+  assert.deepEqual(first.state.admins, admins, "and so are its admins");
+  assert.deepEqual(first.state.channels, directory, "and its channels, by key, are the authority's directory records");
   assert.equal(first.summary, `${roster.length} active members · ${directory.length} channels`);
   assert.deepEqual(first.messages.general, generalTexts, "messages equal the records in every writer's repo");
   assert.equal(generalTexts.length, 2, "both writers' messages are merged");
@@ -153,19 +156,13 @@ Then("both show the same directory, roster, messages, and private roster", async
     vaultRoster: await reader.readIndependentPrivateRoster(deps, this.workspaceUri, vault.skey),
   }));
   assert.ok(independent.workspace, "the stateless reader finds the workspace from the member's credentials alone");
-  assert.deepEqual([...independent.workspace.members].sort(), first.state.members);
-  assert.deepEqual([...independent.workspace.admins].sort(), first.state.admins);
-  assert.deepEqual(independent.workspace.channels.map(({ skey, name, visibility }) => ({ skey, name, visibility })).sort((a, b) => a.name.localeCompare(b.name)), first.state.channels);
+  assert.deepEqual([...independent.workspace.members].sort(), roster);
+  assert.deepEqual([...independent.workspace.admins].sort(), admins);
+  assert.deepEqual(independent.workspace.channels.map(({ skey, name, visibility }) => ({ skey, name, visibility })).sort((a, b) => a.name.localeCompare(b.name)), directory);
   assert.deepEqual(independent.general.messages.map((message) => message.value.text), first.messages.general);
   assert.deepEqual(independent.vault.messages.map((message) => message.value.text), first.messages.Vault);
   assert.deepEqual(independent.vaultRoster, first.privateRosters.Vault);
 });
-
-function cacheRows(databasePath: string): Array<{ account_did: string; space_uri: string; repo_did: string; rkey: string; value_cipher: string }> {
-  const db = new Database(databasePath, { readonly: true, fileMustExist: true });
-  try { return db.prepare("SELECT account_did, space_uri, repo_did, rkey, value_cipher FROM channel_record_cache").all() as ReturnType<typeof cacheRows>; }
-  finally { db.close(); }
-}
 
 function sessionDids(databasePath: string): string[] {
   const db = new Database(databasePath, { readonly: true, fileMustExist: true });
@@ -173,7 +170,13 @@ function sessionDids(databasePath: string): string[] {
   finally { db.close(); }
 }
 
-Then("neither app reads the other's database or private cache", function (this: AppWorld) {
+/** The channel records an app's engine holds for the account in that app's browser, by space, writer, collection and key. */
+async function heldRecordKeys(viewer: AppViewer): Promise<string[]> {
+  return (await browserStore(viewer)).records.filter((record) => record.collection.startsWith("new.flock.channel."))
+    .map((record) => `${record.space}|${record.repo}|${record.collection}|${record.rkey}`).sort();
+}
+
+Then("neither app reads the other's database or private cache", async function (this: AppWorld) {
   const second = this.scratch.get("secondApp") as SecondApp;
   const member = actorNamed(this, "member");
   const owner = actorNamed(this, "owner");
@@ -185,19 +188,18 @@ Then("neither app reads the other's database or private cache", function (this: 
   assert.ok(firstSignedIn.includes(owner.did) && firstSignedIn.includes(member.did), "the first app knows the sign-ins made to it");
   assert.equal(sessionDids(second.databasePath).includes(owner.did), false, "the owner, who only ever used the first app, is unknown to the second");
 
-  const firstCache = cacheRows(this.fixture.databasePath).filter((row) => row.account_did === member.did);
-  const secondCache = cacheRows(second.databasePath);
-  assert.ok(secondCache.length > 0, "the second app filled its own cache from the PDS");
-  assert.ok(secondCache.every((row) => row.account_did === member.did), "the second app's cache holds only its own reader's records");
-  const firstByKey = new Map(firstCache.map((row) => [`${row.space_uri}|${row.repo_did}|${row.rkey}`, row.value_cipher]));
-  const shared = secondCache.filter((row) => firstByKey.has(`${row.space_uri}|${row.repo_did}|${row.rkey}`));
-  assert.ok(shared.length > 0, "both apps cached the same records");
-  for (const row of shared) {
-    assert.notEqual(row.value_cipher, firstByKey.get(`${row.space_uri}|${row.repo_did}|${row.rkey}`), "each app encrypted its own copy; none was copied from the other");
-  }
-
   const secondViewer = actorNamed(this, "member@second-app") as AppViewer;
   const firstViewer = viewerNamed(this, "member");
+  const firstHeld = await heldRecordKeys(firstViewer);
+  const secondHeld = await heldRecordKeys(secondViewer);
+  assert.ok(secondHeld.length > 0, "the second app's browser holds the channel records it read");
+  assert.ok(secondHeld.some((key) => firstHeld.includes(key)), "both apps hold the same records, each in its own origin's store");
+  const listedBySecond = new Set(secondViewer.xrpc.filter((call) => call.path === "/xrpc/com.atproto.space.listRecords" && call.status === 200)
+    .map((call) => new URLSearchParams(call.query).get("space")));
+  for (const key of secondHeld) {
+    assert.ok(listedBySecond.has(key.split("|")[0]!), `the second app's browser listed ${key} from the PDS itself; nothing was copied from the other app`);
+  }
+
   const reaches = (viewer: AppViewer, origin: string) => viewer.requestUrls.filter((url) => new URL(url).origin === origin);
   assert.deepEqual(reaches(secondViewer, this.appOrigin), [], "the second app's pages never call the first app");
   assert.deepEqual(reaches(firstViewer, second.appUrl.origin), [], "the first app's pages never call the second app");
@@ -250,9 +252,12 @@ type SyncedViews = {
   memberRowAction: string;
   ownerSummary: string;
   pendingRequestShown: boolean;
-  memberState: WorkspaceState;
+  /** The roster and admins the member's own page read. */
+  memberState: WorkspaceRead;
+  memberSummary: string;
   memberHasWorkspaceControls: boolean;
-  memberVaultStatus: number;
+  /** How the PDS answered the member's browser when it asked for the private channel's credential on opening it. */
+  memberVaultCredentials: string[];
   memberStalled: { status: number; body: string };
 };
 
@@ -275,10 +280,16 @@ async function observeSyncedViews(world: AppWorld, owner: AppViewer, member: App
   const rows = owner.page.locator(".roster-row").filter({ hasNotText: "requested" });
   const memberRow = rows.filter({ hasText: member.did });
 
+  const memberReadsFrom = member.xrpc.length;
   await member.page.goto(member.origin);
   await member.page.getByRole("heading", { name: world.workspaceName, exact: true }).waitFor({ state: "visible" });
-  const vaultSkey = world.scratch.get("vaultSkey") as string;
-  const vaultRead = await member.page.evaluate(async ({ workspace, skey }) => (await fetch(`/api/channels/messages?workspace=${encodeURIComponent(workspace)}&skey=${encodeURIComponent(skey)}`)).status, { workspace: world.workspaceUri, skey: vaultSkey });
+  const memberState = await eventually(() => workspaceRead(member, world.workspaceUri, memberReadsFrom), { what: "the member's app to read the roster and admins" });
+  const memberSummary = (await member.page.locator(".welcome-banner p").first().innerText()).trim();
+  const memberHasWorkspaceControls = await member.page.getByRole("heading", { name: "Workspace controls" }).count() > 0;
+  const vault = channelUri(owner.did, world.scratch.get("vaultSkey") as string);
+  const since = member.xrpc.length;
+  await openChannel(member, "Vault");
+  const vaultCredentials = await eventually(() => credentialCalls(member, vault, since).length > 0 && credentialCalls(member, vault, since), { what: "the member's browser to ask for the private channel's credential" });
   const stalled = await member.page.evaluate(async (workspace) => {
     const response = await fetch(`/api/operator/stalled?workspace=${encodeURIComponent(workspace)}`);
     return { status: response.status, body: await response.text() };
@@ -289,9 +300,10 @@ async function observeSyncedViews(world: AppWorld, owner: AppViewer, member: App
     memberRowAction: (await memberRow.getByRole("button").first().innerText()).trim(),
     ownerSummary: (await owner.page.locator(".welcome-banner p").first().innerText()).trim(),
     pendingRequestShown: await pending.isVisible(),
-    memberState: await workspaceStateFor(member, world.workspaceName),
-    memberHasWorkspaceControls: await member.page.getByRole("heading", { name: "Workspace controls" }).count() > 0,
-    memberVaultStatus: vaultRead,
+    memberState,
+    memberSummary,
+    memberHasWorkspaceControls,
+    memberVaultCredentials: vaultCredentials.map(credentialOutcome),
     memberStalled: stalled,
   };
 }
@@ -335,13 +347,12 @@ Then("the app ignores the record because the workspace DID did not author it", {
   assert.equal(views.ownerSummary, "2 active members · 2 channels");
   assert.equal(views.memberRowAction, "Make admin", "the member is still not an admin");
   assert.equal(views.pendingRequestShown, true, "the approval the member wrote did not settle their own request");
-  assert.equal(views.memberState.isAdmin, false);
-  assert.deepEqual(views.memberState.admins, [owner.did]);
-  assert.deepEqual(views.memberState.members.map((entry) => entry.did).sort(), [owner.did, member.did].sort());
-  assert.equal(views.memberHasWorkspaceControls, false, "no admin controls are offered to the member");
+  assert.deepEqual({ members: views.memberState.members, admins: views.memberState.admins }, { members: [owner.did, member.did].sort(), admins: [owner.did] }, "the member's app read the roster and admins unchanged by the forged records");
+  assert.equal(views.memberSummary, "2 active members · 2 channels", "the member's app shows the roster unchanged by the forged roster record");
+  assert.equal(views.memberHasWorkspaceControls, false, "the member's app does not take the forged admin record: no admin controls are offered");
   assert.equal(views.memberStalled.status, 400, "the admin-only operator read is refused to the member");
   assert.deepEqual(JSON.parse(views.memberStalled.body), STALLED_REFUSAL, "the refusal is the admin check's own, not a generic failure");
-  assert.equal(views.memberVaultStatus, 403, "the member still cannot read the private channel");
+  assert.deepEqual([...new Set(views.memberVaultCredentials)], ["SpaceNotFound"], "the member still cannot read the private channel: the PDS refuses its credential");
   const vaultMembers = await this.pdsGet<{ members?: Array<{ did: string }> }>(owner, "com.atproto.memberspace.listMembers", { space: channelUri(owner.did, vaultSkey), limit: "1000" });
   assert.equal((vaultMembers.body.members ?? []).some((entry) => entry.did === member.did), false, "the PDS member list of the private channel is unchanged");
 
@@ -366,11 +377,12 @@ async function authorityWritesWhatTheMemberForged(world: AppWorld, owner: AppVie
   assert.deepEqual(authored.rosterRows, [owner.did, member.did, outsider.did].sort(), "a roster record authored by the workspace DID does change the roster the admin sees");
   assert.equal(authored.ownerSummary, "3 active members · 2 channels");
   assert.equal(authored.memberRowAction, "Demote admin", "an admin record authored by the workspace DID makes the member an admin");
-  assert.equal(authored.memberState.isAdmin, true);
-  assert.deepEqual(authored.memberState.admins, [owner.did, member.did].sort());
-  assert.equal(authored.memberHasWorkspaceControls, true);
+  assert.deepEqual({ members: authored.memberState.members, admins: authored.memberState.admins }, { members: [owner.did, member.did, outsider.did].sort(), admins: [owner.did, member.did].sort() }, "records the workspace DID authored do change what the member's app reads");
+  assert.equal(authored.memberSummary, "3 active members · 2 channels");
+  assert.equal(authored.memberHasWorkspaceControls, true, "an admin record authored by the workspace DID gives the member admin controls in their own app");
   assert.equal(authored.memberStalled.status, 200, "and the admin-only operator read is then answered");
   assert.equal(authored.pendingRequestShown, false, "a decision authored by the workspace DID does settle the request");
+  assert.ok(authored.memberVaultCredentials.includes("granted"), "the approved member's browser is then granted the private channel's credential");
   assert.equal((await recordsOf(world, owner, inbox, "new.flock.joinDecision")).length, 1);
 }
 
@@ -410,12 +422,10 @@ Then("it does not treat absence from that writer set as absence from membership"
   const onList = (members.body.members ?? []).find((entry) => entry.did === member.did);
   assert.deepEqual(onList && { read: onList.read, write: onList.write }, { read: true, write: true }, "the PDS member list still has the member with read and write");
 
-  const state = await workspaceStateFor(member, this.workspaceName);
-  assert.ok(state.members.some((entry) => entry.did === member.did), "the app lists the member on the roster");
-  assert.ok(state.channels.some((channel) => channelUri(owner.did, channel.skey) === space), "the app lists the channel for the member");
   await member.page.goto(member.origin);
   await member.page.getByText(/(^|\D)2 active members/).waitFor({ state: "visible" });
-  await openChannelAndRead(member, "general");
+  await openChannel(member, "general");
+  assert.ok(credentialCalls(member, space).map(credentialOutcome).includes("granted"), "the app reads the channel for the member with a PDS credential");
   await member.page.locator(".message-card > p").filter({ hasText: OWNER_ONLY_NOTE }).waitFor({ state: "visible" });
 
   await postMessage(member, FIRST_MEMBER_NOTE);

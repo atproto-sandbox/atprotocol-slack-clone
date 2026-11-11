@@ -167,6 +167,11 @@ export function authorityCollections(spaceType: SpaceType): Collection[] {
   return collectionsWhere((entry) => entry.spaceType === spaceType && entry.author === "authority");
 }
 
+/** The collections any member writes in a space of this type: an acceptance, a join request, a message or a reaction. */
+export function memberCollections(spaceType: SpaceType): Collection[] {
+  return collectionsWhere((entry) => entry.spaceType === spaceType && entry.author === "member");
+}
+
 export function isRegisteredCollection(collection: string): collection is Collection {
   return Object.hasOwn(REGISTRY, collection);
 }

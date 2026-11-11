@@ -135,7 +135,13 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
 
     await page.waitForURL(appUrl.origin, { timeout: 30_000 });
     await page.getByText("No workspaces yet").waitFor({ state: "visible" });
-    assert.match(await page.locator("body").innerText(), /Create a shared workspace or accept an invitation\./);
+    // The browser's own session: one grant on the PDS for reading and writing the account's spaces, the operator's methods
+    // and direct messages.
+    const browserScope = await connectThisBrowser(page, appUrl, "browser-owner.test", password);
+    for (const expected of ["space:new.flock.channel?", "new.flock.channel.message", "lxm=new.flock.operator.getChanges", "lxm=new.flock.operator.listInboxWriters", "space:new.flock.dm.conversation"]) {
+      assert.ok(browserScope.includes(expected), `the browser's grant includes ${expected}`);
+    }
+    await page.getByText("Create a shared workspace or accept an invitation.").waitFor({ state: "visible" });
 
     const cookies = await context.cookies(appUrl.origin);
     const webSession = cookies.find(({ name }) => name === "spaces_session");
@@ -192,10 +198,21 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
     } finally {
       await strangerContext.close();
     }
-    await page.getByText("Grant operator controls to sync private-channel requests.", { exact: false }).waitFor({ state: "visible", timeout: 30_000 }).catch(async (error: unknown) => {
-      const state = await page.evaluate(async () => await fetch("/api/workspaces").then((response) => response.json()));
-      throw new Error(`Expected the inbox permission prompt after bootstrap. API: ${JSON.stringify(state)}\nPage: ${(await page.locator("body").innerText()).slice(0, 4_000)}\nServer: ${serverOutput}`, { cause: error });
+    // The browser reads the inbox with its own grant, which carries the operator's methods, so no prompt comes first; the
+    // admin controls granted next are the server session's, for the operations it still runs until R6b.
+    await page.getByText("No pending join requests.").waitFor({ state: "visible", timeout: 30_000 }).catch(async (error: unknown) => {
+      throw new Error(`Expected the synced inbox after bootstrap. Page: ${(await page.locator("body").innerText()).slice(0, 4_000)}\nServer: ${serverOutput}`, { cause: error });
     });
+
+    // Until the admin controls are granted, the server session cannot run an operation for this admin (R6b moves operations
+    // to the browser's grant).
+    const earlyOperation = page.waitForResponse((response) => response.url().includes("/api/operator/execute"));
+    await page.getByLabel("Channel name").fill("Too Early Room");
+    await page.locator("form").filter({ has: page.getByLabel("Channel name") }).getByRole("button", { name: /Create channel/ }).click();
+    const refused = await earlyOperation;
+    const earlyRefusal = await refused.text();
+    assert.ok(refused.status() >= 400, `an operation before the admin grant is refused (${refused.status()}: ${earlyRefusal})`);
+    assert.match(earlyRefusal, /Missing required scope \\"rpc:new\.flock\.operator\.execute/, "for want of the operator method the admin grant gives");
 
     const adminScopeResponse = page.waitForResponse((response) => response.url().includes("/api/oauth/permission"));
     const operatorPermissionsCard = page.getByRole("heading", { name: "Operator permissions" }).locator("xpath=ancestor::article");
@@ -227,25 +244,7 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
     await channelButton.waitFor({ state: "visible", timeout: 30_000 });
     await channelButton.click();
 
-    await page.getByPlaceholder("Write a message…").fill("A real browser wrote this public channel message.");
-    await page.getByRole("button", { name: "Send", exact: true }).click();
-    await page.getByRole("button", { name: "Grant message posting →" }).waitFor({ state: "visible", timeout: 30_000 });
-
-    const channelScopeResponse = page.waitForResponse((response) => response.url().includes("/api/oauth/permission"));
-    await page.getByRole("button", { name: "Grant message posting →" }).click();
-    await page.waitForURL(/\/oauth\/authorize\?/, { timeout: 30_000 });
-    await signInIfPrompted(page);
-    await page.getByRole("button", { name: "Authorize", exact: true }).waitFor({ state: "visible" }).catch(async (error: unknown) => {
-      throw new Error(`PDS did not show consent for channel posting. Page: ${(await page.locator("body").innerText()).slice(0, 2_000)}\nServer: ${serverOutput}`, { cause: error });
-    });
-    const channelConsentScope = await page.evaluate(() => String((window as unknown as { __authorizeData?: { scope?: string } }).__authorizeData?.scope ?? ""));
-    assert.ok(channelConsentScope.includes("new.flock.channel.message") && channelConsentScope.includes("action=create"), "PDS consent includes channel message write scope");
-    await page.getByRole("button", { name: "Authorize", exact: true }).click();
-    await page.waitForURL(appUrl.origin, { timeout: 30_000 }).catch(async (error: unknown) => {
-      throw new Error(`Channel consent did not return to the app. URL: ${page.url()} Page: ${(await page.locator("body").innerText()).slice(0, 2_000)}\nServer: ${serverOutput}`, { cause: error });
-    });
-    assert.equal((await channelScopeResponse).status(), 200, "the account receives the selected channel message-write scope");
-    await page.getByPlaceholder("Write a message…").waitFor({ state: "visible", timeout: 30_000 });
+    // The browser writes the message to the account's own repo with the grant it already holds: no further consent.
     await page.getByPlaceholder("Write a message…").fill("A real browser wrote this public channel message.");
     await page.getByRole("button", { name: "Send", exact: true }).click();
     await page.getByText("A real browser wrote this public channel message.", { exact: true }).waitFor({ state: "visible", timeout: 30_000 });
@@ -259,14 +258,10 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
 
     await page.getByLabel("Member DID", { exact: true }).fill(memberDid);
     await page.getByRole("button", { name: /Invite member/ }).click();
-    await page.getByText(memberDid, { exact: true }).waitFor({ state: "visible", timeout: 30_000 });
-    const workspaceState = await page.evaluate(async () => await fetch("/api/workspaces").then((response) => response.json())) as {
-      workspaces: Array<{ uri: string; name: string; members: Array<{ did: string }>; channels: Array<{ skey: string; name: string; visibility: string }>; degradedReasons: string[] }>;
-    };
-    const workspace = workspaceState.workspaces.find(({ name }) => name === "Browser Acceptance Workspace");
-    assert.ok(workspace);
-    assert.deepEqual(workspace.degradedReasons, [], "workspaces inside the supported envelope are not marked degraded");
-    assert.ok(workspace.members.some(({ did }) => did === memberDid), "owner UI invite adds the second DID to the shared roster");
+    await page.locator(".roster-row").filter({ hasText: memberDid }).waitFor({ state: "visible", timeout: 30_000 });
+    assert.equal(await page.locator(".envelope-alert").count(), 0, "workspaces inside the supported envelope are not marked degraded");
+    const workspaceUri = (await page.locator(".welcome-banner .mono-note").innerText()).trim();
+    assert.match(workspaceUri, /^at:\/\/did:plc:[a-z0-9]+\/space\/new\.flock\.workspace\//, "the workspace home shows the workspace URI");
 
     const independentPort = await freePort();
     secondaryAppUrl = new URL(`http://127.0.0.1:${independentPort}`);
@@ -316,8 +311,9 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
     await memberPage.getByRole("button", { name: "Authorize", exact: true }).click();
     await memberPage.waitForURL(secondaryAppUrl.origin, { timeout: 30_000 });
     await memberPage.getByText("No workspaces yet").waitFor({ state: "visible" });
+    await connectThisBrowser(memberPage, secondaryAppUrl, "browser-member.test", memberPassword);
 
-    await memberPage.getByLabel("Workspace URI").fill(workspace.uri);
+    await memberPage.getByLabel("Workspace URI").fill(workspaceUri);
     const acceptForm = memberPage.locator("form").filter({ has: memberPage.getByLabel("Workspace URI") });
     await acceptForm.getByRole("button", { name: "Connect invitation", exact: true }).click();
     await completePdsConsentFlow(memberPage, secondaryAppUrl, "browser-member.test", memberPassword);
@@ -325,18 +321,16 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
     await memberPage.getByText(/2 active members · 3 channels/).waitFor({ state: "visible", timeout: 30_000 });
 
     await memberPage.getByRole("button", { name: /Browser Room/ }).click();
-    await memberPage.getByText(/Grant workspace\/channel read scope/).waitFor({ state: "visible", timeout: 30_000 });
-    await memberPage.getByRole("button", { name: "Grant channel read →" }).click();
-    await completePdsConsentFlow(memberPage, secondaryAppUrl, "browser-member.test", memberPassword);
     await memberPage.getByText("A real browser wrote this public channel message.", { exact: true }).waitFor({ state: "visible", timeout: 30_000 });
 
+    const offRoster = memberPage.getByText("You are not on this channel’s active roster.");
     await memberPage.getByRole("button", { name: /Private Room/ }).click();
-    await memberPage.getByText(/Grant workspace\/channel read scope/).waitFor({ state: "visible", timeout: 30_000 });
+    await offRoster.waitFor({ state: "visible", timeout: 30_000 });
     await memberPage.getByRole("button", { name: "Request private access →" }).last().click();
     await memberPage.getByText(/Grant write-only inbox access/).waitFor({ state: "visible", timeout: 30_000 });
     await memberPage.getByRole("button", { name: "Grant request access →" }).click();
     await completePdsConsentFlow(memberPage, secondaryAppUrl, "browser-member.test", memberPassword);
-    await memberPage.getByText(/Grant workspace\/channel read scope/).waitFor({ state: "visible", timeout: 30_000 });
+    await offRoster.waitFor({ state: "visible", timeout: 30_000 });
     const firstJoinRequestResponse = memberPage.waitForResponse((response) => response.url().includes("/api/channels/requests") && response.status() === 201);
     await memberPage.getByRole("button", { name: "Request private access →" }).last().click();
     const firstJoinRequest = await (await firstJoinRequestResponse).json() as { requestId: string };
@@ -352,7 +346,8 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
 
     const replacementJoinRequestResponse = memberPage.waitForResponse((response) => response.url().includes("/api/channels/requests"), { timeout: 10_000 })
       .then((response) => ({ response }), (error: unknown) => ({ error }));
-    const updateRequestButton = memberPage.getByRole("button", { name: "Request private access →" }).last();
+    // A request already sent is offered as an update; after the denial it sends a new generation.
+    const updateRequestButton = memberPage.getByRole("button", { name: "Update request →" });
     await updateRequestButton.click({ timeout: 5_000 }).catch(async (error: unknown) => {
       throw new Error(`Could not click the request resubmission button. Network: ${JSON.stringify(memberRequestEvents)}\nPage: ${(await memberPage.locator("body").innerText()).slice(0, 4_000)}\nButton: ${await updateRequestButton.evaluate((button) => button.outerHTML).catch(() => "not present")}\nServer: ${secondaryServerOutput}`, { cause: error });
     });
@@ -376,16 +371,7 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
     await page.getByText(/Operation completed; \d+ steps recorded/).waitFor({ state: "visible", timeout: 30_000 });
 
     await memberPage.getByRole("button", { name: /Private Room/ }).click();
-    await memberPage.getByText(/Grant workspace\/channel read scope/).waitFor({ state: "visible", timeout: 30_000 });
-    await memberPage.getByRole("button", { name: "Grant channel read →" }).click();
-    await completePdsConsentFlow(memberPage, secondaryAppUrl, "browser-member.test", memberPassword);
-    await memberPage.getByPlaceholder("Write a message…").waitFor({ state: "visible", timeout: 30_000 });
-    await memberPage.getByPlaceholder("Write a message…").fill("A second app member can write after admin approval.");
-    await memberPage.getByRole("button", { name: "Send", exact: true }).click();
-    await memberPage.getByRole("button", { name: "Grant message posting →" }).waitFor({ state: "visible", timeout: 30_000 });
-    await memberPage.getByRole("button", { name: "Grant message posting →" }).click();
-    await completePdsConsentFlow(memberPage, secondaryAppUrl, "browser-member.test", memberPassword);
-    await memberPage.getByPlaceholder("Write a message…").waitFor({ state: "visible", timeout: 30_000 });
+    await memberPage.locator(".private-roster").filter({ hasText: memberDid }).waitFor({ state: "visible", timeout: 30_000 });
     await memberPage.getByPlaceholder("Write a message…").fill("A second app member can write after admin approval.");
     await memberPage.getByRole("button", { name: "Send", exact: true }).click();
     await memberPage.getByText("A second app member can write after admin approval.", { exact: true }).waitFor({ state: "visible", timeout: 30_000 });
@@ -520,6 +506,20 @@ test("the authority flow runs twice at once in one browser, and a used callback 
     await browser.close();
   }
 });
+
+/** Connects the page's browser session through the PDS consent screen and returns the scope that screen asked for. */
+async function connectThisBrowser(page: import("@playwright/test").Page, app: URL, handle: string, accountPassword: string): Promise<string> {
+  await page.getByRole("button", { name: "Connect this browser →" }).click();
+  await page.waitForURL(/\/oauth\/authorize\?/, { timeout: 30_000 });
+  await signInIfPrompted(page, handle, accountPassword);
+  await page.getByRole("button", { name: "Authorize", exact: true }).waitFor({ state: "visible" });
+  const scope = await page.evaluate(() => String((window as unknown as { __authorizeData?: { scope?: string } }).__authorizeData?.scope ?? ""));
+  await page.getByRole("button", { name: "Authorize", exact: true }).click();
+  await page.waitForURL(app.origin, { timeout: 30_000 });
+  // The prompt stays (as "Connecting this browser…") until the session is restored and the app reads through it.
+  await page.locator(".permission-box").filter({ hasText: /Connect this browser|Connecting this browser/ }).waitFor({ state: "detached", timeout: 30_000 });
+  return scope;
+}
 
 async function completePdsConsentFlow(
   page: import("@playwright/test").Page,

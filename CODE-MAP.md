@@ -13,12 +13,12 @@ A Slack-style team workspace built directly on atproto (AT Protocol) permissione
   │    conversation (src/app/ui/dm-*.tsx)      │      │  - xrpc/** operator + notices           │     │ new.flock.channel.message/.reaction│
   │                                             │      │  - oauth/** login/callback/metadata    │     │ (member-list read/write, open      │
   │ Workspace OAuth session (server-issued)     │      │                                         │     │  app access; member lists ARE the  │
-  │  - used for channel/workspace reads+writes  │      │ Workspace authority operator            │     │  read gate)                        │
+  │  - operator calls and joins (until R6b)     │      │ Workspace authority operator            │     │  read gate)                        │
   │                                             │      │  (src/operator/**)                      │     ├───────────────────────────────────┤
-  │ DM OAuth session (browser-held, M3)         │      │  - signs service-auth JWTs, journals,   │     │ new.flock.dm.inbox (self)          │
-  │  - IndexedDB, non-extractable DPoP keys     │      │    resumes, reconciles PDS membership   │     │ new.flock.dm.conversation/<convKey>│
-  │  - src/dm/browser-session.ts                │      │                                         │     │   header/message/reaction          │
-  │  - scopes: DM_BROWSER_SCOPES only            │      │ SQLite (src/lib/db.ts)                  │     │ (member-list; convKey is a TID,    │
+  │ Browser OAuth session (one grant: member    │      │  - signs service-auth JWTs, journals,   │     │ new.flock.dm.inbox (self)          │
+  │  set, operator rpc, DM set), IndexedDB,     │      │    resumes, reconciles PDS membership   │     │ new.flock.dm.conversation/<convKey>│
+  │  non-extractable keys; src/browser/**       │      │                                         │     │   header/message/reaction          │
+  │  - engine (src/client) reads spaces itself  │      │ SQLite (src/lib/db.ts)                  │     │ (member-list; convKey is a TID,    │
   │                                             │      │  - encrypted OAuth/session state,       │◀───▶│  not a secret — DM state lives     │
   │ DmClient (src/dm/dm-client.ts)              │──────┼─▶  sync cursors, channel-message cache,│     │  only here, per participant)       │
   │  isomorphic engine; runs unmodified here    │ mint │    operator journal, audit,             │     └───────────────────────────────────┘
@@ -121,7 +121,8 @@ src/
                               published lexicons (@atproto/lexicon) + the entry's meaning rule; records are
                               open (unknown fields kept); MAX_RECORD_BYTES bounds what a reader keeps.
     scopes.ts                 Scope builders for member, authority and operator sessions, derived from the
-                              registry, and DM_BROWSER_SCOPES (asserted disjoint from every server scope).
+                              registry, DM_BROWSER_SCOPES (asserted disjoint from every server scope), and
+                              memberGrantScopes: the browser's one grant (member set, operator rpc, DM set).
     workspace-summary.ts      What a workspace is, summarized from its authority's records, and the v1
                               envelope check; the member read model and the operator both use it.
   auth/                   Server session, OAuth flow.
@@ -180,12 +181,21 @@ src/
                              The member's operations, each rule of the route table owned here; engine.ts wires them.
                               operator-client.ts calls every operator method, reusing one long-poll token for getChanges.
     feed.ts                  ChangeFollower: follows spaces through getChanges in the order that loses nothing (head,
-                              sync, follow), syncs changed and reset spaces, mints afresh for denied ones, and backs off a
-                              round that could not finish.
+                              sync, follow), syncs changed and reset spaces, mints afresh for denied ones (a space still
+                              readable is followed again after REFOLLOW_DELAY_MS), and backs off a round that could not finish.
+    views.ts                 Snapshots (one immutable snapshot per key, with subscriptions, for useSyncExternalStore) and
+                              LiveSpaces (each watched key bound to the spaces it reads and loaded again when the feed names
+                              one; a key loads even while the operator is unreachable).
     accept-errors.ts, inbox-requests.ts, errors.ts
                              Accept refusal codes, one writer's join requests, ChannelUnavailableError.
   testing/                Test-only: fake-network.ts (the in-memory multi-host PDS network for every engine and DM
                            test), engine-fixture.ts (channels and workspaces on it), store-contract.ts.
+  browser/                The account's browser session (R6a): one OAuth grant (member set, operator rpc, DM set) through
+                           @atproto/oauth-client-browser (session.ts), browser identity resolution (identity.ts), the
+                           client metadata builder (client-metadata.ts), and useBrowserSession, which builds the DM
+                           client and the engine over the account's IndexedDB store with its live views. The page's
+                           and callback's config has one owner: src/app/browser-session-config.ts; the UI reads the
+                           session through src/app/ui/session-context.tsx.
   dm/                     The DM feature. Isomorphic engine + browser-only glue. See below.
   reader/                 Independent second-app readers (no app database, no DM-engine import).
     independent.ts           Channels/workspaces; takes injected transports (sessionCredentialDeps builds them from a
@@ -215,16 +225,10 @@ scripts/                  codegen-lex.mjs, backup-db.mjs, reconcile-workspaces.t
   user-facing mode (`everyone` / `allowlist` / `nobody`).
 - The inbox declaration (`new.flock.dm.declaration`, a public record in the owner's own repo, written by `enableDms`) is how a sender learns a recipient has an inbox: the authority answers a stranger asking for the inbox like a missing space.
 - `backoff.ts` — the re-notify backoff schedule (1 min, 10 min, 1 h, 1 day, then stop).
-- `browser-session.ts` — `@atproto/oauth-client-browser` wiring: `connectDms`, `restoreDmSession`,
-  `disconnectDms`, the well-known-only handle resolver, `DmConfig`.
-- `browser-identity.ts` — browser-side DID→PDS and DID→handle resolution (`did:plc` via the
-  configured PLC directory, `did:web` via `/.well-known/did.json`), bounded and HTTPS-only
-  outside loopback development.
+- The browser session, identity resolution and client metadata moved to `src/browser/` in R6a (one grant for the
+  workspace engine and the DMs).
 - `browser-store.ts` — the `DmDeps.store` implementation: `localStorage`, per-DID prefixed,
   falling back to in-memory state (and saying so) when storage is unavailable.
-- `use-dm-client.ts` — the React hook that restores/builds a browser `DmClient`.
-- `client-metadata.ts` — pure OAuth client-metadata builder (production + loopback forms),
-  served by `src/app/oauth/dm-client-metadata.json/route.ts`.
 - `ui-logic.ts` — pure UI helpers (participant-input parsing, conversation labels/visibility,
   co-member/allowlist edits) kept separate from the `dm-*.tsx` components for testability.
 - `index.ts` — `export {};` only, so the ESLint isomorphic-boundary rule has a stable target.

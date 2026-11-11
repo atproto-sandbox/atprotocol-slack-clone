@@ -1,5 +1,8 @@
 import { AUTHORIZATION_REQUIRED } from "@/lib/api-codes";
 import { parseWorkspaceUri as parseWorkspaceSpaceUri } from "@/protocol/keys";
+import { SpaceCredentialError } from "@/atproto/space-credential-core";
+import { XrpcError } from "@/atproto/xrpc";
+import { ChannelUnavailableError } from "@/client/errors";
 
 export type Message = { uri: string; rkey: string; repo: string; value: { text?: string; createdAt?: string; parent?: string }; reactions?: Array<{ emoji: string; count: number; active: boolean }> };
 export type Reaction = { repo: string; value: { subject?: string; emoji?: string } };
@@ -22,7 +25,12 @@ export async function api<T = unknown>(url: string, init?: RequestInit): Promise
 }
 
 export class ApiError extends Error { constructor(readonly status: number, message: string, readonly code?: string) { super(message); } }
-export function httpStatus(error: unknown): number | undefined { return error instanceof ApiError ? error.status : undefined; }
+/** The HTTP status a failure stands for, whether a server route or the engine answered: a channel paused or archived is 409. */
+export function httpStatus(error: unknown): number | undefined {
+  if (error instanceof ApiError || error instanceof SpaceCredentialError || error instanceof XrpcError) return error.status;
+  if (error instanceof ChannelUnavailableError) return 409;
+  return undefined;
+}
 export function isAuthorizationRequired(error: unknown): boolean { return error instanceof ApiError && error.status === 403 && error.code === AUTHORIZATION_REQUIRED; }
 export function isAccessFailure(error: unknown): boolean { return [401, 403, 409].includes(httpStatus(error) ?? 0); }
 export function messageOf(error: unknown): string { return error instanceof Error ? error.message : "Request failed."; }
