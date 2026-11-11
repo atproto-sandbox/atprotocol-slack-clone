@@ -1,11 +1,14 @@
 import { parseSpaceDeletedNotification, parseWriteNotification } from "../atproto/write-notification";
+import { isDid } from "@flock/protocol/keys";
 import { NOTICE_METHOD, OPERATOR_METHOD } from "@flock/protocol/nsids";
 import { WorkspaceEnvelopeError } from "@flock/protocol/workspace-summary";
 import { AuthorityReauthorizationRequiredError, authorityFlowUrl, restoreAuthorityGrant } from "./authority-grant";
 import { AUTHORITY_APPROVAL_REQUIRED, OperatorAuthError, operatorHttpFailure } from "./errors";
 import { FeedRequestError, getChanges, parseFollow } from "./feed";
 import { getActorOperation, OperationBusyError, OperationConflictError } from "./journal";
-import { assertWorkspaceName, bootstrapWorkspace } from "./kinds/bootstrap-workspace";
+import { CreationNotAuthorizedError } from "./creation-authorization";
+import { assertCreationAdmissible, createWorkspace, WorkspaceExistsError } from "./kinds/create-workspace";
+import { assertWorkspaceName } from "./workspace-spaces";
 import { dropMemberList } from "./member-access";
 import { AdminMutationsPausedError, assertAdminMutationsEnabled } from "./mutations-paused";
 import { purgeSpaceNotifications, recordWriteNotification } from "./notices";
@@ -74,7 +77,14 @@ async function asWorkspaceAdmin<T>(call: MethodCall, method: string, action: (ac
   return action(actor);
 }
 
-const AUTHORIZATION_REQUIRED = "Workspace setup needs the authority's approval first: start the authority flow to reauthorize, then retry with the same operation id.";
+const AUTHORIZATION_REQUIRED = "Workspace setup needs the workspace account's approval first: start the authority flow, then retry with the same operation id.";
+
+/** The workspace account a request names, or the caller's own. */
+function authorityOf(body: Record<string, unknown>, caller: string): string {
+  if (body.authority === undefined) return caller;
+  if (typeof body.authority !== "string" || !isDid(body.authority)) throw new MethodError(400, "InvalidRequest", "The workspace account must be a DID.");
+  return body.authority;
+}
 
 export const OPERATOR_METHODS: Readonly<Record<string, OperatorMethodDefinition>> = {
   [OPERATOR_METHOD.execute]: {
@@ -139,23 +149,34 @@ export const OPERATOR_METHODS: Readonly<Record<string, OperatorMethodDefinition>
     async serve(call) {
       const did = await authenticateOperatorRequest(call.authorization, OPERATOR_METHOD.createWorkspace);
       assertAdminMutationsEnabled();
-      const body = objectBody(call, ["name", "operationId"], "The request takes a workspace name and an operation ID.");
+      const body = objectBody(call, ["name", "operationId", "authority"], "The request takes a workspace name, an operation ID and, optionally, the workspace account.");
       if (typeof body.name !== "string" || typeof body.operationId !== "string") {
         throw new MethodError(400, "InvalidRequest", "A workspace name and operation ID are required.");
       }
       assertWorkspaceName(body.name);
+      const authority = authorityOf(body, did);
+      try {
+        assertCreationAdmissible({ authorityDid: authority, creator: did, name: body.name, operationId: body.operationId });
+      } catch (error) {
+        if (error instanceof CreationNotAuthorizedError) throw new MethodError(403, "AuthorizationRequired", AUTHORIZATION_REQUIRED);
+        throw error;
+      }
       let grant;
       try {
-        grant = await restoreAuthorityGrant(did);
+        grant = await restoreAuthorityGrant(authority);
       } catch (error) {
         if (error instanceof AuthorityReauthorizationRequiredError) throw new MethodError(403, "AuthorizationRequired", AUTHORIZATION_REQUIRED);
         throw error;
       }
       let result;
       try {
-        result = await bootstrapWorkspace(grant, { name: body.name, operationId: body.operationId }, registrationDeps);
+        result = await createWorkspace(grant, { creator: did, name: body.name, operationId: body.operationId }, registrationDeps);
       } catch (error) {
         if (error instanceof OperationConflictError) throw new MethodError(409, "OperationIdConflict", error.message);
+        // Someone other than the workspace account, with no approval for this workspace: the same answer as a missing grant,
+        // so the web app's one path (approve, return, retry the same operation) serves both.
+        if (error instanceof CreationNotAuthorizedError) throw new MethodError(403, "AuthorizationRequired", AUTHORIZATION_REQUIRED);
+        if (error instanceof WorkspaceExistsError) throw new MethodError(409, "WorkspaceExists", error.message);
         throw error;
       }
       if (result.authorizationRequired) throw new MethodError(403, "AuthorizationRequired", AUTHORIZATION_REQUIRED);
@@ -169,13 +190,14 @@ export const OPERATOR_METHODS: Readonly<Record<string, OperatorMethodDefinition>
     unexpected: "InvalidRequest",
     async serve(call) {
       const did = await authenticateOperatorRequest(call.authorization, OPERATOR_METHOD.startAuthorityFlow);
-      const body = objectBody(call, ["purpose", "name"], "The request takes a purpose and, to create a workspace, its name.");
-      if (body.purpose === "reauthorize" && body.name === undefined) return { url: authorityFlowUrl(did, null).toString() };
+      const body = objectBody(call, ["purpose", "name", "authority"], "The request takes a purpose, to create a workspace its name, and optionally the workspace account.");
+      const authority = authorityOf(body, did);
+      if (body.purpose === "reauthorize" && body.name === undefined) return { url: authorityFlowUrl(did, authority, null).toString() };
       if (body.purpose !== "createWorkspace" || typeof body.name !== "string") {
         throw new MethodError(400, "InvalidRequest", "The purpose is createWorkspace with a workspace name, or reauthorize without one.");
       }
       assertWorkspaceName(body.name);
-      return { url: authorityFlowUrl(did, body.name.trim()).toString() };
+      return { url: authorityFlowUrl(did, authority, body.name.trim()).toString() };
     },
   },
   [NOTICE_METHOD.notifyWrite]: {

@@ -11,6 +11,7 @@ export interface SlackDb {
   authority_grant: { key: string; value: string; updated_at: number };
   authority_grant_state: { key: string; value: string; updated_at: number };
   authority_ticket: { token_hash: string; initiator_did: string; authority_did: string; purpose_json: string; expires_at: number };
+  creation_authorization: { authority_did: string; initiator_did: string; name: string; operation_id: string | null; expires_at: number };
   operation: {
     workspace: string;
     workspace_uri: string | null;
@@ -112,6 +113,14 @@ export function getDb(): Kysely<SlackDb> {
       expires_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS authority_ticket_expiry ON authority_ticket(expires_at);
+    CREATE TABLE IF NOT EXISTS creation_authorization (
+      authority_did TEXT NOT NULL,
+      initiator_did TEXT NOT NULL,
+      name TEXT NOT NULL,
+      operation_id TEXT,
+      expires_at INTEGER NOT NULL,
+      PRIMARY KEY (authority_did, initiator_did, name)
+    );
     CREATE TABLE IF NOT EXISTS oauth_request_lock (
       name TEXT PRIMARY KEY,
       token TEXT NOT NULL,

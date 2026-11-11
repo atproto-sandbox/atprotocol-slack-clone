@@ -20,6 +20,8 @@ export type QueryParams = {}
 export interface InputSchema {
   name: string
   operationId: string
+  /** The workspace account: its DID is in every URI of the workspace. Omitted, the caller's own. */
+  authority?: string
 }
 
 export interface OutputSchema {
@@ -70,6 +72,12 @@ export class OperationIdConflictError extends XRPCError {
   }
 }
 
+export class WorkspaceExistsError extends XRPCError {
+  constructor(src: XRPCError) {
+    super(src.status, src.error, src.message, src.headers, { cause: src })
+  }
+}
+
 export class PausedError extends XRPCError {
   constructor(src: XRPCError) {
     super(src.status, src.error, src.message, src.headers, { cause: src })
@@ -89,6 +97,7 @@ export function toKnownErr(e: any) {
       return new AuthorizationRequiredError(e)
     if (e.error === 'OperationIdConflict')
       return new OperationIdConflictError(e)
+    if (e.error === 'WorkspaceExists') return new WorkspaceExistsError(e)
     if (e.error === 'Paused') return new PausedError(e)
     if (e.error === 'Busy') return new BusyError(e)
   }

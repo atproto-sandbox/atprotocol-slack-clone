@@ -4,7 +4,7 @@
   "defs": {
     "main": {
       "type": "procedure",
-      "description": "Creates a workspace as the caller's own authority with the grant its authority flow left: the workspace, inbox and general channel spaces, the profile, the authority's roster and admin records and the directory entry, as one journaled operation that a retry with the same operation id resumes.",
+      "description": "Creates a workspace under a workspace account (its authority: the caller's own, or the account named by authority) with the grant its authority flow left, for the caller: the workspace, inbox and general channel spaces, the profile, the caller in their member lists, the caller's roster and admin records and the directory entry, as one journaled operation that a retry with the same operation id resumes. A caller other than the workspace account needs that account's approval of this workspace (a createWorkspace authority flow they started), which this operation uses up; without a grant or that approval it answers AuthorizationRequired.",
       "input": {
         "encoding": "application/json",
         "schema": {
@@ -22,6 +22,11 @@
             "operationId": {
               "type": "string",
               "format": "tid"
+            },
+            "authority": {
+              "type": "string",
+              "format": "did",
+              "description": "The workspace account: its DID is in every URI of the workspace. Omitted, the caller's own."
             }
           }
         }
@@ -86,6 +91,10 @@
         },
         {
           "name": "OperationIdConflict"
+        },
+        {
+          "name": "WorkspaceExists",
+          "description": "A workspace of this name exists under the workspace account, or someone else is creating it there: it is joined through its admins, or its creator, not created again."
         },
         {
           "name": "Paused",

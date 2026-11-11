@@ -12,7 +12,7 @@ import { mintSpaceCredential } from "./space-credential";
 import { isMemberListOnly, memberspacePolicy } from "@flock/protocol/atproto/space-policy";
 import { validateSpaceRecord } from "@flock/protocol/registry";
 import { assertBoundedRecordPage, listBoundedMembers } from "@flock/protocol/atproto/record-pages";
-import { isSpaceAlreadyExists } from "@flock/protocol/atproto/xrpc";
+import { isSpaceAlreadyExists, XrpcError } from "@flock/protocol/atproto/xrpc";
 import { requireSpaceAuthority, spaceRecordUri, spaceUri } from "@flock/protocol/keys";
 import { WorkspaceEnvelopeError } from "@flock/protocol/workspace-summary";
 
@@ -34,6 +34,17 @@ export async function ensureMemberListSpace(
     const current = await client.query<GetSpace.OutputSchema>("com.atproto.space.getSpace", { space: uri });
     if (!isMemberListOnly(current.policy)) throw new Error(`Space already exists with an incompatible policy: ${uri}`);
     return current.uri;
+  }
+}
+
+/** Whether the session's account has this space live: its host answers `getSpace` with anything but `SpaceNotFound`. */
+export async function spaceExists(session: OAuthSession, space: string): Promise<boolean> {
+  try {
+    await sessionClient(session).query<GetSpace.OutputSchema>("com.atproto.space.getSpace", { space });
+    return true;
+  } catch (error) {
+    if (error instanceof XrpcError && error.code === "SpaceNotFound") return false;
+    throw error;
   }
 }
 

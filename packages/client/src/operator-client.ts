@@ -54,6 +54,9 @@ export function operatorResponseFailure(status: number, ok: boolean, body: { err
  * The operator's methods, called with a service token the member's own host issues for that one method and the operator's
  * audience. No cookie and no server session: what a browser, a bot or a test holds is enough.
  */
+/** What an authority flow is for, and for which workspace account (the caller's own when absent). */
+export type AuthorityFlowRequest = ({ purpose: "createWorkspace"; name: string } | { purpose: "reauthorize" }) & { authority?: string };
+
 export class OperatorClient {
   private changesToken: { token: string; expiresAt: number } | undefined;
 
@@ -64,12 +67,16 @@ export class OperatorClient {
     return this.call(OPERATOR_METHOD.getChanges, { input: { follow } }, signal);
   }
 
-  createWorkspace(input: { name: string; operationId: string }): Promise<CreatedWorkspace> {
+  /** Creates the workspace `name` for the caller, under `authority` (a dedicated workspace account's DID) or their own account. */
+  createWorkspace(input: { name: string; operationId: string; authority?: string }): Promise<CreatedWorkspace> {
     return this.call(OPERATOR_METHOD.createWorkspace, { input });
   }
 
-  /** The operator URL to open, as a top-level navigation, to grant it authority over the caller's own workspaces. */
-  startAuthorityFlow(input: { purpose: "createWorkspace"; name: string } | { purpose: "reauthorize" }): Promise<{ url: string }> {
+  /**
+   * The operator URL to open, as a top-level navigation, to grant it authority over a workspace account's workspaces: the
+   * caller's own, or `authority`'s, which only someone who signs in as that account can approve.
+   */
+  startAuthorityFlow(input: AuthorityFlowRequest): Promise<{ url: string }> {
     return this.call(OPERATOR_METHOD.startAuthorityFlow, { input });
   }
 

@@ -45,6 +45,14 @@ const MAX_STALLED_OPERATIONS = 100;
 const MAX_JOURNALED_WORKSPACES = 10_000;
 
 /**
+ * What lets an operation's first run insert its row, besides who its actor is. `verify` runs under the workspace lock before
+ * the row is inserted, once per operation, and may read the authority's host; `admit` runs in the transaction that inserts
+ * the row. A refusal from either leaves no row. `restore` gives the admission back in the transaction that discards the row
+ * when its first step was refused for a scope the authority's grant lacks.
+ */
+export type JournalAdmission = { verify?(): Promise<void>; admit(now: number): void; restore?(now: number): void };
+
+/**
  * Runs one journaled operation under the workspace lock. `steps` are the step names the operation may record (`{…}` stands for
  * a value): a persisted operation is replayed by name, so recording a step under any other name is refused. A step the PDS
  * refuses for a missing scope marks the operation as needing the authority's approval. When its submitter is running it and no
@@ -57,7 +65,7 @@ export async function runJournaledOperation(
   request: Record<string, unknown>,
   steps: readonly string[],
   run: (context: OperationContext) => Promise<void>,
-  options: { replay?: boolean } = {},
+  options: { replay?: boolean; admission?: JournalAdmission } = {},
 ): Promise<OperationView> {
   const declared = stepMatcher(steps);
   const workspaceDid = actor.workspace.authorityDid;
@@ -70,7 +78,9 @@ export async function runJournaledOperation(
     if (prior && prior.request_hash !== requestHash) throw new OperationConflictError("OperationIdConflict");
     if (prior?.state === "completed" || prior?.state === "failed") return operationView(operationId, requestHash, prior.state, parseSteps(prior.steps_json), prior.error, prior.updated_at);
     if (!prior) {
+      await options.admission?.verify?.();
       raw.transaction(() => {
+        options.admission?.admit(now);
         raw.prepare("INSERT INTO operation (workspace, workspace_uri, actor, operation_id, request_hash, request_json, state, steps_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'running', '[]', ?, ?)")
           .run(workspaceDid, actor.workspace.uri, actor.did, operationId, requestHash, canonicalJson({ workspace: actor.workspace.uri, request }), now, now);
         raw.prepare("INSERT OR IGNORE INTO operation_workspace_catalog (workspace, workspace_uri) VALUES (?, ?)")
@@ -119,8 +129,10 @@ export async function runJournaledOperation(
       const failed = error instanceof OperationRejectedError;
       const timestamp = unixNow();
       const authorizationRequired = isScopeMissingError(error) ? { authorizationRequired: true as const } : {};
+      const restore = options.admission?.restore;
       if (authorizationRequired.authorizationRequired && !options.replay && completedSteps.length === 0 && discardEmptyOperationIfWorkspaceLockOwned({
         workspace: workspaceDid, workspaceUri: actor.workspace.uri, actor: actor.did, operationId, lock, reason: "authorizationRequired",
+        alsoInTransaction: restore && (() => restore(timestamp)),
       })) {
         return { ...operationView(operationId, requestHash, "pending", [], message, timestamp), ...authorizationRequired };
       }
@@ -171,6 +183,8 @@ export function discardEmptyOperationIfWorkspaceLockOwned(input: {
   operationId: string;
   lock: WorkspaceLock;
   reason: string;
+  /** Runs in the transaction that discards the row, only when it does. */
+  alsoInTransaction?: () => void;
 }): boolean {
   const raw = getRawDb();
   try {
@@ -180,6 +194,7 @@ export function discardEmptyOperationIfWorkspaceLockOwned(input: {
         WHERE workspace = ? AND actor = ? AND operation_id = ? AND steps_json = '[]' AND state IN ('running', 'pending')`)
         .run(input.workspace, input.actor, input.operationId);
       if (removed.changes !== 1) return false;
+      input.alsoInTransaction?.();
       raw.prepare(`DELETE FROM operation_workspace_catalog
         WHERE workspace = ? AND workspace_uri = ?
         AND NOT EXISTS (SELECT 1 FROM operation WHERE workspace = ? AND workspace_uri = ?)`)
@@ -267,14 +282,14 @@ export function listStalledOperations(workspaceDid: string, workspaceUri: string
   };
 }
 
-export function listRecoverableOperations(workspaceDid: string, workspaceUri: string): Array<{ actor: string; operationId: string; requestJson: string }> {
-  const rows = getRawDb().prepare(`SELECT actor, operation_id, request_json FROM operation
+export function listRecoverableOperations(workspaceDid: string, workspaceUri: string): Array<{ actor: string; operationId: string; requestJson: string; completedSteps: string[] }> {
+  const rows = getRawDb().prepare(`SELECT actor, operation_id, request_json, steps_json FROM operation
     WHERE workspace = ? AND workspace_uri = ? AND state IN ('queued','running','pending') ORDER BY created_at ASC LIMIT ?`)
-    .all(workspaceDid, workspaceUri, MAX_RECOVERABLE_OPERATIONS + 1) as Array<{ actor: string; operation_id: string; request_json: string }>;
+    .all(workspaceDid, workspaceUri, MAX_RECOVERABLE_OPERATIONS + 1) as Array<{ actor: string; operation_id: string; request_json: string; steps_json: string }>;
   if (rows.length > MAX_RECOVERABLE_OPERATIONS) {
     throw new OperationBusyError(`Workspace has more than ${MAX_RECOVERABLE_OPERATIONS} recoverable operations; automatic recovery is paused.`);
   }
-  return rows.map((row) => ({ actor: row.actor, operationId: row.operation_id, requestJson: row.request_json }));
+  return rows.map((row) => ({ actor: row.actor, operationId: row.operation_id, requestJson: row.request_json, completedSteps: stepsOrNone(row.steps_json) }));
 }
 
 export function listJournaledWorkspaces(): Array<{ authorityDid: string; uri: string }> {
@@ -310,6 +325,26 @@ export function operationView(operationId: string, requestHash: string, state: O
 export function stepMatcher(steps: readonly string[]): (name: string) => boolean {
   const patterns = steps.map((step) => new RegExp(`^${step.split(/\{[^}]+\}/).map((part) => part.replace(/[.*+?^$()|[\]\\]/g, "\\$&")).join(".+")}$`));
   return (name) => patterns.some((pattern) => pattern.test(name));
+}
+
+/** A row's steps for deciding who may resume it; an unreadable list is no steps (its replay then fails on its own row). */
+function stepsOrNone(value: string): string[] {
+  try {
+    return parseSteps(value);
+  } catch {
+    return [];
+  }
+}
+
+/** Whether someone other than `actorDid` has an operation on this workspace that is not finished (completed or failed). */
+export function othersHaveUnfinishedOperation(workspaceDid: string, workspaceUri: string, actorDid: string): boolean {
+  return getRawDb().prepare("SELECT 1 FROM operation WHERE workspace = ? AND workspace_uri = ? AND actor != ? AND state NOT IN ('completed', 'failed') LIMIT 1")
+    .get(workspaceDid, workspaceUri, actorDid) !== undefined;
+}
+
+/** Whether `actor` journaled `operationId` in this authority's workspaces. */
+export function operationRowExists(workspaceDid: string, actorDid: string, operationId: string): boolean {
+  return getRawDb().prepare("SELECT 1 FROM operation WHERE workspace = ? AND actor = ? AND operation_id = ?").get(workspaceDid, actorDid, operationId) !== undefined;
 }
 
 function parseSteps(value: string): string[] {

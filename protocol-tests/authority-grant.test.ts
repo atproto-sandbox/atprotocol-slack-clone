@@ -59,6 +59,54 @@ test("the workspace authority grant outlives the creator's sign-in session", asy
       assert.notEqual(first.workspace, second.workspace);
     });
 
+    await t.test("a workspace under a dedicated account that never signs in to the app is created for its creator, who administers it with a second admin after both sign out (R8)", async () => {
+      const [{ parseWorkspaceUri, tidNow }, { grantCreationAuthorization }] = await Promise.all([import("@flock/protocol/keys"), import("@flock/operator/operator/creation-authorization")]);
+      // given a workspace account whose grant the operator holds (it has no browser session, here or anywhere), a person
+      // signed in at their own browser, and a second person who will become an admin
+      const account = await pds.createActor("k8account", 0);
+      const creatorAccount = await pds.createActor("k8creator", 0);
+      const second = await pds.createActor("k8admin", 1);
+      const scopes = await combinedMemberScopes(pds.serviceRef);
+      const creator = await mintBrowserSession(pds.hosts[0], creatorAccount.did, scopes, "k8creator-dpop");
+      await storeAuthorityGrant(pds.hosts[0], account.did, "k8account-grant-dpop");
+      const name = "K8 dedicated";
+
+      // when the person creates a workspace under the account without its approval of that workspace, it is refused
+      const unapproved = await outcome(() => createWorkspace(pds, creator, name, tidNow(), account.did));
+      assert.equal(unapproved.ok, false, "the account's grant alone does not let someone else create under it");
+      assert.match(unapproved.ok ? "" : unapproved.error, /AuthorizationRequired|approve/, `refused as needing the account's approval: ${JSON.stringify(unapproved)}`);
+
+      // and when the account's creation flow has approved it, the workspace is created under the account for the person
+      grantCreationAuthorization({ authorityDid: account.did, initiatorDid: creatorAccount.did, name }, Math.floor(Date.now() / 1000));
+      const created = await createWorkspace(pds, creator, name, tidNow(), account.did);
+      assert.equal(created.state, "completed");
+      assert.equal(parseWorkspaceUri(created.workspace)?.authorityDid, account.did, "the workspace is the account's");
+
+      // and an approval of that name for someone else does not join them to it: the workspace exists at the account's host
+      const secondBrowser = await mintBrowserSession(second.pds, second.did, scopes, "k8admin-dpop");
+      grantCreationAuthorization({ authorityDid: account.did, initiatorDid: second.did, name }, Math.floor(Date.now() / 1000));
+      const existing = await outcome(() => createWorkspace(pds, secondBrowser, name, tidNow(), account.did));
+      assert.equal(existing.ok, false, "a second approval of an existing name creates nothing");
+      assert.match(existing.ok ? "" : existing.error, /WorkspaceExists|already exists/, `refused as an existing workspace: ${JSON.stringify(existing)}`);
+
+      // then the person administers it: they add a second admin
+      for (const request of [{ kind: "inviteMember", subject: second.did }, { kind: "setAdmin", subject: second.did, active: true }]) {
+        const answer = await callOperatorMethod(creator.session, pds.serviceRef, "new.flock.operator.execute", {}, { workspace: created.workspace, operationId: tidNow(), request }) as { operation?: { state?: string } };
+        assert.equal(answer.operation?.state, "completed", `the creator's ${request.kind} completes`);
+      }
+
+      // and after both admins sign out, the workspace still runs on the account's grant: the second admin, signing in again,
+      // administers it
+      await creator.session.signOut();
+      await secondBrowser.session.signOut();
+      const again = await mintBrowserSession(second.pds, second.did, scopes, "k8admin-again-dpop");
+      const operationId = tidNow();
+      const answer = await callOperatorMethod(again.session, pds.serviceRef, "new.flock.operator.execute", {}, {
+        workspace: created.workspace, operationId, request: { kind: "createChannel", skey: `k8-${operationId}`, name: "k8", visibility: "public" },
+      }) as { operation?: { state?: string } };
+      assert.equal(answer.operation?.state, "completed", "an admin administers the workspace after every admin signed out");
+    });
+
     await t.test("a session restored before the authority approves again cannot use or delete the grant that replaced it", async () => {
       // given the authority's grant restored as a session, as an operator request in flight holds it
       const [{ hasAuthorityGrant, restoreAuthorityGrant }, { TokenRefreshError }] = await Promise.all([import("@flock/operator/operator/authority-grant"), import("@atproto/oauth-client-node")]);
@@ -116,8 +164,9 @@ type WorkspaceUnderTest = {
   creatorEvent(scenario: Scenario): Promise<void>;
 };
 
-async function createWorkspace(pds: PdsNetwork, browser: BrowserSession, name: string, operationId: string): Promise<{ state: string; workspace: string }> {
-  return await callOperatorMethod(browser.session, pds.serviceRef, "new.flock.operator.createWorkspace", {}, { name, operationId }) as { state: string; workspace: string };
+/** Creates `name` as the browser's account, under `authority` (a dedicated workspace account) or its own account. */
+async function createWorkspace(pds: PdsNetwork, browser: BrowserSession, name: string, operationId: string, authority?: string): Promise<{ state: string; workspace: string }> {
+  return await callOperatorMethod(browser.session, pds.serviceRef, "new.flock.operator.createWorkspace", {}, { name, operationId, ...(authority ? { authority } : {}) }) as { state: string; workspace: string };
 }
 
 async function createWorkspaceWithSecondAdmin(pds: PdsNetwork, scenario: Scenario): Promise<WorkspaceUnderTest> {

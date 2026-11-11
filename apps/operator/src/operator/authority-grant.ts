@@ -24,6 +24,7 @@ import {
   type OAuthFlowClient,
 } from "../auth/oauth-flow";
 import { oauthSqliteRequestLock } from "../auth/oauth-request-lock";
+import { grantCreationAuthorization } from "./creation-authorization";
 import { canonicalOAuthScope } from "../auth/oauth-scope";
 import { workspaceAuthorityScopes } from "@flock/protocol/scopes";
 import { getConfig } from "@flock/deployment/config";
@@ -129,8 +130,6 @@ export function issueAuthorityTicket(input: AuthorityTicketInput, now = unixNow(
   if (!isDid(input.initiatorDid) || !isDid(input.authorityDid) || !isAuthorityFlowPurpose(input.purpose)) {
     throw new AuthorityFlowError("Invalid authority approval request.");
   }
-  // Until a workspace can be created under an authority other than its creator (R8), the creator is the authority.
-  if (input.authorityDid !== input.initiatorDid) throw new AuthorityFlowError("Only the authority account can approve its own permission.");
   const ticket = randomBytes(32).toString("base64url");
   const db = getRawDb();
   db.transaction(() => {
@@ -153,13 +152,14 @@ export function consumeAuthorityTicket(ticket: string, now = unixNow()): Authori
 }
 
 /**
- * The operator URL that starts the authority flow for `did` as its own authority (R1: the initiator is the authority): a
- * ticket for creating the named workspace, or, without a name, for reauthorizing. A browser opens it as a top-level navigation.
+ * The operator URL that starts the authority flow that `initiatorDid` asked for, for the account `authorityDid` (their own,
+ * or a dedicated workspace account): a ticket for creating the named workspace, or, without a name, for reauthorizing. A
+ * browser opens it as a top-level navigation; only a sign-in as that account completes it.
  */
-export function authorityFlowUrl(did: string, workspaceName: string | null, now = unixNow()): URL {
+export function authorityFlowUrl(initiatorDid: string, authorityDid: string, workspaceName: string | null, now = unixNow()): URL {
   const ticket = issueAuthorityTicket({
-    initiatorDid: did,
-    authorityDid: did,
+    initiatorDid,
+    authorityDid,
     purpose: workspaceName ? { kind: "createWorkspace", name: workspaceName } : { kind: "reauthorize" },
   }, now);
   return authorityStartUrl(ticket);
@@ -223,6 +223,11 @@ export async function completeAuthorityFlow(
     // Nothing else holds this session, so it must not stay live at the PDS.
     await session.signOut().catch(() => undefined);
     throw error;
+  }
+  // Someone other than the authority account asked to create this workspace: the approval lets them, once (the
+  // authority account itself needs only its grant).
+  if (binding.purpose.kind === "createWorkspace" && binding.initiatorDid !== session.did) {
+    grantCreationAuthorization({ authorityDid: session.did, initiatorDid: binding.initiatorDid, name: binding.purpose.name }, now);
   }
   return { authorityDid: session.did, initiatorDid: binding.initiatorDid, purpose: binding.purpose };
 }

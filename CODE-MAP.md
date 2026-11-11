@@ -172,12 +172,24 @@ apps/
     src/operator/authority-grant.ts
                              The one owner of the workspace authority grant: its own OAuth client (confidential
                               private_key_jwt outside loopback), the ticket -> /authority/start -> PDS consent ->
-                              /authority/callback flow, and the `authority_grant` table. Each restore is a client over a view
-                              of one approval, so a session still in use after a new approval can neither use nor delete it.
-    src/operator/journal.ts  runJournaledOperation: the workspace lock, the operation row, declared step names, resume by
-                              name and request hash, and "waiting for the authority's approval"; operationView.
+                              /authority/callback flow (started by the account itself, or by someone creating a workspace
+                              under it, R8), and the `authority_grant` table. Each restore is a client over a view of one
+                              approval, so a session still in use after a new approval can neither use nor delete it.
+    src/operator/creation-authorization.ts
+                             The one owner of the approval to create a workspace under an account other than one's own: a
+                              completed flow's single-use, 15-minute approval of one name for one person, consumed as the
+                              creation's journal row is inserted and restored for that operation if its first step lacked a
+                              scope. When a creation may start at all (the approval, a new workspace, no unfinished claim
+                              on it) is creationAdmission in kinds/create-workspace.ts.
+    src/operator/journal.ts  runJournaledOperation: the workspace lock, the operation row (an admission that verifies under
+                              the lock, then admits in the insert transaction, and restores what let the row in), declared
+                              step names, resume by name and request hash, and "waiting for the authority's approval";
+                              operationView.
     src/operator/kinds/      One file per operation kind; kinds/index.ts is the table every request and journal row
                               dispatches through, and kinds/kinds.test.ts pins every persisted kind, field and step name.
+                              create-workspace.ts creates a workspace for its creator (its first admin and member) under
+                              its account; bootstrap-workspace.ts only resumes rows begun before it. Their shared space
+                              and record actions are src/operator/workspace-spaces.ts.
     src/operator/operations.ts, actor.ts, security.ts
                              Request validation and execution; who an operation runs for; service-auth verification with
                               each method's token lifetime and authorizeOperationActor.

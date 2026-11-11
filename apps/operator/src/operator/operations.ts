@@ -1,10 +1,13 @@
+import type { OAuthSession } from "@atproto/oauth-client-node";
 import { listSpaceMembers } from "../atproto/space-ops";
 import { inboxUri, isDid, isSkey, isTid } from "@flock/protocol/keys";
 import { OPERATOR_METHOD } from "@flock/protocol/nsids";
-import type { OperatorActor, WorkspaceRef } from "./actor";
+import { parseWorkspaceRef, type OperatorActor, type WorkspaceRef } from "./actor";
 import { AuthorityReauthorizationRequiredError } from "./authority-grant";
 import { OperatorAuthError } from "./errors";
 import { auditOperationEvent, listRecoverableOperations, OperationBusyError, runJournaledOperation, type OperationView } from "./journal";
+import { bootstrapWorkspaceKind } from "./kinds/bootstrap-workspace";
+import { createWorkspaceKind, creationAdmission, creationResult, type WorkspaceCreation } from "./kinds/create-workspace";
 import { operationKind } from "./kinds/index";
 import type { OperationKind, OperatorRequest } from "./kinds/kind";
 import { assertAdminMutationsEnabled } from "./mutations-paused";
@@ -51,6 +54,7 @@ async function resumeRecoverableOperations(actor: OperatorActor, currentOperatio
       const { kind, request } = validateOperatorRequest(row.request, priorActor, "journal");
       assertMayStartKind(kind, actor.did, actor.workspace);
       assertMayStartKind(kind, row.actor, actor.workspace);
+      assertMayResumeCreation(kind, actor.did, row);
       const view = await runJournaledOperation(priorActor, row.operationId, request, kind.steps, (context) => kind.run(priorActor, context, request), { replay: true });
       awaitingApproval ||= view.authorizationRequired === true;
       completed = { priorActor, kind, request, view };
@@ -79,19 +83,19 @@ async function resumeRecoverableOperations(actor: OperatorActor, currentOperatio
 }
 
 export function savedWorkspaceOperations(
-  rows: Array<{ actor: string; operationId: string; requestJson: string }>,
+  rows: Array<{ actor: string; operationId: string; requestJson: string; completedSteps: string[] }>,
   actor: Pick<OperatorActor, "did" | "workspace">,
   currentOperationId: string,
-): Array<{ actor: string; operationId: string; request: Record<string, unknown> | null }> {
+): Array<{ actor: string; operationId: string; completedSteps: string[]; request: Record<string, unknown> | null }> {
   return rows
     .filter((row) => !(row.actor === actor.did && row.operationId === currentOperationId))
     .flatMap((row) => {
       let saved: unknown;
       try { saved = JSON.parse(row.requestJson); }
-      catch { return [{ actor: row.actor, operationId: row.operationId, request: null }]; }
+      catch { return [{ actor: row.actor, operationId: row.operationId, completedSteps: row.completedSteps, request: null }]; }
       if (isPlainObject(saved) && saved.workspace !== actor.workspace.uri) return [];
       const request = isPlainObject(saved) && isPlainObject(saved.request) ? saved.request : null;
-      return [{ actor: row.actor, operationId: row.operationId, request }];
+      return [{ actor: row.actor, operationId: row.operationId, completedSteps: row.completedSteps, request }];
     });
 }
 
@@ -106,9 +110,53 @@ export function assertMayStartKind(kind: OperationKind, actorDid: string, worksp
   if (kind.actor === "authority" && actorDid !== workspace.authorityDid) throw new OperatorAuthError("Only the workspace authority can run this operation.");
 }
 
+/**
+ * The operator's own recovery of a workspace's unfinished creations (the reconcile job), with its authority's grant: it runs
+ * before the workspace's admin records exist to authorize anyone. A `createWorkspace` row stays its creator's and a
+ * `bootstrapWorkspace` row its authority's. Like its creator's own attempt, a row with nothing done whose first step lacks a
+ * scope is discarded, and a creator's approval is restored for it.
+ */
+export async function resumePendingWorkspaceCreations(grant: OAuthSession, workspace: string, registration?: RegistrationDeps): Promise<WorkspaceCreation[]> {
+  const ref = parseWorkspaceRef(workspace);
+  if (ref.authorityDid !== grant.did) throw new Error("Workspace creation recovery requires its authority's grant.");
+  const operator: OperatorActor = { did: grant.did, session: grant, workspace: ref, canRecoverOperations: true };
+  const results: WorkspaceCreation[] = [];
+  for (const row of savedWorkspaceOperations(listRecoverableOperations(grant.did, workspace), operator, "")) {
+    if (row.request?.kind !== createWorkspaceKind.kind && row.request?.kind !== bootstrapWorkspaceKind.kind) continue;
+    const actor: OperatorActor = { ...operator, did: row.actor };
+    let started: { kind: OperationKind; request: OperatorRequest };
+    try {
+      started = validateOperatorRequest(row.request, actor, "journal");
+      assertMayStartKind(started.kind, row.actor, ref);
+    } catch (error) {
+      // Left pending for an operator to inspect, like a row an admin's recovery cannot run; the workspace's other rows go on.
+      auditOperationEvent(operator, row.operationId, "operationResumeFailed", { originalActor: row.actor, error: error instanceof Error ? error.message : "Unknown error" });
+      continue;
+    }
+    const { kind, request } = started;
+    const admission = kind === createWorkspaceKind ? creationAdmission(actor, String(request.name), row.operationId) : undefined;
+    const view = await runJournaledOperation(actor, row.operationId, request, kind.steps, (context) => kind.run(actor, context, request), { admission });
+    if (registration) await afterOperation(actor, kind, request, view, registration);
+    results.push(creationResult(actor, row.operationId, view));
+  }
+  return results;
+}
+
+/**
+ * A workspace creation is its creator's until it has made them an admin: before, the row is the only proof they were allowed
+ * to create, so nobody else resumes it; after, any active admin recovers it like every other kind, and the creator stays its
+ * journal and audit principal.
+ */
+export function assertMayResumeCreation(kind: OperationKind, recoveringDid: string, row: { actor: string; completedSteps: readonly string[] }): void {
+  if (kind.actor === "creator" && recoveringDid !== row.actor && !row.completedSteps.includes("creator-admin")) {
+    throw new OperatorAuthError("Only its creator can resume a workspace creation before it has made them an admin.");
+  }
+}
+
 /** The rule for each request field, wherever it appears. Every field a kind declares has one (kinds.test.ts checks it). */
 export const FIELD_RULES: Record<string, (value: unknown, actor: OperatorActor) => string | null> = {
   subject: (value) => isDid(value) ? null : "Invalid subject DID.",
+  creator: (value) => isDid(value) ? null : "Invalid creator DID.",
   active: (value) => typeof value === "boolean" ? null : "Admin state must be boolean.",
   skey: (value) => isSkey(value) ? null : "Invalid channel key.",
   name: (value) => typeof value === "string" && value.trim().length >= 1 && Array.from(value).length <= 80 ? null : "Channel name must contain 1 to 80 characters.",

@@ -1,4 +1,5 @@
 import type { OAuthSession } from "@atproto/oauth-client-node";
+import { memberspacePolicy } from "@flock/protocol/atproto/space-policy";
 
 // An authority's PDS held in memory, for operator unit tests: the spaces, records and member lists an operation reads and
 // writes through the authority's session. Production code never imports it.
@@ -11,7 +12,9 @@ export type FakeAuthorityPds = {
   writes: string[];
   /** Every request, in order, as `<method> <space> [<collection>]`. */
   calls: string[];
+  /** A space's records in one collection; a test that reaches for them makes the space exist, as if it was created. */
   recordsOf(space: string, collection: string): Map<string, Record<string, unknown>>;
+  /** A space's member list; a test that reaches for it makes the space exist, as if it was created. */
   membersOf(space: string): Map<string, FakeMember>;
 };
 
@@ -25,17 +28,27 @@ export type FakeAuthorityPdsOptions = {
 
 export function fakeAuthorityPds(did: string, options: FakeAuthorityPdsOptions = {}): FakeAuthorityPds {
   const records = new Map<string, Map<string, Record<string, unknown>>>();
+  /** Spaces that exist: created through the fake, or reached for by a test. A request's read never creates one. */
+  const spaces = new Set<string>();
   const members = new Map<string, Map<string, FakeMember>>();
   const writes: string[] = [];
   const calls: string[] = [];
-  const recordsOf = (space: string, collection: string) => {
+  const recordMap = (space: string, collection: string) => {
     const key = `${space} ${collection}`;
     if (!records.has(key)) records.set(key, new Map());
     return records.get(key)!;
   };
-  const membersOf = (space: string) => {
+  const memberMap = (space: string) => {
     if (!members.has(space)) members.set(space, new Map());
     return members.get(space)!;
+  };
+  const recordsOf = (space: string, collection: string) => {
+    spaces.add(space);
+    return recordMap(space, collection);
+  };
+  const membersOf = (space: string) => {
+    spaces.add(space);
+    return memberMap(space);
   };
   const write = (entry: string) => {
     writes.push(entry);
@@ -54,28 +67,34 @@ export function fakeAuthorityPds(did: string, options: FakeAuthorityPdsOptions =
       switch (method) {
         case "com.atproto.space.createSpace": {
           const uri = `at://${did}/space/${body!.spaceType}/${body!.skey}`;
+          if (spaces.has(uri)) return Response.json({ error: "SpaceAlreadyExists", message: "Space already exists" }, { status: 400 });
+          spaces.add(uri);
           write(`createSpace ${uri}`);
           return Response.json({ uri });
         }
         case "com.atproto.space.putRecord":
           write(`putRecord ${body!.space} ${body!.collection}/${body!.rkey}`);
-          recordsOf(body!.space, body!.collection).set(body!.rkey, body!.record);
+          recordMap(body!.space, body!.collection).set(body!.rkey, body!.record);
           return Response.json({ uri: `${body!.space}/${body!.collection}/${body!.rkey}`, cid: "bafyreib2rxk3rybk3aobmv5cjuql3bm2twh4jo5uxgf5ss5c3sk6tkztoe" });
         case "com.atproto.space.getRecord": {
-          const value = recordsOf(params.get("space")!, params.get("collection")!).get(params.get("rkey")!);
+          const value = recordMap(params.get("space")!, params.get("collection")!).get(params.get("rkey")!);
           return value
             ? Response.json({ uri: `${params.get("space")}/${params.get("collection")}/${params.get("rkey")}`, value })
             : Response.json({ error: "RecordNotFound", message: "Record not found" }, { status: 400 });
         }
+        case "com.atproto.space.getSpace":
+          return spaces.has(params.get("space")!)
+            ? Response.json({ uri: params.get("space"), policy: memberspacePolicy() })
+            : Response.json({ error: "SpaceNotFound", message: "Space not found" }, { status: 400 });
         case "com.atproto.space.listRecords": {
           const collection = params.get("collection")!;
-          return Response.json({ records: [...recordsOf(params.get("space")!, collection)].map(([rkey, value]) => ({ collection, rkey, value })) });
+          return Response.json({ records: [...recordMap(params.get("space")!, collection)].map(([rkey, value]) => ({ collection, rkey, value })) });
         }
         case "com.atproto.memberspace.listMembers":
-          return Response.json({ members: [...membersOf(params.get("space")!).values()] });
+          return Response.json({ members: [...memberMap(params.get("space")!).values()] });
         case "com.atproto.memberspace.putMember":
           write(`putMember ${body!.space} ${body!.did}`);
-          membersOf(body!.space).set(body!.did, { did: body!.did, read: body!.read, write: body!.write });
+          memberMap(body!.space).set(body!.did, { did: body!.did, read: body!.read, write: body!.write });
           return Response.json({});
         default:
           throw new Error(`unexpected request: ${path}`);

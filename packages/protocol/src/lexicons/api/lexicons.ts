@@ -2213,7 +2213,7 @@ export const schemaDict = {
       main: {
         type: 'procedure',
         description:
-          "Creates a workspace as the caller's own authority with the grant its authority flow left: the workspace, inbox and general channel spaces, the profile, the authority's roster and admin records and the directory entry, as one journaled operation that a retry with the same operation id resumes.",
+          "Creates a workspace under a workspace account (its authority: the caller's own, or the account named by authority) with the grant its authority flow left, for the caller: the workspace, inbox and general channel spaces, the profile, the caller in their member lists, the caller's roster and admin records and the directory entry, as one journaled operation that a retry with the same operation id resumes. A caller other than the workspace account needs that account's approval of this workspace (a createWorkspace authority flow they started), which this operation uses up; without a grant or that approval it answers AuthorizationRequired.",
         input: {
           encoding: 'application/json',
           schema: {
@@ -2228,6 +2228,12 @@ export const schemaDict = {
               operationId: {
                 type: 'string',
                 format: 'tid',
+              },
+              authority: {
+                type: 'string',
+                format: 'did',
+                description:
+                  "The workspace account: its DID is in every URI of the workspace. Omitted, the caller's own.",
               },
             },
           },
@@ -2293,6 +2299,11 @@ export const schemaDict = {
           },
           {
             name: 'OperationIdConflict',
+          },
+          {
+            name: 'WorkspaceExists',
+            description:
+              'A workspace of this name exists under the workspace account, or someone else is creating it there: it is joined through its admins, or its creator, not created again.',
           },
           {
             name: 'Paused',
@@ -2794,7 +2805,7 @@ export const schemaDict = {
       main: {
         type: 'procedure',
         description:
-          'Issues a single-use, two-minute ticket for the caller to grant the operator authority over its own workspaces, and returns the operator URL that starts the flow. The caller opens it as a top-level navigation; the flow succeeds only for someone who signs in as the caller.',
+          "Issues a single-use, two-minute ticket for the caller to grant the operator authority over a workspace account's workspaces (the caller's own account, or the one named by authority), and returns the operator URL that starts the flow. The caller opens it as a top-level navigation; the flow succeeds only for someone who signs in as that account. For createWorkspace with another account, it also leaves the caller an approval to create that one workspace.",
         input: {
           encoding: 'application/json',
           schema: {
@@ -2811,6 +2822,12 @@ export const schemaDict = {
                 maxLength: 60,
                 description:
                   'The workspace to create, for purpose createWorkspace.',
+              },
+              authority: {
+                type: 'string',
+                format: 'did',
+                description:
+                  "The workspace account to approve for. Omitted, the caller's own.",
               },
             },
           },

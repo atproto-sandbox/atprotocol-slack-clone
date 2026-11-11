@@ -1,6 +1,7 @@
 import { archiveChannelKind } from "./archive-channel";
 import { bootstrapWorkspaceKind } from "./bootstrap-workspace";
 import { createChannelKind } from "./create-channel";
+import { createWorkspaceKind } from "./create-workspace";
 import { decideJoinRequestKind } from "./decide-join-request";
 import { inviteMemberKind } from "./invite-member";
 import type { OperationKind } from "./kind";
@@ -12,7 +13,7 @@ import { transitionChannelKind } from "./transition-channel";
 
 /** Every persisted operation kind, by name. The journal replays rows through this table. */
 export const OPERATION_KINDS: Readonly<Record<string, OperationKind>> = Object.fromEntries([
-  bootstrapWorkspaceKind, inviteMemberKind, removeMemberKind, setAdminKind, createChannelKind, transitionChannelKind,
+  bootstrapWorkspaceKind, createWorkspaceKind, inviteMemberKind, removeMemberKind, setAdminKind, createChannelKind, transitionChannelKind,
   archiveChannelKind, decideJoinRequestKind, leaveWorkspaceKind, leaveChannelKind, reconcileWorkspaceKind,
 ].map((kind) => [kind.kind, kind]));
 

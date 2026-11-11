@@ -21,6 +21,8 @@ export interface InputSchema {
   purpose: 'createWorkspace' | 'reauthorize' | (string & {})
   /** The workspace to create, for purpose createWorkspace. */
   name?: string
+  /** The workspace account to approve for. Omitted, the caller's own. */
+  authority?: string
 }
 
 export interface OutputSchema {

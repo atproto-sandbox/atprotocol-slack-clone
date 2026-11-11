@@ -12,8 +12,12 @@ export type OperationKind = {
   /** The fields its request carries besides `kind` (and the lexicon `$type`). */
   required: readonly string[];
   optional?: readonly string[];
-  /** Who may start it: the workspace's authority only; any active admin; or, besides any admin, an active member it concerns. */
-  actor: "authority" | "admin" | "member";
+  /**
+   * Who may start it: the workspace's authority only; any active admin; besides any admin, an active member it concerns; or
+   * the person creating the workspace (allowed by the authority's grant or a creation authorization), whose pending row only
+   * they resume until its admin record is written.
+   */
+  actor: "authority" | "admin" | "member" | "creator";
   /** Where it is submitted: the operator's execute method, or workspace creation. */
   submittedThrough: "execute" | "createWorkspace";
   /** The step names it may record; `{…}` stands for a value (a DID, a channel key). */

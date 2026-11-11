@@ -104,12 +104,12 @@ type Workspace = {
 };
 
 async function createWorkspace(pds: PdsNetwork): Promise<Workspace> {
-  const [{ restoreAuthorityGrant }, { bootstrapWorkspace }, { requireActiveWorkspaceAdmin }, { executeOperatorOperation }, { tidNow, inboxUri }] = await Promise.all([
-    import("@flock/operator/operator/authority-grant"), import("@flock/operator/operator/kinds/bootstrap-workspace"), import("@flock/operator/operator/security"), import("@flock/operator/operator/operations"), import("@flock/protocol/keys"),
+  const [{ restoreAuthorityGrant }, { createWorkspace }, { requireActiveWorkspaceAdmin }, { executeOperatorOperation }, { tidNow, inboxUri }] = await Promise.all([
+    import("@flock/operator/operator/authority-grant"), import("@flock/operator/operator/kinds/create-workspace"), import("@flock/operator/operator/security"), import("@flock/operator/operator/operations"), import("@flock/protocol/keys"),
   ]);
   const authority = await pds.createActor("k3owner", 0);
   await storeAuthorityGrant(pds.hosts[0], authority.did, "k3-authority-dpop");
-  const created = await bootstrapWorkspace(await restoreAuthorityGrant(authority.did), { name: "Capabilities", operationId: tidNow() });
+  const created = await createWorkspace(await restoreAuthorityGrant(authority.did), { creator: authority.did, name: "Capabilities", operationId: tidNow() });
   assert.equal(created.state, "completed");
   const run = async (request: Record<string, unknown>) => {
     const view = await executeOperatorOperation(await requireActiveWorkspaceAdmin(created.workspace, authority.did), tidNow(), request);

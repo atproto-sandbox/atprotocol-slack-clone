@@ -5,9 +5,10 @@ import { withIndependentReader } from "../support/independent-app-ui";
 import { credentialCalls, credentialOutcome, workspaceChannels } from "../support/channels-ui";
 import type { AppWorld, Actor } from "../support/world";
 import {
-  waitForAdminControls, completeConsent, copyInviteLink, createWorkspaceAs, escapeRegExp, eventually, inviteMemberAs,
-  joinFromInvitation, openInviteLinkAndSignIn, ownerInvites, signIn, submitWorkspaceName, uniqueWorkspaceName, waitForApp, workspaceUriOnPage,
+  approveConsentAs, waitForAdminControls, completeConsent, copyInviteLink, createWorkspaceAs, escapeRegExp, eventually, inviteMemberAs,
+  joinFromInvitation, openInviteLinkAndSignIn, ownerInvites, signIn, signOutAs, submitWorkspaceName, uniqueWorkspaceName, waitForApp, workspaceUriOnPage,
 } from "../support/ui";
+import { createChannelAs } from "../support/lifecycle-ui";
 import { OPERATOR_AUTHORITY_FLOW, OPERATOR_CREATE_WORKSPACE, operatorCalls } from "../support/operator-calls";
 
 type Member = { did: string; read: boolean; write: boolean };
@@ -286,6 +287,71 @@ Then("a second app reads the same directory and workspace roster", async functio
 });
 
 // --- Administration ---------------------------------------------------------------------------------
+
+// --- A workspace owned by a dedicated account (R8) -------------------------------------------------------------------
+
+Given("a person is signed in, and a workspace account exists that has never signed in to the app", async function (this: AppWorld) {
+  const person = await this.actor("owner", 0);
+  await this.actor("account", 0);
+  await signIn(this, person);
+});
+
+When("the person creates a workspace owned by that account, approved by signing in as the account", async function (this: AppWorld) {
+  const person = owner(this);
+  const account = actorNamed(this, "account");
+  const name = uniqueWorkspaceName();
+  await person.page.getByLabel("Workspace account (optional DID)").fill(account.did);
+  await submitWorkspaceName(person, name);
+  await approveConsentAs(person, account);
+  await waitForApp(this, person);
+  await person.page.getByRole("heading", { name, exact: true }).waitFor({ state: "visible", timeout: 90_000 }).catch(async (error: unknown) => {
+    throw new Error(`The workspace did not appear after the account's approval. Page: ${(await person.page.locator("body").innerText()).slice(0, 2_000)}`, { cause: error });
+  });
+  this.workspaceName = name;
+  this.workspaceUri = await workspaceUriOnPage(person);
+});
+
+Then("the workspace belongs to the account, and the person is its first admin while the account is not an admin", async function (this: AppWorld) {
+  const person = owner(this);
+  const account = actorNamed(this, "account");
+  assert.equal(this.workspaceUri.split("/")[2], account.did, "the workspace's URIs name the account");
+  await waitForAdminControls(this, person);
+  // Read at the account's own host, where its records live (a read by the test, not a sign-in to the app).
+  const admins = await this.pdsGet<{ records?: Array<{ value: { subject: string; active: boolean } }> }>(
+    account, "com.atproto.space.listRecords", { space: this.workspaceUri, repo: account.did, collection: "new.flock.admin", limit: "100" },
+  );
+  assert.equal(admins.status, 200, JSON.stringify(admins.body));
+  assert.deepEqual(admins.body.records?.map(({ value }) => ({ subject: value.subject, active: value.active })), [{ subject: person.did, active: true }],
+    "the one admin record is the person's, none is the account's");
+  // A member list is the owner's to read.
+  assert.equal((await membersOf(this, account, this.workspaceUri)).some((entry) => entry.did === person.did && entry.read && entry.write), true, "the person is a member");
+});
+
+When("the person makes a second member an admin", async function (this: AppWorld) {
+  const person = owner(this);
+  const second = await this.actor("deputy", 1);
+  await inviteMemberAs(person, second.did);
+  const link = await copyInviteLink(person);
+  await openInviteLinkAndSignIn(this, second, link);
+  await joinFromInvitation(second);
+  await promote(this, second);
+});
+
+When("both admins sign out", async function (this: AppWorld) {
+  for (const role of ["owner", "deputy"]) await signOutAs(actorNamed(this, role));
+});
+
+Then("an admin who signs in again still administers the workspace", async function (this: AppWorld) {
+  const second = actorNamed(this, "deputy");
+  await signIn(this, second);
+  await createChannelAs(this, second, "after sign out", "public");
+});
+
+Then("the workspace account never signed in to the app", function (this: AppWorld) {
+  const account = actorNamed(this, "account");
+  assert.equal(account.page.url(), "about:blank", "the account's own browser never opened the app");
+  assert.deepEqual(account.xrpc, [], "and made no call");
+});
 
 Given("a workspace authority DID owns the workspace", async function (this: AppWorld) {
   const actor = await this.actor("owner");

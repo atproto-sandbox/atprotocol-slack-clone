@@ -68,6 +68,33 @@ export async function completeConsent(actor: Actor, decision: "authorize" | "den
   await button.click();
 }
 
+/**
+ * The PDS consent screen in `actor`'s browser, approved by signing in there as `account`: a dedicated workspace account
+ * approving the operator's grant from someone else's browser. It never visits the web app.
+ */
+export async function approveConsentAs(actor: Actor, account: Actor): Promise<void> {
+  const { page } = actor;
+  await page.waitForURL(/\/oauth\/authorize\?/, { timeout: 30_000 });
+  const authorize = page.getByRole("button", { name: "Authorize", exact: true });
+  const password = page.locator("input[name=password]");
+  await password.or(authorize).first().waitFor({ state: "visible" });
+  if (await password.isVisible()) {
+    // The flow names the account it is for, so the host may show its username already filled and fixed.
+    const username = page.locator("input[name=username]");
+    if (await username.isEditable().catch(() => false) && !await username.inputValue()) await username.fill(account.handle);
+    await password.fill(account.password);
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  }
+  await authorize.waitFor({ state: "visible" });
+  await authorize.click();
+}
+
+/** Signs `actor` out with the app's sign-out control, and waits for the sign-in form. */
+export async function signOutAs(actor: Actor): Promise<void> {
+  await actor.page.getByRole("button", { name: "Sign out", exact: true }).click();
+  await actor.page.getByLabel("Your AT Protocol handle").waitFor({ state: "visible", timeout: 60_000 });
+}
+
 /** From the app's sign-in page: enter the DID and approve the app's one grant at the account's host. */
 export async function signInFromLoginForm(world: AppWorld, actor: Actor): Promise<void> {
   await signInFromLoginFormAt(actor, world.appOrigin);

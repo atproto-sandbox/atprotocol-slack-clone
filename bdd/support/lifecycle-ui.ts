@@ -87,8 +87,16 @@ export async function directory(world: AppWorld, owner: Actor): Promise<ChannelR
   }));
 }
 
+/** The scenario's account that owns the workspace: the one its URI names (the "owner", or a dedicated workspace account). */
+function workspaceAuthority(world: AppWorld): Actor {
+  const did = world.workspaceUri.split("/")[2];
+  const authority = [...world.actors.values()].find((actor) => actor.did === did);
+  assert.ok(authority, `no actor of this scenario owns ${world.workspaceUri}`);
+  return authority;
+}
+
 export async function channelNamed(world: AppWorld, name: string): Promise<ChannelRef> {
-  const channel = (await directory(world, actorNamed(world, "owner"))).find((entry) => entry.name === name);
+  const channel = (await directory(world, workspaceAuthority(world))).find((entry) => entry.name === name);
   assert.ok(channel, `the directory has no channel named ${name}`);
   return channel;
 }

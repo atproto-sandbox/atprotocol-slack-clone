@@ -15,6 +15,13 @@ const PERSISTED_KINDS = {
     required: ["name"], optional: [], actor: "authority", submittedThrough: "createWorkspace",
     steps: ["workspace-space", "inbox-space", "general-channel-space", "workspace-profile", "owner-roster", "owner-admin", "general-directory"],
   },
+  createWorkspace: {
+    required: ["name", "creator"], optional: [], actor: "creator", submittedThrough: "createWorkspace",
+    steps: [
+      "workspace-space", "inbox-space", "general-channel-space", "workspace-profile",
+      "creator-workspace", "creator-inbox", "creator-general", "creator-roster", "creator-admin", "general-directory",
+    ],
+  },
   inviteMember: {
     required: ["subject"], optional: [], actor: "admin", submittedThrough: "execute",
     steps: ["member-workspace", "member-inbox-writer", "member-public-channel-{skey}", "member-workspace-roster", "member-state-verified"],
@@ -134,7 +141,7 @@ test("every step a kind's run body records is a step that kind declares", async 
     for (const name of names) assert.ok(declared.some((matches) => matches(name)), `${file}: step "${name}" is not declared`);
     checked += calls.length;
   }
-  assert.equal(checked, 58, "every context.step call in the kind modules was checked");
+  assert.equal(checked, 68, "every context.step call in the kind modules was checked");
 });
 
 function isKind(value: unknown): value is { kind: string; steps: readonly string[] } {
@@ -153,9 +160,12 @@ test("the kinds that create or archive spaces name them, so the operator registe
   assert.deepEqual(operationKind("bootstrapWorkspace")!.createsSpaces!(actor, { kind: "bootstrapWorkspace", name: "Acme" }), [
     `at://${owner}/space/new.flock.workspace/acme`, `at://${owner}/space/new.flock.inbox/acme`, `at://${owner}/space/new.flock.channel/acme-general`,
   ]);
+  assert.deepEqual(operationKind("createWorkspace")!.createsSpaces!(actor, { kind: "createWorkspace", name: "Acme", creator: "did:plc:creator" }), [
+    `at://${owner}/space/new.flock.workspace/acme`, `at://${owner}/space/new.flock.inbox/acme`, `at://${owner}/space/new.flock.channel/acme-general`,
+  ]);
   assert.deepEqual(operationKind("createChannel")!.createsSpaces!(actor, { kind: "createChannel", skey: "design" }), [`at://${owner}/space/new.flock.channel/acme-design`]);
   assert.deepEqual(operationKind("archiveChannel")!.archivesSpaces!(actor, { kind: "archiveChannel", skey: "acme-design" }), [`at://${owner}/space/new.flock.channel/acme-design`]);
-  for (const kind of Object.values(OPERATION_KINDS).filter((entry) => !["bootstrapWorkspace", "createChannel", "archiveChannel"].includes(entry.kind))) {
+  for (const kind of Object.values(OPERATION_KINDS).filter((entry) => !["bootstrapWorkspace", "createWorkspace", "createChannel", "archiveChannel"].includes(entry.kind))) {
     assert.equal(kind.createsSpaces ?? kind.archivesSpaces, undefined, `${kind.kind} neither creates nor archives a space`);
   }
 });

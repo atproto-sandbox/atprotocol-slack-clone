@@ -1,9 +1,8 @@
 import { hasAuthorityGrant, restoreAuthorityGrant } from "../src/operator/authority-grant";
 import { requireActiveWorkspaceAdmin } from "../src/operator/security";
-import { executeOperatorOperation } from "../src/operator/operations";
+import { executeOperatorOperation, resumePendingWorkspaceCreations } from "../src/operator/operations";
 import { listJournaledWorkspaces, listStalledOperations } from "../src/operator/journal";
 import { tidNow } from "@flock/protocol/keys";
-import { resumePendingWorkspaceBootstraps } from "../src/operator/kinds/bootstrap-workspace";
 import { assertOperatorWorkspaceWithinEnvelope } from "../src/operator/workspace-envelope";
 import { registrationDeps, registrationProblems, sweepRegistrations } from "../src/operator/registrations";
 import { pruneNotices } from "../src/operator/notices";
@@ -39,9 +38,9 @@ async function main() {
         continue;
       }
       const session = await restoreAuthorityGrant(workspace.authorityDid);
-      const bootstrapResults = await resumePendingWorkspaceBootstraps(session, workspace.uri, registrationDeps);
-      if (bootstrapResults.some((result) => result.state !== "completed")) {
-        process.stderr.write(`${workspace.uri}: workspace bootstrap recovery remains pending.\n`);
+      const creationResults = await resumePendingWorkspaceCreations(session, workspace.uri, registrationDeps);
+      if (creationResults.some((result) => result.state !== "completed")) {
+        process.stderr.write(`${workspace.uri}: workspace creation recovery remains pending.\n`);
         failed = true;
         continue;
       }

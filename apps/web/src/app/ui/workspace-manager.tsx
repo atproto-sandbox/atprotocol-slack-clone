@@ -4,7 +4,7 @@ import dynamic from "next/dynamic";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChannelView } from "./channel-view";
 import { acceptFailure } from "@flock/client/accept-errors";
-import { captureInviteLink, INVITE_LINK_KEY, isAccessFailure, makeTid, needsAuthorityApproval, WORKSPACE_OPERATION_KEY, workspaceOperationIdFor, messageOf, parsePastedWorkspaceUri, type Message, type PendingOperation } from "./client-api";
+import { captureInviteLink, INVITE_LINK_KEY, isAccessFailure, makeTid, needsAuthorityApproval, WORKSPACE_OPERATION_KEY, workspaceCreationFrom, workspaceOperationIdFor, messageOf, parsePastedWorkspaceUri, type Message, type PendingOperation, type WorkspaceCreationInput } from "./client-api";
 import { DmProvider, type DmView } from "./dm-context";
 import { InviteBanner } from "./invite-banner";
 import { SessionProvider, useBrowserSessionContext } from "./session-context";
@@ -16,7 +16,9 @@ import { useAdminViews } from "./use-admin-views";
 import { useDiscovery } from "./use-discovery";
 import { shownChannel, type ChosenChannel } from "./selection";
 import type { BrowserSessionConfig } from "../../browser/session";
+import { isDid } from "@flock/protocol/keys";
 import { SPACE_TYPE } from "@flock/protocol/nsids";
+import type { AuthorityFlowRequest } from "@flock/client/operator-client";
 import type { WorkspaceDiscovery } from "@flock/client/workspace-client";
 import type { WorkspaceSummary } from "@flock/protocol/workspace-summary";
 
@@ -42,6 +44,7 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
   const [chosenChannel, setChosenChannel] = useState<ChosenChannel | null>(null);
   const [dmView, setDmView] = useState<DmView | null>(null);
   const [workspaceName, setWorkspaceName] = useState("");
+  const [workspaceAccount, setWorkspaceAccount] = useState("");
   const [inviteUri, setInviteUri] = useState("");
   const [invitedTo, setInvitedTo] = useState<string | null>(null);
   const [messageText, setMessageText] = useState("");
@@ -123,8 +126,11 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
     }
   }, [engine, clearChannelView, refreshWorkspaces]);
 
-  /** Sends the workspace authority to approve the operator's grant: for a workspace it is creating, or again for its own. */
-  const approveAuthority = useCallback(async (input: { purpose: "createWorkspace"; name: string } | { purpose: "reauthorize" }) => {
+  /**
+   * Sends the browser to approve the operator's grant for a workspace account (this person's own, or a dedicated one, which
+   * whoever approves must sign in as): for a workspace being created, or again for a workspace's account.
+   */
+  const approveAuthority = useCallback(async (input: AuthorityFlowRequest) => {
     if (!engine?.operator) throw new Error("Connect this browser first.");
     const { url } = await engine.operator.startAuthorityFlow(input);
     window.location.assign(url);
@@ -134,14 +140,19 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
   // and this approves, returns, and resumes the same journaled operation once. The resumed
   // attempt must not redirect again, so an approval that did not take shows an error instead
   // of looping.
-  const createWorkspaceNamed = useCallback(async (name: string, options: { mayAuthorize: boolean }) => {
+  const createWorkspaceNamed = useCallback(async ({ name, account }: WorkspaceCreationInput, options: { mayAuthorize: boolean }) => {
     let redirecting = false;
     setBusy(true); setError(""); setStatus("Creating protocol spaces and authority records…");
     try {
-      const operationId = workspaceOperationIdFor(name, sessionStorage.getItem(WORKSPACE_OPERATION_KEY));
-      sessionStorage.setItem(WORKSPACE_OPERATION_KEY, JSON.stringify({ name, operationId }));
+      if (account && !isDid(account)) throw new Error("The workspace account must be a DID (did:plc:… or did:web:…), or empty for your own account.");
+      const authority = account ? { authority: account } : {};
+      const operationId = workspaceOperationIdFor({ name, account }, sessionStorage.getItem(WORKSPACE_OPERATION_KEY));
+      sessionStorage.setItem(WORKSPACE_OPERATION_KEY, JSON.stringify({ name, account, operationId }));
       if (!engine?.operator) throw new Error("Connect this browser first.");
-      const result = await engine.operator.createWorkspace({ name, operationId });
+      const result = await engine.operator.createWorkspace({ name, operationId, ...authority });
+      // Under a dedicated account the person is a member, not the owner: like an invited member, they list the workspace
+      // once they have accepted it, which only their own session can write.
+      if (account && result.state === "completed") await engine.workspaces.accept(result.workspace);
       const current = await refreshWorkspaces();
       if (current?.workspaces.some((entry) => entry.uri === result.workspace)) {
         setChosenWorkspace(result.workspace); clearChannelView();
@@ -157,14 +168,18 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
         setError("Permission was not granted, so the workspace could not be created. Try again and approve every requested permission.");
         return;
       }
-      setStatus("Opening the permission screen. Approve it to finish creating your workspace…");
+      setStatus(account
+        ? "Opening the permission screen. Sign in there as the workspace account and approve it to finish creating the workspace…"
+        : "Opening the permission screen. Approve it to finish creating your workspace…");
       sessionStorage.setItem("spaces.pendingWorkspaceName", name);
+      sessionStorage.setItem("spaces.pendingWorkspaceAccount", account);
       sessionStorage.setItem("spaces.autoCreateWorkspace", "1");
       try {
-        await approveAuthority({ purpose: "createWorkspace", name });
+        await approveAuthority({ purpose: "createWorkspace", name, ...(account ? { authority: account } : {}) });
         redirecting = true;
       } catch (grantFailure) {
         sessionStorage.removeItem("spaces.pendingWorkspaceName");
+        sessionStorage.removeItem("spaces.pendingWorkspaceAccount");
         sessionStorage.removeItem("spaces.autoCreateWorkspace");
         setStatus("");
         setError(messageOf(grantFailure));
@@ -179,6 +194,7 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
       if (!event.persisted) return;
       sessionStorage.removeItem("spaces.autoCreateWorkspace");
       sessionStorage.removeItem("spaces.pendingWorkspaceName");
+      sessionStorage.removeItem("spaces.pendingWorkspaceAccount");
       setBusy(false);
       setStatus("");
     };
@@ -209,10 +225,12 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
       if (resumedRef.current) return;
       resumedRef.current = true;
       const savedName = sessionStorage.getItem("spaces.pendingWorkspaceName");
-      if (savedName) { setWorkspaceName(savedName); sessionStorage.removeItem("spaces.pendingWorkspaceName"); }
+      const savedAccount = sessionStorage.getItem("spaces.pendingWorkspaceAccount") ?? "";
+      if (savedName) { setWorkspaceName(savedName); setWorkspaceAccount(savedAccount); sessionStorage.removeItem("spaces.pendingWorkspaceName"); }
+      sessionStorage.removeItem("spaces.pendingWorkspaceAccount");
       if (sessionStorage.getItem("spaces.autoCreateWorkspace")) {
         sessionStorage.removeItem("spaces.autoCreateWorkspace");
-        if (savedName) void createWorkspaceNamed(savedName, { mayAuthorize: false });
+        if (savedName) void createWorkspaceNamed({ name: savedName, account: savedAccount }, { mayAuthorize: false });
       }
       const savedOperatorOperation = sessionStorage.getItem("spaces.pendingOperatorOperation");
       if (savedOperatorOperation) {
@@ -252,7 +270,7 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
 
   async function createWorkspace(event: FormEvent) {
     event.preventDefault();
-    await createWorkspaceNamed(workspaceName, { mayAuthorize: true });
+    await createWorkspaceNamed(workspaceCreationFrom({ name: workspaceName, account: workspaceAccount }, did), { mayAuthorize: true });
   }
 
   async function connectInvitation(uri: string) {
@@ -302,10 +320,14 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
     } catch (caught) {
       setStatus("");
       if (needsAuthorityApproval(caught)) {
-        // The operator's grant for this workspace lapsed. Only its authority can renew it; the operation stays pending to retry.
-        if (parsePastedWorkspaceUri(workspace)?.authorityDid !== did) { setError(messageOf(caught)); return; }
-        setStatus("Opening the permission screen. Approve it, then retry the pending operation.");
-        await approveAuthority({ purpose: "reauthorize" }).catch((grantFailure) => { setStatus(""); setError(messageOf(grantFailure)); });
+        // The operator's grant for this workspace lapsed. Any admin may open its renewal, which only a sign-in as the workspace
+        // account completes; the operation stays pending to retry.
+        const authority = parsePastedWorkspaceUri(workspace)?.authorityDid;
+        if (!authority) { setError(messageOf(caught)); return; }
+        setStatus(authority === did
+          ? "Opening the permission screen. Approve it, then retry the pending operation."
+          : "Opening the permission screen. Sign in there as the workspace account and approve it, then retry the pending operation.");
+        await approveAuthority({ purpose: "reauthorize", authority }).catch((grantFailure) => { setStatus(""); setError(messageOf(grantFailure)); });
         return;
       }
       setError(messageOf(caught));
@@ -390,7 +412,7 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
           {inboxView && inboxView.skipped.length > 0 && <p className="status-note" role="status">Join requests from {inboxView.skipped.map(({ did: writer, reason }) => `${writer} (${reason})`).join("; ")} could not be read.</p>}
           {sessionStatus === "ready" && <>
           {!dmView && workspacesLoaded && invitedTo && !workspaces.some((workspace) => workspace.uri === invitedTo) && <InviteBanner workspace={invitedTo} busy={busy} join={() => void connectInvitation(invitedTo)} dismiss={dismissInvitation} />}
-          {!dmView && !activeWorkspace && <WorkspaceOnboarding busy={busy} workspaceName={workspaceName} setWorkspaceName={setWorkspaceName} inviteUri={inviteUri} setInviteUri={setInviteUri} createWorkspace={createWorkspace} beginAccept={beginAccept} />}
+          {!dmView && !activeWorkspace && <WorkspaceOnboarding busy={busy} workspaceName={workspaceName} setWorkspaceName={setWorkspaceName} workspaceAccount={workspaceAccount} setWorkspaceAccount={setWorkspaceAccount} inviteUri={inviteUri} setInviteUri={setInviteUri} createWorkspace={createWorkspace} beginAccept={beginAccept} />}
           {!dmView && activeWorkspace && (!activeChannel || activeChannel.workspace !== activeUri) && <WorkspaceHome did={did} activeWorkspace={activeWorkspace} busy={busy} workspaceDegraded={workspaceDegraded} inbox={inboxView?.requests ?? []} inboxLoaded={inboxView !== undefined && !inboxView.refused} inboxPermissionMissing={inboxView?.refused === true} runOperation={runOperation} leaveWorkspace={leaveWorkspace} syncInbox={syncInbox} setStatus={setStatus} setError={setError} />}
           {!dmView && activeChannel?.workspace === activeUri && <ChannelView did={did} activeChannel={activeChannel} activeWorkspace={activeWorkspace} busy={busy} workspaceDegraded={workspaceDegraded} requestSubmitted={requestSubmitted} content={openContent.content} loadOlder={openContent.loadOlder} reload={openContent.reload} messageText={messageText} setMessageText={setMessageText} replyTo={replyTo} setReplyTo={setReplyTo} runOperation={runOperation} leaveChannel={leaveChannel} requestPrivateAccess={requestPrivateAccess} sendMessage={sendMessage} toggleReaction={toggleReaction} editMessage={editMessage} deleteMessage={deleteMessage} setError={setError} />}
           {dmView && <DmStage />}

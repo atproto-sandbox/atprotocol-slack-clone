@@ -136,7 +136,7 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
     assert.equal(firstResponse.status(), 403, "creating before approving the permission is refused");
     const refusal = await firstResponse.json() as { error: string; message: string };
     assert.equal(refusal.error, "AuthorizationRequired", "the refusal is typed, not a raw scope string");
-    assert.match(refusal.message, /needs the authority's approval/);
+    assert.match(refusal.message, /needs the workspace account's approval/);
     await page.waitForURL(/\/oauth\/authorize\?/, { timeout: 30_000 });
 
     // Decline on the consent screen. Returning without the permission must explain itself (no redirect
@@ -422,8 +422,8 @@ async function authorityFlowTwiceAtOnce(app: Stack, appDatabase: string): Promis
     assert.match(third.url(), /[?&]authority=failed/, "a used state is refused even with its cookie");
     assert.deepEqual(grantRow(), afterApproval, "the refused replay leaves the grant as it was");
 
-    // and the grant that remains works: the operator creates a workspace with it
-    const created = await operator.createWorkspace({ name: "Grant Survivor", operationId: tidNow() });
+    // and the grant that remains works: the operator creates a workspace with it (one per run, since a creation makes a new one)
+    const created = await operator.createWorkspace({ name: `Grant Survivor ${app.operatorUrl.port}`, operationId: tidNow() });
     assert.equal(created.state, "completed", JSON.stringify(created));
   } finally {
     await browser.close();

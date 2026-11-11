@@ -62,8 +62,8 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     assert.deepEqual(appSpaceTypes.get("new.flock.workspace")?.collections, [
       "new.flock.workspace.profile", "new.flock.directory", "new.flock.workspace.roster", "new.flock.admin", "new.flock.acceptance",
     ], "the pinned OAuth provider resolves the app's published workspace space declaration");
-    const [{ bootstrapWorkspace, resumePendingWorkspaceBootstraps }, { executeOperatorOperation, listInboxWriters }, { parseWorkspaceRef }, { mintSpaceCredential }, { sessionClient }, { createEngine }, { listIndependentWorkspaces, readIndependentChannelPage, readIndependentPrivateRoster }, { validateSpaceRecord }, { acceptanceRecordKey, channelUri, decisionRecordKey, inboxUri, reactionRecordKey, requestRecordKey, subjectKey, tidNow }, { getRawDb }] = await Promise.all([
-      import("@flock/operator/operator/kinds/bootstrap-workspace"), import("@flock/operator/operator/operations"), import("@flock/operator/operator/actor"), import("@flock/operator/atproto/space-credential"), import("@flock/operator/atproto/client"), import("@flock/client/engine"), import("@flock/reader/independent"), import("@flock/protocol/registry"), import("@flock/protocol/keys"), import("@flock/operator/lib/db"),
+    const [{ createWorkspace }, { executeOperatorOperation, listInboxWriters, resumePendingWorkspaceCreations }, { parseWorkspaceRef }, { mintSpaceCredential }, { sessionClient }, { createEngine }, { listIndependentWorkspaces, readIndependentChannelPage, readIndependentPrivateRoster }, { validateSpaceRecord }, { acceptanceRecordKey, channelUri, decisionRecordKey, inboxUri, reactionRecordKey, requestRecordKey, subjectKey, tidNow }, { getRawDb }] = await Promise.all([
+      import("@flock/operator/operator/kinds/create-workspace"), import("@flock/operator/operator/operations"), import("@flock/operator/operator/actor"), import("@flock/operator/atproto/space-credential"), import("@flock/operator/atproto/client"), import("@flock/client/engine"), import("@flock/reader/independent"), import("@flock/protocol/registry"), import("@flock/protocol/keys"), import("@flock/operator/lib/db"),
     ]);
     const { readSpaceRecords } = await import("@flock/operator/atproto/space-ops");
 
@@ -81,13 +81,13 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     const adminEngine = createEngine(actorTransport({ plcUrl: network.plc.url }, admin), { operator: { serviceRef, endpoint: await inProcessOperator() } });
     const independentDeps = (actor: TestActor) => actorTransport({ plcUrl: network.plc.url }, actor);
 
-    const bootstrap = await bootstrapWorkspace(ownerSession as never, { name: "Pilot Workspace", operationId: tidNow() });
+    const bootstrap = await createWorkspace(ownerSession as never, { creator: owner.did, name: "Pilot Workspace", operationId: tidNow() });
     assert.equal(bootstrap.state, "completed");
     const bootstrapJournal = getRawDb().prepare("SELECT workspace,request_json FROM operation WHERE actor=? AND operation_id=?")
       .get(owner.did, bootstrap.operationId) as { workspace: string; request_json: string };
-    assert.equal(bootstrapJournal.workspace, owner.did, "bootstrap journal rows use the authority key shared by operator recovery");
+    assert.equal(bootstrapJournal.workspace, owner.did, "creation journal rows use the authority key shared by operator recovery");
     assert.deepEqual(JSON.parse(bootstrapJournal.request_json), {
-      workspace: bootstrap.workspace, request: { kind: "bootstrapWorkspace", name: "Pilot Workspace" },
+      workspace: bootstrap.workspace, request: { kind: "createWorkspace", name: "Pilot Workspace", creator: owner.did },
     });
     getRawDb().prepare("INSERT INTO notification_registration (service_ref,space_uri,expires_at) VALUES (?,?,?)").run(serviceRef, bootstrap.workspace, Date.now() + 2 * 60 * 60 * 1000);
     const workspace = parseWorkspaceRef(bootstrap.workspace);
@@ -106,7 +106,7 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
         return ownerSession.fetchHandler(path, init);
       },
     };
-    const pendingBootstrap = await bootstrapWorkspace(flakyBootstrapSession as never, { name: "Retry Workspace", operationId: tidNow() });
+    const pendingBootstrap = await createWorkspace(flakyBootstrapSession as never, { creator: owner.did, name: "Retry Workspace", operationId: tidNow() });
     rejectBootstrapSpaceCreate = false;
     assert.equal(pendingBootstrap.state, "pending");
     const retryActor = { ...operatorActor, workspace: parseWorkspaceRef(pendingBootstrap.workspace) };
@@ -128,13 +128,13 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
         return ownerSession.fetchHandler(path, init);
       },
     };
-    const pendingScheduledBootstrap = await bootstrapWorkspace(schedulerFlakySession as never, {
-      name: "Scheduled Retry Workspace", operationId: tidNow(),
+    const pendingScheduledBootstrap = await createWorkspace(schedulerFlakySession as never, {
+      creator: owner.did, name: "Scheduled Retry Workspace", operationId: tidNow(),
     });
     rejectScheduledBootstrap = false;
     assert.equal(pendingScheduledBootstrap.state, "pending");
     assert.deepEqual(pendingScheduledBootstrap.completedSteps, [], "the failure is before workspace creation and the initial admin record");
-    const scheduledBootstrapRecovery = await resumePendingWorkspaceBootstraps(ownerSession as never, pendingScheduledBootstrap.workspace);
+    const scheduledBootstrapRecovery = await resumePendingWorkspaceCreations(ownerSession as never, pendingScheduledBootstrap.workspace);
     assert.equal(scheduledBootstrapRecovery.length, 1);
     assert.equal(scheduledBootstrapRecovery[0]?.state, "completed", "the owner session resumes bootstrap before an admin record exists");
 

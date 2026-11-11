@@ -13,15 +13,15 @@ test("a member session alone follows a channel live through the change feed", { 
   let server: AppServer | undefined;
   try {
     server = await startOperatorServer();
-    const [{ restoreAuthorityGrant }, { bootstrapWorkspace }, { registrationDeps }, { requireActiveWorkspaceAdmin }, { executeOperatorOperation }, { tidNow }, { createEngine }, { ChangeFollower }] = await Promise.all([
-      import("@flock/operator/operator/authority-grant"), import("@flock/operator/operator/kinds/bootstrap-workspace"), import("@flock/operator/operator/registrations"), import("@flock/operator/operator/security"),
+    const [{ restoreAuthorityGrant }, { createWorkspace }, { registrationDeps }, { requireActiveWorkspaceAdmin }, { executeOperatorOperation }, { tidNow }, { createEngine }, { ChangeFollower }] = await Promise.all([
+      import("@flock/operator/operator/authority-grant"), import("@flock/operator/operator/kinds/create-workspace"), import("@flock/operator/operator/registrations"), import("@flock/operator/operator/security"),
       import("@flock/operator/operator/operations"), import("@flock/protocol/keys"), import("@flock/client/engine"), import("@flock/client/feed"),
     ]);
     const authority = await pds.createActor("feedowner", 0);
     const reader = await pds.createActor("feedreader", 1);
     const writer = await pds.createActor("feedwriter", 0);
     await storeAuthorityGrant(pds.hosts[0], authority.did, "feed-authority-dpop");
-    const created = await bootstrapWorkspace(await restoreAuthorityGrant(authority.did), { name: "Feed Follow", operationId: tidNow() }, registrationDeps);
+    const created = await createWorkspace(await restoreAuthorityGrant(authority.did), { creator: authority.did, name: "Feed Follow", operationId: tidNow() }, registrationDeps);
     assert.equal(created.state, "completed");
     const admin = await requireActiveWorkspaceAdmin(created.workspace, authority.did);
     for (const member of [reader, writer]) {

@@ -10,7 +10,7 @@ import type { OperatorActor } from "../actor";
 import { AuthorityReauthorizationRequiredError } from "../authority-grant";
 import { executeOperatorOperation } from "../operations";
 import { fakeAuthorityPds, type FakeAuthorityPdsOptions } from "../testing/fake-authority-pds";
-import { resumePendingWorkspaceBootstraps } from "./bootstrap-workspace";
+import { resumePendingWorkspaceCreations } from "../operations";
 import type { RegistrationDeps } from "../registrations";
 
 // Journal rows exactly as the code before the kind table wrote them: the request JSON, its hash, the actor and the step
@@ -69,7 +69,7 @@ test("a pre-table bootstrap row with no step done resumes under its hash and run
   const pds = authorityPds(OWNER);
 
   // #when the authority's pending bootstraps are resumed
-  const [result] = await resumePendingWorkspaceBootstraps(pds.session, ACME);
+  const [result] = await resumePendingWorkspaceCreations(pds.session, ACME);
 
   // #then the same row completes every step, in order, each written once, under the authority's workspace lock
   assert.equal(result?.state, "completed");
@@ -90,7 +90,7 @@ test("a pre-table bootstrap row half done resumes after its last completed step"
   const pds = authorityPds(OWNER);
 
   // #when it is resumed
-  const [result] = await resumePendingWorkspaceBootstraps(pds.session, workspace);
+  const [result] = await resumePendingWorkspaceCreations(pds.session, workspace);
 
   // #then no space is created again, and only the four record writes run
   assert.equal(result?.state, "completed");
@@ -186,7 +186,7 @@ test("resumed operations register the spaces they created, as a new one does", a
 
   // #when the reconcile job resumes them, with the registration deps it passes
   const resumedBootstrap = recordingRegistration();
-  const [result] = await resumePendingWorkspaceBootstraps(authorityPds(OWNER).session, bootstrap, resumedBootstrap.deps);
+  const [result] = await resumePendingWorkspaceCreations(authorityPds(OWNER).session, bootstrap, resumedBootstrap.deps);
   const resumedChannel = recordingRegistration();
   await executeOperatorOperation(owner, "2222222222226", { kind: "createChannel", skey: "random", name: "random", visibility: "public" }, resumedChannel.deps);
 

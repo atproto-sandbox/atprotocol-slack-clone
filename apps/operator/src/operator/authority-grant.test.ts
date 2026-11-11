@@ -33,13 +33,13 @@ function fakeCallback(signedInAs: string, appState: string, label: string, signO
   });
 }
 
-function boundFlow(options: { expectedDid?: string; expiresAt?: number } = {}): { params: URLSearchParams; cookie: string; appState: string } {
+function boundFlow(options: { expectedDid?: string; initiatorDid?: string; expiresAt?: number } = {}): { params: URLSearchParams; cookie: string; appState: string } {
   const state = flow.createOAuthFlowState();
   const appState = flow.createOAuthFlowState();
   const cookie = flow.createOAuthFlowCookieValue(state, {
     kind: "authority",
     expectedDid: options.expectedDid ?? AUTHORITY,
-    initiatorDid: AUTHORITY,
+    initiatorDid: options.initiatorDid ?? AUTHORITY,
     purpose: { kind: "createWorkspace", name: "Acme" },
     expiresAt: options.expiresAt ?? Math.floor(Date.now() / 1000) + 900,
     appState,
@@ -76,11 +76,56 @@ test("a ticket expires after two minutes", () => {
   assert.equal(late, null);
 });
 
-test("until R8 only the authority account can ask for its own grant", () => {
-  assert.throws(
-    () => grant.issueAuthorityTicket({ initiatorDid: OTHER, authorityDid: AUTHORITY, purpose: { kind: "reauthorize" } }),
-    /Only the authority account/,
-  );
+test("someone else may ask for a workspace account's approval: the ticket keeps who asked apart from the account", () => {
+  const ticket = grant.issueAuthorityTicket({ initiatorDid: OTHER, authorityDid: AUTHORITY, purpose: { kind: "createWorkspace", name: "Acme" } });
+  assert.deepEqual(grant.consumeAuthorityTicket(ticket), { initiatorDid: OTHER, authorityDid: AUTHORITY, purpose: { kind: "createWorkspace", name: "Acme" } });
+});
+
+const creationAuthorizations = () => getRawDb().prepare("SELECT authority_did, initiator_did, name, operation_id FROM creation_authorization ORDER BY initiator_did")
+  .all() as Array<{ authority_did: string; initiator_did: string; name: string; operation_id: string | null }>;
+
+test("a creation flow someone else started leaves them an approval of that one workspace; the account's own flow leaves none", async () => {
+  getRawDb().prepare("DELETE FROM creation_authorization").run();
+
+  // given a creation flow the workspace account started for itself, completed
+  const own = boundFlow();
+  await grant.completeAuthorityFlow(own.params, own.cookie, { callbackClient: fakeCallback(AUTHORITY, own.appState, "own", []), persistGrant: grant.persistAuthorityGrant });
+
+  // then it needs only the grant: no approval is written
+  assert.deepEqual(creationAuthorizations(), []);
+
+  // when someone else starts one for the account, and someone who can sign in as the account approves it
+  const theirs = boundFlow({ initiatorDid: OTHER });
+  const completed = await grant.completeAuthorityFlow(theirs.params, theirs.cookie, { callbackClient: fakeCallback(AUTHORITY, theirs.appState, "theirs", []), persistGrant: grant.persistAuthorityGrant });
+
+  // then the grant is the account's, and the one approval is theirs, for that name, for any one operation
+  assert.deepEqual(completed, { authorityDid: AUTHORITY, initiatorDid: OTHER, purpose: { kind: "createWorkspace", name: "Acme" } });
+  assert.equal((await storedGrant(AUTHORITY))?.tokenSet.access_token, "theirs");
+  assert.deepEqual(creationAuthorizations(), [{ authority_did: AUTHORITY, initiator_did: OTHER, name: "Acme", operation_id: null }]);
+});
+
+test("a creation flow someone else started, approved by the wrong account, leaves them no approval", async () => {
+  getRawDb().prepare("DELETE FROM creation_authorization").run();
+  const theirs = boundFlow({ initiatorDid: OTHER });
+  await assert.rejects(grant.completeAuthorityFlow(theirs.params, theirs.cookie, {
+    callbackClient: fakeCallback(OTHER, theirs.appState, "wrong", []), persistGrant: grant.persistAuthorityGrant,
+  }), /different account/);
+  assert.deepEqual(creationAuthorizations(), []);
+});
+
+test("a reauthorization someone else started grants nothing but the account's fresh session", async () => {
+  getRawDb().prepare("DELETE FROM creation_authorization").run();
+  const state = flow.createOAuthFlowState();
+  const appState = flow.createOAuthFlowState();
+  const cookie = flow.createOAuthFlowCookieValue(state, {
+    kind: "authority", expectedDid: AUTHORITY, initiatorDid: OTHER, purpose: { kind: "reauthorize" },
+    expiresAt: Math.floor(Date.now() / 1000) + 900, appState,
+  }, KEY);
+  await grant.completeAuthorityFlow(new URLSearchParams({ state, code: "code", iss: "https://pds.test" }), cookie, {
+    callbackClient: fakeCallback(AUTHORITY, appState, "renewed", []), persistGrant: grant.persistAuthorityGrant,
+  });
+  assert.equal((await storedGrant(AUTHORITY))?.tokenSet.access_token, "renewed");
+  assert.deepEqual(creationAuthorizations(), []);
 });
 
 test("a malformed or unknown ticket starts nothing", () => {

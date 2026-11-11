@@ -73,16 +73,16 @@ test("recovery keeps unreadable journal rows visible instead of silently skippin
   const workspace = "at://did:plc:owner/space/new.flock.workspace/team";
   const recoveringActor = { did: "did:plc:admin", workspace: { authorityDid: "did:plc:owner", uri: workspace } } as OperatorActor;
   const rows = [
-    { actor: "did:plc:admin", operationId: "current", requestJson: JSON.stringify({ workspace, request: { kind: "reconcileWorkspace" } }) },
-    { actor: "did:plc:other", operationId: "valid", requestJson: JSON.stringify({ workspace, request: { kind: "leaveWorkspace" } }) },
-    { actor: "did:plc:other", operationId: "corrupt", requestJson: "{not json" },
-    { actor: "did:plc:other", operationId: "no-request", requestJson: JSON.stringify({ workspace }) },
-    { actor: "did:plc:other", operationId: "elsewhere", requestJson: JSON.stringify({ workspace: `${workspace}-2`, request: { kind: "leaveWorkspace" } }) },
+    { actor: "did:plc:admin", operationId: "current", completedSteps: [], requestJson: JSON.stringify({ workspace, request: { kind: "reconcileWorkspace" } }) },
+    { actor: "did:plc:other", operationId: "valid", completedSteps: [], requestJson: JSON.stringify({ workspace, request: { kind: "leaveWorkspace" } }) },
+    { actor: "did:plc:other", operationId: "corrupt", completedSteps: [], requestJson: "{not json" },
+    { actor: "did:plc:other", operationId: "no-request", completedSteps: [], requestJson: JSON.stringify({ workspace }) },
+    { actor: "did:plc:other", operationId: "elsewhere", completedSteps: [], requestJson: JSON.stringify({ workspace: `${workspace}-2`, request: { kind: "leaveWorkspace" } }) },
   ];
   assert.deepEqual(savedWorkspaceOperations(rows, recoveringActor, "current"), [
-    { actor: "did:plc:other", operationId: "valid", request: { kind: "leaveWorkspace" } },
-    { actor: "did:plc:other", operationId: "corrupt", request: null },
-    { actor: "did:plc:other", operationId: "no-request", request: null },
+    { actor: "did:plc:other", operationId: "valid", completedSteps: [], request: { kind: "leaveWorkspace" } },
+    { actor: "did:plc:other", operationId: "corrupt", completedSteps: [], request: null },
+    { actor: "did:plc:other", operationId: "no-request", completedSteps: [], request: null },
   ]);
 });
 

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { OperatorRemoteError } from "@flock/client/operator-client";
 import { ChannelUnavailableError } from "@flock/client/errors";
-import { captureInviteLink, clearAccountScopedState, INVITE_LINK_KEY, inviteLinkFor, workspaceFromInviteSearch, isAccessFailure, needsAuthorityApproval, makeTid, mergeMessages, threadMessages, workspaceOperationIdFor, parsePastedWorkspaceUri, splitDids, toSlug, withReactions, type Message } from "./client-api";
+import { captureInviteLink, clearAccountScopedState, INVITE_LINK_KEY, inviteLinkFor, workspaceFromInviteSearch, isAccessFailure, needsAuthorityApproval, makeTid, mergeMessages, threadMessages, workspaceCreationFrom, workspaceOperationIdFor, parsePastedWorkspaceUri, splitDids, toSlug, withReactions, type Message } from "./client-api";
 
 const message = (rkey: string): Message => ({ uri: `at://did:plc:a/space/x/${rkey}`, rkey, repo: "did:plc:a", value: { text: rkey } });
 
@@ -44,14 +44,21 @@ test("only the operator's answers that the authority must approve its grant ask 
 });
 
 test("a stored workspace operation ID is reused only for the exact name it was issued for", () => {
-  const stored = JSON.stringify({ name: "Acme", operationId: "2222222222222" });
+  const stored = JSON.stringify({ name: "Acme", account: "did:plc:team", operationId: "2222222222222" });
   const mint = () => "3333333333333";
-  assert.equal(workspaceOperationIdFor("Acme", stored, mint), "2222222222222", "same name resumes the same operation");
-  assert.equal(workspaceOperationIdFor("Acme Inc", stored, mint), "3333333333333", "a corrected name starts a fresh operation");
-  assert.equal(workspaceOperationIdFor("Acme", null, mint), "3333333333333");
-  for (const corrupt of ["", "not json", "null", "[]", JSON.stringify({ name: "Acme" }), JSON.stringify({ name: 1, operationId: "x" })]) {
-    assert.equal(workspaceOperationIdFor("Acme", corrupt, mint), "3333333333333", `ignores ${JSON.stringify(corrupt)}`);
+  assert.equal(workspaceOperationIdFor({ name: "Acme", account: "did:plc:team" }, stored, mint), "2222222222222", "same name and account resume the same operation");
+  assert.equal(workspaceOperationIdFor({ name: "Acme Inc", account: "did:plc:team" }, stored, mint), "3333333333333", "a corrected name starts a fresh operation");
+  assert.equal(workspaceOperationIdFor({ name: "Acme", account: "" }, stored, mint), "3333333333333", "another workspace account starts a fresh operation");
+  assert.equal(workspaceOperationIdFor({ name: "Acme", account: "did:plc:team" }, null, mint), "3333333333333");
+  for (const corrupt of ["", "not json", "null", "[]", JSON.stringify({ name: "Acme" }), JSON.stringify({ name: "Acme", operationId: "x" }), JSON.stringify({ name: 1, account: "", operationId: "x" })]) {
+    assert.equal(workspaceOperationIdFor({ name: "Acme", account: "" }, corrupt, mint), "3333333333333", `ignores ${JSON.stringify(corrupt)}`);
   }
+});
+
+test("the creation form keys a trimmed name, and the person's own DID as no workspace account", () => {
+  assert.deepEqual(workspaceCreationFrom({ name: "  Acme ", account: " did:plc:team " }, "did:plc:me"), { name: "Acme", account: "did:plc:team" });
+  assert.deepEqual(workspaceCreationFrom({ name: "Acme", account: " did:plc:me" }, "did:plc:me"), { name: "Acme", account: "" });
+  assert.deepEqual(workspaceCreationFrom({ name: "Acme", account: "" }, "did:plc:me"), { name: "Acme", account: "" });
 });
 
 test("invite links round-trip a workspace URI and reject anything that is not one", () => {

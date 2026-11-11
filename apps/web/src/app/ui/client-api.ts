@@ -119,18 +119,34 @@ export function captureInviteLink(search: string, storage: Pick<Storage, "setIte
 
 export const WORKSPACE_OPERATION_KEY = "spaces.pendingWorkspaceOperation";
 
-/** The operation ID for creating `name`: the stored one only if it was issued for this exact name, so fixing a typo never conflicts with it. */
-export function workspaceOperationIdFor(name: string, stored: string | null, mint: () => string = makeTid): string {
-  const previous = parseStoredOperation(stored);
-  return previous && previous.name === name ? previous.operationId : mint();
+/** A workspace being created: its name, and its workspace account's DID ("" for the person's own account). */
+export type WorkspaceCreationInput = { name: string; account: string };
+
+/**
+ * The creation the form describes, as the operator keys it: the trimmed name, and no workspace account when the one typed
+ * is the person's own, since that is a workspace they own rather than one they are a member of.
+ */
+export function workspaceCreationFrom(form: WorkspaceCreationInput, did: string): WorkspaceCreationInput {
+  const account = form.account.trim();
+  return { name: form.name.trim(), account: account === did ? "" : account };
 }
 
-function parseStoredOperation(stored: string | null): { name: string; operationId: string } | null {
+/**
+ * The operation ID for creating this workspace: the stored one only if it was issued for this exact name and account, so
+ * fixing a typo in either never conflicts with it.
+ */
+export function workspaceOperationIdFor(creation: WorkspaceCreationInput, stored: string | null, mint: () => string = makeTid): string {
+  const previous = parseStoredOperation(stored);
+  return previous && previous.name === creation.name && previous.account === creation.account ? previous.operationId : mint();
+}
+
+function parseStoredOperation(stored: string | null): (WorkspaceCreationInput & { operationId: string }) | null {
   if (!stored) return null;
   try {
     const value: unknown = JSON.parse(stored);
-    if (value && typeof value === "object" && "name" in value && "operationId" in value && typeof value.name === "string" && typeof value.operationId === "string") {
-      return { name: value.name, operationId: value.operationId };
+    if (value && typeof value === "object" && "name" in value && "account" in value && "operationId" in value
+      && typeof value.name === "string" && typeof value.account === "string" && typeof value.operationId === "string") {
+      return { name: value.name, account: value.account, operationId: value.operationId };
     }
   } catch {
     return null;

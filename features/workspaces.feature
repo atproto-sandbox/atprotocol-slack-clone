@@ -57,6 +57,15 @@ Feature: Workspace membership and discovery
 
   Rule: Workspace administration follows current authority state
 
+    Scenario: A workspace owned by a dedicated account outlives every admin signing out
+      Given a person is signed in, and a workspace account exists that has never signed in to the app
+      When the person creates a workspace owned by that account, approved by signing in as the account
+      Then the workspace belongs to the account, and the person is its first admin while the account is not an admin
+      When the person makes a second member an admin
+      And both admins sign out
+      Then an admin who signs in again still administers the workspace
+      And the workspace account never signed in to the app
+
     Scenario: The authority remains the first active admin
       Given a workspace authority DID owns the workspace
       When the workspace is created
