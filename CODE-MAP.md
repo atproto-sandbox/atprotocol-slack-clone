@@ -138,13 +138,25 @@ src/
                               kinds/index.ts is the table every request and journal row dispatches through, and
                               kinds/kinds.test.ts pins every persisted kind, field and step name.
     operations.ts            Request validation from the kind table, recovery of pending rows, and execution.
-    security.ts              Service-auth verification; authorizeOperationActor decides who may run an operation (an
-                              admin; the authority alone for an authority kind; the member a member kind concerns,
-                              through the kind's authorizeMember, after the request is validated).
+    security.ts              Service-auth verification, with each method's accepted token lifetime (15 minutes for
+                              getChanges, 75 s for everything else); authorizeOperationActor decides who may run an
+                              operation (an admin; the authority alone for an authority kind; the member a member kind
+                              concerns, through the kind's authorizeMember, after the request is validated).
+    feed.ts                  getChanges: per-space cursors, denied/reset, one shared poller per process, the access check
+                              repeated on the spaces about to be answered.
+    member-access.ts         Who may follow a space's changes: the DM rule, or, for a space the operator registered, its
+                              member list read with the authority grant, cached 60 s. members.ts is the only way the
+                              operator changes a member list (lint-enforced), and drops the cached list when it does.
+    registrations.ts         The operator's change-notice sink: registered after an operation creates a space (kinds
+                              declare createsSpaces/archivesSpaces), renewed by a sweep (process start via
+                              src/instrumentation.ts, and the reconcile job) under a lease that is also its schedule,
+                              failures backed off per space and reported with lapsed ones; stalled.ts adds them to the
+                              stalled-operations report.
     workspace-state.ts       The operator's reads and writes of rosters, admins and the directory.
     workspace-envelope.ts    The operator's own envelope check, read with the authority's grant.
-    notices.ts               registerNotify bookkeeping; which write/deleted notices are accepted; the capped
-                              write-notice table the change streams read.
+    notices.ts               Which write/deleted notices are accepted; the capped write-notice table (per space, per
+                              authority, per space type) and the floors that turn a cursor below what was pruned into a
+                              reset, read by the change feed and the SSE streams.
     testing/fake-authority-pds.ts
                              In-memory authority PDS for operator unit tests; production code never imports it.
   workspaces/             Server-side channel/workspace sync, caching, and the read model.
@@ -166,6 +178,10 @@ src/
                               channels, retention sweep, sign-out.
     channel-client.ts, workspace-client.ts, operator-client.ts
                              The member's operations, each rule of the route table owned here; engine.ts wires them.
+                              operator-client.ts calls every operator method, reusing one long-poll token for getChanges.
+    feed.ts                  ChangeFollower: follows spaces through getChanges in the order that loses nothing (head,
+                              sync, follow), syncs changed and reset spaces, mints afresh for denied ones, and backs off a
+                              round that could not finish.
     accept-errors.ts, inbox-requests.ts, errors.ts
                              Accept refusal codes, one writer's join requests, ChannelUnavailableError.
   testing/                Test-only: fake-network.ts (the in-memory multi-host PDS network for every engine and DM
@@ -222,14 +238,17 @@ workspace layers even by accident.
 ## Entry points
 
 - `src/app/page.tsx` — the one page in the app; resolves session state and renders everything else.
-- `pnpm dev` / `pnpm build` / `pnpm start` — Next.js dev/build/prod (see `package.json`).
+- `pnpm dev` / `pnpm build` / `pnpm start` — Next.js dev/build/prod (see `package.json`). `src/instrumentation.ts` runs once
+  as a server process starts: the operator's notice-registration sweep.
+- `src/app/xrpc/new.flock.operator.*` — the operator's methods (`execute`, `getOperation`, `listInboxWriters`, `getChanges`,
+  `createWorkspace`, `startAuthorityFlow`, `listStalledOperations`), each authenticated by a PDS-issued service token.
 - `pnpm playground` (`scripts/playground.ts`) — a local copy of the whole stack with ready-made accounts, for trying the app by hand (`ATPROTO_PINNED_CHECKOUT` must point at the built pinned checkout).
 - `pnpm reconcile` (`scripts/reconcile-workspaces.ts`) — the scheduled membership-reconciliation job (`docs/operations.md`).
 - `pnpm authority` (`scripts/authority-grant.ts`) — generate an authority client key, or revoke an authority grant.
 - `pnpm backup:db` (`scripts/backup-db.mjs`) — online SQLite backup.
 - `pnpm test` — unit tests (`node --test` over every `src/**/*.test.ts`), plus `bdd/gate.test.ts`, which keeps the Gherkin features honest (below).
 - `pnpm test:bdd` — builds, then runs the executable Gherkin scenarios in `features/` with `@cucumber/cucumber`, driving real browsers against a real pinned PDS network.
-- `pnpm test:acceptance` — builds, then runs `protocol-tests/{app-acceptance,reconcile-workspaces,dm-acceptance,authority-grant,platform-capabilities,engine-acceptance}.test.ts` against a real pinned PDS network (needs `ATPROTO_PINNED_CHECKOUT`). `platform-capabilities` and `authority-grant` hold the platform refactor's capability checks (K1, K3, K7), and `engine-acceptance` the engine's parity with the independent reader on two real hosts, all on the network-only helper `protocol-tests/support/pds-network.ts` (`actorTransport` builds the engine's transport for a real account).
+- `pnpm test:acceptance` — builds, then runs `protocol-tests/{app-acceptance,reconcile-workspaces,dm-acceptance,authority-grant,platform-capabilities,engine-acceptance,feed-follow}.test.ts` against a real pinned PDS network (needs `ATPROTO_PINNED_CHECKOUT`). `platform-capabilities` and `authority-grant` hold the platform refactor's capability checks (K1, K3, K7), `engine-acceptance` the engine's parity with the independent reader on two real hosts, and `feed-follow` (R5's gate) a cookie-less member following a channel live through `getChanges` with `next start` receiving the PDS's notices (`protocol-tests/support/app-server.ts`), all on the network-only helper `protocol-tests/support/pds-network.ts` (`actorTransport` builds the engine's transport for a real account).
 - `pnpm test:browser` — builds, then runs Playwright specs in `protocol-tests/browser/` (`--test-concurrency=1`, since the specs start real servers); `cross-origin.spec.ts` (K9) signs in through the real OAuth flow and sends every request from a separate web origin.
 - `pnpm test:performance` — `protocol-tests/{performance-envelope,dm-performance}.test.ts` (slow; the channel envelope test is ~30 minutes); each latest-100 read is repeated ten times and reported as median and p95.
 - `pnpm test:sync-budget` — `protocol-tests/sync-budget.ts` (K4, R4's gate): calls and time of the engine's first open, reopen and one new message at 20, 100 and 200 writers; it fails if a reopen's call count depends on the writer count.

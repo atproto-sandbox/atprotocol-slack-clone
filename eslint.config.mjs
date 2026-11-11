@@ -31,6 +31,11 @@ const ONE_WAY_IMPORTS = {
   group: ["@/workspaces", "@/workspaces/*", "@/app", "@/app/*"],
   message: "Imports point one way: the atproto and operator layers must not depend on the member read model (src/workspaces) or the app.",
 };
+const MEMBER_LIST_WRITES = {
+  name: "@/atproto/space-ops",
+  importNames: ["putSpaceMember", "removeSpaceMember"],
+  message: "The operator changes member lists through src/operator/members.ts, which drops the change feed's cached list.",
+};
 const NO_DM_IMPORT = {
   group: ["@/dm", "@/dm/*"],
   message: "M6 independence proof: this module must not import src/dm/** (see .ai/plans/dm-tasks/m6.md).",
@@ -45,6 +50,13 @@ export default defineConfig([
     files: ["src/atproto/**/*.{ts,tsx}", "src/operator/**/*.{ts,tsx}"],
     rules: {
       "no-restricted-imports": ["error", { patterns: [ONE_WAY_IMPORTS] }],
+    },
+  },
+  {
+    files: ["src/operator/**/*.{ts,tsx}"],
+    ignores: ["src/operator/members.ts"],
+    rules: {
+      "no-restricted-imports": ["error", { patterns: [ONE_WAY_IMPORTS], paths: [MEMBER_LIST_WRITES] }],
     },
   },
   {

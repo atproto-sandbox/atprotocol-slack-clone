@@ -149,8 +149,21 @@ export function consumeAuthorityTicket(ticket: string, now = unixNow()): Authori
   return { initiatorDid: row.initiator_did, authorityDid: row.authority_did, purpose };
 }
 
+/**
+ * The operator URL that starts the authority flow for `did` as its own authority (R1: the initiator is the authority): a
+ * ticket for creating the named workspace, or, without a name, for reauthorizing. A browser opens it as a top-level navigation.
+ */
+export function authorityFlowUrl(did: string, workspaceName: string | null, now = unixNow()): URL {
+  const ticket = issueAuthorityTicket({
+    initiatorDid: did,
+    authorityDid: did,
+    purpose: workspaceName ? { kind: "createWorkspace", name: workspaceName } : { kind: "reauthorize" },
+  }, now);
+  return authorityStartUrl(ticket);
+}
+
 /** Starts the flow a ticket allows: returns the PDS authorization URL and the per-flow cookie that binds it to this browser. */
-export async function startAuthorityFlow(ticket: string, now = unixNow()): Promise<{ url: URL; cookieName: string; cookieValue: string }> {
+export async function beginAuthorityFlow(ticket: string, now = unixNow()): Promise<{ url: URL; cookieName: string; cookieValue: string }> {
   const intent = consumeAuthorityTicket(ticket, now);
   if (!intent) throw new AuthorityFlowError("This approval link is invalid, already used, or expired.");
   const scope = authorityGrantScope();

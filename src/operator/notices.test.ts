@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test, { after } from "node:test";
 import { closeDb, getRawDb } from "@/lib/db";
 import { dmConversationUri, dmInboxUri } from "@/protocol/keys";
-import { isNotificationAccepted, recordWriteNotification } from "./notices";
+import { isNotificationAccepted, purgeSpaceNotifications, readNotices, recordWriteNotification } from "./notices";
 
 const DIRECTORY = mkdtempSync(join(tmpdir(), "slack-notifications-test-"));
 const SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
@@ -23,8 +23,9 @@ const rowCount = (where = "1=1", ...values: unknown[]) => (getRawDb().prepare(`S
 const notice = (space: string, index: number) => ({ space, repo: "did:plc:writer", repoRev: `rev-${index}` });
 
 function reset(): void {
-  getRawDb().prepare("DELETE FROM space_notification").run();
-  getRawDb().prepare("DELETE FROM notification_registration").run();
+  for (const table of ["space_notification", "space_notification_type_floor", "space_notification_space_floor", "notification_registration"]) {
+    getRawDb().prepare(`DELETE FROM ${table}`).run();
+  }
 }
 
 test("a notice is accepted for a space the app registered and refused for one it did not", () => {
@@ -81,32 +82,32 @@ test("notices older than a week are dropped when a new one arrives", () => {
   assert.equal(rowCount("space_uri=?", CHANNEL), 1);
 });
 
-test("the table keeps only its newest 50,000 notices overall, however many authorities file them", () => {
-  // #given 50,010 notices from 50,010 different DM-space authorities
+test("a space type keeps only its newest 50,000 notices, however many authorities file them, and another type keeps its own", () => {
+  // #given 50,010 notices from 50,010 different DM-space authorities, and one channel notice among the oldest
   reset();
-  const insert = getRawDb().prepare("INSERT INTO space_notification (space_uri,repo_did,rev,notified_at) VALUES (?,?,?,?)");
+  recordWriteNotification(notice(CHANNEL, 0));
+  const insert = getRawDb().prepare("INSERT INTO space_notification (space_uri,space_type,type_seq,repo_did,rev,notified_at) VALUES (?,'new.flock.dm.inbox',?,?,?,?)");
   const now = Math.floor(Date.now() / 1000);
   getRawDb().transaction(() => {
-    for (let index = 0; index < 50_010; index += 1) insert.run(`at://did:plc:a${index}/space/new.flock.dm.inbox/self`, "did:plc:writer", `rev-${index}`, now);
+    for (let index = 0; index < 50_009; index += 1) insert.run(`at://did:plc:a${index}/space/new.flock.dm.inbox/self`, index + 1, "did:plc:writer", `rev-${index}`, now);
   })();
+  recordWriteNotification(notice("at://did:plc:a50009/space/new.flock.dm.inbox/self", 50_009));
 
-  // #when one more notice arrives
-  recordWriteNotification(notice(CHANNEL, 0));
-
-  // #then the oldest are dropped and the table is at the cap
-  assert.equal(rowCount(), 50_000);
+  // #then the DM inbox type is at its cap, and the channel notice, older than all of them, is still there
+  assert.equal(rowCount("space_type=?", "new.flock.dm.inbox"), 50_000);
   assert.equal(rowCount("space_uri=?", CHANNEL), 1);
 });
 
 test("an authority's cap counts exactly its own notices, not those of an authority whose DID starts the same", () => {
   // #given 5,400 notices for did:plc:ab spread over six spaces (each under the per-space cap), and ten for did:plc:abc
   reset();
-  const insert = getRawDb().prepare("INSERT INTO space_notification (space_uri,repo_did,rev,notified_at) VALUES (?,?,?,?)");
+  const insert = getRawDb().prepare("INSERT INTO space_notification (space_uri,space_type,type_seq,repo_did,rev,notified_at) VALUES (?,'new.flock.channel',?,?,?,?)");
   const now = Math.floor(Date.now() / 1000);
+  let seq = 0;
   getRawDb().transaction(() => {
-    for (let index = 0; index < 5_400; index += 1) insert.run(`at://did:plc:ab/space/new.flock.channel/c${index % 6}`, "did:plc:writer", `rev-${index}`, now);
-    for (let index = 0; index < 10; index += 1) insert.run("at://did:plc:abc/space/new.flock.channel/x", "did:plc:writer", `rev-${index}`, now);
-    for (let index = 0; index < 10; index += 1) insert.run("at://did:plc:ab0/space/new.flock.channel/x", "did:plc:writer", `rev-${index}`, now);
+    for (let index = 0; index < 5_400; index += 1) insert.run(`at://did:plc:ab/space/new.flock.channel/c${index % 6}`, ++seq, "did:plc:writer", `rev-${index}`, now);
+    for (let index = 0; index < 10; index += 1) insert.run("at://did:plc:abc/space/new.flock.channel/x", ++seq, "did:plc:writer", `rev-${index}`, now);
+    for (let index = 0; index < 10; index += 1) insert.run("at://did:plc:ab0/space/new.flock.channel/x", ++seq, "did:plc:writer", `rev-${index}`, now);
   })();
 
   // #when one more notice arrives for did:plc:ab
@@ -116,4 +117,60 @@ test("an authority's cap counts exactly its own notices, not those of an authori
   assert.equal(rowCount("space_uri LIKE ?", "at://did:plc:ab/%"), 5_000);
   assert.equal(rowCount("space_uri LIKE ?", "at://did:plc:abc/%"), 10);
   assert.equal(rowCount("space_uri LIKE ?", "at://did:plc:ab0/%"), 10, "the DID whose first differing character is the range's end character is untouched too");
+});
+
+// Cursors: what `readNotices` answers for followed spaces, which the change feed passes on.
+
+const OTHER_CHANNEL = "at://did:plc:owner/space/new.flock.channel/gamma";
+const newestId = (space: string) => (getRawDb().prepare("SELECT MAX(id) AS id FROM space_notification WHERE space_uri=?").get(space) as { id: number }).id;
+
+test("a space with a notice newer than its cursor is changed, with its newest notice as the cursor; head moves with every notice", () => {
+  reset();
+  const start = readNotices([]).head;
+  recordWriteNotification(notice(CHANNEL, 1));
+  recordWriteNotification(notice(OTHER_CHANNEL, 2));
+  recordWriteNotification(notice(CHANNEL, 3));
+  const answer = readNotices([{ space: CHANNEL, after: start }, { space: OTHER_CHANNEL, after: newestId(OTHER_CHANNEL) }]);
+  assert.equal(answer.head, start + 3);
+  assert.deepEqual(answer.changed, [{ space: CHANNEL, cursor: newestId(CHANNEL) }]);
+  assert.deepEqual(answer.reset, []);
+});
+
+test("a space added after the last notice is not missed when followed from head", () => {
+  reset();
+  recordWriteNotification(notice(CHANNEL, 1));
+  const { head } = readNotices([]);
+  recordWriteNotification(notice(OTHER_CHANNEL, 2));
+  assert.deepEqual(readNotices([{ space: OTHER_CHANNEL, after: head }]).changed.map((change) => change.space), [OTHER_CHANNEL]);
+});
+
+test("a cursor below what was pruned for its space is reset; one above it, or another space's, is not", () => {
+  // #given a cursor taken before a space ran past its own cap
+  reset();
+  recordWriteNotification(notice(OTHER_CHANNEL, 0));
+  const before = readNotices([]).head;
+  for (let index = 0; index < 1_005; index += 1) recordWriteNotification(notice(CHANNEL, index));
+  const answer = readNotices([{ space: CHANNEL, after: before }, { space: OTHER_CHANNEL, after: before }]);
+  assert.deepEqual(answer.reset, [CHANNEL], "the busy space's pruned notices may hold a change after the cursor");
+  assert.deepEqual(readNotices([{ space: CHANNEL, after: newestId(CHANNEL) - 10 }]).reset, [], "a cursor inside what is kept is not");
+});
+
+test("a cursor below what was pruned for its type, by age or by cap, is reset", () => {
+  reset();
+  const now = Math.floor(Date.now() / 1000);
+  recordWriteNotification(notice(CHANNEL, 0), now - 8 * 86_400);
+  const before = newestId(CHANNEL) - 1;
+  recordWriteNotification(notice(OTHER_CHANNEL, 1), now);
+  assert.deepEqual(readNotices([{ space: CHANNEL, after: before }]).reset, [CHANNEL], "its week-old notice aged out");
+  assert.deepEqual(readNotices([{ space: CHANNEL, after: newestId(OTHER_CHANNEL) }]).reset, []);
+});
+
+test("a cursor above head, from another database, is reset, and a deleted space's floor goes with it", () => {
+  reset();
+  recordWriteNotification(notice(CHANNEL, 0));
+  const { head } = readNotices([]);
+  assert.deepEqual(readNotices([{ space: CHANNEL, after: head + 100 }]).reset, [CHANNEL]);
+  for (let index = 0; index < 1_001; index += 1) recordWriteNotification(notice(OTHER_CHANNEL, index));
+  purgeSpaceNotifications(OTHER_CHANNEL);
+  assert.equal((getRawDb().prepare("SELECT count(*) AS count FROM space_notification_space_floor WHERE space_uri=?").get(OTHER_CHANNEL) as { count: number }).count, 0);
 });

@@ -4,13 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after, before } from "node:test";
 import { closeDb, getRawDb } from "@/lib/db";
-import { canonicalJson, channelUri, requestDigest, stableHash, subjectKey, workspaceUri } from "@/protocol/keys";
+import { canonicalJson, channelUri, inboxUri, requestDigest, stableHash, subjectKey, workspaceUri } from "@/protocol/keys";
 import { COLLECTION } from "@/protocol/nsids";
 import type { OperatorActor } from "../actor";
 import { AuthorityReauthorizationRequiredError } from "../authority-grant";
 import { executeOperatorOperation } from "../operations";
 import { fakeAuthorityPds, type FakeAuthorityPdsOptions } from "../testing/fake-authority-pds";
 import { resumePendingWorkspaceBootstraps } from "./bootstrap-workspace";
+import type { RegistrationDeps } from "../registrations";
 
 // Journal rows exactly as the code before the kind table wrote them: the request JSON, its hash, the actor and the step
 // names. Each must resume under the same hash, actor and workspace lock, and repeat none of its completed steps.
@@ -161,4 +162,36 @@ test("recovery that meets a missing scope keeps the other admin's row pending an
   await assert.rejects(next, AuthorityReauthorizationRequiredError);
   assert.deepEqual({ ...journalRow("222222222222c"), request_hash: undefined }, { actor: ADMIN, request_hash: undefined, state: "pending", steps_json: "[]" });
   assert.equal((getRawDb().prepare("SELECT count(*) AS count FROM operation WHERE operation_id = ?").get("222222222222d") as { count: number }).count, 0, "the new operation was not started");
+});
+
+/** Registration deps that record what they were asked to register, as the operator's request handlers and reconcile pass. */
+function recordingRegistration() {
+  const registered: string[] = [];
+  const deps: RegistrationDeps = {
+    register: async (_session, space) => { registered.push(space); return Date.now() + 24 * 60 * 60 * 1000; },
+    unregister: async () => undefined,
+    now: () => Date.now(),
+  };
+  return { deps, registered };
+}
+
+test("resumed operations register the spaces they created, as a new one does", async () => {
+  // #given a pending bootstrap, and an admin's pending private channel in another workspace
+  const name = "Epsilon";
+  const bootstrap = workspaceUri(OWNER, `epsilon-${stableHash(name).slice(0, 10)}`);
+  writePreKindTableRow({ workspace: bootstrap, actor: OWNER, operationId: "2222222222224", requestHash: requestDigest({ workspace: bootstrap, request: { kind: "bootstrapWorkspace", name } }), request: { kind: "bootstrapWorkspace", name }, steps: [] });
+  const { workspace, owner } = seededWorkspace("zeta");
+  const request = { kind: "createChannel", skey: "design", name: "design", visibility: "private", members: [ADMIN] };
+  writePreKindTableRow({ workspace, actor: ADMIN, operationId: "2222222222225", requestHash: requestDigest({ workspace, request }), request, steps: [] });
+
+  // #when the reconcile job resumes them, with the registration deps it passes
+  const resumedBootstrap = recordingRegistration();
+  const [result] = await resumePendingWorkspaceBootstraps(authorityPds(OWNER).session, bootstrap, resumedBootstrap.deps);
+  const resumedChannel = recordingRegistration();
+  await executeOperatorOperation(owner, "2222222222226", { kind: "createChannel", skey: "random", name: "random", visibility: "public" }, resumedChannel.deps);
+
+  // #then each completed operation's spaces are registered: the bootstrap's three, the resumed channel and the new one
+  assert.equal(result?.state, "completed");
+  assert.deepEqual(resumedBootstrap.registered, [bootstrap, inboxUri(OWNER, bootstrap.split("/").at(-1)!), channelUri(OWNER, `${bootstrap.split("/").at(-1)!}-general`)]);
+  assert.deepEqual(resumedChannel.registered, [channelUri(OWNER, "zeta-design"), channelUri(OWNER, "zeta-random")]);
 });

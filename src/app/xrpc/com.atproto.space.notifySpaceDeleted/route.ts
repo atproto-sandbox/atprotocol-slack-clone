@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { OperatorAuthError } from "@/operator/errors";
+import { dropMemberList } from "@/operator/member-access";
 import { authenticateSpaceNotification } from "@/operator/space-notification";
 import { parseSpaceDeletedNotification } from "@/atproto/write-notification";
 import { purgeDeletedSpace } from "@/workspaces/cache";
@@ -8,8 +9,9 @@ import { readRequestJson, RequestJsonError } from "@/lib/bounded-json";
 export const runtime = "nodejs";
 
 /**
- * The space authority says a registered space was deleted: every account's copy of it goes. Applying it twice changes nothing; the
- * registration is dropped with the copies, so a retry of an already-applied notice is refused, which loses nothing.
+ * The space authority says a registered space was deleted: every account's copy of it goes, and so does the member list the
+ * change feed answers from. Applying it twice changes nothing; the registration is dropped with the copies, so a retry of an
+ * already-applied notice is refused, which loses nothing.
  */
 export async function POST(request: NextRequest) {
   try {
@@ -17,6 +19,7 @@ export async function POST(request: NextRequest) {
     if (!notification) return xrpcError(400, "InvalidRequest", "Invalid space deletion notification.");
     await authenticateSpaceNotification(request, "com.atproto.space.notifySpaceDeleted", notification.space);
     purgeDeletedSpace(notification.space);
+    dropMemberList(notification.space);
     return NextResponse.json({}, { headers: { "cache-control": "no-store" } });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Notification rejected.";

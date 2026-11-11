@@ -9,7 +9,7 @@ import { canonicalOAuthScope } from "@/auth/oauth-scope";
 import { oauthFlowCookieName, startOAuthFlow } from "@/auth/oauth-flow";
 import { getConfig } from "@/lib/config";
 import { isDid } from "@/protocol/keys";
-import { authorityStartUrl, issueAuthorityTicket } from "@/operator/authority-grant";
+import { authorityFlowUrl } from "@/operator/authority-grant";
 import { readRequestJson, RequestJsonError } from "@/lib/bounded-json";
 import { rejectCrossOriginMutation } from "@/lib/same-origin-mutation";
 
@@ -29,12 +29,7 @@ export async function POST(request: NextRequest) {
     if (body.action === "workspaceAuthority") {
       // Not a widening of this sign-in: a ticket for the separate authority flow, which only this account can complete.
       const name = typeof body.workspaceName === "string" ? body.workspaceName.trim() : "";
-      const ticket = issueAuthorityTicket({
-        initiatorDid: session.did,
-        authorityDid: session.did,
-        purpose: name ? { kind: "createWorkspace", name } : { kind: "reauthorize" },
-      });
-      return NextResponse.json({ redirectUrl: authorityStartUrl(ticket).toString() });
+      return NextResponse.json({ redirectUrl: authorityFlowUrl(session.did, name || null).toString() });
     }
     if (body.skey !== undefined && typeof body.skey !== "string") {
       return NextResponse.json({ error: "Invalid channel key." }, { status: 400 });

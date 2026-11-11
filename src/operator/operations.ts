@@ -9,29 +9,39 @@ import { operationKind } from "./kinds";
 import type { OperationKind, OperatorRequest } from "./kinds/kind";
 import { assertAdminMutationsEnabled } from "./mutations-paused";
 import { parseJoinRequestUri } from "./workspace-state";
+import { afterOperation, type RegistrationDeps } from "./registrations";
 
 // Dispatch for journaled operator operations: validate a request against its kind, recover earlier pending operations,
 // and run the kind's steps under the journal. What each kind does lives in ./kinds, one file per kind.
 
+/**
+ * Runs an operation submitted through `execute`, after resuming this workspace's pending ones. With `registration`, the
+ * spaces each completed run created or archived then get or lose the operator's notice registration (the request handlers
+ * and the reconcile job pass it; an operation that stops between completing and registering is left to the sweep).
+ */
 export async function executeOperatorOperation(
   actor: OperatorActor,
   operationId: string,
   rawRequest: unknown,
+  registration?: RegistrationDeps,
 ): Promise<OperationView> {
   assertAdminMutationsEnabled();
   const { kind, request } = validateOperatorRequest(rawRequest, actor, "execute");
   assertMayStartKind(kind, actor.did, actor.workspace);
   const current = (row: { actor: string; operationId: string }) => row.actor === actor.did && row.operationId === operationId;
   const pending = listRecoverableOperations(actor.workspace.authorityDid, actor.workspace.uri).filter((row) => !current(row));
-  if (actor.canRecoverOperations) await resumeRecoverableOperations(actor, operationId);
+  if (actor.canRecoverOperations) await resumeRecoverableOperations(actor, operationId, registration);
   else if (pending.length > 0) throw new OperationBusyError("Pending admin operations must be recovered by an active admin before member leave can proceed.");
-  return runJournaledOperation(actor, operationId, request, kind.steps, (context) => kind.run(actor, context, request));
+  const view = await runJournaledOperation(actor, operationId, request, kind.steps, (context) => kind.run(actor, context, request));
+  if (registration) await afterOperation(actor, kind, request, view, registration);
+  return view;
 }
 
-async function resumeRecoverableOperations(actor: OperatorActor, currentOperationId: string): Promise<void> {
+async function resumeRecoverableOperations(actor: OperatorActor, currentOperationId: string, registration?: RegistrationDeps): Promise<void> {
   const pending = savedWorkspaceOperations(listRecoverableOperations(actor.workspace.authorityDid, actor.workspace.uri), actor, currentOperationId);
   let awaitingApproval = false;
   for (const row of pending) {
+    let completed: { priorActor: OperatorActor; kind: OperationKind; request: OperatorRequest; view: OperationView } | undefined;
     try {
       if (!row.request) throw new Error("Journaled operation request is unreadable.");
       // The row was created only after its actor passed service-auth and PDS role checks. The current admin authorizes
@@ -43,9 +53,18 @@ async function resumeRecoverableOperations(actor: OperatorActor, currentOperatio
       assertMayStartKind(kind, row.actor, actor.workspace);
       const view = await runJournaledOperation(priorActor, row.operationId, request, kind.steps, (context) => kind.run(priorActor, context, request), { replay: true });
       awaitingApproval ||= view.authorizationRequired === true;
+      completed = { priorActor, kind, request, view };
     } catch (error) {
       // Leave the row pending for an active admin to inspect; never reconcile around it.
       auditOperationEvent(actor, row.operationId, "operationResumeFailed", { originalActor: row.actor, error: error instanceof Error ? error.message : "Unknown error" });
+    }
+    if (completed && registration) {
+      try {
+        await afterOperation(completed.priorActor, completed.kind, completed.request, completed.view, registration);
+      } catch (error) {
+        // The operation is done; only its notice registration is not, and the sweep makes it.
+        auditOperationEvent(actor, row.operationId, "operationRegistrationFailed", { error: error instanceof Error ? error.message : "Unknown error" });
+      }
     }
   }
   // Nothing else may run until the authority approves what the pending operations need.

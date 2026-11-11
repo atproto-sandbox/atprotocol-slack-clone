@@ -5,7 +5,6 @@ import type * as ListRecords from "@/lexicons/api/types/com/atproto/space/listRe
 import type * as ListRepos from "@/lexicons/api/types/com/atproto/space/listRepos";
 import { decryptCachedValue, encryptCachedValue, type CachedRecordContext } from "@/auth/encrypted-cache";
 import { resolvePds } from "@/atproto/identity";
-import { registerSpaceNotifications } from "@/operator/notices";
 import { assertBoundedRecordPage, listBoundedRepos } from "@/atproto/record-pages";
 import { selectValidChannelMessages } from "@/atproto/valid-channel-messages";
 import { mintSpaceCredential, type SpaceCredential } from "@/atproto/space-credential";
@@ -47,7 +46,6 @@ export async function readChannelPage(session: OAuthSession, workspace: string, 
   let credential: SpaceCredential;
   try {
     credential = await mintSpaceCredential(session, space);
-    await registerSpaceNotifications(credential, space);
   } catch (error) {
     if (isAccessLost(error)) purgeSpaceCache(session.did, space);
     throw error;

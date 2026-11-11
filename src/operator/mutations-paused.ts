@@ -7,6 +7,10 @@ export class AdminMutationsPausedError extends Error {
   }
 }
 
+export function adminMutationsPaused(): boolean {
+  return process.env.FLOCK_ADMIN_MUTATIONS_PAUSED === "true";
+}
+
 export function assertAdminMutationsEnabled(): void {
-  if (process.env.FLOCK_ADMIN_MUTATIONS_PAUSED === "true") throw new AdminMutationsPausedError();
+  if (adminMutationsPaused()) throw new AdminMutationsPausedError();
 }

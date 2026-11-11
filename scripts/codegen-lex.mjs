@@ -39,9 +39,7 @@ const PUBLISHED_RECORD_TYPES = new Set([
 ]);
 
 const inputs = [
-  "lexicons/new/flock/operator/execute.json",
-  "lexicons/new/flock/operator/getOperation.json",
-  "lexicons/new/flock/operator/listInboxWriters.json",
+  "lexicons/new/flock/operator/*.json",
   "lexicons/com/atproto/space/*.json",
   "lexicons/com/atproto/memberspace/*.json",
   "lexicons/com/atproto/managedspace/*.json",

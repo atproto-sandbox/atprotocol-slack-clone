@@ -24,13 +24,16 @@ export class OAuthRequestLockError extends Error {
  * The lease outlives the 15-minute browser cookie so abandoned flows recover.
  */
 export function acquireOAuthPermissionFlowLock(did: string, token: string): boolean {
-  const name = permissionFlowLockName(did);
-  const now = unixNow();
+  return claimLease(permissionFlowLockName(did), token, PERMISSION_FLOW_LEASE_SECONDS);
+}
+
+/** Claims the lease `name` for `leaseSeconds`, unless another holder's lease on it is still running. */
+export function claimLease(name: string, token: string, leaseSeconds: number, now = unixNow()): boolean {
   const result = getRawDb().prepare(`
     INSERT INTO oauth_request_lock (name, token, expires_at) VALUES (?, ?, ?)
     ON CONFLICT(name) DO UPDATE SET token = excluded.token, expires_at = excluded.expires_at
     WHERE oauth_request_lock.expires_at <= ?
-  `).run(name, token, now + PERMISSION_FLOW_LEASE_SECONDS, now);
+  `).run(name, token, now + leaseSeconds, now);
   return result.changes === 1;
 }
 
@@ -99,13 +102,7 @@ export const oauthSqliteRequestLock: RuntimeLock = async <T>(name: string, actio
 };
 
 function tryAcquire(name: string, token: string): boolean {
-  const now = unixNow();
-  const result = getRawDb().prepare(`
-    INSERT INTO oauth_request_lock (name, token, expires_at) VALUES (?, ?, ?)
-    ON CONFLICT(name) DO UPDATE SET token = excluded.token, expires_at = excluded.expires_at
-    WHERE oauth_request_lock.expires_at <= ?
-  `).run(name, token, now + LEASE_SECONDS, now);
-  return result.changes === 1;
+  return claimLease(name, token, LEASE_SECONDS);
 }
 
 function refresh(name: string, token: string): boolean {

@@ -1,10 +1,11 @@
-import { listSpaceMembers, putSpaceMember, removeSpaceMember } from "@/atproto/space-ops";
+import { listSpaceMembers } from "@/atproto/space-ops";
 import { channelUri, inboxUri } from "@/protocol/keys";
 import { COLLECTION } from "@/protocol/nsids";
 import type { OperationContext } from "../journal";
 import type { OperatorActor } from "../actor";
 import { activeAdmins, activePrivateRoster, activeRoster, directoryRecords, writeRoster } from "../workspace-state";
 import type { OperationKind } from "./kind";
+import { putListMember, removeListMember } from "../members";
 
 export const reconcileWorkspaceKind: OperationKind = {
   kind: "reconcileWorkspace",
@@ -64,12 +65,12 @@ async function reconcileSpace(
   for (const [did, access] of desiredNonOwner) {
     const existing = current.find((member) => member.did === did);
     if (existing?.read !== access.read || existing?.write !== access.write) {
-      await context.step(`${label}-set-${did}`, () => putSpaceMember(actor.session, space, did, access.read, access.write));
+      await context.step(`${label}-set-${did}`, () => putListMember(actor.session, space, did, access.read, access.write));
     }
   }
   for (const member of current) {
     if (member.did !== authorityDid && !desiredNonOwner.has(member.did)) {
-      await context.step(`${label}-remove-${member.did}`, () => removeSpaceMember(actor.session, space, member.did));
+      await context.step(`${label}-remove-${member.did}`, () => removeListMember(actor.session, space, member.did));
     }
   }
   await context.step(`${label}-verified`, async () => {

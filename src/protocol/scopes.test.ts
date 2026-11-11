@@ -14,10 +14,12 @@ test("member leave authorization grants only execute", () => {
   }), ["rpc:new.flock.operator.execute?aud=did:web:slack.example%23atproto_flock_operator"]);
 });
 
-test("admin authorization includes only the three published operator methods", () => {
+test("admin authorization includes exactly the published operator methods", () => {
   const scopes = permissionScopeFor("operatorAdmin", { workspaceDid: "did:plc:owner", serviceRef });
   assert.equal(scopes.length, 1);
-  assert.equal(scopes[0], "rpc?lxm=new.flock.operator.execute&lxm=new.flock.operator.getOperation&lxm=new.flock.operator.listInboxWriters&aud=did:web:slack.example%23atproto_flock_operator");
+  assert.equal(scopes[0], "rpc?lxm=new.flock.operator.execute&lxm=new.flock.operator.getOperation&lxm=new.flock.operator.listInboxWriters"
+    + "&lxm=new.flock.operator.getChanges&lxm=new.flock.operator.createWorkspace&lxm=new.flock.operator.startAuthorityFlow"
+    + "&lxm=new.flock.operator.listStalledOperations&aud=did:web:slack.example%23atproto_flock_operator");
 });
 
 test("operator RPC scopes preserve percent-encoded DID web ports", () => {

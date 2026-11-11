@@ -3,7 +3,6 @@ import { sessionClient } from "@/atproto/client";
 import { resolvePds } from "@/atproto/identity";
 import { listAllSpaceUris, listBoundedRecords } from "@/atproto/record-pages";
 import { mintSpaceCredential } from "@/atproto/space-credential";
-import { registerSpaceNotifications } from "@/operator/notices";
 import { parseWorkspaceUri } from "@/protocol/keys";
 import { summarizeWorkspace, WORKSPACE_ENVELOPE, type WorkspaceSummary } from "@/protocol/workspace-summary";
 import { purgeCachesForUnlistedWorkspaces, purgeWorkspaceCache, replaceWorkspaceChannels } from "./cache";
@@ -64,7 +63,6 @@ async function readWorkspaceSummary(session: OAuthSession, uri: string): Promise
   if (!workspace) return null;
   const { authorityDid } = workspace;
   const credential = await mintSpaceCredential(session, uri);
-  await registerSpaceNotifications(credential, uri);
   const reader = credential.client(await resolvePds(authorityDid));
   const scan = (collection: string, maxRecords: number) => listBoundedRecords(reader, { space: uri, repo: authorityDid, collection, maxRecords });
   const [profiles, directory, roster, admins] = await Promise.all([

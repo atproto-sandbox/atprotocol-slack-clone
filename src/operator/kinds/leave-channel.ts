@@ -1,4 +1,4 @@
-import { listSpaceMembers, removeSpaceMember } from "@/atproto/space-ops";
+import { listSpaceMembers } from "@/atproto/space-ops";
 import { channelUri } from "@/protocol/keys";
 import { COLLECTION } from "@/protocol/nsids";
 import { OperationRejectedError, type OperationContext } from "../journal";
@@ -6,6 +6,7 @@ import type { OperatorActor } from "../actor";
 import { OperatorAuthError } from "../errors";
 import { assertNoMembership, getOwnerRecord, writeRoster } from "../workspace-state";
 import type { OperationKind } from "./kind";
+import { removeListMember } from "../members";
 
 export const leaveChannelKind: OperationKind = {
   kind: "leaveChannel",
@@ -27,7 +28,7 @@ async function leaveChannel(actor: OperatorActor, context: OperationContext, ske
   if (!directory || directory.visibility !== "private") throw new OperationRejectedError("Only an active private channel can be left.");
   if (actor.did === actor.workspace.authorityDid) throw new OperationRejectedError("The workspace authority cannot leave its own channel.");
   const space = channelUri(actor.workspace.authorityDid, skey);
-  await context.step("leave-channel-membership", () => removeSpaceMember(actor.session, space, actor.did));
+  await context.step("leave-channel-membership", () => removeListMember(actor.session, space, actor.did));
   await context.step("leave-channel-roster", () => writeRoster(actor, space, actor.did, false, COLLECTION.channelRoster));
   await context.step("leave-channel-verified", () => assertNoMembership(actor, space, actor.did));
 }

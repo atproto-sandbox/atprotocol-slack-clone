@@ -1,10 +1,11 @@
-import { listSpaceMembers, putAuthorityRecord, putSpaceMember, ensureMemberListSpace } from "@/atproto/space-ops";
+import { listSpaceMembers, putAuthorityRecord, ensureMemberListSpace } from "@/atproto/space-ops";
 import { channelUri } from "@/protocol/keys";
 import { COLLECTION, SPACE_TYPE } from "@/protocol/nsids";
 import { OperationRejectedError, type OperationContext } from "../journal";
 import type { OperatorActor } from "../actor";
 import { currentWorkspaceMembers, directoryRecords, writeRoster } from "../workspace-state";
 import type { OperationKind, OperatorRequest } from "./kind";
+import { putListMember } from "../members";
 
 export const createChannelKind: OperationKind = {
   kind: "createChannel",
@@ -14,6 +15,7 @@ export const createChannelKind: OperationKind = {
   submittedThrough: "execute",
   steps: ["channel-space", "channel-member-{did}", "channel-roster-{did}", "channel-directory", "channel-membership-verified"],
   run: (actor, context, request) => createChannel(actor, context, request as OperatorRequest & { skey: string; name: string; visibility: "public" | "private"; members?: string[] }),
+  createsSpaces: (actor, request) => [channelUri(actor.workspace.authorityDid, `${actor.workspace.skey}-${String(request.skey)}`)],
 };
 
 async function createChannel(
@@ -37,7 +39,7 @@ async function createChannel(
   await context.step("channel-space", async () => { await ensureMemberListSpace(actor.session, SPACE_TYPE.channel, skey); });
   for (const did of selected) {
     if (did === actor.workspace.authorityDid) continue;
-    await context.step(`channel-member-${did}`, () => putSpaceMember(actor.session, space, did, true, true));
+    await context.step(`channel-member-${did}`, () => putListMember(actor.session, space, did, true, true));
     if (operation.visibility === "private") {
       await context.step(`channel-roster-${did}`, () => writeRoster(actor, space, did, true, COLLECTION.channelRoster));
     }

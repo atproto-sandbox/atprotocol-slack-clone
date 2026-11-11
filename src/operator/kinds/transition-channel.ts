@@ -1,10 +1,11 @@
-import { listSpaceMembers, putAuthorityRecord, putSpaceMember, removeSpaceMember } from "@/atproto/space-ops";
+import { listSpaceMembers, putAuthorityRecord } from "@/atproto/space-ops";
 import { channelUri } from "@/protocol/keys";
 import { COLLECTION } from "@/protocol/nsids";
 import { OperationRejectedError, type OperationContext } from "../journal";
 import type { OperatorActor } from "../actor";
 import { activePrivateRoster, currentWorkspaceMembers, getOwnerRecord, writeRoster } from "../workspace-state";
 import type { OperationKind, OperatorRequest } from "./kind";
+import { putListMember, removeListMember } from "../members";
 
 export const transitionChannelKind: OperationKind = {
   kind: "transitionChannel",
@@ -42,10 +43,10 @@ async function transitionChannel(
   const currentMembers = await listSpaceMembers(actor.session, space);
   const desired = new Set(selected.filter((did) => did !== actor.workspace.authorityDid));
   if (operation.visibility === "public") {
-    for (const did of desired) await context.step(`channel-public-add-${did}`, () => putSpaceMember(actor.session, space, did, true, true));
+    for (const did of desired) await context.step(`channel-public-add-${did}`, () => putListMember(actor.session, space, did, true, true));
   }
   for (const member of currentMembers) {
-    if (!desired.has(member.did)) await context.step(`channel-remove-${member.did}`, () => removeSpaceMember(actor.session, space, member.did));
+    if (!desired.has(member.did)) await context.step(`channel-remove-${member.did}`, () => removeListMember(actor.session, space, member.did));
   }
   if (operation.visibility === "private") {
     const roster = await activePrivateRoster(actor, space);
@@ -54,7 +55,7 @@ async function transitionChannel(
     }
     for (const did of selected) {
       if (did === actor.workspace.authorityDid) continue;
-      await context.step(`channel-private-add-${did}`, () => putSpaceMember(actor.session, space, did, true, true));
+      await context.step(`channel-private-add-${did}`, () => putListMember(actor.session, space, did, true, true));
       await context.step(`channel-roster-active-${did}`, () => writeRoster(actor, space, did, true, COLLECTION.channelRoster));
     }
   }

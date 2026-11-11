@@ -88,7 +88,7 @@ export function workspaceAuthorityScopes(): string[] {
   ]);
 }
 
-export const OPERATOR_METHODS = [OPERATOR_METHOD.execute, OPERATOR_METHOD.getOperation, OPERATOR_METHOD.listInboxWriters] as const;
+export const OPERATOR_METHODS = Object.values(OPERATOR_METHOD);
 
 export const OPERATOR_LEAVE_METHODS = [OPERATOR_METHOD.execute] as const;
 

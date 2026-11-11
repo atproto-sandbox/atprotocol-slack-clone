@@ -1,0 +1,120 @@
+{
+  "lexicon": 1,
+  "id": "new.flock.operator.listStalledOperations",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "The workspace's operations that have not moved for five minutes, and its spaces whose change-notice registration has failed to renew. The operator revalidates the caller as an active workspace admin.",
+      "parameters": {
+        "type": "params",
+        "required": [
+          "workspace"
+        ],
+        "properties": {
+          "workspace": {
+            "type": "string",
+            "format": "space-ref"
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "operations",
+            "registrations",
+            "truncated"
+          ],
+          "properties": {
+            "operations": {
+              "type": "array",
+              "items": {
+                "type": "ref",
+                "ref": "#stalledOperation"
+              }
+            },
+            "registrations": {
+              "type": "array",
+              "items": {
+                "type": "ref",
+                "ref": "#failedRegistration"
+              }
+            },
+            "truncated": {
+              "type": "boolean"
+            }
+          }
+        }
+      },
+      "errors": [
+        {
+          "name": "Unauthorized"
+        }
+      ]
+    },
+    "stalledOperation": {
+      "type": "object",
+      "required": [
+        "actor",
+        "operationId",
+        "state",
+        "updatedAt"
+      ],
+      "properties": {
+        "actor": {
+          "type": "string",
+          "format": "did"
+        },
+        "operationId": {
+          "type": "string",
+          "format": "tid"
+        },
+        "state": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "error": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "datetime"
+        }
+      }
+    },
+    "failedRegistration": {
+      "type": "object",
+      "description": "A space that gets no change ticks: its registration failed since it last succeeded, or ran out.",
+      "required": [
+        "space",
+        "failures"
+      ],
+      "properties": {
+        "space": {
+          "type": "string",
+          "format": "space-ref"
+        },
+        "failures": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Attempts that failed since the last success; 0 for one that only ran out."
+        },
+        "error": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "nextAttemptAt": {
+          "type": "string",
+          "format": "datetime"
+        },
+        "expiredAt": {
+          "type": "string",
+          "format": "datetime",
+          "description": "When its registration ran out, if it has."
+        }
+      }
+    }
+  }
+}

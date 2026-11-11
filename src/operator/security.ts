@@ -11,7 +11,7 @@ import { restoreAuthorityGrant } from "./authority-grant";
 import { OperatorAuthError, OperatorInfrastructureError, isTransientOperatorInfrastructureError } from "./errors";
 import { operationKind } from "./kinds";
 import { assertMayStartKind, validateOperatorRequest } from "./operations";
-import { COLLECTION } from "@/protocol/nsids";
+import { COLLECTION, OPERATOR_METHOD } from "@/protocol/nsids";
 import { parseWorkspaceRef, type OperatorActor, type WorkspaceRef } from "./actor";
 import { getOwnerRecord } from "./workspace-state";
 
@@ -36,7 +36,23 @@ export function unverifiedBearerIssuer(request: Request): string | null {
   }
 }
 
-export async function authenticateOperatorRequest(request: Request, method: string): Promise<string> {
+/**
+ * How long a service token may live, from when it was issued, per method: a minute and a little more for one call (the
+ * PDS's notices included), fifteen minutes for the long poll, so a client reuses one token across polls.
+ */
+const SERVICE_TOKEN_LIFETIME_SECONDS: Readonly<Record<string, number>> = { [OPERATOR_METHOD.getChanges]: 15 * 60 };
+const DEFAULT_SERVICE_TOKEN_LIFETIME_SECONDS = 75;
+
+export function serviceTokenLifetimeSeconds(method: string): number {
+  return SERVICE_TOKEN_LIFETIME_SECONDS[method] ?? DEFAULT_SERVICE_TOKEN_LIFETIME_SECONDS;
+}
+
+/** The caller's DID from a PDS-issued service token bound to this operator and to `method`, within that method's lifetime. */
+export async function authenticateOperatorRequest(
+  request: Request,
+  method: string,
+  resolveSigningKey: (did: string) => Promise<string> = (did) => getIdResolver().did.resolveAtprotoKey(did),
+): Promise<string> {
   const token = bearerToken(request);
   if (!token) throw new OperatorAuthError("Bearer service authorization is required.");
   const serviceRef = getConfig().operatorServiceRef;
@@ -44,7 +60,7 @@ export async function authenticateOperatorRequest(request: Request, method: stri
     token,
     serviceRef,
     method,
-    async (issuer) => getIdResolver().did.resolveAtprotoKey(issuer.split("#", 1)[0]),
+    async (issuer) => resolveSigningKey(issuer.split("#", 1)[0]!),
   ).catch((error: unknown) => {
     if (isTransientOperatorInfrastructureError(error)) throw new OperatorInfrastructureError();
     throw new OperatorAuthError("Service authorization is invalid or expired.");
@@ -56,7 +72,10 @@ export async function authenticateOperatorRequest(request: Request, method: stri
   const decoded: unknown = JSON.parse(payloadBytes.toString("utf8"));
   const issuedAt = isPlainObject(decoded) ? decoded.iat : undefined;
   const now = Math.floor(Date.now() / 1000);
-  if (typeof issuedAt !== "number" || issuedAt > now + 5 || payload.exp <= issuedAt || payload.exp - issuedAt > 75 || now - issuedAt > 75) {
+  const lifetime = serviceTokenLifetimeSeconds(method);
+  // The token's age, from the PDS's own iat, bounds when it is accepted; its exp is the client's ask, made on the client's
+  // clock, so it is only required to come after iat.
+  if (typeof issuedAt !== "number" || issuedAt > now + 5 || payload.exp <= issuedAt || now - issuedAt > lifetime) {
     throw new OperatorAuthError("Service authorization is outside the accepted lifetime.");
   }
   return payload.iss;

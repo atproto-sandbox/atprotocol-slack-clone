@@ -5,10 +5,12 @@ import { listJournaledWorkspaces, listStalledOperations } from "@/operator/journ
 import { tidNow } from "@/protocol/keys";
 import { resumePendingWorkspaceBootstraps } from "@/operator/kinds/bootstrap-workspace";
 import { assertOperatorWorkspaceWithinEnvelope } from "@/operator/workspace-envelope";
+import { registrationDeps, registrationProblems, sweepRegistrations } from "@/operator/registrations";
+import { adminMutationsPaused } from "@/operator/mutations-paused";
 
 async function main() {
   let failed = false;
-  const mutationsPaused = process.env.FLOCK_ADMIN_MUTATIONS_PAUSED === "true";
+  const mutationsPaused = adminMutationsPaused();
   const workspaces = listJournaledWorkspaces();
   for (const workspace of workspaces) {
     const stalledResult = listStalledOperations(workspace.authorityDid, workspace.uri);
@@ -36,7 +38,7 @@ async function main() {
         continue;
       }
       const session = await restoreAuthorityGrant(workspace.authorityDid);
-      const bootstrapResults = await resumePendingWorkspaceBootstraps(session, workspace.uri);
+      const bootstrapResults = await resumePendingWorkspaceBootstraps(session, workspace.uri, registrationDeps);
       if (bootstrapResults.some((result) => result.state !== "completed")) {
         process.stderr.write(`${workspace.uri}: workspace bootstrap recovery remains pending.\n`);
         failed = true;
@@ -44,7 +46,7 @@ async function main() {
       }
       const actor = await requireActiveWorkspaceAdmin(workspace.uri, session.did);
       await assertOperatorWorkspaceWithinEnvelope(actor);
-      const operation = await executeOperatorOperation(actor, tidNow(), { kind: "reconcileWorkspace" });
+      const operation = await executeOperatorOperation(actor, tidNow(), { kind: "reconcileWorkspace" }, registrationDeps);
       process.stdout.write(`${workspace.uri}: ${operation.state}\n`);
       if (operation.state !== "completed") failed = true;
     } catch (error) {
@@ -52,6 +54,17 @@ async function main() {
       // revoked session or failed PDS read for an empty workspace list.
       process.stderr.write(`${workspace.uri}: reconciliation failed (${error instanceof Error ? error.name : "unknown error"}).\n`);
       failed = true;
+    }
+  }
+  // Notice registrations: backfilled and renewed at most every 30 minutes, whichever process gets there first, and not while
+  // mutations are paused. A space without one gets no change ticks, so its clients fall back to their hourly check: worth a
+  // warning and the admin screen, not a failed run.
+  const sweep = await sweepRegistrations();
+  if (sweep) process.stdout.write(`notice registrations: ${sweep.registered} registered, ${sweep.failed} failed\n`);
+  for (const skipped of sweep?.skipped ?? []) process.stderr.write(`WARN notice registration sweep skipped workspace=${skipped.workspace} (${skipped.reason})\n`);
+  for (const workspace of workspaces) {
+    for (const problem of registrationProblems(workspace.uri)) {
+      process.stderr.write(`WARN notice registration space=${problem.space} failures=${problem.failures}${problem.expiredAt ? ` expired=${problem.expiredAt}` : ""}\n`);
     }
   }
   if (failed) process.exitCode = 1;

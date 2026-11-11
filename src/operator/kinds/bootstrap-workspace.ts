@@ -6,6 +6,7 @@ import { listRecoverableOperations, OperationRejectedError, runJournaledOperatio
 import { assertAdminMutationsEnabled } from "../mutations-paused";
 import { parseWorkspaceRef, type OperatorActor } from "../actor";
 import type { OperationKind } from "./kind";
+import { afterOperation, type RegistrationDeps } from "../registrations";
 
 export type BootstrapResult = {
   operationId: string; workspace: string; channel: string; state: string; completedSteps: string[]; error?: string;
@@ -22,6 +23,7 @@ export const bootstrapWorkspaceKind: OperationKind = {
   steps: ["workspace-space", "inbox-space", "general-channel-space", "workspace-profile", "owner-roster", "owner-admin", "general-directory"],
   validate: (request) => assertWorkspaceName(String(request.name)),
   run: (actor, context, request) => runBootstrap(actor, context, String(request.name)),
+  createsSpaces: (actor) => [actor.workspace.uri, inboxUri(actor.workspace.authorityDid, actor.workspace.skey), channelUri(actor.workspace.authorityDid, generalKey(actor.workspace.skey))],
 };
 
 /** Refuses a workspace name the app does not create, before anything else is asked of the account. */
@@ -31,16 +33,25 @@ export function assertWorkspaceName(name: string): void {
   }
 }
 
-/** Creates (or resumes creating) the workspace named `name`, with the authority's grant session. */
-export async function bootstrapWorkspace(session: OAuthSession, input: { name: string; operationId: string }): Promise<BootstrapResult> {
+/**
+ * Creates (or resumes creating) the workspace named `name`, with the authority's grant session. With `registration`, its
+ * three spaces then get the operator's notice registration.
+ */
+export async function bootstrapWorkspace(
+  session: OAuthSession,
+  input: { name: string; operationId: string },
+  registration?: RegistrationDeps,
+): Promise<BootstrapResult> {
   assertAdminMutationsEnabled();
   assertWorkspaceName(input.name);
   if (!/^[234567abcdefghijklmnopqrstuvwxyz]{13}$/.test(input.operationId)) throw new Error("Operation ID must be a protocol TID.");
   const name = input.name.trim();
   const skey = workspaceKey(name);
   const actor: OperatorActor = { did: session.did, session, workspace: parseWorkspaceRef(workspaceUri(session.did, skey)), canRecoverOperations: true };
-  const view = await runJournaledOperation(actor, input.operationId, { kind: bootstrapWorkspaceKind.kind, name }, bootstrapWorkspaceKind.steps,
-    (context) => bootstrapWorkspaceKind.run(actor, context, { kind: bootstrapWorkspaceKind.kind, name }));
+  const request = { kind: bootstrapWorkspaceKind.kind, name };
+  const view = await runJournaledOperation(actor, input.operationId, request, bootstrapWorkspaceKind.steps,
+    (context) => bootstrapWorkspaceKind.run(actor, context, request));
+  if (registration) await afterOperation(actor, bootstrapWorkspaceKind, request, view, registration);
   return {
     operationId: input.operationId,
     workspace: actor.workspace.uri,
@@ -53,7 +64,7 @@ export async function bootstrapWorkspace(session: OAuthSession, input: { name: s
 }
 
 /** Resumes this authority's unfinished creations of `workspace`, before its admin records exist to authorize anything else. */
-export async function resumePendingWorkspaceBootstraps(session: OAuthSession, workspace: string): Promise<BootstrapResult[]> {
+export async function resumePendingWorkspaceBootstraps(session: OAuthSession, workspace: string, registration?: RegistrationDeps): Promise<BootstrapResult[]> {
   if (parseWorkspaceUri(workspace)?.authorityDid !== session.did) throw new Error("Workspace bootstrap recovery requires its authority session.");
   const results: BootstrapResult[] = [];
   for (const row of listRecoverableOperations(session.did, workspace).filter((entry) => entry.actor === session.did)) {
@@ -62,7 +73,7 @@ export async function resumePendingWorkspaceBootstraps(session: OAuthSession, wo
     catch { continue; }
     if (!isPlainObject(saved) || saved.workspace !== workspace || !isPlainObject(saved.request) || saved.request.kind !== bootstrapWorkspaceKind.kind) continue;
     if (typeof saved.request.name !== "string") throw new Error("Pending workspace bootstrap has an invalid name.");
-    results.push(await bootstrapWorkspace(session, { name: saved.request.name, operationId: row.operationId }));
+    results.push(await bootstrapWorkspace(session, { name: saved.request.name, operationId: row.operationId }, registration));
   }
   return results;
 }

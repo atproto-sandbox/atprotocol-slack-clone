@@ -44,6 +44,10 @@ export const OPERATOR_METHOD = {
   execute: nsid("operator.execute"),
   getOperation: nsid("operator.getOperation"),
   listInboxWriters: nsid("operator.listInboxWriters"),
+  getChanges: nsid("operator.getChanges"),
+  createWorkspace: nsid("operator.createWorkspace"),
+  startAuthorityFlow: nsid("operator.startAuthorityFlow"),
+  listStalledOperations: nsid("operator.listStalledOperations"),
 } as const;
 
 export type SpaceType = (typeof SPACE_TYPE)[keyof typeof SPACE_TYPE];

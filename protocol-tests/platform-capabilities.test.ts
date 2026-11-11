@@ -5,8 +5,6 @@ import {
   bearerSession,
   callOperatorMethod,
   combinedMemberScopes,
-  SERVICE_METHODS_PLANNED,
-  SERVICE_METHODS_TODAY,
   outcome,
   startPdsNetwork,
   storeAuthorityGrant,
@@ -181,7 +179,7 @@ async function memberGrantOperations(
     });
     assert.equal(request.value.channelSkey, workspace.generalSkey);
   });
-  const callOperator = (method: (typeof SERVICE_METHODS_TODAY)[number], query: Record<string, string>, body?: unknown) =>
+  const callOperator = (method: import("@/protocol/nsids").OperatorMethod, query: Record<string, string>, body?: unknown) =>
     callOperatorMethod(admin, pds.serviceRef, method, query, body);
   const operationId = keys.tidNow();
   results["the admin calls new.flock.operator.execute"] = await outcome(async () => {
@@ -198,12 +196,25 @@ async function memberGrantOperations(
     const answer = await callOperator("new.flock.operator.listInboxWriters", { workspace: workspace.uri }) as { writers?: string[] };
     assert.ok(answer.writers?.includes(member.did), "the member who filed a request is an inbox writer");
   });
-  for (const method of SERVICE_METHODS_PLANNED) {
-    results[`service token for not-yet-built ${method} is issued and verified`] = await outcome(async () => {
-      const token = await sessionClient(admin).query<{ token: string }>("com.atproto.server.getServiceAuth", { aud: pds.serviceRef, lxm: method });
-      await verifyServiceToken(token.token, pds.serviceRef, method);
-    });
-  }
+  results["the admin calls new.flock.operator.getChanges: head at once, and a space it may not follow denied at once"] = await outcome(async () => {
+    const head = await callOperator("new.flock.operator.getChanges", {}, { follow: [] }) as { head?: string };
+    assert.match(head.head ?? "", /^[0-9]+$/);
+    const elsewhere = `at://${member.did}/space/new.flock.channel/not-${operationId}`;
+    const denied = await callOperator("new.flock.operator.getChanges", {}, { follow: [{ space: elsewhere, after: head.head }] }) as { denied?: string[] };
+    assert.deepEqual(denied.denied, [elsewhere]);
+  });
+  results["the admin calls new.flock.operator.listStalledOperations"] = await outcome(async () => {
+    const answer = await callOperator("new.flock.operator.listStalledOperations", { workspace: workspace.uri }) as { operations?: unknown[]; registrations?: unknown[] };
+    assert.ok(Array.isArray(answer.operations) && Array.isArray(answer.registrations));
+  });
+  results["the admin calls new.flock.operator.startAuthorityFlow and gets a ticket URL for its own authority flow"] = await outcome(async () => {
+    const answer = await callOperator("new.flock.operator.startAuthorityFlow", {}, { purpose: "reauthorize" }) as { url?: string };
+    assert.match(answer.url ?? "", /\/authority\/start\?ticket=[A-Za-z0-9_-]+$/);
+  });
+  results["the admin calls new.flock.operator.createWorkspace and is told its own authority grant is missing"] = await outcome(async () => {
+    const refusal = await callOperator("new.flock.operator.createWorkspace", {}, { name: "K3 Admin", operationId: keys.tidNow() }).then(() => null, (error: unknown) => error);
+    assert.match(refusal instanceof Error ? refusal.message : "", /answered 403: .*AuthorizationRequired/, "the token was accepted; only the grant is missing");
+  });
   results["a non-member holding the grant is refused a credential"] = await outcome(async () => {
     const refusal = await mintSpaceCredential(outsider, workspace.uri).then(() => null, (error: unknown) => error);
     assert.ok(refusal && isAccessLost(refusal), "the authority refuses a credential to an account outside the member list");

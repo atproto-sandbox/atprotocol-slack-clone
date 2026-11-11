@@ -199,7 +199,7 @@ test("a deleted space is dropped from every account's cache, with its change not
     seedSpace(account, kept, now);
     registerWorkspaceChannel(account, "at://did:plc:owner/space/new.flock.workspace/team", deleted);
   }
-  getRawDb().prepare("INSERT INTO space_notification (space_uri,repo_did,rev,notified_at) VALUES (?,?,?,?)").run(deleted, "did:plc:writer", "r1", now);
+  getRawDb().prepare("INSERT INTO space_notification (space_uri,space_type,type_seq,repo_did,rev,notified_at) VALUES (?,?,?,?,?,?)").run(deleted, "new.flock.channel", 1, "did:plc:writer", "r1", now);
   getRawDb().prepare("INSERT INTO notification_registration (service_ref,space_uri,expires_at) VALUES (?,?,?)").run("did:web:localhost%3A3000#atproto_flock_operator", deleted, Date.now() + 3_600_000);
 
   // #when the authority's deletion notice is applied, twice
@@ -330,9 +330,9 @@ test("the sweep drops change notices older than a week even when no new notice e
   useEmptyCache();
   const nowMs = Date.now();
   const nowSeconds = Math.floor(nowMs / 1000);
-  const insert = getRawDb().prepare("INSERT INTO space_notification (space_uri,repo_did,rev,notified_at) VALUES (?,?,?,?)");
-  insert.run("at://did:plc:owner/space/new.flock.channel/alpha", "did:plc:writer", "r1", nowSeconds - 8 * 86_400);
-  insert.run("at://did:plc:owner/space/new.flock.channel/alpha", "did:plc:writer", "r2", nowSeconds - 60);
+  const insert = getRawDb().prepare("INSERT INTO space_notification (space_uri,space_type,type_seq,repo_did,rev,notified_at) VALUES (?,'new.flock.channel',?,?,?,?)");
+  insert.run("at://did:plc:owner/space/new.flock.channel/alpha", 1, "did:plc:writer", "r1", nowSeconds - 8 * 86_400);
+  insert.run("at://did:plc:owner/space/new.flock.channel/alpha", 2, "did:plc:writer", "r2", nowSeconds - 60);
 
   sweepStaleCache(nowMs, 30 * 86_400_000);
 

@@ -2,7 +2,6 @@ import type { OAuthSession } from "@atproto/oauth-client-node";
 import type * as GetRecord from "@/lexicons/api/types/com/atproto/space/getRecord";
 import { resolvePds } from "@/atproto/identity";
 import { mintSpaceCredential } from "@/atproto/space-credential";
-import { registerSpaceNotifications } from "@/operator/notices";
 import { listBoundedRecords } from "@/atproto/record-pages";
 import { isMissingXrpcResource } from "@/atproto/xrpc";
 import { channelUri, isSkey, parseWorkspaceUri } from "@/protocol/keys";
@@ -21,7 +20,6 @@ export async function requireChannelDirectory(session: OAuthSession, workspace: 
   if (!parsedWorkspace || !isSkey(skey)) throw new Error("Invalid workspace or channel reference.");
   const { authorityDid } = parsedWorkspace;
   const directoryReader = await mintSpaceCredential(session, workspace);
-  await registerSpaceNotifications(directoryReader, workspace);
   const directoryClient = directoryReader.client(await resolvePds(authorityDid));
   let result: GetRecord.OutputSchema | null;
   try {
@@ -73,7 +71,6 @@ export async function readPrivateChannelRoster(session: OAuthSession, workspace:
   if (current.visibility !== "private") return [];
   try {
     const credential = await mintSpaceCredential(session, current.channel);
-    await registerSpaceNotifications(credential, current.channel);
     const client = credential.client(await resolvePds(current.authorityDid));
     const roster = await listBoundedRecords(client, {
       space: current.channel, repo: current.authorityDid, collection: COLLECTION.channelRoster, maxRecords: MAX_PRIVATE_ROSTER_SCAN,

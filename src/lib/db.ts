@@ -43,12 +43,55 @@ export interface SlackDb {
     rev: string;
     updated_at: number;
   };
-  notification_registration: { service_ref: string; space_uri: string; expires_at: number };
-  space_notification: { id: number; space_uri: string; repo_did: string; rev: string; notified_at: number };
+  notification_registration: { service_ref: string; space_uri: string; expires_at: number; workspace_uri: string | null };
+  notification_registration_failure: { space_uri: string; workspace_uri: string; failures: number; next_attempt_at: number; last_error: string };
+  space_notification: { id: number; space_uri: string; space_type: string; type_seq: number; repo_did: string; rev: string; notified_at: number };
 }
 
 let database: Kysely<SlackDb> | undefined;
 let rawDatabase: BetterSqlite3.Database | undefined;
+
+/**
+ * Content-free write notices, with what the change feed needs to answer a cursor: each notice's space type and its place
+ * among that type's notices (the per-type cap), and the newest notice id pruned per type and, for a space's own cap, per
+ * space, so a cursor below what was pruned is answered with a reset.
+ */
+const SPACE_NOTIFICATION_SCHEMA = `
+    CREATE TABLE IF NOT EXISTS space_notification (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      space_uri TEXT NOT NULL,
+      space_type TEXT NOT NULL,
+      type_seq INTEGER NOT NULL,
+      repo_did TEXT NOT NULL,
+      rev TEXT NOT NULL,
+      notified_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS space_notification_lookup ON space_notification(space_uri, id);
+    CREATE INDEX IF NOT EXISTS space_notification_age ON space_notification(notified_at);
+    CREATE INDEX IF NOT EXISTS space_notification_type ON space_notification(space_type, type_seq);
+    CREATE TABLE IF NOT EXISTS space_notification_type_floor (
+      space_type TEXT PRIMARY KEY,
+      floor INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS space_notification_space_floor (
+      space_uri TEXT PRIMARY KEY,
+      space_type TEXT NOT NULL,
+      floor INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS space_notification_space_floor_type ON space_notification_space_floor(space_type, floor);
+`;
+
+/**
+ * Notices are content-free and kept a week at most, so a table from before the per-type caps is dropped, not migrated, before
+ * the schema is created; its id sequence restarts, so a client's older cursor is above the new head and is answered with a
+ * reset. Checked inside the write lock, so two processes opening an old database at once drop it only once.
+ */
+function replaceNoticeTableFromBeforeTypeCaps(database: BetterSqlite3.Database): void {
+  database.transaction(() => {
+    const columns = database.prepare("PRAGMA table_info(space_notification)").all() as Array<{ name: string }>;
+    if (columns.length > 0 && !columns.some(({ name }) => name === "space_type")) database.exec("DROP TABLE space_notification");
+  }).immediate();
+}
 
 export function getDb(): Kysely<SlackDb> {
   if (database) return database;
@@ -59,6 +102,7 @@ export function getDb(): Kysely<SlackDb> {
   rawDatabase.pragma("journal_mode = WAL");
   rawDatabase.pragma("foreign_keys = ON");
   rawDatabase.pragma("busy_timeout = 5000");
+  replaceNoticeTableFromBeforeTypeCaps(rawDatabase);
   rawDatabase.exec(`
     CREATE TABLE IF NOT EXISTS oauth_state (
       key TEXT PRIMARY KEY,
@@ -181,21 +225,27 @@ export function getDb(): Kysely<SlackDb> {
       service_ref TEXT NOT NULL,
       space_uri TEXT NOT NULL,
       expires_at INTEGER NOT NULL,
+      workspace_uri TEXT,
       PRIMARY KEY (service_ref, space_uri)
     );
-    CREATE TABLE IF NOT EXISTS space_notification (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      space_uri TEXT NOT NULL,
-      repo_did TEXT NOT NULL,
-      rev TEXT NOT NULL,
-      notified_at INTEGER NOT NULL
+    CREATE TABLE IF NOT EXISTS notification_registration_failure (
+      space_uri TEXT PRIMARY KEY,
+      workspace_uri TEXT NOT NULL,
+      failures INTEGER NOT NULL,
+      next_attempt_at INTEGER NOT NULL,
+      last_error TEXT NOT NULL
     );
-    CREATE INDEX IF NOT EXISTS space_notification_lookup ON space_notification(space_uri, id);
-    CREATE INDEX IF NOT EXISTS space_notification_age ON space_notification(notified_at);
+    CREATE INDEX IF NOT EXISTS notification_registration_failure_workspace ON notification_registration_failure(workspace_uri);
+    ${SPACE_NOTIFICATION_SCHEMA}
     CREATE INDEX IF NOT EXISTS space_collection_cursor_repo ON space_collection_cursor(space_uri, repo_did);
   `);
   rawDatabase.exec("BEGIN IMMEDIATE");
   try {
+    const registrationColumns = rawDatabase.prepare("PRAGMA table_info(notification_registration)").all() as Array<{ name: string }>;
+    if (!registrationColumns.some(({ name }) => name === "workspace_uri")) {
+      rawDatabase.exec("ALTER TABLE notification_registration ADD COLUMN workspace_uri TEXT");
+    }
+    rawDatabase.exec("CREATE INDEX IF NOT EXISTS notification_registration_workspace ON notification_registration(workspace_uri, expires_at)");
     const operationColumns = rawDatabase.prepare("PRAGMA table_info(operation)").all() as Array<{ name: string }>;
     if (!operationColumns.some(({ name }) => name === "workspace_uri")) {
       rawDatabase.exec("ALTER TABLE operation ADD COLUMN workspace_uri TEXT");

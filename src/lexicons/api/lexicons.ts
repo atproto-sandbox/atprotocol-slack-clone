@@ -2206,6 +2206,108 @@ export const schemaDict = {
       },
     },
   },
+  NewFlockOperatorCreateWorkspace: {
+    lexicon: 1,
+    id: 'new.flock.operator.createWorkspace',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          "Creates a workspace as the caller's own authority with the grant its authority flow left: the workspace, inbox and general channel spaces, the profile, the authority's roster and admin records and the directory entry, as one journaled operation that a retry with the same operation id resumes.",
+        input: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['name', 'operationId'],
+            properties: {
+              name: {
+                type: 'string',
+                minLength: 1,
+                maxLength: 60,
+              },
+              operationId: {
+                type: 'string',
+                format: 'tid',
+              },
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: [
+              'operationId',
+              'workspace',
+              'channel',
+              'state',
+              'completedSteps',
+            ],
+            properties: {
+              operationId: {
+                type: 'string',
+                format: 'tid',
+              },
+              workspace: {
+                type: 'string',
+                format: 'space-ref',
+              },
+              channel: {
+                type: 'string',
+                format: 'space-ref',
+                description: "The workspace's general channel.",
+              },
+              state: {
+                type: 'string',
+                knownValues: [
+                  'queued',
+                  'running',
+                  'pending',
+                  'completed',
+                  'failed',
+                  'paused',
+                ],
+              },
+              completedSteps: {
+                type: 'array',
+                items: {
+                  type: 'string',
+                  maxLength: 128,
+                },
+              },
+              error: {
+                type: 'string',
+                maxLength: 1000,
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'Unauthorized',
+          },
+          {
+            name: 'AuthorizationRequired',
+            description:
+              'The operator holds no usable grant for the caller as an authority: start the authority flow with purpose reauthorize, then retry with the same operation id.',
+          },
+          {
+            name: 'OperationIdConflict',
+          },
+          {
+            name: 'Paused',
+            description:
+              'Workspace admin mutations are paused by the operator.',
+          },
+          {
+            name: 'Busy',
+            description:
+              "Another operation holds this authority's workspaces; retry with the same operation id.",
+          },
+        ],
+      },
+    },
+  },
   NewFlockOperatorExecute: {
     lexicon: 1,
     id: 'new.flock.operator.execute',
@@ -2375,6 +2477,107 @@ export const schemaDict = {
       },
     },
   },
+  NewFlockOperatorGetChanges: {
+    lexicon: 1,
+    id: 'new.flock.operator.getChanges',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          "Waits up to about 25 seconds for any followed space to change, then says which did. It names no writer, revision or content: a client that sees a space change asks that space's authority for listRepos, where its access is checked. Each space has its own cursor. A space the caller may not follow comes back in denied and its cursor does not move; a space whose cursor is older than the notices the operator keeps comes back in reset and should be synced. A call that follows nothing returns head at once: a client reads head, syncs a space, then follows it from head. A procedure, not a query, because 200 space references do not fit in a request line.",
+        input: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['follow'],
+            properties: {
+              follow: {
+                type: 'array',
+                maxLength: 200,
+                items: {
+                  type: 'ref',
+                  ref: 'lex:new.flock.operator.getChanges#follow',
+                },
+              },
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['head', 'changed', 'denied', 'reset'],
+            properties: {
+              head: {
+                type: 'string',
+                maxLength: 16,
+                description:
+                  "The operator's newest notice cursor, to follow a space from once it is synced.",
+              },
+              changed: {
+                type: 'array',
+                items: {
+                  type: 'ref',
+                  ref: 'lex:new.flock.operator.getChanges#change',
+                },
+              },
+              denied: {
+                type: 'array',
+                items: {
+                  type: 'string',
+                  format: 'space-ref',
+                },
+              },
+              reset: {
+                type: 'array',
+                items: {
+                  type: 'string',
+                  format: 'space-ref',
+                },
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'Unauthorized',
+          },
+        ],
+      },
+      follow: {
+        type: 'object',
+        required: ['space', 'after'],
+        properties: {
+          space: {
+            type: 'string',
+            format: 'space-ref',
+          },
+          after: {
+            type: 'string',
+            maxLength: 16,
+            description:
+              'The cursor this space was last synced or answered at.',
+          },
+        },
+      },
+      change: {
+        type: 'object',
+        required: ['space', 'cursor'],
+        properties: {
+          space: {
+            type: 'string',
+            format: 'space-ref',
+          },
+          cursor: {
+            type: 'string',
+            maxLength: 16,
+            description:
+              "This space's newest notice: follow it from here once it is synced.",
+          },
+        },
+      },
+    },
+  },
   NewFlockOperatorGetOperation: {
     lexicon: 1,
     id: 'new.flock.operator.getOperation',
@@ -2472,6 +2675,164 @@ export const schemaDict = {
       },
     },
   },
+  NewFlockOperatorListStalledOperations: {
+    lexicon: 1,
+    id: 'new.flock.operator.listStalledOperations',
+    defs: {
+      main: {
+        type: 'query',
+        description:
+          "The workspace's operations that have not moved for five minutes, and its spaces whose change-notice registration has failed to renew. The operator revalidates the caller as an active workspace admin.",
+        parameters: {
+          type: 'params',
+          required: ['workspace'],
+          properties: {
+            workspace: {
+              type: 'string',
+              format: 'space-ref',
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['operations', 'registrations', 'truncated'],
+            properties: {
+              operations: {
+                type: 'array',
+                items: {
+                  type: 'ref',
+                  ref: 'lex:new.flock.operator.listStalledOperations#stalledOperation',
+                },
+              },
+              registrations: {
+                type: 'array',
+                items: {
+                  type: 'ref',
+                  ref: 'lex:new.flock.operator.listStalledOperations#failedRegistration',
+                },
+              },
+              truncated: {
+                type: 'boolean',
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'Unauthorized',
+          },
+        ],
+      },
+      stalledOperation: {
+        type: 'object',
+        required: ['actor', 'operationId', 'state', 'updatedAt'],
+        properties: {
+          actor: {
+            type: 'string',
+            format: 'did',
+          },
+          operationId: {
+            type: 'string',
+            format: 'tid',
+          },
+          state: {
+            type: 'string',
+            maxLength: 32,
+          },
+          error: {
+            type: 'string',
+            maxLength: 1000,
+          },
+          updatedAt: {
+            type: 'string',
+            format: 'datetime',
+          },
+        },
+      },
+      failedRegistration: {
+        type: 'object',
+        description:
+          'A space that gets no change ticks: its registration failed since it last succeeded, or ran out.',
+        required: ['space', 'failures'],
+        properties: {
+          space: {
+            type: 'string',
+            format: 'space-ref',
+          },
+          failures: {
+            type: 'integer',
+            minimum: 0,
+            description:
+              'Attempts that failed since the last success; 0 for one that only ran out.',
+          },
+          error: {
+            type: 'string',
+            maxLength: 1000,
+          },
+          nextAttemptAt: {
+            type: 'string',
+            format: 'datetime',
+          },
+          expiredAt: {
+            type: 'string',
+            format: 'datetime',
+            description: 'When its registration ran out, if it has.',
+          },
+        },
+      },
+    },
+  },
+  NewFlockOperatorStartAuthorityFlow: {
+    lexicon: 1,
+    id: 'new.flock.operator.startAuthorityFlow',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          'Issues a single-use, two-minute ticket for the caller to grant the operator authority over its own workspaces, and returns the operator URL that starts the flow. The caller opens it as a top-level navigation; the flow succeeds only for someone who signs in as the caller.',
+        input: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['purpose'],
+            properties: {
+              purpose: {
+                type: 'string',
+                knownValues: ['createWorkspace', 'reauthorize'],
+              },
+              name: {
+                type: 'string',
+                minLength: 1,
+                maxLength: 60,
+                description:
+                  'The workspace to create, for purpose createWorkspace.',
+              },
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['url'],
+            properties: {
+              url: {
+                type: 'string',
+                format: 'uri',
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'Unauthorized',
+          },
+        ],
+      },
+    },
+  },
 } as const
 export const schemas = Object.values(schemaDict) as unknown as LexiconDoc[]
 export const lexicons: Lexicons = new Lexicons(schemas)
@@ -2545,7 +2906,12 @@ export const ids = {
   ComAtprotoSpaceRemoveWriter: 'com.atproto.space.removeWriter',
   ComAtprotoSpaceUnregisterNotify: 'com.atproto.space.unregisterNotify',
   ComAtprotoSpaceUpdateSpace: 'com.atproto.space.updateSpace',
+  NewFlockOperatorCreateWorkspace: 'new.flock.operator.createWorkspace',
   NewFlockOperatorExecute: 'new.flock.operator.execute',
+  NewFlockOperatorGetChanges: 'new.flock.operator.getChanges',
   NewFlockOperatorGetOperation: 'new.flock.operator.getOperation',
   NewFlockOperatorListInboxWriters: 'new.flock.operator.listInboxWriters',
+  NewFlockOperatorListStalledOperations:
+    'new.flock.operator.listStalledOperations',
+  NewFlockOperatorStartAuthorityFlow: 'new.flock.operator.startAuthorityFlow',
 } as const

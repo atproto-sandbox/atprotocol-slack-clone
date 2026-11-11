@@ -1,10 +1,11 @@
-import { listSpaceMembers, putAuthorityRecord, removeSpaceMember } from "@/atproto/space-ops";
+import { listSpaceMembers, putAuthorityRecord } from "@/atproto/space-ops";
 import { channelUri } from "@/protocol/keys";
 import { COLLECTION } from "@/protocol/nsids";
 import { OperationRejectedError, type OperationContext } from "../journal";
 import type { OperatorActor } from "../actor";
 import { activePrivateRoster, getOwnerRecord, writeRoster } from "../workspace-state";
 import type { OperationKind } from "./kind";
+import { removeListMember } from "../members";
 
 export const archiveChannelKind: OperationKind = {
   kind: "archiveChannel",
@@ -13,6 +14,7 @@ export const archiveChannelKind: OperationKind = {
   submittedThrough: "execute",
   steps: ["channel-archive-transition", "channel-archive-remove-{did}", "channel-archive-roster-{did}", "channel-archive-verified", "channel-archive-final"],
   run: (actor, context, request) => archiveChannel(actor, context, request.skey as string),
+  archivesSpaces: (actor, request) => [channelUri(actor.workspace.authorityDid, String(request.skey))],
 };
 
 async function archiveChannel(actor: OperatorActor, context: OperationContext, skey: string): Promise<void> {
@@ -25,7 +27,7 @@ async function archiveChannel(actor: OperatorActor, context: OperationContext, s
   }).then(() => undefined));
   const members = await listSpaceMembers(actor.session, space);
   for (const member of members) {
-    await context.step(`channel-archive-remove-${member.did}`, () => removeSpaceMember(actor.session, space, member.did));
+    await context.step(`channel-archive-remove-${member.did}`, () => removeListMember(actor.session, space, member.did));
   }
   for (const did of await activePrivateRoster(actor, space)) {
     await context.step(`channel-archive-roster-${did}`, () => writeRoster(actor, space, did, false, COLLECTION.channelRoster));

@@ -4,6 +4,7 @@ import { assertWorkspaceName, bootstrapWorkspace, type BootstrapResult } from "@
 import { readRequestJson } from "@/lib/bounded-json";
 import { AuthorityReauthorizationRequiredError, restoreAuthorityGrant } from "@/operator/authority-grant";
 import { assertAdminMutationsEnabled } from "@/operator/mutations-paused";
+import { registrationDeps } from "@/operator/registrations";
 import { rejectCrossOriginMutation } from "@/lib/same-origin-mutation";
 import { AUTHORIZATION_REQUIRED } from "@/lib/api-codes";
 
@@ -24,7 +25,7 @@ export async function POST(request: NextRequest) {
     // with its sign-in session.
     let result: BootstrapResult;
     try {
-      result = await bootstrapWorkspace(await restoreAuthorityGrant(session.did), { name: body.name, operationId: body.operationId });
+      result = await bootstrapWorkspace(await restoreAuthorityGrant(session.did), { name: body.name, operationId: body.operationId }, registrationDeps);
     } catch (error) {
       if (error instanceof AuthorityReauthorizationRequiredError) return authorizationRequired(body.operationId);
       throw error;

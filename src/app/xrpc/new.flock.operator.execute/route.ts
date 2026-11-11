@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { executeOperatorOperation } from "@/operator/operations";
+import { registrationDeps } from "@/operator/registrations";
 import { OperationBusyError, OperationConflictError } from "@/operator/journal";
 import { authenticateOperatorRequest, requireWorkspaceActorForOperation } from "@/operator/security";
 import { AUTHORITY_APPROVAL_REQUIRED, OperatorAuthError, operatorHttpFailure } from "@/operator/errors";
@@ -25,7 +26,7 @@ export async function POST(request: NextRequest) {
     }
     const actor = await requireWorkspaceActorForOperation(body.workspace, did, body.request);
     await assertOperatorWorkspaceWithinEnvelope(actor);
-    const operation = await executeOperatorOperation(actor, body.operationId, body.request);
+    const operation = await executeOperatorOperation(actor, body.operationId, body.request, registrationDeps);
     if (operation.authorizationRequired) {
       return operatorError(AUTHORITY_APPROVAL_REQUIRED.status, AUTHORITY_APPROVAL_REQUIRED.name, AUTHORITY_APPROVAL_REQUIRED.message);
     }

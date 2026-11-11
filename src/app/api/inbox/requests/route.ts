@@ -5,7 +5,6 @@ import { isMissingXrpcResource } from "@/atproto/xrpc";
 import { requireSession } from "@/auth/session";
 import { resolvePds } from "@/atproto/identity";
 import { mintSpaceCredential } from "@/atproto/space-credential";
-import { registerSpaceNotifications } from "@/operator/notices";
 import { fetchInboxWriters } from "@/operator/client";
 import { decisionRecordKey, inboxUri } from "@/protocol/keys";
 import { validateSpaceRecord } from "@/protocol/registry";
@@ -29,7 +28,6 @@ export async function GET(request: NextRequest) {
     const candidates = await fetchInboxWriters(session, workspace);
     const inbox = inboxUri(summary.authorityDid, summary.skey);
     const inboxCredential = await mintSpaceCredential(session, inbox);
-    await registerSpaceNotifications(inboxCredential, inbox);
     const authorityClient = inboxCredential.client(await resolvePds(summary.authorityDid));
     const repoScan = await listBoundedRepos(authorityClient, { space: inbox, maxRepos: 2_000 });
     if (repoScan.truncated) throw new WorkspaceEnvelopeError("Inbox writer set exceeds the 2,000-repo scan limit; inbox results are incomplete.");

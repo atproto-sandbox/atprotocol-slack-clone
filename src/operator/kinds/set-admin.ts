@@ -1,10 +1,11 @@
-import { listSpaceMembers, putSpaceMember } from "@/atproto/space-ops";
+import { listSpaceMembers } from "@/atproto/space-ops";
 import { inboxUri, subjectKey } from "@/protocol/keys";
 import { COLLECTION } from "@/protocol/nsids";
 import { OperationRejectedError, type OperationContext } from "../journal";
 import type { OperatorActor } from "../actor";
 import { activeAdmins, getOwnerRecord, writeRoster } from "../workspace-state";
 import type { OperationKind } from "./kind";
+import { putListMember } from "../members";
 
 export const setAdminKind: OperationKind = {
   kind: "setAdmin",
@@ -30,9 +31,9 @@ async function setAdmin(actor: OperatorActor, context: OperationContext, subject
   const inbox = inboxUri(actor.workspace.authorityDid, actor.workspace.skey);
   if (active) {
     await context.step("write-admin-active", () => writeRoster(actor, actor.workspace.uri, subject, true, COLLECTION.admin));
-    await context.step("grant-inbox-read", () => putSpaceMember(actor.session, inbox, subject, true, true));
+    await context.step("grant-inbox-read", () => putListMember(actor.session, inbox, subject, true, true));
   } else {
-    await context.step("remove-inbox-read", () => putSpaceMember(actor.session, inbox, subject, false, true));
+    await context.step("remove-inbox-read", () => putListMember(actor.session, inbox, subject, false, true));
     await context.step("write-admin-inactive", () => writeRoster(actor, actor.workspace.uri, subject, false, COLLECTION.admin));
   }
   await context.step("admin-state-verified", async () => {

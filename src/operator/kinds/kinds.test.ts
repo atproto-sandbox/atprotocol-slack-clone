@@ -5,6 +5,7 @@ import test from "node:test";
 import { stepMatcher } from "../journal";
 import { FIELD_RULES } from "../operations";
 import { OPERATION_KINDS, operationKind } from ".";
+import type { OperatorActor } from "../actor";
 
 // A journal row is replayed by its kind's name, request fields and step names. Changing any of them strands rows an earlier
 // release wrote, so this table only ever grows by a new kind.
@@ -142,5 +143,18 @@ function isKind(value: unknown): value is { kind: string; steps: readonly string
 test("every request field a kind declares has a validation rule", () => {
   for (const kind of Object.values(OPERATION_KINDS)) {
     for (const field of [...kind.required, ...(kind.optional ?? [])]) assert.ok(Object.hasOwn(FIELD_RULES, field), `${kind.kind}: ${field}`);
+  }
+});
+
+test("the kinds that create or archive spaces name them, so the operator registers or drops their change notices", () => {
+  const owner = "did:plc:owner";
+  const actor = { did: owner, workspace: { uri: `at://${owner}/space/new.flock.workspace/acme`, authorityDid: owner, skey: "acme" } } as OperatorActor;
+  assert.deepEqual(operationKind("bootstrapWorkspace")!.createsSpaces!(actor, { kind: "bootstrapWorkspace", name: "Acme" }), [
+    `at://${owner}/space/new.flock.workspace/acme`, `at://${owner}/space/new.flock.inbox/acme`, `at://${owner}/space/new.flock.channel/acme-general`,
+  ]);
+  assert.deepEqual(operationKind("createChannel")!.createsSpaces!(actor, { kind: "createChannel", skey: "design" }), [`at://${owner}/space/new.flock.channel/acme-design`]);
+  assert.deepEqual(operationKind("archiveChannel")!.archivesSpaces!(actor, { kind: "archiveChannel", skey: "acme-design" }), [`at://${owner}/space/new.flock.channel/acme-design`]);
+  for (const kind of Object.values(OPERATION_KINDS).filter((entry) => !["bootstrapWorkspace", "createChannel", "archiveChannel"].includes(entry.kind))) {
+    assert.equal(kind.createsSpaces ?? kind.archivesSpaces, undefined, `${kind.kind} neither creates nor archives a space`);
   }
 });

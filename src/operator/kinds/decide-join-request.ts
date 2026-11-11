@@ -1,4 +1,4 @@
-import { listSpaceMembers, putAuthorityRecord, putSpaceMember, removeSpaceMember } from "@/atproto/space-ops";
+import { listSpaceMembers, putAuthorityRecord } from "@/atproto/space-ops";
 import { channelUri, decisionRecordKey, inboxUri, requestRecordKey } from "@/protocol/keys";
 import { COLLECTION } from "@/protocol/nsids";
 import { OperationRejectedError, type OperationContext } from "../journal";
@@ -7,6 +7,7 @@ import {
   activePrivateRoster, activeRoster, assertMembership, directoryRecords, getOwnerRecord, parseJoinRequestUri, readJoinRequest, writeRoster,
 } from "../workspace-state";
 import type { OperationKind, OperatorRequest } from "./kind";
+import { putListMember, removeListMember } from "../members";
 
 export const decideJoinRequestKind: OperationKind = {
   kind: "decideJoinRequest",
@@ -66,12 +67,12 @@ async function decideJoinRequest(
     const isWorkspaceMember = roster.has(parsed.repo) && workspaceMembers.some((member) =>
       member.did === parsed.repo && member.read && member.write);
     if (isWorkspaceMember) return;
-    await context.step("join-request-inactive-revoke-membership", () => removeSpaceMember(actor.session, channelSpace, parsed.repo));
+    await context.step("join-request-inactive-revoke-membership", () => removeListMember(actor.session, channelSpace, parsed.repo));
     await context.step("join-request-inactive-deactivate-roster", () => writeRoster(actor, channelSpace, parsed.repo, false, COLLECTION.channelRoster));
     throw new OperationRejectedError("Only an active workspace member can be approved for a private channel.");
   };
   if (operation.decision === "approve") {
-    await context.step("join-request-channel-membership", async () => { await ensureApprovalEligible(); await putSpaceMember(actor.session, channelSpace, parsed.repo, true, true); });
+    await context.step("join-request-channel-membership", async () => { await ensureApprovalEligible(); await putListMember(actor.session, channelSpace, parsed.repo, true, true); });
     await context.step("join-request-private-roster", async () => { await ensureApprovalEligible(); await writeRoster(actor, channelSpace, parsed.repo, true, COLLECTION.channelRoster); });
   }
   await context.step("join-request-decision", async () => {
@@ -99,12 +100,12 @@ async function cleanupStaleJoinApproval(
   await context.step("join-request-stale-restore-membership", async () => {
     const current = (await listSpaceMembers(actor.session, channelSpace)).find((member) => member.did === repoDid);
     if (baseline.membership === "none") {
-      if (current) await removeSpaceMember(actor.session, channelSpace, repoDid);
+      if (current) await removeListMember(actor.session, channelSpace, repoDid);
     } else {
       const read = baseline.membership[0] === "1";
       const write = baseline.membership[1] === "1";
       if (!current || current.read !== read || current.write !== write) {
-        await putSpaceMember(actor.session, channelSpace, repoDid, read, write);
+        await putListMember(actor.session, channelSpace, repoDid, read, write);
       }
     }
   });

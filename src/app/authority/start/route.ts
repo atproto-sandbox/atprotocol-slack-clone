@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { AUTHORITY_FLOW_PATHS, startAuthorityFlow } from "@/operator/authority-grant";
+import { AUTHORITY_FLOW_PATHS, beginAuthorityFlow } from "@/operator/authority-grant";
 import { getConfig } from "@/lib/config";
 
 export const runtime = "nodejs";
@@ -13,7 +13,7 @@ export function HEAD() {
 export async function GET(request: NextRequest) {
   const { appUrl } = getConfig();
   try {
-    const flow = await startAuthorityFlow(request.nextUrl.searchParams.get("ticket") ?? "");
+    const flow = await beginAuthorityFlow(request.nextUrl.searchParams.get("ticket") ?? "");
     const response = NextResponse.redirect(flow.url);
     response.cookies.set(flow.cookieName, flow.cookieValue, {
       httpOnly: true,

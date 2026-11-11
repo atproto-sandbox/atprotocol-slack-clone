@@ -638,3 +638,73 @@ Review: Codex was not run (the configured model is the one rejected in R1; the o
   - slot hand-off is not FIFO;
   - an identity entry can be written after sign-out;
   - the fake's `listSpaces` and `listMembers` still end without a cursor on a full page.
+
+### R5 (2026-11-10)
+
+Done as planned: the operator's methods for clients without a cookie, each a lexicon and a route under `src/app/xrpc/new.flock.operator.*`, authenticated by a PDS-issued service token:
+- `getChanges` (`src/operator/feed.ts`);
+- `createWorkspace`, which runs the existing `bootstrapWorkspace` kind with its step names and request hash unchanged;
+- `startAuthorityFlow`, which issues the R1 ticket. The ticket request now has two owners, the cookie route and this method, sharing one `authorityFlowUrl`; the browser-start function was renamed `beginAuthorityFlow`;
+- `listStalledOperations`, which also reports spaces whose notice registration failed or ran out (`src/operator/stalled.ts`).
+
+The feed and its rules:
+- **Cursors and answers.** Cursors are per space; a call with no entries returns `head` at once. A space the caller may not follow is `denied` and its cursor does not move. A cursor below what was pruned for that space, or above `head`, is `reset`.
+- **One poller.** One shared poller per process wakes every held call.
+- **Who may follow.** Decided by `src/operator/member-access.ts`: the DM rule as before; for a workspace, inbox or channel, the member list read with the authority grant. The authority is not exempt from that read. Lists are cached 60 s; `src/operator/members.ts` is now the only way the operator changes a member list (a lint rule keeps it so), and it drops the cached list; a deletion notice drops it too. The check runs again on the spaces about to be answered.
+- **Token lifetime.** It is per method: fifteen minutes for `getChanges`, 75 s otherwise. The engine asks for fourteen minutes and reuses the token across polls.
+- **Notice caps.** Counted per space type; floors make every pruning visible as a `reset`.
+- **Notice registration.** Now the operator's: it mints a credential with the authority grant and registers its own sink. A sweep (`src/operator/registrations.ts`) backfills and renews, with failures backed off per space and reported. It runs at process start (`src/instrumentation.ts`) and from the reconcile job, under a lease that is also its 30-minute schedule. Archiving unregisters and drops a space's notices. The member-read paths no longer register with member credentials.
+- **Engine.** `OperatorClient` calls every method, and `src/client/feed.ts` (`ChangeFollower`) follows spaces in the stated order.
+
+Departures:
+- **`getChanges` is a procedure (POST), not the "long-poll query" of D2 and the method table.** Two hundred space references, URL-encoded, are about 24 KB, past Node's 16 KB request-header limit.
+- **Registration follows the operation instead of being one of its steps.** Each kind that creates or archives spaces declares them (`createsSpaces`, `archivesSpaces`), and the request handler that ran the operation registers or drops them once it completed. Reasons: `bootstrapWorkspace` must keep its step names, and a journal step would have the kinds' unit tests reach the network. An operation resumed elsewhere (the reconcile job) is left to the sweep. Either way, registering never takes the workspace lock.
+- **The cookie routes these methods replace are not forwarded through service tokens.** The server's member session carries an operator `rpc` scope only after an admin consent, so creating a workspace would gain a consent step. Each cookie route and its method call one operator function instead, and R6 deletes the routes.
+- **The feed denies a workspace, inbox or channel space the operator never registered**, before any grant is restored or member list read. A caller can therefore make the operator read only real spaces' member lists. The plan's rule otherwise stands.
+- **A call whose every space is denied answers at once.** The follower then waits five seconds before asking again, as it does after a failed sync; that wait closes both client loops the review found.
+- **A service token is bounded by its age from the PDS's `iat`.** Its `exp` is no longer compared with `iat`, because `exp` is the client's ask on the client's clock, and a clock a minute ahead of its PDS was refused.
+- **Registration problems are warnings, not failures of the reconcile run.** A space without ticks falls back to the hourly check. The sweep does not run while mutations are paused, since registering writes at the authority's host.
+- **The notice table is replaced, not migrated (D6).** An old cursor is above the new `head` and so is reset.
+
+Residuals, recorded for R7 (the operator as its own service):
+- no overall cap on held calls and no per-IP limit; the existing operator methods have none either;
+- the member-list cache is dropped per process, so another process's change is seen within D12's 60 s;
+- an authority or type cap raises a per-type floor, so an idle follower pays about one spurious sync per 5,000 notices from a hot authority.
+
+Gate:
+- **Live follow** (`protocol-tests/feed-follow.test.ts`): a Node client holding only its member's PDS session followed `#general` through `getChanges` against two real PDS hosts, with `next start` receiving their notices. Another member's message reached its page 133 to 154 ms after the write, on the first poll.
+- **K3** (`protocol-tests/platform-capabilities.test.ts`) passes against the real methods:
+  - `getChanges` answers `head`, and denies at once a space the caller may not follow;
+  - `listStalledOperations` answers;
+  - `startAuthorityFlow` returns a ticket URL;
+  - `createWorkspace` refuses with `AuthorizationRequired`, which shows the token was accepted, since the admin holds no authority grant of its own.
+- **Suites:**
+  - Unit: 568 of 568.
+  - Typecheck and lint are clean. The one warning predates R4.
+  - Acceptance: 14 of 14, the live follow included (133 ms on the final run).
+  - Browser: 4 of 4.
+  - BDD: 65 of 66. The one failure, "Open a channel at the latest 100 messages", is a flake that predates R5. On the R4 commit, built in a separate worktree, the same scenario failed 2 runs of 6; on R5 it failed 3 of 7 reruns. It failed the same way every time: after a reader grants channel read and one read succeeds, a later read is refused for the scope just granted. That fault is in the server's cookie member session, which R6 removes.
+  - Conformance: not rerun, since no conformance test changed in R5.
+
+Review: Codex was not run (the configured model is the one rejected in R1; the owner said to continue). Sonnet subagents reviewed under the code-review procedure.
+- **Round 1, reviewer and critic.**
+  - Critical: an existing database could not open, because the new index ran before the old notice table was replaced.
+  - Also found:
+    - the notice write could lose a notice to a second writer process;
+    - two client hot loops;
+    - the clock-skew refusal;
+    - unbounded authority reads for guessed spaces;
+    - stale rows reported forever;
+    - the sweep under pause;
+    - documentation drift.
+  - All were fixed with tests, or recorded above.
+- **Round 2: the fix delta.** Confirmed the fixes and found a new race, reproduced: the sweep could unregister a space that an operation registered while the sweep read the directory. The sweep now reads what it holds before the directory, and a test reproduces the race. Round 2 also found:
+  - my own edit had turned the lexicon's 200-entry limit into 160; a test now pins it to the code;
+  - operations resumed by the reconcile job did not register their spaces; they now do;
+  - the feed's registration check was not scoped to this operator's service.
+- **Round 3: that delta.** No correctness defect. It asked for:
+  - a test of registration on resume, now added;
+  - a distinct audit event when registering after a resume fails;
+  - pruning the member-list cache at most once a minute.
+
+  All three were done. The fixes after round 3 were not reviewed again.

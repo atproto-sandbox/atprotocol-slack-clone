@@ -66,7 +66,6 @@ export type PdsNetwork = {
   close(): Promise<void>;
 };
 
-export const SPIKE_SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
 
 export function pinnedCheckout(): string {
   const checkout = process.env.ATPROTO_PINNED_CHECKOUT;
@@ -74,7 +73,13 @@ export function pinnedCheckout(): string {
   return resolve(checkout);
 }
 
-export async function startPdsNetwork(label: string): Promise<PdsNetwork> {
+/**
+ * The pinned two-host network with this app's lexicons, and this process's environment pointed at it. `appPort` is where the
+ * operator is reached (its `did:web` service, `APP_URL`), for a test that runs the app server there to receive notices.
+ */
+export async function startPdsNetwork(label: string, options: { appPort?: number } = {}): Promise<PdsNetwork> {
+  const appPort = options.appPort ?? 3000;
+  const serviceRef = `did:web:localhost%3A${appPort}#atproto_flock_operator`;
   const { TestNetworkNoAppView } = await import(pathToFileURL(join(pinnedCheckout(), "packages/dev-env/src/index.ts")).href) as {
     TestNetworkNoAppView: { create(options: { extraPdses: number; lexiconAuthority: boolean }): Promise<TestNetwork> };
   };
@@ -91,9 +96,9 @@ export async function startPdsNetwork(label: string): Promise<PdsNetwork> {
   const restoreEnvironment = setEnvironment({
     NODE_ENV: "test",
     ATPROTO_ACCEPTANCE_TEST: "true",
-    APP_URL: "http://127.0.0.1:3000",
+    APP_URL: `http://127.0.0.1:${appPort}`,
     AUTH_ENCRYPTION_KEY: "4a".repeat(32),
-    OPERATOR_SERVICE_REF: SPIKE_SERVICE_REF,
+    OPERATOR_SERVICE_REF: serviceRef,
     PLC_URL: network.plc.url,
     DATABASE_PATH: databasePath,
   });
@@ -119,7 +124,7 @@ export async function startPdsNetwork(label: string): Promise<PdsNetwork> {
     hosts,
     plcUrl: network.plc.url,
     databasePath,
-    serviceRef: SPIKE_SERVICE_REF,
+    serviceRef,
     async createActor(name, host) {
       const handle = `${name}.test${host === 0 ? "" : "2"}`;
       const password = `${name}-spike-pass`;
@@ -279,13 +284,10 @@ export async function memberSignInScopes(): Promise<readonly string[]> {
   return (await import("@/protocol/scopes")).MEMBER_SIGN_IN_SCOPES;
 }
 
-export const SERVICE_METHODS_TODAY = ["new.flock.operator.execute", "new.flock.operator.getOperation", "new.flock.operator.listInboxWriters"] as const;
-// Not built yet: a token must still be issued for them, and verified by whoever serves them.
-export const SERVICE_METHODS_PLANNED = ["new.flock.operator.getChanges", "new.flock.operator.createWorkspace", "new.flock.operator.startAuthorityFlow", "new.flock.operator.listStalledOperations"] as const;
 
 /** The member grant of the refactor plan's "Identities and sessions" section plus the browser DM set, as one consent (K3). */
 export async function combinedMemberScopes(serviceRef: string): Promise<string[]> {
-  const { DM_BROWSER_SCOPES } = await import("@/protocol/scopes");
+  const { DM_BROWSER_SCOPES, OPERATOR_METHODS } = await import("@/protocol/scopes");
   const audience = serviceRef.replaceAll("%", "%25").replace("#", "%23");
   return [
     "space:new.flock.workspace?authority=*&action=read",
@@ -294,12 +296,10 @@ export async function combinedMemberScopes(serviceRef: string): Promise<string[]
     "space:new.flock.inbox?authority=*&collection=new.flock.joinRequest&action=create&action=update&action=delete",
     "space:new.flock.channel?authority=*&action=read",
     "space:new.flock.channel?authority=*&collection=new.flock.channel.message&collection=new.flock.channel.reaction&action=create&action=update&action=delete",
-    `rpc?${[...SERVICE_METHODS_TODAY, ...SERVICE_METHODS_PLANNED].map((method) => `lxm=${method}`).join("&")}&aud=${audience}`,
+    `rpc?${OPERATOR_METHODS.map((method) => `lxm=${method}`).join("&")}&aud=${audience}`,
     ...DM_BROWSER_SCOPES.filter((scope) => scope !== "atproto"),
   ];
 }
-
-type OperatorMethod = (typeof SERVICE_METHODS_TODAY)[number];
 
 /**
  * Calls one of the operator's XRPC methods through its real route handler, authenticated with a service token the caller's
@@ -308,7 +308,7 @@ type OperatorMethod = (typeof SERVICE_METHODS_TODAY)[number];
 export async function callOperatorMethod(
   session: { did: string; fetchHandler(path: string, init: RequestInit): Promise<Response> },
   serviceRef: string,
-  method: OperatorMethod,
+  method: import("@/protocol/nsids").OperatorMethod,
   query: Record<string, string>,
   body?: unknown,
 ): Promise<Record<string, unknown>> {

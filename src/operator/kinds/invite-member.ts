@@ -1,9 +1,9 @@
-import { putSpaceMember } from "@/atproto/space-ops";
 import { channelUri, inboxUri } from "@/protocol/keys";
 import { OperationRejectedError, type OperationContext } from "../journal";
 import type { OperatorActor } from "../actor";
 import { activeRoster, assertMembership, directoryRecords, writeRoster } from "../workspace-state";
 import type { OperationKind } from "./kind";
+import { putListMember } from "../members";
 
 export const inviteMemberKind: OperationKind = {
   kind: "inviteMember",
@@ -23,11 +23,11 @@ async function inviteMember(actor: OperatorActor, context: OperationContext, sub
   const current = await activeRoster(actor);
   if (!current.has(subject) && current.size >= 200) throw new OperationRejectedError("Workspace member limit reached (200).");
 
-  await context.step("member-workspace", () => putSpaceMember(actor.session, workspace, subject, true, true));
-  await context.step("member-inbox-writer", () => putSpaceMember(actor.session, inbox, subject, false, true));
+  await context.step("member-workspace", () => putListMember(actor.session, workspace, subject, true, true));
+  await context.step("member-inbox-writer", () => putListMember(actor.session, inbox, subject, false, true));
   for (const channel of publicChannels) {
     const space = channelUri(actor.workspace.authorityDid, channel.value.skey);
-    await context.step(`member-public-channel-${channel.value.skey}`, () => putSpaceMember(actor.session, space, subject, true, true));
+    await context.step(`member-public-channel-${channel.value.skey}`, () => putListMember(actor.session, space, subject, true, true));
   }
   await context.step("member-workspace-roster", async () => {
     await writeRoster(actor, workspace, subject, true);

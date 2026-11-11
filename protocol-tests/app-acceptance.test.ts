@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 import BetterSqlite3 from "better-sqlite3";
 import { spawn } from "node:child_process";
 import { mkdtempSync, statSync } from "node:fs";
-import { createServer } from "node:net";
 import { readdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,6 +11,7 @@ import test from "node:test";
 import { isAccessLost, SPACE_CREDENTIAL_LIFETIME_MS } from "@/atproto/space-credential-core";
 import { createFixtureTempRoot } from "./fixture-temp";
 import { expireStoredSession, memberSignInScopes, storeAuthorityGrant, storeOAuthSession, type TestPds as NetworkPds } from "./support/pds-network";
+import { availablePort, waitForChildClose, waitForClientMetadata } from "./support/app-server";
 
 type DidResolver = { resolve(did: string, ...args: unknown[]): Promise<unknown> };
 type TestPds = NetworkPds & { ctx: NetworkPds["ctx"] & { idResolver: { did: DidResolver } } };
@@ -1161,52 +1161,6 @@ async function acceptAuthenticatedApiRoute(pds: TestPds, authorityDid: string): 
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
     await closed;
   }
-}
-
-async function availablePort(): Promise<number> {
-  const server = createServer();
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
-  });
-  const address = server.address();
-  assert.ok(address && typeof address === "object");
-  const port = address.port;
-  await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-  return port;
-}
-
-async function waitForClientMetadata(serverUrl: string, child: ReturnType<typeof spawn>): Promise<void> {
-  let lastError = "Next.js did not become ready.";
-  const deadline = Date.now() + 90_000;
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null || child.signalCode !== null) {
-      throw new Error(`Next.js exited before becoming ready (code=${child.exitCode}, signal=${child.signalCode}).`);
-    }
-    try {
-      const response = await fetch(`${serverUrl}/oauth/client-metadata.json`, { signal: AbortSignal.timeout(2_000) });
-      if (response.ok) return;
-      lastError = `Next.js client metadata returned ${response.status}.`;
-    } catch (error) {
-      lastError = error instanceof Error ? error.message : String(error);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 200));
-  }
-  throw new Error(lastError);
-}
-
-function waitForChildClose(child: ReturnType<typeof spawn>): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      child.kill("SIGKILL");
-      reject(new Error("Next.js did not stop after SIGTERM."));
-    }, 10_000);
-    child.once("close", () => {
-      clearTimeout(timeout);
-      resolve();
-    });
-  });
 }
 
 async function runRestartRecovery(input: {

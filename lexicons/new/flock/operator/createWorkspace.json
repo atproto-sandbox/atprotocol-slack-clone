@@ -1,0 +1,101 @@
+{
+  "lexicon": 1,
+  "id": "new.flock.operator.createWorkspace",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Creates a workspace as the caller's own authority with the grant its authority flow left: the workspace, inbox and general channel spaces, the profile, the authority's roster and admin records and the directory entry, as one journaled operation that a retry with the same operation id resumes.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "name",
+            "operationId"
+          ],
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 60
+            },
+            "operationId": {
+              "type": "string",
+              "format": "tid"
+            }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": [
+            "operationId",
+            "workspace",
+            "channel",
+            "state",
+            "completedSteps"
+          ],
+          "properties": {
+            "operationId": {
+              "type": "string",
+              "format": "tid"
+            },
+            "workspace": {
+              "type": "string",
+              "format": "space-ref"
+            },
+            "channel": {
+              "type": "string",
+              "format": "space-ref",
+              "description": "The workspace's general channel."
+            },
+            "state": {
+              "type": "string",
+              "knownValues": [
+                "queued",
+                "running",
+                "pending",
+                "completed",
+                "failed",
+                "paused"
+              ]
+            },
+            "completedSteps": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 128
+              }
+            },
+            "error": {
+              "type": "string",
+              "maxLength": 1000
+            }
+          }
+        }
+      },
+      "errors": [
+        {
+          "name": "Unauthorized"
+        },
+        {
+          "name": "AuthorizationRequired",
+          "description": "The operator holds no usable grant for the caller as an authority: start the authority flow with purpose reauthorize, then retry with the same operation id."
+        },
+        {
+          "name": "OperationIdConflict"
+        },
+        {
+          "name": "Paused",
+          "description": "Workspace admin mutations are paused by the operator."
+        },
+        {
+          "name": "Busy",
+          "description": "Another operation holds this authority's workspaces; retry with the same operation id."
+        }
+      ]
+    }
+  }
+}
