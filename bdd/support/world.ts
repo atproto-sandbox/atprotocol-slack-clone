@@ -57,6 +57,11 @@ export class AppWorld extends World {
     return this.fixture.appUrl.origin;
   }
 
+  /** The audience of the app's operator: its `did:web` and service fragment, as service tokens name it. */
+  get operatorServiceRef(): string {
+    return `did:web:localhost%3A${this.fixture.appUrl.port}#atproto_flock_operator`;
+  }
+
   /** The actor for a role, created on first use with a fresh account and its own browser context. */
   async actor(role: string, host: 0 | 1 = 0): Promise<Actor> {
     const existing = this.actors.get(role);

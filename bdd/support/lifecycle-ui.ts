@@ -13,9 +13,10 @@ import { AtprotoClient, XrpcError } from "@/atproto/xrpc";
 import { mintSpaceCredentialWith, SpaceCredential, SpaceCredentialError } from "@/atproto/space-credential-core";
 import { inboxUri, subjectKey } from "@/protocol/keys";
 import type { Actor, AppWorld } from "./world";
+import { submitAndWait, type Executed } from "./operator-calls";
 import { memberspacePolicy } from "@/atproto/space-policy";
 import {
-  approveAdminControls, createWorkspaceAs, escapeRegExp, eventually, inviteMemberAs,
+  waitForAdminControls, createWorkspaceAs, escapeRegExp, inviteMemberAs,
   joinFromInvitation, openInviteLinkAndSignIn,
 } from "./ui";
 
@@ -24,8 +25,6 @@ import {
 
 export type Member = { did: string; read: boolean; write: boolean };
 export type ChannelRef = { name: string; skey: string; uri: string; visibility: string };
-export type OperationView = { operationId: string; requestHash: string; state: string; completedSteps: string[]; error?: string; updatedAt: string };
-export type Executed = { status: number; operationId: string; request: Record<string, unknown>; operation?: OperationView; error?: string };
 export type JournalEntry = {
   operationId: string; workspace: string; workspaceUri: string | null; actor: string; requestHash: string; state: string; steps: string[];
   error: string | null; request: Record<string, unknown>; createdAt: number; updatedAt: number;
@@ -210,7 +209,7 @@ export async function eventuallyAsync<T>(read: () => Promise<T | undefined | nul
 export async function workspaceWithAdmin(world: AppWorld): Promise<Actor> {
   const owner = await world.actor("owner", 0);
   await createWorkspaceAs(world, owner);
-  await approveAdminControls(world, owner);
+  await waitForAdminControls(world, owner);
   return owner;
 }
 
@@ -220,22 +219,9 @@ export async function showWorkspaceHome(world: AppWorld, actor: Actor): Promise<
 }
 
 /** Runs `act`, then waits for the app's reply to the operator call it caused and decodes it. */
-export async function submitAndWait(world: AppWorld, actor: Actor, act: () => Promise<void>): Promise<Executed> {
-  const before = world.callsTo(actor, "/api/operator/execute").length;
-  await act();
-  const call = await eventually(() => world.callsTo(actor, "/api/operator/execute")[before], { what: "the operator reply", timeoutMs: 120_000 });
-  return decodeExecuted(call.status, call.requestBody, call.responseBody);
-}
-
-export function decodeExecuted(status: number, requestBody: string, responseBody: string): Executed {
-  const request = JSON.parse(requestBody) as { operationId: string; request: Record<string, unknown> };
-  const body = (responseBody ? JSON.parse(responseBody) : {}) as { operation?: OperationView; error?: string };
-  return { status, operationId: request.operationId, request: request.request, operation: body.operation, error: body.error };
-}
-
 export async function createChannelAs(world: AppWorld, owner: Actor, name: string, visibility: "public" | "private", memberDids: string[] = []): Promise<ChannelRef> {
   await showWorkspaceHome(world, owner);
-  const done = await submitAndWait(world, owner, async () => {
+  const done = await submitAndWait(owner, async () => {
     await owner.page.getByLabel("Channel name").fill(name);
     await owner.page.getByLabel("Channel visibility").selectOption(visibility);
     if (visibility === "private") await owner.page.getByLabel("Private member DIDs").fill(memberDids.join(" "));
@@ -251,14 +237,14 @@ export const channelButton = (actor: Actor, name: string): Locator =>
 
 export async function removeMemberViaRoster(world: AppWorld, admin: Actor, did: string): Promise<Executed> {
   await showWorkspaceHome(world, admin);
-  return submitAndWait(world, admin, async () => {
+  return submitAndWait(admin, async () => {
     await admin.page.locator(".roster-row").filter({ hasText: did }).getByRole("button", { name: "Remove", exact: true }).click();
   });
 }
 
 export async function joinWorkspaceAs(world: AppWorld, member: Actor): Promise<void> {
   await openInviteLinkAndSignIn(world, member, inviteLinkFor(world.appOrigin, world.workspaceUri));
-  await joinFromInvitation(world, member);
+  await joinFromInvitation(member);
   await member.page.getByRole("heading", { name: world.workspaceName, exact: true }).waitFor({ state: "visible" });
 }
 

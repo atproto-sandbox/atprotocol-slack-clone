@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import { Given, Then, When } from "@cucumber/cucumber";
 import { inboxUri } from "@/protocol/keys";
 import { withIndependentReader } from "../support/independent-app-ui";
-import { workspaceChannels } from "../support/channels-ui";
+import { credentialCalls, credentialOutcome, workspaceChannels } from "../support/channels-ui";
 import type { AppWorld, Actor } from "../support/world";
 import {
-  approveAdminControls, completeConsent, copyInviteLink, createWorkspaceAs, escapeRegExp, eventually, inviteMemberAs,
+  waitForAdminControls, completeConsent, copyInviteLink, createWorkspaceAs, escapeRegExp, eventually, inviteMemberAs,
   joinFromInvitation, openInviteLinkAndSignIn, ownerInvites, signIn, submitWorkspaceName, uniqueWorkspaceName, waitForApp, workspaceUriOnPage,
 } from "../support/ui";
+import { OPERATOR_AUTHORITY_FLOW, OPERATOR_CREATE_WORKSPACE, operatorCalls } from "../support/operator-calls";
 
 type Member = { did: string; read: boolean; write: boolean };
 
@@ -65,11 +66,10 @@ When("the account submits a workspace name", async function (this: AppWorld) {
 });
 
 Then("the app reports that permission is required, not a raw scope error", async function (this: AppWorld) {
-  const first = await eventually(() => this.callsTo(owner(this), "/api/workspaces/bootstrap")[0], { what: "the first create request" });
+  const first = await eventually(() => operatorCalls(owner(this), OPERATOR_CREATE_WORKSPACE)[0], { what: "the first create request" });
   assert.equal(first.status, 403);
-  const body = JSON.parse(first.responseBody) as { code?: string; action?: string };
-  assert.equal(body.code, "authorization_required");
-  assert.equal(body.action, "workspaceAuthority");
+  const body = JSON.parse(first.responseBody) as { error?: string; message?: string };
+  assert.equal(body.error, "AuthorizationRequired", "the operator answers with its typed error, which the app turns into the approval");
   assert.doesNotMatch(first.responseBody, /Missing required scope/);
   this.scratch.set("operationId", (JSON.parse(first.requestBody) as { operationId: string }).operationId);
 });
@@ -85,7 +85,7 @@ Then("after approval the same operation ID is retried and the workspace is creat
   await actor.page.getByRole("heading", { name: this.workspaceName, exact: true }).waitFor({ state: "visible" });
   const operationId = this.scratch.get("operationId") as string;
   // The page shows the workspace as soon as the retry answered; the recorder files that answer a moment later.
-  await eventually(() => this.callsTo(actor, "/api/workspaces/bootstrap").filter((call) => (JSON.parse(call.requestBody) as { operationId: string }).operationId === operationId).length >= 2,
+  await eventually(() => operatorCalls(actor, OPERATOR_CREATE_WORKSPACE).filter((call) => (JSON.parse(call.requestBody) as { operationId: string }).operationId === operationId).length >= 2,
     { what: "the same operation ID to be submitted again after approval" });
   const journal = this.withAppDatabase((db) => db.prepare("SELECT state FROM operation WHERE operation_id = ?").get(operationId) as { state: string } | undefined);
   assert.equal(journal?.state, "completed");
@@ -106,17 +106,17 @@ Given("the account returns from the permission screen without the required permi
 
 When("the app resumes the setup once", async function (this: AppWorld) {
   const actor = owner(this);
-  await eventually(() => this.callsTo(actor, "/api/workspaces/bootstrap").length >= 2, { what: "the setup to resume after returning" });
+  await eventually(() => operatorCalls(actor, OPERATOR_CREATE_WORKSPACE).length >= 2, { what: "the setup to resume after returning" });
   // The resumed attempt ends in the refusal shown to the person; nothing runs after it.
   await actor.page.getByText(/Permission was not granted/).waitFor({ state: "visible" });
-  assert.equal(this.callsTo(actor, "/api/workspaces/bootstrap").length, 2, "setup was attempted once at submit and resumed exactly once");
+  assert.equal(operatorCalls(actor, OPERATOR_CREATE_WORKSPACE).length, 2, "setup was attempted once at submit and resumed exactly once");
 });
 
 Then("it shows a clear error instead of redirecting again", async function (this: AppWorld) {
   const actor = owner(this);
   await actor.page.getByText(/Permission was not granted/).waitFor({ state: "visible" });
   assert.doesNotMatch(actor.page.url(), /\/oauth\/authorize/, "the account was not sent to approve the permission a second time");
-  assert.equal(this.callsTo(actor, "/api/oauth/permission").length, 1, "only the first attempt asked for permission");
+  assert.equal(operatorCalls(actor, OPERATOR_AUTHORITY_FLOW).length, 1, "only the first attempt asked for permission");
 });
 
 // --- Invitations ------------------------------------------------------------------------------------
@@ -124,7 +124,7 @@ Then("it shows a clear error instead of redirecting again", async function (this
 Given("a workspace has one active owner and two public channels", async function (this: AppWorld) {
   const actor = await this.actor("owner");
   await createWorkspaceAs(this, actor);
-  await approveAdminControls(this, actor);
+  await waitForAdminControls(this, actor);
   await actor.page.getByLabel("Channel name").fill("Second Room");
   await actor.page.locator("form").filter({ has: actor.page.getByLabel("Channel name") }).getByRole("button", { name: /Create channel/ }).click();
   await actor.page.getByRole("button", { name: /Second Room/ }).waitFor({ state: "visible" });
@@ -172,7 +172,7 @@ Then("the invite is reported complete only after every member list matches", fun
 Given("a workspace owner has created a workspace and approved admin controls", async function (this: AppWorld) {
   const actor = await this.actor("owner");
   await createWorkspaceAs(this, actor);
-  await approveAdminControls(this, actor);
+  await waitForAdminControls(this, actor);
 });
 
 When("the owner invites a member by DID", async function (this: AppWorld) {
@@ -207,7 +207,7 @@ Then("the member is offered to join that workspace", async function (this: AppWo
 });
 
 When("the member joins the workspace", async function (this: AppWorld) {
-  await joinFromInvitation(this, actorNamed(this, "member"));
+  await joinFromInvitation(actorNamed(this, "member"));
 });
 
 Then("the workspace appears in the member's dashboard with {int} active members", async function (this: AppWorld, count: number) {
@@ -227,14 +227,15 @@ Given("a DID is absent from a workspace member list", async function (this: AppW
 When("that DID opens a forwarded invite link and tries to join", async function (this: AppWorld) {
   const stranger = actorNamed(this, "stranger");
   await openInviteLinkAndSignIn(this, stranger, this.inviteLink);
-  await joinFromInvitation(this, stranger);
+  await joinFromInvitation(stranger);
 });
 
 Then("the app says the account has not been added to the workspace", async function (this: AppWorld) {
-  await actorNamed(this, "stranger").page.getByRole("alert").filter({ hasText: /may not have been added to it yet/ }).waitFor({ state: "visible" });
-  const accept = this.callsTo(actorNamed(this, "stranger"), "/api/workspaces/accept").at(-1);
-  assert.equal(accept?.status, 404, "the authority gives an account it never added the same answer it gives for a missing workspace");
-  assert.equal((JSON.parse(accept!.responseBody) as { code: string }).code, "workspace_unavailable");
+  const stranger = actorNamed(this, "stranger");
+  await stranger.page.getByRole("alert").filter({ hasText: /may not have been added to it yet/ }).waitFor({ state: "visible" });
+  const asked = credentialCalls(stranger, this.workspaceUri);
+  assert.ok(asked.length > 0, "joining asked the authority for the workspace's credential");
+  assert.deepEqual([...new Set(asked.map(credentialOutcome))], ["SpaceNotFound"], "the authority gives an account it never added the same answer it gives for a missing workspace");
 });
 
 Then("the workspace does not appear in that account's dashboard", async function (this: AppWorld) {
@@ -262,7 +263,7 @@ Given("an invitee has been added to the workspace member list", async function (
 When("the invitee joins the workspace from its invite link", async function (this: AppWorld) {
   const invitee = actorNamed(this, "invitee");
   await openInviteLinkAndSignIn(this, invitee, this.inviteLink);
-  await joinFromInvitation(this, invitee);
+  await joinFromInvitation(invitee);
   await invitee.page.getByRole("heading", { name: this.workspaceName, exact: true }).waitFor({ state: "visible" });
 });
 
@@ -378,21 +379,3 @@ Then("inbox read access is removed before the admin record becomes inactive", as
   assert.ok(steps.indexOf("remove-inbox-read") >= 0 && steps.indexOf("remove-inbox-read") < steps.indexOf("write-admin-inactive"), `step order was ${steps.join(", ")}`);
 });
 
-// --- Declining the join permission ------------------------------------------------------------------
-
-When("the member declines the permission screen when joining", async function (this: AppWorld) {
-  const member = actorNamed(this, "member");
-  await member.page.getByRole("region", { name: "Workspace invitation" }).getByRole("button", { name: "Join this workspace" }).click();
-  await completeConsent(member, "deny");
-  await waitForApp(this, member);
-});
-
-Then("the app says the permission was not granted", async function (this: AppWorld) {
-  const member = actorNamed(this, "member");
-  await member.page.getByRole("alert").filter({ hasText: /Permission was not granted/ }).waitFor({ state: "visible" });
-  assert.doesNotMatch(await member.page.locator("body").innerText(), /Missing required scope/, "no raw scope error reaches the person");
-});
-
-Then("the invitation is still offered", async function (this: AppWorld) {
-  await actorNamed(this, "member").page.getByRole("region", { name: "Workspace invitation" }).waitFor({ state: "visible" });
-});

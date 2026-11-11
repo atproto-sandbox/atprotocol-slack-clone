@@ -43,26 +43,30 @@ export class Snapshots {
     const entry: { running: Promise<void>; again: boolean; load: () => Promise<unknown> } = { running: Promise.resolve(), again: false, load };
     // Registered before it runs, so even a loader that fails at once leaves no finished entry behind.
     this.loads.set(key, entry);
+    // A load the key was forgotten during answers nothing.
+    const current = () => this.loads.get(key) === entry;
     entry.running = (async () => {
       try {
         do {
           entry.again = false;
           this.set(key, { ...this.get<T>(key), loading: true });
           try {
-            this.set(key, { value: await entry.load(), error: undefined, loading: false });
+            const value = await entry.load();
+            if (current()) this.set(key, { value, error: undefined, loading: false });
           } catch (error) {
-            this.set(key, { value: this.get<T>(key).value, error, loading: false });
+            if (current()) this.set(key, { value: this.get<T>(key).value, error, loading: false });
           }
-        } while (entry.again);
+        } while (entry.again && current());
       } finally {
-        this.loads.delete(key);
+        if (current()) this.loads.delete(key);
       }
     })();
     return entry.running;
   }
 
-  /** Drops a key's snapshot: what it showed is no longer the account's to see (sign-out, a lost space). */
+  /** Drops a key's snapshot, and the answer of a load still running for it: nothing shows the key any more. */
   forget(key: string): void {
+    this.loads.delete(key);
     if (!this.values.delete(key)) return;
     for (const listener of [...(this.listeners.get(key) ?? [])]) listener();
   }
@@ -98,27 +102,36 @@ export class LiveSpaces {
   }
 
   /**
-   * Loads `key` now and again whenever one of `spaces` changes; the returned function stops this watch (a later watch of the
-   * same key replaces it, and stopping the earlier one then does nothing). Spaces not yet followed are followed in the order
-   * that loses nothing (head, then this load, then follow from head), so following them is what loads the key, once;
-   * otherwise, or when the operator cannot be reached, the key is loaded directly.
+   * Loads `key` now and again whenever one of `spaces` changes, until `signal` aborts or the returned function is called (a
+   * later watch of the same key replaces it, and stopping the earlier one then does nothing). Spaces not yet followed are
+   * followed in the order that loses nothing (head, then this load, then follow from head), so following them is what loads
+   * the key, once; otherwise, or when the operator cannot be reached, the key is loaded directly. A watch stopped before its
+   * load begins loads nothing; one replaced loads with the replacing watch's loader. It never rejects: a load that fails is the
+   * key's snapshot error.
    */
-  async watch(key: string, spaces: readonly string[], load: () => Promise<unknown>): Promise<() => void> {
+  async watch(key: string, spaces: readonly string[], load: () => Promise<unknown>, signal?: AbortSignal): Promise<() => void> {
     const binding: Binding = { spaces, load };
-    const replaced = this.bindings.get(key);
-    this.bindings.set(key, binding);
-    if (replaced) this.release(replaced.spaces);
-    for (const space of spaces) this.lost.delete(space);
-    const unfollowed = spaces.filter((space) => !this.follower.following.includes(space));
-    if (!(unfollowed.length > 0 && await this.followNow(unfollowed, () => this.snapshots.refresh(key, load)))) await this.snapshots.refresh(key, load);
-    // Stopped or replaced while it was following: what only this watch read is not followed.
-    if (this.bindings.get(key) !== binding) this.release(spaces);
-    this.wake?.();
-    return () => {
+    const stop = () => {
       if (this.bindings.get(key) !== binding) return;
       this.bindings.delete(key);
       this.release(spaces);
     };
+    if (signal?.aborted) return stop;
+    const replaced = this.bindings.get(key);
+    this.bindings.set(key, binding);
+    if (replaced) this.release(replaced.spaces);
+    signal?.addEventListener("abort", stop, { once: true });
+    for (const space of spaces) this.lost.delete(space);
+    const loadWhileWatched = () => {
+      const current = this.bindings.get(key);
+      return current ? this.snapshots.refresh(key, current.load) : Promise.resolve();
+    };
+    const unfollowed = spaces.filter((space) => !this.follower.following.includes(space));
+    if (!(unfollowed.length > 0 && await this.followNow(unfollowed, loadWhileWatched))) await loadWhileWatched();
+    // Stopped or replaced while it was following: what only this watch read is not followed.
+    if (this.bindings.get(key) !== binding) this.release(spaces);
+    this.wake?.();
+    return stop;
   }
 
   /** Loads a watched key again now, as the UI asks after its own write. */
@@ -190,7 +203,8 @@ export class LiveSpaces {
   private async run(signal: AbortSignal): Promise<void> {
     while (!signal.aborted) {
       const waiting = this.waiting();
-      if (waiting.length === 0 && this.follower.following.length === 0) {
+      // Nothing to poll yet (a follow under way wakes the loop when it is done): waiting, not asking again at once.
+      if (waiting.length === 0 && !this.follower.pollable) {
         await this.idle(signal);
         continue;
       }

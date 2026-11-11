@@ -77,36 +77,8 @@ export async function joinWorkspaceAt(viewer: AppViewer, workspaceUri: string, w
   const join = viewer.page.getByRole("region", { name: "Workspace invitation" }).getByRole("button", { name: "Join this workspace" });
   const opened = viewer.page.getByRole("heading", { name: workspaceName, exact: true });
   await join.or(opened).first().waitFor({ state: "visible" });
-  if (await join.isVisible()) {
-    await join.click();
-    await completeConsent(viewer);
-    await waitForAppAt(viewer);
-  }
+  if (await join.isVisible()) await join.click();
   await opened.waitFor({ state: "visible" });
-}
-
-export async function grantAdminControlsAt(viewer: AppViewer, workspaceName: string): Promise<void> {
-  const card = viewer.page.getByRole("heading", { name: "Operator permissions" }).locator("xpath=ancestor::article");
-  await card.getByRole("button", { name: /Grant admin controls/ }).click();
-  await completeConsent(viewer);
-  await waitForAppAt(viewer);
-  await viewer.page.getByRole("heading", { name: workspaceName, exact: true }).waitFor({ state: "visible" });
-}
-
-/**
- * The owner approves workspace-authority permission on an app other than the one that created the workspace. The
- * create-workspace flow asks for it with this same request; there is no button for it afterwards.
- */
-export async function grantWorkspaceAuthorityAt(viewer: AppViewer): Promise<void> {
-  const granted = await viewer.page.evaluate(async (workspaceDid) => {
-    const response = await fetch("/api/oauth/permission", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "workspaceAuthority", workspaceDid }) });
-    return { status: response.status, body: await response.json() as { redirectUrl?: string } };
-  }, viewer.did);
-  assert.equal(granted.status, 200);
-  assert.ok(granted.body.redirectUrl, "the app sends the owner to approve workspace-authority permission");
-  await viewer.page.goto(granted.body.redirectUrl);
-  await completeConsent(viewer);
-  await waitForAppAt(viewer);
 }
 
 export async function createChannelAs(viewer: AppViewer, name: string, options: { privateMembers?: string[] } = {}): Promise<void> {
@@ -124,19 +96,13 @@ function channelButton(viewer: AppViewer, name: string) {
   return workspaceChannels(viewer.page).filter({ hasText: new RegExp(`^\\W*${escapeRegExp(name)}$`) });
 }
 
-/** A member who is not on a private channel's roster asks for access, approving the write-only inbox permission on the way. */
+/** A member who is not on a private channel's roster asks for access from its roster card. */
 export async function requestPrivateAccess(viewer: AppViewer, channelName: string): Promise<void> {
   const page = viewer.page;
   const offRoster = page.getByText("You are not on this channel’s active roster.");
   await channelButton(viewer, channelName).click();
   await offRoster.waitFor({ state: "visible" });
-  await page.getByRole("button", { name: "Request private access →" }).last().click();
-  await page.getByText(/Grant write-only inbox access/).waitFor({ state: "visible" });
-  await page.getByRole("button", { name: "Grant request access →" }).click();
-  await completeConsent(viewer);
-  await waitForAppAt(viewer);
-  await offRoster.waitFor({ state: "visible" });
-  await page.getByRole("button", { name: "Request private access →" }).last().click();
+  await page.getByRole("button", { name: "Request private access →" }).click();
   await page.getByText("Your access request is in the workspace inbox.", { exact: true }).waitFor({ state: "visible" });
 }
 

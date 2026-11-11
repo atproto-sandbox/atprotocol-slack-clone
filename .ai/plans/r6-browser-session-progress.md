@@ -206,3 +206,44 @@ and only reconnect where a scenario disconnects. "Grant channel read →" clicks
   connected session; `dmpWaitForOrigin` → `waitForOrigin`; the "never holds DM scopes" step captures the scopes at sign-in);
   `independent-app-ui` (`waitForAppAt`, `signInFromLoginFormAt` connect); `channels-ui` `openChannel` (no history /api
   call: wait for the channel to settle) and `openChannelReading` (no grant); then each step listed in the plan above.
+
+## R6b plan (2026-11-11)
+
+What still goes to the app server from the UI after R6a, and where each goes:
+- `/api/workspaces/bootstrap` (create a workspace): `engine.operator.createWorkspace({ name, operationId })`. A 403
+  `AuthorizationRequired` answer starts the authority flow with `engine.operator.startAuthorityFlow({ purpose:
+  "createWorkspace", name })` and redirects to its URL. On return the same operation ID is retried once, as today.
+- `/api/oauth/permission` "workspaceAuthority" (an operation the authority must approve again):
+  `startAuthorityFlow({ purpose: "reauthorize" })`. The answers are `AuthorizationRequired` from `createWorkspace` and
+  `AuthoritySessionUnavailable` (502) from `execute` when the grant lacks a scope.
+- `/api/operator/execute` and `/api/operator/reconcile`: `engine.operator.execute` (reconcile is the `reconcileWorkspace`
+  kind with a fresh TID). The operator method already checks the actor, the pause and the envelope.
+- `/api/operator/stalled`: `engine.operator.listStalledOperations(workspace)` (the UI shows the operations, as before; the
+  stalled notice registrations it also returns are not shown, as they were not before).
+- `/api/workspaces/accept` and the `joinWorkspace` grant: `engine.workspaces.accept(workspace)`, with its typed refusals
+  (`src/client/accept-errors.ts`). No consent: the browser grant writes the acceptance record.
+- `/api/channels/requests` and the "Grant request access" consent: `engine.channels.requestJoin` / `withdrawJoin`.
+- The server grants `operatorAdmin` ("Grant admin controls"), `operatorLeave` ("Authorize leave control") and
+  `workspaceRead` go from the UI: the browser grant carries the operator's methods.
+- Kept until R6c: sign-in and sign-out (`/api/oauth/login`, `/api/oauth/logout`), which R6c moves to the browser.
+
+Steps:
+- [x] b1 the calls above through the engine; the UI's grant plumbing reduced to the authority flow; BDD: grant steps
+  rewritten, the declining-join scenario deleted (owner sign-off), steps that inspected those `/api` calls read the
+  browser's own operator calls (`actor.xrpc`, origin = the app)
+- [x] b2 the shell's state onto snapshots read through `useSyncExternalStore`: discovery, the open channel's page and
+  roster, the inbox and the stalled operations as keyed live views; `workspace-manager.tsx` loses its fetch and refresh
+  state; one discovery at start-up
+- [x] b3 gate (unit, typecheck, lint, acceptance, browser, BDD), review, outcome, commit (outcome in the plan, "### R6b")
+
+b2 notes (2026-11-11):
+- Hooks over the engine's keyed live views, read through `useSyncExternalStore` (`use-live-view.ts`): `use-discovery.ts`
+  (key `workspaces`, following the shown workspace's space), `use-channel-content.ts` (key per channel; the page and the
+  private roster; a refused read is a value, `refused: status`), `use-admin-views.ts` (inbox and stalled operations, keyed
+  by workspace, only while the account is its admin and it is within the envelope). Each has its minute reload.
+- The shell keeps what a person chose (`chosenWorkspace`, `chosenChannel`) and derives what is shown (`selection.ts`): the
+  chosen workspace while listed, else the first; the chosen channel while the directory lists it, with its current name
+  and visibility. A channel gone from the directory closes during render.
+- Start-up discovers twice, not once (as R6a did): the first discovery finds the workspace to show, and following its
+  space takes the feed head and then discovers again, which is what loses no change. One discovery would need the
+  workspace spaces listed before the head is taken, a split of `WorkspaceClient.discover` left out of R6b.

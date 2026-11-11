@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { inviteLinkFor, makeShortId, splitDids, toSlug, type Grant, type InboxRequest, type RunOperation } from "./client-api";
+import { inviteLinkFor, makeShortId, splitDids, toSlug, type InboxRequest, type RunOperation } from "./client-api";
 import { useBrowserSessionContext } from "./session-context";
 import type { WorkspaceSummary } from "@/protocol/workspace-summary";
 
@@ -10,19 +10,17 @@ type WorkspaceHomeProps = {
   activeWorkspace: WorkspaceSummary;
   busy: boolean;
   workspaceDegraded: boolean;
-  needOperatorLeave: boolean;
   inbox: InboxRequest[];
   inboxLoaded: boolean;
   inboxPermissionMissing: boolean;
   runOperation: RunOperation;
-  grant: Grant;
   leaveWorkspace: () => Promise<void>;
   syncInbox: () => void;
   setStatus: (message: string) => void;
   setError: (message: string) => void;
 };
 
-export function WorkspaceHome({ did, activeWorkspace, busy, workspaceDegraded, needOperatorLeave, inbox, inboxLoaded, inboxPermissionMissing, runOperation, grant, leaveWorkspace, syncInbox, setStatus, setError }: WorkspaceHomeProps) {
+export function WorkspaceHome({ did, activeWorkspace, busy, workspaceDegraded, inbox, inboxLoaded, inboxPermissionMissing, runOperation, leaveWorkspace, syncInbox, setStatus, setError }: WorkspaceHomeProps) {
   // The inbox is read with the browser session's grant, so a refusal is answered by connecting it again.
   const { connect: connectBrowser } = useBrowserSessionContext();
   const [inviteDid, setInviteDid] = useState("");
@@ -35,8 +33,8 @@ export function WorkspaceHome({ did, activeWorkspace, busy, workspaceDegraded, n
     {activeWorkspace.isAdmin && <><div className="section-heading"><div><span className="eyebrow">GETTING STARTED</span><h2>Workspace controls</h2></div></div>
     <div className="starter-grid"><article className="starter-card"><span className="starter-icon icon-violet">＋</span><h3>Invite a member</h3><p>Add their DID to workspace, inbox, and public-channel membership.</p><form onSubmit={(event) => { event.preventDefault(); void runOperation({ kind: "inviteMember", subject: inviteDid }); setInviteDid(""); }}><input aria-label="Member DID" value={inviteDid} onChange={(event) => setInviteDid(event.target.value)} placeholder="did:plc:…" required /><button className="text-button" disabled={busy || workspaceDegraded}>Invite member →</button></form></article>
       <article className="starter-card"><span className="starter-icon icon-mint">#</span><h3>Create a channel</h3><p>Membership is applied before the directory entry becomes visible.</p><form onSubmit={(event) => { event.preventDefault(); const skey = `${toSlug(channelName)}-${makeShortId()}`; const members = splitDids(privateMembers); void runOperation({ kind: "createChannel", skey, name: channelName, visibility: channelVisibility, ...(channelVisibility === "private" ? { members } : {}) }); setChannelName(""); }}><input aria-label="Channel name" value={channelName} onChange={(event) => setChannelName(event.target.value)} placeholder="project-room" required /><select aria-label="Channel visibility" value={channelVisibility} onChange={(event) => setChannelVisibility(event.target.value as "public" | "private")}><option value="public">Public</option><option value="private">Private</option></select>{channelVisibility === "private" && <input aria-label="Private member DIDs" value={privateMembers} onChange={(event) => setPrivateMembers(event.target.value)} placeholder="Member DIDs, comma separated" /> }<button className="text-button" disabled={busy || workspaceDegraded}>Create channel →</button></form></article>
-      <article className="starter-card"><span className="starter-icon icon-peach">⚙</span><h3>Operator permissions</h3><p>Grant this admin identity the exact XRPC method scopes used for workspace changes.</p><button className="text-button" type="button" disabled={workspaceDegraded} onClick={() => void grant("operatorAdmin", activeWorkspace.uri)}>Grant admin controls →</button></article></div></>}
-    {did !== activeWorkspace.authorityDid && <div className="starter-card lifecycle-card"><h3>Leave workspace</h3><p>Leaving removes your workspace, inbox, public-channel, and private-channel memberships.</p><button className="text-button danger" disabled={busy || workspaceDegraded} onClick={() => void leaveWorkspace()}>Leave this workspace</button>{needOperatorLeave && <button className="text-button" disabled={workspaceDegraded} onClick={() => void grant("operatorLeave", activeWorkspace.uri)}>Authorize leave control →</button>}</div>}
+      </div></>}
+    {did !== activeWorkspace.authorityDid && <div className="starter-card lifecycle-card"><h3>Leave workspace</h3><p>Leaving removes your workspace, inbox, public-channel, and private-channel memberships.</p><button className="text-button danger" disabled={busy || workspaceDegraded} onClick={() => void leaveWorkspace()}>Leave this workspace</button></div>}
     {activeWorkspace.isAdmin && <>
       <div className="section-heading"><div><span className="eyebrow">MEMBERS</span><h2>Current workspace roster</h2></div></div>
       <div className="starter-card roster-list">{activeWorkspace.members.map((member) => <div className="roster-row" key={member.did}><span>{member.did}</span>{member.did !== activeWorkspace.authorityDid && <div><button className="text-button" disabled={workspaceDegraded} onClick={() => void runOperation({ kind: "setAdmin", subject: member.did, active: !activeWorkspace.admins.includes(member.did) })}>{activeWorkspace.admins.includes(member.did) ? "Demote admin" : "Make admin"}</button><button className="text-button danger" disabled={workspaceDegraded} onClick={() => void runOperation({ kind: "removeMember", subject: member.did })}>Remove</button></div>}</div>)}</div>

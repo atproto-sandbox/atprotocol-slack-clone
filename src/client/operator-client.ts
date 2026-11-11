@@ -22,10 +22,12 @@ export type StalledWork = {
 
 export type OperationView = {
   operationId: string;
+  /** Lowercase hexadecimal SHA-256 of the canonical request JSON, as the operator's execute lexicon defines it. */
+  requestHash: string;
   state: string;
   completedSteps: string[];
   error?: string;
-  updatedAt?: string;
+  updatedAt: string;
 };
 
 export type OperatorService = {

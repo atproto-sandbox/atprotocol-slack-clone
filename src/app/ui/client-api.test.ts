@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { api, ApiError, captureInviteLink, clearAccountScopedState, INVITE_LINK_KEY, inviteLinkFor, workspaceFromInviteSearch, isAccessFailure, isAuthorizationRequired, makeTid, mergeMessages, threadMessages, workspaceOperationIdFor, parsePastedWorkspaceUri, splitDids, toSlug, withReactions, type Message } from "./client-api";
+import { OperatorRemoteError } from "@/client/operator-client";
+import { ChannelUnavailableError } from "@/client/errors";
+import { captureInviteLink, clearAccountScopedState, INVITE_LINK_KEY, inviteLinkFor, workspaceFromInviteSearch, isAccessFailure, needsAuthorityApproval, makeTid, mergeMessages, threadMessages, workspaceOperationIdFor, parsePastedWorkspaceUri, splitDids, toSlug, withReactions, type Message } from "./client-api";
 
 const message = (rkey: string): Message => ({ uri: `at://did:plc:a/space/x/${rkey}`, rkey, repo: "did:plc:a", value: { text: rkey } });
 
@@ -27,29 +29,18 @@ test("client helpers parse workspace URIs, DID lists, slugs, TIDs, and access fa
   assert.equal(toSlug("  Project Room!! "), "project-room");
   assert.equal(toSlug("!!!"), "channel");
   assert.match(makeTid(), /^[2-7a-z]{13}$/);
-  assert.equal(isAccessFailure(new ApiError(409, "archived")), true);
-  assert.equal(isAccessFailure(new ApiError(500, "down")), false);
+  assert.equal(isAccessFailure(new ChannelUnavailableError("archived", "archived")), true);
+  assert.equal(isAccessFailure(new OperatorRemoteError(403, "Unauthorized", "no")), true);
+  assert.equal(isAccessFailure(new OperatorRemoteError(503, "UpstreamUnavailable", "down")), false);
   assert.equal(isAccessFailure(new Error("plain")), false);
 });
 
-test("api() surfaces a typed error code, and only the authorization-required 403 is treated as such", async () => {
-  const original = globalThis.fetch;
-  try {
-    globalThis.fetch = async () => Response.json({ error: "Workspace setup needs your permission first.", code: "authorization_required" }, { status: 403 });
-    const caught = await api("/api/workspaces/bootstrap", { method: "POST", body: "{}" }).catch((error: unknown) => error);
-    assert.ok(caught instanceof ApiError);
-    assert.equal(caught.status, 403);
-    assert.equal(caught.code, "authorization_required");
-    assert.equal(isAuthorizationRequired(caught), true);
-
-    globalThis.fetch = async () => Response.json({ error: "Forbidden." }, { status: 403 });
-    const plain = await api("/api/anything").catch((error: unknown) => error);
-    assert.equal(isAuthorizationRequired(plain), false, "a plain 403 has no code");
-    assert.equal(isAuthorizationRequired(new ApiError(400, "x", "authorization_required")), false, "the code only counts on a 403");
-    assert.equal(isAuthorizationRequired(new Error("authorization_required")), false);
-  } finally {
-    globalThis.fetch = original;
-  }
+test("only the operator's answers that the authority must approve its grant ask for the authority flow", () => {
+  assert.equal(needsAuthorityApproval(new OperatorRemoteError(403, "AuthorizationRequired", "approve first")), true);
+  assert.equal(needsAuthorityApproval(new OperatorRemoteError(502, "AuthoritySessionUnavailable", "approve again")), true);
+  assert.equal(needsAuthorityApproval(new OperatorRemoteError(403, "Unauthorized", "not an admin")), false);
+  assert.equal(needsAuthorityApproval(new OperatorRemoteError(423, "Paused", "paused")), false);
+  assert.equal(needsAuthorityApproval(new Error("AuthorizationRequired")), false);
 });
 
 test("a stored workspace operation ID is reused only for the exact name it was issued for", () => {

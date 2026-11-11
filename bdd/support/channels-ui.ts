@@ -8,7 +8,7 @@ import { inviteLinkFor } from "@/app/ui/client-api";
 import type { SecondApp } from "../../protocol-tests/support/app-fixture";
 import { PAGE_TIMEOUT_MS, type Actor, type ApiCall, type AppWorld } from "./world";
 import { browserRecords } from "./browser-store";
-import { approveAdminControls, completeConsent, connectBrowser, createWorkspaceAs, eventually, inviteMemberAs, waitForOrigin } from "./ui";
+import { waitForAdminControls, completeConsent, connectBrowser, createWorkspaceAs, eventually, inviteMemberAs, waitForOrigin } from "./ui";
 
 export type ChannelRef = { skey: string; name: string; uri: string; visibility: string };
 export type Member = { did: string; read: boolean; write: boolean };
@@ -140,8 +140,6 @@ export async function joinWorkspaceOn(site: Site, actor: Actor, inviteLink: stri
   await actor.page.getByText(/invited to a workspace/).waitFor({ state: "visible" });
   await signInFromLoginFormOn(site, actor);
   await actor.page.getByRole("region", { name: "Workspace invitation" }).getByRole("button", { name: "Join this workspace" }).click();
-  await completeConsent(actor);
-  await waitForSite(site, actor);
 }
 
 /** The open workspace's channels in the sidebar (the direct-message list beside them uses the same item style). */
@@ -245,7 +243,7 @@ export type Roster = { owner: Actor; general: ChannelRef; sessions: Map<string, 
 export async function setUpRoster(world: AppWorld, people: Person[]): Promise<Roster> {
   const owner = await world.actor("owner");
   await createWorkspaceAs(world, owner);
-  await approveAdminControls(world, owner);
+  await waitForAdminControls(world, owner);
   const accounts = new Map<string, Actor>();
   for (const person of people) {
     const account = await world.actor(person.role, person.host);

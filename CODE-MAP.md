@@ -13,7 +13,7 @@ A Slack-style team workspace built directly on atproto (AT Protocol) permissione
   │    conversation (src/app/ui/dm-*.tsx)      │      │  - xrpc/** operator + notices           │     │ new.flock.channel.message/.reaction│
   │                                             │      │  - oauth/** login/callback/metadata    │     │ (member-list read/write, open      │
   │ Workspace OAuth session (server-issued)     │      │                                         │     │  app access; member lists ARE the  │
-  │  - operator calls and joins (until R6b)     │      │ Workspace authority operator            │     │  read gate)                        │
+  │  - sign-in and sign-out only (until R6c)    │      │ Workspace authority operator            │     │  read gate)                        │
   │                                             │      │  (src/operator/**)                      │     ├───────────────────────────────────┤
   │ Browser OAuth session (one grant: member    │      │  - signs service-auth JWTs, journals,   │     │ new.flock.dm.inbox (self)          │
   │  set, operator rpc, DM set), IndexedDB,     │      │    resumes, reconciles PDS membership   │     │ new.flock.dm.conversation/<convKey>│
@@ -83,6 +83,11 @@ src/
     ui/                     React components (client + server). workspace-manager.tsx is the
                              main stage; dm-*.tsx are the DM sidebar/home/requests/settings/
                              conversation views, wired in through dm-context.tsx / dm-session-bridge.tsx.
+                             The shell's data are the engine's keyed live views, read through use-live-view.ts
+                             (useSyncExternalStore): use-discovery.ts (the workspaces, following the shown one's
+                             space), use-channel-content.ts (the open channel's page and roster), use-admin-views.ts
+                             (the admin inbox and stalled operations). selection.ts derives what is shown from what was
+                             chosen and what discovery lists; the shell keeps no fetched state of its own.
   atproto/                Low-level protocol clients, shared by server channel code and the
                            isomorphic DM engine.
     xrpc.ts                  Minimal XRPC client (query/procedure) over an injected fetch handler.
@@ -185,7 +190,8 @@ src/
                               readable is followed again after REFOLLOW_DELAY_MS), and backs off a round that could not finish.
     views.ts                 Snapshots (one immutable snapshot per key, with subscriptions, for useSyncExternalStore) and
                               LiveSpaces (each watched key bound to the spaces it reads and loaded again when the feed names
-                              one; a key loads even while the operator is unreachable).
+                              one; a key loads even while the operator is unreachable; a watch stops on its AbortSignal; the
+                              live loop waits until a followed space has a cursor to poll).
     accept-errors.ts, inbox-requests.ts, errors.ts
                              Accept refusal codes, one writer's join requests, ChannelUnavailableError.
   testing/                Test-only: fake-network.ts (the in-memory multi-host PDS network for every engine and DM

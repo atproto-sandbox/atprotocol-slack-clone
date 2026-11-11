@@ -9,7 +9,7 @@ import {
   inboxOf, inboxRequestsSeen, inboxRow, inboxSweepsSince, joinWorkspaceAs, leaveChannelForWorkspaceHome, membersOf, messagesOf,
   inboxWriterSources, mintCredential, onboardMember, openChannelRoster, ownerWithAdminControls, requestPrivateAccessAs, requestsReadByOwner,
   requestsReadWithCredential, resubmitRequestAs, snapshotOfDecisionWrites, submitOperationAs, syncInbox, unregisterAppNotifications,
-  watchDecisionWrites, withdrawRequestAs, workspaceWithPrivateChannel, writeRequestAsUnlistedWriter, writeRequestDirectly, writerSetOf, operatorServiceRef,
+  watchDecisionWrites, withdrawRequestAs, workspaceWithPrivateChannel, writeRequestAsUnlistedWriter, writeRequestDirectly, writerSetOf,
   type OperationOutcome, type PrivateChannel, type SubmittedRequest, type WriteSnapshot,
 } from "../support/private-requests-ui";
 
@@ -78,7 +78,7 @@ async function adminHoldsCurrentRequest(world: AppWorld): Promise<void> {
   const { owner, channel } = await workspaceWithPrivateChannel(world);
   const requester = await onboardMember(world, owner, "requester", 1);
   await assertCredentialRefused(world, requester, channel.space, "before approval the requester has no channel access");
-  const submitted = await requestPrivateAccessAs(world, requester, channel);
+  const submitted = await requestPrivateAccessAs(requester, channel);
   const sweepsBefore = owner.xrpc.length;
   await syncInbox(owner);
   const listed = await eventually(
@@ -108,7 +108,7 @@ Given("a workspace member has inbox write access and no inbox read access", LONG
 });
 
 When("they submit a request to their own PDS repo", async function (this: AppWorld) {
-  stateOf(this).request = await requestPrivateAccessAs(this, actorNamed(this, "requester"), channelOf(this));
+  stateOf(this).request = await requestPrivateAccessAs(actorNamed(this, "requester"), channelOf(this));
 });
 
 Then("they can read their own request", async function (this: AppWorld) {
@@ -154,7 +154,7 @@ Given("a request write reached the authority PDS writer set", LONG_SETUP, async 
   const requester = await this.actor("requester", 1);
   await inviteMemberAs(owner, requester.did);
   const registered = this.withAppDatabase((db) => db.prepare("SELECT 1 AS found FROM notification_registration WHERE service_ref = ? AND space_uri = ?")
-    .get(operatorServiceRef(this), inboxOf(this)));
+    .get(this.operatorServiceRef, inboxOf(this)));
   assert.ok(registered, "the app registered for inbox notifications when the admin first opened the inbox");
   await unregisterAppNotifications(this, owner);
   const state = stateOf(this);
@@ -339,7 +339,7 @@ Then("the requester receives no channel membership", async function (this: AppWo
 Given("a requester withdrew and resubmitted a request with a fresh requestId", LONG_SETUP, async function (this: AppWorld) {
   const { owner, channel } = await workspaceWithPrivateChannel(this);
   const requester = await onboardMember(this, owner, "requester", 1);
-  const first = await requestPrivateAccessAs(this, requester, channel);
+  const first = await requestPrivateAccessAs(requester, channel);
   await syncInbox(owner);
   await inboxRow(owner, requester, channel).waitFor({ state: "visible", timeout: 60_000 });
   await withdrawRequestAs(requester);
@@ -355,7 +355,7 @@ Given("a requester withdrew and resubmitted a request with a fresh requestId", L
 
 When("an older approval decision arrives", async function (this: AppWorld) {
   const owner = actorNamed(this, "owner");
-  stateOf(this).outcome = await submitOperationAs(owner.page, this.workspaceUri, {
+  stateOf(this).outcome = await submitOperationAs(this, owner, this.workspaceUri, {
     kind: "decideJoinRequest", request: requestOf(this).uri, requestId: need(stateOf(this).staleRequestId, "older request generation"), decision: "approve",
   });
 });
@@ -395,7 +395,7 @@ Given("a member has an authorized private-channel credential", LONG_SETUP, async
   await joinWorkspaceAs(this, gamma);
   await joinWorkspaceAs(this, alpha);
 
-  await requestPrivateAccessAs(this, gamma, channel);
+  await requestPrivateAccessAs(gamma, channel);
   await syncInbox(owner);
   const approval = await decideInUi(owner, inboxRow(owner, gamma, channel), "Approve");
   assert.equal(approval.state, "completed", approval.error);

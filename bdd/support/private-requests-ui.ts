@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { generateSpaceKey } from "@/atproto/space-key";
-import type { Locator, Page, Response as PlaywrightResponse } from "@playwright/test";
+import type { Locator } from "@playwright/test";
 import { inviteLinkFor } from "@/app/ui/client-api";
 import { mintSpaceCredentialWith, SpaceCredentialError, type SpaceCredential } from "@/atproto/space-credential-core";
 import { AtprotoClient } from "@/atproto/xrpc";
 import { channelUri, decisionRecordKey, inboxUri, parseSpaceUri, requestRecordKey, spaceRecordUri, tidNow } from "@/protocol/keys";
-import type { Actor, AppWorld } from "./world";
+import type { Actor, ApiCall, AppWorld } from "./world";
 import { listingCalls } from "./channels-ui";
-import { approveAdminControls, completeConsent, createWorkspaceAs, inviteMemberAs, joinFromInvitation, openInviteLinkAndSignIn, waitForApp } from "./ui";
+import { executeAs, submitAndWait, type Executed } from "./operator-calls";
+import { waitForAdminControls, createWorkspaceAs, eventually, inviteMemberAs, joinFromInvitation, openInviteLinkAndSignIn } from "./ui";
 import { memberspacePolicy } from "@/atproto/space-policy";
 
 export const PRIVATE_CHANNEL_NAME = "Private Room";
@@ -33,10 +34,6 @@ export function inboxOf(world: AppWorld): string {
   const parsed = parseSpaceUri(world.workspaceUri);
   assert.ok(parsed, "this scenario has no workspace yet");
   return inboxUri(parsed.authorityDid, parsed.skey);
-}
-
-export function operatorServiceRef(world: AppWorld): string {
-  return `did:web:localhost%3A${world.fixture.appUrl.port}#atproto_flock_operator`;
 }
 
 export function requestUriOf(world: AppWorld, channel: PrivateChannel, requester: Actor): string {
@@ -181,7 +178,7 @@ export async function writeRequestDirectly(world: AppWorld, requester: Actor, ch
 export async function unregisterAppNotifications(world: AppWorld, authority: Actor): Promise<void> {
   const inbox = inboxOf(world);
   const credential = await mintCredential(world, authority, inbox);
-  await credential.client(authority.pdsUrl).procedure("com.atproto.space.unregisterNotify", { space: inbox, service: operatorServiceRef(world) });
+  await credential.client(authority.pdsUrl).procedure("com.atproto.space.unregisterNotify", { space: inbox, service: world.operatorServiceRef });
 }
 
 /**
@@ -223,7 +220,7 @@ export async function inboxWriterSources(world: AppWorld, authority: Actor): Pro
 
 /** Calls the operator's own XRPC endpoint with a service-auth token minted by the caller's PDS, not through the app's UI routes. */
 export async function callOperator(world: AppWorld, as: Actor, method: "new.flock.operator.listInboxWriters", params: Record<string, string>): Promise<{ status: number; text: string }> {
-  const auth = await world.pdsGet<{ token?: string }>(as, "com.atproto.server.getServiceAuth", { aud: operatorServiceRef(world), lxm: method });
+  const auth = await world.pdsGet<{ token?: string }>(as, "com.atproto.server.getServiceAuth", { aud: world.operatorServiceRef, lxm: method });
   assert.equal(auth.status, 200, `service auth for ${method}: ${JSON.stringify(auth.body)}`);
   assert.ok(auth.body.token, "the PDS issued a service-auth token");
   const url = new URL(`/xrpc/${method}`, world.appOrigin);
@@ -234,16 +231,14 @@ export async function callOperator(world: AppWorld, as: Actor, method: "new.floc
 
 // --- What people do in the browser ------------------------------------------------------------------
 
-function isExecuteCall(response: PlaywrightResponse): boolean {
-  return new URL(response.url()).pathname === "/api/operator/execute" && response.request().method() === "POST";
+function outcomeOf(executed: Executed): OperationOutcome {
+  return { status: executed.status, state: executed.operation?.state, error: executed.operation?.error ?? executed.error, completedSteps: executed.operation?.completedSteps ?? [] };
 }
 
-async function outcomeOf(response: PlaywrightResponse): Promise<OperationOutcome> {
-  const body = await response.json() as { operation?: { state?: string; error?: string; completedSteps?: string[] }; error?: string };
-  return {
-    status: response.status(), state: body.operation?.state, error: body.operation?.error ?? body.error,
-    completedSteps: body.operation?.completedSteps ?? [],
-  };
+/** The browser's own write of a join request record (put) or its removal (delete) since `since`, as the member's host answered. */
+function joinRequestWrite(member: Actor, since: number, method: "putRecord" | "deleteRecord"): ApiCall | undefined {
+  return member.xrpc.slice(since).find((call) => call.path === `/xrpc/com.atproto.space.${method}` && call.status === 200
+    && (JSON.parse(call.requestBody) as { collection?: string }).collection === "new.flock.joinRequest");
 }
 
 export async function createPrivateChannelAs(world: AppWorld, owner: Actor, name: string, memberDids: string[] = []): Promise<PrivateChannel> {
@@ -252,18 +247,17 @@ export async function createPrivateChannelAs(world: AppWorld, owner: Actor, name
   await page.getByLabel("Channel visibility").selectOption("private");
   if (memberDids.length > 0) await page.getByLabel("Private member DIDs").fill(memberDids.join(", "));
   const form = page.locator("form").filter({ has: page.getByLabel("Channel name") });
-  const [response] = await Promise.all([page.waitForResponse(isExecuteCall), form.getByRole("button", { name: /Create channel/ }).click()]);
-  const outcome = await outcomeOf(response);
-  assert.equal(outcome.state, "completed", `creating the private channel: ${outcome.error ?? outcome.status}`);
+  const executed = await submitAndWait(owner, () => form.getByRole("button", { name: /Create channel/ }).click());
+  assert.equal(outcomeOf(executed).state, "completed", `creating the private channel: ${JSON.stringify(executed)}`);
   await page.locator(".channel-nav-item").filter({ hasText: name }).waitFor({ state: "visible" });
   return privateChannelNamed(world, owner, name);
 }
 
-/** A signed-in workspace owner who has approved admin controls. */
+/** A signed-in workspace owner whose admin controls are live. */
 export async function ownerWithAdminControls(world: AppWorld): Promise<Actor> {
   const owner = await world.actor("owner", 0);
   await createWorkspaceAs(world, owner);
-  await approveAdminControls(world, owner);
+  await waitForAdminControls(world, owner);
   return owner;
 }
 
@@ -275,7 +269,7 @@ export async function workspaceWithPrivateChannel(world: AppWorld): Promise<{ ow
 
 export async function joinWorkspaceAs(world: AppWorld, member: Actor): Promise<void> {
   await openInviteLinkAndSignIn(world, member, inviteLinkFor(world.appOrigin, world.workspaceUri));
-  await joinFromInvitation(world, member);
+  await joinFromInvitation(member);
   await member.page.getByRole("heading", { name: world.workspaceName, exact: true }).waitFor({ state: "visible" });
 }
 
@@ -292,25 +286,20 @@ async function openPrivateChannel(member: Actor, channel: PrivateChannel): Promi
   await member.page.getByText("You are not on this channel’s active roster.").waitFor({ state: "visible" });
 }
 
+/** Sends the request (or updates it) from the roster card; the browser writes it to the account's own repo in the inbox. */
 async function clickRequestAccess(member: Actor): Promise<SubmittedRequest> {
   const page = member.page;
-  const created = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/channels/requests" && response.status() === 201);
-  await page.getByRole("button", { name: "Request private access →" }).last().click();
-  const body = await (await created).json() as { requestId: string; uri: string };
+  const since = member.xrpc.length;
+  await page.getByRole("button", { name: /^(Request private access|Update request) →$/ }).click();
+  const write = await eventually(() => joinRequestWrite(member, since, "putRecord"), { what: "the browser to write the join request" });
+  const body = JSON.parse(write.requestBody) as { space: string; repo: string; rkey: string; record: { requestId: string } };
   await page.getByText("Your access request is in the workspace inbox.", { exact: true }).waitFor({ state: "visible" });
-  return { id: body.requestId, uri: body.uri };
+  return { id: body.record.requestId, uri: spaceRecordUri(body.space, body.repo, "new.flock.joinRequest", body.rkey) };
 }
 
-/** First request from this account: the channel, the one-time write-only inbox permission, then the request itself. */
-export async function requestPrivateAccessAs(world: AppWorld, member: Actor, channel: PrivateChannel): Promise<SubmittedRequest> {
-  const page = member.page;
+/** A first request from this account: the private channel's roster card, then the request; the browser's grant covers it. */
+export async function requestPrivateAccessAs(member: Actor, channel: PrivateChannel): Promise<SubmittedRequest> {
   await openPrivateChannel(member, channel);
-  await page.getByRole("button", { name: "Request private access →" }).last().click();
-  await page.getByText(/Grant write-only inbox access/).waitFor({ state: "visible" });
-  await page.getByRole("button", { name: "Grant request access →" }).click();
-  await completeConsent(member);
-  await waitForApp(world, member);
-  await page.getByText("You are not on this channel’s active roster.").waitFor({ state: "visible" });
   return clickRequestAccess(member);
 }
 
@@ -320,9 +309,9 @@ export async function resubmitRequestAs(member: Actor): Promise<SubmittedRequest
 
 export async function withdrawRequestAs(member: Actor): Promise<void> {
   const page = member.page;
-  const withdrawn = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/channels/requests" && response.status() === 200);
+  const since = member.xrpc.length;
   await page.getByRole("button", { name: "Withdraw request", exact: true }).click();
-  assert.deepEqual(await (await withdrawn).json(), { withdrawn: true });
+  await eventually(() => joinRequestWrite(member, since, "deleteRecord"), { what: "the browser to delete the join request" });
   await page.getByText("Your private-channel request was withdrawn.", { exact: true }).waitFor({ state: "visible" });
 }
 
@@ -335,8 +324,7 @@ export async function syncInbox(admin: Actor): Promise<void> {
 }
 
 export async function decideInUi(admin: Actor, row: Locator, decision: "Approve" | "Deny"): Promise<OperationOutcome> {
-  const [response] = await Promise.all([admin.page.waitForResponse(isExecuteCall), row.getByRole("button", { name: decision, exact: true }).click()]);
-  return outcomeOf(response);
+  return outcomeOf(await submitAndWait(admin, () => row.getByRole("button", { name: decision, exact: true }).click()));
 }
 
 const INBOX_WRITERS = "/xrpc/new.flock.operator.listInboxWriters";
@@ -356,16 +344,9 @@ export function inboxRequestsSeen(admin: Actor, inbox: string, from: number): Ar
     });
 }
 
-/** An operator operation submitted through the admin's own signed-in browser session, exactly as the UI's Approve/Deny buttons do. */
-export async function submitOperationAs(page: Page, workspace: string, request: Record<string, unknown>): Promise<OperationOutcome> {
-  const result = await page.evaluate(async (payload) => {
-    const response = await fetch("/api/operator/execute", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
-    return { status: response.status, body: await response.json() as { operation?: { state?: string; error?: string; completedSteps?: string[] }; error?: string } };
-  }, { workspace, operationId: tidNow(), request });
-  return {
-    status: result.status, state: result.body.operation?.state, error: result.body.operation?.error ?? result.body.error,
-    completedSteps: result.body.operation?.completedSteps ?? [],
-  };
+/** An operator operation submitted as the admin, the way the UI's Approve/Deny buttons send it, with a body the page would not build. */
+export async function submitOperationAs(world: AppWorld, admin: Actor, workspace: string, request: Record<string, unknown>): Promise<OperationOutcome> {
+  return outcomeOf(await executeAs(world, admin, { workspace, operationId: tidNow(), request }));
 }
 
 

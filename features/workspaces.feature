@@ -42,15 +42,6 @@ Feature: Workspace membership and discovery
       When the member joins the workspace
       Then the workspace appears in the member's dashboard with 2 active members
 
-    Scenario: Declining the join permission explains itself and keeps the invitation
-      Given a member has been invited to a workspace and given its invite link
-      When the member opens the invite link and signs in
-      And the member declines the permission screen when joining
-      Then the app says the permission was not granted
-      And the invitation is still offered
-      When the member joins the workspace
-      Then the workspace appears in the member's dashboard with 2 active members
-
     Scenario: A forwarded workspace URI does not grant access
       Given a DID is absent from a workspace member list
       When that DID opens a forwarded invite link and tries to join

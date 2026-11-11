@@ -4,7 +4,7 @@ import { expect } from "@playwright/test";
 import { reactionRecordKey, spaceRecordUri, tidNow } from "@/protocol/keys";
 import { PAGE_TIMEOUT_MS, type Actor, type AppWorld } from "../support/world";
 import {
-  approveAdminControls, copyInviteLink, createWorkspaceAs, eventually, inviteMemberAs, joinFromInvitation, openInviteLinkAndSignIn, ownerInvites,
+  waitForAdminControls, copyInviteLink, createWorkspaceAs, eventually, inviteMemberAs, joinFromInvitation, openInviteLinkAndSignIn, ownerInvites,
 } from "../support/ui";
 import { browserRecords } from "../support/browser-store";
 import { engineAs } from "../support/engine";
@@ -58,7 +58,7 @@ async function listChannelSpaces(world: AppWorld, authority: Actor): Promise<str
 Given("a workspace has current members", async function (this: AppWorld) {
   const admin = await this.actor("owner");
   await createWorkspaceAs(this, admin);
-  await approveAdminControls(this, admin);
+  await waitForAdminControls(this, admin);
   const invitees = [await this.actor("alice", 1), await this.actor("bob", 0), await this.actor("carol", 1)];
   for (const invitee of invitees) await inviteMemberAs(admin, invitee.did);
   const removed = admin.page.locator(".roster-row").filter({ hasText: actorNamed(this, "carol").did });
@@ -140,7 +140,7 @@ Given("a member is absent from a private channel member list", async function (t
   const link = await copyInviteLink(admin);
   for (const person of [outsider, insider]) {
     await openInviteLinkAndSignIn(this, person, link);
-    await joinFromInvitation(this, person);
+    await joinFromInvitation(person);
   }
   const secret = `secret plans ${Math.random().toString(36).slice(2, 8)}`;
   await openChannel(insider, name);
@@ -174,10 +174,11 @@ Then("the PDS refuses a channel read credential", async function (this: AppWorld
   const secret = this.scratch.get("secret") as string;
   assert.equal(await messageCards(outsider).count(), 0, "no message is shown to the account");
   assert.doesNotMatch(await outsider.page.locator("body").innerText(), new RegExp(secret));
+  // What the browser was answered, by the app's server and by every XRPC host it called itself.
   const scanned = outsider.calls.filter((call) => call.body === "recorded");
-  assert.ok(scanned.length > 0, "the account's recorded app responses were scanned");
-  for (const call of scanned) assert.doesNotMatch(call.responseBody, new RegExp(secret), `${call.path} must not leak the private message`);
   const read = outsider.xrpc.filter((call) => call.body === "recorded");
+  assert.ok(scanned.length + read.length > 0, "the account's recorded responses were scanned");
+  for (const call of scanned) assert.doesNotMatch(call.responseBody, new RegExp(secret), `${call.path} must not leak the private message`);
   for (const call of read) assert.doesNotMatch(call.responseBody, new RegExp(secret), `the browser's own ${call.path} must not receive the private message`);
   assert.equal((await browserRecords(outsider, messageCollection)).some((record) => record.value.text === secret), false, "the account's browser store holds no message of the channel");
   this.log(`leak scan: ${scanned.length} app and ${read.length} XRPC responses read; headers only, not covered: ${[...outsider.calls, ...outsider.xrpc].filter((call) => call.body !== "recorded").map((call) => `${call.path} (${call.body})`).join(", ") || "none"}`);

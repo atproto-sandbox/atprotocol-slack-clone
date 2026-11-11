@@ -77,6 +77,11 @@ export class ChangeFollower {
     }
   }
 
+  /** Whether a poll has anything to ask: a space with a cursor, or a denied one waiting to be followed again. */
+  get pollable(): boolean {
+    return this.cursors.size > 0 || this.deferred.size > 0;
+  }
+
   unfollow(space: string): void {
     this.cursors.delete(space);
     this.deferred.delete(space);

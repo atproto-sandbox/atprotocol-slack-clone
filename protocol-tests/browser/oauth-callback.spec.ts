@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { after, before, test } from "node:test";
 import Database from "better-sqlite3";
-import { chromium } from "@playwright/test";
+import { chromium, type Response as PageResponse } from "@playwright/test";
 import { createFixtureTempRoot } from "../fixture-temp";
 
 const projectRoot = process.cwd();
@@ -138,7 +138,7 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
     // The browser's own session: one grant on the PDS for reading and writing the account's spaces, the operator's methods
     // and direct messages.
     const browserScope = await connectThisBrowser(page, appUrl, "browser-owner.test", password);
-    for (const expected of ["space:new.flock.channel?", "new.flock.channel.message", "lxm=new.flock.operator.getChanges", "lxm=new.flock.operator.listInboxWriters", "space:new.flock.dm.conversation"]) {
+    for (const expected of ["space:new.flock.channel?", "new.flock.channel.message", "lxm=new.flock.operator.getChanges", "lxm=new.flock.operator.listInboxWriters", "lxm=new.flock.operator.execute", "lxm=new.flock.operator.createWorkspace", "lxm=new.flock.operator.startAuthorityFlow", "lxm=new.flock.operator.listStalledOperations", "space:new.flock.dm.conversation"]) {
       assert.ok(browserScope.includes(expected), `the browser's grant includes ${expected}`);
     }
     await page.getByText("Create a shared workspace or accept an invitation.").waitFor({ state: "visible" });
@@ -149,19 +149,18 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
     assert.equal(webSession.httpOnly, true);
     assert.equal(cookies.some(({ name }) => name.startsWith("spaces_oauth_")), false, "OAuth state-binding cookie is cleared after callback");
 
-    // First-time creation: one click. The server answers that permission is required, the app
-    // sends the user to the PDS consent screen on its own, and creation resumes after approval.
+    // First-time creation: one click. The operator answers that the authority's approval is required, the app sends the
+    // user to the PDS consent screen on its own, and creation resumes after approval.
     assert.equal(await page.getByRole("button", { name: /Authorize workspace setup/ }).count(), 0, "there is no separate manual authorization step");
     await page.getByLabel("Workspace name").fill("Browser Acceptance Workspace");
-    const firstAttempt = page.waitForResponse((response) => response.url().includes("/api/workspaces/bootstrap"));
+    const firstAttempt = page.waitForResponse((response) => new URL(response.url()).pathname === "/xrpc/new.flock.operator.createWorkspace");
     const workspaceForm = page.locator("form").filter({ has: page.getByLabel("Workspace name") });
     await workspaceForm.getByRole("button", { name: "Create workspace", exact: true }).click();
     const firstResponse = await firstAttempt;
     assert.equal(firstResponse.status(), 403, "creating before approving the permission is refused");
-    const refusal = await firstResponse.json() as { error: string; code: string; action: string };
-    assert.equal(refusal.code, "authorization_required", "the refusal is typed, not a raw scope string");
-    assert.equal(refusal.action, "workspaceAuthority");
-    assert.match(refusal.error, /needs your permission/);
+    const refusal = await firstResponse.json() as { error: string; message: string };
+    assert.equal(refusal.error, "AuthorizationRequired", "the refusal is typed, not a raw scope string");
+    assert.match(refusal.message, /needs the authority's approval/);
     await page.waitForURL(/\/oauth\/authorize\?/, { timeout: 30_000 });
 
     // Decline on the consent screen. Returning without the permission must explain itself (no redirect
@@ -172,7 +171,7 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
     assert.equal(await page.getByLabel("Workspace name").inputValue(), "Browser Acceptance Workspace", "the typed name is kept");
 
     // Trying again asks for permission again instead of stranding the user.
-    const permissionRetry = page.waitForResponse((response) => response.url().includes("/api/oauth/permission"));
+    const permissionRetry = page.waitForResponse((response) => new URL(response.url()).pathname === "/xrpc/new.flock.operator.startAuthorityFlow");
     await workspaceForm.getByRole("button", { name: "Create workspace", exact: true }).click();
     assert.equal((await permissionRetry).status(), 200, "a retry after declining can start a new permission request");
     await page.waitForURL(/\/oauth\/authorize\?/, { timeout: 30_000 });
@@ -198,44 +197,10 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
     } finally {
       await strangerContext.close();
     }
-    // The browser reads the inbox with its own grant, which carries the operator's methods, so no prompt comes first; the
-    // admin controls granted next are the server session's, for the operations it still runs until R6b.
+    // The browser's own grant carries the operator's methods: the admin inbox loads and operations run with no further consent.
     await page.getByText("No pending join requests.").waitFor({ state: "visible", timeout: 30_000 }).catch(async (error: unknown) => {
       throw new Error(`Expected the synced inbox after bootstrap. Page: ${(await page.locator("body").innerText()).slice(0, 4_000)}\nServer: ${serverOutput}`, { cause: error });
     });
-
-    // Until the admin controls are granted, the server session cannot run an operation for this admin (R6b moves operations
-    // to the browser's grant).
-    const earlyOperation = page.waitForResponse((response) => response.url().includes("/api/operator/execute"));
-    await page.getByLabel("Channel name").fill("Too Early Room");
-    await page.locator("form").filter({ has: page.getByLabel("Channel name") }).getByRole("button", { name: /Create channel/ }).click();
-    const refused = await earlyOperation;
-    const earlyRefusal = await refused.text();
-    assert.ok(refused.status() >= 400, `an operation before the admin grant is refused (${refused.status()}: ${earlyRefusal})`);
-    assert.match(earlyRefusal, /Missing required scope \\"rpc:new\.flock\.operator\.execute/, "for want of the operator method the admin grant gives");
-
-    const adminScopeResponse = page.waitForResponse((response) => response.url().includes("/api/oauth/permission"));
-    const operatorPermissionsCard = page.getByRole("heading", { name: "Operator permissions" }).locator("xpath=ancestor::article");
-    await operatorPermissionsCard.getByRole("button", { name: /Grant admin controls/ }).click();
-    await page.waitForURL(/\/oauth\/authorize\?/, { timeout: 30_000 });
-    const authorizationRequest = new URL(page.url());
-    const clientId = authorizationRequest.searchParams.get("client_id");
-    assert.ok(clientId);
-    const requestedScope = new URL(clientId).searchParams.get("scope") ?? "";
-    for (const method of ["execute", "getOperation", "listInboxWriters"]) {
-      assert.ok(requestedScope.includes(`lxm=new.flock.operator.${method}`), `client metadata includes operator method ${method}`);
-    }
-    await signInIfPrompted(page);
-    await page.getByRole("button", { name: "Authorize", exact: true }).waitFor({ state: "visible" });
-    const consentScope = await page.evaluate(() => String((window as unknown as { __authorizeData?: { scope?: string } }).__authorizeData?.scope ?? ""));
-    for (const method of ["execute", "getOperation", "listInboxWriters"]) {
-      assert.ok(consentScope.includes(`lxm=new.flock.operator.${method}`), `PDS consent includes operator method ${method}`);
-    }
-    await page.getByRole("button", { name: "Authorize", exact: true }).click();
-    await page.waitForURL(appUrl.origin, { timeout: 30_000 });
-    assert.equal((await adminScopeResponse).status(), 200, "the admin client receives the exact operator RPC scopes");
-    await page.getByRole("heading", { name: "Browser Acceptance Workspace", exact: true }).waitFor({ state: "visible", timeout: 30_000 });
-    await page.getByText("No pending join requests.").waitFor({ state: "visible", timeout: 30_000 });
 
     await page.getByLabel("Channel name").fill("Browser Room");
     const channelForm = page.locator("form").filter({ has: page.getByLabel("Channel name") });
@@ -292,16 +257,10 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
     independentContext = await browser.newContext();
     const memberPage = await independentContext.newPage();
     memberPage.setDefaultTimeout(30_000);
-    const memberRequestEvents: string[] = [];
-    memberPage.on("request", (request) => {
-      if (request.url().includes("/api/channels/requests")) memberRequestEvents.push(`${request.method()} ${request.url()}`);
-    });
-    memberPage.on("requestfinished", (request) => {
-      if (request.url().includes("/api/channels/requests")) memberRequestEvents.push(`finished ${request.method()} ${request.url()}`);
-    });
-    memberPage.on("requestfailed", (request) => {
-      if (request.url().includes("/api/channels/requests")) memberRequestEvents.push(`failed ${request.method()} ${request.url()}: ${request.failure()?.errorText ?? "unknown"}`);
-    });
+    // A join request is a record the browser writes to the member's own repo in the workspace inbox.
+    const joinRequestWritten = () => memberPage.waitForResponse((response) => new URL(response.url()).pathname === "/xrpc/com.atproto.space.putRecord"
+      && (JSON.parse(response.request().postData() ?? "{}") as { collection?: string }).collection === "new.flock.joinRequest", { timeout: 30_000 });
+    const requestIdOf = (response: PageResponse) => (JSON.parse(response.request().postData() ?? "{}") as { record: { requestId: string } }).record.requestId;
     await memberPage.goto(secondaryAppUrl.origin);
     await memberPage.getByLabel("Your AT Protocol handle").fill(memberDid);
     await memberPage.getByRole("button", { name: /Continue with atproto/i }).click();
@@ -316,7 +275,6 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
     await memberPage.getByLabel("Workspace URI").fill(workspaceUri);
     const acceptForm = memberPage.locator("form").filter({ has: memberPage.getByLabel("Workspace URI") });
     await acceptForm.getByRole("button", { name: "Connect invitation", exact: true }).click();
-    await completePdsConsentFlow(memberPage, secondaryAppUrl, "browser-member.test", memberPassword);
     await memberPage.getByRole("heading", { name: "Browser Acceptance Workspace", exact: true }).waitFor({ state: "visible", timeout: 30_000 });
     await memberPage.getByText(/2 active members · 3 channels/).waitFor({ state: "visible", timeout: 30_000 });
 
@@ -326,14 +284,11 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
     const offRoster = memberPage.getByText("You are not on this channel’s active roster.");
     await memberPage.getByRole("button", { name: /Private Room/ }).click();
     await offRoster.waitFor({ state: "visible", timeout: 30_000 });
-    await memberPage.getByRole("button", { name: "Request private access →" }).last().click();
-    await memberPage.getByText(/Grant write-only inbox access/).waitFor({ state: "visible", timeout: 30_000 });
-    await memberPage.getByRole("button", { name: "Grant request access →" }).click();
-    await completePdsConsentFlow(memberPage, secondaryAppUrl, "browser-member.test", memberPassword);
-    await offRoster.waitFor({ state: "visible", timeout: 30_000 });
-    const firstJoinRequestResponse = memberPage.waitForResponse((response) => response.url().includes("/api/channels/requests") && response.status() === 201);
-    await memberPage.getByRole("button", { name: "Request private access →" }).last().click();
-    const firstJoinRequest = await (await firstJoinRequestResponse).json() as { requestId: string };
+    const firstJoinRequestResponse = joinRequestWritten();
+    await memberPage.getByRole("button", { name: "Request private access →" }).click();
+    const firstWrite = await firstJoinRequestResponse;
+    assert.equal(firstWrite.status(), 200, `the member's host stores the request: ${await firstWrite.text()}`);
+    const firstJoinRequest = { requestId: requestIdOf(firstWrite) };
     await memberPage.getByText("Your access request is in the workspace inbox.", { exact: true }).waitFor({ state: "visible", timeout: 30_000 });
 
     await page.getByRole("button", { name: "Sync inbox ↻" }).click();
@@ -344,23 +299,12 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
     await page.getByText(/Operation completed; \d+ steps recorded/).waitFor({ state: "visible", timeout: 30_000 });
     await pendingRequest.waitFor({ state: "hidden", timeout: 30_000 });
 
-    const replacementJoinRequestResponse = memberPage.waitForResponse((response) => response.url().includes("/api/channels/requests"), { timeout: 10_000 })
-      .then((response) => ({ response }), (error: unknown) => ({ error }));
+    const replacementJoinRequestResponse = joinRequestWritten();
     // A request already sent is offered as an update; after the denial it sends a new generation.
-    const updateRequestButton = memberPage.getByRole("button", { name: "Update request →" });
-    await updateRequestButton.click({ timeout: 5_000 }).catch(async (error: unknown) => {
-      throw new Error(`Could not click the request resubmission button. Network: ${JSON.stringify(memberRequestEvents)}\nPage: ${(await memberPage.locator("body").innerText()).slice(0, 4_000)}\nButton: ${await updateRequestButton.evaluate((button) => button.outerHTML).catch(() => "not present")}\nServer: ${secondaryServerOutput}`, { cause: error });
-    });
-    const responseResult = await replacementJoinRequestResponse;
-    if ("error" in responseResult) {
-      const buttonState = await memberPage.getByRole("button").evaluateAll((buttons) => buttons.map((button) => ({
-        text: button.textContent?.trim(), disabled: (button as HTMLButtonElement).disabled,
-      })));
-      throw new Error(`No request response after resubmission. Network: ${JSON.stringify(memberRequestEvents)}\nPage: ${(await memberPage.locator("body").innerText()).slice(0, 4_000)}\nButtons: ${JSON.stringify(buttonState)}\nServer: ${secondaryServerOutput}`, { cause: responseResult.error });
-    }
-    const replacementResponse = responseResult.response;
-    assert.equal(replacementResponse.status(), 201, `resubmitting after denial failed: ${await replacementResponse.text()}`);
-    const replacementJoinRequest = await replacementResponse.json() as { requestId: string };
+    await memberPage.getByRole("button", { name: "Update request →" }).click();
+    const replacementResponse = await replacementJoinRequestResponse;
+    assert.equal(replacementResponse.status(), 200, `resubmitting after denial failed: ${await replacementResponse.text()}`);
+    const replacementJoinRequest = { requestId: requestIdOf(replacementResponse) };
     assert.notEqual(replacementJoinRequest.requestId, firstJoinRequest.requestId, "resubmitting after denial creates a new request generation");
     await memberPage.getByText("Your access request is in the workspace inbox.", { exact: true }).waitFor({ state: "visible", timeout: 30_000 });
 

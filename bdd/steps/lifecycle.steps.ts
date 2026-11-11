@@ -6,18 +6,19 @@ import { expect } from "@playwright/test";
 import type { SpaceCredential } from "@/atproto/space-credential-core";
 import { requestDigest } from "@/protocol/keys";
 import type { Actor, AppWorld } from "../support/world";
-import { completeConsent, escapeRegExp, eventually, inviteMemberAs, waitForApp } from "../support/ui";
+import { escapeRegExp, eventually, inviteMemberAs } from "../support/ui";
 import {
   MAX_CREDENTIAL_LIFETIME_SECONDS, actorNamed, allSpaces, auditTrail, channelButton, claimsOf, createChannelAs, grantedCredential,
   inboxOf, journalEntry, joinWorkspaceAs, memberAccess, readRecordsWith, recall, refusal, remember, removeMemberViaRoster,
-  requiredJournalEntry, sampleWhile, showWorkspaceHome, submitAndWait, subjectRecordActive, tryMintAs, workspaceWithAdmin,
-  authorityRecord, breakChannelSpace, eventuallyAsync, tryReadWith, withSignedExpiry, journalRowsFor, repairChannelSpace, decodeExecuted, membersOf, sampleTimed, channelNamed,
+  requiredJournalEntry, sampleWhile, showWorkspaceHome, subjectRecordActive, tryMintAs, workspaceWithAdmin,
+  authorityRecord, breakChannelSpace, eventuallyAsync, tryReadWith, withSignedExpiry, journalRowsFor, repairChannelSpace, membersOf, sampleTimed, channelNamed,
   startOwnApp, runReconcileJob, withExtendedExpiry, withFinalReading, worldOn,
-  type ChannelRef, type Executed, type JournalEntry, type OwnApp, type ReconcileRun, type Timed,
+  type ChannelRef, type JournalEntry, type OwnApp, type ReconcileRun, type Timed,
 } from "../support/lifecycle-ui";
 import { browserStore, browserStoreAt, type BrowserStore } from "../support/browser-store";
 import { credentialCalls, credentialOutcome, openChannel, postMessage, sidebarChannel } from "../support/channels-ui";
 import { engineAs, probeChannelRead, type ReadProbe } from "../support/engine";
+import { executeAs, submitAndWait, type Executed } from "../support/operator-calls";
 import { workspaceRead } from "../support/independent-app-ui";
 import { BROWSER_CLIENT_METADATA_PATH } from "@/browser/client-metadata";
 
@@ -159,7 +160,7 @@ Then("the operation stays pending until every PDS member list agrees", async fun
   const stuck = await removeWhileChannelIsBroken(this, owner, bystander, secondRoom);
   assert.equal(removalState(this, bystander.did), "pending", "while the lists disagree the operation stays pending");
   await repairChannelSpace(this, owner, secondRoom);
-  const resumed = await submitAndWait(this, owner, async () => {
+  const resumed = await submitAndWait(owner, async () => {
     await owner.page.getByRole("button", { name: "Retry same operation ↻" }).click();
   });
   assert.equal(resumed.operationId, stuck.operationId);
@@ -264,19 +265,12 @@ Given("a member belongs to a private channel", async function (this: AppWorld) {
 
 When("they leave that channel", async function (this: AppWorld) {
   const member = actorNamed(this, "member");
-  const first = await submitAndWait(this, member, async () => {
+  // The browser's own grant carries the operator's methods, so a member's first leave goes through.
+  const left = await submitAndWait(member, async () => {
     await member.page.getByRole("button", { name: "Leave private channel" }).click();
   });
-  assert.ok(first.status >= 400 && first.operation === undefined, `a member's first leave is refused until they approve the leave permission: ${JSON.stringify(first)}`);
-  await member.page.getByRole("button", { name: "Authorize leave control →" }).click();
-  await completeConsent(member);
-  await waitForApp(this, member);
-  const retried = await submitAndWait(this, member, async () => {
-    await member.page.getByRole("button", { name: "Retry same operation ↻" }).click();
-  });
-  assert.equal(retried.operationId, first.operationId, "the retry reuses the same operation ID");
-  assert.equal(retried.operation?.state, "completed", JSON.stringify(retried));
-  remember(this, "leave", retried);
+  assert.equal(left.operation?.state, "completed", JSON.stringify(left));
+  remember(this, "leave", left);
 });
 
 Then("channel access and the private roster entry are removed", async function (this: AppWorld) {
@@ -365,7 +359,7 @@ When("an admin starts a private transition for selected members", async function
   remember(this, "syncBefore", await probeSync());
   const sampler = sampleTimed(() => readChannel(this, roadmap));
   const probers = [1, 2, 3].map(() => sampleTimed(probeSync));
-  const executed = await submitAndWait(this, owner, async () => {
+  const executed = await submitAndWait(owner, async () => {
     await owner.page.getByLabel("Selected members when making this channel private").fill(kept.did);
     await owner.page.getByRole("button", { name: "Make private", exact: true }).click();
   });
@@ -470,7 +464,7 @@ When("an admin archives it", async function (this: AppWorld) {
   const owner = actorNamed(this, "owner");
   const room = recall<ChannelRef>(this, "archiveRoom");
   const sampler = sampleTimed(() => readChannel(this, room));
-  const executed = await submitAndWait(this, owner, async () => {
+  const executed = await submitAndWait(owner, async () => {
     await owner.page.getByRole("button", { name: "Archive", exact: true }).click();
   });
   const readings = await withFinalReading(await sampler.stop(), () => readChannel(this, room));
@@ -538,7 +532,7 @@ type Journaled = { executed: Executed; hash: string; steps: string[]; updatedAt:
 
 async function inviteViaUi(world: AppWorld, owner: Actor, did: string): Promise<Executed> {
   await showWorkspaceHome(world, owner);
-  const executed = await submitAndWait(world, owner, () => inviteMemberAs(owner, did));
+  const executed = await submitAndWait(owner, () => inviteMemberAs(owner, did));
   assert.equal(executed.operation?.state, "completed", JSON.stringify(executed));
   return executed;
 }
@@ -552,10 +546,6 @@ async function journaledSnapshot(world: AppWorld, executed: Executed): Promise<J
   };
 }
 
-async function postOperation(world: AppWorld, actor: Actor, body: Record<string, unknown>): Promise<Executed> {
-  const response = await actor.page.request.post(`${world.appOrigin}/api/operator/execute`, { data: body, headers: { origin: world.appOrigin } });
-  return decodeExecuted(response.status(), JSON.stringify(body), await response.text());
-}
 
 Given("an operation with a workspace, actor, and operationId is journaled", async function (this: AppWorld) {
   const owner = await workspaceWithAdmin(this);
@@ -571,7 +561,7 @@ When("the same request hash is submitted again", async function (this: AppWorld)
   const owner = actorNamed(this, "owner");
   const { executed } = recall<Journaled>(this, "journaled");
   const reordered = { subject: executed.request.subject, kind: executed.request.kind };
-  remember(this, "resubmitted", await postOperation(this, owner, { request: reordered, operationId: executed.operationId, workspace: this.workspaceUri }));
+  remember(this, "resubmitted", await executeAs(this, owner, { request: reordered, operationId: executed.operationId, workspace: this.workspaceUri }));
 });
 
 Then("the existing operation status is returned", async function (this: AppWorld) {
@@ -596,7 +586,7 @@ Given("an operationId is already bound to a request hash", async function (this:
 
 When("another request body uses the same operationId", async function (this: AppWorld) {
   const { executed } = recall<Journaled>(this, "journaled");
-  remember(this, "reused", await postOperation(this, actorNamed(this, "owner"), {
+  remember(this, "reused", await executeAs(this, actorNamed(this, "owner"), {
     workspace: this.workspaceUri, operationId: executed.operationId, request: { kind: "inviteMember", subject: actorNamed(this, "other").did },
   }));
 });
@@ -685,7 +675,7 @@ async function leaveAdminOperationPending(world: AppWorld, extraMemberRoles: str
 }
 
 async function submitInviteViaUi(world: AppWorld, owner: Actor, did: string): Promise<Executed> {
-  return submitAndWait(world, owner, async () => {
+  return submitAndWait(owner, async () => {
     await owner.page.getByLabel("Member DID", { exact: true }).fill(did);
     await owner.page.getByRole("button", { name: /Invite member/ }).click();
   });
@@ -707,7 +697,7 @@ When("an active admin submits another mutation", async function (this: AppWorld)
   remember(this, "olderAuditAfterBlocked", auditTrail(this, older.executed.operationId).length);
 
   await repairChannelSpace(this, owner, zulu);
-  const retried = await submitAndWait(this, owner, async () => {
+  const retried = await submitAndWait(owner, async () => {
     await owner.page.getByRole("button", { name: "Retry same operation ↻" }).click();
   });
   assert.equal(retried.operationId, blocked.operationId, "the retry reuses the newer mutation's own operation ID");
@@ -761,17 +751,10 @@ When("a workspace member requests to leave", async function (this: AppWorld) {
   const leaver = actorNamed(this, "leaver");
   remember(this, "pendingBeforeLeave", { entry: requiredJournalEntry(this, recall<PendingWork>(this, "pending").executed.operationId), auditEvents: auditTrail(this, recall<PendingWork>(this, "pending").executed.operationId).length });
   await joinWorkspaceAs(this, leaver);
-  const first = await submitAndWait(this, leaver, async () => {
+  const attempt = await submitAndWait(leaver, async () => {
     await leaver.page.getByRole("button", { name: "Leave this workspace" }).click();
   });
-  assert.ok(first.status >= 400 && first.operation === undefined, `a member's first leave is refused until they approve the leave permission: ${JSON.stringify(first)}`);
-  await leaver.page.getByRole("button", { name: "Authorize leave control →" }).click();
-  await completeConsent(leaver);
-  await waitForApp(this, leaver);
-  const retried = await submitAndWait(this, leaver, async () => {
-    await leaver.page.getByRole("button", { name: "Retry same operation ↻" }).click();
-  });
-  remember(this, "leaveAttempt", retried);
+  remember(this, "leaveAttempt", attempt);
 });
 
 Then("the operator returns a busy response", async function (this: AppWorld) {
@@ -822,7 +805,7 @@ Given("a privacy transition failed after any PDS mutation step", async function 
   assert.deepEqual(await memberAccess(web, owner, roadmap.uri, dropped.did), FULL_ACCESS);
   await openChannel(owner, "Roadmap");
   await breakChannelSpace(web, owner, roadmap);
-  const failed = await submitAndWait(web, owner, async () => {
+  const failed = await submitAndWait(owner, async () => {
     await owner.page.getByLabel("Selected members when making this channel private").fill(kept.did);
     await owner.page.getByRole("button", { name: "Make private", exact: true }).click();
   });

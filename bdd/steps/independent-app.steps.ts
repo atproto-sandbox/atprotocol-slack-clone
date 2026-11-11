@@ -9,13 +9,16 @@ import { canonicalJson, channelUri, decisionRecordKey, inboxUri, requestDigest, 
 import { validateSpaceRecord } from "@/protocol/registry";
 import type { SecondApp } from "../../protocol-tests/support/app-fixture";
 import {
-  createChannelAs, grantAdminControlsAt, grantWorkspaceAuthorityAt, insertJournalRow, joinWorkspaceAt, listWriters, observeWorkspace, onPrimaryApp, openViewer,
+  createChannelAs, insertJournalRow, joinWorkspaceAt, listWriters, observeWorkspace, onPrimaryApp, openViewer,
   requestPrivateAccess, runNode, runProtocolTest, withIndependentReader, type ChildRun,
   type AppViewer, type WorkspaceObservation, type WorkspaceRead, workspaceRead,
 } from "../support/independent-app-ui";
 import { browserStore } from "../support/browser-store";
+import { operatorAs } from "../support/engine";
+import { decodeExecuted, executeCalls } from "../support/operator-calls";
+import { OperatorRemoteError, type StalledWork } from "@/client/operator-client";
 import { credentialCalls, credentialOutcome, openChannel, postMessage } from "../support/channels-ui";
-import { approveAdminControls, createWorkspaceAs, eventually, inviteMemberAs } from "../support/ui";
+import { waitForAdminControls, createWorkspaceAs, eventually, inviteMemberAs } from "../support/ui";
 import type { Actor, AppWorld } from "../support/world";
 
 type PdsRecord = { uri: string; rkey: string; value: Record<string, unknown> };
@@ -92,7 +95,7 @@ Given("two apps use published lexicons, OAuth, and space credentials", { timeout
 
   const owner = onPrimaryApp(this, await this.actor("owner", 0));
   await createWorkspaceAs(this, owner);
-  await approveAdminControls(this, owner);
+  await waitForAdminControls(this, owner);
   const member = onPrimaryApp(this, await this.actor("member", 1));
   await inviteMemberAs(owner, member.did);
   await createChannelAs(owner, "Second Room");
@@ -218,7 +221,7 @@ async function writeAsMember(world: AppWorld, member: Actor, space: string, coll
 Given("a member writes an admin, decision, or roster record in their own repo", { timeout: 900_000 }, async function (this: AppWorld) {
   const owner = onPrimaryApp(this, await this.actor("owner", 0));
   await createWorkspaceAs(this, owner);
-  await approveAdminControls(this, owner);
+  await waitForAdminControls(this, owner);
   const member = onPrimaryApp(this, await this.actor("member", 1));
   const outsider = await this.actor("outsider", 0);
   await inviteMemberAs(owner, member.did);
@@ -258,7 +261,7 @@ type SyncedViews = {
   memberHasWorkspaceControls: boolean;
   /** How the PDS answered the member's browser when it asked for the private channel's credential on opening it. */
   memberVaultCredentials: string[];
-  memberStalled: { status: number; body: string };
+  memberStalled: { status: number; message?: string };
 };
 
 /** Presses Sync inbox until `result` shows. A click on a page that is still loading its workspace can be answered and then wiped, so one press is not enough. */
@@ -269,7 +272,17 @@ async function syncInboxUntilShown(owner: AppViewer, result: Locator): Promise<v
   }).toPass({ timeout: 90_000 });
 }
 
-const STALLED_REFUSAL = { error: "Actor is not an active workspace admin." };
+const STALLED_REFUSAL = "Actor is not an active workspace admin.";
+
+/** The operator's stalled-work method as `actor`'s browser calls it, with its refusal kept. */
+async function stalledAs(world: AppWorld, actor: Actor): Promise<{ status: number; message?: string; list?: StalledWork }> {
+  try {
+    return { status: 200, list: await operatorAs(world, actor).listStalledOperations(world.workspaceUri) };
+  } catch (error) {
+    if (!(error instanceof OperatorRemoteError)) throw error;
+    return { status: error.status, message: error.message };
+  }
+}
 
 /** What the admin sees after syncing the inbox and what the member's own app answers, read fresh from both pages. */
 async function observeSyncedViews(world: AppWorld, owner: AppViewer, member: AppViewer, options: { requestPending: boolean }): Promise<SyncedViews> {
@@ -290,10 +303,7 @@ async function observeSyncedViews(world: AppWorld, owner: AppViewer, member: App
   const since = member.xrpc.length;
   await openChannel(member, "Vault");
   const vaultCredentials = await eventually(() => credentialCalls(member, vault, since).length > 0 && credentialCalls(member, vault, since), { what: "the member's browser to ask for the private channel's credential" });
-  const stalled = await member.page.evaluate(async (workspace) => {
-    const response = await fetch(`/api/operator/stalled?workspace=${encodeURIComponent(workspace)}`);
-    return { status: response.status, body: await response.text() };
-  }, world.workspaceUri);
+  const stalled = await stalledAs(world, member);
 
   return {
     rosterRows: (await rows.locator("span").allInnerTexts()).map((text) => text.trim()).sort(),
@@ -350,8 +360,8 @@ Then("the app ignores the record because the workspace DID did not author it", {
   assert.deepEqual({ members: views.memberState.members, admins: views.memberState.admins }, { members: [owner.did, member.did].sort(), admins: [owner.did] }, "the member's app read the roster and admins unchanged by the forged records");
   assert.equal(views.memberSummary, "2 active members · 2 channels", "the member's app shows the roster unchanged by the forged roster record");
   assert.equal(views.memberHasWorkspaceControls, false, "the member's app does not take the forged admin record: no admin controls are offered");
-  assert.equal(views.memberStalled.status, 400, "the admin-only operator read is refused to the member");
-  assert.deepEqual(JSON.parse(views.memberStalled.body), STALLED_REFUSAL, "the refusal is the admin check's own, not a generic failure");
+  assert.equal(views.memberStalled.status, 403, "the admin-only operator read is refused to the member");
+  assert.equal(views.memberStalled.message, STALLED_REFUSAL, "the refusal is the admin check's own, not a generic failure");
   assert.deepEqual([...new Set(views.memberVaultCredentials)], ["SpaceNotFound"], "the member still cannot read the private channel: the PDS refuses its credential");
   const vaultMembers = await this.pdsGet<{ members?: Array<{ did: string }> }>(owner, "com.atproto.memberspace.listMembers", { space: channelUri(owner.did, vaultSkey), limit: "1000" });
   assert.equal((vaultMembers.body.members ?? []).some((entry) => entry.did === member.did), false, "the PDS member list of the private channel is unchanged");
@@ -394,7 +404,7 @@ const FIRST_MEMBER_NOTE = "The member writes here for the first time";
 Given("a workspace member has not written to a channel", { timeout: 900_000 }, async function (this: AppWorld) {
   const owner = onPrimaryApp(this, await this.actor("owner", 0));
   await createWorkspaceAs(this, owner);
-  await approveAdminControls(this, owner);
+  await waitForAdminControls(this, owner);
   const member = onPrimaryApp(this, await this.actor("member", 1));
   await inviteMemberAs(owner, member.did);
   await owner.page.locator(".channel-nav-item").filter({ hasText: /general$/ }).click();
@@ -475,7 +485,7 @@ Then("opening the channel loads the latest 100 messages first", function (this: 
 
 // --- Alert on stalled admin work --------------------------------------------------------------------
 
-type StalledList = { operations: Array<{ actor: string; operationId: string; state: string; error: string | null; updatedAt: string }>; truncated: boolean };
+type StalledList = StalledWork;
 type BoundarySample = { before: number; after: number; listed: boolean };
 type StalledChecks = {
   uiAlert: string;
@@ -503,7 +513,7 @@ function journalRowFor(world: AppWorld, owner: Actor, ageSeconds: number): { ope
 Given("a journaled operation has made no progress for five minutes", { timeout: 300_000 }, async function (this: AppWorld) {
   const owner = onPrimaryApp(this, await this.actor("owner", 0));
   await createWorkspaceAs(this, owner);
-  await approveAdminControls(this, owner);
+  await waitForAdminControls(this, owner);
   assert.equal(await owner.page.locator(".operation-alert").count(), 0, "a healthy workspace shows no operator alert");
   const stalled = journalRowFor(this, owner, STALL_SECONDS);
   const recent = journalRowFor(this, owner, 60);
@@ -514,14 +524,12 @@ Given("a journaled operation has made no progress for five minutes", { timeout: 
 async function probeFiveMinuteBoundary(world: AppWorld, owner: AppViewer): Promise<Pick<StalledChecks, "samples" | "probeId" | "boundaryMs">> {
   const probe = journalRowFor(world, owner, STALL_SECONDS - 3);
   const boundaryMs = (probe.updatedAt + STALL_SECONDS) * 1000;
-  const url = new URL(`/api/operator/stalled?workspace=${encodeURIComponent(world.workspaceUri)}`, world.appOrigin).href;
+  const operator = operatorAs(world, owner);
   const samples: BoundarySample[] = [];
   while (samples.length === 0 || samples.at(-1)!.before < boundaryMs + 300) {
     const before = Date.now();
-    const response = await owner.context.request.get(url);
+    const list = await operator.listStalledOperations(world.workspaceUri);
     const after = Date.now();
-    assert.equal(response.status(), 200);
-    const list = await response.json() as StalledList;
     samples.push({ before, after, listed: list.operations.some((operation) => operation.operationId === probe.operationId) });
     assert.ok(after < boundaryMs + 10_000, "the probe crossed the five-minute mark");
   }
@@ -536,12 +544,11 @@ When("the operator checks its pending operations", { timeout: 300_000 }, async f
   await alert.waitFor({ state: "visible" });
   const uiAlert = await alert.innerText();
 
-  const api = await owner.context.request.get(new URL(`/api/operator/stalled?workspace=${encodeURIComponent(this.workspaceUri)}`, this.appOrigin).href);
-  assert.equal(api.status(), 200);
+  const api = await operatorAs(this, owner).listStalledOperations(this.workspaceUri);
 
   const reconcile = await runProtocolReconcile(this);
   const boundary = await probeFiveMinuteBoundary(this, owner);
-  this.scratch.set("stalledChecks", { uiAlert, api: await api.json() as StalledList, reconcile, ...boundary } satisfies StalledChecks);
+  this.scratch.set("stalledChecks", { uiAlert, api, reconcile, ...boundary } satisfies StalledChecks);
 });
 
 Then("it raises an operator alert with the operation status", function (this: AppWorld) {
@@ -555,8 +562,8 @@ Then("it raises an operator alert with the operation status", function (this: Ap
   assert.doesNotMatch(checks.uiAlert, new RegExp(recent.operationId), "an operation that moved a minute ago raises no alert");
 
   assert.deepEqual(checks.api.operations, [{
-    actor: owner.did, operationId: stalled.operationId, state: "running", error: null, updatedAt: new Date(stalled.updatedAt * 1000).toISOString(),
-  }]);
+    actor: owner.did, operationId: stalled.operationId, state: "running", updatedAt: new Date(stalled.updatedAt * 1000).toISOString(),
+  }], "the operator's own method lists it; an operation without an error has no error field");
   assert.equal(checks.api.truncated, false);
 
   const alertLine = new RegExp(`ALERT stalled operation ${stalled.operationId} actor=${owner.did} state=running since=${new Date(stalled.updatedAt * 1000).toISOString()}`);
@@ -605,7 +612,7 @@ async function pdsSnapshot(world: AppWorld, owner: Actor): Promise<unknown> {
 Given("the owner has paused admin mutations", { timeout: 900_000 }, async function (this: AppWorld) {
   const owner = onPrimaryApp(this, await this.actor("owner", 0));
   await createWorkspaceAs(this, owner);
-  await approveAdminControls(this, owner);
+  await waitForAdminControls(this, owner);
   const member = await this.actor("member", 1);
   await this.actor("invitee", 1);
   await inviteMemberAs(owner, member.did);
@@ -615,8 +622,6 @@ Given("the owner has paused admin mutations", { timeout: 900_000 }, async functi
   this.scratch.set("pausedApp", paused);
   const onPaused = await openViewer(this, owner, paused.appUrl.origin, "owner@paused-app");
   await joinWorkspaceAt(onPaused, this.workspaceUri, this.workspaceName);
-  await grantAdminControlsAt(onPaused, this.workspaceName);
-  await grantWorkspaceAuthorityAt(onPaused);
 });
 
 When("an admin submits a mutation", { timeout: 300_000 }, async function (this: AppWorld) {
@@ -628,17 +633,17 @@ When("an admin submits a mutation", { timeout: 300_000 }, async function (this: 
   ).then(() => true, () => false);
   await onPaused.page.getByLabel("Member DID", { exact: true }).fill(invitee.did);
   await onPaused.page.getByRole("button", { name: /Invite member/ }).click();
-  await eventually(() => onPaused.calls.find((call) => call.path === "/api/operator/execute"), { what: "the paused app to answer the mutation", timeoutMs: 60_000 });
+  await eventually(() => executeCalls(onPaused)[0], { what: "the paused app's operator to answer the mutation", timeoutMs: 60_000 });
   this.scratch.set("pauseMessageShown", await pauseShown);
 });
 
 Then("the operator rejects or queues it as paused", function (this: AppWorld) {
   const onPaused = actorNamed(this, "owner@paused-app");
   const paused = this.scratch.get("pausedApp") as SecondApp;
-  const attempts = onPaused.calls.filter((call) => call.path === "/api/operator/execute");
+  const attempts = executeCalls(onPaused).map((call) => decodeExecuted(call.status, call.requestBody, call.responseBody));
   assert.equal(attempts.length, 1);
   assert.equal(attempts[0]!.status, 423);
-  assert.equal((JSON.parse(attempts[0]!.responseBody) as { error: string }).error, PAUSED_MESSAGE);
+  assert.equal(attempts[0]!.error, PAUSED_MESSAGE);
   assert.equal(this.scratch.get("pauseMessageShown"), true, "the person is told the mutation is paused");
   const journal = new Database(paused.databasePath, { readonly: true, fileMustExist: true });
   try {

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ChangesAnswer } from "./operator-client";
+import { ChangeFollower } from "./feed";
 import { LiveSpaces, Snapshots } from "./views";
 
 // The engine's views for the UI: snapshots per key with a subscription, kept live by the change feed.
@@ -226,4 +227,109 @@ test("the live loop waits the configured delay before asking an unreachable oper
 
   // #then it asked again and again, not once per five seconds
   assert.ok(polls > 3, `asked ${polls} times`);
+});
+
+test("a key forgotten while its load runs keeps nothing that load answers", async () => {
+  // #given a load still running
+  const snapshots = new Snapshots();
+  await snapshots.refresh("channel", async () => "seen before");
+  let answer!: (value: string) => void;
+  const running = snapshots.refresh("channel", () => new Promise<string>((resolve) => { answer = resolve; }));
+
+  // #when the key is forgotten and the load answers afterwards
+  snapshots.forget("channel");
+  answer("read after the view closed");
+  await running;
+
+  // #then the key shows nothing, and a new load runs on its own
+  assert.equal(snapshots.get("channel").value, undefined);
+  await snapshots.refresh("channel", async () => "read afresh");
+  assert.equal(snapshots.get("channel").value, "read afresh");
+});
+
+
+test("the live loop waits, rather than asking again at once, while a follow is still under way and nothing has a cursor", async () => {
+  // #given the loop started, one follow whose head read is still out, and polls counted
+  const polls = { count: 0 };
+  const poll = ChangeFollower.prototype.poll;
+  ChangeFollower.prototype.poll = function (this: ChangeFollower, signal?: AbortSignal) {
+    polls.count += 1;
+    // A loop asking again at once never yields to the timers below; failing the poll makes it pause, so the test ends.
+    if (polls.count > 100) return Promise.reject(new Error("the loop polls with nothing to poll"));
+    return poll.call(this, signal);
+  };
+  let answerHead!: () => void;
+  const operator = {
+    getChanges: (follow: ReadonlyArray<unknown>, signal?: AbortSignal) => (follow.length > 0
+      ? new Promise<ChangesAnswer>((_resolve, reject) => signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true }))
+      : new Promise<ChangesAnswer>((resolve) => { answerHead = () => resolve(answer("1")); })),
+  };
+  const live = new LiveSpaces(new Snapshots(), { operator, credentials: { fresh: async () => ({}) as never } });
+  try {
+    live.start();
+    const following = live.watch("workspaces", [GENERAL], async () => "workspaces");
+
+    // #when a key that reads no space loads, which wakes the loop
+    await live.watch("stalled", [], async () => "stalled");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    // #then the loop has not polled; once the follow is done it polls that space
+    assert.equal(polls.count, 0);
+    answerHead();
+    await following;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(polls.count, 1);
+  } finally {
+    live.stop();
+    ChangeFollower.prototype.poll = poll;
+  }
+});
+
+test("a watch stopped before its load began loads nothing and follows nothing", async () => {
+  // #given a watch whose head read is still out, and the spaces any poll asks about
+  const snapshots = new Snapshots();
+  let answerHead!: () => void;
+  const polled: string[] = [];
+  const operator = {
+    getChanges: (follow: ReadonlyArray<{ space: string }>) => {
+      polled.push(...follow.map((entry) => entry.space));
+      return new Promise<ChangesAnswer>((resolve) => { answerHead = () => resolve(answer("1")); });
+    },
+  };
+  const live = new LiveSpaces(snapshots, { operator, credentials: { fresh: async () => ({}) as never } });
+  const watching = new AbortController();
+  const loads: string[] = [];
+  const watched = live.watch("channel", [GENERAL], async () => loads.push("channel"), watching.signal);
+
+  // #when it is stopped and the head answers afterwards
+  watching.abort();
+  answerHead();
+  await watched;
+
+  // #then the key was not loaded, so no snapshot is left for it, and the loop has no space to ask about
+  assert.deepEqual(loads, []);
+  assert.equal(snapshots.get("channel").value, undefined);
+  live.start();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  live.stop();
+  assert.deepEqual(polled, []);
+});
+
+test("a watch replaced while its follow is under way has the key loaded again after the head, with the new loader", async () => {
+  // #given a first watch whose head read is still out
+  const snapshots = new Snapshots();
+  let answerHead!: () => void;
+  const operator = { getChanges: () => new Promise<ChangesAnswer>((resolve) => { answerHead = () => resolve(answer("1")); }) };
+  const live = new LiveSpaces(snapshots, { operator, credentials: { fresh: async () => ({}) as never } });
+  const loads: string[] = [];
+  const first = live.watch("inbox", [GENERAL], async () => loads.push("first"));
+
+  // #when a second watch of the key replaces it (loading at once, its space being followed already) and the head answers
+  const stop = await live.watch("inbox", [GENERAL], async () => loads.push("second"));
+  answerHead();
+  await first;
+
+  // #then the key was loaded once more after the head, by the second watch's loader, so nothing before the head is missed
+  assert.deepEqual(loads, ["second", "second"]);
+  stop();
 });

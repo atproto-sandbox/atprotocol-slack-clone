@@ -826,3 +826,45 @@ Review: Codex was not run (the configured model is the one rejected in R1; the o
 - **Round 2, the fix delta.** The OAuth spec's connect wait passed while still connecting. Unfollows still raced awaits. Listener leaks, an unannounced closed store, and a dev StrictMode regression. All fixed.
 - **Round 3.** Approved with follow-ups, all taken: per-follow tokens and generations, tearing down a closed store's engine, the registration order, and stronger tests.
 - **Gate after round 3.** 39 BDD scenarios timed out on the admin inbox: every discovery discarded an inbox load in flight. A focused review confirmed the fix and found three more inbox gaps, which were fixed. A last focused review found the inbox loader took its workspace at call time without an admin check. The loaders are now bound to their workspace. Fixes after that last review were covered by the final gate but not reviewed again.
+
+### R6b (2026-11-11)
+
+Done:
+- **Writes and operator calls go through the engine.** The browser calls the operator's methods itself, with service tokens, through `engine.operator`:
+  - `createWorkspace`, `execute` (every operation, and the admin's five-minute `reconcileWorkspace`), `startAuthorityFlow`, `listStalledOperations`;
+  - accepting an invitation is `engine.workspaces.accept` (its typed refusals in `src/client/accept-errors.ts`), and asking to join a private channel is `engine.channels.requestJoin` / `withdrawJoin`.
+
+  The UI's per-feature server grants are gone ("Grant admin controls", "Authorize leave control", "Grant request access", the join consent and the workspace read grant): the browser's one grant carries the operator's methods. The one consent left is the workspace authority's grant flow, for a first workspace and to renew the operator's grant. `needsAuthorityApproval` (`src/app/ui/client-api.ts`) recognizes the operator's two answers that ask for it.
+- **The shell reads keyed live views.** `workspace-manager.tsx` keeps only what a person chose and typed. What it shows comes from the engine's live views, read through `useSyncExternalStore` (`use-live-view.ts`):
+  - `use-discovery.ts`: the workspaces, following the shown workspace's own space;
+  - `use-channel-content.ts`: the open channel's page and private roster, keyed by channel and visibility; a refused read is a value, so nothing of the channel stays shown;
+  - `use-admin-views.ts`: the inbox and the stalled operations, keyed by workspace, while the account is its admin and the workspace is within the envelope.
+
+  Each has its minute reload, and a view that fails to load shows its error. `selection.ts` derives the shown workspace and channel; a workspace once shown stays the choice, and "+" chooses the create-or-join form. A key is forgotten once it is no longer shown, so a channel opened again is read afresh.
+- **Routes with no caller left:** `/api/workspaces/{bootstrap,accept}`, `/api/operator/*`, `/api/channels/{requests,messages/write,reactions}`, `/api/oauth/permission` (still called by test 4 of `oauth-callback.spec.ts`). R6c deletes them with the rest.
+
+Departures:
+- **Start-up discovers twice**, as R6a did. Following the shown workspace's space takes the feed head and then discovers again, which is what loses no change. One discovery needs the workspace spaces listed before the head is read, a split of `WorkspaceClient.discover` left out.
+- **Statuses no longer clear when a channel loads**; they stay until the next action replaces them.
+- **The hooks have no unit tests.** The repository has no DOM test runner; the logic is unit-tested where it lives (`selection.ts`, `Snapshots`, `LiveSpaces`, `ChangeFollower`), and the hooks are covered by BDD. The reviews ran them under React with a stub DOM.
+- **The operator's error names** are spelled where they are emitted and where the client recognizes them, and `AuthoritySessionUnavailable` is not declared in the `execute` lexicon. R7, which makes the operator its own service, declares it.
+- **The stalled notice registrations** that `listStalledOperations` returns are not shown, as before.
+- **The DM views' watches** (`dm-context.tsx`, `dm-conversation.tsx`) use `LiveSpaces` as triggers and keep their own state; their keys are never forgotten (memory only).
+
+Found and fixed on the way, each with a unit test:
+- **The live loop could freeze the page.** `LiveSpaces.run` idled only when nothing was followed, but a follow under way counts as followed while `poll` has no cursor to ask about, so a wake in that window looped on microtasks. R6b's stalled-operations key, which reads no space, made the window common: the first full BDD run of R6b failed 25 scenarios on it. The loop now idles until `ChangeFollower.pollable`.
+- **A watch stopped before its load began** loaded anyway and left a snapshot nothing forgot. `watch` takes an `AbortSignal` and loads only while it is the key's watch; a replaced one loads with the replacing watch's loader, after the head, so nothing before it is missed.
+- `Snapshots.forget` drops the answer of a load still running.
+- In the shell, from the reviews: "+" reached onboarding again; the admin views' failures are shown; "Load older" no longer overwrites a reload that ran first; the shown workspace no longer follows discovery's sort order; a refused public, paused or archived channel says why; a channel in transition is not marked busy and leaves no stale notice.
+
+BDD:
+- Steps that inspected `/api` operator calls read the browser's own XRPC calls (`bdd/support/operator-calls.ts`). The app's background reconcile is not counted as a person's operation.
+- The first-workspace scenarios assert the operator's `403 AuthorizationRequired` answer to `createWorkspace`, the same operation ID after approval, and one `startAuthorityFlow`.
+- The declining-join scenario is deleted (owner sign-off). The join, request and leave steps go through on the first attempt, without consent prompts.
+- The member's stalled read is refused with 403; the leak scan counts what the app and every XRPC host answered.
+
+Gate: unit 595/595; typecheck and lint clean, apart from one earlier warning; acceptance 14/14 (`platform-capabilities.test.ts` could not start its network on the pinned dev-env's port lock and passed 4/4 on rerun); browser 5/5; BDD 63/65 on the full run, and both failures passed on rerun:
+- a server sign-in that came back `?error=login` (the server sign-in R6c removes);
+- a channel-creation step that decoded a 200 `execute` answer without its operation, while the page showed the operation completed. That step now reports the whole answer if it happens again.
+
+Reviews: Codex was unavailable (model not found), so each round used independent Sonnet reviewers on a frozen snapshot of the tree: a reviewer and a critic on the whole step, then three reviewers on each fix delta. The third and fourth rounds ran the hooks under React with a stub DOM and fuzzed `LiveSpaces` (about 300 seeds); they found the freeze, the late load and the replaced-watch reload above.

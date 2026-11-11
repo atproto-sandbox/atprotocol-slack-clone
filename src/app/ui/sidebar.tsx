@@ -1,8 +1,9 @@
 import dynamic from "next/dynamic";
 import { LogoutButton } from "./logout-button";
-import { messageOf, type ChannelSelection, type Grant } from "./client-api";
+import type { ChannelSelection } from "./client-api";
 import type { WorkspaceCandidate } from "@/workspaces/read-model";
 import type { WorkspaceSummary } from "@/protocol/workspace-summary";
+import { NO_WORKSPACE } from "./selection";
 
 // The DM tree touches IndexedDB and WebCrypto and must never render (or even
 // load its module graph, which pulls in @atproto/oauth-client-browser) during
@@ -19,19 +20,19 @@ type SidebarProps = {
   activeChannel: ChannelSelection | null;
   switchWorkspace: (uri: string) => void;
   openChannel: (channel: WorkspaceSummary["channels"][number]) => Promise<void>;
-  grant: Grant;
-  setError: (message: string) => void;
+  /** Reads the account's workspaces again. */
+  refresh: () => void;
 };
 
-export function Sidebar({ did, workspaces, workspaceCandidates, activeUri, activeWorkspace, activeChannel, switchWorkspace, openChannel, grant, setError }: SidebarProps) {
+export function Sidebar({ did, workspaces, workspaceCandidates, activeUri, activeWorkspace, activeChannel, switchWorkspace, openChannel, refresh }: SidebarProps) {
   return (
     <aside className="sidebar">
       <div className="sidebar-top"><span className="brand brand-inverse"><span className="brand-mark"><i /><i /><i /></span><span>spaces</span></span><button className="icon-button sidebar-menu" aria-label="Open menu">☰</button></div>
       <div className="workspace-heading"><span className="workspace-avatar">{activeWorkspace?.name.slice(0, 1).toUpperCase() ?? "S"}</span><span className="workspace-title"><strong>{activeWorkspace?.name ?? "Your spaces"}</strong><small>{activeWorkspace ? "AT Protocol workspace" : "Personal workspace"}</small></span></div>
       <div className="sidebar-section">
-        <div className="section-label"><span>WORKSPACES</span><button className="plus-button" aria-label="Create workspace" onClick={() => switchWorkspace("")}>+</button></div>
+        <div className="section-label"><span>WORKSPACES</span><button className="plus-button" aria-label="Create workspace" onClick={() => switchWorkspace(NO_WORKSPACE)}>+</button></div>
         {workspaces.length ? workspaces.map((workspace) => <button key={workspace.uri} className={`sidebar-action ${workspace.uri === activeUri ? "selected-workspace" : ""}`} onClick={() => switchWorkspace(workspace.uri)}><span>◈</span> {workspace.name}</button>) : <div className="empty-workspaces"><span className="empty-icon">⌂</span><p>No workspaces yet</p><span>Start a space for your team</span></div>}
-        {workspaceCandidates.length > 0 && <div className="channel-nav"><div className="section-label"><span>ACCEPTED · NEEDS ACCESS</span></div>{workspaceCandidates.map((candidate) => <button key={candidate.uri} className="sidebar-action" title={candidate.uri} aria-label={`Authorize reading accepted workspace ${candidate.uri}`} onClick={() => void grant("workspaceRead", candidate.uri).catch((caught) => setError(messageOf(caught)))}><span>↗</span> {candidate.skey}</button>)}</div>}
+        {workspaceCandidates.length > 0 && <div className="channel-nav"><div className="section-label"><span>ACCEPTED · NEEDS ACCESS</span></div>{workspaceCandidates.map((candidate) => <button key={candidate.uri} className="sidebar-action" title={candidate.uri} aria-label={`Check again whether accepted workspace ${candidate.uri} can be read`} onClick={refresh}><span>↻</span> {candidate.skey}</button>)}</div>}
         {activeWorkspace && <div className="channel-nav"><div className="section-label"><span>CHANNELS</span></div>{activeWorkspace.channels.map((channel) => <button key={channel.skey} className={`channel-nav-item ${activeChannel?.skey === channel.skey ? "active" : ""}`} onClick={() => void openChannel(channel)}><span>{channel.visibility === "private" ? "▣" : "#"}</span>{channel.name}</button>)}</div>}
         <DmSidebar />
       </div>

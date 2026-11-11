@@ -105,11 +105,11 @@ export async function createWorkspaceAs(world: AppWorld, actor: Actor, name = un
   world.workspaceUri = await workspaceUriOnPage(actor);
 }
 
-export async function approveAdminControls(world: AppWorld, actor: Actor): Promise<void> {
-  const card = actor.page.getByRole("heading", { name: "Operator permissions" }).locator("xpath=ancestor::article");
-  await card.getByRole("button", { name: /Grant admin controls/ }).click();
-  await completeConsent(actor);
-  await waitForApp(world, actor);
+/**
+ * Waits until an admin's controls are live: the admin inbox has been read. The browser session's one grant carries the
+ * operator's methods, so there is nothing more to approve.
+ */
+export async function waitForAdminControls(world: AppWorld, actor: Actor): Promise<void> {
   await actor.page.getByRole("heading", { name: world.workspaceName, exact: true }).waitFor({ state: "visible" });
   await actor.page.getByText("No pending join requests.").waitFor({ state: "visible" });
 }
@@ -133,17 +133,16 @@ export async function openInviteLinkAndSignIn(world: AppWorld, actor: Actor, lin
   await signInFromLoginForm(world, actor);
 }
 
-export async function joinFromInvitation(world: AppWorld, actor: Actor): Promise<void> {
+/** Joins from the invitation banner: the browser writes the acceptance record with the session's grant, no consent screen. */
+export async function joinFromInvitation(actor: Actor): Promise<void> {
   await actor.page.getByRole("region", { name: "Workspace invitation" }).getByRole("button", { name: "Join this workspace" }).click();
-  await completeConsent(actor);
-  await waitForApp(world, actor);
 }
 
 /** The shared set-up of most invitation scenarios: an owner with admin controls who has added `invitee`. */
 export async function ownerInvites(world: AppWorld, inviteeRole: string, options: { inviteeHost?: 0 | 1; ownerHost?: 0 | 1 } = {}): Promise<{ owner: Actor; invitee: Actor }> {
   const owner = await world.actor("owner", options.ownerHost ?? 0);
   await createWorkspaceAs(world, owner);
-  await approveAdminControls(world, owner);
+  await waitForAdminControls(world, owner);
   const invitee = await world.actor(inviteeRole, options.inviteeHost ?? 1);
   await inviteMemberAs(owner, invitee.did);
   return { owner, invitee };

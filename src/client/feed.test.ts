@@ -327,3 +327,22 @@ test("a deferred space unfollowed while it was being followed again is not defer
   // #then nothing follows it any more
   assert.deepEqual(follower.following, []);
 });
+
+test("a poll has something to ask only once a follow has its cursor, not while the follow is under way", async () => {
+  // #given a follow whose head read is still out
+  let answerHead!: () => void;
+  const follower = new ChangeFollower({
+    operator: { getChanges: () => new Promise<ChangesAnswer>((resolve) => { answerHead = () => resolve(answer("1")); }) },
+    credentials: { fresh: async () => { throw new Error("not used"); } },
+    sync: async () => undefined,
+  });
+  const following = follower.follow([SPACE]);
+
+  // #when the head answers
+  const before = follower.pollable;
+  answerHead();
+  await following;
+
+  // #then the space was followed all along, but pollable only once it had its cursor
+  assert.deepEqual([before, follower.pollable, follower.following], [false, true, [SPACE]]);
+});

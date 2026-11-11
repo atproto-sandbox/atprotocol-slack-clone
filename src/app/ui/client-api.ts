@@ -1,37 +1,28 @@
-import { AUTHORIZATION_REQUIRED } from "@/lib/api-codes";
 import { parseWorkspaceUri as parseWorkspaceSpaceUri } from "@/protocol/keys";
 import { SpaceCredentialError } from "@/atproto/space-credential-core";
 import { XrpcError } from "@/atproto/xrpc";
 import { ChannelUnavailableError } from "@/client/errors";
+import { OperatorRemoteError } from "@/client/operator-client";
 
 export type Message = { uri: string; rkey: string; repo: string; value: { text?: string; createdAt?: string; parent?: string }; reactions?: Array<{ emoji: string; count: number; active: boolean }> };
 export type Reaction = { repo: string; value: { subject?: string; emoji?: string } };
 export type InboxRequest = { uri: string; repoDid: string; channelSkey: string; channelName: string; requestId: string; createdAt: string };
 export type ChannelSelection = { workspace: string; skey: string; name: string; visibility: string };
 export type PendingOperation = { workspace: string; operationId: string; request: Record<string, unknown> };
-export type StalledOperation = { actor: string; operationId: string; state: string; error: string | null; updatedAt: string };
 export type RunOperation = (request: Record<string, unknown>, workspace?: string, operationId?: string) => Promise<void>;
-export type Grant = (action: string, workspaceUri?: string, skey?: string) => Promise<void>;
 
 export const TRANSITIONING_STATUS = "This channel is transitioning. Sync and posting are paused until its access changes finish.";
 
-export async function api<T = unknown>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, { ...init, headers: { ...(init?.body ? { "content-type": "application/json" } : {}), ...init?.headers }, cache: "no-store" });
-  const body = await response.json().catch(() => null) as (T & { error?: string; code?: string }) | null;
-  if (!response.ok) {
-    throw new ApiError(response.status, body && typeof body.error === "string" ? body.error : `Request failed (${response.status}).`, body && typeof body.code === "string" ? body.code : undefined);
-  }
-  return body as T;
-}
-
-export class ApiError extends Error { constructor(readonly status: number, message: string, readonly code?: string) { super(message); } }
-/** The HTTP status a failure stands for, whether a server route or the engine answered: a channel paused or archived is 409. */
+/** The HTTP status a failure stands for, whether a host, the operator or the engine answered: a channel paused or archived is 409. */
 export function httpStatus(error: unknown): number | undefined {
-  if (error instanceof ApiError || error instanceof SpaceCredentialError || error instanceof XrpcError) return error.status;
+  if (error instanceof SpaceCredentialError || error instanceof XrpcError || error instanceof OperatorRemoteError) return error.status;
   if (error instanceof ChannelUnavailableError) return 409;
   return undefined;
 }
-export function isAuthorizationRequired(error: unknown): boolean { return error instanceof ApiError && error.status === 403 && error.code === AUTHORIZATION_REQUIRED; }
+/** The operator answered that the workspace authority must approve the operator's grant first, or again. */
+export function needsAuthorityApproval(error: unknown): boolean {
+  return error instanceof OperatorRemoteError && (error.code === "AuthorizationRequired" || error.code === "AuthoritySessionUnavailable");
+}
 export function isAccessFailure(error: unknown): boolean { return [401, 403, 409].includes(httpStatus(error) ?? 0); }
 export function messageOf(error: unknown): string { return error instanceof Error ? error.message : "Request failed."; }
 
