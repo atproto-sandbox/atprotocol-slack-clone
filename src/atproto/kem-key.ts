@@ -1,6 +1,12 @@
 import { P256_JWT_ALG, formatDidKey, multibaseToBytes } from "@atproto/crypto";
 import { SpaceMacError, isP256DidKey } from "@atproto/space";
 
+/**
+ * How long what a DID document said (its PDS host, its `#atproto_kem` key) is trusted before it is read again, wherever this
+ * app holds it: the browser's documents, the server's KEM keys and the engine's store. A failed MAC reads the key again at once.
+ */
+export const DID_DOCUMENT_TTL_MS = 10 * 60 * 1000;
+
 export class KemKeyError extends Error {
   constructor(did: string, reason: string) {
     super(`${did} has no usable #atproto_kem key: ${reason}. A syncer cannot read its space repos without one.`);

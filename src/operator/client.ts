@@ -2,14 +2,22 @@ import type { OAuthSession } from "@atproto/oauth-client-node";
 import type * as Execute from "@/lexicons/api/types/new/flock/operator/execute";
 import type * as GetOperation from "@/lexicons/api/types/new/flock/operator/getOperation";
 import type * as ListInboxWriters from "@/lexicons/api/types/new/flock/operator/listInboxWriters";
-import { assertSafePdsEndpoint, fetchValidatedEndpoint, getIdResolver } from "@/atproto/identity";
+import { assertSafePdsEndpoint, fetchValidatedEndpoint, getIdResolver, OUTBOUND_REQUEST_TIMEOUT_MS } from "@/atproto/identity";
 import type * as GetServiceAuth from "@/lexicons/api/types/com/atproto/server/getServiceAuth";
 import { sessionClient } from "@/atproto/client";
 import { OPERATOR_METHODS } from "@/protocol/scopes";
 import { getConfig } from "@/lib/config";
 import { readUpstreamJson } from "@/lib/bounded-json";
 import { operatorHttpFailure } from "./errors";
+import { OPERATION_ANSWER_BUDGET_MS } from "./journal";
 import { OPERATOR_METHOD } from "@/protocol/nsids";
+import { OperatorRemoteError, operatorResponseFailure } from "@/client/operator-client";
+
+// An execute call is answered only when its operation stops, so the ordinary request limit would give up while the operator
+// was still inside a normal run. This allows the operator's own budget and one more request's worth for the step in flight.
+// An answer that takes longer still ends here as a timeout; the operator carries on, and sending the same operation again
+// returns its state.
+const EXECUTE_TIMEOUT_MS = OPERATION_ANSWER_BUDGET_MS + OUTBOUND_REQUEST_TIMEOUT_MS;
 
 export async function submitOperation(
   session: OAuthSession,
@@ -50,7 +58,7 @@ async function operatorRequest<TInput, TOutput>(
       ...(input === undefined ? {} : { "content-type": "application/json" }),
     },
     ...(input === undefined ? {} : { body: JSON.stringify(input) }),
-  }));
+  }), undefined, method === OPERATOR_METHOD.execute ? EXECUTE_TIMEOUT_MS : undefined);
   const body = await readUpstreamJson<TOutput & { error?: string; message?: string }>(response, 1024 * 1024);
   const failure = operatorResponseFailure(response.status, response.ok, body);
   if (failure) throw failure;
@@ -85,23 +93,6 @@ export async function requestOperatorServiceAuth(
 ): Promise<string> {
   const result = await sessionClient(session).query<GetServiceAuth.OutputSchema>("com.atproto.server.getServiceAuth", { aud: serviceRef, lxm: method });
   return result.token;
-}
-
-export class OperatorRemoteError extends Error {
-  constructor(readonly status: number, readonly code: string, message: string) {
-    super(message);
-    this.name = "OperatorRemoteError";
-  }
-}
-
-export function operatorResponseFailure(
-  status: number,
-  ok: boolean,
-  body: { error?: string; message?: string } | null,
-): OperatorRemoteError | null {
-  if (body === null) return new OperatorRemoteError(502, "InvalidUpstreamResponse", "Operator service returned invalid JSON.");
-  if (!ok) return new OperatorRemoteError(status, body.error ?? "OperatorError", body.message ?? `Operator request failed (${status}).`);
-  return null;
 }
 
 /** The operator holds no usable grant for the workspace's authority; only the authority approving again fixes it. */

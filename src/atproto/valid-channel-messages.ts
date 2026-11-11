@@ -27,7 +27,7 @@ export async function selectValidChannelMessages(
     } catch {
       return false;
     }
-  }).sort((left, right) => right.rkey.localeCompare(left.rkey));
+  }).sort((left, right) => right.rkey.localeCompare(left.rkey) || (left.uri < right.uri ? -1 : left.uri > right.uri ? 1 : 0));
   const knownMessages = new Set<string>();
   const knownTopLevelMessages = new Set<string>();
   const validTopLevelMessages = new Set<string>();

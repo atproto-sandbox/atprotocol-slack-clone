@@ -24,8 +24,8 @@ import { MEMBERSPACE_POLICY } from "@/atproto/space-policy";
 import { AtprotoClient } from "@/atproto/xrpc";
 
 /**
- * An in-memory, multi-host fake of the DM-relevant slice of the pinned PDS
- * protocol. Test-only: production code (`dm-client.ts`) never imports this.
+ * An in-memory, multi-host fake of the pinned PDS protocol for spaces of any type: the engine's channels, workspaces and
+ * inboxes as well as DMs. Test-only: production code never imports this.
  *
  * Space management (`createSpace`/`updateSpace`/`getSpace`/`deleteSpace`, and
  * `putMember`/`removeMember`/`listMembers` under memberspace, plus `listSpaces`)
@@ -99,7 +99,7 @@ class WithHeaders {
   constructor(readonly body: unknown, readonly headers: Record<string, string>) {}
 }
 
-export class FakeDmNetwork {
+export class FakeNetwork {
   private virtualNow = Date.now();
 
   private readonly accounts = new Map<string, string>();
@@ -115,8 +115,60 @@ export class FakeDmNetwork {
   private readonly credentials = new Map<string, { space: string; grantedDid: string; keyId: string; expiresAt: number }>();
   private tokenCounter = 0;
   private revCounter = 0;
+  /** Spaces whose writes reach `listRepos` only on `flushListing`, so a reported revision lags the host. */
+  private readonly lagging = new Set<string>();
+  private readonly pendingListing = new Map<string, Array<{ did: string; repoRev: string }>>();
+  /** Writer DIDs whose host is down: every read of their repo by another account fails. */
+  private readonly unreachable = new Set<string>();
+  private readonly notifyRegistrations = new Map<string, string>();
+  private readonly withheldNotices = new Set<string>();
+
+  /** Requests served, by XRPC method. */
+  readonly calls = new Map<string, number>();
+  /** Called for every write notice the authority would send a registered service, unless the space's notices are withheld. */
+  onNotifyWrite: ((notice: { space: string; repo: string; service: string }) => void) | undefined;
+  /** Runs before each `listRecords` page is served, so a test can write between two pages of one listing. */
+  beforeListRecords: ((params: { space: string; repo: string; collection: string; cursor?: string }) => Promise<void> | void) | undefined;
 
   now = (): number => this.virtualNow;
+
+  /** Holds a space's writes back from `listRepos` until `flushListing`, as an authority that has not processed them yet. */
+  setListingLag(space: string, lagging: boolean): void {
+    if (lagging) this.lagging.add(space);
+    else {
+      this.lagging.delete(space);
+      this.flushListing(space);
+    }
+  }
+
+  flushListing(space: string): void {
+    const target = this.spaces.get(space);
+    for (const { did, repoRev } of this.pendingListing.get(space) ?? []) {
+      if (target && this.currentlyAuthorizedWriter(target, did)) target.trackedWriters.set(did, { repoRev, spaceRev: this.nextRev() });
+    }
+    this.pendingListing.delete(space);
+  }
+
+  /** Takes a writer's host down (or back up): every other account's read of its repo fails with 503. */
+  setHostReachable(did: string, reachable: boolean): void {
+    if (reachable) this.unreachable.delete(did);
+    else this.unreachable.add(did);
+  }
+
+  /** Stops (or resumes) the authority's write notices for a space: a lost notice. */
+  withholdNotices(space: string, withheld: boolean): void {
+    if (withheld) this.withheldNotices.add(space);
+    else this.withheldNotices.delete(space);
+  }
+
+  /** Writes a record into `did`'s repo in a space without a client: another app's write, or seeding. */
+  async writeAs(did: string, space: string, collection: string, rkey: string, record: Record<string, unknown>): Promise<void> {
+    await this.putRecord({ space, repo: did, collection, rkey, record: { $type: collection, ...record } }, { kind: "self", did });
+  }
+
+  async deleteAs(did: string, space: string, collection: string, rkey: string): Promise<void> {
+    this.deleteRecord({ space, repo: did, collection, rkey }, { kind: "self", did });
+  }
 
   /** Advances the fake network's clock, used by tests exercising credential expiry and re-notify backoff. */
   advanceClock(ms: number): void {
@@ -217,7 +269,11 @@ export class FakeDmNetwork {
     const params: Record<string, unknown> = {};
     for (const [key, value] of url.searchParams.entries()) params[key] = value;
     if (typeof init.body === "string" && init.body.length > 0) Object.assign(params, JSON.parse(init.body));
+    this.calls.set(method, (this.calls.get(method) ?? 0) + 1);
     if (auth.kind === "rejected") return errorResponse(auth.error);
+    if (typeof params.repo === "string" && this.unreachable.has(params.repo) && !(auth.kind === "self" && auth.did === params.repo)) {
+      return errorResponse(new FakeXrpcError(503, "ServiceUnavailable", "The repo host is down."));
+    }
     try {
       const handled = await this.handle(method, params, auth, requestHeaders);
       const [body, headers] = handled instanceof WithHeaders ? [handled.body, handled.headers] : [handled, {}];
@@ -243,6 +299,8 @@ export class FakeDmNetwork {
       case "com.atproto.memberspace.listMembers": return this.listMembers(params, auth);
       case "com.atproto.space.listSpaces": return this.listSpaces(params, auth);
       case "com.atproto.space.putRecord": return this.putRecord(params, auth);
+      case "com.atproto.space.createRecord": return this.createRecord(params, auth);
+      case "com.atproto.server.getServiceAuth": return this.getServiceAuth(params, auth);
       case "com.atproto.space.deleteRecord": return this.deleteRecord(params, auth);
       case "com.atproto.space.getRecord": return this.getRecord(params, auth, requestHeaders);
       case "com.atproto.space.getLatestCommit": return this.getLatestCommit(params, auth, requestHeaders);
@@ -430,8 +488,39 @@ export class FakeDmNetwork {
     repoCollections.set(collection, records);
     records.set(rkey, { value: record, cid });
     space.repoRevs.set(repo, this.nextRev());
-    if (this.currentlyAuthorizedWriter(space, repo)) space.trackedWriters.set(repo, { repoRev: space.repoRevs.get(repo)!, spaceRev: this.nextRev() });
+    this.recordWrite(space, repo);
     return { uri: `${spaceUri(space)}/${repo}/${collection}/${rkey}`, cid: cid.toString() };
+  }
+
+  /** Like `putRecord`, but a record already at that key is refused, as the pinned PDS's `createRecord` does. */
+  private async createRecord(params: Record<string, unknown>, auth: FakeAuth) {
+    const space = typeof params.space === "string" ? this.spaces.get(params.space) : undefined;
+    const rkey = typeof params.rkey === "string" ? params.rkey : fakeTid(++this.revCounter);
+    if (space && !space.deleted && this.repoCollections(space, String(params.repo)).get(String(params.collection))?.has(rkey)) {
+      throw new FakeXrpcError(400, "RecordAlreadyExists", "Record already exists");
+    }
+    return this.putRecord({ ...params, rkey }, auth);
+  }
+
+  /**
+   * A service token for `aud` and `lxm`, as the caller's own PDS issues one. The token is readable by `readServiceToken`
+   * instead of being a signed JWT; the fake operator a test runs trusts the network that issued it.
+   */
+  private getServiceAuth(params: Record<string, unknown>, auth: FakeAuth): { token: string } {
+    const did = this.requireSelf(auth);
+    if (typeof params.aud !== "string") throw new FakeXrpcError(400, "InvalidRequest", "aud is required");
+    const exp = params.exp !== undefined ? Number(params.exp) : Math.floor(this.now() / 1000) + 60;
+    return { token: `fake-service-token.${btoa(JSON.stringify({ iss: did, aud: params.aud, lxm: params.lxm ?? null, exp }))}` };
+  }
+
+  /** What a fake service token says, or null when it is not one this network issued. */
+  readServiceToken(token: string): { iss: string; aud: string; lxm: string | null; exp: number } | null {
+    if (!token.startsWith("fake-service-token.")) return null;
+    try {
+      return JSON.parse(atob(token.slice("fake-service-token.".length))) as { iss: string; aud: string; lxm: string | null; exp: number };
+    } catch {
+      return null;
+    }
   }
 
   private deleteRecord(params: Record<string, unknown>, auth: FakeAuth): Record<string, never> {
@@ -441,7 +530,23 @@ export class FakeDmNetwork {
     const space = this.requireSpace(params.space);
     this.repoCollections(space, repo).get(String(params.collection))?.delete(String(params.rkey));
     space.repoRevs.set(repo, this.nextRev());
+    this.recordWrite(space, repo);
     return {};
+  }
+
+  /** What the authority learns of a write: the writer set moves (now, or on `flushListing`) and registered services are told. */
+  private recordWrite(space: FakeSpace, repo: string): void {
+    const uri = spaceUri(space);
+    if (!this.currentlyAuthorizedWriter(space, repo)) return;
+    if (this.lagging.has(uri)) {
+      const pending = this.pendingListing.get(uri) ?? [];
+      pending.push({ did: repo, repoRev: space.repoRevs.get(repo)! });
+      this.pendingListing.set(uri, pending);
+    } else {
+      space.trackedWriters.set(repo, { repoRev: space.repoRevs.get(repo)!, spaceRev: this.nextRev() });
+    }
+    const service = this.notifyRegistrations.get(uri);
+    if (service && !this.withheldNotices.has(uri)) this.onNotifyWrite?.({ space: uri, repo, service });
   }
 
   private requireCredential(params: Record<string, unknown>, auth: FakeAuth): string {
@@ -521,7 +626,11 @@ export class FakeDmNetwork {
     return RepoCommit.fromRecords(records).toCommit({ space: spaceUri(space) as never, repo: repo as never, rev });
   }
 
-  private listRecords(params: Record<string, unknown>, auth: FakeAuth) {
+  private async listRecords(params: Record<string, unknown>, auth: FakeAuth) {
+    await this.beforeListRecords?.({
+      space: String(params.space), repo: String(params.repo), collection: String(params.collection),
+      ...(typeof params.cursor === "string" ? { cursor: params.cursor } : {}),
+    });
     // An account listing its own repo with its own OAuth session needs no credential, as on the pinned PDS.
     const own = this.isOwnRead(params, auth);
     if (!own) this.requireCredential(params, auth);
@@ -532,7 +641,8 @@ export class FakeDmNetwork {
     const records = [...(space.deleted ? [] : this.repoCollections(space, repo).get(collection)?.entries() ?? [])]
       .sort(([left], [right]) => right.localeCompare(left))
       .map(([rkey, entry]) => ({ collection, rkey, cid: entry.cid.toString(), value: entry.value }));
-    return paginate(records, params, (record) => record.rkey, "records");
+    // Like the pinned PDS's listRecords, a full page carries a cursor even when nothing follows it.
+    return paginate(records, params, (record) => record.rkey, "records", { cursorOnFullPage: true });
   }
 
   private listRepos(params: Record<string, unknown>, auth: FakeAuth) {
@@ -551,6 +661,7 @@ export class FakeDmNetwork {
   private registerNotify(params: Record<string, unknown>, auth: FakeAuth): { expiresAt: string } {
     this.requireCredential(params, auth);
     this.requireSpace(params.space);
+    this.notifyRegistrations.set(String(params.space), String(params.service));
     return { expiresAt: new Date(this.now() + NOTIFY_REGISTRATION_TTL_MS).toISOString() };
   }
 
@@ -595,13 +706,20 @@ function commitJson(commit: { ver: number; repo: string; space: string; rev: str
   return { ver: commit.ver, repo: commit.repo, space: commit.space, rev: commit.rev, data: { $bytes: toBase64(commit.data) } };
 }
 
-function paginate<T>(all: T[], params: Record<string, unknown>, key: (item: T) => string, field: string): Record<string, unknown> {
+function paginate<T>(
+  all: T[],
+  params: Record<string, unknown>,
+  key: (item: T) => string,
+  field: string,
+  options: { cursorOnFullPage?: boolean } = {},
+): Record<string, unknown> {
   const limit = typeof params.limit === "number" ? params.limit : Number(params.limit ?? 100) || 100;
   const cursor = typeof params.cursor === "string" ? params.cursor : undefined;
   const startIndex = cursor ? all.findIndex((item) => key(item) === cursor) + 1 : 0;
   const page = all.slice(startIndex, startIndex + limit);
   const nextIndex = startIndex + page.length;
-  return { [field]: page, ...(nextIndex < all.length ? { cursor: key(page[page.length - 1]!) } : {}) };
+  const more = nextIndex < all.length || (options.cursorOnFullPage === true && page.length > 0 && page.length === limit);
+  return { [field]: page, ...(more ? { cursor: key(page[page.length - 1]!) } : {}) };
 }
 
 const TID_ALPHABET = "234567abcdefghijklmnopqrstuvwxyz";

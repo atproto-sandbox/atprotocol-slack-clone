@@ -39,6 +39,17 @@ test("a kind outside the table, a wrong lexicon type, or a wrongly typed field i
   assert.throws(() => validateOperatorRequest({ kind: "createChannel", skey: "x", name: " ", visibility: "public" }, actor, "execute"), /1 to 80 characters/i);
 });
 
+test("a channel name is accepted exactly when the directory record that will carry it accepts it", () => {
+  const create = (name: string) => () => validateOperatorRequest({ kind: "createChannel", skey: "x", name, visibility: "public" }, actor, "execute");
+
+  // #then the limit is 80 graphemes within 320 bytes, however many code points a grapheme takes
+  const accented = "e\u0301"; // one grapheme, two code points, three bytes
+  const family = "\u{1F468}\u200D\u{1F469}\u200D\u{1F467}"; // one grapheme, five code points, 18 bytes
+  const flag = "\u{1F1E8}\u{1F1E6}"; // one grapheme, two code points, eight bytes
+  for (const name of ["a".repeat(80), "\u{1F600}".repeat(80), accented.repeat(80), family.repeat(17), flag.repeat(40)]) assert.doesNotThrow(create(name), name);
+  for (const name of ["a".repeat(81), "\u{1F600}".repeat(81), accented.repeat(81), family.repeat(18), flag.repeat(41)]) assert.throws(create(name), /1 to 80 characters/i, name);
+});
+
 test("private visibility transitions require a selected member list", () => {
   assert.throws(() => validateOperatorRequest({ kind: "transitionChannel", skey: "general", visibility: "private" }, actor, "execute"), /selected member list/i);
   assert.deepEqual(validateOperatorRequest({ kind: "transitionChannel", skey: "general", visibility: "private", members: ["did:plc:member"] }, actor, "execute").request.members, ["did:plc:member"]);

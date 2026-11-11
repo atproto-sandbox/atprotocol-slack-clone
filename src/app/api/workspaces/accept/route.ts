@@ -8,7 +8,7 @@ import { validateSpaceRecord } from "@/protocol/registry";
 import { purgeDeniedPermissionCache } from "@/workspaces/cache";
 import { readRequestJson } from "@/lib/bounded-json";
 import { rejectCrossOriginMutation } from "@/lib/same-origin-mutation";
-import { acceptFailure } from "@/workspaces/accept-errors";
+import { acceptFailure } from "@/client/accept-errors";
 import { COLLECTION } from "@/protocol/nsids";
 
 export const runtime = "nodejs";

@@ -45,13 +45,13 @@ Two independent-app proofs exist side by side: `src/reader/independent.ts` (chan
         ▼
  for each participant's conversation half (fan-out 8, src/lib/map-limited.ts):
    - read header, validate convKey + participant set match (validateDmHeaderMatchesRequest)
-   - page new.flock.dm.message / new.flock.dm.reaction, validate every record (validateSpaceRecord)
    - classify a failed mint as missing / deleted / revoked (SpaceCredentialError.code)
         │
-        │ 3. merge
+        │ 3. sync and merge
         ▼
- src/dm/merge.ts: incremental k-way merge, pages only the halves the current
-   window still needs (production path, used by DmClient.readConversation)
+ src/client/sync.ts (the engine's sync core, used by DmClient.readConversation): each readable half is a
+   source; every read checks each half's revision at its host and lists only halves that moved, between two
+   revision reads; messages and reactions are validated on read and merged newest key first, then by URI
    -- OR --
  src/reader/independent-dm.ts: fetches each half's full bounded history up
    front, then one sort+slice (separate implementation, proves independence)
@@ -106,7 +106,9 @@ src/
     record-pages.ts          Bounded listRepos/listRecords/listMembers/listSpaces paging with
                               cursor/duplicate/limit assertions; the one listBoundedSpaces and
                               listAllSpaceUris (workspace discovery).
-    identity.ts               Server-side DID→PDS resolution (SSRF-guarded; Node-only).
+    identity.ts               Server-side DID→PDS resolution (SSRF-guarded; Node-only), and fetchValidatedEndpoint:
+                              the one outbound fetch path, which ends every request at its time limit (30 s unless
+                              the caller asks for longer; only the operator client's execute call does).
     space-ops.ts, valid-channel-messages.ts, client.ts
   protocol/               Pure, isomorphic protocol logic shared by everything above.
     keys.ts                  The one owner of URI and key syntax: parseSpaceUri / parseWorkspaceUri /
@@ -133,14 +135,18 @@ src/
                               the reconcile job restore the grant from here; a member sign-in never writes it.
     actor.ts                 OperatorActor and WorkspaceRef: who an operation runs for, through which session.
     journal.ts               runJournaledOperation: the workspace lock, the operation row, declared step names,
-                              resume by name and request hash, and "waiting for the authority's approval".
-    kinds/                   One file per operation kind ({ fields, actor, steps, validate, authorizeMember, run });
+                              resume by name and request hash, "waiting for the authority's approval", and the
+                              time limit after which a run starts no further step.
+    kinds/                   One file per operation kind ({ fields, actor, steps, validate, authorizeMember,
+                              endsOwnRole, run });
                               kinds/index.ts is the table every request and journal row dispatches through, and
                               kinds/kinds.test.ts pins every persisted kind, field and step name.
     operations.ts            Request validation from the kind table, recovery of pending rows, and execution.
     security.ts              Service-auth verification; authorizeOperationActor decides who may run an operation (an
                               admin; the authority alone for an authority kind; the member a member kind concerns,
                               through the kind's authorizeMember, after the request is validated).
+                              authorizeSubmittedOperation adds the one exception: a submitter that current state
+                              refuses may send again a journaled operation whose kind says it ends their own role.
     workspace-state.ts       The operator's reads and writes of rosters, admins and the directory.
     workspace-envelope.ts    The operator's own envelope check, read with the authority's grant.
     notices.ts               registerNotify bookkeeping; which write/deleted notices are accepted; the capped
@@ -148,9 +154,32 @@ src/
     testing/fake-authority-pds.ts
                              In-memory authority PDS for operator unit tests; production code never imports it.
   workspaces/             Server-side channel/workspace sync, caching, and the read model.
+  client/                 The engine (isomorphic, under the same lint boundary as src/dm; the SDK from R7). One owner each:
+    transport.ts             ClientTransport: what the engine needs from its host (own client, DID resolution, fetch, keys).
+    credentials.ts           CredentialCache: one space credential per space; a refused mint drops the space (onAccessLost).
+    identity.ts              withIdentityCache: a DID's host and KEM key held in the store (across sessions) for
+                              DID_DOCUMENT_TTL_MS, six resolutions at once per origin in the process, each given up after
+                              ten seconds; a failed MAC forces a fresh key. The ten-minute bound has one owner,
+                              src/atproto/kem-key.ts, shared with the browser's documents and the server's KEM keys.
+    store.ts                 SyncStore contract: records, per-writer state (coverage per collection, syncedRev, generation),
+                              per-space state, compare-and-set commits by generation, revision and space epoch.
+    memory-store.ts, indexeddb-store.ts
+                             The two stores: memory (DM spaces, tests) and IndexedDB (one database per account).
+    merge.ts                 The merge order (newest key, then URI) and the opaque (key, uri) page cursor.
+    sync.ts                  SyncCore: the writer set (full listRepos per session and truth interval, hints between),
+                              bracketed refresh, backfill, set-aside writers, bounds, completeness.
+    lifecycle.ts             When held copies stop being served: lost access, deletion, unlisted workspaces, archived
+                              channels, retention sweep, sign-out.
+    channel-client.ts, workspace-client.ts, operator-client.ts
+                             The member's operations, each rule of the route table owned here; engine.ts wires them.
+    accept-errors.ts, inbox-requests.ts, errors.ts
+                             Accept refusal codes, one writer's join requests, ChannelUnavailableError.
+  testing/                Test-only: fake-network.ts (the in-memory multi-host PDS network for every engine and DM
+                           test), engine-fixture.ts (channels and workspaces on it), store-contract.ts.
   dm/                     The DM feature. Isomorphic engine + browser-only glue. See below.
   reader/                 Independent second-app readers (no app database, no DM-engine import).
-    independent.ts           Channels/workspaces.
+    independent.ts           Channels/workspaces; takes injected transports (sessionCredentialDeps builds them from a
+                              server session), so it runs on the fake network too.
     independent-dm.ts        DMs (M6 independence proof).
   lib/                    Cross-cutting utilities: config, db, bounded-json parsing,
                            map-limited concurrency, security headers, same-origin checks.
@@ -171,8 +200,9 @@ scripts/                  codegen-lex.mjs, backup-db.mjs, reconcile-workspaces.t
 - `dm-client.ts` — `DmClient`: the isomorphic DM engine (inbox/policy, discovery, start/accept,
   messages/reactions, `readConversation`'s k-way merge, leave/delete, re-notify). Constructed
   with injected transports (`memberClient`, `resolvePds`, `fetchEndpoint`, `generateKey`,
-  `store`), so the same class runs in the browser and in Node tests/acceptance.
-- `merge.ts` — the pure k-way merge `readConversation` uses (paginate-only-what's-needed).
+  `store`), so the same class runs in the browser and in Node tests/acceptance. `leave` removes
+  the other participants from the caller's half and hides the conversation in the local store
+  (off the list, not re-announced); starting a conversation with the same people readmits them.
 - `request-policy.ts` — pure mapping between the inbox memberspace `publicWrite` flag/member state and the
   user-facing mode (`everyone` / `allowlist` / `nobody`).
 - The inbox declaration (`new.flock.dm.declaration`, a public record in the owner's own repo, written by `enableDms`) is how a sender learns a recipient has an inbox: the authority answers a stranger asking for the inbox like a missing space.
@@ -189,8 +219,6 @@ scripts/                  codegen-lex.mjs, backup-db.mjs, reconcile-workspaces.t
   served by `src/app/oauth/dm-client-metadata.json/route.ts`.
 - `ui-logic.ts` — pure UI helpers (participant-input parsing, conversation labels/visibility,
   co-member/allowlist edits) kept separate from the `dm-*.tsx` components for testability.
-- `testing/fake-pds.ts` — an in-memory, multi-host fake of the DM-relevant PDS surface, used only
-  by `src/dm/*.test.ts` unit tests; production code never imports it.
 - `index.ts` — `export {};` only, so the ESLint isomorphic-boundary rule has a stable target.
 
 Every module above except the `*.test.ts` files is covered by an `eslint.config.mjs`
@@ -209,10 +237,10 @@ workspace layers even by accident.
 - `pnpm backup:db` (`scripts/backup-db.mjs`) — online SQLite backup.
 - `pnpm test` — unit tests (`node --test` over every `src/**/*.test.ts`), plus `bdd/gate.test.ts`, which keeps the Gherkin features honest (below).
 - `pnpm test:bdd` — builds, then runs the executable Gherkin scenarios in `features/` with `@cucumber/cucumber`, driving real browsers against a real pinned PDS network.
-- `pnpm test:acceptance` — builds, then runs `protocol-tests/{app-acceptance,reconcile-workspaces,dm-acceptance,authority-grant,platform-capabilities}.test.ts` against a real pinned PDS network (needs `ATPROTO_PINNED_CHECKOUT`). The last two hold the platform refactor's capability checks (K1, K3, K7), on the network-only helper `protocol-tests/support/pds-network.ts`.
+- `pnpm test:acceptance` — builds, then runs `protocol-tests/{app-acceptance,reconcile-workspaces,dm-acceptance,authority-grant,platform-capabilities,engine-acceptance}.test.ts` against a real pinned PDS network (needs `ATPROTO_PINNED_CHECKOUT`). `platform-capabilities` and `authority-grant` hold the platform refactor's capability checks (K1, K3, K7), and `engine-acceptance` the engine's parity with the independent reader on two real hosts, all on the network-only helper `protocol-tests/support/pds-network.ts` (`actorTransport` builds the engine's transport for a real account).
 - `pnpm test:browser` — builds, then runs Playwright specs in `protocol-tests/browser/` (`--test-concurrency=1`, since the specs start real servers); `cross-origin.spec.ts` (K9) signs in through the real OAuth flow and sends every request from a separate web origin.
 - `pnpm test:performance` — `protocol-tests/{performance-envelope,dm-performance}.test.ts` (slow; the channel envelope test is ~30 minutes); each latest-100 read is repeated ten times and reported as median and p95.
-- `pnpm test:sync-budget` — `protocol-tests/sync-budget.ts` (K4): calls and time of the planned sync at 20, 100 and 200 writers.
+- `pnpm test:sync-budget` — `protocol-tests/sync-budget.ts` (K4, R4's gate): calls and time of the engine's first open, reopen and one new message at 20, 100 and 200 writers; it fails if a reopen's call count depends on the writer count.
 
 ## Executable Gherkin
 

@@ -1,7 +1,13 @@
-import { listBoundedMembers, listBoundedRecords, listBoundedRepos, listBoundedSpaces, assertBoundedRecordPage } from "@/atproto/record-pages";
-import { isCredentialRefused, mintSpaceCredentialWith, SpaceCredential, SpaceCredentialError, type ResolveKemKey } from "@/atproto/space-credential-core";
-import type { SpaceKey } from "@/atproto/space-key";
+import { listBoundedMembers, listBoundedRecords, listBoundedRepos, listBoundedSpaces } from "@/atproto/record-pages";
+import { isCredentialRefused, SpaceCredential, SpaceCredentialError } from "@/atproto/space-credential-core";
 import { AtprotoClient, isMissingXrpcResource, isSpaceAlreadyExists } from "@/atproto/xrpc";
+import { CredentialCache } from "@/client/credentials";
+import { withIdentityCache } from "@/client/identity";
+import { MemoryStore } from "@/client/memory-store";
+import { decodeCursor, encodeCursor } from "@/client/merge";
+import type { SyncStore } from "@/client/store";
+import { SyncCore } from "@/client/sync";
+import type { ClientTransport } from "@/client/transport";
 import { mapLimited } from "@/lib/map-limited";
 import {
   canonicalParticipants,
@@ -18,7 +24,6 @@ import {
 } from "@/protocol/keys";
 import { validateDmDeclaration, validateDmHeaderMatchesRequest, validateSpaceRecord } from "@/protocol/registry";
 import { advanceRenotifyState, isRenotifyDue, type DmRenotifyState } from "./backoff";
-import { mergeDmHalves, type DmHalfPage } from "./merge";
 import { classifyRepoFailure } from "@/atproto/repo-failure";
 import { memberspacePolicy, readMemberspacePolicy, withPublicWrite } from "@/atproto/space-policy";
 import { isSenderAllowedUnderMode, modeForInboxPolicy, publicWriteForMode, type DmRequestMode } from "./request-policy";
@@ -35,8 +40,6 @@ const MAX_INBOX_SCAN = 10_000;
 const EMPTY_SENDER_TTL_MS = 5 * 60_000;
 const MAX_REQUESTS_PER_WRITER = 1_000;
 const MAX_OWN_CONVERSATIONS = 10_000;
-const MAX_REACTIONS_PER_HALF = 20_000;
-const MAX_MERGE_ROUNDS = 10_000;
 
 export type DmStore = {
   get(key: string): Promise<string | null>;
@@ -44,16 +47,12 @@ export type DmStore = {
   delete(key: string): Promise<void>;
 };
 
-export type DmDeps = {
-  did: string;
-  memberClient: AtprotoClient;
-  resolvePds(did: string): Promise<string>;
-  resolveKemKey: ResolveKemKey;
-  fetchEndpoint(request: Request): Promise<Response>;
-  generateKey(): Promise<SpaceKey>;
+export type DmDeps = ClientTransport & {
+  /** Small per-account settings: hidden requests, hidden conversations, re-notify state. */
   store: DmStore;
-  now?: () => number;
-  limits?: { maxInboxScan?: number; maxRequestsPerWriter?: number };
+  /** Where conversation records are held between reads; memory by default, as DM content never goes to disk (D10). */
+  syncStore?: SyncStore;
+  limits?: { maxInboxScan?: number; maxRequestsPerWriter?: number; maxRecordsPerHalf?: number };
 };
 
 export type DmInboxState = { exists: boolean; mode: DmRequestMode; allowlist: string[] };
@@ -61,6 +60,8 @@ export type DmInboxState = { exists: boolean; mode: DmRequestMode; allowlist: st
 export type DmRequest = { convKey: string; participants: string[]; sender: string; createdAt: string; uri: string };
 
 export type DmConversationSummary = { convKey: string; participants: string[] };
+
+type DmHeader = { convKey: string; participants: string[]; createdAt: string };
 
 export type DmSkippedSenders = {
   oversizedWriters: string[];
@@ -86,19 +87,29 @@ export type DmConversationPage = {
 };
 
 /**
- * The DM engine (M4). Isomorphic: it depends only on injected transports
- * (`memberClient`, `resolvePds`, `resolveKemKey`, `fetchEndpoint`, `generateKey`, `store`), so
- * the same class runs in the browser (M5) and in Node tests/acceptance against
- * a fake or real PDS. Every write is validated locally with
- * `validateSpaceRecord` before being sent; every read record is validated
- * after being fetched, and invalid or wrong-repo records are dropped.
+ * The DM engine (M4). Isomorphic: it depends only on injected transports, so the same class runs in the browser (M5) and in
+ * Node tests/acceptance against a fake or real PDS. It reads through the engine's credential cache and sync core: each half
+ * of a conversation is one source, checked at its host on every read and listed only when its revision moved. Every write
+ * is validated locally with `validateSpaceRecord` before being sent; every read record is validated after being fetched,
+ * and invalid or wrong-repo records are dropped.
  */
 export class DmClient {
-  private readonly credentials = new Map<string, Promise<SpaceCredential>>();
+  private readonly credentials: CredentialCache;
+  private readonly sync: SyncCore;
   /** Active allowlist members the last scan found nothing to read from, and until when that answer is trusted. */
   private readonly emptySenders = new Map<string, number>();
 
-  constructor(private readonly deps: DmDeps) {}
+  private readonly deps: DmDeps;
+
+  constructor(deps: DmDeps) {
+    const store = deps.syncStore ?? new MemoryStore();
+    this.deps = { ...deps, ...withIdentityCache(deps, store) };
+    this.credentials = new CredentialCache(this.deps);
+    this.sync = new SyncCore({
+      transport: this.deps, credentials: this.credentials, store,
+      ...(deps.limits?.maxRecordsPerHalf ? { options: { maxRecordsPerCollection: deps.limits.maxRecordsPerHalf } } : {}),
+    });
+  }
 
   // --- Inbox and request policy (§3.6) ---
 
@@ -201,7 +212,7 @@ export class DmClient {
     if (!inbox.exists) return { requests: [], skipped };
     const maxInboxScan = this.deps.limits?.maxInboxScan ?? MAX_INBOX_SCAN;
     const maxRequestsPerWriter = this.deps.limits?.maxRequestsPerWriter ?? MAX_REQUESTS_PER_WRITER;
-    const credential = await this.credentialFor(inboxSpace);
+    const credential = await this.credentials.get(inboxSpace);
     const repoClient = credential.client(await this.deps.resolvePds(this.deps.did));
     const writerScan = await listBoundedRepos(repoClient, { space: inboxSpace, maxRepos: maxInboxScan });
     skipped.writerSetTruncated = writerScan.truncated;
@@ -268,7 +279,7 @@ export class DmClient {
     if (halves.truncated) throw new Error("Own DM conversation count exceeds the bounded scan limit.");
     const own = await mapLimited(halves.spaces, FANOUT, async (space): Promise<DmConversationSummary | null> => {
       const parsed = parseDmConversationUri(space.uri);
-      if (!parsed) return null;
+      if (!parsed || await this.hasLeft(parsed.convKey)) return null;
       const header = await this.getValidatedOwnHeader(space.uri);
       if (!header) return null;
       return { convKey: parsed.convKey, participants: header.participants };
@@ -282,7 +293,7 @@ export class DmClient {
     const participants = canonicalParticipants([...dids, this.deps.did]);
     if (participants.length > MAX_PARTICIPANTS) throw new RangeError(`DM conversations are capped at ${MAX_PARTICIPANTS} participants.`);
     const existing = await this.findExistingHalf(participants);
-    if (existing) return { convKey: existing, participants, delivery: {} };
+    if (existing) return { convKey: existing.convKey, participants, delivery: await this.rejoin(existing) };
 
     const convKey = tidNow(this.now());
     const half = dmConversationUri(this.deps.did, convKey);
@@ -378,14 +389,13 @@ export class DmClient {
     const canonical = canonicalParticipants(participants);
 
     const halves: Record<string, DmHalfStatus> = {};
-    const credentials = new Map<string, SpaceCredential>();
-    const pages = new Map<string, DmHalfPage>();
+    const readable = new Set<string>();
 
     await mapLimited(canonical, FANOUT, async (ownerDid) => {
       const half = dmConversationUri(ownerDid, convKey);
       let credential: SpaceCredential;
       try {
-        credential = await this.credentialFor(half);
+        credential = await this.credentials.get(half);
       } catch (error) {
         halves[ownerDid] = classifyHalfError(error);
         return;
@@ -397,7 +407,7 @@ export class DmClient {
         // Another participant whose repo cannot be read (deactivated, taken down, unauthenticated, or on a host that is down) is an
         // unreadable half, not a reason to hide the other halves. A failure reading the caller's own half is the caller's own
         // problem (offline, their host down), not a participant's, and fails the read.
-        if (isCredentialRefused(error)) this.credentials.delete(half);
+        if (isCredentialRefused(error)) this.credentials.drop(half);
         if (ownerDid === this.deps.did || !classifyRepoFailure(error)) throw error;
         halves[ownerDid] = "missing";
         return;
@@ -414,64 +424,57 @@ export class DmClient {
         return;
       }
       halves[ownerDid] = "ok";
-      credentials.set(ownerDid, credential);
-      pages.set(ownerDid, { ownerDid, records: [], exhausted: false });
+      readable.add(ownerDid);
     });
 
-    const cursors = new Map<string, string | undefined>();
-    const seenCursors = new Map<string, Set<string>>();
-    let merge = mergeDmHalves([...pages.values()], { limit, before: options.before });
-    for (let round = 0; merge.needsMore.length > 0; round += 1) {
-      if (round >= MAX_MERGE_ROUNDS) throw new Error("DM conversation merge exceeded the bounded round limit.");
-      const perHalfLimit = Math.max(1, Math.min(100, Math.ceil(limit / merge.needsMore.length)));
-      await mapLimited(merge.needsMore, FANOUT, async (ownerDid) => {
-        const half = dmConversationUri(ownerDid, convKey);
-        try {
-          const client = credentials.get(ownerDid)!.client(await this.deps.resolvePds(ownerDid));
-          const cursor = cursors.get(ownerDid);
-          const usedCursors = seenCursors.get(ownerDid) ?? new Set<string>();
-          seenCursors.set(ownerDid, usedCursors);
-          if (cursor && usedCursors.has(cursor)) throw new Error("PDS record pagination did not advance.");
-          if (cursor) usedCursors.add(cursor);
-          const page = await client.query<{ cursor?: string; records: Array<{ rkey: string; value?: Record<string, unknown> }> }>(
-            "com.atproto.space.listRecords", { space: half, repo: ownerDid, collection: COLLECTION.dmMessage, cursor, limit: perHalfLimit },
-          );
-          assertBoundedRecordPage(page, { collection: COLLECTION.dmMessage, limit: perHalfLimit, cursor, seenCursors: usedCursors });
-          const existing = pages.get(ownerDid)!;
-          const validRecords = page.records.flatMap((record) => {
-            if (!record.value) return [];
-            const validation = validateSpaceRecord(COLLECTION.dmMessage, record.value, {
-              authorityDid: ownerDid, spaceUri: half, repoDid: ownerDid, rkey: record.rkey, participants: canonical,
-            });
-            if (!validation.valid) return [];
-            return [{ uri: spaceRecordUri(half, ownerDid, COLLECTION.dmMessage, record.rkey), rkey: record.rkey, ownerDid, value: record.value }];
-          });
-          pages.set(ownerDid, { ownerDid, records: [...existing.records, ...validRecords], exhausted: !page.cursor });
-          cursors.set(ownerDid, page.cursor);
-        } catch (error) {
-          // A half that stops being readable mid-read shows nothing, like one that was unreadable at the header.
-          if (isCredentialRefused(error)) this.credentials.delete(half);
-          if (ownerDid === this.deps.did || !classifyRepoFailure(error)) throw error;
-          halves[ownerDid] = "missing";
-          pages.delete(ownerDid);
-          credentials.delete(ownerDid);
-        }
-      });
-      merge = mergeDmHalves([...pages.values()], { limit, before: options.before });
-    }
-
-    const messages: DmMessage[] = merge.messages.map((record) => ({
-      uri: record.uri, ownerDid: record.ownerDid, rkey: record.rkey,
+    const sources = canonical.filter((ownerDid) => readable.has(ownerDid)).map((ownerDid) => ({ space: dmConversationUri(ownerDid, convKey), repo: ownerDid }));
+    if (sources.length === 0) return { messages: [], reactions: [], halves };
+    // Every read checks each half at its host, as DM halves have no writer-set hint; a half that stops being readable mid-read
+    // shows nothing, like one that was unreadable at the header, and the caller's own half failing fails the read.
+    const result = await this.sync.read({
+      sources,
+      window: COLLECTION.dmMessage,
+      alongside: [COLLECTION.dmReaction],
+      limit,
+      before: decodeCursor(options.before),
+      truthIntervalMs: 0,
+      showSetAside: false,
+      required: [this.deps.did],
+      select: async (candidates, count) => candidates.filter((record) => validateSpaceRecord(COLLECTION.dmMessage, record.value, {
+        authorityDid: record.repo, spaceUri: record.space, repoDid: record.repo, rkey: record.rkey, participants: canonical,
+      }).valid).slice(0, count),
+    });
+    // A half set aside shows nothing; one whose reactions alone could not be read keeps its messages. Either is flagged.
+    for (const aside of [...result.setAside, ...result.partial]) halves[aside.did] = "missing";
+    if (result.cut.includes(COLLECTION.dmReaction)) throw new Error("DM reaction history exceeds the bounded scan limit.");
+    if (result.cut.includes(COLLECTION.dmMessage)) throw new Error(`DM message history in one half exceeds the ${this.sync.options.maxRecordsPerCollection}-record read limit.`);
+    const messages: DmMessage[] = result.items.map((record) => ({
+      uri: record.uri, ownerDid: record.repo, rkey: record.rkey,
       text: String(record.value.text ?? ""), createdAt: String(record.value.createdAt ?? ""),
       parent: typeof record.value.parent === "string" ? record.value.parent : undefined,
     }));
     const messageUris = new Set(messages.map((message) => message.uri));
-    const reactions = await this.readReactions(convKey, canonical, credentials, messageUris, halves);
-    return { messages, reactions, halves, nextBefore: merge.nextBefore };
+    const reactions: DmReaction[] = [];
+    for (const source of sources) {
+      if (halves[source.repo] !== "ok") continue;
+      for (const record of await this.sync.store.records(source.space, COLLECTION.dmReaction, source.repo)) {
+        const value = record.value as { subject?: unknown; emoji?: unknown; createdAt?: unknown };
+        if (typeof value.subject !== "string" || !messageUris.has(value.subject)) continue;
+        if (!validateSpaceRecord(COLLECTION.dmReaction, record.value, {
+          authorityDid: source.repo, spaceUri: source.space, repoDid: source.repo, rkey: record.rkey, participants: canonical,
+        }).valid) continue;
+        reactions.push({ uri: record.uri, ownerDid: source.repo, subject: value.subject, emoji: String(value.emoji), createdAt: String(value.createdAt) });
+      }
+    }
+    return { messages, reactions, halves, ...(result.next ? { nextBefore: encodeCursor(result.next) } : {}) };
   }
 
   // --- Leaving and deleting ---
 
+  /**
+   * Stops sharing this account's half and hides the conversation on this device: it leaves the list and is no longer
+   * re-announced. The half and its messages stay, so starting a conversation with the same people brings it back (`rejoin`).
+   */
   async leave(convKey: string): Promise<void> {
     const half = dmConversationUri(this.deps.did, convKey);
     const members = await listBoundedMembers(this.deps.memberClient, { space: half, maxMembers: MAX_PARTICIPANTS });
@@ -479,6 +482,30 @@ export class DmClient {
     await mapLimited(members.members, FANOUT, (member) =>
       this.deps.memberClient.procedure("com.atproto.memberspace.removeMember", { space: half, did: member.did }));
     await this.deps.store.set(hiddenConversationKey(convKey), "1");
+  }
+
+  private async hasLeft(convKey: string): Promise<boolean> {
+    return (await this.deps.store.get(hiddenConversationKey(convKey))) !== null;
+  }
+
+  /**
+   * Undoes `leave` on a half this account still owns: readmits the participants it removed, shows the conversation again,
+   * and sends the request again to a readmitted participant who has no half yet. A half nobody was removed from is untouched.
+   */
+  private async rejoin(header: DmHeader): Promise<Record<string, DmDelivery>> {
+    const half = dmConversationUri(this.deps.did, header.convKey);
+    const members = await listBoundedMembers(this.deps.memberClient, { space: half, maxMembers: MAX_PARTICIPANTS });
+    if (members.truncated) throw new Error("DM conversation member count exceeds the bounded scan limit.");
+    const readers = new Set(members.members.filter((member) => member.read).map((member) => member.did));
+    const removed = header.participants.filter((did) => did !== this.deps.did && !readers.has(did));
+    await mapLimited(removed, FANOUT, (did) =>
+      this.deps.memberClient.procedure("com.atproto.memberspace.putMember", { space: half, did, read: true, write: false }));
+    await this.deps.store.delete(hiddenConversationKey(header.convKey));
+    const delivery: Record<string, DmDelivery> = {};
+    await mapLimited(removed, FANOUT, async (recipient) => {
+      if (await this.isPending(recipient, header.convKey)) delivery[recipient] = await this.sendRequest(recipient, header.convKey, header.participants, header.createdAt);
+    });
+    return delivery;
   }
 
   async deleteEverything(convKey: string): Promise<void> {
@@ -492,6 +519,8 @@ export class DmClient {
     const halves = await listBoundedSpaces(this.deps.memberClient, { spaceType: SPACE_TYPE.dmConversation, maxSpaces: MAX_OWN_CONVERSATIONS });
     if (halves.truncated) throw new Error("Own DM conversation count exceeds the bounded scan limit.");
     await mapLimited(halves.spaces, FANOUT, async (space) => {
+      const parsed = parseDmConversationUri(space.uri);
+      if (!parsed || await this.hasLeft(parsed.convKey)) return;
       const header = await this.getValidatedOwnHeader(space.uri);
       if (!header) return;
       const others = header.participants.filter((did) => did !== this.deps.did);
@@ -505,7 +534,7 @@ export class DmClient {
     const entries = await mapLimited(spaces, FANOUT, async (space): Promise<readonly [string, string]> => {
       const parsed = parseSpaceUri(space);
       if (!parsed) throw new Error("Invalid DM space URI.");
-      const credential = await this.credentialFor(space);
+      const credential = await this.credentials.get(space);
       const client = credential.client(await this.deps.resolvePds(parsed.authorityDid));
       const result = await client.procedure<{ space: string; service: string }, { expiresAt: string }>(
         "com.atproto.space.registerNotify", { space, service: serviceRef },
@@ -543,25 +572,6 @@ export class DmClient {
     const allowlist = members.members.map((member) => member.did).sort();
     const activeAllowlist = members.members.filter((member) => member.write).map((member) => member.did).sort();
     return { exists: true, mode: modeForInboxPolicy(settings.publicWrite, members.members), allowlist, activeAllowlist };
-  }
-
-  private async credentialFor(space: string): Promise<SpaceCredential> {
-    const pending = this.credentials.get(space);
-    if (pending) {
-      const credential = await pending;
-      if (credential.expiresAt - this.now() > credential.renewBeforeMs) return credential;
-      const current = this.credentials.get(space);
-      if (current && current !== pending) return current;
-      this.credentials.delete(space);
-    }
-    const minted = mintSpaceCredentialWith(this.deps, space);
-    this.credentials.set(space, minted);
-    try {
-      return await minted;
-    } catch (error) {
-      if (this.credentials.get(space) === minted) this.credentials.delete(space);
-      throw error;
-    }
   }
 
   private async createHalf(convKey: string): Promise<void> {
@@ -647,27 +657,31 @@ export class DmClient {
 
   /** A cached credential outlives a deleted half, so a missing header is re-checked with a fresh mint to tell "left" from "not replied". */
   private async classifyHeaderlessHalf(half: string): Promise<DmHalfStatus> {
-    this.credentials.delete(half);
+    this.credentials.drop(half);
     try {
-      await this.credentialFor(half);
+      await this.credentials.get(half);
       return "missing";
     } catch (error) {
       return error instanceof SpaceCredentialError ? classifyHalfError(error) : "missing";
     }
   }
 
-  private async findExistingHalf(participants: readonly string[]): Promise<string | null> {
+  /** This account's half for exactly these participants. Two can exist (both sides started at once): one still in use wins over one that was left. */
+  private async findExistingHalf(participants: readonly string[]): Promise<DmHeader | null> {
     const halves = await listBoundedSpaces(this.deps.memberClient, { spaceType: SPACE_TYPE.dmConversation, maxSpaces: MAX_OWN_CONVERSATIONS });
     if (halves.truncated) throw new Error("Own DM conversation count exceeds the bounded scan limit.");
+    let left: DmHeader | null = null;
     for (const space of halves.spaces) {
       const header = await this.getValidatedOwnHeader(space.uri);
-      if (header && sameParticipants(header.participants, participants)) return header.convKey;
+      if (!header || !sameParticipants(header.participants, participants)) continue;
+      if (!(await this.hasLeft(header.convKey))) return header;
+      left ??= header;
     }
-    return null;
+    return left;
   }
 
   /** Fetches the caller's own header for `space` and validates it, returning `null` for a missing or invalid record. */
-  private async getValidatedOwnHeader(space: string): Promise<{ convKey: string; participants: string[]; createdAt: string } | null> {
+  private async getValidatedOwnHeader(space: string): Promise<DmHeader | null> {
     const header = await this.getOwnRecord(space, COLLECTION.dmHeader, "self");
     if (!header) return null;
     const validation = validateSpaceRecord(COLLECTION.dmHeader, header, {
@@ -690,7 +704,7 @@ export class DmClient {
   private async getOwnRecord(space: string, collection: string, rkey: string): Promise<Record<string, unknown> | null> {
     let credential: SpaceCredential;
     try {
-      credential = await this.credentialFor(space);
+      credential = await this.credentials.get(space);
     } catch (error) {
       if (error instanceof SpaceCredentialError) return null;
       throw error;
@@ -709,43 +723,6 @@ export class DmClient {
     }
   }
 
-  private async readReactions(
-    convKey: string,
-    participants: readonly string[],
-    credentials: ReadonlyMap<string, SpaceCredential>,
-    messageUris: ReadonlySet<string>,
-    halves: Record<string, DmHalfStatus>,
-  ): Promise<DmReaction[]> {
-    const perHalf = await mapLimited(participants, FANOUT, async (ownerDid): Promise<DmReaction[]> => {
-      const credential = credentials.get(ownerDid);
-      if (!credential) return [];
-      const half = dmConversationUri(ownerDid, convKey);
-      try {
-        const client = credential.client(await this.deps.resolvePds(ownerDid));
-        const page = await listBoundedRecords(client, { space: half, repo: ownerDid, collection: COLLECTION.dmReaction, maxRecords: MAX_REACTIONS_PER_HALF });
-        if (page.truncated) throw new Error("DM reaction history exceeds the bounded scan limit.");
-        const reactions: DmReaction[] = [];
-        for (const record of page.records) {
-          const validation = validateSpaceRecord(COLLECTION.dmReaction, record.value, {
-            authorityDid: ownerDid, spaceUri: half, repoDid: ownerDid, rkey: record.rkey, participants,
-          });
-          if (!validation.valid) continue;
-          const value = record.value as { subject: string; emoji: string; createdAt: string };
-          if (!messageUris.has(value.subject)) continue;
-          reactions.push({ uri: spaceRecordUri(half, ownerDid, COLLECTION.dmReaction, record.rkey), ownerDid, subject: value.subject, emoji: value.emoji, createdAt: value.createdAt });
-        }
-        return reactions;
-      } catch (error) {
-        // A half whose reactions cannot be read is reported as unreadable rather than silently showing none.
-        if (isCredentialRefused(error)) this.credentials.delete(half);
-        if (ownerDid === this.deps.did || !classifyRepoFailure(error)) throw error;
-        halves[ownerDid] = "missing";
-        return [];
-      }
-    });
-    return perHalf.flat();
-  }
-
   private async renotifyOne(convKey: string, participant: string, participants: readonly string[], createdAt: string): Promise<void> {
     const pending = await this.isPending(participant, convKey);
     if (!pending) return;
@@ -761,7 +738,7 @@ export class DmClient {
 
   private async isPending(participant: string, convKey: string): Promise<boolean> {
     try {
-      await this.credentialFor(dmConversationUri(participant, convKey));
+      await this.credentials.get(dmConversationUri(participant, convKey));
       return false; // a half exists: they replied.
     } catch (error) {
       // A half that was never created answers SpaceNotFound, and so does one whose owner replied and then removed this

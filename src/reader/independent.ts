@@ -1,10 +1,7 @@
-import type { OAuthSession } from "@atproto/oauth-client-node";
 import type * as GetRecord from "@/lexicons/api/types/com/atproto/space/getRecord";
 import type * as ListRecords from "@/lexicons/api/types/com/atproto/space/listRecords";
 import type * as ListRepos from "@/lexicons/api/types/com/atproto/space/listRepos";
-import { resolvePds } from "@/atproto/identity";
-import { sessionClient } from "@/atproto/client";
-import { mintSpaceCredential, SpaceCredentialError } from "@/atproto/space-credential";
+import { mintSpaceCredentialWith, SpaceCredentialError, type SpaceCredential, type SpaceCredentialDeps } from "@/atproto/space-credential-core";
 import { assertBoundedRecordPage, listAllSpaceUris, listBoundedRecords, listBoundedRepos } from "@/atproto/record-pages";
 import { selectValidChannelMessages } from "@/atproto/valid-channel-messages";
 import { classifyRepoFailure, describeRepoFailure, MAX_LISTED_SET_ASIDE } from "@/atproto/repo-failure";
@@ -33,6 +30,9 @@ const MAX_CHANNEL_RECORD_PAGES = MAX_CHANNEL_RECORD_SCAN + MAX_CHANNEL_WRITERS;
 const MAX_CHANNEL_REACTION_RECORDS = 20_000;
 const MAX_CHANNEL_REACTION_PAGES = MAX_CHANNEL_WRITERS + Math.ceil((MAX_CHANNEL_REACTION_RECORDS + 1) / 100) + 1;
 
+/** What the reader needs from its host: the account's own client and the transports a space credential is minted with. */
+export type IndependentDeps = SpaceCredentialDeps;
+
 export type IndependentMessage = { uri: string; rkey: string; repo: string; value: Record<string, unknown> };
 export type IndependentReaction = { uri: string; rkey: string; repo: string; value: Record<string, unknown> };
 export type IndependentChannelPage = {
@@ -43,14 +43,14 @@ export type IndependentChannelPage = {
 };
 
 /**
- * A deliberately stateless reader for a second app. It uses the caller's OAuth
- * session, published lexicon NSIDs, and PDS-issued space credentials only. It
- * does not import the primary app's database, sync cache, or web-session layer.
+ * A deliberately stateless reader for a second app. It uses the caller's own
+ * client, published lexicon NSIDs, and PDS-issued space credentials only. It
+ * does not import the primary app's database, sync cache, engine, or session layer.
  */
-export async function listIndependentWorkspaces(session: OAuthSession): Promise<IndependentWorkspace[]> {
-  const spaces = await listAllSpaceUris(sessionClient(session), { spaceType: SPACE_TYPE.workspace, maxSpaces: MAX_DISCOVERABLE_WORKSPACES });
+export async function listIndependentWorkspaces(deps: IndependentDeps): Promise<IndependentWorkspace[]> {
+  const spaces = await listAllSpaceUris(deps.memberClient, { spaceType: SPACE_TYPE.workspace, maxSpaces: MAX_DISCOVERABLE_WORKSPACES });
   const summaries = await mapLimited(spaces, 8, async (uri) => {
-    try { return await readIndependentWorkspace(session, uri); }
+    try { return await readIndependentWorkspace(deps, uri); }
     catch (error) {
       if (error instanceof SpaceCredentialError) return null;
       throw error;
@@ -59,12 +59,12 @@ export async function listIndependentWorkspaces(session: OAuthSession): Promise<
   return summaries.flatMap((summary) => summary ? [summary] : []).sort((left, right) => left.name.localeCompare(right.name));
 }
 
-export async function readIndependentWorkspace(session: OAuthSession, uri: string): Promise<IndependentWorkspace | null> {
+export async function readIndependentWorkspace(deps: IndependentDeps, uri: string): Promise<IndependentWorkspace | null> {
   const workspace = parseWorkspaceUri(uri);
   if (!workspace) return null;
   const { authorityDid } = workspace;
-  const credential = await mintSpaceCredential(session, uri);
-  const client = credential.client(await resolvePds(authorityDid));
+  const credential = await mintSpaceCredentialWith(deps, uri);
+  const client = credential.client(await deps.resolvePds(authorityDid));
   const [profile, directories, roster, adminRecords] = await Promise.all([
     listBoundedRecords(client, { space: uri, repo: authorityDid, collection: COLLECTION.workspaceProfile, maxRecords: 1 }),
     listBoundedRecords(client, { space: uri, repo: authorityDid, collection: COLLECTION.directory, maxRecords: MAX_AUTHORITY_RECORD_SCAN }),
@@ -98,12 +98,12 @@ export async function readIndependentWorkspace(session: OAuthSession, uri: strin
   return { uri, authorityDid, name: validProfile.value.name, members, admins, channels, degradedReasons };
 }
 
-export async function readIndependentPrivateRoster(session: OAuthSession, workspace: string, skey: string): Promise<string[]> {
-  const summary = await readIndependentWorkspace(session, workspace);
+export async function readIndependentPrivateRoster(deps: IndependentDeps, workspace: string, skey: string): Promise<string[]> {
+  const summary = await readIndependentWorkspace(deps, workspace);
   const channel = summary?.channels.find((entry) => entry.skey === skey && entry.visibility === "private");
   if (!summary || !channel) throw new Error("Private channel is unavailable.");
-  const credential = await mintSpaceCredential(session, channel.uri);
-  const client = credential.client(await resolvePds(summary.authorityDid));
+  const credential = await mintSpaceCredentialWith(deps, channel.uri);
+  const client = credential.client(await deps.resolvePds(summary.authorityDid));
   const roster = await listBoundedRecords(client, { space: channel.uri, repo: summary.authorityDid, collection: COLLECTION.channelRoster, maxRecords: MAX_AUTHORITY_RECORD_SCAN });
   const members = roster.records.flatMap((record) => validateSpaceRecord(COLLECTION.channelRoster, record.value, {
     authorityDid: summary.authorityDid, spaceUri: channel.uri, repoDid: summary.authorityDid, rkey: record.rkey,
@@ -114,17 +114,17 @@ export async function readIndependentPrivateRoster(session: OAuthSession, worksp
 }
 
 export async function readIndependentChannelPage(
-  session: OAuthSession,
+  deps: IndependentDeps,
   workspace: string,
   skey: string,
   limit = 100,
 ): Promise<IndependentChannelPage> {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new RangeError("Independent reader page limit must be between 1 and 100.");
-  const summary = await readIndependentWorkspace(session, workspace);
+  const summary = await readIndependentWorkspace(deps, workspace);
   const channel = summary?.channels.find((entry) => entry.skey === skey);
   if (!summary || !channel || (channel.visibility !== "public" && channel.visibility !== "private")) throw new Error("Channel is unavailable for new reads.");
-  const credential = await mintSpaceCredential(session, channel.uri);
-  const authorityClient = credential.client(await resolvePds(summary.authorityDid));
+  const credential = await mintSpaceCredentialWith(deps, channel.uri);
+  const authorityClient = credential.client(await deps.resolvePds(summary.authorityDid));
   const repoScan = await listBoundedRepos(authorityClient, { space: channel.uri, maxRepos: MAX_CHANNEL_WRITERS });
   if (repoScan.truncated) throw new Error("Channel writer count exceeds the v1 envelope.");
   const repos = repoScan.repos;
@@ -145,7 +145,7 @@ export async function readIndependentChannelPage(
     }
   };
   const finishPage = async (messages: IndependentMessage[]): Promise<IndependentChannelPage> => {
-    const { reactions, truncated } = await readIndependentReactions(credential, channel.uri, summary.authorityDid, repos.filter((repo) => !setAside.has(repo.did)), messages, readWriter);
+    const { reactions, truncated } = await readIndependentReactions(deps, credential, channel.uri, summary.authorityDid, repos.filter((repo) => !setAside.has(repo.did)), messages, readWriter);
     const degradedReasons = [
       ...[...setAside].slice(0, MAX_LISTED_SET_ASIDE).map(([did, reason]) => `Messages or reactions from ${did} may be missing: ${reason}`),
       ...(setAside.size > MAX_LISTED_SET_ASIDE ? [`${setAside.size - MAX_LISTED_SET_ASIDE} more writers' messages or reactions may be missing.`] : []),
@@ -168,7 +168,7 @@ export async function readIndependentChannelPage(
     let result = parentReads.get(uri);
     if (!result) {
       result = (async () => {
-        const parent = await credential.client(await resolvePds(repo)).query<GetRecord.OutputSchema>("com.atproto.space.getRecord", {
+        const parent = await credential.client(await deps.resolvePds(repo)).query<GetRecord.OutputSchema>("com.atproto.space.getRecord", {
           space: channel.uri, repo, collection: COLLECTION.message, rkey,
         });
         return { uri: parent.uri, value: parent.value };
@@ -198,7 +198,7 @@ export async function readIndependentChannelPage(
       pageRequests += candidates.length;
       const lookahead = (await mapLimited(candidates, 8, (state) => readWriter(state.repo.did, async () => {
         if (state.cursor) state.seenCursors.add(state.cursor);
-        const page = await credential.client(await resolvePds(state.repo.did)).query<ListRecords.OutputSchema>("com.atproto.space.listRecords", {
+        const page = await credential.client(await deps.resolvePds(state.repo.did)).query<ListRecords.OutputSchema>("com.atproto.space.listRecords", {
           space: channel.uri, repo: state.repo.did, collection: COLLECTION.message, cursor: state.cursor, limit: 1,
         });
         assertBoundedRecordPage(page, { collection: COLLECTION.message, limit: 1, cursor: state.cursor, seenCursors: state.seenCursors });
@@ -231,7 +231,7 @@ export async function readIndependentChannelPage(
     pageRequests += candidates.length;
     const pages = (await mapLimited(candidates, 8, (state) => readWriter(state.repo.did, async () => {
       if (state.cursor) state.seenCursors.add(state.cursor);
-      const page = await credential.client(await resolvePds(state.repo.did)).query<ListRecords.OutputSchema>("com.atproto.space.listRecords", {
+      const page = await credential.client(await deps.resolvePds(state.repo.did)).query<ListRecords.OutputSchema>("com.atproto.space.listRecords", {
         space: channel.uri, repo: state.repo.did, collection: COLLECTION.message, cursor: state.cursor, limit: pageLimit,
       });
       assertBoundedRecordPage(page, { collection: COLLECTION.message, limit: pageLimit, cursor: state.cursor, seenCursors: state.seenCursors });
@@ -261,7 +261,8 @@ export async function readIndependentChannelPage(
 }
 
 async function readIndependentReactions(
-  credential: Awaited<ReturnType<typeof mintSpaceCredential>>,
+  deps: IndependentDeps,
+  credential: SpaceCredential,
   space: string,
   authorityDid: string,
   repos: ListRepos.Repo[],
@@ -284,7 +285,7 @@ async function readIndependentReactions(
       const remaining = MAX_CHANNEL_REACTION_RECORDS - scanned;
       const limit = Math.min(100, remaining > 0 ? remaining + 1 : 1);
       const page = await readWriter(repo.did, async () => {
-        const read = await credential.client(await resolvePds(repo.did)).query<ListRecords.OutputSchema>("com.atproto.space.listRecords", {
+        const read = await credential.client(await deps.resolvePds(repo.did)).query<ListRecords.OutputSchema>("com.atproto.space.listRecords", {
           space, repo: repo.did, collection: COLLECTION.reaction, cursor, limit,
         });
         assertBoundedRecordPage(read, { collection: COLLECTION.reaction, limit, cursor, seenCursors });

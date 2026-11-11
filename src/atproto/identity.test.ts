@@ -57,6 +57,26 @@ test("validated endpoint fetch rejects redirects", async () => {
   }
 });
 
+test("a request to a host that stalls ends at its time limit, before the answer or part-way through it", async () => {
+  Reflect.set(process.env, "NODE_ENV", "development");
+  const server = createServer((request, response) => {
+    if (request.url === "/silent") return;
+    response.writeHead(200, { "content-type": "text/plain" });
+    response.write("partial");
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const { port } = server.address() as AddressInfo;
+    await assert.rejects(fetchValidatedEndpoint(new Request(`http://127.0.0.1:${port}/silent`), undefined, 100), { name: "TimeoutError" });
+    // Long enough for the headers to arrive on a busy machine, so that it is the body read that runs out of time.
+    const stalled = await fetchValidatedEndpoint(new Request(`http://127.0.0.1:${port}/stalled`), undefined, 1_000);
+    await assert.rejects(stalled.text(), { name: "TimeoutError" });
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
 test("identity resolver fetch preserves response metadata and caps actual streamed bytes", async () => {
   Reflect.set(process.env, "NODE_ENV", "development");
   const server = createServer((request, response) => {

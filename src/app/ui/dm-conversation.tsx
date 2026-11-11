@@ -33,7 +33,8 @@ export function DmConversation({ convKey, participants }: { convKey: string; par
       if (ticket < refreshes.current.applied) return page;
       refreshes.current.applied = ticket;
     }
-    const windowStart = page.nextBefore ?? "";
+    // The page's oldest message bounds what a refresh replaces; `nextBefore` is an opaque cursor, not a key.
+    const windowStart = page.nextBefore === undefined ? "" : page.messages.at(-1)?.rkey ?? "";
     const freshMessageUris = new Set(page.messages.map((message) => message.uri));
     setMessages((current) => mergeByUri(refreshing ? retainAfterRefresh(current, page.halves, (message) => message.rkey >= windowStart) : current, page.messages));
     setReactions((current) => mergeByUri(refreshing ? retainAfterRefresh(current, page.halves, (reaction) => freshMessageUris.has(reaction.subject)) : current, page.reactions));

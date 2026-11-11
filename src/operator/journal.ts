@@ -39,6 +39,17 @@ const TRANSIENT_NETWORK_CODES = new Set([
 const RETRY_DELAYS_MS = [100, 200, 400] as const;
 const WORKSPACE_LOCK_LEASE_SECONDS = 90;
 const WORKSPACE_LOCK_ACQUIRE_WAIT_MS = 100_000;
+/**
+ * How long one run of an operation may keep starting steps under the workspace lock. Past it the run starts no further step:
+ * the operation is left pending with the steps it completed, and sending it again continues it. Hosts that answer slowly can
+ * then delay a workspace's operations but cannot keep its lock. The step in flight still ends, bounded by each request's limit.
+ */
+const OPERATION_TIME_LIMIT_MS = 3 * 60_000;
+/**
+ * What a caller should allow for one operation's answer: the wait for the lock, then one run. It is a budget, not a bound:
+ * the step in flight at the limit still ends, and earlier pending operations are resumed first, each with its own wait and run.
+ */
+export const OPERATION_ANSWER_BUDGET_MS = WORKSPACE_LOCK_ACQUIRE_WAIT_MS + OPERATION_TIME_LIMIT_MS;
 const WORKSPACE_LOCK_POLL_MS = 100;
 const MAX_RECOVERABLE_OPERATIONS = 1_000;
 const MAX_STALLED_OPERATIONS = 100;
@@ -61,8 +72,9 @@ export async function runJournaledOperation(
 ): Promise<OperationView> {
   const declared = stepMatcher(steps);
   const workspaceDid = actor.workspace.authorityDid;
-  const requestHash = requestDigest({ workspace: actor.workspace.uri, request });
+  const requestHash = operationRequestHash(actor, request);
   return withWorkspaceLock(workspaceDid, async (lock) => {
+    const heldSince = Date.now();
     const raw = getRawDb();
     const now = unixNow();
     const prior = raw.prepare("SELECT request_hash, steps_json, state, error, updated_at FROM operation WHERE workspace = ? AND actor = ? AND operation_id = ?")
@@ -87,6 +99,7 @@ export async function runJournaledOperation(
     const step = async (name: string, action: () => Promise<void>) => {
       if (!declared(name)) throw new Error(`Step "${name}" is not declared for this operation.`);
       if (completedSteps.includes(name)) return;
+      if (Date.now() - heldSince >= OPERATION_TIME_LIMIT_MS) throw new Error("Operation paused at its time limit; send it again to continue it.");
       lock.refresh();
       await action();
       lock.refresh();
@@ -243,6 +256,18 @@ export function getActorOperation(actor: OperatorActor, operationId: string): Op
     .get(actor.workspace.authorityDid, actor.did, operationId) as { request_hash: string; workspace_uri: string | null; state: OperationState; steps_json: string; error: string | null; updated_at: number } | undefined;
   if (row && row.workspace_uri !== actor.workspace.uri) return null;
   return row ? operationView(operationId, row.request_hash, row.state, parseSteps(row.steps_json), row.error, row.updated_at) : null;
+}
+
+/**
+ * Whether `actor` already journaled `operationId` in this workspace with exactly this request. A row is written only after its
+ * submitter passed the role checks.
+ */
+export function hasJournaledOperation(actor: OperatorActor, operationId: string, request: Record<string, unknown>): boolean {
+  return getActorOperation(actor, operationId)?.requestHash === operationRequestHash(actor, request);
+}
+
+function operationRequestHash(actor: OperatorActor, request: Record<string, unknown>): string {
+  return requestDigest({ workspace: actor.workspace.uri, request });
 }
 
 export type StalledOperations = {

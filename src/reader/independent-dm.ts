@@ -29,7 +29,7 @@ type RawMessage = { uri: string; ownerDid: string; rkey: string; value: Record<s
  * layer with `src/dm/dm-client.ts` (`src/protocol/*`, `xrpc.ts`,
  * `record-pages.ts`, `space-credential-core.ts`); it never imports
  * `src/dm/**` and merges every half's own (bounded) full history itself,
- * rather than reusing `src/dm/merge.ts`'s incremental k-way page merge.
+ * rather than reusing the engine's sync core and merge order (`src/client/`).
  */
 export async function readIndependentDmConversation(
   deps: IndependentDmDeps,
@@ -91,7 +91,7 @@ export async function readIndependentDmConversation(
 /**
  * This reader's own merge: fetch every half's full (bounded) history up
  * front, then sort the union once by TID (`rkey`), newest first, breaking
- * ties on URI for a deterministic order. Unlike `src/dm/merge.ts`'s
+ * ties on URI for a deterministic order. Unlike the engine's
  * incremental per-page k-way merge, there is no paging loop to converge; the
  * whole bounded history is already in hand.
  */

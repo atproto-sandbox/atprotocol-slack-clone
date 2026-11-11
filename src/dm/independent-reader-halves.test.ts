@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readIndependentDmConversation } from "@/reader/independent-dm";
 import { DmClient, type DmDeps, type DmStore } from "./dm-client";
-import { FakeDmNetwork } from "./testing/fake-pds";
+import { FakeNetwork } from "@/testing/fake-network";
 
 // These live beside the DM client because the independent reader may not import src/dm/** (M6 independence proof), and the
 // conversation they read is written by the DM client against its fake network.
@@ -16,7 +16,7 @@ function memoryStore(): DmStore {
   };
 }
 
-async function conversationOf(network: FakeDmNetwork) {
+async function conversationOf(network: FakeNetwork) {
   const depsFor = (did: string): DmDeps => ({
     did, memberClient: network.clientFor(did), resolvePds: network.resolvePds, resolveKemKey: network.resolveKemKey,
     fetchEndpoint: network.fetchEndpoint, generateKey: network.generateKey, store: memoryStore(), now: () => network.now(),
@@ -36,7 +36,7 @@ async function conversationOf(network: FakeDmNetwork) {
 
 test("a participant whose account was deactivated reads as a missing half and the other half is still read", async () => {
   // #given a conversation whose other participant has since deactivated their account
-  const network = new FakeDmNetwork();
+  const network = new FakeNetwork();
   const { started, deps } = await conversationOf(network);
   network.setAccountState("did:plc:bob", "deactivated");
 
@@ -51,7 +51,7 @@ test("a participant whose account was deactivated reads as a missing half and th
 
 test("a participant whose host fails while its reactions are listed is flagged as a missing half and its messages are kept", async () => {
   // #given bob's host answers the header and messages but fails the reaction listing
-  const network = new FakeDmNetwork();
+  const network = new FakeNetwork();
   const { started, deps } = await conversationOf(network);
   const failing: DmDeps = {
     ...deps,

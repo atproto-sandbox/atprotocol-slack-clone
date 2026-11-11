@@ -268,8 +268,8 @@ Then("the workspace appears in that account's spaces index", async function (thi
 
 Then("a second app reads the same directory and workspace roster", async function (this: AppWorld) {
   const invitee = actorNamed(this, "invitee");
-  const seen = await withIndependentReader(this, invitee, async (reader, session) =>
-    (await reader.listIndependentWorkspaces(session)).find((entry) => entry.uri === this.workspaceUri));
+  const seen = await withIndependentReader(this, invitee, async (reader, deps) =>
+    (await reader.listIndependentWorkspaces(deps)).find((entry) => entry.uri === this.workspaceUri));
   assert.ok(seen, "the second app finds the workspace from the invitee's credentials alone");
 
   const { workspaces } = await invitee.page.evaluate(async () => (await fetch("/api/workspaces")).json()) as { workspaces: WorkspaceState[] };

@@ -9,6 +9,7 @@ import { inboxUri, isDid, subjectKey } from "@/protocol/keys";
 import { WorkspaceEnvelopeError } from "@/protocol/workspace-summary";
 import { restoreAuthorityGrant } from "./authority-grant";
 import { OperatorAuthError, OperatorInfrastructureError, isTransientOperatorInfrastructureError } from "./errors";
+import { hasJournaledOperation } from "./journal";
 import { operationKind } from "./kinds";
 import { assertMayStartKind, validateOperatorRequest } from "./operations";
 import { COLLECTION } from "@/protocol/nsids";
@@ -97,9 +98,33 @@ async function hasCurrentMembership(session: OAuthSession, space: string, did: s
   return false;
 }
 
-export async function requireWorkspaceActorForOperation(workspaceUri: string, actorDid: string, request: unknown): Promise<OperatorActor> {
+export async function requireWorkspaceActorForOperation(workspaceUri: string, actorDid: string, operationId: string, request: unknown): Promise<OperatorActor> {
   const workspace = parseWorkspaceRef(workspaceUri);
-  return authorizeOperationActor(await restoreAuthorityGrant(workspace.authorityDid), workspace, actorDid, request);
+  return authorizeSubmittedOperation(await restoreAuthorityGrant(workspace.authorityDid), workspace, actorDid, operationId, request);
+}
+
+/**
+ * Who `actorDid` is for a submission of `operationId`. The workspace's current state decides, with one exception: a request
+ * that takes away the role that let its submitter start it (leaving, removing or demoting oneself) can stop part-way, after
+ * which current state refuses the submitter. They may still send that same operation again when the journal holds it. The
+ * journal then resumes it or returns its recorded result, and the submitter recovers nobody else's operations.
+ */
+export async function authorizeSubmittedOperation(
+  session: OAuthSession,
+  workspace: WorkspaceRef,
+  actorDid: string,
+  operationId: string,
+  request: unknown,
+): Promise<OperatorActor> {
+  try {
+    return await authorizeOperationActor(session, workspace, actorDid, request);
+  } catch (error) {
+    if (!(error instanceof OperatorAuthError) || !isPlainObject(request)) throw error;
+    const kind = operationKind(request.kind);
+    const submitter: OperatorActor = { did: actorDid, session, workspace, canRecoverOperations: false };
+    if (kind?.endsOwnRole?.({ ...request, kind: kind.kind }, actorDid) && hasJournaledOperation(submitter, operationId, request)) return submitter;
+    throw error;
+  }
 }
 
 /**

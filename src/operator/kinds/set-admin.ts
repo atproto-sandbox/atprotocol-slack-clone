@@ -12,6 +12,7 @@ export const setAdminKind: OperationKind = {
   actor: "admin",
   submittedThrough: "execute",
   steps: ["write-admin-active", "grant-inbox-read", "remove-inbox-read", "write-admin-inactive", "admin-state-verified"],
+  endsOwnRole: (request, actorDid) => request.subject === actorDid && request.active === false,
   run: (actor, context, request) => setAdmin(actor, context, request.subject as string, request.active as boolean),
 };
 

@@ -121,6 +121,38 @@ export async function listBoundedRepos(
   return { repos: [...collected.values()], truncated };
 }
 
+/**
+ * The repos updated in a space since a space revision, for a reader that holds the space and follows its changes: the
+ * hint that names writers to check. A page shorter than the limit is the last; a repo updated while paging reappears in a
+ * later call, under the revision this one returns. Throws when the changes exceed `maxRepos`.
+ */
+export async function listReposSince(
+  client: AtprotoClient,
+  input: { space: string; since: string | null; maxRepos: number },
+): Promise<{ repos: ListRepos.Repo[]; spaceRev: string | null }> {
+  const limit = 100;
+  const repos = new Map<string, ListRepos.Repo>();
+  const seenCursors = new Set<string>();
+  let cursor = input.since ?? undefined;
+  let spaceRev = input.since;
+  for (let pages = 0; ; pages += 1) {
+    if (pages >= MAX_REPO_SCAN_PAGES) throw new Error("PDS repo pagination exceeded the bounded page limit.");
+    const requested = cursor;
+    const page = await client.query<ListRepos.OutputSchema>("com.atproto.space.listRepos", { space: input.space, limit, ...(cursor ? { cursor } : {}) });
+    assertRepoPage(page, limit);
+    if (page.cursor !== undefined && page.cursor === requested && page.repos.length === 0) return { repos: [...repos.values()], spaceRev };
+    assertRepoCursor(page, requested, seenCursors);
+    for (const repo of page.repos) {
+      repos.set(repo.did, repo);
+      if (spaceRev === null || repo.spaceRev > spaceRev) spaceRev = repo.spaceRev;
+    }
+    if (repos.size > input.maxRepos) throw new Error(`The space's changed writers exceed the ${input.maxRepos}-repo scan limit.`);
+    if (!page.cursor || page.repos.length < limit) return { repos: [...repos.values()], spaceRev };
+    seenCursors.add(page.cursor);
+    cursor = page.cursor;
+  }
+}
+
 function assertSpacePage(page: unknown, limit: number): asserts page is ListSpaces.OutputSchema {
   if (typeof page !== "object" || page === null) throw new Error("PDS space page is malformed.");
   const candidate = page as { spaces?: unknown; cursor?: unknown };

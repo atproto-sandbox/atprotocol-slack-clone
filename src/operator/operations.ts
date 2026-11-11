@@ -1,6 +1,7 @@
 import { listSpaceMembers } from "@/atproto/space-ops";
 import { inboxUri, isDid, isSkey, isTid } from "@/protocol/keys";
 import { OPERATOR_METHOD } from "@/protocol/nsids";
+import { fitsDirectoryName } from "@/protocol/registry";
 import type { OperatorActor, WorkspaceRef } from "./actor";
 import { AuthorityReauthorizationRequiredError } from "./authority-grant";
 import { OperatorAuthError } from "./errors";
@@ -92,7 +93,7 @@ export const FIELD_RULES: Record<string, (value: unknown, actor: OperatorActor) 
   subject: (value) => isDid(value) ? null : "Invalid subject DID.",
   active: (value) => typeof value === "boolean" ? null : "Admin state must be boolean.",
   skey: (value) => isSkey(value) ? null : "Invalid channel key.",
-  name: (value) => typeof value === "string" && value.trim().length >= 1 && Array.from(value).length <= 80 ? null : "Channel name must contain 1 to 80 characters.",
+  name: (value) => typeof value === "string" && value.trim().length >= 1 && fitsDirectoryName(value) ? null : "Channel name must contain 1 to 80 characters.",
   visibility: (value) => value === "public" || value === "private" ? null : "Invalid channel visibility.",
   members: (value) => Array.isArray(value) && value.length <= 200 && value.every(isDid) && new Set(value).size === value.length ? null : "Channel members must be at most 200 unique DIDs.",
   request: (value, actor) => typeof value === "string" && parseJoinRequestUri(value, actor.workspace.authorityDid, inboxUri(actor.workspace.authorityDid, actor.workspace.skey))

@@ -5,7 +5,7 @@ import { mintSpaceCredentialWith, SpaceCredentialError, type SpaceCredentialDeps
 import { generateSpaceKey, type SpaceKey } from "@/atproto/space-key";
 import { MEMBERSPACE_POLICY, memberspacePolicy } from "@/atproto/space-policy";
 import { dmInboxUri, type Did } from "@/protocol/keys";
-import { FakeDmNetwork } from "./fake-pds";
+import { FakeNetwork } from "./fake-network";
 
 const OWNER = "did:plc:owner";
 const READER = "did:plc:reader";
@@ -16,7 +16,7 @@ const PUBLIC_READ = { $type: MEMBERSPACE_POLICY, publicRead: true, publicWrite: 
 type Tamper = (request: Request) => Promise<Request> | Request;
 
 async function setup(tamper?: Tamper, policy: unknown = PUBLIC_READ) {
-  const network = new FakeDmNetwork();
+  const network = new FakeNetwork();
   for (const [did, host] of [[OWNER, "pds1"], [READER, "pds2"], [OUTSIDER, "pds3"]] as const) network.createAccount(did, host);
   await network.clientFor(OWNER).procedure("com.atproto.space.createSpace", { spaceType: "new.flock.dm.inbox", skey: "self", policy });
   const minted: SpaceKey[] = [];
@@ -55,14 +55,14 @@ async function readRepos(deps: SpaceCredentialDeps) {
 }
 
 /** A raw exchange, as any client (or an attacker) could send it: no authorization, everything in the body. */
-async function exchange(network: FakeDmNetwork, body: Record<string, unknown>): Promise<{ status: number; body: { credential?: string; error?: string } }> {
+async function exchange(network: FakeNetwork, body: Record<string, unknown>): Promise<{ status: number; body: { credential?: string; error?: string } }> {
   const response = await network.fetchEndpoint(new Request("https://fake-pds.test/pds1/xrpc/com.atproto.space.getSpaceCredential".replace("/pds1", ""), {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
   }));
   return { status: response.status, body: await response.json() as { credential?: string; error?: string } };
 }
 
-async function delegationFor(network: FakeDmNetwork, did: string, space = SPACE): Promise<string> {
+async function delegationFor(network: FakeNetwork, did: string, space = SPACE): Promise<string> {
   return (await network.clientFor(did).query<{ token: string }>("com.atproto.space.getDelegationToken", { space })).token;
 }
 
@@ -286,13 +286,13 @@ test("getSpace is owner-only and refuses a space credential", async () => {
 
 // --- The writer set ------------------------------------------------------------------------------------------
 
-async function trackedWriters(network: FakeDmNetwork, deps: SpaceCredentialDeps): Promise<string[]> {
+async function trackedWriters(network: FakeNetwork, deps: SpaceCredentialDeps): Promise<string[]> {
   const credential = await mintSpaceCredentialWith({ ...deps, memberClient: network.clientFor(OWNER) }, SPACE);
   const page = await credential.client("https://fake-pds.test/pds1").query<{ repos: Array<{ did: string }> }>("com.atproto.space.listRepos", { space: SPACE });
   return page.repos.map((repo) => repo.did);
 }
 
-async function writeRequest(network: FakeDmNetwork, did: string): Promise<void> {
+async function writeRequest(network: FakeNetwork, did: string): Promise<void> {
   await network.clientFor(did).procedure("com.atproto.space.putRecord", { space: SPACE, repo: did, collection: "new.flock.dm.request", rkey: "r", record: { text: "x" } });
 }
 

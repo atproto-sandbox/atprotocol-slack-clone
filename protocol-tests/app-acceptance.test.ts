@@ -64,7 +64,7 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     assert.deepEqual(appSpaceTypes.get("new.flock.workspace")?.collections, [
       "new.flock.workspace.profile", "new.flock.directory", "new.flock.workspace.roster", "new.flock.admin", "new.flock.acceptance",
     ], "the pinned OAuth provider resolves the app's published workspace space declaration");
-    const [{ bootstrapWorkspace, resumePendingWorkspaceBootstraps }, { executeOperatorOperation, listInboxWriters }, { parseWorkspaceRef }, { mintSpaceCredential }, { sessionClient }, { discoverWorkspaces }, { listIndependentWorkspaces, readIndependentChannelPage, readIndependentPrivateRoster }, { validateSpaceRecord }, { acceptanceRecordKey, channelUri, decisionRecordKey, inboxUri, reactionRecordKey, requestRecordKey, subjectKey, tidNow }, { readChannelPage }, { getRawDb }] = await Promise.all([
+    const [{ bootstrapWorkspace, resumePendingWorkspaceBootstraps }, { executeOperatorOperation, listInboxWriters }, { parseWorkspaceRef }, { mintSpaceCredential, sessionCredentialDeps }, { sessionClient }, { discoverWorkspaces }, { listIndependentWorkspaces, readIndependentChannelPage, readIndependentPrivateRoster }, { validateSpaceRecord }, { acceptanceRecordKey, channelUri, decisionRecordKey, inboxUri, reactionRecordKey, requestRecordKey, subjectKey, tidNow }, { readChannelPage }, { getRawDb }] = await Promise.all([
       import("@/operator/kinds/bootstrap-workspace"), import("@/operator/operations"), import("@/operator/actor"), import("@/atproto/space-credential"), import("@/atproto/client"), import("@/workspaces/read-model"), import("@/reader/independent"), import("@/protocol/registry"), import("@/protocol/keys"), import("@/workspaces/channel-sync"), import("@/lib/db"),
     ]);
     const { readSpaceRecords } = await import("@/atproto/space-ops");
@@ -154,7 +154,7 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     });
 
     const discovered = await discoverWorkspaces(memberSession as never);
-    const independent = await listIndependentWorkspaces(memberSession as never);
+    const independent = await listIndependentWorkspaces(sessionCredentialDeps(memberSession as never));
     assert.deepEqual(independent, discovered.map(({ uri, authorityDid, name, members, admins, channels, degradedReasons }) => ({ uri, authorityDid, name, members: members.map(({ did }) => did).sort(), admins: admins.sort(), channels, degradedReasons })));
     assert.equal(discovered[0]?.name, "Pilot Workspace");
     assert.deepEqual(discovered[0]?.members.map(({ did }) => did).sort(), [owner.did, member.did, admin.did].sort());
@@ -206,7 +206,7 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     assert.equal(validateSpaceRecord("new.flock.admin", { $type: "new.flock.admin", subject: member.did, active: true, updatedAt: new Date().toISOString() }, {
       authorityDid: owner.did, spaceUri: bootstrap.workspace, repoDid: member.did, rkey: subjectKey(member.did),
     }).valid, false);
-    assert.deepEqual((await listIndependentWorkspaces(memberSession as never))[0]?.admins, [owner.did, admin.did].sort());
+    assert.deepEqual((await listIndependentWorkspaces(sessionCredentialDeps(memberSession as never)))[0]?.admins, [owner.did, admin.did].sort());
 
     const messageSpace = channelUri(owner.did, `${workspace.skey}-team-lobby`);
     getRawDb().prepare("INSERT INTO notification_registration (service_ref,space_uri,expires_at) VALUES (?,?,?)").run(serviceRef, messageSpace, Date.now() + 2 * 60 * 60 * 1000);
@@ -243,8 +243,8 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     const primaryPage = await readChannelPage(memberSession as never, bootstrap.workspace, `${workspace.skey}-team-lobby`);
     assert.equal(primaryPage.messages.length, 100, "the app's initial history page is capped at 100 messages");
     assert.equal(primaryPage.messages[0]?.value.text, "latest second PDS message");
-    const memberView = await readIndependentChannelPage(memberSession as never, bootstrap.workspace, `${workspace.skey}-team-lobby`);
-    const adminView = await readIndependentChannelPage(adminSession as never, bootstrap.workspace, `${workspace.skey}-team-lobby`);
+    const memberView = await readIndependentChannelPage(sessionCredentialDeps(memberSession as never), bootstrap.workspace, `${workspace.skey}-team-lobby`);
+    const adminView = await readIndependentChannelPage(sessionCredentialDeps(adminSession as never), bootstrap.workspace, `${workspace.skey}-team-lobby`);
     assert.equal(memberView.messages.length, 100);
     assert.equal(adminView.messages.length, 100);
     assert.deepEqual(memberView.messages.map((message) => message.uri).sort(), adminView.messages.map((message) => message.uri).sort());
@@ -289,7 +289,7 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
       assert.ok(appPage.degradedReasons.some((reason) => reason.includes(admin.did) && reason.includes("its account is deactivated")), "the app names the deactivated writer");
       assert.ok(appPage.messages.some((message) => message.value.text === "latest second PDS message"), "the app still reads the other writers");
       assert.ok(!appPage.messages.some((message) => message.repo === admin.did), "the app serves nothing from the deactivated writer");
-      const independentPage = await readIndependentChannelPage(memberSession as never, bootstrap.workspace, lobby);
+      const independentPage = await readIndependentChannelPage(sessionCredentialDeps(memberSession as never), bootstrap.workspace, lobby);
       assert.equal(independentPage.degraded, true);
       assert.ok(independentPage.degradedReasons.some((reason) => reason.includes(admin.did) && reason.includes("its account is deactivated")), "the independent reader names the deactivated writer");
       assert.ok(independentPage.messages.some((message) => message.value.text === "latest second PDS message"), "the independent reader still reads the other writers");
@@ -306,7 +306,7 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     const restoredPage = await readChannelPage(memberSession as never, bootstrap.workspace, lobby);
     assert.ok(restoredPage.messages.some((message) => message.value.text === "admin host message"), "the writer's messages return once the account is active");
     assert.ok(!restoredPage.degradedReasons.some((reason) => reason.includes(admin.did)), "and the writer is no longer reported");
-    const restoredIndependent = await readIndependentChannelPage(memberSession as never, bootstrap.workspace, lobby);
+    const restoredIndependent = await readIndependentChannelPage(sessionCredentialDeps(memberSession as never), bootstrap.workspace, lobby);
     assert.ok(restoredIndependent.messages.some((message) => message.value.text === "admin host message"), "the independent reader sees the writer again too");
     assert.ok(!restoredIndependent.degradedReasons.some((reason) => reason.includes(admin.did)), "and no longer reports it");
 
@@ -405,8 +405,8 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     await writeRecord(sessionClient(memberSession as never), privateSpace, member.did, "new.flock.channel.message", privateMessage, {
       $type: "new.flock.channel.message", text: "approved private message", createdAt: new Date().toISOString(),
     });
-    assert.deepEqual(await readIndependentPrivateRoster(memberSession as never, bootstrap.workspace, privateSkey), [admin.did, member.did].sort());
-    assert.equal((await readIndependentChannelPage(memberSession as never, bootstrap.workspace, privateSkey)).messages[0]?.value.text, "approved private message");
+    assert.deepEqual(await readIndependentPrivateRoster(sessionCredentialDeps(memberSession as never), bootstrap.workspace, privateSkey), [admin.did, member.did].sort());
+    assert.equal((await readIndependentChannelPage(sessionCredentialDeps(memberSession as never), bootstrap.workspace, privateSkey)).messages[0]?.value.text, "approved private message");
     const { requireCurrentChannelCredential } = await import("@/workspaces/channels");
     const { putSpaceMember, removeSpaceMember } = await import("@/atproto/space-ops");
     await removeSpaceMember(ownerSession as never, privateSpace, member.did);
@@ -530,7 +530,7 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     await assert.rejects(readChannelPage(memberSession as never, bootstrap.workspace, `${workspace.skey}-team-lobby`), (error: unknown) => isAccessLost(error));
     assert.equal(countRows("channel_record_cache"), 0, "a failed workspace credential renewal purges the local channel cache");
     await assert.rejects(mintSpaceCredential(memberSession as never, bootstrap.workspace), (error: unknown) => isAccessLost(error));
-    assert.equal((await listIndependentWorkspaces(memberSession as never)).length, 0, "the independent reader drops a stale acceptance marker after access is revoked");
+    assert.equal((await listIndependentWorkspaces(sessionCredentialDeps(memberSession as never))).length, 0, "the independent reader drops a stale acceptance marker after access is revoked");
     const existingCredentialStillWorks = await preRemovalCredential.client(network.pds.url).query<{ records: Array<{ rkey: string }> }>("com.atproto.space.listRecords", {
       space: bootstrap.workspace, repo: owner.did, collection: "new.flock.workspace.profile",
     });
