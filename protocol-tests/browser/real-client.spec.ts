@@ -131,7 +131,7 @@ test("the app's own browser client reaches the PDS hosts and the operator's own 
  */
 async function provision(pds: PdsNetwork) {
   const [{ createEngine }, { readIndependentChannelPage }, { ensureMemberListSpace, putAuthorityRecord, putSpaceMember }, keys, { COLLECTION, SPACE_TYPE }, { AtprotoClient }] = await Promise.all([
-    import("@/client/engine"), import("@/reader/independent"), import("@/atproto/space-ops"), import("@/protocol/keys"), import("@/protocol/nsids"), import("@/atproto/xrpc"),
+    import("@flock/client/engine"), import("@flock/reader/independent"), import("@flock/operator/atproto/space-ops"), import("@flock/protocol/keys"), import("@flock/protocol/nsids"), import("@flock/protocol/atproto/xrpc"),
   ]);
   const authority = await pds.createActor("k9rowner", 0);
   const member = await pds.createActor("k9rmember", 0);

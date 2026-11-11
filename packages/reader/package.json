@@ -1,0 +1,11 @@
+{
+  "name": "@flock/reader",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./*": "./src/*.ts"
+  },
+  "dependencies": {
+    "@flock/protocol": "workspace:*"
+  }
+}

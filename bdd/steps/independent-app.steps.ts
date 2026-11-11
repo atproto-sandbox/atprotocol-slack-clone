@@ -5,8 +5,8 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import { Given, Then, When } from "@cucumber/cucumber";
 import { expect, type Locator } from "@playwright/test";
-import { canonicalJson, channelUri, decisionRecordKey, inboxUri, requestDigest, spaceRecordUri, subjectKey, tidNow } from "@/protocol/keys";
-import { validateSpaceRecord } from "@/protocol/registry";
+import { canonicalJson, channelUri, decisionRecordKey, inboxUri, requestDigest, spaceRecordUri, subjectKey, tidNow } from "@flock/protocol/keys";
+import { validateSpaceRecord } from "@flock/protocol/registry";
 import type { SecondApp } from "../../protocol-tests/support/app-fixture";
 import {
   createChannelAs, insertJournalRow, joinWorkspaceAt, listWriters, observeWorkspace, onPrimaryApp, openViewer,
@@ -16,7 +16,7 @@ import {
 import { browserStore } from "../support/browser-store";
 import { operatorAs } from "../support/engine";
 import { decodeExecuted, executeCalls } from "../support/operator-calls";
-import { OperatorRemoteError, type StalledWork } from "@/client/operator-client";
+import { OperatorRemoteError, type StalledWork } from "@flock/client/operator-client";
 import { credentialCalls, credentialOutcome, openChannel, postMessage } from "../support/channels-ui";
 import { waitForAdminControls, createWorkspaceAs, eventually, inviteMemberAs } from "../support/ui";
 import type { Actor, AppWorld } from "../support/world";
@@ -74,7 +74,7 @@ async function publishedLexiconIds(world: AppWorld): Promise<string[]> {
 }
 
 async function localLexiconIds(): Promise<string[]> {
-  const root = join(process.cwd(), "lexicons/new/flock");
+  const root = join(process.cwd(), "packages/protocol/lexicons/new/flock");
   const files = (await readdir(root, { recursive: true })).filter((file) => file.endsWith(".json"));
   return [...new Set(await Promise.all(files.map(async (file) => (JSON.parse(await readFile(join(root, file), "utf8")) as { id: string }).id)))];
 }
@@ -577,7 +577,7 @@ async function runProtocolReconcile(world: AppWorld): Promise<ChildRun> {
     PLC_URL: world.fixture.plcUrl, OPERATOR_SERVICE_REF: world.operatorServiceRef,
     FLOCK_ADMIN_MUTATIONS_PAUSED: "true",
   };
-  return runNode(["--import", "tsx", "scripts/reconcile-workspaces.ts"], { env: environment, timeoutMs: RECONCILE_TIMEOUT_MS, what: "the scheduled reconcile job" });
+  return runNode(["--import", "tsx", "apps/operator/scripts/reconcile-workspaces.ts"], { env: environment, timeoutMs: RECONCILE_TIMEOUT_MS, what: "the scheduled reconcile job" });
 }
 
 // --- Stop new work with the operator pause switch ---------------------------------------------------

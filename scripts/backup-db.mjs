@@ -1,10 +1,6 @@
-import nextEnv from "@next/env";
 import BetterSqlite3 from "better-sqlite3";
 import { chmodSync, closeSync, existsSync, openSync, unlinkSync } from "node:fs";
 import { resolve } from "node:path";
-
-const { loadEnvConfig } = nextEnv;
-loadEnvConfig(process.cwd());
 
 const sourcePath = resolve(process.env.DATABASE_PATH ?? "./data/flock.db");
 const destinationArg = process.argv[2];

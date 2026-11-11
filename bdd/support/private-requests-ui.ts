@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
-import { generateSpaceKey } from "@/atproto/space-key";
+import { generateSpaceKey } from "@flock/protocol/atproto/space-key";
 import type { Locator } from "@playwright/test";
-import { inviteLinkFor } from "@/app/ui/client-api";
-import { mintSpaceCredentialWith, SpaceCredentialError, type SpaceCredential } from "@/atproto/space-credential-core";
-import { AtprotoClient } from "@/atproto/xrpc";
-import { channelUri, decisionRecordKey, inboxUri, parseSpaceUri, requestRecordKey, spaceRecordUri, tidNow } from "@/protocol/keys";
+import { inviteLinkFor } from "@flock/web/app/ui/client-api";
+import { mintSpaceCredentialWith, SpaceCredentialError, type SpaceCredential } from "@flock/protocol/atproto/space-credential-core";
+import { AtprotoClient } from "@flock/protocol/atproto/xrpc";
+import { channelUri, decisionRecordKey, inboxUri, parseSpaceUri, requestRecordKey, spaceRecordUri, tidNow } from "@flock/protocol/keys";
 import type { Actor, ApiCall, AppWorld } from "./world";
 import { listingCalls } from "./channels-ui";
 import { executeAs, submitAndWait, type Executed } from "./operator-calls";
 import { waitForAdminControls, createWorkspaceAs, eventually, inviteMemberAs, joinFromInvitation, openInviteLinkAndSignIn } from "./ui";
-import { memberspacePolicy } from "@/atproto/space-policy";
+import { memberspacePolicy } from "@flock/protocol/atproto/space-policy";
 
 export const PRIVATE_CHANNEL_NAME = "Private Room";
 

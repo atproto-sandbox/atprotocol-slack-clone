@@ -1,7 +1,7 @@
-import { CredentialCache } from "@/client/credentials";
-import { MemoryStore } from "@/client/memory-store";
-import { SyncCore } from "@/client/sync";
-import { COLLECTION } from "@/protocol/nsids";
+import { CredentialCache } from "@flock/client/credentials";
+import { MemoryStore } from "@flock/client/memory-store";
+import { SyncCore } from "@flock/client/sync";
+import { COLLECTION } from "@flock/protocol/nsids";
 import { actorTransport, startPdsNetwork, type NetworkActor, type PdsNetwork } from "./support/pds-network";
 import { createChannel, deleteMessage, MESSAGES_PER_WRITER, percentile, Probe, provision, writeMessage, WRITER_COUNTS } from "./support/sync-dataset";
 

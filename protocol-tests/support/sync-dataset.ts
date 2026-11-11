@@ -1,5 +1,5 @@
-import { mintSpaceCredentialWith } from "@/atproto/space-credential-core";
-import { AtprotoClient } from "@/atproto/xrpc";
+import { mintSpaceCredentialWith } from "@flock/protocol/atproto/space-credential-core";
+import { AtprotoClient } from "@flock/protocol/atproto/xrpc";
 import { actorTransport, bearerSession, type NetworkActor, type PdsNetwork } from "./pds-network";
 
 // K4's fixed dataset (`.ai/plans/platform-refactor.md`): a channel per writer count, five messages per writer, and the
@@ -54,7 +54,7 @@ export async function provision(pds: PdsNetwork, count: number): Promise<{ autho
 }
 
 export async function createChannel(pds: PdsNetwork, authority: NetworkActor, reader: NetworkActor, writers: NetworkActor[], skey: string): Promise<string> {
-  const [{ ensureMemberListSpace, putSpaceMember }, { mapLimited }] = await Promise.all([import("@/atproto/space-ops"), import("@/lib/map-limited")]);
+  const [{ ensureMemberListSpace, putSpaceMember }, { mapLimited }] = await Promise.all([import("@flock/operator/atproto/space-ops"), import("@flock/protocol/map-limited")]);
   const owner = bearerSession(authority) as never;
   const space = await ensureMemberListSpace(owner, "new.flock.channel", skey);
   await putSpaceMember(owner, space, reader.did, true, true);
@@ -69,7 +69,7 @@ export async function createChannel(pds: PdsNetwork, authority: NetworkActor, re
 }
 
 export async function writeMessage(writer: NetworkActor, space: string, text: string): Promise<string> {
-  const { tidNow } = await import("@/protocol/keys");
+  const { tidNow } = await import("@flock/protocol/keys");
   const rkey = tidNow();
   await new AtprotoClient(bearerSession(writer).fetchHandler).procedure("com.atproto.space.createRecord", {
     space, repo: writer.did, collection: "new.flock.channel.message", rkey,

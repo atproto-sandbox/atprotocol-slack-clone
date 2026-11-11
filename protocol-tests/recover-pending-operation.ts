@@ -1,8 +1,8 @@
-import { executeOperatorOperation } from "@/operator/operations";
-import { parseWorkspaceRef } from "@/operator/actor";
-import { tidNow } from "@/protocol/keys";
-import { getRawDb } from "@/lib/db";
-import { restoreAuthorityGrant } from "@/operator/authority-grant";
+import { executeOperatorOperation } from "@flock/operator/operator/operations";
+import { parseWorkspaceRef } from "@flock/operator/operator/actor";
+import { tidNow } from "@flock/protocol/keys";
+import { getRawDb } from "@flock/operator/lib/db";
+import { restoreAuthorityGrant } from "@flock/operator/operator/authority-grant";
 
 const authorityDid = process.env.RECOVERY_AUTHORITY_DID;
 const workspaceUri = process.env.RECOVERY_WORKSPACE;

@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import Database from "better-sqlite3";
 import type { OAuthSession } from "@atproto/oauth-client-node";
-import { inviteLinkFor } from "@/app/ui/client-api";
+import { inviteLinkFor } from "@flock/web/app/ui/client-api";
 import { pinnedCheckoutPath } from "../../protocol-tests/support/app-fixture";
-import { COLLECTION } from "@/protocol/nsids";
-import { parseWorkspaceUri } from "@/protocol/keys";
+import { COLLECTION } from "@flock/protocol/nsids";
+import { parseWorkspaceUri } from "@flock/protocol/keys";
 import { listingCalls, openChannel, workspaceChannels } from "./channels-ui";
 import { escapeRegExp, eventually, signInFromLoginFormAt, waitForOrigin } from "./ui";
 import { PAGE_TIMEOUT_MS, type Actor, type AppWorld } from "./world";
@@ -152,13 +152,13 @@ export function workspaceRead(viewer: Actor, workspaceUri: string, since = 0): W
 }
 
 /**
- * Runs `read` with the independent reader (src/reader/independent.ts) authenticated as `account`. The reader needs
+ * Runs `read` with the independent reader (packages/reader/src/independent.ts) authenticated as `account`. The reader needs
  * only the account's credentials, the published lexicons and PDS space credentials; it has no database or cache.
  */
 export async function withIndependentReader<T>(
   world: AppWorld,
   account: Actor,
-  read: (reader: typeof import("@/reader/independent"), deps: import("@/reader/independent").IndependentDeps, session: OAuthSession) => Promise<T>,
+  read: (reader: typeof import("@flock/reader/independent"), deps: import("@flock/reader/independent").IndependentDeps, session: OAuthSession) => Promise<T>,
 ): Promise<T> {
   const environment: Record<string, string> = {
     APP_URL: world.appOrigin, OPERATOR_URL: world.operatorOrigin, PLC_URL: world.fixture.plcUrl, ATPROTO_ACCEPTANCE_TEST: "true",
@@ -176,8 +176,8 @@ export async function withIndependentReader<T>(
         return fetch(new URL(path, account.pdsUrl), { ...init, headers, redirect: "error" });
       },
     } as unknown as OAuthSession;
-    const { sessionCredentialDeps } = await import("@/atproto/space-credential");
-    return await read(await import("@/reader/independent"), sessionCredentialDeps(session), session);
+    const { sessionCredentialDeps } = await import("@flock/operator/atproto/space-credential");
+    return await read(await import("@flock/reader/independent"), sessionCredentialDeps(session), session);
   } finally {
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key]; else process.env[key] = value;
@@ -189,7 +189,7 @@ export async function withIndependentReader<T>(
 export async function listWriters(world: AppWorld, account: Actor, space: string): Promise<string[]> {
   return withIndependentReader(world, account, async (_reader, _deps, session) => {
     const [{ mintSpaceCredential }, { resolvePds }, { listBoundedRepos }] = await Promise.all([
-      import("@/atproto/space-credential"), import("@/atproto/identity"), import("@/atproto/record-pages"),
+      import("@flock/operator/atproto/space-credential"), import("@flock/operator/atproto/identity"), import("@flock/protocol/atproto/record-pages"),
     ]);
     const authorityDid = /^at:\/\/([^/]+)\//.exec(space)?.[1];
     assert.ok(authorityDid, `${space} is not a space URI`);

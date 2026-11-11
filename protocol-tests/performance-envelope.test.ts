@@ -73,8 +73,8 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
     try {
       await publishAppLexicons(fixture);
       const [{ bootstrapWorkspace }, { ensureMemberListSpace, listSpaceMembers, putAuthorityRecord, putSpaceMember }, { executeOperatorOperation, listInboxWriters }, { mintSpaceCredential, sessionCredentialDeps }, { readIndependentChannelPage }, { inboxUri, reactionRecordKey, requestRecordKey, spaceRecordUri, subjectKey, tidNow }, { parseWorkspaceRef }, { getRawDb }, { resolvePds }, { createEngine }] = await Promise.all([
-        import("@/operator/kinds/bootstrap-workspace"), import("@/atproto/space-ops"), import("@/operator/operations"), import("@/atproto/space-credential"), import("@/reader/independent"), import("@/protocol/keys"), import("@/operator/actor"), import("@/lib/db"), import("@/atproto/identity"),
-        import("@/client/engine"),
+        import("@flock/operator/operator/kinds/bootstrap-workspace"), import("@flock/operator/atproto/space-ops"), import("@flock/operator/operator/operations"), import("@flock/operator/atproto/space-credential"), import("@flock/reader/independent"), import("@flock/protocol/keys"), import("@flock/operator/operator/actor"), import("@flock/operator/lib/db"), import("@flock/operator/atproto/identity"),
+        import("@flock/client/engine"),
       ]);
       const owner = await createActor(network.pds, "scaleowner", "test");
       const ownerSession = sessionFor(owner);
@@ -403,7 +403,7 @@ async function publishAppLexicons(network: TestNetwork): Promise<void> {
   assert.ok(network.lexiconAuthority, "fixture must expose its lexicon authority");
   const agent = network.pds.getAgent();
   const session = await agent.com.atproto.server.createSession({ identifier: "lex-authority.test", password: "hunter2" });
-  const root = join(process.cwd(), "lexicons/new/flock");
+  const root = join(process.cwd(), "packages/protocol/lexicons/new/flock");
   const { readdir, readFile } = await import("node:fs/promises");
   const files = await readdir(root, { recursive: true });
   const published = new Set<string>();

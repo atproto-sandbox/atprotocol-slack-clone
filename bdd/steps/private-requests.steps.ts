@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { Given, Then, When } from "@cucumber/cucumber";
-import { requestRecordKey } from "@/protocol/keys";
+import { requestRecordKey } from "@flock/protocol/keys";
 import { eventually, inviteMemberAs } from "../support/ui";
 import type { Actor, AppWorld } from "../support/world";
 import { listingCalls, openChannel, postMessage } from "../support/channels-ui";

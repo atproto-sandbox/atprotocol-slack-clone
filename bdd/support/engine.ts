@@ -1,7 +1,7 @@
-import { httpStatus, messageOf } from "@/app/ui/client-api";
-import { createEngine, type Engine } from "@/client/engine";
-import type { ChannelRef } from "@/client/channel-client";
-import type { OperatorClient } from "@/client/operator-client";
+import { httpStatus, messageOf } from "@flock/web/app/ui/client-api";
+import { createEngine, type Engine } from "@flock/client/engine";
+import type { ChannelRef } from "@flock/client/channel-client";
+import type { OperatorClient } from "@flock/client/operator-client";
 import { actorTransport } from "../../protocol-tests/support/pds-network";
 import type { Actor, AppWorld } from "./world";
 

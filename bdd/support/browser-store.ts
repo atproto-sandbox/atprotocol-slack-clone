@@ -1,7 +1,7 @@
-import { databaseName } from "@/client/indexeddb-store";
-import type { StoredRecord } from "@/client/store";
+import { databaseName } from "@flock/client/indexeddb-store";
+import type { StoredRecord } from "@flock/client/store";
 import type { Actor } from "./world";
-import { BROWSER_CLIENT_METADATA_PATH } from "@/browser/client-metadata";
+import { BROWSER_CLIENT_METADATA_PATH } from "@flock/web/browser/client-metadata";
 
 // What the app's engine holds in a browser: the signed-in account's IndexedDB store at the page's origin. Steps that once
 // read the app server's record cache read this instead, since the browser now reads and keeps the records itself.

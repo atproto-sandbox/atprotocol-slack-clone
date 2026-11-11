@@ -5,16 +5,16 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { generateSpaceKey } from "@/atproto/space-key";
+import { generateSpaceKey } from "@flock/protocol/atproto/space-key";
 import type { Locator } from "@playwright/test";
 import Database from "better-sqlite3";
-import { inviteLinkFor } from "@/app/ui/client-api";
-import { AtprotoClient, XrpcError } from "@/atproto/xrpc";
-import { mintSpaceCredentialWith, SpaceCredential, SpaceCredentialError } from "@/atproto/space-credential-core";
-import { inboxUri, subjectKey } from "@/protocol/keys";
+import { inviteLinkFor } from "@flock/web/app/ui/client-api";
+import { AtprotoClient, XrpcError } from "@flock/protocol/atproto/xrpc";
+import { mintSpaceCredentialWith, SpaceCredential, SpaceCredentialError } from "@flock/protocol/atproto/space-credential-core";
+import { inboxUri, subjectKey } from "@flock/protocol/keys";
 import type { Actor, AppWorld } from "./world";
 import { submitAndWait, type Executed } from "./operator-calls";
-import { memberspacePolicy } from "@/atproto/space-policy";
+import { memberspacePolicy } from "@flock/protocol/atproto/space-policy";
 import {
   waitForAdminControls, createWorkspaceAs, escapeRegExp, inviteMemberAs,
   joinFromInvitation, openInviteLinkAndSignIn,
@@ -371,8 +371,8 @@ async function freePort(): Promise<number> {
 async function launch(environment: NodeJS.ProcessEnv, port: number): Promise<ChildProcess[]> {
   const operatorUrl = environment.OPERATOR_URL;
   assert.ok(operatorUrl, "OPERATOR_URL says where the operator serves");
-  const operator = await launchProcess(["--import", "tsx", join(process.cwd(), "src/operator/main.ts")], environment, `${operatorUrl}/.well-known/did.json`, "the operator");
-  const web = await launchProcess([join(process.cwd(), "node_modules/next/dist/bin/next"), "start", "--hostname", "127.0.0.1", "--port", String(port)], environment, `http://127.0.0.1:${port}/`, "the app");
+  const operator = await launchProcess(["--import", "tsx", join(process.cwd(), "apps/operator/src/operator/main.ts")], environment, `${operatorUrl}/.well-known/did.json`, "the operator");
+  const web = await launchProcess([join(process.cwd(), "apps/web/node_modules/next/dist/bin/next"), "start", "apps/web", "--hostname", "127.0.0.1", "--port", String(port)], environment, `http://127.0.0.1:${port}/`, "the app");
   return [operator, web];
 }
 
@@ -464,7 +464,7 @@ const RECONCILE_DEADLINE_MS = 120_000;
 
 /** The scheduled reconcile job (`pnpm reconcile`), run as a new process against the app's database and key. Killed if it outlives its deadline or the cucumber process. */
 export async function runReconcileJob(app: OwnApp): Promise<ReconcileRun> {
-  const child = spawn(process.execPath, ["--import", "tsx", "scripts/reconcile-workspaces.ts"], {
+  const child = spawn(process.execPath, ["--import", "tsx", "apps/operator/scripts/reconcile-workspaces.ts"], {
     cwd: process.cwd(), env: { ...app.environment }, stdio: ["ignore", "pipe", "pipe"],
   });
   runningApps.add(child);

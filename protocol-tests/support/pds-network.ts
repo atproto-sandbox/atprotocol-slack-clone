@@ -7,9 +7,9 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { asAtprotoDid, asAtprotoOAuthScope, jwkSchema, NodeOAuthClient, oauthClientMetadataSchema, type NodeSavedSession, type NodeSavedState, type OAuthSession } from "@atproto/oauth-client-node";
-import { kemKeyFromDidDocument } from "@/atproto/kem-key";
-import { generateSpaceKey } from "@/atproto/space-key";
-import { AtprotoClient } from "@/atproto/xrpc";
+import { kemKeyFromDidDocument } from "@flock/protocol/atproto/kem-key";
+import { generateSpaceKey } from "@flock/protocol/atproto/space-key";
+import { AtprotoClient } from "@flock/protocol/atproto/xrpc";
 import { createFixtureTempRoot } from "../fixture-temp";
 
 // The pinned PDS network without the Next app: two in-memory PDS hosts, a PLC directory and the app's lexicons published
@@ -112,7 +112,7 @@ export async function startPdsNetwork(label: string, options: { appPort?: number
     try {
       await network.close();
     } finally {
-      (await import("@/lib/db")).closeDb();
+      (await import("@flock/operator/lib/db")).closeDb();
       rmSync(databaseDirectory, { recursive: true, force: true });
       restoreEnvironment();
       fixtureTemp.cleanup();
@@ -156,7 +156,7 @@ export async function publishAppLexicons(network: TestNetwork, projectRoot: stri
   if (!network.lexiconAuthority) throw new Error("The fixture must expose its lexicon authority.");
   const agent = network.pds.getAgent();
   const session = await agent.com.atproto.server.createSession({ identifier: "lex-authority.test", password: "hunter2" });
-  const root = join(projectRoot, "lexicons/new/flock");
+  const root = join(projectRoot, "packages/protocol/lexicons/new/flock");
   const files = await readdir(root, { recursive: true });
   const published = new Set<string>();
   for (const relative of files.filter((file) => file.endsWith(".json"))) {
@@ -201,7 +201,7 @@ export type BrowserSession = {
  * driving the consent screen.
  */
 export async function mintBrowserSession(pds: TestPds, did: string, scopes: readonly string[], keyLabel: string): Promise<BrowserSession> {
-  const [{ browserSessionConfig }, { buildBrowserClientMetadata }] = await Promise.all([import("@/app/browser-session-config"), import("@/browser/client-metadata")]);
+  const [{ browserSessionConfig }, { buildBrowserClientMetadata }] = await Promise.all([import("@flock/web/app/browser-session-config"), import("@flock/web/browser/client-metadata")]);
   const { appUrl, plcUrl } = browserSessionConfig();
   const metadata = buildBrowserClientMetadata({ appUrl, scope: ["atproto", ...scopes.filter((scope) => scope !== "atproto")].join(" ") });
   const { saved, accessToken } = await mintProviderSession(pds, did, { clientId: metadata.client_id, redirectUri: metadata.redirect_uris[0], scope: metadata.scope }, keyLabel);
@@ -227,7 +227,7 @@ function inMemoryStore<V>(entries = new Map<string, V>()) {
 
 /** Mints the same kind of session for the workspace-authority client and stores it in the grant table, as a completed authority flow does. */
 export async function storeAuthorityGrant(pds: TestPds, did: string, keyLabel: string): Promise<{ accessToken: string }> {
-  const [{ authorityClientMetadata }, { oauthSqliteStore }] = await Promise.all([import("@/operator/authority-grant"), import("@/auth/encrypted-store")]);
+  const [{ authorityClientMetadata }, { oauthSqliteStore }] = await Promise.all([import("@flock/operator/operator/authority-grant"), import("@flock/operator/auth/encrypted-store")]);
   const metadata = authorityClientMetadata();
   const { saved, accessToken } = await mintProviderSession(pds, did, { clientId: metadata.client_id, redirectUri: metadata.redirect_uris[0], scope: metadata.scope }, keyLabel);
   await oauthSqliteStore("authority_grant").set(did, saved);
@@ -303,7 +303,7 @@ export async function ageOAuthSessionAtProvider(pds: TestPds, table: SessionTabl
 
 /** Marks the stored copy's access token expired, so its next use refreshes it at the provider. */
 export async function expireStoredSession(table: SessionTable, did: string): Promise<void> {
-  const { oauthSqliteStore } = await import("@/auth/encrypted-store");
+  const { oauthSqliteStore } = await import("@flock/operator/auth/encrypted-store");
   const store = oauthSqliteStore(table);
   const saved = await store.get(did);
   assert.ok(saved && "tokenSet" in saved && saved.tokenSet, `a session is stored in ${table}`);
@@ -314,7 +314,7 @@ export async function expireStoredSession(table: SessionTable, did: string): Pro
 
 /** The one browser grant (R6), from the app's own builder: the member set, the operator methods and the DM set (K3). */
 export async function combinedMemberScopes(serviceRef: string): Promise<string[]> {
-  return (await import("@/protocol/scopes")).memberGrantScopes(serviceRef).filter((scope) => scope !== "atproto");
+  return (await import("@flock/protocol/scopes")).memberGrantScopes(serviceRef).filter((scope) => scope !== "atproto");
 }
 
 let operatorServed: Promise<string> | undefined;
@@ -326,7 +326,7 @@ let operatorServed: Promise<string> | undefined;
  */
 export function inProcessOperator(): Promise<string> {
   operatorServed ??= (async () => {
-    const { createOperatorApp } = await import("@/operator/server");
+    const { createOperatorApp } = await import("@flock/operator/operator/server");
     const server = createOperatorApp().listen(0, "127.0.0.1");
     await once(server, "listening");
     server.unref();
@@ -344,11 +344,11 @@ export function inProcessOperator(): Promise<string> {
 export async function callOperatorMethod(
   session: { did: string; fetchHandler(path: string, init: RequestInit): Promise<Response> },
   serviceRef: string,
-  method: import("@/protocol/nsids").OperatorMethod,
+  method: import("@flock/protocol/nsids").OperatorMethod,
   query: Record<string, string>,
   body?: unknown,
 ): Promise<Record<string, unknown>> {
-  const { sessionClient } = await import("@/atproto/client");
+  const { sessionClient } = await import("@flock/operator/atproto/client");
   // A service token from the caller's own session, bound to the operator's service and to exactly this method.
   const { token } = await sessionClient(session as never).query<{ token: string }>("com.atproto.server.getServiceAuth", { aud: serviceRef, lxm: method });
   const url = new URL(`/xrpc/${method}`, await inProcessOperator());
@@ -386,7 +386,7 @@ export function actorTransport(
   network: Pick<PdsNetwork, "plcUrl">,
   actor: Pick<NetworkActor, "did" | "accessJwt"> & { pds: { url: string } },
   options: { now?: () => number; fetchVia?: (request: Request) => Promise<Response> } = {},
-): import("@/client/transport").ClientTransport {
+): import("@flock/client/transport").ClientTransport {
   const send = options.fetchVia ?? ((request: Request) => fetch(request));
   const documents = new Map<string, Promise<{ service?: Array<{ id?: string; serviceEndpoint?: unknown }>; verificationMethod?: unknown }>>();
   const document = (did: string, forceRefresh: boolean) => {

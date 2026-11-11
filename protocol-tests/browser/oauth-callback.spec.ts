@@ -11,9 +11,9 @@ import { chromium, type Response as PageResponse } from "@playwright/test";
 import { createFixtureTempRoot } from "../fixture-temp";
 import { startStack, type Stack } from "../support/app-server";
 import { actorTransport } from "../support/pds-network";
-import { createEngine } from "@/client/engine";
-import type { OperatorClient } from "@/client/operator-client";
-import { tidNow } from "@/protocol/keys";
+import { createEngine } from "@flock/client/engine";
+import type { OperatorClient } from "@flock/client/operator-client";
+import { tidNow } from "@flock/protocol/keys";
 
 const projectRoot = process.cwd();
 const pinnedCheckout = process.env.ATPROTO_PINNED_CHECKOUT;
@@ -286,7 +286,7 @@ async function publishAppLexicons(fixture: NonNullable<typeof network>): Promise
   assert.ok(fixture.lexiconAuthority, "fixture must expose its lexicon authority");
   const agent = fixture.pds.getAgent();
   const session = await agent.com.atproto.server.createSession({ identifier: "lex-authority.test", password: "hunter2" });
-  const root = join(projectRoot, "lexicons/new/flock");
+  const root = join(projectRoot, "packages/protocol/lexicons/new/flock");
   const files = await readdir(root, { recursive: true });
   const published = new Set<string>();
   for (const relative of files.filter((file) => file.endsWith(".json"))) {

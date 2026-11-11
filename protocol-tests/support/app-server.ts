@@ -10,7 +10,7 @@ export type AppServer = { url: string; output(): string; stop(): Promise<void> }
 /** `next start` on `port` with this process's environment; resolves once it serves its OAuth client metadata. */
 export function startAppServer(port: number): Promise<AppServer> {
   return startServer(
-    ["node_modules/next/dist/bin/next", "start", "--hostname", "127.0.0.1", "--port", String(port)],
+    ["apps/web/node_modules/next/dist/bin/next", "start", "apps/web", "--hostname", "127.0.0.1", "--port", String(port)],
     `http://127.0.0.1:${port}`, "/oauth/client-metadata.json",
   );
 }
@@ -19,7 +19,7 @@ export function startAppServer(port: number): Promise<AppServer> {
 export function startOperatorServer(env: NodeJS.ProcessEnv = process.env): Promise<AppServer> {
   const url = env.OPERATOR_URL;
   assert.ok(url, "OPERATOR_URL says where the operator serves");
-  return startServer(["--import", "tsx", "src/operator/main.ts"], new URL(url).origin, "/.well-known/did.json", env);
+  return startServer(["--import", "tsx", "apps/operator/src/operator/main.ts"], new URL(url).origin, "/.well-known/did.json", env);
 }
 
 /** One app: the web app at `APP_URL` and its operator at `OPERATOR_URL`, each its own process and origin. */
@@ -36,7 +36,7 @@ export async function startStack(env: NodeJS.ProcessEnv): Promise<Stack> {
   let web: AppServer;
   try {
     web = await startServer(
-      ["node_modules/next/dist/bin/next", "start", "--hostname", appUrl.hostname, "--port", appUrl.port],
+      ["apps/web/node_modules/next/dist/bin/next", "start", "apps/web", "--hostname", appUrl.hostname, "--port", appUrl.port],
       appUrl.origin, "/oauth/client-metadata.json", env,
     );
   } catch (error) {

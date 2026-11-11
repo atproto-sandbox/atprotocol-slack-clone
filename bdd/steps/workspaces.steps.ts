@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { Given, Then, When } from "@cucumber/cucumber";
-import { inboxUri } from "@/protocol/keys";
+import { inboxUri } from "@flock/protocol/keys";
 import { withIndependentReader } from "../support/independent-app-ui";
 import { credentialCalls, credentialOutcome, workspaceChannels } from "../support/channels-ui";
 import type { AppWorld, Actor } from "../support/world";

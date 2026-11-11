@@ -1,17 +1,17 @@
 import assert from "node:assert/strict";
 import { createDecipheriv } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { generateSpaceKey } from "@/atproto/space-key";
+import { generateSpaceKey } from "@flock/protocol/atproto/space-key";
 import type { Frame, Locator, Page, Response as PlaywrightResponse } from "@playwright/test";
 import Database from "better-sqlite3";
-import { listBoundedRecords, listBoundedRepos } from "@/atproto/record-pages";
-import { mintSpaceCredentialWith, SpaceCredentialError, type SpaceCredential, type SpaceCredentialDeps } from "@/atproto/space-credential-core";
-import { AtprotoClient } from "@/atproto/xrpc";
-import { dmConversationUri, dmInboxUri, parseDmConversationUri, tidNow } from "@/protocol/keys";
+import { listBoundedRecords, listBoundedRepos } from "@flock/protocol/atproto/record-pages";
+import { mintSpaceCredentialWith, SpaceCredentialError, type SpaceCredential, type SpaceCredentialDeps } from "@flock/protocol/atproto/space-credential-core";
+import { AtprotoClient } from "@flock/protocol/atproto/xrpc";
+import { dmConversationUri, dmInboxUri, parseDmConversationUri, tidNow } from "@flock/protocol/keys";
 import type { FixtureAccount } from "../../protocol-tests/support/app-fixture";
 import { signInFromLoginFormAt, waitForOrigin } from "./ui";
 import type { Actor, AppWorld } from "./world";
-import { memberspacePolicy } from "@/atproto/space-policy";
+import { memberspacePolicy } from "@flock/protocol/atproto/space-policy";
 
 // One helper per thing a person does with direct messages, plus an independent Node-side view of the PDS
 // (`DmpProbe`) so a step can check what the recipient's PDS tracks without trusting the browser client.

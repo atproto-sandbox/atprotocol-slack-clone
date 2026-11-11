@@ -1,0 +1,16 @@
+{
+  "name": "@flock/client",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./*": "./src/*.ts"
+  },
+  "dependencies": {
+    "@flock/protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "@flock/reader": "workspace:*",
+    "@flock/testing": "workspace:*",
+    "fake-indexeddb": "6.2.6"
+  }
+}

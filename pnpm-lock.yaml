@@ -20,75 +20,36 @@ importers:
 
   .:
     dependencies:
-      '@atproto-labs/simple-store-memory':
-        specifier: 0.2.6
-        version: 0.2.6
       '@atproto/crypto':
         specifier: 0.0.0-spaces-alpha-20261029171913
         version: 0.0.0-spaces-alpha-20261029171913
-      '@atproto/identity':
-        specifier: 0.5.13
-        version: 0.5.13
       '@atproto/jwk-jose':
         specifier: 0.2.4
         version: 0.2.4
-      '@atproto/lex-client':
-        specifier: 0.3.6
-        version: 0.3.6
-      '@atproto/lex-data':
-        specifier: 0.0.0-spaces-alpha-20261029171913
-        version: 0.0.0-spaces-alpha-20261029171913
-      '@atproto/lex-schema':
-        specifier: 0.2.7
-        version: 0.2.7
-      '@atproto/lexicon':
-        specifier: 0.0.0-spaces-alpha-20261029171913
-        version: 0.0.0-spaces-alpha-20261029171913
-      '@atproto/oauth-client-browser':
-        specifier: 0.5.7
-        version: 0.5.7
       '@atproto/oauth-client-node':
         specifier: 0.5.7
         version: 0.5.7
-      '@atproto/space':
-        specifier: 0.0.0-spaces-alpha-20261029171913
-        version: 0.0.0-spaces-alpha-20261029171913
-      '@atproto/xrpc':
-        specifier: 0.8.13
-        version: 0.8.13
       '@atproto/xrpc-server':
         specifier: 0.0.0-spaces-alpha-20261029171913
         version: 0.0.0-spaces-alpha-20261029171913
-      '@next/env':
-        specifier: 16.3.6
-        version: 16.3.6
-      '@noble/hashes':
-        specifier: 1.8.0
-        version: 1.8.0
+      '@flock/client':
+        specifier: workspace:*
+        version: link:packages/client
+      '@flock/operator':
+        specifier: workspace:*
+        version: link:apps/operator
+      '@flock/protocol':
+        specifier: workspace:*
+        version: link:packages/protocol
+      '@flock/reader':
+        specifier: workspace:*
+        version: link:packages/reader
+      '@flock/web':
+        specifier: workspace:*
+        version: link:apps/web
       better-sqlite3:
         specifier: 12.6.0
         version: 12.6.0
-      express:
-        specifier: 4.22.3
-        version: 4.22.3
-      kysely:
-        specifier: 0.29.5
-        version: 0.29.5
-      multiformats:
-        specifier: 13.4.2
-        version: 13.4.2
-      next:
-        specifier: 16.3.6
-        version: 16.3.6(@babel/core@7.29.7(supports-color@11.0.0))(@playwright/test@1.63.0)(@types/node@24.0.0)(react-dom@19.2.3(react@19.2.3))(react@19.2.3)
-      react:
-        specifier: 19.2.3
-        version: 19.2.3
-      react-dom:
-        specifier: 19.2.3
-        version: 19.2.3(react@19.2.3)
-      undici:
-        specifier: 7.29.1
-        version: 7.29.1
     devDependencies:
       '@atproto/lex-cli':
         specifier: 0.10.13
@@ -102,33 +63,173 @@ importers:
       '@types/better-sqlite3':
         specifier: 7.6.13
         version: 7.6.13
-      '@types/express':
-        specifier: 4.17.23
-        version: 4.17.23
       '@types/node':
         specifier: 24.0.0
         version: 24.0.0
-      '@types/react':
-        specifier: 19.0.0
-        version: 19.0.0
-      '@types/react-dom':
-        specifier: 19.0.0
-        version: 19.0.0
       eslint:
         specifier: 9.39.1
         version: 9.39.1(supports-color@11.0.0)
       eslint-config-next:
         specifier: 16.3.6
         version: 16.3.6(@typescript-eslint/parser@8.70.1(eslint@9.39.1(supports-color@11.0.0))(supports-color@11.0.0)(typescript@5.9.3))(eslint@9.39.1(supports-color@11.0.0))(supports-color@11.0.0)(typescript@5.9.3)
-      fake-indexeddb:
-        specifier: 6.2.6
-        version: 6.2.6
       tsx:
         specifier: 4.23.15
         version: 4.23.15
       typescript:
         specifier: 5.9.3
         version: 5.9.3
+
+  apps/operator:
+    dependencies:
+      '@atproto-labs/simple-store-memory':
+        specifier: 0.2.6
+        version: 0.2.6
+      '@atproto/identity':
+        specifier: 0.5.13
+        version: 0.5.13
+      '@atproto/jwk-jose':
+        specifier: 0.2.4
+        version: 0.2.4
+      '@atproto/oauth-client-node':
+        specifier: 0.5.7
+        version: 0.5.7
+      '@atproto/xrpc-server':
+        specifier: 0.0.0-spaces-alpha-20261029171913
+        version: 0.0.0-spaces-alpha-20261029171913
+      '@flock/deployment':
+        specifier: workspace:*
+        version: link:../../packages/deployment
+      '@flock/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+      better-sqlite3:
+        specifier: 12.6.0
+        version: 12.6.0
+      express:
+        specifier: 4.22.3
+        version: 4.22.3
+      kysely:
+        specifier: 0.29.5
+        version: 0.29.5
+      undici:
+        specifier: 7.29.1
+        version: 7.29.1
+    devDependencies:
+      '@atproto/crypto':
+        specifier: 0.0.0-spaces-alpha-20261029171913
+        version: 0.0.0-spaces-alpha-20261029171913
+      '@atproto/space':
+        specifier: 0.0.0-spaces-alpha-20261029171913
+        version: 0.0.0-spaces-alpha-20261029171913
+      '@types/better-sqlite3':
+        specifier: 7.6.13
+        version: 7.6.13
+      '@types/express':
+        specifier: 4.17.23
+        version: 4.17.23
+
+  apps/web:
+    dependencies:
+      '@atproto/oauth-client-browser':
+        specifier: 0.5.7
+        version: 0.5.7
+      '@flock/client':
+        specifier: workspace:*
+        version: link:../../packages/client
+      '@flock/deployment':
+        specifier: workspace:*
+        version: link:../../packages/deployment
+      '@flock/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+      next:
+        specifier: 16.3.6
+        version: 16.3.6(@babel/core@7.29.7(supports-color@11.0.0))(@playwright/test@1.63.0)(@types/node@24.0.0)(react-dom@19.2.3(react@19.2.3))(react@19.2.3)
+      react:
+        specifier: 19.2.3
+        version: 19.2.3
+      react-dom:
+        specifier: 19.2.3
+        version: 19.2.3(react@19.2.3)
+    devDependencies:
+      '@atproto/crypto':
+        specifier: 0.0.0-spaces-alpha-20261029171913
+        version: 0.0.0-spaces-alpha-20261029171913
+      '@types/react':
+        specifier: 19.0.0
+        version: 19.0.0
+      '@types/react-dom':
+        specifier: 19.0.0
+        version: 19.0.0
+      fake-indexeddb:
+        specifier: 6.2.6
+        version: 6.2.6
+
+  packages/client:
+    dependencies:
+      '@flock/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+    devDependencies:
+      '@flock/reader':
+        specifier: workspace:*
+        version: link:../reader
+      '@flock/testing':
+        specifier: workspace:*
+        version: link:../testing
+      fake-indexeddb:
+        specifier: 6.2.6
+        version: 6.2.6
+
+  packages/deployment: {}
+
+  packages/protocol:
+    dependencies:
+      '@atproto/crypto':
+        specifier: 0.0.0-spaces-alpha-20261029171913
+        version: 0.0.0-spaces-alpha-20261029171913
+      '@atproto/lex-data':
+        specifier: 0.0.0-spaces-alpha-20261029171913
+        version: 0.0.0-spaces-alpha-20261029171913
+      '@atproto/lexicon':
+        specifier: 0.0.0-spaces-alpha-20261029171913
+        version: 0.0.0-spaces-alpha-20261029171913
+      '@atproto/space':
+        specifier: 0.0.0-spaces-alpha-20261029171913
+        version: 0.0.0-spaces-alpha-20261029171913
+      '@atproto/xrpc':
+        specifier: 0.8.13
+        version: 0.8.13
+      '@noble/hashes':
+        specifier: 1.8.0
+        version: 1.8.0
+      multiformats:
+        specifier: 13.4.2
+        version: 13.4.2
+
+  packages/reader:
+    dependencies:
+      '@flock/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+
+  packages/testing:
+    dependencies:
+      '@atproto/crypto':
+        specifier: 0.0.0-spaces-alpha-20261029171913
+        version: 0.0.0-spaces-alpha-20261029171913
+      '@atproto/lex-data':
+        specifier: 0.0.0-spaces-alpha-20261029171913
+        version: 0.0.0-spaces-alpha-20261029171913
+      '@atproto/lexicon':
+        specifier: 0.0.0-spaces-alpha-20261029171913
+        version: 0.0.0-spaces-alpha-20261029171913
+      '@atproto/space':
+        specifier: 0.0.0-spaces-alpha-20261029171913
+        version: 0.0.0-spaces-alpha-20261029171913
+      '@flock/protocol':
+        specifier: workspace:*
+        version: link:../protocol
 
 packages:
 
@@ -225,10 +326,6 @@ packages:
     resolution: {integrity: sha512-5+O85kcNdvJv5EXtzQaTeM3419cN0yOq40GAX6ge7x7qkJYThtuUR6EXCJ4vD4D1VXYXGHG73NtARDeyqrSiPg==}
     engines: {node: '>=22'}
 
-  '@atproto/lex-client@0.3.6':
-    resolution: {integrity: sha512-8tPDTyCdMN8qtyODl00oVcBlh26a0HeurOdtJnz9Fcq+dBuRo2XuEcxCUfvwtulOY+zghyw3zAG6fqwxUe2lvw==}
-    engines: {node: '>=22'}
-
   '@atproto/lex-data@0.0.0-spaces-alpha-20261029171913':
     resolution: {integrity: sha512-PO9JpQid8J9+lxEesn4k7gfHRcgXTmAXFjmS26gQhxgzoFeJnhbr5DEMPObAkyILgS5qFvyd0JTp2J4COaEQ6Q==}
     engines: {node: '>=22'}
@@ -247,10 +344,6 @@ packages:
 
   '@atproto/lex-schema@0.0.0-spaces-alpha-20261029171913':
     resolution: {integrity: sha512-Kzk5o2q6Jt9LEM4nknj3wn0ixOfLLfq9EWnjjR0chnuKpV0UojjbSSugpBVLLQ1xf55OZWlDX5Sjl5oOKviq+w==}
-    engines: {node: '>=22'}
-
-  '@atproto/lex-schema@0.2.7':
-    resolution: {integrity: sha512-K+Ce0SyFPcP19tSo4AhLLEOYnJzKh6sVzhGuB4ZCSto9tHgaVZ3iTQT895IPviZSPjd3+XIRA/rpqWSA2wPGEg==}
     engines: {node: '>=22'}
 
   '@atproto/lexicon@0.0.0-spaces-alpha-20261029171913':
@@ -3193,13 +3286,6 @@ snapshots:
       '@atproto/lex-schema': 0.0.0-spaces-alpha-20261029171913
       tslib: 2.8.1
 
-  '@atproto/lex-client@0.3.6':
-    dependencies:
-      '@atproto/lex-data': 0.1.7
-      '@atproto/lex-json': 0.1.6
-      '@atproto/lex-schema': 0.2.7
-      tslib: 2.8.1
-
   '@atproto/lex-data@0.0.0-spaces-alpha-20261029171913':
     dependencies:
       multiformats: 13.4.2
@@ -3226,13 +3312,6 @@ snapshots:
     dependencies:
       '@atproto/lex-data': 0.0.0-spaces-alpha-20261029171913
       '@atproto/syntax': 0.0.0-spaces-alpha-20261029171913
-      '@standard-schema/spec': 1.1.0
-      tslib: 2.8.1
-
-  '@atproto/lex-schema@0.2.7':
-    dependencies:
-      '@atproto/lex-data': 0.1.7
-      '@atproto/syntax': 0.7.6
       '@standard-schema/spec': 1.1.0
       tslib: 2.8.1
 

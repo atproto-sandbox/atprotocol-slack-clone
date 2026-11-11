@@ -3,8 +3,8 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { statSync } from "node:fs";
 import { After, Given, Then, When } from "@cucumber/cucumber";
 import { expect } from "@playwright/test";
-import type { SpaceCredential } from "@/atproto/space-credential-core";
-import { requestDigest } from "@/protocol/keys";
+import type { SpaceCredential } from "@flock/protocol/atproto/space-credential-core";
+import { requestDigest } from "@flock/protocol/keys";
 import type { Actor, AppWorld } from "../support/world";
 import { escapeRegExp, eventually, inviteMemberAs } from "../support/ui";
 import {
@@ -20,7 +20,7 @@ import { credentialCalls, credentialOutcome, openChannel, postMessage, sidebarCh
 import { engineAs, probeChannelRead, type ReadProbe } from "../support/engine";
 import { executeAs, submitAndWait, type Executed } from "../support/operator-calls";
 import { workspaceRead } from "../support/independent-app-ui";
-import { BROWSER_CLIENT_METADATA_PATH } from "@/browser/client-metadata";
+import { BROWSER_CLIENT_METADATA_PATH } from "@flock/web/browser/client-metadata";
 
 type Space = { label: string; uri: string };
 type RemovalSample = { state: string | undefined; present: Record<string, boolean> };

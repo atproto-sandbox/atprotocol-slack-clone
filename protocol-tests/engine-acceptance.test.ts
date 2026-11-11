@@ -10,7 +10,7 @@ test("the engine's channel page matches the independent reader on two real PDS h
   const pds = await startPdsNetwork("engine-acceptance");
   try {
     const [{ createEngine }, { readIndependentChannelPage }, { ensureMemberListSpace, putAuthorityRecord, putSpaceMember }, keys, { COLLECTION, SPACE_TYPE }, { AtprotoClient }] = await Promise.all([
-      import("@/client/engine"), import("@/reader/independent"), import("@/atproto/space-ops"), import("@/protocol/keys"), import("@/protocol/nsids"), import("@/atproto/xrpc"),
+      import("@flock/client/engine"), import("@flock/reader/independent"), import("@flock/operator/atproto/space-ops"), import("@flock/protocol/keys"), import("@flock/protocol/nsids"), import("@flock/protocol/atproto/xrpc"),
     ]);
     const authority = await pds.createActor("engowner", 0);
     const alice = await pds.createActor("engalice", 0);
@@ -74,7 +74,7 @@ test("the engine's channel page matches the independent reader on two real PDS h
 
 /** Waits until the authority lists every writer at the revision its own host reports, so a comparison does not race a write notice. */
 async function settled(pds: PdsNetwork, reader: NetworkActor, space: string, writers: readonly NetworkActor[]): Promise<void> {
-  const [{ mintSpaceCredentialWith }] = await Promise.all([import("@/atproto/space-credential-core")]);
+  const [{ mintSpaceCredentialWith }] = await Promise.all([import("@flock/protocol/atproto/space-credential-core")]);
   const transport = actorTransport(pds, reader);
   const credential = await mintSpaceCredentialWith(transport, space);
   const authorityDid = space.slice("at://".length).split("/")[0]!;

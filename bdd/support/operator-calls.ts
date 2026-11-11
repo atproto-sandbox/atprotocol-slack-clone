@@ -1,5 +1,5 @@
-import { OperatorRemoteError, type OperationView } from "@/client/operator-client";
-import { operationView, type OperationState } from "@/operator/journal";
+import { OperatorRemoteError, type OperationView } from "@flock/client/operator-client";
+import { operationView, type OperationState } from "@flock/operator/operator/journal";
 import { operatorAs } from "./engine";
 import { eventually } from "./ui";
 import type { Actor, ApiCall, AppWorld } from "./world";

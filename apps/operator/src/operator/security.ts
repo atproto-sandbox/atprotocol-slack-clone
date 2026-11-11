@@ -1,0 +1,154 @@
+import { verifyJwt } from "@atproto/xrpc-server";
+import type { OAuthSession } from "@atproto/oauth-client-node";
+import { getIdResolver } from "../atproto/identity";
+import { sessionClient } from "../atproto/client";
+import { listBoundedMembers } from "@flock/protocol/atproto/record-pages";
+import { listSpaceMembers } from "../atproto/space-ops";
+import { getConfig } from "@flock/deployment/config";
+import { inboxUri, isDid, subjectKey } from "@flock/protocol/keys";
+import { WorkspaceEnvelopeError } from "@flock/protocol/workspace-summary";
+import { restoreAuthorityGrant } from "./authority-grant";
+import { OperatorAuthError, OperatorInfrastructureError, isTransientOperatorInfrastructureError } from "./errors";
+import { operationKind } from "./kinds/index";
+import { assertMayStartKind, validateOperatorRequest } from "./operations";
+import { COLLECTION, OPERATOR_METHOD } from "@flock/protocol/nsids";
+import { parseWorkspaceRef, type OperatorActor, type WorkspaceRef } from "./actor";
+import { getOwnerRecord } from "./workspace-state";
+
+const MAX_READ_ONLY_MEMBER_SCAN = 1_000;
+
+/** The bearer token an `authorization` header value carries. */
+function bearerToken(authorization: string | undefined): string | undefined {
+  return authorization?.match(/^Bearer ([A-Za-z0-9._~-]+)$/)?.[1];
+}
+
+/**
+ * The `iss` a bearer service token claims, read without verifying it, or `null` when there is no well-formed token. It proves
+ * nothing; it lets a caller refuse a token that names the wrong issuer before any DID is resolved for it.
+ */
+export function unverifiedBearerIssuer(authorization: string | undefined): string | null {
+  const payload = bearerToken(authorization)?.split(".")[1];
+  if (!payload) return null;
+  try {
+    const claims: unknown = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    return isPlainObject(claims) && typeof claims.iss === "string" ? claims.iss : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * How long a service token may live, from when it was issued, per method: a minute and a little more for one call (the
+ * PDS's notices included), fifteen minutes for the long poll, so a client reuses one token across polls.
+ */
+const SERVICE_TOKEN_LIFETIME_SECONDS: Readonly<Record<string, number>> = { [OPERATOR_METHOD.getChanges]: 15 * 60 };
+const DEFAULT_SERVICE_TOKEN_LIFETIME_SECONDS = 75;
+
+export function serviceTokenLifetimeSeconds(method: string): number {
+  return SERVICE_TOKEN_LIFETIME_SECONDS[method] ?? DEFAULT_SERVICE_TOKEN_LIFETIME_SECONDS;
+}
+
+/** The caller's DID from a PDS-issued service token bound to this operator and to `method`, within that method's lifetime. */
+export async function authenticateOperatorRequest(
+  authorization: string | undefined,
+  method: string,
+  resolveSigningKey: (did: string) => Promise<string> = (did) => getIdResolver().did.resolveAtprotoKey(did),
+): Promise<string> {
+  const token = bearerToken(authorization);
+  if (!token) throw new OperatorAuthError("Bearer service authorization is required.");
+  const serviceRef = getConfig().operatorServiceRef;
+  const payload = await verifyJwt(
+    token,
+    serviceRef,
+    method,
+    async (issuer) => resolveSigningKey(issuer.split("#", 1)[0]!),
+  ).catch((error: unknown) => {
+    if (isTransientOperatorInfrastructureError(error)) throw new OperatorInfrastructureError();
+    throw new OperatorAuthError("Service authorization is invalid or expired.");
+  });
+  if (!isDid(payload.iss)) {
+    throw new OperatorAuthError("Service authorization issuer must be an actor DID.");
+  }
+  const payloadBytes = Buffer.from(token.split(".")[1] ?? "", "base64url");
+  const decoded: unknown = JSON.parse(payloadBytes.toString("utf8"));
+  const issuedAt = isPlainObject(decoded) ? decoded.iat : undefined;
+  const now = Math.floor(Date.now() / 1000);
+  const lifetime = serviceTokenLifetimeSeconds(method);
+  // The token's age, from the PDS's own iat, bounds when it is accepted; its exp is the client's ask, made on the client's
+  // clock, so it is only required to come after iat.
+  if (typeof issuedAt !== "number" || issuedAt > now + 5 || payload.exp <= issuedAt || now - issuedAt > lifetime) {
+    throw new OperatorAuthError("Service authorization is outside the accepted lifetime.");
+  }
+  return payload.iss;
+}
+
+export async function requireActiveWorkspaceAdmin(
+  workspaceUri: string,
+  actorDid: string,
+  options: { allowDegradedLookup?: boolean } = {},
+): Promise<OperatorActor> {
+  const workspace = parseWorkspaceRef(workspaceUri);
+  const session = await restoreAuthorityGrant(workspace.authorityDid);
+  const [admin, roster] = await Promise.all([
+    getOwnerRecord(session, workspace.uri, COLLECTION.admin, subjectKey(actorDid)),
+    getOwnerRecord(session, workspace.uri, COLLECTION.workspaceRoster, subjectKey(actorDid)),
+  ]);
+  if (admin?.subject !== actorDid || admin.active !== true || roster?.subject !== actorDid || roster.active !== true) throw new OperatorAuthError("Actor is not an active workspace admin.");
+  const isAuthority = actorDid === workspace.authorityDid;
+  const inbox = inboxUri(workspace.authorityDid, workspace.skey);
+  const [hasWorkspaceAccess, hasInboxAccess] = isAuthority
+    ? [true, true]
+    : await Promise.all([
+      hasCurrentMembership(session, workspace.uri, actorDid, options.allowDegradedLookup === true),
+      hasCurrentMembership(session, inbox, actorDid, options.allowDegradedLookup === true),
+    ]);
+  if (!hasWorkspaceAccess || !hasInboxAccess) throw new OperatorAuthError("Actor lacks current workspace or inbox membership.");
+  return { did: actorDid, session, workspace, canRecoverOperations: true };
+}
+
+async function hasCurrentMembership(session: OAuthSession, space: string, did: string, allowDegradedLookup: boolean): Promise<boolean> {
+  if (!allowDegradedLookup) {
+    return (await listSpaceMembers(session, space)).some((member) => member.did === did && member.read && member.write);
+  }
+  const result = await listBoundedMembers(sessionClient(session), { space, maxMembers: MAX_READ_ONLY_MEMBER_SCAN });
+  const member = result.members.find((entry) => entry.did === did);
+  if (member) return member.read && member.write;
+  if (result.truncated) throw new WorkspaceEnvelopeError(`Could not verify this actor within the ${MAX_READ_ONLY_MEMBER_SCAN}-member read-only authorization scan.`);
+  return false;
+}
+
+export async function requireWorkspaceActorForOperation(workspaceUri: string, actorDid: string, request: unknown): Promise<OperatorActor> {
+  const workspace = parseWorkspaceRef(workspaceUri);
+  return authorizeOperationActor(await restoreAuthorityGrant(workspace.authorityDid), workspace, actorDid, request);
+}
+
+/**
+ * Who `actorDid` is for `request`, read from the workspace's current state with the authority's session. An active admin may
+ * run any kind but one only the authority may start; an active member may run only a kind that concerns their own membership,
+ * once the request is valid and the kind's own check agrees.
+ */
+export async function authorizeOperationActor(session: OAuthSession, workspace: WorkspaceRef, actorDid: string, request: unknown): Promise<OperatorActor> {
+  const kind = isPlainObject(request) ? operationKind(request.kind) : undefined;
+  if (kind) assertMayStartKind(kind, actorDid, workspace);
+  const [admin, roster, workspaceMembers, inboxMembers] = await Promise.all([
+    getOwnerRecord(session, workspace.uri, COLLECTION.admin, subjectKey(actorDid)),
+    getOwnerRecord(session, workspace.uri, COLLECTION.workspaceRoster, subjectKey(actorDid)),
+    listSpaceMembers(session, workspace.uri),
+    listSpaceMembers(session, inboxUri(workspace.authorityDid, workspace.skey)),
+  ]);
+  const isAuthority = actorDid === workspace.authorityDid;
+  const isAdmin = admin?.subject === actorDid && admin.active === true && roster?.subject === actorDid && roster.active === true &&
+    (isAuthority || workspaceMembers.some((member) => member.did === actorDid && member.read && member.write)) &&
+    (isAuthority || inboxMembers.some((member) => member.did === actorDid && member.read && member.write));
+  if (isAdmin) return { did: actorDid, session, workspace, canRecoverOperations: true };
+  const isMember = roster?.subject === actorDid && roster.active === true && workspaceMembers.some((member) => member.did === actorDid && member.read && member.write) &&
+    inboxMembers.some((member) => member.did === actorDid && member.write);
+  if (!isMember || kind?.actor !== "member") throw new OperatorAuthError("Active workspace admin permission is required.");
+  const actor: OperatorActor = { did: actorDid, session, workspace, canRecoverOperations: false };
+  await kind.authorizeMember?.(actor, validateOperatorRequest(request, actor, "execute").request);
+  return actor;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}

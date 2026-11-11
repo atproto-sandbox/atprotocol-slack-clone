@@ -3,7 +3,7 @@ import { availablePort, startAppServer, startOperatorServer, type AppServer } fr
 import { signIn } from "../support/browser-app";
 import { actorTransport, bearerSession, startPdsNetwork, type NetworkActor, type PdsNetwork } from "../support/pds-network";
 import { createChannel, deleteMessage, MESSAGES_PER_WRITER, percentile, Probe, provision, writeMessage, WRITER_COUNTS } from "../support/sync-dataset";
-import { BROWSER_CLIENT_METADATA_PATH } from "@/browser/client-metadata";
+import { BROWSER_CLIENT_METADATA_PATH } from "@flock/web/browser/client-metadata";
 
 // K4 of `.ai/plans/platform-refactor.md`, measured for R6a with the real client: the app's own page opening a channel's
 // latest 100 messages in a real browser, on K4's dataset. A first open starts from an empty store (the account's IndexedDB
@@ -84,7 +84,7 @@ async function main(): Promise<void> {
 /** A workspace the reader has accepted, listing one channel of K4's dataset per writer count. */
 async function workspaceWithChannels(pds: PdsNetwork, authority: NetworkActor, reader: NetworkActor, writers: NetworkActor[]): Promise<Map<number, { space: string; name: string }>> {
   const [{ createEngine }, { ensureMemberListSpace, putAuthorityRecord, putSpaceMember }, keys, { COLLECTION, SPACE_TYPE }] = await Promise.all([
-    import("@/client/engine"), import("@/atproto/space-ops"), import("@/protocol/keys"), import("@/protocol/nsids"),
+    import("@flock/client/engine"), import("@flock/operator/atproto/space-ops"), import("@flock/protocol/keys"), import("@flock/protocol/nsids"),
   ]);
   const owner = bearerSession(authority) as never;
   const updatedAt = new Date().toISOString();
@@ -116,7 +116,7 @@ async function recordRequests(page: Page): Promise<Sent[]> {
 
 /** Deletes the account's store from a page of the origin that runs no app code, then loads the app again. */
 async function emptyStore(page: Page, appUrl: string, did: string): Promise<void> {
-  const { databaseName } = await import("@/client/indexeddb-store");
+  const { databaseName } = await import("@flock/client/indexeddb-store");
   await page.goto(new URL(BROWSER_CLIENT_METADATA_PATH, appUrl).href);
   await page.evaluate((name) => new Promise<void>((resolve, reject) => {
     const deleting = indexedDB.deleteDatabase(name);
@@ -199,7 +199,7 @@ async function assertHolds(page: Page, did: string, space: string, writers: stri
       for (const record of records) if (record.space === space && record.collection === "new.flock.channel.message") counts[record.repo] = (counts[record.repo] ?? 0) + 1;
       return counts;
     } finally { db.close(); }
-  }, { name: (await import("@/client/indexeddb-store")).databaseName(did), space });
+  }, { name: (await import("@flock/client/indexeddb-store")).databaseName(did), space });
   const short = writers.filter((writer) => counts[writer] !== MESSAGES_PER_WRITER);
   if (Object.keys(counts).length !== writers.length || short.length > 0) {
     throw new Error(`The first open read ${Object.keys(counts).length} of ${writers.length} writers; ${short.length} without all ${MESSAGES_PER_WRITER} messages.`);
@@ -220,7 +220,7 @@ async function holdsRecord(page: Page, did: string, space: string, repo: string,
         request.onerror = () => reject(request.error);
       });
     } finally { db.close(); }
-  }, { name: (await import("@/client/indexeddb-store")).databaseName(did), key: [space, "new.flock.channel.message", repo, rkey] });
+  }, { name: (await import("@flock/client/indexeddb-store")).databaseName(did), key: [space, "new.flock.channel.message", repo, rkey] });
 }
 
 await main();

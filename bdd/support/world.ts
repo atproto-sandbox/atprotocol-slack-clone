@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { World, type IWorldOptions } from "@cucumber/cucumber";
 import Database from "better-sqlite3";
-import { resolveKemKey } from "../../src/browser/identity";
+import { resolveKemKey } from "@flock/web/browser/identity";
 import type { Browser, BrowserContext, Page, Response as PlaywrightResponse } from "@playwright/test";
 import type { AppFixture, FixtureAccount } from "../../protocol-tests/support/app-fixture";
 

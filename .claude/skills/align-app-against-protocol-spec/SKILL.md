@@ -36,7 +36,7 @@ npm view @atproto/space versions --json | grep spaces-alpha | tail -3
 | Proposal `main` differs from the recorded proposal commit | The spec changed. Clone it next to this repo (`../atproto-proposals`, outside the repo) and run `git diff <recorded>..HEAD -- 0016-permissioned-data`. |
 | PR head differs from the recorded PDS commit | Compare it with the PR head the newest plan records (its "Sources" list, as `d0097360` for the current pin) first; a head that differs from the pin only by a prompt file is already explained there. Otherwise fetch only trees into a scratch directory: `git init -q . && git fetch --depth=1 --filter=blob:none https://github.com/bluesky-social/atproto.git refs/pull/5187/head <recorded>`, then `git diff --stat <recorded> FETCH_HEAD -- lexicons packages/space packages/pds packages/oauth packages/dev-env alpha-migrations` and `git ls-tree --name-only FETCH_HEAD alpha-migrations/`. |
 | A new `alpha-migrations/prompt-*.md` | Read it even when no code moved: the core team publishes the next wave's migration there, and the file can land on the PR head before the code does. A head that differs only by a prompt file is not code drift. |
-| A newer `spaces-alpha` npm snapshot | `package.json` pins one snapshot of `@atproto/space`, `crypto` and `lex-data`, built from the pinned commit; `pnpm-workspace.yaml` also lists it for `car`, `lex-cbor` and `syntax` (release-age exclusions and range overrides). A newer snapshot belongs to a newer commit, so treat it as PDS drift. |
+| A newer `spaces-alpha` npm snapshot | The packages' `package.json` files pin one snapshot of the `@atproto/*` alpha packages they use (`space`, `crypto`, `lex-data`, `lexicon`, `xrpc-server`, by package), built from the pinned commit; `pnpm-workspace.yaml` also lists it for the transitive ones (release-age exclusions and range overrides). A bump changes every one of them. A newer snapshot belongs to a newer commit, so treat it as PDS drift. |
 
 Nothing moved: say so with the three values and the date, and stop (do not edit the pin note's "Verified" line; that line means the test suites were run). Something moved: continue.
 
@@ -46,14 +46,14 @@ Diff the PDS areas above and build a table "upstream change → app owner" (see 
 
 | Upstream area | App owner |
 |---|---|
-| credential request, presentation, MAC, KEM keys | `src/atproto/space-credential-core.ts`, `space-key.ts`, `kem-key.ts` |
-| change notifications (`registerNotify`, `notifyWrite`, `notifySpaceDeleted`) | `src/atproto/notifications.ts`, `write-notification.ts`, `src/app/xrpc/com.atproto.space.notifyWrite/route.ts` |
-| policy object, space methods, record and repo paging | `src/atproto/space-policy.ts`, `space-ops.ts`, `record-pages.ts` |
-| DID and PDS resolution | `src/atproto/identity.ts` |
-| scope grammar, permission sets | `src/protocol/scopes.ts` |
-| lexicons | `lexicons/**` (the `new.flock.permissions.*` permission sets must keep matching `src/protocol/scopes.ts`; a unit test checks it), generated `src/lexicons/**` (`pnpm codegen:lex`) |
-| direct messages and their test double | `src/dm/**` (browser side: `browser-identity.ts`, `browser-session.ts`), `src/dm/testing/fake-pds.ts` (mirror the real PDS) |
-| workspaces, operator journal, independent reader | `src/workspaces/**`, `src/operator/**`, `src/reader/**` |
+| credential request, presentation, MAC, KEM keys | `packages/protocol/src/atproto/space-credential-core.ts`, `space-key.ts`, `kem-key.ts` |
+| change notifications (`registerNotify`, `notifyWrite`, `notifySpaceDeleted`) | `apps/operator/src/operator/registrations.ts`, `space-notification.ts`, `methods.ts` (the two notice methods), `apps/operator/src/atproto/write-notification.ts`; the browser registers DM spaces in `packages/client/src/dm/dm-client.ts` |
+| policy object, space methods, record and repo paging | `packages/protocol/src/atproto/space-policy.ts`, `record-pages.ts`, `apps/operator/src/atproto/space-ops.ts` |
+| DID and PDS resolution | `apps/operator/src/atproto/identity.ts` |
+| scope grammar, permission sets | `packages/protocol/src/scopes.ts` |
+| lexicons | `packages/protocol/lexicons/**` (the `new.flock.permissions.*` permission sets must keep matching `packages/protocol/src/scopes.ts`; a unit test checks it), generated `packages/protocol/src/lexicons/**` (`pnpm codegen:lex`) |
+| direct messages and their test double | `packages/client/src/dm/**` (browser side: `apps/web/src/browser/identity.ts`, `session.ts`), `packages/testing/src/fake-network.ts` (mirror the real PDS) |
+| workspaces, operator journal, independent reader | `packages/client/src/workspace-client.ts`, `apps/operator/src/operator/**`, `packages/reader/src/**` |
 
 Write `.ai/plans/protocol-drift-<short sha>.md` in the shape of the newest one: what changed and where it hits us, decisions needed from the owner, out of scope, phases P0 to P8, risks. Present it and wait for approval before implementing. Product decisions (for example what a departing member's history does) go to the owner; do not decide them in the plan.
 
@@ -70,7 +70,7 @@ Write `.ai/plans/protocol-drift-<short sha>.md` in the shape of the newest one: 
 1. Make a standalone clone of the PDS at the new commit (not a `git worktree`, so deleting an older checkout cannot break it), apply `protocol-tests/atproto/strict-credential-expiry.patch`, and build it with the commands in the pin note (pnpm 11.11.0, `PUPPETEER_SKIP_DOWNLOAD=1`, Node 22.17 on `PATH`). The patch should apply with offsets only; if a hunk moved, re-base it and update its SHA-256 everywhere it is recorded.
 2. Copy the three `protocol-tests/atproto/*.test.ts` files into the checkout's `packages/pds/tests/space/` and run the upstream `@atproto/space` and PDS space suites first, to learn which of ours fail before any app change.
 3. Move every recorded pin. Find them with `grep -rIl "<old pdsCommit>\|<old pdsCommit first 8>\|<old snapshot>\|<old proposal sha>\|<old proposal first 8>" --exclude-dir=node_modules --exclude-dir=.next --exclude-dir=.git .`; many files use the 8-character form, and `protocol-tests/support/app-fixture.ts` names the checkout directory instead of a sha. Expect at least `docs/protocol/atproto-spaces-pin.md`, `README.md`, `ARCHITECTURE.md`, `PROGRESS.md`, `docs/prd/atproto-slack-clone.md`, `scripts/codegen-lex.mjs` (`expectedCommit`), `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml` (the snapshot appears in `minimumReleaseAgeExclude` and `overrides`), `protocol-tests/atproto/README.md`, `protocol-tests/support/app-fixture.ts` (default checkout directory), and the "Status against" line of each `.ai/upstream/U*.md`.
-4. Regenerate the Lexicon clients (`src/lexicons/api`) with `ATPROTO_PIN_CHECKOUT=<checkout> pnpm codegen:lex` once `pnpm build:tooling` has run in the checkout; the script refuses a checkout whose HEAD is not its `expectedCommit`. Note the two names: codegen reads `ATPROTO_PIN_CHECKOUT`; the acceptance, BDD, browser and performance runs read `ATPROTO_PINNED_CHECKOUT`.
+4. Regenerate the Lexicon clients (`packages/protocol/src/lexicons/api`) with `ATPROTO_PIN_CHECKOUT=<checkout> pnpm codegen:lex` once `pnpm build:tooling` has run in the checkout; the script refuses a checkout whose HEAD is not its `expectedCommit`. Note the two names: codegen reads `ATPROTO_PIN_CHECKOUT`; the acceptance, BDD, browser and performance runs read `ATPROTO_PINNED_CHECKOUT`.
 5. Change the app in the owner modules and delete the old protocol shape. Check `@atproto/space` and the other installed `@atproto/*` packages (types and docs) before writing any protocol code by hand.
 6. Update the fake PDS to match the new real behavior, and keep it no more lenient than the real PDS.
 
@@ -83,7 +83,7 @@ Run in this order, with Node 22.17 on `PATH` and `ATPROTO_PINNED_CHECKOUT` set t
 3. `pnpm test:acceptance` and `pnpm test:browser`.
 4. `pnpm test:bdd`, then `pnpm test:bdd:slow`. Run them alone: the suite is long, timing sensitive and has failed intermittently before, so do not run it next to another run. Report any slowdown; do not raise a timeout or perf budget to hide it.
 5. `pnpm test:performance` when the change touches sync, paging or credentials.
-6. Check record-size limits in `src/protocol` against any new PDS record cap.
+6. Check record-size limits in `packages/protocol/src` against any new PDS record cap.
 
 ## 6. Review, then record
 

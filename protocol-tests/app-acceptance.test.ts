@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
-import { isAccessLost, SPACE_CREDENTIAL_LIFETIME_MS } from "@/atproto/space-credential-core";
+import { isAccessLost, SPACE_CREDENTIAL_LIFETIME_MS } from "@flock/protocol/atproto/space-credential-core";
 import { createFixtureTempRoot } from "./fixture-temp";
 import { actorTransport, callOperatorMethod, expireStoredSession, inProcessOperator, storeAuthorityGrant, type TestPds as NetworkPds } from "./support/pds-network";
 
@@ -63,9 +63,9 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
       "new.flock.workspace.profile", "new.flock.directory", "new.flock.workspace.roster", "new.flock.admin", "new.flock.acceptance",
     ], "the pinned OAuth provider resolves the app's published workspace space declaration");
     const [{ bootstrapWorkspace, resumePendingWorkspaceBootstraps }, { executeOperatorOperation, listInboxWriters }, { parseWorkspaceRef }, { mintSpaceCredential }, { sessionClient }, { createEngine }, { listIndependentWorkspaces, readIndependentChannelPage, readIndependentPrivateRoster }, { validateSpaceRecord }, { acceptanceRecordKey, channelUri, decisionRecordKey, inboxUri, reactionRecordKey, requestRecordKey, subjectKey, tidNow }, { getRawDb }] = await Promise.all([
-      import("@/operator/kinds/bootstrap-workspace"), import("@/operator/operations"), import("@/operator/actor"), import("@/atproto/space-credential"), import("@/atproto/client"), import("@/client/engine"), import("@/reader/independent"), import("@/protocol/registry"), import("@/protocol/keys"), import("@/lib/db"),
+      import("@flock/operator/operator/kinds/bootstrap-workspace"), import("@flock/operator/operator/operations"), import("@flock/operator/operator/actor"), import("@flock/operator/atproto/space-credential"), import("@flock/operator/atproto/client"), import("@flock/client/engine"), import("@flock/reader/independent"), import("@flock/protocol/registry"), import("@flock/protocol/keys"), import("@flock/operator/lib/db"),
     ]);
-    const { readSpaceRecords } = await import("@/atproto/space-ops");
+    const { readSpaceRecords } = await import("@flock/operator/atproto/space-ops");
 
     const owner = await createActor(network.pds, "alice", "test");
     const member = await createActor(network.extraPdses[0], "bob", "test2");
@@ -377,7 +377,7 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     assert.deepEqual(await memberEngine.channels.roster(privateRef), [admin.did, member.did].sort(), "the engine's roster is the independent reader's");
     assert.equal((await readIndependentChannelPage(independentDeps(member), bootstrap.workspace, privateSkey)).messages[0]?.value.text, "approved private message");
     assert.equal((await memberEngine.channels.readPage(privateRef)).messages[0]?.value.text, "approved private message", "the engine reads the private channel the approval opened");
-    const { putSpaceMember, removeSpaceMember } = await import("@/atproto/space-ops");
+    const { putSpaceMember, removeSpaceMember } = await import("@flock/operator/atproto/space-ops");
     await removeSpaceMember(ownerSession as never, privateSpace, member.did);
     await assert.rejects(
       memberEngine.channels.send(privateRef, "after removal"),
@@ -426,7 +426,7 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     assert.ok(encryptedGrant?.value.startsWith("v1."));
     assert.equal(encryptedGrant?.value.includes(grant.accessToken), false, "the authority grant's access token is encrypted in the live database");
     await expireStoredSession("authority_grant", owner.did);
-    const refreshedGrant = await (await import("@/operator/authority-grant")).restoreAuthorityGrant(owner.did);
+    const refreshedGrant = await (await import("@flock/operator/operator/authority-grant")).restoreAuthorityGrant(owner.did);
     assert.equal(refreshedGrant.did, owner.did, "the expired authority grant refreshes using the authority client");
     await expireStoredSession("authority_grant", owner.did);
     await acceptOperatorCreateWorkspace(ownerSession, serviceRef, owner.did);
@@ -462,7 +462,7 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     try {
       assert.equal(restoredDb.pragma("integrity_check", { simple: true }), "ok");
       const tables = (restoredDb.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map(({ name }) => name);
-      for (const removed of (await import("@/lib/db")).MEMBER_SESSION_TABLES) {
+      for (const removed of (await import("@flock/operator/lib/db")).MEMBER_SESSION_TABLES) {
         assert.ok(!tables.includes(removed), `the server database holds no member session, cursor or channel content: ${removed} is gone`);
       }
     } finally { restoredDb.close(); }
@@ -521,7 +521,7 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     const journalBeforeRevokedCheck = revokedCheckDb.prepare("SELECT workspace, actor, operation_id, state, steps_json, updated_at FROM operation ORDER BY workspace, actor, operation_id").all();
     const encryptedRestoredGrant = revokedCheckDb.prepare("SELECT value FROM authority_grant WHERE key = ?").get(owner.did) as { value: string } | undefined;
     assert.ok(encryptedRestoredGrant);
-    const { decryptJson } = await import("@/auth/encrypted-store");
+    const { decryptJson } = await import("@flock/operator/auth/encrypted-store");
     const restoredGrant = decryptJson<{ tokenSet: { access_token: string } }>(encryptedRestoredGrant.value);
     const storedGrant = await oauthProvider.tokenManager.findToken(restoredGrant.tokenSet.access_token);
     assert.ok(storedGrant);
@@ -537,7 +537,7 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     revokedCheckDb.close();
   } finally {
     try {
-      const { closeDb } = await import("@/lib/db");
+      const { closeDb } = await import("@flock/operator/lib/db");
       closeDb();
       await network.close();
     } finally {
@@ -578,7 +578,7 @@ async function runPhase5FailureMatrix(input: {
   pdsUrl: string;
 }): Promise<void> {
   const [{ executeOperatorOperation }, { ensureMemberListSpace, listSpaceMembers, putAuthorityRecord, putSpaceMember, removeSpaceMember }, { sessionClient }, { channelUri, decisionRecordKey, inboxUri, requestRecordKey, spaceRecordUri, subjectKey, tidNow }, { mintSpaceCredential }, { resolvePds }] = await Promise.all([
-    import("@/operator/operations"), import("@/atproto/space-ops"), import("@/atproto/client"), import("@/protocol/keys"), import("@/atproto/space-credential"), import("@/atproto/identity"),
+    import("@flock/operator/operator/operations"), import("@flock/operator/atproto/space-ops"), import("@flock/operator/atproto/client"), import("@flock/protocol/keys"), import("@flock/operator/atproto/space-credential"), import("@flock/operator/atproto/identity"),
   ]);
   const owner = input.operatorActor as LifecycleMatrixActor;
   const memberActor = input.memberActor as LifecycleMatrixActor;
@@ -1022,7 +1022,7 @@ async function publishAppLexicons(network: TestNetwork): Promise<void> {
   assert.ok(network.lexiconAuthority, "fixture must expose its lexicon authority");
   const agent = network.pds.getAgent();
   const session = await agent.com.atproto.server.createSession({ identifier: "lex-authority.test", password: "hunter2" });
-  const root = join(process.cwd(), "lexicons/new/flock");
+  const root = join(process.cwd(), "packages/protocol/lexicons/new/flock");
   const files = await readdir(root, { recursive: true });
   const published = new Set<string>();
   for (const relative of files.filter((file) => file.endsWith(".json"))) {
@@ -1061,7 +1061,7 @@ async function writeRecord(client: { procedure<TInput, TOutput>(method: string, 
 }
 
 async function runReconciliation(databasePath: string, mutationsPaused = true): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
-  const child = spawn(process.execPath, ["--import", "tsx", "scripts/reconcile-workspaces.ts"], {
+  const child = spawn(process.execPath, ["--import", "tsx", "apps/operator/scripts/reconcile-workspaces.ts"], {
     cwd: process.cwd(),
     env: { ...process.env, DATABASE_PATH: databasePath, FLOCK_ADMIN_MUTATIONS_PAUSED: mutationsPaused ? "true" : "false" },
     stdio: ["ignore", "pipe", "pipe"],
@@ -1078,7 +1078,7 @@ async function runReconciliation(databasePath: string, mutationsPaused = true): 
 }
 
 async function acceptOperatorCreateWorkspace(session: Session, serviceRef: string, authorityDid: string): Promise<void> {
-  const { tidNow } = await import("@/protocol/keys");
+  const { tidNow } = await import("@flock/protocol/keys");
   // The owner asks as a member, with a service token from their own host; the operator creates the workspace with the separate authority grant.
   const body = { name: "Authenticated Operator Workspace", operationId: tidNow() };
   const anonymous = await fetch(new URL("/xrpc/new.flock.operator.createWorkspace", await inProcessOperator()), {

@@ -52,7 +52,7 @@ test("platform capabilities at the pinned PDS (K3, K7)", async (t) => {
       const bot = await appPasswordActor(pds, "k7apppw");
       await workspace.invite(bot.did);
       const [{ mintSpaceCredential }, { sessionClient }, { tidNow }] = await Promise.all([
-        import("@/atproto/space-credential"), import("@/atproto/client"), import("@/protocol/keys"),
+        import("@flock/operator/atproto/space-credential"), import("@flock/operator/atproto/client"), import("@flock/protocol/keys"),
       ]);
       const session = bearerSession(bot) as never;
 
@@ -105,7 +105,7 @@ type Workspace = {
 
 async function createWorkspace(pds: PdsNetwork): Promise<Workspace> {
   const [{ restoreAuthorityGrant }, { bootstrapWorkspace }, { requireActiveWorkspaceAdmin }, { executeOperatorOperation }, { tidNow, inboxUri }] = await Promise.all([
-    import("@/operator/authority-grant"), import("@/operator/kinds/bootstrap-workspace"), import("@/operator/security"), import("@/operator/operations"), import("@/protocol/keys"),
+    import("@flock/operator/operator/authority-grant"), import("@flock/operator/operator/kinds/bootstrap-workspace"), import("@flock/operator/operator/security"), import("@flock/operator/operator/operations"), import("@flock/protocol/keys"),
   ]);
   const authority = await pds.createActor("k3owner", 0);
   await storeAuthorityGrant(pds.hosts[0], authority.did, "k3-authority-dpop");
@@ -132,7 +132,7 @@ type GrantHolder = { actor: NetworkActor; session: OAuthSession };
 
 async function memberGrantOperations(pds: PdsNetwork, workspace: Workspace, holders: [GrantHolder, GrantHolder, GrantHolder]): Promise<Record<string, Outcome>> {
   const [{ createEngine }, { isAccessLost }, { sessionClient }, keys, { validateSpaceRecord }] = await Promise.all([
-    import("@/client/engine"), import("@/atproto/space-credential-core"), import("@/atproto/client"), import("@/protocol/keys"), import("@/protocol/registry"),
+    import("@flock/client/engine"), import("@flock/protocol/atproto/space-credential-core"), import("@flock/operator/atproto/client"), import("@flock/protocol/keys"), import("@flock/protocol/registry"),
   ]);
   // The engine as the account's browser runs it: its own requests go out with the OAuth session.
   const engineFor = ({ actor, session }: GrantHolder) => createEngine({ ...actorTransport(pds, actor), memberClient: sessionClient(session) });
@@ -170,7 +170,7 @@ async function memberGrantOperations(pds: PdsNetwork, workspace: Workspace, hold
     });
     assert.equal(request.value.channelSkey, workspace.generalSkey);
   });
-  const callOperator = (method: import("@/protocol/nsids").OperatorMethod, query: Record<string, string>, body?: unknown) =>
+  const callOperator = (method: import("@flock/protocol/nsids").OperatorMethod, query: Record<string, string>, body?: unknown) =>
     callOperatorMethod(admin, pds.serviceRef, method, query, body);
   const operationId = keys.tidNow();
   results["the admin calls new.flock.operator.execute"] = await outcome(async () => {
@@ -228,7 +228,7 @@ async function memberGrantOperations(pds: PdsNetwork, workspace: Workspace, hold
 
 async function botOperations(pds: PdsNetwork, workspace: Workspace, bot: NetworkActor, session: OAuthSession): Promise<Record<string, Outcome>> {
   const [{ mintSpaceCredential }, { isAccessLost }, { sessionClient }, { resolvePds }, keys] = await Promise.all([
-    import("@/atproto/space-credential"), import("@/atproto/space-credential-core"), import("@/atproto/client"), import("@/atproto/identity"), import("@/protocol/keys"),
+    import("@flock/operator/atproto/space-credential"), import("@flock/protocol/atproto/space-credential-core"), import("@flock/operator/atproto/client"), import("@flock/operator/atproto/identity"), import("@flock/protocol/keys"),
   ]);
   const results: Record<string, Outcome> = {};
   let messageUri = "";
@@ -291,14 +291,14 @@ async function appPasswordActor(pds: PdsNetwork, name: string): Promise<NetworkA
 
 /** A stand-in for an operator method that does not exist yet: verifies audience, method and issuer signature. */
 async function verifyServiceToken(token: string, serviceRef: string, method: string): Promise<void> {
-  const { getIdResolver } = await import("@/atproto/identity");
+  const { getIdResolver } = await import("@flock/operator/atproto/identity");
   const payload = await verifyJwt(token, serviceRef, method, async (issuer) => getIdResolver().did.resolveAtprotoKey(issuer.split("#", 1)[0]!));
   assert.equal(payload.lxm, method);
 }
 
-async function dmClientFor(pds: PdsNetwork, did: string, memberClient: import("@/atproto/xrpc").AtprotoClient) {
+async function dmClientFor(pds: PdsNetwork, did: string, memberClient: import("@flock/protocol/atproto/xrpc").AtprotoClient) {
   const [{ DmClient }, { kemKeyFromDidDocument }, { generateSpaceKey }, { resolvePds, getIdResolver }] = await Promise.all([
-    import("@/dm/dm-client"), import("@/atproto/kem-key"), import("@/atproto/space-key"), import("@/atproto/identity"),
+    import("@flock/client/dm/dm-client"), import("@flock/protocol/atproto/kem-key"), import("@flock/protocol/atproto/space-key"), import("@flock/operator/atproto/identity"),
   ]);
   const store = new Map<string, string>();
   return new DmClient({

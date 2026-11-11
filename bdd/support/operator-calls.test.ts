@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { OperationView } from "@/client/operator-client";
+import type { OperationView } from "@flock/client/operator-client";
 import { answerOf, decodeExecuted } from "./operator-calls";
 import type { ApiCall } from "./world";
 

@@ -14,8 +14,8 @@ test("a member session alone follows a channel live through the change feed", { 
   try {
     server = await startOperatorServer();
     const [{ restoreAuthorityGrant }, { bootstrapWorkspace }, { registrationDeps }, { requireActiveWorkspaceAdmin }, { executeOperatorOperation }, { tidNow }, { createEngine }, { ChangeFollower }] = await Promise.all([
-      import("@/operator/authority-grant"), import("@/operator/kinds/bootstrap-workspace"), import("@/operator/registrations"), import("@/operator/security"),
-      import("@/operator/operations"), import("@/protocol/keys"), import("@/client/engine"), import("@/client/feed"),
+      import("@flock/operator/operator/authority-grant"), import("@flock/operator/operator/kinds/bootstrap-workspace"), import("@flock/operator/operator/registrations"), import("@flock/operator/operator/security"),
+      import("@flock/operator/operator/operations"), import("@flock/protocol/keys"), import("@flock/client/engine"), import("@flock/client/feed"),
     ]);
     const authority = await pds.createActor("feedowner", 0);
     const reader = await pds.createActor("feedreader", 1);

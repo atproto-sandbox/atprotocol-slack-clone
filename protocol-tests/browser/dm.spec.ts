@@ -234,7 +234,7 @@ async function publishAppLexicons(fixture: TestNetwork): Promise<void> {
   assert.ok(fixture.lexiconAuthority, "fixture must expose its lexicon authority");
   const agent = fixture.pds.getAgent();
   const session = await agent.com.atproto.server.createSession({ identifier: "lex-authority.test", password: "hunter2" });
-  const root = join(projectRoot, "lexicons/new/flock");
+  const root = join(projectRoot, "packages/protocol/lexicons/new/flock");
   const files = await readdir(root, { recursive: true });
   const published = new Set<string>();
   for (const relative of files.filter((file) => file.endsWith(".json"))) {

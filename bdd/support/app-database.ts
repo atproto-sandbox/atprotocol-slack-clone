@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { MEMBER_SESSION_TABLES } from "@/lib/db";
+import { MEMBER_SESSION_TABLES } from "@flock/operator/lib/db";
 
 /**
  * Which tables of the server's member session an app's database has (`MEMBER_SESSION_TABLES`: sessions, OAuth state, and

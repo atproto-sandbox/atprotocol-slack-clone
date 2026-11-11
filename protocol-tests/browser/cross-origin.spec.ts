@@ -71,7 +71,7 @@ async function steps(pds: PdsNetwork, input: {
   authority: NetworkActor; memberSide: BrowserMember; outsiderSide: BrowserMember; channel: string; rkey: string; operatorOrigin: string; unreachableOrigin: string;
 }): Promise<Record<string, Outcome>> {
   const [{ mintSpaceCredentialWith, isAccessLost }, { generateSpaceKey }, { kemKeyFromDidDocument }, { sessionClient }, { tidNow }] = await Promise.all([
-    import("@/atproto/space-credential-core"), import("@/atproto/space-key"), import("@/atproto/kem-key"), import("@/atproto/client"), import("@/protocol/keys"),
+    import("@flock/protocol/atproto/space-credential-core"), import("@flock/protocol/atproto/space-key"), import("@flock/protocol/atproto/kem-key"), import("@flock/operator/atproto/client"), import("@flock/protocol/keys"),
   ]);
   const deps = (side: BrowserMember) => ({
     memberClient: sessionClient(side.session),
@@ -166,7 +166,7 @@ async function signInThroughBrowser(browser: Browser, webOrigin: string, pds: Pd
 
 async function provision(pds: PdsNetwork): Promise<{ authority: NetworkActor; member: NetworkActor; outsider: NetworkActor; channel: string; rkey: string }> {
   const [{ ensureMemberListSpace, putSpaceMember }, { bearerSession }, { AtprotoClient }, { tidNow }] = await Promise.all([
-    import("@/atproto/space-ops"), import("../support/pds-network"), import("@/atproto/xrpc"), import("@/protocol/keys"),
+    import("@flock/operator/atproto/space-ops"), import("../support/pds-network"), import("@flock/protocol/atproto/xrpc"), import("@flock/protocol/keys"),
   ]);
   const authority = await pds.createActor("k9owner", 0);
   const member = await pds.createActor("k9member", 1);
@@ -225,7 +225,7 @@ function operatorStandIn(webOrigin: string, serviceRef: string, preflights: stri
     }
     const token = request.headers.authorization?.match(/^Bearer (.+)$/)?.[1] ?? "";
     void (async () => {
-      const { getIdResolver } = await import("@/atproto/identity");
+      const { getIdResolver } = await import("@flock/operator/atproto/identity");
       try {
         const payload = await verifyJwt(token, serviceRef, OPERATOR_METHOD, async (issuer) => getIdResolver().did.resolveAtprotoKey(issuer.split("#", 1)[0]!));
         response.writeHead(200, { ...cors, "content-type": "application/json" }).end(JSON.stringify({ issuer: payload.iss }));

@@ -45,7 +45,7 @@ test("the workspace authority grant outlives the creator's sign-in session", asy
 
     await t.test("the authority account creates a second workspace with no further approval", async () => {
       // given an authority whose grant created one workspace, asking the operator as its browser does
-      const { tidNow } = await import("@/protocol/keys");
+      const { tidNow } = await import("@flock/protocol/keys");
       const authority = await pds.createActor("k1second-owner", 0);
       const browser = await mintBrowserSession(pds.hosts[0], authority.did, await combinedMemberScopes(pds.serviceRef), "k1second-browser-dpop");
       await storeAuthorityGrant(pds.hosts[0], authority.did, "k1second-grant-dpop");
@@ -61,7 +61,7 @@ test("the workspace authority grant outlives the creator's sign-in session", asy
 
     await t.test("a session restored before the authority approves again cannot use or delete the grant that replaced it", async () => {
       // given the authority's grant restored as a session, as an operator request in flight holds it
-      const [{ hasAuthorityGrant, restoreAuthorityGrant }, { TokenRefreshError }] = await Promise.all([import("@/operator/authority-grant"), import("@atproto/oauth-client-node")]);
+      const [{ hasAuthorityGrant, restoreAuthorityGrant }, { TokenRefreshError }] = await Promise.all([import("@flock/operator/operator/authority-grant"), import("@atproto/oauth-client-node")]);
       const authority = await pds.createActor("k1replaced-owner", 0);
       await storeAuthorityGrant(pds.hosts[0], authority.did, "k1replaced-first-dpop");
       const inFlight = await restoreAuthorityGrant(authority.did);
@@ -80,7 +80,7 @@ test("the workspace authority grant outlives the creator's sign-in session", asy
 
     await t.test("a restore that reads a grant just before the authority approves again restores the new approval", async () => {
       // given a restore that has read the authority's grant and waits for the grant's lock, held as a refresh holds it
-      const [{ restoreAuthorityGrant }, { oauthSqliteRequestLock }] = await Promise.all([import("@/operator/authority-grant"), import("@/auth/oauth-request-lock")]);
+      const [{ restoreAuthorityGrant }, { oauthSqliteRequestLock }] = await Promise.all([import("@flock/operator/operator/authority-grant"), import("@flock/operator/auth/oauth-request-lock")]);
       const authority = await pds.createActor("k1race-owner", 0);
       await storeAuthorityGrant(pds.hosts[0], authority.did, "k1race-first-dpop");
       let release: () => void = () => undefined;
@@ -121,7 +121,7 @@ async function createWorkspace(pds: PdsNetwork, browser: BrowserSession, name: s
 }
 
 async function createWorkspaceWithSecondAdmin(pds: PdsNetwork, scenario: Scenario): Promise<WorkspaceUnderTest> {
-  const { tidNow } = await import("@/protocol/keys");
+  const { tidNow } = await import("@flock/protocol/keys");
   const label = { "signs out": "k1out", "signs in again in a second browser": "k1again", "lets the sign-in session pass its lifetime": "k1lapse" }[scenario];
   const authority = await pds.createActor(`${label}-owner`, 0);
   const admin = await pds.createActor(`${label}-admin`, 1);
@@ -162,7 +162,7 @@ async function createWorkspaceWithSecondAdmin(pds: PdsNetwork, scenario: Scenari
 }
 
 async function adminOperations(pds: PdsNetwork, workspace: WorkspaceUnderTest): Promise<Record<string, Outcome>> {
-  const [{ requireActiveWorkspaceAdmin }, { tidNow }] = await Promise.all([import("@/operator/security"), import("@/protocol/keys")]);
+  const [{ requireActiveWorkspaceAdmin }, { tidNow }] = await Promise.all([import("@flock/operator/operator/security"), import("@flock/protocol/keys")]);
   // The second admin calls each operator method through its route, with service tokens from its own browser session.
   const admin = workspace.adminBrowser.session;
   const operationId = tidNow();
@@ -184,7 +184,7 @@ async function adminOperations(pds: PdsNetwork, workspace: WorkspaceUnderTest): 
 }
 
 async function runReconcileJob(pds: PdsNetwork, workspaceUri: string): Promise<void> {
-  const child = spawn(process.execPath, ["--import", "tsx", "scripts/reconcile-workspaces.ts"], {
+  const child = spawn(process.execPath, ["--import", "tsx", "apps/operator/scripts/reconcile-workspaces.ts"], {
     cwd: process.cwd(),
     env: { ...process.env, DATABASE_PATH: pds.databasePath, FLOCK_ADMIN_MUTATIONS_PAUSED: "true" },
     stdio: ["ignore", "pipe", "pipe"],

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { Given, Then, When } from "@cucumber/cucumber";
-import { reactionRecordKey, tidNow } from "@/protocol/keys";
+import { reactionRecordKey, tidNow } from "@flock/protocol/keys";
 import type { FixtureAccount } from "../../protocol-tests/support/app-fixture";
 import { PAGE_TIMEOUT_MS, type AppWorld, type Actor } from "../support/world";
 import {

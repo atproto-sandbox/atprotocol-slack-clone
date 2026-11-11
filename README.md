@@ -11,12 +11,12 @@ There is no app database of record. Each workspace, channel and conversation liv
 - **Workspaces and channels:** public and private channels, messages, one-level replies, one reaction per author, message and emoji, private-channel join requests with admin approval, admin promote and demote, leave and remove, archive.
 - **Invitations:** an admin adds a member by DID and copies an invite link. The member opens it, signs in and sees a banner offering to join. The PDS member list is the only gate; the link grants nothing by itself.
 - **Direct messages:** one-to-one and groups of up to 100. Each participant owns only their own half of a conversation and their own inbox, with a write policy they set (everyone, only people I allow, nobody). Sign-in is a separate browser-held OAuth session, and the server relays only a content-free change cursor.
-- **Independent readers:** `src/reader/` renders workspaces and DMs from the published lexicons and the PDS alone, without this app's database or DM engine, as a check that nothing is locked in.
+- **Independent readers:** `packages/reader/src` renders workspaces and DMs from the published lexicons and the PDS alone, without this app's database or DM engine, as a check that nothing is locked in.
 - **Operator:** journaled, idempotent mutations, restart recovery, a scheduled reconcile job, a pause switch and stalled-operation alerts.
 
 ## How it is built
 
-Next.js 16 (App Router) with SQLite for session state, caches and the operator journal. Lexicons are in `lexicons/new/flock/`. See [`ARCHITECTURE.md`](ARCHITECTURE.md) for runtime boundaries and data flow, [`CODE-MAP.md`](CODE-MAP.md) for the directory map and who owns what, and [`SPEC.md`](SPEC.md) for product scope.
+Next.js 16 (App Router) with SQLite for session state, caches and the operator journal. Lexicons are in `packages/protocol/lexicons/new/flock/`. See [`ARCHITECTURE.md`](ARCHITECTURE.md) for runtime boundaries and data flow, [`CODE-MAP.md`](CODE-MAP.md) for the directory map and who owns what, and [`SPEC.md`](SPEC.md) for product scope.
 
 ## Run it locally
 
@@ -38,7 +38,7 @@ You need Node 22.17 (`.nvmrc`) and pnpm 11 (`corepack pnpm`). The local stack ru
 
    It prints a local URL and four ready-made accounts, all with the password `playground-pass`. Type the account's DID (not the handle) into the sign-in box. Everything lives in memory and disappears when you stop it.
 
-For a real deployment, run the web app and the operator (`corepack pnpm operator`) as two processes on their own origins. Copy `.env.example`: both need `APP_URL`, `OPERATOR_URL`, `PLC_URL` and `OPERATOR_SERVICE_REF`; the operator also needs `DATABASE_PATH`, `AUTH_ENCRYPTION_KEY` and `AUTHORITY_CLIENT_PRIVATE_JWKS`. The operator DID's `did:web` document is served by the operator at `OPERATOR_URL`, and public deployments need HTTPS. See [`docs/operations.md`](docs/operations.md).
+For a real deployment, run the web app and the operator (`corepack pnpm operator`) as two processes on their own origins. Copy `.env.example` to `.env` at the repository root (or set the same variables in each process's environment): both need `APP_URL`, `OPERATOR_URL`, `PLC_URL` and `OPERATOR_SERVICE_REF`; the operator also needs `DATABASE_PATH`, `AUTH_ENCRYPTION_KEY` and `AUTHORITY_CLIENT_PRIVATE_JWKS`. The operator DID's `did:web` document is served by the operator at `OPERATOR_URL`, and public deployments need HTTPS. See [`docs/operations.md`](docs/operations.md).
 
 ## Tests
 

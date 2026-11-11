@@ -17,7 +17,7 @@ test("scheduled reconciliation reports stalled work and a missing authority gran
   });
 
   try {
-    const { getRawDb } = await import("@/lib/db");
+    const { getRawDb } = await import("@flock/operator/lib/db");
     const db = getRawDb();
     const authorityDid = "did:plc:reconcilefixture0001";
     const workspace = `at://${authorityDid}/space/new.flock.workspace/reconcile-fixture`;
@@ -31,7 +31,7 @@ test("scheduled reconciliation reports stalled work and a missing authority gran
       }), "injected outage", updatedAt, updatedAt);
     db.prepare("INSERT INTO operation_workspace_catalog (workspace, workspace_uri) VALUES (?, ?)").run(authorityDid, workspace);
 
-    const child = spawn(process.execPath, ["--import", "tsx", "scripts/reconcile-workspaces.ts"], {
+    const child = spawn(process.execPath, ["--import", "tsx", "apps/operator/scripts/reconcile-workspaces.ts"], {
       cwd: process.cwd(),
       env: { ...process.env, DATABASE_PATH: databasePath, FLOCK_ADMIN_MUTATIONS_PAUSED: "true" },
       stdio: ["ignore", "pipe", "pipe"],
@@ -54,7 +54,7 @@ test("scheduled reconciliation reports stalled work and a missing authority gran
     assert.deepEqual(operation, { state: "pending", updated_at: updatedAt }, "paused recovery must leave the journal untouched");
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM audit_event").get().count, 0);
   } finally {
-    const { closeDb } = await import("@/lib/db");
+    const { closeDb } = await import("@flock/operator/lib/db");
     closeDb();
     delete process.env.DATABASE_PATH;
     rmSync(directory, { recursive: true, force: true });

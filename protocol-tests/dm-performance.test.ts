@@ -3,14 +3,14 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { acceptedTimestamps, loadSlurFilter } from "./support/accepted-tid";
 import test from "node:test";
-import { kemKeyFromDidDocument } from "@/atproto/kem-key";
-import { generateSpaceKey } from "@/atproto/space-key";
-import { AtprotoClient } from "@/atproto/xrpc";
-import { DmClient, type DmDeps, type DmStore } from "@/dm/dm-client";
-import { tidNow } from "@/protocol/keys";
-import { mapLimited } from "@/lib/map-limited";
+import { kemKeyFromDidDocument } from "@flock/protocol/atproto/kem-key";
+import { generateSpaceKey } from "@flock/protocol/atproto/space-key";
+import { AtprotoClient } from "@flock/protocol/atproto/xrpc";
+import { DmClient, type DmDeps, type DmStore } from "@flock/client/dm/dm-client";
+import { tidNow } from "@flock/protocol/keys";
+import { mapLimited } from "@flock/protocol/map-limited";
 import { createFixtureTempRoot } from "./fixture-temp";
-import { memberspacePolicy } from "@/atproto/space-policy";
+import { memberspacePolicy } from "@flock/protocol/atproto/space-policy";
 
 // M4 exit evidence (.ai/plans/dm-tasks/m4.md): a 100-participant conversation
 // with 20,000 total messages must let `readConversation` fetch the latest 100

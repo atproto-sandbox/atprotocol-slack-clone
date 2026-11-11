@@ -1,102 +1,87 @@
+import { readFileSync } from "node:fs";
 import { defineConfig, globalIgnores } from "eslint/config";
 import nextVitals from "eslint-config-next/core-web-vitals";
 import nextTs from "eslint-config-next/typescript";
 
-const ISOMORPHIC_PROTOCOL_MODULES = [
-  "src/browser/**/*.{ts,tsx}",
-  "src/client/**/*.{ts,tsx}",
-  "src/dm/**/*.{ts,tsx}",
-  "src/protocol/**/*.{ts,tsx}",
-  "src/atproto/space-key.ts",
-  "src/atproto/kem-key.ts",
-  "src/atproto/repo-failure.ts",
-  "src/atproto/space-policy.ts",
-  "src/atproto/space-credential-core.ts",
-  "src/atproto/xrpc.ts",
-  "src/atproto/record-pages.ts",
-  "src/lib/bounded-json.ts",
-  "src/atproto/valid-channel-messages.ts",
-];
-// Test files for the above run under Node's own test runner (`node --test`),
-// so they need `node:*` imports even though the modules they exercise must
-// stay browser-safe. They still may not reach into server-only app layers.
-const ISOMORPHIC_PROTOCOL_TEST_FILES = ["src/browser/**/*.test.{ts,tsx}", "src/client/**/*.test.{ts,tsx}", "src/dm/**/*.test.{ts,tsx}", "src/protocol/**/*.test.{ts,tsx}"];
-const APP_LAYER_BOUNDARY = {
-  group: [
-    "@/lib/db", "@/lib/config", "@/auth/*", "@/operator/*",
-    "@atproto/oauth-client-node", "undici", "@/atproto/identity",
-  ],
-  message: "Isomorphic engine, DM and protocol modules must not depend on the server-only session, database, or SSRF-guarded fetch layer.",
+// Package boundaries are the packages' own dependency lists: a package imports only what its package.json declares
+// (`import/no-extraneous-dependencies`), so the protocol and client packages cannot reach the server, the reader only the
+// protocol, and neither app the other. The rules below say what a dependency list cannot.
+
+/** React is the web app's dependency, so its version is read from there. */
+const WEB_REACT_VERSION = JSON.parse(readFileSync(new URL("./apps/web/package.json", import.meta.url), "utf8")).dependencies.react;
+
+/** Code that runs in a browser. */
+const BROWSER_CODE = ["packages/protocol/src/**/*.{ts,tsx}", "packages/client/src/**/*.{ts,tsx}", "apps/web/src/browser/**/*.{ts,tsx}"];
+/** Tests and test fixtures, which run under Node's test runner and may use a package's dev dependencies. */
+const NODE_TESTS = ["**/*.test.{ts,tsx}", "packages/client/src/testing/**"];
+const NO_NODE_BUILTINS = {
+  group: ["node:*"],
+  message: "This code runs in a browser and cannot import Node built-ins.",
 };
-const ONE_WAY_IMPORTS = {
-  group: ["@/app", "@/app/*"],
-  message: "Imports point one way: the atproto and operator layers must not depend on the app.",
+const NO_SERVER_CONFIG = {
+  group: ["@flock/deployment/*"],
+  message: "Browser code reads its configuration from the page (browser-session-config.ts), not from the server's environment.",
+};
+const NO_APP_LAYER = {
+  group: ["../app/*", "@flock/web/app/*"],
+  message: "Browser code sits below the web app's UI: the UI imports it, not the other way round.",
 };
 const MEMBER_LIST_WRITES = {
-  name: "@/atproto/space-ops",
+  group: ["**/atproto/space-ops"],
   importNames: ["putSpaceMember", "removeSpaceMember"],
-  message: "The operator changes member lists through src/operator/members.ts, which drops the change feed's cached list.",
+  message: "The operator changes member lists through apps/operator/src/operator/members.ts, which drops the change feed's cached list.",
 };
 const NO_DM_IMPORT = {
-  group: ["@/dm", "@/dm/*"],
-  message: "M6 independence proof: this module must not import src/dm/** (see .ai/plans/dm-tasks/m6.md).",
+  group: ["@flock/client/dm/*"],
+  message: "M6 independence proof: this module must not import the DM engine (see .ai/plans/dm-tasks/m6.md).",
 };
 
 export default defineConfig([
   ...nextVitals,
   ...nextTs,
-  globalIgnores([".next/**", "src/lexicons/api/**", "next-env.d.ts"]),
+  globalIgnores(["**/.next/**", "packages/protocol/src/lexicons/api/**", "**/next-env.d.ts"]),
+  { settings: { react: { version: WEB_REACT_VERSION }, next: { rootDir: "apps/web/" } } },
   {
-    // Listed before the isomorphic rule, which replaces this one for the isomorphic modules and repeats ONE_WAY_IMPORTS.
-    // M6: DMs never touch the server, so the operator and the server-only atproto modules may not import the DM engine either.
-    files: ["src/atproto/**/*.{ts,tsx}", "src/operator/**/*.{ts,tsx}"],
+    files: ["packages/*/src/**/*.{ts,tsx}", "apps/*/src/**/*.{ts,tsx}", "apps/*/scripts/**/*.ts", "apps/*/next.config.ts"],
     rules: {
-      "no-restricted-imports": ["error", { patterns: [ONE_WAY_IMPORTS, NO_DM_IMPORT] }],
+      "import/no-extraneous-dependencies": ["error", { includeTypes: true, devDependencies: NODE_TESTS, optionalDependencies: false, peerDependencies: false }],
+      "import/no-relative-packages": "error",
     },
   },
   {
-    files: ["src/operator/**/*.{ts,tsx}"],
-    ignores: ["src/operator/members.ts"],
+    // The root's own code (the suites and scripts) is held to the root's package.json, test code throughout.
+    files: ["bdd/**/*.ts", "protocol-tests/**/*.ts", "scripts/**/*.{ts,mjs}"],
+    ignores: ["protocol-tests/atproto/**"],
     rules: {
-      "no-restricted-imports": ["error", { patterns: [ONE_WAY_IMPORTS, NO_DM_IMPORT], paths: [MEMBER_LIST_WRITES] }],
+      "import/no-extraneous-dependencies": ["error", { includeTypes: true, devDependencies: true }],
     },
   },
   {
-    files: ISOMORPHIC_PROTOCOL_MODULES,
-    ignores: ISOMORPHIC_PROTOCOL_TEST_FILES,
+    // Browser code and its tests: neither the server's configuration nor the UI above it. (Listed before the next block,
+    // which replaces this rule for non-test files and repeats these patterns.)
+    files: BROWSER_CODE,
     rules: {
-      "no-restricted-imports": ["error", {
-        patterns: [
-          {
-            group: ["node:*"],
-            message: "Isomorphic DM/protocol modules must run in the browser and cannot import Node built-ins.",
-          },
-          APP_LAYER_BOUNDARY,
-          ONE_WAY_IMPORTS,
-        ],
-      }],
+      "no-restricted-imports": ["error", { patterns: [NO_SERVER_CONFIG, NO_APP_LAYER] }],
     },
   },
   {
-    files: ISOMORPHIC_PROTOCOL_TEST_FILES,
+    files: BROWSER_CODE,
+    ignores: NODE_TESTS,
     rules: {
-      "no-restricted-imports": ["error", { patterns: [APP_LAYER_BOUNDARY] }],
+      "no-restricted-imports": ["error", { patterns: [NO_NODE_BUILTINS, NO_SERVER_CONFIG, NO_APP_LAYER] }],
     },
   },
   {
-    // M6: the independent reader must prove DM state is reconstructible from
-    // published lexicons alone, without depending on the primary app's DM
-    // engine (`src/dm/**`).
-    files: ["src/reader/**/*.{ts,tsx}"],
+    files: ["apps/operator/src/**/*.{ts,tsx}"],
+    ignores: ["apps/operator/src/operator/members.ts"],
     rules: {
-      "no-restricted-imports": ["error", { patterns: [NO_DM_IMPORT] }],
+      "no-restricted-imports": ["error", { patterns: [MEMBER_LIST_WRITES] }],
     },
   },
   {
-    // M6: DMs never touch server routes, tables, or cache. No route handler
-    // the web app's server still has (the sign-in client's metadata) may
-    // import the DM engine.
-    files: ["src/app/**/route.{ts,tsx}"],
+    // M6: DMs never touch server routes, tables, or cache. No route handler the web app's server has (the sign-in client's
+    // metadata) may import the DM engine.
+    files: ["apps/web/src/app/**/route.{ts,tsx}"],
     rules: {
       "no-restricted-imports": ["error", { patterns: [NO_DM_IMPORT] }],
     },

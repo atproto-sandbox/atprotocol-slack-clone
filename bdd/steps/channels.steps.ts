@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { Given, Then, When } from "@cucumber/cucumber";
 import { expect } from "@playwright/test";
-import { reactionRecordKey, spaceRecordUri, tidNow } from "@/protocol/keys";
+import { reactionRecordKey, spaceRecordUri, tidNow } from "@flock/protocol/keys";
 import { PAGE_TIMEOUT_MS, type Actor, type AppWorld } from "../support/world";
 import {
   waitForAdminControls, copyInviteLink, createWorkspaceAs, eventually, inviteMemberAs, joinFromInvitation, openInviteLinkAndSignIn, ownerInvites,
 } from "../support/ui";
 import { browserRecords } from "../support/browser-store";
 import { engineAs } from "../support/engine";
-import type { Engine } from "@/client/engine";
+import type { Engine } from "@flock/client/engine";
 import {
   channelNamed, clickReaction, completedOperationSteps, composer, createChannelAs, deliveredMessage, deliveredReactions, directoryOf,
   credentialCalls, credentialOutcome, grantedCredential, listingCalls, listMembers, messageCard, messageCards, messageCollection, openChannel, ownRecords,

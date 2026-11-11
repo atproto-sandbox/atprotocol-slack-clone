@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { generateSpaceKey } from "@/atproto/space-key";
+import { generateSpaceKey } from "@flock/protocol/atproto/space-key";
 import { expect, type Locator, type Page } from "@playwright/test";
-import { mintSpaceCredentialWith, SpaceCredentialError, type SpaceCredential } from "@/atproto/space-credential-core";
-import { AtprotoClient } from "@/atproto/xrpc";
-import { channelUri, spaceRecordUri } from "@/protocol/keys";
-import { inviteLinkFor } from "@/app/ui/client-api";
+import { mintSpaceCredentialWith, SpaceCredentialError, type SpaceCredential } from "@flock/protocol/atproto/space-credential-core";
+import { AtprotoClient } from "@flock/protocol/atproto/xrpc";
+import { channelUri, spaceRecordUri } from "@flock/protocol/keys";
+import { inviteLinkFor } from "@flock/web/app/ui/client-api";
 import type { SecondApp } from "../../protocol-tests/support/app-fixture";
 import { PAGE_TIMEOUT_MS, type Actor, type ApiCall, type AppWorld } from "./world";
 import { browserRecords } from "./browser-store";
