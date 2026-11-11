@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { mkdtempSync, rmSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
@@ -9,6 +8,7 @@ import { pathToFileURL } from "node:url";
 import { after, before, test } from "node:test";
 import { chromium, type Page } from "@playwright/test";
 import { createFixtureTempRoot } from "../fixture-temp";
+import { startStack, type Stack } from "../support/app-server";
 
 // M5 browser acceptance (.ai/plans/dm-tasks/m5.md): two accounts on two PDS
 // hosts complete a full DM round trip through the real browser OAuth flow (the
@@ -41,12 +41,11 @@ type TestNetwork = {
 
 let network: TestNetwork | undefined;
 let fixtureTemp: ReturnType<typeof createFixtureTempRoot> | undefined;
-let server: ChildProcess | undefined;
+let stack: Stack | undefined;
 let scratchDirectory: string | undefined;
 let appUrl: URL | undefined;
 let aliceDid = "";
 let bobDid = "";
-let serverOutput = "";
 
 type AppRequestRecord = { actor: string; method: string; url: string; body: string };
 const appRequests: AppRequestRecord[] = [];
@@ -77,33 +76,27 @@ before(async () => {
   bobDid = bob.data.did;
 
   scratchDirectory = mkdtempSync(join(tmpdir(), "slack-dm-oauth-browser-"));
-  const port = await freePort();
-  appUrl = new URL(`http://127.0.0.1:${port}`);
-  const childEnv = {
+  const [port, operatorPort] = [await freePort(), await freePort()];
+  stack = await startStack({
     PATH: process.env.PATH ?? "",
     HOME: process.env.HOME ?? tmpdir(),
     TMPDIR: process.env.TMPDIR ?? tmpdir(),
     NODE_ENV: "production",
     NEXT_TELEMETRY_DISABLED: "1",
     ATPROTO_ACCEPTANCE_TEST: "true",
-    APP_URL: appUrl.origin,
+    APP_URL: `http://127.0.0.1:${port}`,
+    OPERATOR_URL: `http://127.0.0.1:${operatorPort}`,
     DATABASE_PATH: join(scratchDirectory, "app.db"),
     AUTH_ENCRYPTION_KEY: Buffer.alloc(32, 0x3c).toString("hex"),
     PLC_URL: network.plc.url,
-    OPERATOR_SERVICE_REF: `did:web:localhost%3A${port}#atproto_flock_operator`,
-  };
-  server = spawn(process.execPath, [
-    join(projectRoot, "node_modules/next/dist/bin/next"),
-    "start", "--hostname", "127.0.0.1", "--port", String(port),
-  ], { cwd: projectRoot, env: childEnv, stdio: ["ignore", "pipe", "pipe"] });
-  server.stdout?.on("data", (chunk: Buffer) => { serverOutput = `${serverOutput}${chunk}`.slice(-20_000); });
-  server.stderr?.on("data", (chunk: Buffer) => { serverOutput = `${serverOutput}${chunk}`.slice(-20_000); });
-  await waitForApp(appUrl, server);
+    OPERATOR_SERVICE_REF: `did:web:localhost%3A${operatorPort}#atproto_flock_operator`,
+  });
+  appUrl = stack.appUrl;
 }, { timeout: 60_000 });
 
 after(async () => {
   try {
-    await stopServer(server);
+    await stack?.stop();
     await network?.close();
   } finally {
     if (scratchDirectory) rmSync(scratchDirectory, { recursive: true, force: true });
@@ -121,8 +114,8 @@ test("real browsers complete a DM round trip across two PDS hosts, then a leave 
     const bobPage = await bobContext.newPage();
     alicePage.setDefaultTimeout(30_000);
     bobPage.setDefaultTimeout(30_000);
-    recordAppRequests("alice", alicePage, appUrl);
-    recordAppRequests("bob", bobPage, appUrl);
+    recordAppRequests("alice", alicePage, stack!);
+    recordAppRequests("bob", bobPage, stack!);
     recordMacResponses("alice", alicePage);
     recordMacResponses("bob", bobPage);
 
@@ -213,10 +206,11 @@ function recordMacResponses(actor: string, page: Page): void {
   });
 }
 
-function recordAppRequests(actor: string, page: Page, app: URL): void {
+/** Every request a page sends to either of the app's servers: the web app's origin and its operator's. */
+function recordAppRequests(actor: string, page: Page, app: Stack): void {
   page.on("request", (request) => {
     const url = new URL(request.url());
-    if (url.origin !== app.origin) return;
+    if (url.origin !== app.appUrl.origin && url.origin !== app.operatorUrl.origin) return;
     const body = request.postData() ?? "";
     appRequests.push({ actor, method: request.method(), url: request.url(), body });
   });
@@ -268,27 +262,3 @@ async function freePort(): Promise<number> {
   return address.port;
 }
 
-async function stopServer(child: ChildProcess | undefined): Promise<void> {
-  if (!child || child.killed) return;
-  child.kill("SIGTERM");
-  await new Promise<void>((resolve) => {
-    if (child.exitCode !== null) return resolve();
-    const timer = setTimeout(() => resolve(), 5_000);
-    child.once("exit", () => { clearTimeout(timer); resolve(); });
-  });
-}
-
-async function waitForApp(url: URL, child: ChildProcess): Promise<void> {
-  const deadline = Date.now() + 45_000;
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null) throw new Error(`Next server exited before becoming ready.\n${serverOutput}`);
-    try {
-      const response = await fetch(url);
-      if (response.ok) return;
-    } catch {
-      // Continue polling while Next starts.
-    }
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-  throw new Error(`Next server did not become ready.\n${serverOutput}`);
-}

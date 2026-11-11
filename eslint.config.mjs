@@ -48,16 +48,17 @@ export default defineConfig([
   globalIgnores([".next/**", "src/lexicons/api/**", "next-env.d.ts"]),
   {
     // Listed before the isomorphic rule, which replaces this one for the isomorphic modules and repeats ONE_WAY_IMPORTS.
+    // M6: DMs never touch the server, so the operator and the server-only atproto modules may not import the DM engine either.
     files: ["src/atproto/**/*.{ts,tsx}", "src/operator/**/*.{ts,tsx}"],
     rules: {
-      "no-restricted-imports": ["error", { patterns: [ONE_WAY_IMPORTS] }],
+      "no-restricted-imports": ["error", { patterns: [ONE_WAY_IMPORTS, NO_DM_IMPORT] }],
     },
   },
   {
     files: ["src/operator/**/*.{ts,tsx}"],
     ignores: ["src/operator/members.ts"],
     rules: {
-      "no-restricted-imports": ["error", { patterns: [ONE_WAY_IMPORTS], paths: [MEMBER_LIST_WRITES] }],
+      "no-restricted-imports": ["error", { patterns: [ONE_WAY_IMPORTS, NO_DM_IMPORT], paths: [MEMBER_LIST_WRITES] }],
     },
   },
   {
@@ -92,8 +93,8 @@ export default defineConfig([
     },
   },
   {
-    // M6: DMs never touch server routes, tables, or cache. No server route
-    // handler (the operator's XRPC methods, the authority flow, metadata) may
+    // M6: DMs never touch server routes, tables, or cache. No route handler
+    // the web app's server still has (the sign-in client's metadata) may
     // import the DM engine.
     files: ["src/app/**/route.{ts,tsx}"],
     rules: {

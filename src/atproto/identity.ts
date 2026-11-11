@@ -107,9 +107,9 @@ async function resolveSafePdsEndpoint(endpoint: string): Promise<{
   let url: URL;
   try { url = new URL(endpoint); }
   catch { throw new Error("The DID document contains an invalid PDS endpoint."); }
-  const appUrl = getConfig().appUrl;
+  const operatorUrl = getConfig().operatorUrl;
   const localDevelopment = (process.env.NODE_ENV !== "production" || process.env.ATPROTO_ACCEPTANCE_TEST === "true") &&
-    isLoopbackHost(appUrl.hostname);
+    isLoopbackHost(operatorUrl.hostname);
   const hostname = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
   const localTarget = isLoopbackHost(hostname);
   if ((url.protocol !== "https:" && !(localDevelopment && localTarget && url.protocol === "http:")) ||

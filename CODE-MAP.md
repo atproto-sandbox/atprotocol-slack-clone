@@ -9,8 +9,8 @@ A Slack-style team workspace built directly on atproto (AT Protocol) permissione
   ┌──────────────────────────────────────────┐      ┌───────────────────────────────────────┐     ┌───────────────────────────────────┐
   │ React UI (src/app/ui/**)                   │      │ App Router pages/routes (src/app/**)   │     │ new.flock.workspace / .channel /   │
   │  - workspace-manager, sidebar, channel-view│◀────▶│  - page.tsx (entry), layout.tsx        │────▶│   .inbox spaces                    │
-  │  - dm-sidebar/home/requests/settings/      │      │  - xrpc/** operator + notices           │     │ new.flock.directory/.roster/.admin │
-  │    conversation (src/app/ui/dm-*.tsx)      │      │  - authority/** the authority flow      │     │ new.flock.channel.message/.reaction│
+  │  - dm-sidebar/home/requests/settings/      │      │  OPERATOR (own process, own origin:     │     │ new.flock.directory/.roster/.admin │
+  │    conversation (src/app/ui/dm-*.tsx)      │      │  src/operator/server.ts, xrpc-server)   │     │ new.flock.channel.message/.reaction│
   │                                             │      │  - oauth/callback (a client page) and   │     │ (member-list read/write, open      │
   │ Browser OAuth session: sign-in itself (one  │      │    the browser client's metadata        │     │  app access; member lists ARE the  │
   │  grant: member set, operator rpc, DM set),  │      │                                         │     │  read gate)                        │
@@ -71,11 +71,6 @@ src/
     layout.tsx               Root HTML shell, security headers wiring.
     oauth/                  The browser sign-in's callback page (client-only; the code stays in the fragment) and the
                              browser client's metadata. The server has no member routes and no member session.
-    authority/              The workspace authority flow: start, callback, client metadata, JWKS.
-    xrpc/                   Server-published XRPC methods: the operator's own RPCs
-                             (new.flock.operator.*), com.atproto.space.notifyWrite and com.atproto.space.notifySpaceDeleted.
-    .well-known/did.json/   The operator's did:web document (OPERATOR_SERVICE_REF), when the
-                             operator DID is hosted as did:web on this app's own origin.
     ui/                     React components (client + server). workspace-manager.tsx is the
                              main stage; dm-*.tsx are the DM sidebar/home/requests/settings/
                              conversation views, wired in through dm-context.tsx / dm-session-bridge.tsx.
@@ -127,12 +122,15 @@ src/
     workspace-summary.ts      What a workspace is, summarized from its authority's records, and the v1
                               envelope check; the engine and the operator both use it.
   auth/                   OAuth plumbing for the authority grant: the flow binding (oauth-flow.ts), the encrypted
-                             SQLite stores (encrypted-store.ts), the cross-process refresh lock, scope canonicalization.
+                             SQLite stores (encrypted-store.ts, with a view that sees only the values it accepts), the
+                             cross-process refresh lock, scope canonicalization.
   operator/               Workspace-authority operator: journaled, idempotent PDS mutations.
     authority-grant.ts       The one owner of the workspace authority grant: its own OAuth client (confidential
                               private_key_jwt outside loopback), the ticket -> /authority/start -> PDS consent ->
                               /authority/callback flow, and the `authority_grant` table. The operator, bootstrap and
-                              the reconcile job restore the grant from here; a member sign-in never writes it.
+                              the reconcile job restore the grant from here; a member sign-in never writes it. Each
+                              restore is a client over a view of one approval, so a session still in use after a new
+                              approval can neither use nor delete the new grant.
     actor.ts                 OperatorActor and WorkspaceRef: who an operation runs for, through which session.
     journal.ts               runJournaledOperation: the workspace lock, the operation row, declared step names,
                               resume by name and request hash, and "waiting for the authority's approval".
@@ -150,8 +148,8 @@ src/
                               member list read with the authority grant, cached 60 s. members.ts is the only way the
                               operator changes a member list (lint-enforced), and drops the cached list when it does.
     registrations.ts         The operator's change-notice sink: registered after an operation creates a space (kinds
-                              declare createsSpaces/archivesSpaces), renewed by a sweep (process start via
-                              src/instrumentation.ts, and the reconcile job) under a lease that is also its schedule,
+                              declare createsSpaces/archivesSpaces), renewed by a sweep (the operator process's start,
+                              and the reconcile job) under a lease that is also its schedule,
                               failures backed off per space and reported with lapsed ones; stalled.ts adds them to the
                               stalled-operations report.
     workspace-state.ts       The operator's reads and writes of rosters, admins and the directory.
@@ -244,10 +242,13 @@ cannot reach the server's database, operator or OAuth layers even by accident.
 ## Entry points
 
 - `src/app/page.tsx` — the one page in the app; resolves session state and renders everything else.
-- `pnpm dev` / `pnpm build` / `pnpm start` — Next.js dev/build/prod (see `package.json`). `src/instrumentation.ts` runs once
-  as a server process starts: the operator's notice-registration sweep.
-- `src/app/xrpc/new.flock.operator.*` — the operator's methods (`execute`, `getOperation`, `listInboxWriters`, `getChanges`,
-  `createWorkspace`, `startAuthorityFlow`, `listStalledOperations`), each authenticated by a PDS-issued service token.
+- `pnpm dev` / `pnpm build` / `pnpm start` — the web app (Next.js dev/build/prod, see `package.json`). It holds no database
+  and no secret.
+- `pnpm operator` (`src/operator/main.ts`) — the operator's own process at `OPERATOR_URL`: `src/operator/server.ts` serves its
+  methods (`src/operator/methods.ts`: `execute`, `getOperation`, `listInboxWriters`, `getChanges`, `createWorkspace`,
+  `startAuthorityFlow`, `listStalledOperations`, each authenticated by a PDS-issued service token, and the two notices) on
+  `@atproto/xrpc-server` with the app's lexicons, CORS for the web origin only, the authority flow (`/authority/*`) and its
+  `did:web` document; it runs the notice-registration sweep at start.
 - `pnpm playground` (`scripts/playground.ts`) — a local copy of the whole stack with ready-made accounts, for trying the app by hand (`ATPROTO_PINNED_CHECKOUT` must point at the built pinned checkout).
 - `pnpm reconcile` (`scripts/reconcile-workspaces.ts`) — the scheduled membership-reconciliation job (`docs/operations.md`).
 - `pnpm authority` (`scripts/authority-grant.ts`) — generate an authority client key, or revoke an authority grant.
@@ -274,7 +275,7 @@ bdd/support/hooks.ts      starts the shared fixture once; BDD_HEADED=1 BDD_BROWS
 bdd/gate.test.ts          runs in `pnpm test`: the @unbound count may only go down, every @unbound says why,
                           every bound scenario (including @slow) has a definition for every step
 protocol-tests/support/app-fixture.ts
-                          the stack (two PDS hosts, PLC, lexicons, `next start`) used by the BDD run and
+                          the stack (two PDS hosts, PLC, lexicons, `next start` and the operator process) used by the BDD run and
                           `pnpm playground`; `startSecondApp({env})` adds an independent app instance
 ```
 

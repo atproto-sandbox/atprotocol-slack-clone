@@ -689,7 +689,7 @@ When("a participant signs in with any conforming OAuth client", { timeout: SETUP
   const requested: string[] = [];
   const changeFeedAttempts: string[] = [];
   context.on("request", (request) => { requested.push(request.url()); });
-  await context.route(`${this.appOrigin}/**`, (route) => route.abort("connectionrefused"));
+  for (const origin of [this.appOrigin, this.operatorOrigin]) await context.route(`${origin}/**`, (route) => route.abort("connectionrefused"));
   await context.route("**/xrpc/new.flock.operator.getChanges", (route) => { changeFeedAttempts.push(route.request().url()); return route.abort("connectionrefused"); });
   const page = await context.newPage();
   page.setDefaultTimeout(PAGE_TIMEOUT_MS);
@@ -723,14 +723,14 @@ Then("their conversations are rebuilt from their own spaces, halves, and inbox",
 
   const second = this.scratch.get("secondApp") as SecondApp;
   const contacted = [...new Set((this.scratch.get("rebuildRequests") as string[]).filter((url) => /^https?:/.test(url)).map((url) => new URL(url).origin))].sort();
-  const localServers = [second.appUrl.origin, ...this.fixture.pdsUrls.map((url) => new URL(url).origin), new URL(this.fixture.plcUrl).origin];
+  const localServers = [second.appUrl.origin, second.operatorUrl.origin, ...this.fixture.pdsUrls.map((url) => new URL(url).origin), new URL(this.fixture.plcUrl).origin];
   const outsideServers = ["https://fonts.googleapis.com", "https://fonts.gstatic.com", ...[...this.actors.values()].map((actor) => `https://${actor.handle}`)];
   const isLocal = (origin: string): boolean => ["127.0.0.1", "localhost"].includes(new URL(origin).hostname);
   assert.ok(contacted.includes(second.appUrl.origin), "the rebuilt page was served by the replacement app");
   assert.ok(this.fixture.pdsUrls.some((url) => contacted.includes(new URL(url).origin)), "and talked to the PDS hosts, so the observation below covers the rebuild itself");
   assert.deepEqual(contacted.filter((origin) => isLocal(origin) && !localServers.includes(origin)), [], "of the servers on this machine the rebuild contacted only the replacement app, the PDS hosts, and the PLC directory");
   assert.deepEqual(contacted.filter((origin) => !isLocal(origin) && !outsideServers.includes(origin)), [], "and beyond them only web fonts and handle-domain lookups");
-  assert.equal(contacted.includes(this.appOrigin), false, "so nothing in it so much as tried the original app server");
+  assert.equal(contacted.includes(this.appOrigin) || contacted.includes(this.operatorOrigin), false, "so nothing in it so much as tried the original app server or its operator");
   assert.ok((this.scratch.get("changeFeedAttempts") as string[]).length > 0, "the operator's change feed was tried and refused while the conversations were rebuilt anyway");
   assert.equal(dmpAppDataRowCount(second.databasePath), 0, "and the replacement app, which only ever saw a sign-in, holds no workspace or channel data");
   assert.equal(dmpFilesContain(second.databasePath, "alice to bob"), false, "or any conversation text");
@@ -811,7 +811,9 @@ Then("the app server holds no member session and no member token", async functio
   const bob = actorNamed(this, "bob");
   assert.deepEqual(memberSessionTablesIn(session.second.databasePath), [], "the app's database has nowhere to keep a member session");
   for (const actor of [alice, bob]) {
-    assert.deepEqual(await actor.context.cookies(session.second.appUrl.origin), [], "the app sets no session cookie: the browser holds the session");
+    for (const origin of [session.second.appUrl.origin, session.second.operatorUrl.origin]) {
+      assert.deepEqual(await actor.context.cookies(origin), [], "neither the app nor its operator keeps a cookie: the browser holds the session");
+    }
   }
   // What the server does hold: the workspace authority's grant to its operator, which alice approved when she created a workspace.
   const grants = dmpAuthorityGrants(session.second.databasePath, session.key);
@@ -828,8 +830,8 @@ Then("no server route stores or returns DM content", async function (this: AppWo
   const alice = actorNamed(this, "alice");
   const bob = actorNamed(this, "bob");
   assert.equal(session.texts.length, 2);
-  const appOrigin = session.second.appUrl.origin;
-  const everyCall = [alice, bob].flatMap((actor) => actor.xrpc.filter((call) => call.origin === appOrigin));
+  const appOrigins = [session.second.appUrl.origin, session.second.operatorUrl.origin];
+  const everyCall = [alice, bob].flatMap((actor) => actor.xrpc.filter((call) => appOrigins.includes(call.origin)));
   assert.ok(everyCall.length > 0, "the people's browsers did talk to the app server");
   const stored = dmpEverythingTheAppStored(session.second.databasePath, session.key);
   assert.ok(stored.some((value) => value.includes(alice.did)), "the scan of the database sees what the app does keep: the authority's grant and its operations");

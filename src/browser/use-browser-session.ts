@@ -38,7 +38,7 @@ type Built = { client: DmClient; store: BrowserDmStore; engine: Engine; snapshot
  * runs outside the browser; space signing keys are non-extractable WebCrypto P-256 keys.
  */
 export function useBrowserSession(did: string, config: BrowserSessionConfig): BrowserSessionState {
-  const { appUrl, plcUrl, scope, serviceRef, loopback } = config;
+  const { appUrl, plcUrl, scope, serviceRef, operatorUrl, loopback } = config;
   const [status, setStatus] = useState<BrowserSessionStatus>("connecting");
   const [built, setBuilt] = useState<Built | null>(null);
   const [error, setError] = useState("");
@@ -55,7 +55,7 @@ export function useBrowserSession(did: string, config: BrowserSessionConfig): Br
         if (epoch.current !== run) return;
         setStatus("connecting");
         setError("");
-        const session = await restoreSession({ appUrl, plcUrl, scope, serviceRef, loopback });
+        const session = await restoreSession({ appUrl, plcUrl, scope, serviceRef, operatorUrl, loopback });
         if (epoch.current !== run) return;
         if (!session) {
           setStatus("disconnected");
@@ -83,7 +83,7 @@ export function useBrowserSession(did: string, config: BrowserSessionConfig): Br
           setError("Another tab of this app signed out, or started another account, and closed this account's store. Reload to continue here.");
           setStatus("error");
         });
-        const engine = createEngine(transport, { store: syncStore, operator: { serviceRef, endpoint: appUrl } });
+        const engine = createEngine(transport, { store: syncStore, operator: { serviceRef, endpoint: operatorUrl } });
         // Spaces not opened for the retention period go, which bounds what is kept for spaces an account no longer reads.
         await engine.lifecycle.sweep(STORE_RETENTION_MS);
         const snapshots = new Snapshots();
@@ -110,7 +110,7 @@ export function useBrowserSession(did: string, config: BrowserSessionConfig): Br
       made?.syncStore.close();
       if (builtRef.current === made) builtRef.current = null;
     };
-  }, [did, appUrl, plcUrl, scope, serviceRef, loopback]);
+  }, [did, appUrl, plcUrl, scope, serviceRef, operatorUrl, loopback]);
 
   const connect = useCallback(() => {
     setStatus("connecting");
@@ -121,14 +121,14 @@ export function useBrowserSession(did: string, config: BrowserSessionConfig): Br
         // The session lacks a scope the app asks for. It is revoked first, so if another account is chosen at the host,
         // nothing of this one is left behind. The library forgets it here even when its host cannot be told, and consent
         // replaces it, so that failure does not stop the reconnect.
-        await revoke({ appUrl, plcUrl, scope, serviceRef, loopback }).catch(() => undefined);
-        await signIn(did, { appUrl, plcUrl, scope, serviceRef, loopback });
+        await revoke({ appUrl, plcUrl, scope, serviceRef, operatorUrl, loopback }).catch(() => undefined);
+        await signIn(did, { appUrl, plcUrl, scope, serviceRef, operatorUrl, loopback });
       } catch (caught) {
         setError(caught instanceof Error ? caught.message : "Could not connect.");
         setStatus("error");
       }
     })();
-  }, [did, appUrl, plcUrl, scope, serviceRef, loopback]);
+  }, [did, appUrl, plcUrl, scope, serviceRef, operatorUrl, loopback]);
 
   /** Sign-out: what was built on the session stops and lets go of the store, then the account is signed out. */
   const signOut = useCallback(async () => {
@@ -140,8 +140,8 @@ export function useBrowserSession(did: string, config: BrowserSessionConfig): Br
     current?.syncStore.close();
     setBuilt(null);
     setStatus("disconnected");
-    return signOutAccount(did, async () => (await import("./session")).signOut({ appUrl, plcUrl, scope, serviceRef, loopback }));
-  }, [did, appUrl, plcUrl, scope, serviceRef, loopback]);
+    return signOutAccount(did, async () => (await import("./session")).signOut({ appUrl, plcUrl, scope, serviceRef, operatorUrl, loopback }));
+  }, [did, appUrl, plcUrl, scope, serviceRef, operatorUrl, loopback]);
 
   return {
     status, error, connect, signOut,

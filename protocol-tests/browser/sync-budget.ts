@@ -1,5 +1,5 @@
 import { chromium, type Browser, type Page } from "@playwright/test";
-import { availablePort, startAppServer, type AppServer } from "../support/app-server";
+import { availablePort, startAppServer, startOperatorServer, type AppServer } from "../support/app-server";
 import { signIn } from "../support/browser-app";
 import { actorTransport, bearerSession, startPdsNetwork, type NetworkActor, type PdsNetwork } from "../support/pds-network";
 import { createChannel, deleteMessage, MESSAGES_PER_WRITER, percentile, Probe, provision, writeMessage, WRITER_COUNTS } from "../support/sync-dataset";
@@ -24,10 +24,13 @@ type Sent = { url: string; preflight: boolean };
 
 async function main(): Promise<void> {
   const appPort = await availablePort();
-  const pds = await startPdsNetwork("sync-budget-browser", { appPort });
+  const operatorPort = await availablePort();
+  const pds = await startPdsNetwork("sync-budget-browser", { appPort, operatorPort });
   let app: AppServer | undefined;
+  let operator: AppServer | undefined;
   let browser: Browser | undefined;
   try {
+    operator = await startOperatorServer();
     app = await startAppServer(appPort);
     const { authority, reader, writers } = await provision(pds, Math.max(...WRITER_COUNTS));
     const channels = await workspaceWithChannels(pds, authority, reader, writers);
@@ -38,7 +41,8 @@ async function main(): Promise<void> {
     page.setDefaultTimeout(120_000);
     const sent = await recordRequests(page);
     await signIn(page, app.url, reader, WORKSPACE_NAME);
-    const appOrigin = new URL(app.url).origin;
+    // The app's own servers (the web app and its operator) are not the hosts a sync is measured against.
+    const appOrigins = [new URL(app.url).origin, new URL(operator.url).origin];
 
     const rows: Array<{ writers: number; phase: Phase; calls: number; preflights: number; median: number; p95: number; byMethod: Record<string, number> }> = [];
     for (const count of WRITER_COUNTS) {
@@ -47,14 +51,14 @@ async function main(): Promise<void> {
       const results: Record<Phase, Measurement[]> = { "first open": [], reopen: [], "one new message": [] };
       for (let run = 0; run < RUNS; run += 1) {
         await emptyStore(page, app.url, reader.did);
-        results["first open"].push(await measure(page, sent, appOrigin, pds, name));
+        results["first open"].push(await measure(page, sent, appOrigins, pds, name));
         await assertHolds(page, reader.did, space, writers.slice(0, count).map((writer) => writer.did));
-        results.reopen.push(await measure(page, sent, appOrigin, pds, name));
+        results.reopen.push(await measure(page, sent, appOrigins, pds, name));
         const writer = writers[run % count]!;
         const before = await probe.waitForCurrentRevision(writer.did);
         const rkey = await writeMessage(writer, space, `run ${run}`);
         await probe.waitForNotice(writer.did, before);
-        results["one new message"].push(await measure(page, sent, appOrigin, pds, name));
+        results["one new message"].push(await measure(page, sent, appOrigins, pds, name));
         if (!await holdsRecord(page, reader.did, space, writer.did, rkey)) throw new Error(`The reopen after a new message did not read it (${writer.did}/${rkey}).`);
         await deleteMessage(writer, space, rkey);
         await probe.waitForCurrentRevision(writer.did);
@@ -72,6 +76,7 @@ async function main(): Promise<void> {
   } finally {
     await browser?.close();
     await app?.stop();
+    await operator?.stop();
     await pds.close();
   }
 }
@@ -127,8 +132,8 @@ async function emptyStore(page: Page, appUrl: string, did: string): Promise<void
  * Waits until the page has sent nothing to the protocol hosts for a second (the app's start-up discovery done), so a
  * measurement counts only what the click causes.
  */
-async function quiet(sent: Sent[], appOrigin: string): Promise<void> {
-  const upstream = () => sent.filter((entry) => new URL(entry.url).origin !== appOrigin).length;
+async function quiet(sent: Sent[], appOrigins: readonly string[]): Promise<void> {
+  const upstream = () => sent.filter((entry) => !appOrigins.includes(new URL(entry.url).origin)).length;
   const deadline = Date.now() + 60_000;
   let seen = upstream();
   let since = Date.now();
@@ -143,8 +148,8 @@ async function quiet(sent: Sent[], appOrigin: string): Promise<void> {
 }
 
 /** Clicks the channel in the sidebar and times, in the page, until its message list stops being busy; counts what was sent. */
-async function measure(page: Page, sent: Sent[], appOrigin: string, pds: PdsNetwork, name: string): Promise<Measurement> {
-  await quiet(sent, appOrigin);
+async function measure(page: Page, sent: Sent[], appOrigins: readonly string[], pds: PdsNetwork, name: string): Promise<Measurement> {
+  await quiet(sent, appOrigins);
   const from = sent.length;
   const ms = await page.evaluate((channel) => new Promise<number>((resolve, reject) => {
     const button = [...document.querySelectorAll<HTMLButtonElement>(".channel-nav-item")].find((entry) => entry.textContent?.slice(1).trim() === channel);
@@ -166,7 +171,7 @@ async function measure(page: Page, sent: Sent[], appOrigin: string, pds: PdsNetw
     started = performance.now();
     button.click();
   }), name);
-  const upstream = sent.slice(from).filter((entry) => new URL(entry.url).origin !== appOrigin);
+  const upstream = sent.slice(from).filter((entry) => !appOrigins.includes(new URL(entry.url).origin));
   const byMethod: Record<string, number> = {};
   for (const entry of upstream.filter((item) => !item.preflight)) {
     const url = new URL(entry.url);

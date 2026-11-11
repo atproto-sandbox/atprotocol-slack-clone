@@ -9,19 +9,20 @@ import type { AppFixture, FixtureAccount } from "../../protocol-tests/support/ap
 export const PAGE_TIMEOUT_MS = 90_000;
 
 /**
- * `body` says what `responseBody` holds: "recorded" is the response text. "streamed" (text/event-stream) and "navigated-away" (the
- * page left before the browser would hand over the body, as it does right after an OAuth permission reply) are recorded headers-only
- * with an empty `responseBody`, which says nothing about what they carried. Leak scans must report such calls as not covered.
+ * `body` says what `responseBody` holds: "recorded" is the response text. "streamed" (text/event-stream) and "navigated-away" are
+ * recorded headers-only with an empty `responseBody`, which says nothing about what they carried. "navigated-away" is Playwright's
+ * report of any body the browser would not hand over: the page left (as it does right after an OAuth permission reply), or Chromium
+ * had dropped the body from its buffer before it was read. Leak scans must report such calls as not covered.
  */
 export type ApiCall = {
   method: string; path: string; query: string; status: number; requestBody: string; responseBody: string;
   body: "recorded" | "streamed" | "navigated-away";
-  /** Where the call went: the app's own origin for /api, or a PDS host or the operator for an XRPC call the browser made itself. */
+  /** Where the call went: a PDS host or the operator, for an XRPC call the browser made itself. */
   origin: string;
 };
 /**
- * `xrpc` holds the XRPC calls the browser made itself, to PDS hosts and to the operator (at the app's origin until R7). The
- * app's server has no member routes, so a leak scan of it reads the calls whose `origin` is the app's.
+ * `xrpc` holds the XRPC calls the browser made itself, to PDS hosts and to the operator at its own origin. The app's servers
+ * have no member routes, so a leak scan of them reads the calls whose `origin` is the web app's or the operator's.
  */
 export type Actor = FixtureAccount & { role: string; context: BrowserContext; page: Page; xrpc: ApiCall[] };
 
@@ -56,9 +57,14 @@ export class AppWorld extends World {
     return this.fixture.appUrl.origin;
   }
 
+  /** Where the app's operator serves its methods: its own process and origin. */
+  get operatorOrigin(): string {
+    return this.fixture.operatorUrl.origin;
+  }
+
   /** The audience of the app's operator: its `did:web` and service fragment, as service tokens name it. */
   get operatorServiceRef(): string {
-    return `did:web:localhost%3A${this.fixture.appUrl.port}#atproto_flock_operator`;
+    return `did:web:localhost%3A${this.fixture.operatorUrl.port}#atproto_flock_operator`;
   }
 
   /** The actor for a role, created on first use with a fresh account and its own browser context. */

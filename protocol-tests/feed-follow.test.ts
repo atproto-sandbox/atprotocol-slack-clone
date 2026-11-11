@@ -1,18 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { availablePort, startAppServer, type AppServer } from "./support/app-server";
+import { availablePort, startOperatorServer, type AppServer } from "./support/app-server";
 import { actorTransport, startPdsNetwork, storeAuthorityGrant } from "./support/pds-network";
 
 // R5's gate (`.ai/plans/platform-refactor.md`): a Node client holding only its member session (no cookie, no session on this
-// app's server) follows a channel live through the operator's change feed, against two real PDS hosts, with the app server
-// receiving their notices. The operator registered its notice sink when the workspace was created.
+// app's server) follows a channel live through the operator's change feed, against two real PDS hosts, with the operator's own
+// process receiving their notices. The operator registered its notice sink when the workspace was created.
 
 test("a member session alone follows a channel live through the change feed", { timeout: 5 * 60_000 }, async () => {
   const port = await availablePort();
-  const pds = await startPdsNetwork("feed-follow", { appPort: port });
+  const pds = await startPdsNetwork("feed-follow", { operatorPort: port });
   let server: AppServer | undefined;
   try {
-    server = await startAppServer(port);
+    server = await startOperatorServer();
     const [{ restoreAuthorityGrant }, { bootstrapWorkspace }, { registrationDeps }, { requireActiveWorkspaceAdmin }, { executeOperatorOperation }, { tidNow }, { createEngine }, { ChangeFollower }] = await Promise.all([
       import("@/operator/authority-grant"), import("@/operator/kinds/bootstrap-workspace"), import("@/operator/registrations"), import("@/operator/security"),
       import("@/operator/operations"), import("@/protocol/keys"), import("@/client/engine"), import("@/client/feed"),

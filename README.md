@@ -38,7 +38,7 @@ You need Node 22.17 (`.nvmrc`) and pnpm 11 (`corepack pnpm`). The local stack ru
 
    It prints a local URL and four ready-made accounts, all with the password `playground-pass`. Type the account's DID (not the handle) into the sign-in box. Everything lives in memory and disappears when you stop it.
 
-For a real deployment, copy `.env.example` and set `APP_URL`, `DATABASE_PATH`, `AUTH_ENCRYPTION_KEY`, `PLC_URL` and `OPERATOR_SERVICE_REF`. The operator DID must serve a `did:web` document that points at this app, and public deployments need HTTPS. See [`docs/operations.md`](docs/operations.md).
+For a real deployment, run the web app and the operator (`corepack pnpm operator`) as two processes on their own origins. Copy `.env.example`: both need `APP_URL`, `OPERATOR_URL`, `PLC_URL` and `OPERATOR_SERVICE_REF`; the operator also needs `DATABASE_PATH`, `AUTH_ENCRYPTION_KEY` and `AUTHORITY_CLIENT_PRIVATE_JWKS`. The operator DID's `did:web` document is served by the operator at `OPERATOR_URL`, and public deployments need HTTPS. See [`docs/operations.md`](docs/operations.md).
 
 ## Tests
 

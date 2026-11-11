@@ -294,7 +294,8 @@ export function auditOperationEvent(actor: OperatorActor, operationId: string, e
   audit(actor, operationId, event, details);
 }
 
-function operationView(operationId: string, requestHash: string, state: OperationState, steps: string[], error: string | null | undefined, updatedAt: number): OperationView {
+/** An operation's journal row as the operator answers with it. */
+export function operationView(operationId: string, requestHash: string, state: OperationState, steps: string[], error: string | null | undefined, updatedAt: number): OperationView {
   return {
     operationId,
     requestHash,

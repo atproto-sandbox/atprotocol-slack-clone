@@ -13,17 +13,17 @@ import { authenticateOperatorRequest, unverifiedBearerIssuer } from "./security"
  * so the authority retries.
  */
 export async function authenticateSpaceNotification(
-  request: Request,
+  authorization: string | undefined,
   method: string,
   space: string,
-  authenticate: (request: Request, method: string) => Promise<string> = authenticateOperatorRequest,
+  authenticate: (authorization: string | undefined, method: string) => Promise<string> = authenticateOperatorRequest,
 ): Promise<void> {
   const refusal = new OperatorAuthError("Notification is not authorized.");
-  if (unverifiedBearerIssuer(request) !== requireSpaceAuthority(space)) throw refusal;
+  if (unverifiedBearerIssuer(authorization) !== requireSpaceAuthority(space)) throw refusal;
   if (!isNotificationAccepted(space)) throw refusal;
   let issuer: string;
   try {
-    issuer = await authenticate(request, method);
+    issuer = await authenticate(authorization, method);
   } catch (error) {
     throw error instanceof OperatorAuthError ? refusal : error;
   }

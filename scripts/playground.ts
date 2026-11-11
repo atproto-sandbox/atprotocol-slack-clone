@@ -1,7 +1,7 @@
 import { startAppFixture } from "../protocol-tests/support/app-fixture";
 
 // Local playground: the shared app fixture (two in-memory PDS hosts, a PLC directory, this app served by
-// `next start`) with a few ready-made accounts. Nothing here touches the real network or any real account.
+// `next start`, and its operator in its own process) with a few ready-made accounts. Nothing here touches the real network or any real account.
 
 const PASSWORD = "playground-pass";
 

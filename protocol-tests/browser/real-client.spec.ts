@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { chromium, type Browser, type BrowserContext, type Page } from "@playwright/test";
-import { availablePort, startAppServer, type AppServer } from "../support/app-server";
+import { availablePort, startAppServer, startOperatorServer, type AppServer } from "../support/app-server";
 import { openChannel, signIn as signInPage } from "../support/browser-app";
 import { countByOrigin, watchPreflights, type Preflight } from "../support/browser-network";
 import { actorTransport, bearerSession, startPdsNetwork, type NetworkActor, type PdsNetwork } from "../support/pds-network";
@@ -17,26 +17,27 @@ const REMOTE_NOTE = "k9 from the unreachable host";
 const BROWSER_NOTE = "k9 from the browser";
 
 type Seen = { method: string; url: URL; status: number; requestBody: string; headers: Record<string, string>; requestHeaders: Record<string, string>; body?: string };
-/** A request the page sent to the app's own origin, of any kind (navigations too), as it left the browser. */
+/** A request the page sent to the app's web origin or to its operator's origin, of any kind (navigations too), as it left the browser. */
 type ToApp = { method: string; url: URL; headers: Record<string, string>; body: string };
-type Side = { actor: NetworkActor; context: BrowserContext; page: Page; preflights: Preflight[]; failures: string[]; seen: Seen[]; toApp: ToApp[] };
+type Side = { actor: NetworkActor; context: BrowserContext; page: Page; preflights: Preflight[]; failures: string[]; seen: Seen[]; toApp: ToApp[]; toOperator: ToApp[] };
 
-const OPERATOR_PATH = "/xrpc/new.flock.operator.";
-
-test("the app's own browser client reaches the PDS hosts and the operator directly (K9, R6a)", { timeout: 600_000 }, async (t) => {
+test("the app's own browser client reaches the PDS hosts and the operator's own process directly (K9, R6a, R7)", { timeout: 600_000 }, async (t) => {
   const appPort = await availablePort();
-  const pds = await startPdsNetwork("k9-real-client", { appPort });
+  const operatorPort = await availablePort();
+  const pds = await startPdsNetwork("k9-real-client", { appPort, operatorPort });
   let app: AppServer | undefined;
+  let operator: AppServer | undefined;
   let browser: Browser | undefined;
   try {
+    operator = await startOperatorServer();
     app = await startAppServer(appPort);
+    const operatorOrigin = new URL(operator.url).origin;
     const fixture = await provision(pds);
     const unreachable = new URL(fixture.remote.pds.url).origin;
-    const appOrigin = new URL(app.url).origin;
     browser = await chromium.launch({ headless: true });
 
     // given a member who reads a channel one of whose writers lives on a host the browser cannot reach
-    const member = await signInFrom(browser, app.url, fixture.member, { unreachable });
+    const member = await signInFrom(browser, app.url, operatorOrigin, fixture.member, { unreachable });
     // when the member opens the channel, refreshes the workspace (a credential minted again) and opens it once more
     await openChannel(member.page, "general");
     await member.page.getByText(AUTHORITY_NOTE, { exact: true }).waitFor({ state: "visible" });
@@ -52,7 +53,7 @@ test("the app's own browser client reaches the PDS hosts and the operator direct
     await member.page.locator(".message-card > p").filter({ hasText: BROWSER_NOTE }).waitFor({ state: "visible" });
 
     // and an outsider, a workspace member not on the private channel's member list, opens that channel
-    const outsider = await signInFrom(browser, app.url, fixture.outsider, {});
+    const outsider = await signInFrom(browser, app.url, operatorOrigin, fixture.outsider, {});
     await openChannel(outsider.page, "vault");
     await outsider.page.getByText("You are not on this channel’s active roster.").waitFor({ state: "visible" });
 
@@ -68,7 +69,7 @@ test("the app's own browser client reaches the PDS hosts and the operator direct
       "a getRecord after the renewal carries a MAC the page can read": member.seen.slice(renewedAt).some((entry) => entry.url.pathname.endsWith("/com.atproto.space.getRecord")
         && entry.status === 200 && /atproto-space-mac/i.test(entry.headers["access-control-expose-headers"] ?? "") && Boolean(entry.headers["atproto-space-mac"])),
       "the authority lists the channel's writers": member.seen.some((entry) => entry.url.pathname.endsWith("/com.atproto.space.listRepos") && entry.status === 200),
-      "the operator is called with a service token": member.seen.some((entry) => entry.url.origin === appOrigin
+      "the operator, at its own origin, is called with a service token": member.seen.some((entry) => entry.url.origin === operatorOrigin
         && entry.url.pathname === "/xrpc/new.flock.operator.getChanges" && entry.status === 200 && /^Bearer /.test(entry.requestHeaders.authorization ?? "")),
       "the page writes to its own host with its DPoP-bound session": member.seen.some((entry) => entry.url.origin === memberHost && entry.method === "POST"
         && entry.url.pathname === "/xrpc/com.atproto.space.createRecord" && entry.status === 200 && /^DPoP /.test(entry.requestHeaders.authorization ?? "")
@@ -78,15 +79,15 @@ test("the app's own browser client reaches the PDS hosts and the operator direct
         && await outsider.page.locator(".form-error").count() === 0,
       "the unreachable writer host fails as a network error, and the rest of the channel is shown": member.failures.some((failure) => failure.includes(unreachable))
         && await member.page.getByText(AUTHORITY_NOTE, { exact: true }).isVisible(),
-      // The app's server holds no member session: what reaches its origin carries neither a member token nor a record.
+      // Neither of the app's servers holds a member session: what reaches them carries neither a member token nor a record.
       "the sign-in's authorization code never reaches the app's server": [member, outsider].every((side) => side.toApp.some((request) => request.url.pathname === "/oauth/callback")
         && side.toApp.every((request) => !request.url.searchParams.has("code") && !request.url.searchParams.has("state"))),
-      "no request to the app's origin carries a member token, a DPoP proof or a cookie": [member, outsider].every((side) => side.toApp.length > 0
-        && side.toApp.every((request) => !/^DPoP /i.test(request.headers.authorization ?? "") && request.headers.dpop === undefined && request.headers.cookie === undefined
-          && (request.headers.authorization === undefined || request.url.pathname.startsWith(OPERATOR_PATH)))),
-      "the operator gets service tokens only, and no request to the app's origin carries a record's content": [member, outsider].every((side) => side.toApp.every((request) =>
-        (!request.url.pathname.startsWith(OPERATOR_PATH) || /^Bearer /.test(request.headers.authorization ?? ""))
-        && ![BROWSER_NOTE, AUTHORITY_NOTE].some((text) => request.body.includes(text) || decodeURIComponent(request.url.href).includes(text)))),
+      "no request to the web app carries any authorization, a DPoP proof or a cookie": [member, outsider].every((side) => side.toApp.length > 0
+        && side.toApp.every((request) => request.headers.authorization === undefined && request.headers.dpop === undefined && request.headers.cookie === undefined)),
+      "the operator gets service tokens only, never a member token, a DPoP proof or a cookie": [member, outsider].every((side) => side.toOperator.length > 0
+        && side.toOperator.every((request) => request.method === "OPTIONS" || (/^Bearer /.test(request.headers.authorization ?? "") && request.headers.dpop === undefined && request.headers.cookie === undefined))),
+      "no request to either server carries a record's content": [member, outsider].every((side) => [...side.toApp, ...side.toOperator].every((request) =>
+        ![BROWSER_NOTE, AUTHORITY_NOTE].some((text) => request.body.includes(text) || decodeURIComponent(request.url.href).includes(text)))),
     };
 
     const preflights = [...member.preflights, ...outsider.preflights];
@@ -118,6 +119,7 @@ test("the app's own browser client reaches the PDS hosts and the operator direct
   } finally {
     await browser?.close();
     await app?.stop();
+    await operator?.stop();
     await pds.close();
   }
 });
@@ -162,18 +164,19 @@ async function provision(pds: PdsNetwork) {
 }
 
 /** A browser context for `actor`, recording what its page sends and what fails, signed in on the app. */
-async function signInFrom(browser: Browser, appUrl: string, actor: NetworkActor, options: { unreachable?: string }): Promise<Side> {
+async function signInFrom(browser: Browser, appUrl: string, operatorOrigin: string, actor: NetworkActor, options: { unreachable?: string }): Promise<Side> {
   const context = await browser.newContext();
   if (options.unreachable) await context.route(`${options.unreachable}/**`, (route) => route.abort("connectionrefused"));
   const page = await context.newPage();
   page.setDefaultTimeout(60_000);
-  const side: Side = { actor, context, page, preflights: await watchPreflights(page), failures: [], seen: [], toApp: [] };
+  const side: Side = { actor, context, page, preflights: await watchPreflights(page), failures: [], seen: [], toApp: [], toOperator: [] };
   const appOrigin = new URL(appUrl).origin;
   page.on("request", (request) => {
     const url = new URL(request.url());
-    if (url.origin !== appOrigin) return;
+    const recorded = url.origin === appOrigin ? side.toApp : url.origin === operatorOrigin ? side.toOperator : undefined;
+    if (!recorded) return;
     void request.allHeaders().then(
-      (headers) => side.toApp.push({ method: request.method(), url, headers, body: request.postData() ?? "" }),
+      (headers) => recorded.push({ method: request.method(), url, headers, body: request.postData() ?? "" }),
       (error: unknown) => side.failures.push(`unrecorded request ${url.href} (${String(error)})`),
     );
   });

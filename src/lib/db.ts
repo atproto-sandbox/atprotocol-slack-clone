@@ -2,7 +2,7 @@ import BetterSqlite3 from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { Kysely, SqliteDialect } from "kysely";
-import { getConfig } from "./config";
+import { getOperatorConfig } from "./config";
 
 type OperationState = "queued" | "running" | "pending" | "completed" | "failed" | "paused";
 
@@ -85,7 +85,7 @@ function replaceNoticeTableFromBeforeTypeCaps(database: BetterSqlite3.Database):
 
 export function getDb(): Kysely<SlackDb> {
   if (database) return database;
-  const config = getConfig();
+  const config = getOperatorConfig();
   const file = resolve(config.databasePath);
   mkdirSync(dirname(file), { recursive: true });
   rawDatabase = new BetterSqlite3(file);

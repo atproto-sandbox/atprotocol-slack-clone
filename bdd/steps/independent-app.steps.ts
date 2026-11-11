@@ -195,8 +195,8 @@ Then("neither app reads the other's database or private cache", async function (
   }
 
   const reaches = (viewer: AppViewer, origin: string) => viewer.requestUrls.filter((url) => new URL(url).origin === origin);
-  assert.deepEqual(reaches(secondViewer, this.appOrigin), [], "the second app's pages never call the first app");
-  assert.deepEqual(reaches(firstViewer, second.appUrl.origin), [], "the first app's pages never call the second app");
+  assert.deepEqual([...reaches(secondViewer, this.appOrigin), ...reaches(secondViewer, this.operatorOrigin)], [], "the second app's pages never call the first app or its operator");
+  assert.deepEqual([...reaches(firstViewer, second.appUrl.origin), ...reaches(firstViewer, second.operatorUrl.origin)], [], "the first app's pages never call the second app or its operator");
   assert.ok(reaches(secondViewer, second.appUrl.origin).length > 0);
 });
 
@@ -573,8 +573,8 @@ Then("it raises an operator alert with the operation status", function (this: Ap
 async function runProtocolReconcile(world: AppWorld): Promise<ChildRun> {
   const environment: NodeJS.ProcessEnv = {
     PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", NODE_ENV: "production", ATPROTO_ACCEPTANCE_TEST: "true",
-    APP_URL: world.appOrigin, DATABASE_PATH: world.fixture.databasePath, AUTH_ENCRYPTION_KEY: "7".repeat(64),
-    PLC_URL: world.fixture.plcUrl, OPERATOR_SERVICE_REF: `did:web:localhost%3A${world.fixture.appUrl.port}#atproto_flock_operator`,
+    APP_URL: world.appOrigin, OPERATOR_URL: world.operatorOrigin, DATABASE_PATH: world.fixture.databasePath, AUTH_ENCRYPTION_KEY: "7".repeat(64),
+    PLC_URL: world.fixture.plcUrl, OPERATOR_SERVICE_REF: world.operatorServiceRef,
     FLOCK_ADMIN_MUTATIONS_PAUSED: "true",
   };
   return runNode(["--import", "tsx", "scripts/reconcile-workspaces.ts"], { env: environment, timeoutMs: RECONCILE_TIMEOUT_MS, what: "the scheduled reconcile job" });
@@ -631,7 +631,7 @@ When("an admin submits a mutation", { timeout: 300_000 }, async function (this: 
 Then("the operator rejects or queues it as paused", function (this: AppWorld) {
   const onPaused = actorNamed(this, "owner@paused-app");
   const paused = this.scratch.get("pausedApp") as SecondApp;
-  const attempts = executeCalls(onPaused).map((call) => decodeExecuted(call.status, call.requestBody, call.responseBody));
+  const attempts = executeCalls(onPaused).map(decodeExecuted);
   assert.equal(attempts.length, 1);
   assert.equal(attempts[0]!.status, 423);
   assert.equal(attempts[0]!.error, PAUSED_MESSAGE);

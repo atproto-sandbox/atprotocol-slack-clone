@@ -8,10 +8,11 @@ const valid = {
   repoRev: "3kabcdefghij2",
   spaceRev: "3kabcdefghij3",
   prevSpaceRev: "3kabcdefghij2",
-  data: { $bytes: "q83vEjRWeJCrze8SNFZ4kKvN7xI0VniQq83vEjRWeJA" },
+  // The commit digest, decoded from its lexicon `bytes` as the operator's XRPC server hands it over.
+  data: new Uint8Array(Buffer.from("q83vEjRWeJCrze8SNFZ4kKvN7xI0VniQq83vEjRWeJA", "base64")),
 };
 
-test("parseWriteNotification accepts the body the PDS sends, with data as lexicon bytes", () => {
+test("parseWriteNotification accepts the body the PDS sends, with data as decoded lexicon bytes", () => {
   // #given #when
   const parsed = parseWriteNotification(valid);
 
@@ -19,10 +20,11 @@ test("parseWriteNotification accepts the body the PDS sends, with data as lexico
   assert.deepEqual(parsed, { space: valid.space, repo: valid.repo, repoRev: valid.repoRev });
 });
 
-test("parseWriteNotification rejects a data value that is not a bytes object", () => {
+test("parseWriteNotification rejects a data value that is not a commit digest's bytes", () => {
   assert.equal(parseWriteNotification({ ...valid, data: "q83vEjRWeJCrze8SNFZ4kKvN7xI0VniQ" }), null);
-  assert.equal(parseWriteNotification({ ...valid, data: { $bytes: "not base64 !!" } }), null);
-  assert.equal(parseWriteNotification({ ...valid, data: { $bytes: valid.data.$bytes, extra: true } }), null);
+  assert.equal(parseWriteNotification({ ...valid, data: { $bytes: "q83vEjRWeJCrze8SNFZ4kKvN7xI0VniQq83vEjRWeJA" } }), null, "still in its JSON form");
+  assert.equal(parseWriteNotification({ ...valid, data: new Uint8Array(4) }), null, "too short for a digest");
+  assert.equal(parseWriteNotification({ ...valid, data: new Uint8Array(200) }), null, "too long for a digest");
   assert.equal(parseWriteNotification({ ...valid, data: null }), null);
 });
 

@@ -221,7 +221,7 @@ export async function showWorkspaceHome(world: AppWorld, actor: Actor): Promise<
 /** Runs `act`, then waits for the app's reply to the operator call it caused and decodes it. */
 export async function createChannelAs(world: AppWorld, owner: Actor, name: string, visibility: "public" | "private", memberDids: string[] = []): Promise<ChannelRef> {
   await showWorkspaceHome(world, owner);
-  const done = await submitAndWait(owner, async () => {
+  const done = await submitAndWait(world, owner, async () => {
     await owner.page.getByLabel("Channel name").fill(name);
     await owner.page.getByLabel("Channel visibility").selectOption(visibility);
     if (visibility === "private") await owner.page.getByLabel("Private member DIDs").fill(memberDids.join(" "));
@@ -237,7 +237,7 @@ export const channelButton = (actor: Actor, name: string): Locator =>
 
 export async function removeMemberViaRoster(world: AppWorld, admin: Actor, did: string): Promise<Executed> {
   await showWorkspaceHome(world, admin);
-  return submitAndWait(admin, async () => {
+  return submitAndWait(world, admin, async () => {
     await admin.page.locator(".roster-row").filter({ hasText: did }).getByRole("button", { name: "Remove", exact: true }).click();
   });
 }
@@ -346,6 +346,7 @@ export async function repairChannelSpace(world: AppWorld, owner: Actor, channel:
 
 export type OwnApp = {
   readonly origin: string;
+  readonly operatorOrigin: string;
   readonly databasePath: string;
   readonly environment: NodeJS.ProcessEnv;
   restart(): Promise<void>;
@@ -366,10 +367,17 @@ async function freePort(): Promise<number> {
   });
 }
 
-async function launch(environment: NodeJS.ProcessEnv, port: number): Promise<ChildProcess> {
-  const child = spawn(process.execPath, [join(process.cwd(), "node_modules/next/dist/bin/next"), "start", "--hostname", "127.0.0.1", "--port", String(port)], {
-    cwd: process.cwd(), env: environment, stdio: ["ignore", "pipe", "pipe"],
-  });
+/** The app's two processes: its operator at `OPERATOR_URL` and its web app on `port`, each once it answers. */
+async function launch(environment: NodeJS.ProcessEnv, port: number): Promise<ChildProcess[]> {
+  const operatorUrl = environment.OPERATOR_URL;
+  assert.ok(operatorUrl, "OPERATOR_URL says where the operator serves");
+  const operator = await launchProcess(["--import", "tsx", join(process.cwd(), "src/operator/main.ts")], environment, `${operatorUrl}/.well-known/did.json`, "the operator");
+  const web = await launchProcess([join(process.cwd(), "node_modules/next/dist/bin/next"), "start", "--hostname", "127.0.0.1", "--port", String(port)], environment, `http://127.0.0.1:${port}/`, "the app");
+  return [operator, web];
+}
+
+async function launchProcess(args: string[], environment: NodeJS.ProcessEnv, readyUrl: string, what: string): Promise<ChildProcess> {
+  const child = spawn(process.execPath, args, { cwd: process.cwd(), env: environment, stdio: ["ignore", "pipe", "pipe"] });
   runningApps.add(child);
   let output = "";
   const capture = (chunk: Buffer) => { output = `${output}${chunk}`.slice(-4_000); };
@@ -377,13 +385,13 @@ async function launch(environment: NodeJS.ProcessEnv, port: number): Promise<Chi
   child.stderr?.on("data", capture);
   const deadline = Date.now() + 60_000;
   for (;;) {
-    assert.equal(child.exitCode, null, `the app exited before it was ready\n${output}`);
+    assert.equal(child.exitCode, null, `${what} exited before it was ready\n${output}`);
     try {
-      if ((await fetch(`http://127.0.0.1:${port}/`)).ok) return child;
+      if ((await fetch(readyUrl)).ok) return child;
     } catch (error) {
       if (!(error instanceof TypeError)) throw error;
     }
-    assert.ok(Date.now() < deadline, `the app did not become ready\n${output}`);
+    assert.ok(Date.now() < deadline, `${what} did not become ready\n${output}`);
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
 }
@@ -404,24 +412,26 @@ async function terminate(child: ChildProcess): Promise<void> {
  */
 export async function startOwnApp(world: AppWorld): Promise<OwnApp> {
   const port = await freePort();
+  const operatorPort = await freePort();
   const origin = `http://127.0.0.1:${port}`;
+  const operatorOrigin = `http://127.0.0.1:${operatorPort}`;
   const directory = mkdtempSync(join(tmpdir(), "slack-lifecycle-app-"));
   const databasePath = join(directory, "app.db");
   const environment: NodeJS.ProcessEnv = {
     PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? tmpdir(), TMPDIR: process.env.TMPDIR ?? tmpdir(),
     NODE_ENV: "production", NEXT_TELEMETRY_DISABLED: "1", ATPROTO_ACCEPTANCE_TEST: "true",
-    APP_URL: origin, DATABASE_PATH: databasePath, AUTH_ENCRYPTION_KEY: randomBytes(32).toString("hex"),
-    PLC_URL: world.fixture.plcUrl, OPERATOR_SERVICE_REF: `did:web:localhost%3A${port}#atproto_flock_operator`,
+    APP_URL: origin, OPERATOR_URL: operatorOrigin, DATABASE_PATH: databasePath, AUTH_ENCRYPTION_KEY: randomBytes(32).toString("hex"),
+    PLC_URL: world.fixture.plcUrl, OPERATOR_SERVICE_REF: `did:web:localhost%3A${operatorPort}#atproto_flock_operator`,
   };
-  let child = await launch(environment, port);
+  let children = await launch(environment, port);
   const app: OwnApp = {
-    origin, databasePath, environment,
+    origin, operatorOrigin, databasePath, environment,
     async restart() {
-      await terminate(child);
-      child = await launch(environment, port);
+      await Promise.all(children.map(terminate));
+      children = await launch(environment, port);
     },
     async stop() {
-      await terminate(child);
+      await Promise.all(children.map(terminate));
       rmSync(directory, { recursive: true, force: true });
     },
   };
@@ -433,6 +443,8 @@ export function worldOn(world: AppWorld, app: OwnApp): AppWorld {
   return new Proxy(world, {
     get(target, property) {
       if (property === "appOrigin") return app.origin;
+      if (property === "operatorOrigin") return app.operatorOrigin;
+      if (property === "operatorServiceRef") return `did:web:localhost%3A${new URL(app.operatorOrigin).port}#atproto_flock_operator`;
       if (property === "withAppDatabase") {
         return <T>(read: (db: Database.Database) => T): T => {
           const db = new Database(app.databasePath, { readonly: true, fileMustExist: true });

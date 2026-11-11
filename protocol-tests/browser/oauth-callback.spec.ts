@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { mkdtempSync, rmSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
@@ -10,6 +9,7 @@ import { after, before, test } from "node:test";
 import Database from "better-sqlite3";
 import { chromium, type Response as PageResponse } from "@playwright/test";
 import { createFixtureTempRoot } from "../fixture-temp";
+import { startStack, type Stack } from "../support/app-server";
 import { actorTransport } from "../support/pds-network";
 import { createEngine } from "@/client/engine";
 import type { OperatorClient } from "@/client/operator-client";
@@ -30,17 +30,14 @@ let network: {
   lexiconAuthority?: { did: string };
 } | undefined;
 let fixtureTemp: ReturnType<typeof createFixtureTempRoot> | undefined;
-let server: ChildProcess | undefined;
-let secondaryServer: ChildProcess | undefined;
+let stack: Stack | undefined;
+let secondaryStack: Stack | undefined;
 let scratchDirectory: string | undefined;
 let databasePath: string | undefined;
-let encryptionKey = "";
 let appUrl: URL | undefined;
 let secondaryAppUrl: URL | undefined;
 let ownerDid = "";
 let memberDid = "";
-let serverOutput = "";
-let secondaryServerOutput = "";
 
 before(async () => {
   assert.ok(pinnedCheckout, "set ATPROTO_PINNED_CHECKOUT to the pinned atproto checkout");
@@ -72,36 +69,15 @@ before(async () => {
   memberDid = member.data.did;
 
   scratchDirectory = mkdtempSync(join(tmpdir(), "slack-oauth-browser-"));
-  const port = await freePort();
-  appUrl = new URL(`http://127.0.0.1:${port}`);
-  encryptionKey = Buffer.alloc(32, 0x5a).toString("hex");
   databasePath = join(scratchDirectory, "app.db");
-  const childEnv = {
-    PATH: process.env.PATH ?? "",
-    HOME: process.env.HOME ?? tmpdir(),
-    TMPDIR: process.env.TMPDIR ?? tmpdir(),
-    NODE_ENV: "production",
-    NEXT_TELEMETRY_DISABLED: "1",
-    ATPROTO_ACCEPTANCE_TEST: "true",
-    APP_URL: appUrl.origin,
-    DATABASE_PATH: databasePath,
-    AUTH_ENCRYPTION_KEY: encryptionKey,
-    PLC_URL: network.plc.url,
-    OPERATOR_SERVICE_REF: `did:web:localhost%3A${port}#atproto_flock_operator`,
-  };
-  server = spawn(process.execPath, [
-    join(projectRoot, "node_modules/next/dist/bin/next"),
-    "start", "--hostname", "127.0.0.1", "--port", String(port),
-  ], { cwd: projectRoot, env: childEnv, stdio: ["ignore", "pipe", "pipe"] });
-  server.stdout?.on("data", (chunk: Buffer) => { serverOutput = `${serverOutput}${chunk}`.slice(-20_000); });
-  server.stderr?.on("data", (chunk: Buffer) => { serverOutput = `${serverOutput}${chunk}`.slice(-20_000); });
-  await waitForApp(appUrl, server);
+  stack = await startStack(await stackEnv({ databasePath, encryptionKey: Buffer.alloc(32, 0x5a).toString("hex") }));
+  appUrl = stack.appUrl;
 }, { timeout: 60_000 });
 
 after(async () => {
   try {
-    await stopServer(secondaryServer);
-    await stopServer(server);
+    await secondaryStack?.stop();
+    await stack?.stop();
     await network?.close();
   } finally {
     if (scratchDirectory) rmSync(scratchDirectory, { recursive: true, force: true });
@@ -177,7 +153,7 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
     await page.waitForURL(/\/oauth\/authorize\?/, { timeout: 30_000 });
     // The authority grant has its own OAuth client and callback, separate from the sign-in.
     const authorityClientId = new URL(new URL(page.url()).searchParams.get("client_id") ?? "");
-    assert.equal(authorityClientId.searchParams.get("redirect_uri"), `${appUrl.origin}/authority/callback`, "the workspace authority approves through the authority flow");
+    assert.equal(authorityClientId.searchParams.get("redirect_uri"), `${stack!.operatorUrl.origin}/authority/callback`, "the workspace authority approves through the authority flow");
     const authorityCallbacks: string[] = [];
     page.on("request", (request) => { if (new URL(request.url()).pathname === "/authority/callback") authorityCallbacks.push(request.url()); });
     await signInIfPrompted(page);
@@ -199,7 +175,7 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
     }
     // The browser's own grant carries the operator's methods: the admin inbox loads and operations run with no further consent.
     await page.getByText("No pending join requests.").waitFor({ state: "visible", timeout: 30_000 }).catch(async (error: unknown) => {
-      throw new Error(`Expected the synced inbox after bootstrap. Page: ${(await page.locator("body").innerText()).slice(0, 4_000)}\nServer: ${serverOutput}`, { cause: error });
+      throw new Error(`Expected the synced inbox after bootstrap. Page: ${(await page.locator("body").innerText()).slice(0, 4_000)}\nServer: ${stack?.output()}`, { cause: error });
     });
 
     await page.getByLabel("Channel name").fill("Browser Room");
@@ -228,31 +204,8 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
     const workspaceUri = (await page.locator(".welcome-banner .mono-note").innerText()).trim();
     assert.match(workspaceUri, /^at:\/\/did:plc:[a-z0-9]+\/space\/new\.flock\.workspace\//, "the workspace home shows the workspace URI");
 
-    const independentPort = await freePort();
-    secondaryAppUrl = new URL(`http://127.0.0.1:${independentPort}`);
-    secondaryServer = spawn(process.execPath, [
-      join(projectRoot, "node_modules/next/dist/bin/next"),
-      "start", "--hostname", "127.0.0.1", "--port", String(independentPort),
-    ], {
-      cwd: projectRoot,
-      env: {
-        PATH: process.env.PATH ?? "",
-        HOME: process.env.HOME ?? tmpdir(),
-        TMPDIR: process.env.TMPDIR ?? tmpdir(),
-        NODE_ENV: "production",
-        NEXT_TELEMETRY_DISABLED: "1",
-        ATPROTO_ACCEPTANCE_TEST: "true",
-        APP_URL: secondaryAppUrl.origin,
-        DATABASE_PATH: join(scratchDirectory!, "independent-app.db"),
-        AUTH_ENCRYPTION_KEY: Buffer.alloc(32, 0x6b).toString("hex"),
-        PLC_URL: network!.plc.url,
-        OPERATOR_SERVICE_REF: `did:web:localhost%3A${independentPort}#atproto_flock_operator`,
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    secondaryServer.stdout?.on("data", (chunk: Buffer) => { secondaryServerOutput = `${secondaryServerOutput}${chunk}`.slice(-20_000); });
-    secondaryServer.stderr?.on("data", (chunk: Buffer) => { secondaryServerOutput = `${secondaryServerOutput}${chunk}`.slice(-20_000); });
-    await waitForApp(secondaryAppUrl, secondaryServer, () => secondaryServerOutput);
+    secondaryStack = await startStack(await stackEnv({ databasePath: join(scratchDirectory!, "independent-app.db"), encryptionKey: Buffer.alloc(32, 0x6b).toString("hex") }));
+    secondaryAppUrl = secondaryStack.appUrl;
 
     independentContext = await browser.newContext();
     const memberPage = await independentContext.newPage();
@@ -378,13 +331,33 @@ async function signInIfPrompted(
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
 }
 
-test("the authority flow runs twice at once in one browser, and a used callback cannot be replayed with its cookie", async () => {
-  assert.ok(appUrl && databasePath);
-  const app = appUrl;
+test("with the operator on the web app's site, the authority flow runs twice at once, and neither a used ticket nor a used callback can be replayed", async () => {
+  assert.ok(stack && databasePath);
+  await authorityFlowTwiceAtOnce(stack, databasePath);
+});
+
+test("with the operator on another site, the authority flow runs the same way", async () => {
+  assert.ok(scratchDirectory);
+  // [::1] is another site than 127.0.0.1: the flow's cookie lives on the operator's origin and travels on top-level navigations only.
+  const crossSiteDatabase = join(scratchDirectory, "cross-site.db");
+  const crossSite = await startStack(await stackEnv({ databasePath: crossSiteDatabase, encryptionKey: Buffer.alloc(32, 0x7c).toString("hex"), operatorHost: "[::1]" }));
+  try {
+    await authorityFlowTwiceAtOnce(crossSite, crossSiteDatabase);
+  } finally {
+    await crossSite.stop();
+  }
+});
+
+/**
+ * The owner signs in to `app`, then two authority flows are started and approved at once in two tabs of one browser; a
+ * started ticket is used again; a third flow's callback arrives without its flow cookie, then with it, then is replayed; and
+ * the grant left creates a workspace. The flows run between the web app's origin, the operator's and the PDS.
+ */
+async function authorityFlowTwiceAtOnce(app: Stack, appDatabase: string): Promise<void> {
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext();
   const grantRow = () => {
-    const db = new Database(databasePath!, { readonly: true, fileMustExist: true });
+    const db = new Database(appDatabase, { readonly: true, fileMustExist: true });
     try { return db.prepare("SELECT key, value FROM authority_grant WHERE key = ?").all(ownerDid) as Array<{ key: string; value: string }>; }
     finally { db.close(); }
   };
@@ -392,23 +365,24 @@ test("the authority flow runs twice at once in one browser, and a used callback 
     // given the owner signed in to the app in one browser, and the operator called as the owner's browser calls it
     const page = await context.newPage();
     page.setDefaultTimeout(30_000);
-    await page.goto(app.origin);
+    await page.goto(app.appUrl.origin);
     await page.getByLabel("Your AT Protocol handle").fill(ownerDid);
     await page.getByRole("button", { name: /Continue with atproto/i }).click();
-    await completePdsConsentFlow(page, app, "browser-owner.test", password);
+    await completePdsConsentFlow(page, app.appUrl, "browser-owner.test", password);
     const operator = await ownerOperator(app);
-    const startUrl = async () => new URL((await operator.startAuthorityFlow({ purpose: "reauthorize" })).url, app.origin).href;
+    const startUrl = async () => new URL((await operator.startAuthorityFlow({ purpose: "reauthorize" })).url, app.operatorUrl).href;
     const approve = async (tab: import("@playwright/test").Page) => {
       await tab.waitForURL(/\/oauth\/authorize\?/);
       await signInIfPrompted(tab);
       await tab.getByRole("button", { name: "Authorize", exact: true }).click();
-      await tab.waitForURL((url) => url.origin === app.origin && !url.pathname.startsWith("/authority"));
+      await tab.waitForURL((url) => url.origin === app.appUrl.origin && !url.pathname.startsWith("/authority"));
       return tab.url();
     };
 
     // when two authority flows are started and both approved, in two tabs of that browser
     const [first, second] = [await context.newPage(), await context.newPage()];
-    await first.goto(await startUrl());
+    const firstTicket = await startUrl();
+    await first.goto(firstTicket);
     await second.goto(await startUrl());
     const landed = [await approve(first), await approve(second)];
 
@@ -416,20 +390,33 @@ test("the authority flow runs twice at once in one browser, and a used callback 
     for (const url of landed) assert.doesNotMatch(url, /authority=failed/, "each flow completes");
     assert.equal(grantRow().length, 1, "two approvals leave one grant");
 
-    // and when a third flow completes, its callback replayed with the restored flow cookie is refused. The flow cookie is
-    // taken while the browser is at the consent page (set by /authority/start, cleared by the callback), and the callback
-    // URL from the request event, since a navigation reached through a redirect is not routable.
+    // and a ticket already used starts nothing
+    const replayed = await context.newPage();
+    await replayed.goto(firstTicket);
+    assert.match(replayed.url(), /[?&]authority=failed/, "a used ticket is refused");
+
+    // and a third flow approved without its flow cookie is refused, completes once the cookie is back, and then cannot be
+    // replayed even with it. The flow cookie is taken while the browser is at the consent page (set by /authority/start,
+    // cleared by the callback), and the callback URL from the request event, since a navigation reached through a redirect
+    // is not routable.
     const third = await context.newPage();
     const callbacks: string[] = [];
     third.on("request", (request) => { if (new URL(request.url()).pathname === "/authority/callback") callbacks.push(request.url()); });
     await third.goto(await startUrl());
     await third.waitForURL(/\/oauth\/authorize\?/);
-    const flowCookies = (await context.cookies()).filter(({ name }) => name.startsWith("spaces_oauth_"));
-    assert.ok(flowCookies.length > 0, "the flow cookie is set while the flow is open");
-    assert.doesNotMatch(await approve(third), /authority=failed/, "the third flow completes");
+    const flowCookies = (await context.cookies(new URL("/authority/callback", app.operatorUrl).href)).filter(({ name }) => name.startsWith("spaces_oauth_"));
+    assert.ok(flowCookies.length > 0, "the flow cookie is set for the operator's callback while the flow is open");
+    const beforeThird = grantRow();
+    await context.clearCookies({ name: /^spaces_oauth_/ });
+    assert.match(await approve(third), /[?&]authority=failed/, "a callback without its flow cookie is refused");
+    assert.deepEqual(grantRow(), beforeThird, "the refused callback leaves the grant as it was");
     const callbackUrl = callbacks.at(-1);
     assert.ok(callbackUrl, "the callback was observed");
+    await context.addCookies(flowCookies);
+    await third.goto(callbackUrl);
+    assert.doesNotMatch(third.url(), /authority=failed/, "the same callback with its flow cookie completes the third flow");
     const afterApproval = grantRow();
+    assert.notDeepEqual(afterApproval, beforeThird, "the third approval replaced the grant");
     await context.addCookies(flowCookies);
     await third.goto(callbackUrl);
     assert.match(third.url(), /[?&]authority=failed/, "a used state is refused even with its cookie");
@@ -441,14 +428,14 @@ test("the authority flow runs twice at once in one browser, and a used callback 
   } finally {
     await browser.close();
   }
-});
+}
 
 /** The operator as the owner's browser calls it: each method with a service token the owner's own host issues. */
-async function ownerOperator(app: URL): Promise<OperatorClient> {
+async function ownerOperator(app: Stack): Promise<OperatorClient> {
   assert.ok(network);
   const { data } = await network.pds.getAgent().com.atproto.server.createSession({ identifier: ownerDid, password });
   const engine = createEngine(actorTransport({ plcUrl: network.plc.url }, { did: ownerDid, accessJwt: data.accessJwt, pds: { url: network.pds.url } }), {
-    operator: { serviceRef: `did:web:localhost%3A${app.port}#atproto_flock_operator`, endpoint: app.origin },
+    operator: { serviceRef: `did:web:localhost%3A${app.operatorUrl.port}#atproto_flock_operator`, endpoint: app.operatorUrl.origin },
   });
   assert.ok(engine.operator);
   return engine.operator;
@@ -467,27 +454,22 @@ async function completePdsConsentFlow(
   await page.waitForURL(app.origin, { timeout: 30_000 });
 }
 
-async function stopServer(child: ChildProcess | undefined): Promise<void> {
-  if (!child || child.killed) return;
-  child.kill("SIGTERM");
-  await new Promise<void>((resolve) => {
-    if (child.exitCode !== null) return resolve();
-    const timer = setTimeout(() => resolve(), 5_000);
-    child.once("exit", () => { clearTimeout(timer); resolve(); });
-  });
-}
-
-async function waitForApp(url: URL, child: ChildProcess, readOutput = () => serverOutput): Promise<void> {
-  const deadline = Date.now() + 45_000;
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null) throw new Error(`Next server exited before becoming ready.\n${readOutput()}`);
-    try {
-      const response = await fetch(url);
-      if (response.ok) return;
-    } catch {
-      // Continue polling while Next starts.
-    }
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-  throw new Error(`Next server did not become ready.\n${readOutput()}`);
+/** One app's environment: the web app and its operator on free ports (the operator on `operatorHost`), its own database and key. */
+async function stackEnv(input: { databasePath: string; encryptionKey: string; operatorHost?: string }): Promise<NodeJS.ProcessEnv> {
+  assert.ok(network);
+  const [appPort, operatorPort] = [await freePort(), await freePort()];
+  return {
+    PATH: process.env.PATH ?? "",
+    HOME: process.env.HOME ?? tmpdir(),
+    TMPDIR: process.env.TMPDIR ?? tmpdir(),
+    NODE_ENV: "production",
+    NEXT_TELEMETRY_DISABLED: "1",
+    ATPROTO_ACCEPTANCE_TEST: "true",
+    APP_URL: `http://127.0.0.1:${appPort}`,
+    OPERATOR_URL: `http://${input.operatorHost ?? "127.0.0.1"}:${operatorPort}`,
+    DATABASE_PATH: input.databasePath,
+    AUTH_ENCRYPTION_KEY: input.encryptionKey,
+    PLC_URL: network.plc.url,
+    OPERATOR_SERVICE_REF: `did:web:localhost%3A${operatorPort}#atproto_flock_operator`,
+  };
 }

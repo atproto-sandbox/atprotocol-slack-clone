@@ -3,7 +3,8 @@ import { buildBrowserClientMetadata } from "./client-metadata";
 import { AtprotoClient } from "@/atproto/xrpc";
 import { readUpstreamText } from "@/lib/bounded-json";
 
-export type BrowserSessionConfig = { appUrl: string; plcUrl: string; scope: string; serviceRef: string; loopback: boolean };
+/** What the browser session is built from: the app's origin, the PLC, the one grant, and the operator (its DID and where it serves). */
+export type BrowserSessionConfig = { appUrl: string; plcUrl: string; scope: string; serviceRef: string; operatorUrl: string; loopback: boolean };
 
 const MAX_WELL_KNOWN_DID_BYTES = 512;
 

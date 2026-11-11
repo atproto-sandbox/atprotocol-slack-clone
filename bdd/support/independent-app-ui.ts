@@ -161,9 +161,9 @@ export async function withIndependentReader<T>(
   read: (reader: typeof import("@/reader/independent"), deps: import("@/reader/independent").IndependentDeps, session: OAuthSession) => Promise<T>,
 ): Promise<T> {
   const environment: Record<string, string> = {
-    APP_URL: world.appOrigin, PLC_URL: world.fixture.plcUrl, ATPROTO_ACCEPTANCE_TEST: "true",
+    APP_URL: world.appOrigin, OPERATOR_URL: world.operatorOrigin, PLC_URL: world.fixture.plcUrl, ATPROTO_ACCEPTANCE_TEST: "true",
     DATABASE_PATH: `${world.fixture.databasePath}.independent-reader-unused`, AUTH_ENCRYPTION_KEY: "7".repeat(64),
-    OPERATOR_SERVICE_REF: `did:web:localhost%3A${world.fixture.appUrl.port}#atproto_flock_operator`,
+    OPERATOR_SERVICE_REF: world.operatorServiceRef,
   };
   const previous = Object.fromEntries(Object.keys(environment).map((key) => [key, process.env[key]]));
   Object.assign(process.env, environment);

@@ -223,7 +223,7 @@ export async function callOperator(world: AppWorld, as: Actor, method: "new.floc
   const auth = await world.pdsGet<{ token?: string }>(as, "com.atproto.server.getServiceAuth", { aud: world.operatorServiceRef, lxm: method });
   assert.equal(auth.status, 200, `service auth for ${method}: ${JSON.stringify(auth.body)}`);
   assert.ok(auth.body.token, "the PDS issued a service-auth token");
-  const url = new URL(`/xrpc/${method}`, world.appOrigin);
+  const url = new URL(`/xrpc/${method}`, world.operatorOrigin);
   for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
   const response = await fetch(url, { headers: { authorization: `Bearer ${auth.body.token}` } });
   return { status: response.status, text: await response.text() };
@@ -247,7 +247,7 @@ export async function createPrivateChannelAs(world: AppWorld, owner: Actor, name
   await page.getByLabel("Channel visibility").selectOption("private");
   if (memberDids.length > 0) await page.getByLabel("Private member DIDs").fill(memberDids.join(", "));
   const form = page.locator("form").filter({ has: page.getByLabel("Channel name") });
-  const executed = await submitAndWait(owner, () => form.getByRole("button", { name: /Create channel/ }).click());
+  const executed = await submitAndWait(world, owner, () => form.getByRole("button", { name: /Create channel/ }).click());
   assert.equal(outcomeOf(executed).state, "completed", `creating the private channel: ${JSON.stringify(executed)}`);
   await page.locator(".channel-nav-item").filter({ hasText: name }).waitFor({ state: "visible" });
   return privateChannelNamed(world, owner, name);
@@ -323,8 +323,8 @@ export async function syncInbox(admin: Actor): Promise<void> {
   await admin.page.getByRole("button", { name: "Sync inbox ↻" }).click();
 }
 
-export async function decideInUi(admin: Actor, row: Locator, decision: "Approve" | "Deny"): Promise<OperationOutcome> {
-  return outcomeOf(await submitAndWait(admin, () => row.getByRole("button", { name: decision, exact: true }).click()));
+export async function decideInUi(world: AppWorld, admin: Actor, row: Locator, decision: "Approve" | "Deny"): Promise<OperationOutcome> {
+  return outcomeOf(await submitAndWait(world, admin, () => row.getByRole("button", { name: decision, exact: true }).click()));
 }
 
 const INBOX_WRITERS = "/xrpc/new.flock.operator.listInboxWriters";

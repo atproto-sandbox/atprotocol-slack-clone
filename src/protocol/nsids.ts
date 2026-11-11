@@ -50,6 +50,12 @@ export const OPERATOR_METHOD = {
   listStalledOperations: nsid("operator.listStalledOperations"),
 } as const;
 
+/** The protocol's notices a space authority sends to a service it registered: the operator receives these. */
+export const NOTICE_METHOD = {
+  notifyWrite: "com.atproto.space.notifyWrite",
+  notifySpaceDeleted: "com.atproto.space.notifySpaceDeleted",
+} as const;
+
 export type SpaceType = (typeof SPACE_TYPE)[keyof typeof SPACE_TYPE];
 export type Collection = (typeof COLLECTION)[keyof typeof COLLECTION];
 export type OperatorMethod = (typeof OPERATOR_METHOD)[keyof typeof OPERATOR_METHOD];

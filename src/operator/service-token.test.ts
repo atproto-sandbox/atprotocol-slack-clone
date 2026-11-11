@@ -19,8 +19,7 @@ async function call(method: string, token: { lxm?: string; aud?: string; lifetim
   const keypair = await Secp256k1Keypair.create();
   const iat = Math.floor(Date.now() / 1000) - (token.ageSeconds ?? 0);
   const jwt = await createServiceJwt({ iss: CALLER, aud: token.aud ?? SERVICE_REF, lxm: token.lxm ?? method, keypair, iat, exp: iat + token.lifetimeSeconds });
-  const request = new Request("https://operator.test/xrpc/" + method, { headers: { authorization: `Bearer ${jwt}` } });
-  return authenticateOperatorRequest(request, method, async () => keypair.did());
+  return authenticateOperatorRequest(`Bearer ${jwt}`, method, async () => keypair.did());
 }
 
 const refused = (error: unknown) => error instanceof OperatorAuthError;

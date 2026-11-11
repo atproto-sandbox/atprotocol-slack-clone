@@ -265,7 +265,7 @@ When("the admin approves it", async function (this: AppWorld) {
   const state = stateOf(this);
   let during: WriteSnapshot[] = [];
   try {
-    state.outcome = await decideInUi(owner, inboxRow(owner, requester, channel), "Approve");
+    state.outcome = await decideInUi(this, owner, inboxRow(owner, requester, channel), "Approve");
   } finally {
     during = await watcher.stop();
   }
@@ -274,7 +274,7 @@ When("the admin approves it", async function (this: AppWorld) {
 
 When("the admin denies it", async function (this: AppWorld) {
   const owner = actorNamed(this, "owner");
-  stateOf(this).outcome = await decideInUi(owner, inboxRow(owner, actorNamed(this, "requester"), channelOf(this)), "Deny");
+  stateOf(this).outcome = await decideInUi(this, owner, inboxRow(owner, actorNamed(this, "requester"), channelOf(this)), "Deny");
 });
 
 Then("the requester receives channel read and write access", async function (this: AppWorld) {
@@ -397,7 +397,7 @@ Given("a member has an authorized private-channel credential", LONG_SETUP, async
 
   await requestPrivateAccessAs(gamma, channel);
   await syncInbox(owner);
-  const approval = await decideInUi(owner, inboxRow(owner, gamma, channel), "Approve");
+  const approval = await decideInUi(this, owner, inboxRow(owner, gamma, channel), "Approve");
   assert.equal(approval.state, "completed", approval.error);
 
   await openChannel(alpha, channel.name);

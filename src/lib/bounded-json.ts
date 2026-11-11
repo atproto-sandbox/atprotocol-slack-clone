@@ -1,31 +1,9 @@
-export const DEFAULT_REQUEST_JSON_LIMIT = 64 * 1024;
-
-export class RequestJsonError extends Error {
-  constructor(readonly status: 400 | 413 | 415, message: string) {
-    super(message);
-    this.name = "RequestJsonError";
-  }
-}
-
 export class UpstreamResponseTooLargeError extends Error {
   readonly status = 502;
 
   constructor(readonly limitBytes: number) {
     super(`Upstream JSON response exceeds the ${limitBytes}-byte limit.`);
     this.name = "UpstreamResponseTooLargeError";
-  }
-}
-
-export async function readRequestJson<T = unknown>(request: Request, limitBytes = DEFAULT_REQUEST_JSON_LIMIT): Promise<T> {
-  const contentType = request.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
-  if (contentType !== "application/json") throw new RequestJsonError(415, "Request body must use application/json.");
-  const bytes = await readBoundedBytes(request.body, request.headers.get("content-length"), limitBytes, async () => {
-    await request.body?.cancel().catch(() => undefined);
-  }, (message) => new RequestJsonError(413, message));
-  try {
-    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as T;
-  } catch {
-    throw new RequestJsonError(400, "Request body must be valid JSON.");
   }
 }
 

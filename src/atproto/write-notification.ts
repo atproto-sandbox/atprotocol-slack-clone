@@ -3,9 +3,11 @@ import { isDid, isTid, parseSpaceUri } from "@/protocol/keys";
 export type WriteNotification = { space: string; repo: string; repoRev: string };
 
 const ALLOWED_KEYS = new Set(["space", "repo", "repoRev", "data", "spaceRev", "prevSpaceRev"]);
-const BASE64 = /^[A-Za-z0-9+/]{20,100}={0,2}$/;
+/** The commit digest's size bounds: a sha256 is 32 bytes, and nothing much smaller or larger is one. */
+const MIN_DATA_BYTES = 16;
+const MAX_DATA_BYTES = 64;
 
-/** `spaceRev` and `prevSpaceRev` are present only on notifications the space host forwards; only `repoRev` is kept. `data` (the repo's commit digest, formerly `hash`) is lexicon type `bytes`, which JSON carries as `{ "$bytes": "<base64>" }`. */
+/** `spaceRev` and `prevSpaceRev` are present only on notifications the space host forwards; only `repoRev` is kept. `data` (the repo's commit digest, formerly `hash`) is lexicon type `bytes`: JSON carries it as `{ "$bytes": "<base64>" }`, and the operator's XRPC server hands it over decoded, as a `Uint8Array`. */
 export function parseWriteNotification(body: unknown): WriteNotification | null {
   if (!body || typeof body !== "object" || Array.isArray(body)) return null;
   const input = body as Record<string, unknown>;
@@ -15,9 +17,7 @@ export function parseWriteNotification(body: unknown): WriteNotification | null 
   if (!isTid(repoRev)) return null;
   if (spaceRev !== undefined && !isTid(spaceRev)) return null;
   if (prevSpaceRev !== undefined && !isTid(prevSpaceRev)) return null;
-  if (!data || typeof data !== "object" || Object.keys(data).join() !== "$bytes") return null;
-  const encoded = (data as { $bytes: unknown }).$bytes;
-  if (typeof encoded !== "string" || !BASE64.test(encoded)) return null;
+  if (!(data instanceof Uint8Array) || data.byteLength < MIN_DATA_BYTES || data.byteLength > MAX_DATA_BYTES) return null;
   return { space, repo, repoRev };
 }
 

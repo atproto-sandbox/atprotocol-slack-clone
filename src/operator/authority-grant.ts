@@ -1,7 +1,9 @@
 import { createHash, randomBytes } from "node:crypto";
+import { SimpleStoreMemory } from "@atproto-labs/simple-store-memory";
 import { JoseKey } from "@atproto/jwk-jose";
 import {
   NodeOAuthClient,
+  type NodeOAuthClientOptions,
   TokenInvalidError,
   TokenRefreshError,
   TokenRevokedError,
@@ -10,7 +12,7 @@ import {
   type OAuthSession,
 } from "@atproto/oauth-client-node";
 import { fetchValidatedEndpoint } from "@/atproto/identity";
-import { oauthSqliteStore, UnreadableStoredValueError } from "@/auth/encrypted-store";
+import { oauthSqliteStore, oauthSqliteView, UnreadableStoredValueError } from "@/auth/encrypted-store";
 import {
   assertOAuthFlowAppState,
   isAuthorityFlowPurpose,
@@ -24,9 +26,9 @@ import {
 import { oauthSqliteRequestLock } from "@/auth/oauth-request-lock";
 import { canonicalOAuthScope } from "@/auth/oauth-scope";
 import { workspaceAuthorityScopes } from "@/protocol/scopes";
-import { getAuthorityClientKeys, getConfig, type AuthorityClientKey } from "@/lib/config";
+import { getAuthorityClientKeys, getConfig, getOperatorConfig, type AuthorityClientKey } from "@/lib/config";
 import { getRawDb } from "@/lib/db";
-import { isDid } from "@/protocol/keys";
+import { canonicalJson, isDid } from "@/protocol/keys";
 
 // The workspace authority grant: the one OAuth session the operator administers a workspace with, held per authority DID.
 // It is separate from any person's sign-in: a sign-in never writes it and a sign-out never revokes it. It is created only
@@ -72,14 +74,14 @@ export function authorityGrantScope(): string {
  * are published at the JWKS route, so the PDS gives it the extended session lifetime. Loopback development cannot be
  * confidential (the PDS forces loopback clients public), so there it is a public loopback client.
  */
-type AuthorityClientConfig = { appUrl: URL; authorityClientKeys: readonly AuthorityClientKey[] };
+type AuthorityClientConfig = { operatorUrl: URL; authorityClientKeys: readonly AuthorityClientKey[] };
 
 function authorityClientConfig(): AuthorityClientConfig {
-  return { appUrl: getConfig().appUrl, authorityClientKeys: getAuthorityClientKeys() };
+  return { operatorUrl: getConfig().operatorUrl, authorityClientKeys: getAuthorityClientKeys() };
 }
 
 export function authorityClientMetadata(config: AuthorityClientConfig = authorityClientConfig()) {
-  const origin = config.appUrl.origin;
+  const origin = config.operatorUrl.origin;
   const redirectUri = `${origin}${AUTHORITY_FLOW_PATHS.callback}`;
   const scope = authorityGrantScope();
   const common = {
@@ -90,7 +92,7 @@ export function authorityClientMetadata(config: AuthorityClientConfig = authorit
     response_types: ["code"] as ["code"],
     dpop_bound_access_tokens: true,
   };
-  if (config.appUrl.protocol === "http:") {
+  if (config.operatorUrl.protocol === "http:") {
     return {
       ...common,
       client_id: `http://localhost?${new URLSearchParams({ scope, redirect_uri: redirectUri }).toString()}`,
@@ -116,7 +118,7 @@ export function authorityPublicJwks(config: Pick<AuthorityClientConfig, "authori
 }
 
 export function authorityStartUrl(ticket: string): URL {
-  const url = new URL(AUTHORITY_FLOW_PATHS.start, getConfig().appUrl);
+  const url = new URL(AUTHORITY_FLOW_PATHS.start, getConfig().operatorUrl);
   url.searchParams.set("ticket", ticket);
   return url;
 }
@@ -174,7 +176,7 @@ export async function beginAuthorityFlow(ticket: string, now = unixNow()): Promi
     purpose: intent.purpose,
     expiresAt: now + FLOW_SECONDS,
     clientScope: scope,
-  }, getConfig().encryptionKey);
+  }, getOperatorConfig().encryptionKey);
   return { url: flow.url, cookieName: oauthFlowCookieName(flow.state), cookieValue: flow.cookieValue };
 }
 
@@ -200,7 +202,7 @@ export async function completeAuthorityFlow(
   deps: AuthorityCallbackDeps = defaultCallbackDeps,
   now = unixNow(),
 ): Promise<CompletedAuthorityFlow> {
-  const binding = readOAuthFlowCookieValue(params.get("state") ?? "", cookieValue, getConfig().encryptionKey);
+  const binding = readOAuthFlowCookieValue(params.get("state") ?? "", cookieValue, getOperatorConfig().encryptionKey);
   if (binding?.kind !== "authority") throw new AuthorityFlowError("This approval is not bound to this browser.");
   if (binding.expiresAt <= now) throw new AuthorityFlowError("This approval expired. Start again.");
   const staged = new Map<string, NodeSavedSession>();
@@ -229,15 +231,27 @@ export async function completeAuthorityFlow(
  * one approved with a client key that is no longer configured needs a new approval. A grant's refreshes stay signed with
  * the key it was approved with, so that last case is checked before the OAuth client would delete the grant for it: putting
  * the key back restores the grant.
+ *
+ * The session sees only the approval it was restored from (`approvalView`). The OAuth client reads a session's tokens from
+ * the store on every request but keeps the DPoP key it was restored with, so a session still in use after the authority
+ * approves again would otherwise sign the new approval's tokens with the old key; the host refuses that, and the client
+ * answers by deleting the stored grant, the new one. Pinned, such a session finds no grant and fails, and the new grant stays.
  */
-export async function restoreAuthorityGrant(did: string): Promise<OAuthSession> {
+export function restoreAuthorityGrant(did: string): Promise<OAuthSession> {
+  return restoreApproval(did, true);
+}
+
+async function restoreApproval(did: string, againIfReplaced: boolean): Promise<OAuthSession> {
   const stored = await readable(grantStore().get(did));
   if (!stored || !clientKeyAvailable(stored)) throw new AuthorityReauthorizationRequiredError(did);
   try {
-    const session = await (await authorityGrantClient()).restore(did);
+    const session = await (await createAuthorityClient(approvalView(stored))).restore(did);
     if (session.did !== did) throw new AuthorityReauthorizationRequiredError(did);
     return session;
   } catch (error) {
+    // The authority approved again between the read above and the restore, which then found no grant of its approval: the
+    // new approval is restored instead, once.
+    if (againIfReplaced && error instanceof TokenRefreshError && await approvedAgainSince(did, stored)) return restoreApproval(did, false);
     // Refused at refresh, or revoked or deleted meanwhile: only a new approval gives the operator a usable grant.
     if (error instanceof TokenRefreshError || error instanceof TokenRevokedError || error instanceof TokenInvalidError || error instanceof UnreadableStoredValueError) {
       throw new AuthorityReauthorizationRequiredError(did, { cause: error });
@@ -291,6 +305,21 @@ export async function persistAuthorityGrant(did: string, saved: NodeSavedSession
   });
 }
 
+/** The grant table as one approval's session sees it: that approval through its refreshes, and nothing that replaced it. */
+function approvalView(approved: NodeSavedSession): Store<NodeSavedSession> {
+  return oauthSqliteView<NodeSavedSession>("authority_grant", (value) => sameApproval(value, approved));
+}
+
+async function approvedAgainSince(did: string, approved: NodeSavedSession): Promise<boolean> {
+  const current = await readable(grantStore().get(did));
+  return current !== undefined && !sameApproval(current, approved);
+}
+
+/** Each approval has its own DPoP key, and its refreshes keep it. */
+function sameApproval(left: NodeSavedSession, right: NodeSavedSession): boolean {
+  return canonicalJson(left.dpopJwk) === canonicalJson(right.dpopJwk);
+}
+
 function clientKeyAvailable(saved: NodeSavedSession): boolean {
   const authMethod = saved.authMethod as { method?: string; kid?: string } | undefined;
   if (authMethod?.method !== "private_key_jwt") return true;
@@ -326,11 +355,27 @@ const defaultCallbackDeps: AuthorityCallbackDeps = {
 type Store<T> = { get(key: string): Promise<T | undefined>; set(key: string, value: T): Promise<void>; del(key: string): Promise<void> };
 
 let grantClient: Promise<OAuthFlowClient & NodeOAuthClient> | undefined;
+
+/**
+ * The caches every authority client shares (the library's defaults, kept once per process), so a client made for one restore
+ * does not fetch the authorization server's metadata or a DPoP nonce again.
+ */
+const sharedClientCaches: Pick<NodeOAuthClientOptions, "dpopNonceCache" | "authorizationServerMetadataCache" | "protectedResourceMetadataCache"> = {
+  dpopNonceCache: new SimpleStoreMemory({ ttl: 60e3, max: 100 }),
+  authorizationServerMetadataCache: new SimpleStoreMemory({ ttl: 60e3, max: 100 }),
+  protectedResourceMetadataCache: new SimpleStoreMemory({ ttl: 60e3, max: 100 }),
+};
 let stateTracker: ReturnType<typeof trackOAuthStateStore<NodeSavedState>> | undefined;
 
-/** The client over the grant table: starts flows, restores grants and revokes them. Callbacks use a staged store instead. */
+const refuseSessions = () => Promise.reject(new Error("The authority flow client holds no session; restore a grant with restoreAuthorityGrant."));
+const NO_SESSIONS: Store<NodeSavedSession> = { get: refuseSessions, set: refuseSessions, del: refuseSessions };
+
+/**
+ * The client that starts flows. It holds no session: a restore uses a client of its own over one approval (`approvalView`),
+ * and a callback one over a staged store.
+ */
 function authorityGrantClient(): Promise<OAuthFlowClient & NodeOAuthClient> {
-  grantClient ??= createAuthorityClient(grantStore()).then((client) => Object.assign(client, {
+  grantClient ??= createAuthorityClient(NO_SESSIONS).then((client) => Object.assign(client, {
     takeProtocolStateForAppState: stateStore().takeProtocolStateForAppState,
   }));
   return grantClient;
@@ -343,10 +388,11 @@ async function createAuthorityClient(sessionStore: Store<NodeSavedSession>): Pro
     keyset: await Promise.all(config.authorityClientKeys.map((key) => JoseKey.fromImportable(key, key.kid))),
     fetch: fetchValidatedEndpoint,
     requestLock: oauthSqliteRequestLock,
-    allowHttp: config.appUrl.protocol === "http:",
+    allowHttp: config.operatorUrl.protocol === "http:",
     plcDirectoryUrl: getConfig().plcDirectoryUrl,
     stateStore: stateStore().store,
     sessionStore,
+    ...sharedClientCaches,
   });
 }
 

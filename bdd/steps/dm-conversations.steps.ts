@@ -426,8 +426,10 @@ Then("every reader shows the change", async function (this: AppWorld) {
   for (const viewer of [author, reader]) {
     await dmcSync(viewer);
     await dmcCard(viewer, "edited draft").waitFor({ state: "visible" });
-    assert.equal(await dmcCard(viewer, "draft to edit").count(), 0, `${viewer.role} still shows the text before the edit`);
-    assert.equal(await dmcCard(viewer, "draft to delete").count(), 0, `${viewer.role} still shows the deleted message`);
+    // The edit may already be on screen from a live update while the sync just started still applies the delete, so the
+    // old texts are waited out rather than counted at once; one that stays fails at the page's timeout.
+    await dmcCard(viewer, "draft to edit").waitFor({ state: "detached" });
+    await dmcCard(viewer, "draft to delete").waitFor({ state: "detached" });
   }
 });
 
@@ -707,11 +709,12 @@ Then("no app server is asked for the request", async function (this: AppWorld) {
   // Everything the recipient's browser sent to the app's origin (pages, assets, the operator's methods), and the operator's
   // answers where they are recorded (a held change-feed poll is headers-only): the app's server has no member routes, so this
   // is all it was asked.
-  const appCalls = dmcTrafficOf(this, recipient).requests.filter((request) => new URL(request.url).origin === this.appOrigin);
+  const appOrigins = [this.appOrigin, this.operatorOrigin];
+  const appCalls = dmcTrafficOf(this, recipient).requests.filter((request) => appOrigins.includes(new URL(request.url).origin));
   assert.ok(appCalls.length > 0, "the recipient's browser did talk to the app server");
   const exchanged = [
     ...appCalls.map((request) => `${request.url}\n${request.postData}`),
-    ...recipient.xrpc.filter((call) => call.origin === this.appOrigin).map((call) => `${call.path}\n${call.requestBody}\n${call.responseBody}`),
+    ...recipient.xrpc.filter((call) => appOrigins.includes(call.origin)).map((call) => `${call.path}\n${call.requestBody}\n${call.responseBody}`),
   ].join("\n");
   for (const needle of [convKey, sender.did, "new.flock.dm.request"]) assert.ok(!exchanged.includes(needle), `nothing the recipient exchanged with the app's origin mentions ${needle}`);
   const stored = dmcAppDatabaseText(this);

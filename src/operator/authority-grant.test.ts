@@ -343,7 +343,7 @@ test("a missing grant asks for reauthorization", async () => {
 
 test("on loopback the authority client is a public loopback client", () => {
   // given loopback development
-  const metadata = grant.authorityClientMetadata({ appUrl: new URL("http://127.0.0.1:3000"), authorityClientKeys: [] });
+  const metadata = grant.authorityClientMetadata({ operatorUrl: new URL("http://127.0.0.1:3000"), authorityClientKeys: [] });
 
   // then the client is public, with its own callback
   assert.equal(metadata.token_endpoint_auth_method, "none");
@@ -358,7 +358,7 @@ test("outside loopback the authority client is confidential and publishes its ke
     { kty: "EC" as const, crv: "P-256" as const, x: "x1", y: "y1", d: "secret1", kid: "new" },
     { kty: "EC" as const, crv: "P-256" as const, x: "x2", y: "y2", d: "secret2", kid: "old" },
   ];
-  const config = { appUrl: new URL("https://spaces.example.com"), authorityClientKeys: keys };
+  const config = { operatorUrl: new URL("https://spaces.example.com"), authorityClientKeys: keys };
 
   // when its metadata and JWKS are served
   const metadata = grant.authorityClientMetadata(config);

@@ -9,7 +9,7 @@ import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { isAccessLost, SPACE_CREDENTIAL_LIFETIME_MS } from "@/atproto/space-credential-core";
 import { createFixtureTempRoot } from "./fixture-temp";
-import { actorTransport, callOperatorMethod, expireStoredSession, storeAuthorityGrant, type TestPds as NetworkPds } from "./support/pds-network";
+import { actorTransport, callOperatorMethod, expireStoredSession, inProcessOperator, storeAuthorityGrant, type TestPds as NetworkPds } from "./support/pds-network";
 
 type DidResolver = { resolve(did: string, ...args: unknown[]): Promise<unknown> };
 type TestPds = NetworkPds & { ctx: NetworkPds["ctx"] & { idResolver: { did: DidResolver } } };
@@ -78,7 +78,7 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     // Each account's engine, as its browser runs it. The member's clock can be moved past a truth interval, so a writer is checked at its host again.
     let memberClockOffsetMs = 0;
     const memberEngine = createEngine(actorTransport({ plcUrl: network.plc.url }, member, { now: () => Date.now() + memberClockOffsetMs }));
-    const adminEngine = createEngine(actorTransport({ plcUrl: network.plc.url }, admin, { fetchVia: fetchWithOperatorInProcess }), { operator: { serviceRef, endpoint: OPERATOR_ORIGIN } });
+    const adminEngine = createEngine(actorTransport({ plcUrl: network.plc.url }, admin), { operator: { serviceRef, endpoint: await inProcessOperator() } });
     const independentDeps = (actor: TestActor) => actorTransport({ plcUrl: network.plc.url }, actor);
 
     const bootstrap = await bootstrapWorkspace(ownerSession as never, { name: "Pilot Workspace", operationId: tidNow() });
@@ -289,12 +289,10 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
       assert.equal(response.status, 200, "the PDS signs a service token for the app's service ref");
       return ((await response.json()) as { token: string }).token;
     };
-    const [{ POST: applySpaceDeleted }, { NextRequest }] = await Promise.all([
-      import("@/app/xrpc/com.atproto.space.notifySpaceDeleted/route"), import("next/server"),
-    ]);
-    const notice = (token: string | null, space: string) => applySpaceDeleted(new NextRequest("http://127.0.0.1:3000/xrpc/com.atproto.space.notifySpaceDeleted", {
+    const operatorOrigin = await inProcessOperator();
+    const notice = (token: string | null, space: string) => fetch(new URL("/xrpc/com.atproto.space.notifySpaceDeleted", operatorOrigin), {
       method: "POST", headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify({ space }),
-    }));
+    });
     assert.equal((await notice(null, doomedSpace)).status, 403, "no token");
     assert.equal((await notice(await serviceToken(member), doomedSpace)).status, 403, "a token from someone who is not the space's authority");
     assert.equal((await notice(await serviceToken(owner), channelUri(owner.did, "never-registered"))).status, 403, "a space the app never registered");
@@ -1079,27 +1077,13 @@ async function runReconciliation(databasePath: string, mutationsPaused = true): 
   return { exitCode, stdout, stderr };
 }
 
-const OPERATOR_ORIGIN = "http://127.0.0.1:3000";
-
-/** What a browser's fetch does for the operator, with its routes served in this process: requests to its origin reach the route handler, others go out. */
-async function fetchWithOperatorInProcess(request: Request): Promise<Response> {
-  const url = new URL(request.url);
-  if (url.origin !== OPERATOR_ORIGIN) return fetch(request);
-  const [{ NextRequest }, route] = await Promise.all([import("next/server"), import(`@/app${url.pathname}/route`) as Promise<Record<string, (request: InstanceType<typeof import("next/server").NextRequest>) => Promise<Response>>>]);
-  const handler = route[request.method];
-  assert.ok(handler, `${url.pathname} has a ${request.method} handler`);
-  return handler(new NextRequest(request));
-}
-
 async function acceptOperatorCreateWorkspace(session: Session, serviceRef: string, authorityDid: string): Promise<void> {
-  const [{ NextRequest }, { POST }, { tidNow }] = await Promise.all([
-    import("next/server"), import("@/app/xrpc/new.flock.operator.createWorkspace/route"), import("@/protocol/keys"),
-  ]);
+  const { tidNow } = await import("@/protocol/keys");
   // The owner asks as a member, with a service token from their own host; the operator creates the workspace with the separate authority grant.
   const body = { name: "Authenticated Operator Workspace", operationId: tidNow() };
-  const anonymous = await POST(new NextRequest(`${OPERATOR_ORIGIN}/xrpc/new.flock.operator.createWorkspace`, {
+  const anonymous = await fetch(new URL("/xrpc/new.flock.operator.createWorkspace", await inProcessOperator()), {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
-  }));
+  });
   assert.equal(anonymous.status, 403, "the operator refuses a request without a service token");
   const result = await callOperatorMethod(session, serviceRef, "new.flock.operator.createWorkspace", {}, body) as { state: string; workspace: string };
   assert.equal(result.state, "completed", "the operator restores the encrypted authority grant and bootstraps against the PDS");

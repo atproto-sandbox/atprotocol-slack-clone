@@ -1,3 +1,4 @@
+import { once } from "node:events";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -76,11 +77,13 @@ export function pinnedCheckout(): string {
 
 /**
  * The pinned two-host network with this app's lexicons, and this process's environment pointed at it. `appPort` is where the
- * operator is reached (its `did:web` service, `APP_URL`), for a test that runs the app server there to receive notices.
+ * web app runs (`APP_URL`) and `operatorPort` where the operator does (`OPERATOR_URL`, its `did:web` service), for a test that
+ * runs them there; a test that calls the operator's methods in its own process needs neither.
  */
-export async function startPdsNetwork(label: string, options: { appPort?: number } = {}): Promise<PdsNetwork> {
+export async function startPdsNetwork(label: string, options: { appPort?: number; operatorPort?: number } = {}): Promise<PdsNetwork> {
   const appPort = options.appPort ?? 3000;
-  const serviceRef = `did:web:localhost%3A${appPort}#atproto_flock_operator`;
+  const operatorPort = options.operatorPort ?? 3001;
+  const serviceRef = `did:web:localhost%3A${operatorPort}#atproto_flock_operator`;
   const { TestNetworkNoAppView } = await import(pathToFileURL(join(pinnedCheckout(), "packages/dev-env/src/index.ts")).href) as {
     TestNetworkNoAppView: { create(options: { extraPdses: number; lexiconAuthority: boolean }): Promise<TestNetwork> };
   };
@@ -98,6 +101,7 @@ export async function startPdsNetwork(label: string, options: { appPort?: number
     NODE_ENV: "test",
     ATPROTO_ACCEPTANCE_TEST: "true",
     APP_URL: `http://127.0.0.1:${appPort}`,
+    OPERATOR_URL: `http://127.0.0.1:${operatorPort}`,
     AUTH_ENCRYPTION_KEY: "4a".repeat(32),
     OPERATOR_SERVICE_REF: serviceRef,
     PLC_URL: network.plc.url,
@@ -313,9 +317,29 @@ export async function combinedMemberScopes(serviceRef: string): Promise<string[]
   return (await import("@/protocol/scopes")).memberGrantScopes(serviceRef).filter((scope) => scope !== "atproto");
 }
 
+let operatorServed: Promise<string> | undefined;
+
 /**
- * Calls one of the operator's XRPC methods through its real route handler, authenticated with a service token the caller's
- * own session obtains, and returns the parsed answer. Throws with the operator's answer on any status other than 200.
+ * The operator's app served in this process on a free port, so a test reaches its methods as a browser does (lexicon checks,
+ * routing and error answers included) with the database and keys this process's environment names. Started once, after the
+ * network has set that environment; it does not keep the process alive.
+ */
+export function inProcessOperator(): Promise<string> {
+  operatorServed ??= (async () => {
+    const { createOperatorApp } = await import("@/operator/server");
+    const server = createOperatorApp().listen(0, "127.0.0.1");
+    await once(server, "listening");
+    server.unref();
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    return `http://127.0.0.1:${address.port}`;
+  })();
+  return operatorServed;
+}
+
+/**
+ * Calls one of the operator's XRPC methods on the in-process operator, authenticated with a service token the caller's own
+ * session obtains, and returns the parsed answer. Throws with the operator's answer on any status other than 200.
  */
 export async function callOperatorMethod(
   session: { did: string; fetchHandler(path: string, init: RequestInit): Promise<Response> },
@@ -324,20 +348,16 @@ export async function callOperatorMethod(
   query: Record<string, string>,
   body?: unknown,
 ): Promise<Record<string, unknown>> {
-  const [{ sessionClient }, { NextRequest }] = await Promise.all([import("@/atproto/client"), import("next/server")]);
+  const { sessionClient } = await import("@/atproto/client");
   // A service token from the caller's own session, bound to the operator's service and to exactly this method.
   const { token } = await sessionClient(session as never).query<{ token: string }>("com.atproto.server.getServiceAuth", { aud: serviceRef, lxm: method });
-  const url = new URL(`http://127.0.0.1:3000/xrpc/${method}`);
+  const url = new URL(`/xrpc/${method}`, await inProcessOperator());
   for (const [name, value] of Object.entries(query)) url.searchParams.set(name, value);
-  type Handler = (request: InstanceType<typeof NextRequest>) => Promise<Response>;
-  const route = await import(`@/app/xrpc/${method}/route`) as { GET?: Handler; POST?: Handler };
-  const handler = body === undefined ? route.GET : route.POST;
-  assert.ok(handler, `${method} has a handler`);
-  const response = await handler(new NextRequest(url, {
+  const response = await fetch(url, {
     method: body === undefined ? "GET" : "POST",
-    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    headers: { authorization: `Bearer ${token}`, ...(body === undefined ? {} : { "content-type": "application/json" }) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-  }));
+  });
   const answer = await response.json() as Record<string, unknown>;
   if (response.status !== 200) throw new Error(`${method} answered ${response.status}: ${JSON.stringify(answer)}`);
   return answer;

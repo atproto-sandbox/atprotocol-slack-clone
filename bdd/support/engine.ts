@@ -10,7 +10,7 @@ import type { Actor, AppWorld } from "./world";
 
 export function engineAs(world: AppWorld, actor: Actor): Engine {
   return createEngine(actorTransport({ plcUrl: world.fixture.plcUrl }, { did: actor.did, accessJwt: actor.accessJwt, pds: { url: actor.pdsUrl } }), {
-    operator: { serviceRef: world.operatorServiceRef, endpoint: world.appOrigin },
+    operator: { serviceRef: world.operatorServiceRef, endpoint: world.operatorOrigin },
   });
 }
 

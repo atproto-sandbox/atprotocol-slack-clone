@@ -1,11 +1,12 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import type { NodeSavedSession, NodeSavedState } from "@atproto/oauth-client-node";
-import { getConfig } from "@/lib/config";
+import { getOperatorConfig } from "@/lib/config";
 import { getRawDb } from "@/lib/db";
 
 type OAuthRow = { key: string; value: string; updated_at: number };
 type OAuthValue = NodeSavedSession | NodeSavedState;
-type OAuthTable = "authority_grant_state" | "authority_grant";
+type SessionTable = "authority_grant";
+type OAuthTable = "authority_grant_state" | SessionTable;
 const STATE_TABLES: ReadonlySet<OAuthTable> = new Set(["authority_grant_state"]);
 const SQLITE_WRITE_RETRY_DELAYS_MS = [100, 250] as const;
 const OAUTH_STATE_RETENTION_MS = 30 * 60 * 1000;
@@ -42,8 +43,7 @@ export function oauthSqliteStore<K extends OAuthValue>(table: OAuthTable, option
           if (STATE_TABLES.has(table)) {
             db.prepare(`DELETE FROM ${table} WHERE updated_at < ?`).run(now - OAUTH_STATE_RETENTION_MS);
           }
-          db.prepare(`INSERT INTO ${table}(key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`)
-            .run(key, encryptedValue, now);
+          writeRow(table, key, encryptedValue, now);
         });
         write();
       });
@@ -54,6 +54,46 @@ export function oauthSqliteStore<K extends OAuthValue>(table: OAuthTable, option
       });
     },
   };
+}
+
+/**
+ * A view of the session table that sees only the values `sees` accepts. A read of any other value, or of one that cannot be
+ * decrypted, finds nothing. A write or a delete goes through only while the stored value is one the view sees, checked in
+ * the same transaction, so a value that replaced it meanwhile is never overwritten or deleted, and one deleted meanwhile is
+ * not written back.
+ */
+export function oauthSqliteView<K extends OAuthValue>(table: SessionTable, sees: (value: K) => boolean): Store<K> {
+  const seen = (key: string): K | undefined => {
+    const row = getRawDb().prepare(`SELECT value FROM ${table} WHERE key = ?`).get(key) as Pick<OAuthRow, "value"> | undefined;
+    if (!row) return undefined;
+    try {
+      const value = decryptJson<K>(row.value);
+      return sees(value) ? value : undefined;
+    } catch (error) {
+      if (error instanceof UnreadableStoredValueError) return undefined;
+      throw error;
+    }
+  };
+  const whileSeen = (key: string, write: () => void) => retrySqliteBusyWrite(() => {
+    getRawDb().transaction(() => {
+      if (seen(key) !== undefined) write();
+    }).immediate();
+  });
+  return {
+    get: async (key) => seen(key),
+    async set(key, value) {
+      const encryptedValue = encryptJson(value);
+      await whileSeen(key, () => writeRow(table, key, encryptedValue, Date.now()));
+    },
+    del: (key) => whileSeen(key, () => {
+      getRawDb().prepare(`DELETE FROM ${table} WHERE key = ?`).run(key);
+    }),
+  };
+}
+
+function writeRow(table: OAuthTable, key: string, encryptedValue: string, now: number): void {
+  getRawDb().prepare(`INSERT INTO ${table}(key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`)
+    .run(key, encryptedValue, now);
 }
 
 export async function retrySqliteBusyWrite<T>(write: () => T): Promise<T> {
@@ -71,7 +111,7 @@ export async function retrySqliteBusyWrite<T>(write: () => T): Promise<T> {
 
 export function encryptJson(value: unknown): string {
   const iv = randomBytes(12);
-  const cipher = createCipheriv("aes-256-gcm", getConfig().encryptionKey, iv);
+  const cipher = createCipheriv("aes-256-gcm", getOperatorConfig().encryptionKey, iv);
   const ciphertext = Buffer.concat([cipher.update(JSON.stringify(value), "utf8"), cipher.final()]);
   return ["v1", iv.toString("base64url"), cipher.getAuthTag().toString("base64url"), ciphertext.toString("base64url")].join(".");
 }
@@ -90,7 +130,7 @@ export function decryptJson<T>(value: string): T {
     throw new UnreadableStoredValueError();
   }
   try {
-    const decipher = createDecipheriv("aes-256-gcm", getConfig().encryptionKey, Buffer.from(ivPart, "base64url"));
+    const decipher = createDecipheriv("aes-256-gcm", getOperatorConfig().encryptionKey, Buffer.from(ivPart, "base64url"));
     decipher.setAuthTag(Buffer.from(tagPart, "base64url"));
     const plaintext = Buffer.concat([decipher.update(Buffer.from(ciphertextPart, "base64url")), decipher.final()]);
     return JSON.parse(plaintext.toString("utf8")) as T;

@@ -2398,7 +2398,8 @@ export const schemaDict = {
           name: {
             type: 'string',
             minLength: 1,
-            maxLength: 80,
+            maxLength: 320,
+            maxGraphemes: 80,
           },
           visibility: {
             type: 'string',
@@ -2462,7 +2463,9 @@ export const schemaDict = {
             type: 'array',
             items: {
               type: 'string',
-              maxLength: 128,
+              maxLength: 2560,
+              description:
+                "A step the operation finished. A step about one member names its space key and the member's DID, so the bound allows the longest DID AT Protocol permits.",
             },
           },
           error: {

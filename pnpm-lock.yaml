@@ -5,7 +5,13 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
+  '@atproto/common@^0.0.0-spaces-alpha-20261029171913': 0.0.0-spaces-alpha-20261029171913
   '@atproto/common-web@^0.0.0-spaces-alpha-20261029171913': 0.0.0-spaces-alpha-20261029171913
+  '@atproto/crypto@^0.0.0-spaces-alpha-20261029171913': 0.0.0-spaces-alpha-20261029171913
+  '@atproto/lexicon@^0.0.0-spaces-alpha-20261029171913': 0.0.0-spaces-alpha-20261029171913
+  '@atproto/lex-client@^0.0.0-spaces-alpha-20261029171913': 0.0.0-spaces-alpha-20261029171913
+  '@atproto/lex-schema@^0.0.0-spaces-alpha-20261029171913': 0.0.0-spaces-alpha-20261029171913
+  '@atproto/xrpc@^0.0.0-spaces-alpha-20261029171913': 0.0.0-spaces-alpha-20261029171913
   '@atproto/lex-cbor@^0.0.0-spaces-alpha-20261029171913': 0.0.0-spaces-alpha-20261029171913
   '@atproto/lex-data@^0.0.0-spaces-alpha-20261029171913': 0.0.0-spaces-alpha-20261029171913
   '@atproto/lex-json@^0.0.0-spaces-alpha-20261029171913': 0.0.0-spaces-alpha-20261029171913
@@ -14,6 +20,9 @@ importers:
 
   .:
     dependencies:
+      '@atproto-labs/simple-store-memory':
+        specifier: 0.2.6
+        version: 0.2.6
       '@atproto/crypto':
         specifier: 0.0.0-spaces-alpha-20261029171913
         version: 0.0.0-spaces-alpha-20261029171913
@@ -48,8 +57,8 @@ importers:
         specifier: 0.8.13
         version: 0.8.13
       '@atproto/xrpc-server':
-        specifier: 0.13.1
-        version: 0.13.1
+        specifier: 0.0.0-spaces-alpha-20261029171913
+        version: 0.0.0-spaces-alpha-20261029171913
       '@next/env':
         specifier: 16.3.6
         version: 16.3.6
@@ -59,6 +68,9 @@ importers:
       better-sqlite3:
         specifier: 12.6.0
         version: 12.6.0
+      express:
+        specifier: 4.22.3
+        version: 4.22.3
       kysely:
         specifier: 0.29.5
         version: 0.29.5
@@ -90,6 +102,9 @@ importers:
       '@types/better-sqlite3':
         specifier: 7.6.13
         version: 7.6.13
+      '@types/express':
+        specifier: 4.17.23
+        version: 4.17.23
       '@types/node':
         specifier: 24.0.0
         version: 24.0.0
@@ -165,8 +180,8 @@ packages:
     resolution: {integrity: sha512-FumNnUOUsk68gP+jU0sXY2wY2piqFV9/qU2YaoQq/IZknhJBlLYCzjQXXCN0FCzxAZWD0YUzgydeyuRvFoAxfA==}
     engines: {node: '>=22'}
 
-  '@atproto/common@0.8.3':
-    resolution: {integrity: sha512-y4rE89CNn8DTtv+rJggcRnqv/nZRD7aZ/Vwf0GRvYe/790RItMDoeGORdXLsh9wwhkg1hvWfnPADE/XwF13NMA==}
+  '@atproto/common@0.0.0-spaces-alpha-20261029171913':
+    resolution: {integrity: sha512-aWffhp+2NIZS1mPFJz/Zs02IGI2PlQ3d87qhZXjuMhKUsx5ToDatLPDUtMqn59VvvCqeMXTI07w5dI/11ZWHBw==}
     engines: {node: '>=22'}
 
   '@atproto/crypto@0.0.0-spaces-alpha-20261029171913':
@@ -201,14 +216,14 @@ packages:
     resolution: {integrity: sha512-ijALiT77KTL3Ro+QDrHwRXEirYMtBQWe16p5/d8dbs1oyaKRRvojMYW2O9iOR7mvDeSfmAB8RXM6Izf5Oe2+dw==}
     engines: {node: '>=22'}
 
-  '@atproto/lex-cbor@0.1.6':
-    resolution: {integrity: sha512-PxLQy7jzV8u9zTGURNF8ZczLPk+ZH+WNx/2z/z7RacJbu7sWNpx26U2pC7cIkWtt4jyDaruaLhssw3w3atLotA==}
-    engines: {node: '>=22'}
-
   '@atproto/lex-cli@0.10.13':
     resolution: {integrity: sha512-WERD6XOcEXI2c8lgp6HYIa/58WtDVsxQJvuARnsnJmun1RwBaCYoiT5oMyRDzkbA3nOf5vkH9nnuzar7WXEMLQ==}
     engines: {node: '>=22'}
     hasBin: true
+
+  '@atproto/lex-client@0.0.0-spaces-alpha-20261029171913':
+    resolution: {integrity: sha512-5+O85kcNdvJv5EXtzQaTeM3419cN0yOq40GAX6ge7x7qkJYThtuUR6EXCJ4vD4D1VXYXGHG73NtARDeyqrSiPg==}
+    engines: {node: '>=22'}
 
   '@atproto/lex-client@0.3.6':
     resolution: {integrity: sha512-8tPDTyCdMN8qtyODl00oVcBlh26a0HeurOdtJnz9Fcq+dBuRo2XuEcxCUfvwtulOY+zghyw3zAG6fqwxUe2lvw==}
@@ -228,6 +243,10 @@ packages:
 
   '@atproto/lex-json@0.1.6':
     resolution: {integrity: sha512-mvrAd0lbyuecIHjyld8QN6MN6CBf4j0GCxLzegsvLh0SvDf+GbYWklkcQqmITL44yFQOwmA/QNIQj0Uvh7+R/g==}
+    engines: {node: '>=22'}
+
+  '@atproto/lex-schema@0.0.0-spaces-alpha-20261029171913':
+    resolution: {integrity: sha512-Kzk5o2q6Jt9LEM4nknj3wn0ixOfLLfq9EWnjjR0chnuKpV0UojjbSSugpBVLLQ1xf55OZWlDX5Sjl5oOKviq+w==}
     engines: {node: '>=22'}
 
   '@atproto/lex-schema@0.2.7':
@@ -274,8 +293,12 @@ packages:
     resolution: {integrity: sha512-HCGkqH/Ksxpgg/xCyIvH5hK6o8Lg2PxcEA790GCEV9MspCZB/xIesHZVgJN0cEvklGe+6pNCOZE1B5kj9q1ONA==}
     engines: {node: '>=22'}
 
-  '@atproto/xrpc-server@0.13.1':
-    resolution: {integrity: sha512-Wbv+HE2d26iV2NNnZw+L5rhzl+O/x8yNmHw6ZRW71+ocAt3lkGKzR2vcNc2HpQveZFdNPxJT+MuY+6czq3gNwg==}
+  '@atproto/xrpc-server@0.0.0-spaces-alpha-20261029171913':
+    resolution: {integrity: sha512-5lqdM8LqjtQnB3id1o31ln6mkxfheoN77JcJKUufWGcqVq4/5smXrtdsl7AXqULjx6ZcuB/mjjfSaoXykiN5CQ==}
+    engines: {node: '>=22'}
+
+  '@atproto/xrpc@0.0.0-spaces-alpha-20261029171913':
+    resolution: {integrity: sha512-P/icLBGZOiJHTkVosKe0Lli7XlxwAiyJRFJD/fdpqixdkuU+p80R2t7Kk4g+ZrkNR90dhFbLdYyhf+B0AH2QOA==}
     engines: {node: '>=22'}
 
   '@atproto/xrpc@0.8.13':
@@ -939,8 +962,23 @@ packages:
   '@types/better-sqlite3@7.6.13':
     resolution: {integrity: sha512-NMv9ASNARoKksWtsq/SHakpYAYnhBrQgGD8zkLYk/jaK8jUGn08CfEdTRgYhMypUQAfzSP8W6gNLe0q19/t4VA==}
 
+  '@types/body-parser@1.19.6':
+    resolution: {integrity: sha512-HLFeCYgz89uk22N5Qg3dvGvsv46B8GLvKKo1zKG4NybA8U2DiEO3w9lqGg29t/tfLRJpJ6iQxnVw4OnB7MoM9g==}
+
+  '@types/connect@3.4.38':
+    resolution: {integrity: sha512-K6uROf1LD88uDQqJCktA4yzL1YYAK6NgfsI0v/mTgyPKWsX1CnJ0XPSDhViejru1GcRkLWb8RlzFYJRqGUbaug==}
+
   '@types/estree@1.0.9':
     resolution: {integrity: sha512-GhdPgy1el4/ImP05X05Uw4cw2/M93BCUmnEvWZNStlCzEKME4Fkk+YpoA5OiHNQmoS7Cafb8Xa3Pya8m1Qrzeg==}
+
+  '@types/express-serve-static-core@4.19.9':
+    resolution: {integrity: sha512-QP2ESEe/ImWY0HDwNAnK9PvEffUyhLTnWkk7KXzHfyeWAnlrDe1fN77bXl6ia8KT3wPlmA7t9/VPRpnf4Ex9sg==}
+
+  '@types/express@4.17.23':
+    resolution: {integrity: sha512-Crp6WY9aTYP3qPi2wGDo9iUe/rceX01UMhnF1jmwDcKCFM6cx7YhGP/Mpr3y9AASpfHixIG0E6azCcL5OcDHsQ==}
+
+  '@types/http-errors@2.0.5':
+    resolution: {integrity: sha512-r8Tayk8HJnX0FztbZN7oVqGccWgw98T/0neJphO91KkmOzug1KkofZURD4UaD5uH8AqcFLfdPErnBod0u71/qg==}
 
   '@types/json-schema@7.0.15':
     resolution: {integrity: sha512-5+fP8P8MFNC+AyZCDxrB2pkZFPGzqQWUzpSeuuVLvm8VMcorNYavBqoFcxK8bQz4Qsbn4oUEEem4wDLfcysGHA==}
@@ -954,11 +992,23 @@ packages:
   '@types/normalize-package-data@2.4.4':
     resolution: {integrity: sha512-37i+OaWTh9qeK4LSHPsyRC7NahnGotNuZvjLSgcPzblpHB3rrCJxAOgI5gCdKm7coonsaX1Of0ILiTcnZjbfxA==}
 
+  '@types/qs@6.15.1':
+    resolution: {integrity: sha512-GZHUBZR9hckSUhrxmp1nG6NwdpM9fCunJwyThLW1X3AyHgd9IlHb6VANpQQqDr2o/qQp6McZ3y/IA2rVzKzSbw==}
+
+  '@types/range-parser@1.2.7':
+    resolution: {integrity: sha512-hKormJbkJqzQGhziax5PItDUTMAM9uE2XXQmM37dyd4hVM+5aVl7oVxMVUiVQn2oCQFN/LKCZdvSM0pFRqbSmQ==}
+
   '@types/react-dom@19.0.0':
     resolution: {integrity: sha512-1KfiQKsH1o00p9m5ag12axHQSb3FOU9H20UTrujVSkNhuCrRHiQWFqgEnTNK5ZNfnzZv8UWrnXVqCmCF9fgY3w==}
 
   '@types/react@19.0.0':
     resolution: {integrity: sha512-MY3oPudxvMYyesqs/kW1Bh8y9VqSmf+tzqw3ae8a9DZW68pUe3zAdHeI1jc6iAysuRdACnVknHP8AhwD4/dxtg==}
+
+  '@types/send@1.2.1':
+    resolution: {integrity: sha512-arsCikDvlU99zl1g69TcAB3mzZPpxgw0UQnaHeC1Nwb015xp8bknZv5rIfri9xTOcMuaVgvabfIRA7PSZVuZIQ==}
+
+  '@types/serve-static@2.2.0':
+    resolution: {integrity: sha512-8mam4H1NHLtu7nmtalF7eyBH14QyOASmcxHhSfEoRyr0nP/YdoesEtU+uSRvMe96TW/HPTtkoKqQLl53N7UXMQ==}
 
   '@typescript-eslint/eslint-plugin@8.70.1':
     resolution: {integrity: sha512-nDNrUQ/4ruSNYbu749TRY7cfrzPtoLHEXSNBI8aaNY32LlZCajixqRf3FqcKC4p5Cam4VOHYx/t+i5+nKXvrqA==}
@@ -3073,11 +3123,11 @@ snapshots:
       '@atproto/syntax': 0.7.6
       zod: 3.25.76
 
-  '@atproto/common@0.8.3':
+  '@atproto/common@0.0.0-spaces-alpha-20261029171913':
     dependencies:
-      '@atproto/common-web': 0.5.12
-      '@atproto/lex-cbor': 0.1.6
-      '@atproto/lex-data': 0.1.7
+      '@atproto/common-web': 0.0.0-spaces-alpha-20261029171913
+      '@atproto/lex-cbor': 0.0.0-spaces-alpha-20261029171913
+      '@atproto/lex-data': 0.0.0-spaces-alpha-20261029171913
       multiformats: 13.4.2
       pino: 10.3.1
 
@@ -3125,12 +3175,6 @@ snapshots:
       cborg: 4.5.8
       tslib: 2.8.1
 
-  '@atproto/lex-cbor@0.1.6':
-    dependencies:
-      '@atproto/lex-data': 0.1.7
-      cborg: 4.5.8
-      tslib: 2.8.1
-
   '@atproto/lex-cli@0.10.13':
     dependencies:
       '@atproto/lexicon': 0.7.14
@@ -3141,6 +3185,13 @@ snapshots:
       ts-morph: 24.0.0
       yesno: 0.4.0
       zod: 3.25.76
+
+  '@atproto/lex-client@0.0.0-spaces-alpha-20261029171913':
+    dependencies:
+      '@atproto/lex-data': 0.0.0-spaces-alpha-20261029171913
+      '@atproto/lex-json': 0.0.0-spaces-alpha-20261029171913
+      '@atproto/lex-schema': 0.0.0-spaces-alpha-20261029171913
+      tslib: 2.8.1
 
   '@atproto/lex-client@0.3.6':
     dependencies:
@@ -3169,6 +3220,13 @@ snapshots:
   '@atproto/lex-json@0.1.6':
     dependencies:
       '@atproto/lex-data': 0.1.7
+      tslib: 2.8.1
+
+  '@atproto/lex-schema@0.0.0-spaces-alpha-20261029171913':
+    dependencies:
+      '@atproto/lex-data': 0.0.0-spaces-alpha-20261029171913
+      '@atproto/syntax': 0.0.0-spaces-alpha-20261029171913
+      '@standard-schema/spec': 1.1.0
       tslib: 2.8.1
 
   '@atproto/lex-schema@0.2.7':
@@ -3266,18 +3324,18 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
-  '@atproto/xrpc-server@0.13.1':
+  '@atproto/xrpc-server@0.0.0-spaces-alpha-20261029171913':
     dependencies:
-      '@atproto/common': 0.8.3
-      '@atproto/crypto': 0.5.5
-      '@atproto/lex-cbor': 0.1.6
-      '@atproto/lex-client': 0.3.6
-      '@atproto/lex-data': 0.1.7
-      '@atproto/lex-json': 0.1.6
-      '@atproto/lex-schema': 0.2.7
-      '@atproto/lexicon': 0.7.14
+      '@atproto/common': 0.0.0-spaces-alpha-20261029171913
+      '@atproto/crypto': 0.0.0-spaces-alpha-20261029171913
+      '@atproto/lex-cbor': 0.0.0-spaces-alpha-20261029171913
+      '@atproto/lex-client': 0.0.0-spaces-alpha-20261029171913
+      '@atproto/lex-data': 0.0.0-spaces-alpha-20261029171913
+      '@atproto/lex-json': 0.0.0-spaces-alpha-20261029171913
+      '@atproto/lex-schema': 0.0.0-spaces-alpha-20261029171913
+      '@atproto/lexicon': 0.0.0-spaces-alpha-20261029171913
       '@atproto/ws-client': 0.2.1
-      '@atproto/xrpc': 0.8.13
+      '@atproto/xrpc': 0.0.0-spaces-alpha-20261029171913
       express: 4.22.3
       http-errors: 2.0.1
       mime-types: 3.0.2
@@ -3287,6 +3345,11 @@ snapshots:
       - bufferutil
       - supports-color
       - utf-8-validate
+
+  '@atproto/xrpc@0.0.0-spaces-alpha-20261029171913':
+    dependencies:
+      '@atproto/lexicon': 0.0.0-spaces-alpha-20261029171913
+      zod: 3.25.76
 
   '@atproto/xrpc@0.8.13':
     dependencies:
@@ -3873,7 +3936,32 @@ snapshots:
     dependencies:
       '@types/node': 24.0.0
 
+  '@types/body-parser@1.19.6':
+    dependencies:
+      '@types/connect': 3.4.38
+      '@types/node': 24.0.0
+
+  '@types/connect@3.4.38':
+    dependencies:
+      '@types/node': 24.0.0
+
   '@types/estree@1.0.9': {}
+
+  '@types/express-serve-static-core@4.19.9':
+    dependencies:
+      '@types/node': 24.0.0
+      '@types/qs': 6.15.1
+      '@types/range-parser': 1.2.7
+      '@types/send': 1.2.1
+
+  '@types/express@4.17.23':
+    dependencies:
+      '@types/body-parser': 1.19.6
+      '@types/express-serve-static-core': 4.19.9
+      '@types/qs': 6.15.1
+      '@types/serve-static': 2.2.0
+
+  '@types/http-errors@2.0.5': {}
 
   '@types/json-schema@7.0.15': {}
 
@@ -3885,6 +3973,10 @@ snapshots:
 
   '@types/normalize-package-data@2.4.4': {}
 
+  '@types/qs@6.15.1': {}
+
+  '@types/range-parser@1.2.7': {}
+
   '@types/react-dom@19.0.0':
     dependencies:
       '@types/react': 19.0.0
@@ -3892,6 +3984,15 @@ snapshots:
   '@types/react@19.0.0':
     dependencies:
       csstype: 3.2.3
+
+  '@types/send@1.2.1':
+    dependencies:
+      '@types/node': 24.0.0
+
+  '@types/serve-static@2.2.0':
+    dependencies:
+      '@types/http-errors': 2.0.5
+      '@types/node': 24.0.0
 
   '@typescript-eslint/eslint-plugin@8.70.1(@typescript-eslint/parser@8.70.1(eslint@9.39.1(supports-color@11.0.0))(supports-color@11.0.0)(typescript@5.9.3))(eslint@9.39.1(supports-color@11.0.0))(supports-color@11.0.0)(typescript@5.9.3)':
     dependencies:

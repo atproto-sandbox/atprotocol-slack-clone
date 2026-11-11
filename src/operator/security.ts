@@ -17,16 +17,17 @@ import { getOwnerRecord } from "./workspace-state";
 
 const MAX_READ_ONLY_MEMBER_SCAN = 1_000;
 
-function bearerToken(request: Request): string | undefined {
-  return request.headers.get("authorization")?.match(/^Bearer ([A-Za-z0-9._~-]+)$/)?.[1];
+/** The bearer token an `authorization` header value carries. */
+function bearerToken(authorization: string | undefined): string | undefined {
+  return authorization?.match(/^Bearer ([A-Za-z0-9._~-]+)$/)?.[1];
 }
 
 /**
  * The `iss` a bearer service token claims, read without verifying it, or `null` when there is no well-formed token. It proves
  * nothing; it lets a caller refuse a token that names the wrong issuer before any DID is resolved for it.
  */
-export function unverifiedBearerIssuer(request: Request): string | null {
-  const payload = bearerToken(request)?.split(".")[1];
+export function unverifiedBearerIssuer(authorization: string | undefined): string | null {
+  const payload = bearerToken(authorization)?.split(".")[1];
   if (!payload) return null;
   try {
     const claims: unknown = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
@@ -49,11 +50,11 @@ export function serviceTokenLifetimeSeconds(method: string): number {
 
 /** The caller's DID from a PDS-issued service token bound to this operator and to `method`, within that method's lifetime. */
 export async function authenticateOperatorRequest(
-  request: Request,
+  authorization: string | undefined,
   method: string,
   resolveSigningKey: (did: string) => Promise<string> = (did) => getIdResolver().did.resolveAtprotoKey(did),
 ): Promise<string> {
-  const token = bearerToken(request);
+  const token = bearerToken(authorization);
   if (!token) throw new OperatorAuthError("Bearer service authorization is required.");
   const serviceRef = getConfig().operatorServiceRef;
   const payload = await verifyJwt(

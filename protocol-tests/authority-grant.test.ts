@@ -58,6 +58,50 @@ test("the workspace authority grant outlives the creator's sign-in session", asy
       assert.deepEqual([first.state, second.state], ["completed", "completed"]);
       assert.notEqual(first.workspace, second.workspace);
     });
+
+    await t.test("a session restored before the authority approves again cannot use or delete the grant that replaced it", async () => {
+      // given the authority's grant restored as a session, as an operator request in flight holds it
+      const [{ hasAuthorityGrant, restoreAuthorityGrant }, { TokenRefreshError }] = await Promise.all([import("@/operator/authority-grant"), import("@atproto/oauth-client-node")]);
+      const authority = await pds.createActor("k1replaced-owner", 0);
+      await storeAuthorityGrant(pds.hosts[0], authority.did, "k1replaced-first-dpop");
+      const inFlight = await restoreAuthorityGrant(authority.did);
+
+      // when the authority approves again, and the session in flight makes its next request
+      await storeAuthorityGrant(pds.hosts[0], authority.did, "k1replaced-second-dpop");
+      const staleRequest = await inFlight.fetchHandler("/xrpc/com.atproto.server.getSession", { method: "GET" }).then((response) => response.status, (error: unknown) => error);
+
+      // then the new grant is still stored, the old approval's session found no grant of its own, and a session restored now
+      // is served with the new one
+      assert.equal(hasAuthorityGrant(authority.did), true, "the new grant survives");
+      assert.ok(staleRequest instanceof TokenRefreshError, `the old approval's session is refused before it reaches the host: ${String(staleRequest)}`);
+      const current = await restoreAuthorityGrant(authority.did);
+      assert.equal((await current.fetchHandler("/xrpc/com.atproto.server.getSession", { method: "GET" })).status, 200);
+    });
+
+    await t.test("a restore that reads a grant just before the authority approves again restores the new approval", async () => {
+      // given a restore that has read the authority's grant and waits for the grant's lock, held as a refresh holds it
+      const [{ restoreAuthorityGrant }, { oauthSqliteRequestLock }] = await Promise.all([import("@/operator/authority-grant"), import("@/auth/oauth-request-lock")]);
+      const authority = await pds.createActor("k1race-owner", 0);
+      await storeAuthorityGrant(pds.hosts[0], authority.did, "k1race-first-dpop");
+      let release: () => void = () => undefined;
+      const held = oauthSqliteRequestLock(`@atproto-oauth-client-${authority.did}`, () => new Promise<void>((resolve) => { release = resolve; }));
+      // The restore reads the grant as it is called, before it waits for the lock. It is awaited below; the handler keeps a
+      // failure of the steps in between from being reported as its unhandled rejection instead.
+      const restoring = restoreAuthorityGrant(authority.did);
+      restoring.catch(() => undefined);
+
+      // when the authority approves again before the lock is released
+      try {
+        await storeAuthorityGrant(pds.hosts[0], authority.did, "k1race-second-dpop");
+      } finally {
+        release();
+        await held;
+      }
+
+      // then the restore gives a session of the new approval, which the host serves
+      const session = await restoring;
+      assert.equal((await session.fetchHandler("/xrpc/com.atproto.server.getSession", { method: "GET" })).status, 200);
+    });
   } finally {
     await pds.close();
   }

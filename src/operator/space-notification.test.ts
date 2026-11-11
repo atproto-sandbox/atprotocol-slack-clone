@@ -22,13 +22,10 @@ after(() => {
 const CHANNEL = "at://did:plc:owner/space/new.flock.channel/alpha";
 const METHOD = "com.atproto.space.notifyWrite";
 
-/** A bearer token whose payload claims `iss`; its signature is junk, which only a verifier would notice. */
-function requestClaiming(iss?: string): Request {
+/** The `authorization` header of a notice whose token claims `iss` (or none); its signature is junk, which only a verifier would notice. */
+function requestClaiming(iss?: string): string | undefined {
   const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
-  return new Request("http://127.0.0.1:3000/xrpc/com.atproto.space.notifyWrite", {
-    method: "POST",
-    headers: iss ? { authorization: `Bearer ${part({ alg: "ES256K", typ: "JWT" })}.${part({ iss })}.signature` } : {},
-  });
+  return iss ? `Bearer ${part({ alg: "ES256K", typ: "JWT" })}.${part({ iss })}.signature` : undefined;
 }
 
 const register = (space: string) => getRawDb().prepare("INSERT OR REPLACE INTO notification_registration (service_ref,space_uri,expires_at) VALUES (?,?,?)").run(SERVICE_REF, space, Date.now() + 3_600_000);
