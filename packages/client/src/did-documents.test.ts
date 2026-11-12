@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
 import { P256Keypair } from "@atproto/crypto";
-import { clearBrowserIdentityCache, resolveHandle, resolveKemKey, resolvePds, type BrowserIdentityConfig } from "./identity";
+import { clearDidDocumentCache, resolveHandle, resolveKemKey, resolvePds, type IdentityConfig } from "./did-documents";
 
 type FetchCall = { url: string; redirect: string | undefined };
 
-const config: BrowserIdentityConfig = { plcUrl: "https://plc.example", loopback: false };
-const loopbackConfig: BrowserIdentityConfig = { plcUrl: "http://127.0.0.1:4000", loopback: true };
+const config: IdentityConfig = { plcUrl: "https://plc.example", loopback: false };
+const loopbackConfig: IdentityConfig = { plcUrl: "http://127.0.0.1:4000", loopback: true };
 
 const realFetch = globalThis.fetch;
 const realNow = Date.now;
@@ -23,7 +23,7 @@ function jsonDocument(body: unknown, status = 200): Response {
 }
 
 beforeEach(() => {
-  clearBrowserIdentityCache();
+  clearDidDocumentCache();
   calls = [];
   responder = () => jsonDocument({}, 404);
   globalThis.fetch = fakeFetch as typeof globalThis.fetch;
@@ -86,7 +86,7 @@ test("did:web loopback hosts use http only when the app runs on loopback", async
   assert.equal(await resolvePds("did:web:localhost%3A3000", loopbackConfig), "http://localhost:3000");
   assert.equal(calls[0]!.redirect, "error");
 
-  clearBrowserIdentityCache();
+  clearDidDocumentCache();
   responder = () => jsonDocument({
     id: "did:web:localhost%3A3000",
     service: [{ id: "#atproto_pds", serviceEndpoint: "https://pds.example" }],
@@ -96,8 +96,8 @@ test("did:web loopback hosts use http only when the app runs on loopback", async
 });
 
 test("PDS endpoints must be https unless both endpoint and app are loopback", async () => {
-  const expectEndpoint = async (did: string, serviceEndpoint: string, browser: BrowserIdentityConfig, expected: string | RegExp) => {
-    clearBrowserIdentityCache();
+  const expectEndpoint = async (did: string, serviceEndpoint: string, browser: IdentityConfig, expected: string | RegExp) => {
+    clearDidDocumentCache();
     responder = () => jsonDocument({ id: did, service: [{ id: "#atproto_pds", serviceEndpoint }] });
     if (typeof expected === "string") assert.equal(await resolvePds(did, browser), expected);
     else await assert.rejects(resolvePds(did, browser), expected);
@@ -113,7 +113,7 @@ test("PDS endpoints must be https unless both endpoint and app are loopback", as
 
 test("malformed or foreign DID documents are rejected", async () => {
   const respond = (body: unknown) => {
-    clearBrowserIdentityCache();
+    clearDidDocumentCache();
     responder = () => jsonDocument(body);
   };
 
@@ -129,11 +129,11 @@ test("malformed or foreign DID documents are rejected", async () => {
   respond({ id: "did:plc:alice", service: [{ id: "#atproto_pds", serviceEndpoint: 42 }] });
   await assert.rejects(resolvePds("did:plc:alice", config), /no usable #atproto_pds service endpoint/);
 
-  clearBrowserIdentityCache();
+  clearDidDocumentCache();
   responder = () => new Response("not-json", { status: 200, headers: { "content-type": "application/json" } });
   await assert.rejects(resolvePds("did:plc:alice", config), /not a JSON object/);
 
-  clearBrowserIdentityCache();
+  clearDidDocumentCache();
   responder = () => jsonDocument({}, 500);
   await assert.rejects(resolvePds("did:plc:alice", config), /Could not resolve did:plc:alice \(500\)/);
 });
@@ -162,11 +162,11 @@ test("resolveHandle reads the first at:// entry from alsoKnownAs for display", a
   });
   assert.equal(await resolveHandle("did:plc:alice", config), "alice.test");
 
-  clearBrowserIdentityCache();
+  clearDidDocumentCache();
   responder = () => jsonDocument({ id: "did:plc:bob", alsoKnownAs: ["https://example.com/bob"] });
   assert.equal(await resolveHandle("did:plc:bob", config), null);
 
-  clearBrowserIdentityCache();
+  clearDidDocumentCache();
   responder = () => jsonDocument({ id: "did:plc:carol" });
   assert.equal(await resolveHandle("did:plc:carol", config), null);
 });

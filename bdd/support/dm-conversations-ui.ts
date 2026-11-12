@@ -3,7 +3,7 @@ import { generateSpaceKey } from "@flock/protocol/atproto/space-key";
 import type { Locator } from "@playwright/test";
 import { mintSpaceCredentialWith, SpaceCredentialError } from "@flock/protocol/atproto/space-credential-core";
 import { AtprotoClient } from "@flock/protocol/atproto/xrpc";
-import { resolvePds } from "@flock/web/browser/identity";
+import { resolvePds } from "@flock/client/did-documents";
 import { DmClient, type DmDeps, type DmRequestMode } from "@flock/client/dm/dm-client";
 import { escapeRegExp, signIn } from "./ui";
 import type { FixtureAccount } from "../../protocol-tests/support/app-fixture";

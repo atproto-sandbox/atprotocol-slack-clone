@@ -121,11 +121,18 @@ with that scope removed leaves), and then a complete one.
 
 ## r9b: the app's runtime
 
+Status: done. Outcome, departures, gate and reviews: the plan's "### R9b" section.
+
 Found in r9a's acceptance run, and binding here: the pinned PDS keeps the write bit at the authority, which lists a member
 without it as no writer (a record it writes into its own repo is accepted by its host and synced by nobody). An app reads
 the workspace space only, so it is never a writer there: its acceptance record is never listed, and an app cannot find its
 workspaces the way a person does. An app is told its workspaces, and reads its install record in each for its channels.
 
+- **As built** (after review): the operator's guard on reaching other hosts moved into `packages/net`, which a Node app's
+  transport uses too; the browser's and a Node app's transports are one `sessionTransport`; and the runtime reports every
+  failure, idles with nothing to follow, follows each space on its own, and decides what is new by a window over writer keys
+  (the last complete read less five seconds to the present plus five), after a page-based design kept falling to keys a
+  writer chooses.
 - **One DID resolver for every client.** `apps/web/src/browser/identity.ts` (PLC and `did:web` documents fetched and cached,
   the PDS endpoint, the KEM key, the handle) is fetch-only and not the browser's: it moves to
   `packages/client/src/did-documents.ts`, and the web app and a Node app both use it.
@@ -154,7 +161,7 @@ workspaces the way a person does. An app is told its workspaces, and reads its i
 - **`apps/echo-bot`**, a Node package that depends on `@flock/client` alone (its `package.json`; lint's
   no-extraneous-dependencies holds it there).
   - `sign-in <handle>` runs the OAuth flow once.
-  - `run` publishes its `app.declaration` if it has none, then runs `runApp` over the workspaces in `ECHO_BOT_WORKSPACES`.
+  - `run` publishes its `app.declaration` unless it already says the same, then runs `runApp` over the workspaces in `ECHO_BOT_WORKSPACES`.
     It replies `echo: <text>` in the thread of each message from a person, in channels it may write.
   - Configuration is in the root `.env.example`.
 - **Tests:**

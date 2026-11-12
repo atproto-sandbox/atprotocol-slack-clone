@@ -217,6 +217,19 @@ export async function mintBrowserSession(pds: TestPds, did: string, scopes: read
   return { accessToken, restore, session: await restore() };
 }
 
+/**
+ * Mints a session for an app account with the app's own grant (`appGrantScopes`), for the app's OAuth client on loopback, and
+ * restores it through that client and its state file, as `echo-bot run` restores the session `echo-bot sign-in` left.
+ */
+export async function mintAppSession(pds: TestPds, did: string, input: { serviceRef: string; plcUrl: string; stateFile: string }, keyLabel: string) {
+  const [{ appClientMetadata, appOAuthClient, StateFile }, { appGrantScope }] = await Promise.all([import("@flock/client/node/oauth"), import("@flock/client/app-runtime")]);
+  const config = { appUrl: "http://127.0.0.1:3002", keys: [], name: "Test app", scope: appGrantScope(input.serviceRef), plcUrl: input.plcUrl, stateFile: input.stateFile };
+  const metadata = appClientMetadata(config);
+  const { saved } = await mintProviderSession(pds, did, { clientId: metadata.client_id, redirectUri: metadata.redirect_uris[0], scope: config.scope }, keyLabel);
+  await new StateFile(input.stateFile).store("sessions").set(did, saved);
+  return (await appOAuthClient(config)).restore(did);
+}
+
 function inMemoryStore<V>(entries = new Map<string, V>()) {
   return {
     get: async (key: string) => entries.get(key),

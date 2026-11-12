@@ -123,7 +123,11 @@ export class ChangeFollower {
       try {
         await this.deps.credentials.fresh(space);
       } catch (error) {
-        if (!isAccessLost(error)) continue;
+        if (!isAccessLost(error)) {
+          // Neither lost nor confirmed: asked about again on the next round, and reported meanwhile.
+          result.failed.push({ space, error });
+          continue;
+        }
         this.unfollow(space);
         result.unfollowed.push(space);
         continue;

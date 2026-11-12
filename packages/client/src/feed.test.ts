@@ -90,8 +90,9 @@ test("a denied space whose credential is refused only for now stays followed; on
   const follower = new ChangeFollower({ operator, credentials: { fresh: async () => mint() as never }, sync: async (space) => { synced.push(space); }, retryDelayMs: 0, refollowDelayMs: 0 });
   await follower.follow([SPACE]);
 
-  // #when the first denial meets a passing failure
-  assert.deepEqual(await follower.poll(), { synced: [], unfollowed: [], failed: [] });
+  // #when the first denial meets a passing failure, it is reported and the space stays followed
+  const first = await follower.poll();
+  assert.deepEqual({ ...first, failed: first.failed.map(({ space, error }) => [space, (error as Error).message]) }, { synced: [], unfollowed: [], failed: [[SPACE, "its host is down"]] });
   assert.deepEqual(follower.following, [SPACE], "a passing failure keeps the space followed");
 
   // #when the second denial meets access that is back, and the wait is over by the next poll

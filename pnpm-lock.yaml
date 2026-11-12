@@ -35,6 +35,9 @@ importers:
       '@flock/client':
         specifier: workspace:*
         version: link:packages/client
+      '@flock/echo-bot':
+        specifier: workspace:*
+        version: link:apps/echo-bot
       '@flock/operator':
         specifier: workspace:*
         version: link:apps/operator
@@ -79,6 +82,12 @@ importers:
         specifier: 5.9.3
         version: 5.9.3
 
+  apps/echo-bot:
+    dependencies:
+      '@flock/client':
+        specifier: workspace:*
+        version: link:../../packages/client
+
   apps/operator:
     dependencies:
       '@atproto-labs/simple-store-memory':
@@ -99,6 +108,9 @@ importers:
       '@flock/deployment':
         specifier: workspace:*
         version: link:../../packages/deployment
+      '@flock/net':
+        specifier: workspace:*
+        version: link:../../packages/net
       '@flock/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
@@ -111,9 +123,6 @@ importers:
       kysely:
         specifier: 0.29.5
         version: 0.29.5
-      undici:
-        specifier: 7.29.1
-        version: 7.29.1
     devDependencies:
       '@atproto/crypto':
         specifier: 0.0.0-spaces-alpha-20261029171913
@@ -167,10 +176,19 @@ importers:
 
   packages/client:
     dependencies:
+      '@atproto/oauth-client-node':
+        specifier: 0.5.7
+        version: 0.5.7
+      '@flock/net':
+        specifier: workspace:*
+        version: link:../net
       '@flock/protocol':
         specifier: workspace:*
         version: link:../protocol
     devDependencies:
+      '@atproto/crypto':
+        specifier: 0.0.0-spaces-alpha-20261029171913
+        version: 0.0.0-spaces-alpha-20261029171913
       '@flock/reader':
         specifier: workspace:*
         version: link:../reader
@@ -182,6 +200,12 @@ importers:
         version: 6.2.6
 
   packages/deployment: {}
+
+  packages/net:
+    dependencies:
+      undici:
+        specifier: 7.29.1
+        version: 7.29.1
 
   packages/protocol:
     dependencies:

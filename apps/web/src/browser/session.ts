@@ -1,6 +1,5 @@
 import type { AtprotoDid, HandleResolver, OAuthSession } from "@atproto/oauth-client-browser";
 import { buildBrowserClientMetadata } from "./client-metadata";
-import { AtprotoClient } from "@flock/protocol/atproto/xrpc";
 import { readUpstreamText } from "@flock/protocol/bounded-json";
 
 /** What the browser session is built from: the app's origin, the PLC, the one grant, and the operator (its DID and where it serves). */
@@ -129,6 +128,3 @@ export async function signOut(config: BrowserSessionConfig): Promise<void> {
   if (session) await (await load(config).client).revoke(session.sub);
 }
 
-export function sessionXrpcClient(session: OAuthSession): AtprotoClient {
-  return new AtprotoClient((path, init) => session.fetchHandler(path, init));
-}

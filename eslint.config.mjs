@@ -14,6 +14,8 @@ const WEB_REACT_VERSION = JSON.parse(readFileSync(new URL("./apps/web/package.js
 const BROWSER_CODE = ["packages/protocol/src/**/*.{ts,tsx}", "packages/client/src/**/*.{ts,tsx}", "apps/web/src/browser/**/*.{ts,tsx}"];
 /** Tests and test fixtures, which run under Node's test runner and may use a package's dev dependencies. */
 const NODE_TESTS = ["**/*.test.{ts,tsx}", "packages/client/src/testing/**"];
+/** The client's Node entry (`@flock/client/node/*`): an app's OAuth session and transport, for apps that run on Node. */
+const CLIENT_NODE_ENTRY = ["packages/client/src/node/**"];
 const NO_NODE_BUILTINS = {
   group: ["node:*"],
   message: "This code runs in a browser and cannot import Node built-ins.",
@@ -30,6 +32,10 @@ const MEMBER_LIST_WRITES = {
   group: ["**/atproto/space-ops"],
   importNames: ["putSpaceMember", "removeSpaceMember"],
   message: "The operator changes member lists through apps/operator/src/operator/members.ts, which drops the change feed's cached list.",
+};
+const NO_CLIENT_NODE_ENTRY = {
+  group: ["**/node/*", "@flock/client/node/*", "@flock/net", "@flock/net/*"],
+  message: "Only a Node process imports the client's Node entry or @flock/net; browser code and the web app never do.",
 };
 const NO_DM_IMPORT = {
   group: ["@flock/client/dm/*"],
@@ -66,9 +72,9 @@ export default defineConfig([
   },
   {
     files: BROWSER_CODE,
-    ignores: NODE_TESTS,
+    ignores: [...NODE_TESTS, ...CLIENT_NODE_ENTRY],
     rules: {
-      "no-restricted-imports": ["error", { patterns: [NO_NODE_BUILTINS, NO_SERVER_CONFIG, NO_APP_LAYER] }],
+      "no-restricted-imports": ["error", { patterns: [NO_NODE_BUILTINS, NO_SERVER_CONFIG, NO_APP_LAYER, NO_CLIENT_NODE_ENTRY] }],
     },
   },
   {
@@ -79,11 +85,19 @@ export default defineConfig([
     },
   },
   {
+    // The web app, above its browser code, is no Node process either.
+    files: ["apps/web/src/**/*.{ts,tsx}"],
+    ignores: ["apps/web/src/browser/**", ...NODE_TESTS],
+    rules: {
+      "no-restricted-imports": ["error", { patterns: [NO_CLIENT_NODE_ENTRY] }],
+    },
+  },
+  {
     // M6: DMs never touch server routes, tables, or cache. No route handler the web app's server has (the sign-in client's
     // metadata) may import the DM engine.
     files: ["apps/web/src/app/**/route.{ts,tsx}"],
     rules: {
-      "no-restricted-imports": ["error", { patterns: [NO_DM_IMPORT] }],
+      "no-restricted-imports": ["error", { patterns: [NO_DM_IMPORT, NO_CLIENT_NODE_ENTRY] }],
     },
   },
 ]);

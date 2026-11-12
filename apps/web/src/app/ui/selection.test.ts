@@ -5,7 +5,7 @@ import { NO_WORKSPACE, shownChannel, shownWorkspace } from "./selection";
 
 const workspace = (skey: string, channels: WorkspaceSummary["channels"] = []): WorkspaceSummary => ({
   uri: `at://did:plc:a/space/new.flock.workspace/${skey}`, authorityDid: "did:plc:a", skey, name: skey,
-  isAdmin: false, admins: [], members: [], channels, degradedReasons: [],
+  isAdmin: false, admins: [], members: [], channels, installs: [], degradedReasons: [],
 });
 const general = { uri: "at://did:plc:a/space/new.flock.channel/general", skey: "general", name: "general", visibility: "public" };
 

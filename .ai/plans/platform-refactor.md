@@ -1069,3 +1069,68 @@ Reviews: Codex was unavailable, so each round used independent Sonnet reviewers 
 - A reviewer on that delta approved with follow-ups. The join-request guard was untested, and the clean-up of a stale approval could still restore an app as the person it was; the guard now runs before anything is read, and both decisions are tested. `setAdmin` still accepted demoting an app; it refuses it either way. It also found a declaration bound untested, a spread order, and two doc passages; all are fixed.
 
 Follow-ups, not done here: an uninstalled app's install record stays (inactive) and counts against the 1,000-record scan of the workspace's authority records; and the residual of a credential an app already held is the protocol's, as for a person.
+
+### R9b (2026-11-11): the app's runtime and the echo bot
+
+Done (design: `.ai/plans/r9-apps-progress.md`, "r9b"):
+- **One DID resolver for every client.** The browser's fetch-only resolver (DID documents fetched with no redirects and a bounded body, cached; the PDS endpoint, the KEM key, the handle) moved to `packages/client/src/did-documents.ts`. The web app, the BDD support and a Node app use it.
+- **One way a server process reaches a host someone else named** (`packages/net`, `@flock/net/safe-fetch`): https to a public address only, loopback in loopback development; the address checked is the address connected to; no redirect; a minute's timeout. It was the operator's guard, moved, not copied. The operator and a Node app both use it.
+- **One session transport** (`packages/client/src/session-transport.ts`): the engine's transport for an account's OAuth session. The browser's and a Node app's differ only in the fetch they pass.
+- **An app's own grant** (`appGrantScopes`, built from the registry like the person's): write its declaration, read workspace and channel spaces, write a channel's messages and reactions, and call `getChanges` and no other operator method. It has no inbox and no DM scope.
+- **`@flock/client/node/*`**, the client's only Node code. Lint keeps it outside the browser rules and forbids browser code to import it; the client's no-Node typecheck excludes it, and the root typecheck covers it.
+  - `nodeTransport` is the engine's transport for an app's OAuth session.
+  - `oauth.ts` is an app's OAuth client:
+    - a confidential `private_key_jwt` client over https, serving its metadata and public keys, or a loopback public client in development;
+    - its sessions and sign-in states in one state file, rewritten atomically and created readable by its owner only;
+    - the callback that completes a sign-in, and `isSessionLost` for a refused refresh.
+- **`runApp`** (`packages/client/src/app-runtime.ts`) is an app's runtime.
+  - It follows each workspace the app is told, and the channels its install grants it there, through `ChangeFollower`.
+  - It reads the grants again when the workspace space changes, so a channel granted later is followed and one whose grant ended is not.
+  - **Which messages are new.** A message is new when its key, which its writer's clock made, falls in a window, and the app has not taken it. The window runs from its lower edge to the present plus five seconds. The lower edge starts five seconds before the app followed the channel; after each complete read it moves to the present less five seconds, by no more than the time that really passed, so a jump of the app's clock cannot carry it past every message to come. So:
+    - history is never answered, whatever a page holds or a deletion slides onto it;
+    - a restart answers nothing written before it followed the channel;
+    - a message keyed in the future is given only when its time comes;
+    - a flood of future-keyed messages neither hides the present nor fills memory, since every read starts at the window's upper edge.
+  - **Gaps.**
+    - A burst is read back to the window's lower edge, up to five pages; anything older is reported.
+    - A read without a writer whose host may come back holds the lower edge, for up to ten minutes, so that writer's messages are given when it returns.
+    - A message the app fails on is given again, up to three times, without holding back the rest. It holds the lower edge for at most ten minutes, since a message deleted meanwhile is never read again.
+    - A writer whose clock strays by more than five seconds may have a message taken for old. That is the trade for answering nothing old when any writer chooses its keys.
+  - **Workspaces and channels.**
+    - Each told workspace, and each channel its install grants, is followed on its own: one that cannot be read holds back no other.
+    - A passing failure is tried again after five seconds, then less and less often, up to once a minute; lost access is retried once a minute.
+    - The grants are read again when the workspace space changes.
+    - Two apps never answer each other: an app is given no app's message.
+  - **Every failure reaches the app:** a failed poll, a space that could not be read, a message it failed on, a read without some writer, and lost access (`AppAccessLostError`, once per loss).
+  - With nothing left to follow (an uninstall), it waits instead of asking the feed, and tries its workspaces again once a minute, so a re-install is picked up.
+- **`WorkspaceSummary.installs`**: the active apps and their channels. Both the client and the operator's envelope check read them, and more than 20 is a degraded workspace.
+- **`apps/echo-bot`** depends on `@flock/client` alone, which a test pins.
+  - `sign-in <handle>` once; `run` publishes its declaration and answers each message from a person in a channel it may write, in that message's thread.
+  - Configuration is in `.env.example`, and the session file is in `.gitignore`.
+  - `docs/operations.md`, "Running an app", covers its operation.
+
+Tests:
+- **Unit:** the runtime (each message once, none from an app, grants added and ended, a failed message given again, failures reported, stop); the Node transport; the OAuth client (both client shapes, only public keys served, the state file's sections, mode and deletes, a lost session); the app's scope; the summary's installs; the echo reply and the bot's configuration; and the bot's dependency boundary.
+- **The gate** (`protocol-tests/echo-bot.test.ts`, real PDS network, the operator's own process receiving the hosts' notices): the echo bot runs with a session restored through its own OAuth client and state file.
+  - It answers a person's message in its thread within the poll that brought the change.
+  - After an uninstall through the operator, it is in no member list, the feed denies it at once, its next credential is refused, and it reported no failure while running.
+  - The residual of a credential it already held is r9a's measurement (600 s).
+
+Found on the way:
+- **`runApp` dropped failed syncs.** `ChangeFollower.poll` returns a space it could not sync in its result instead of throwing. `runApp` now reports each one, and a test pins it.
+- **A follow begins with a head read.** A message written before an app follows a channel is one it finds there and does not answer. The gate waits for a poll that follows the channel.
+- **The feed denies at once only in the operator process that removed the entry.** That is the process an admin's app calls; another process answers from its cached list for up to 60 seconds, as `docs/operations.md` says. The gate's first uninstall, run in the test's own process, met that cache.
+
+Gate: unit 678/678; typecheck and lint clean, `packages/client` and `packages/protocol` with no Node types, and `protocol-tests/` typechecks; BDD 66/66 (473 steps) and acceptance 24/24 (`apps.test.ts` and `echo-bot.test.ts` included) on the tree before the last two rounds of runtime changes, which touch nothing the web app or the operator runs; the echo bot's acceptance test again, and the browser suite 6/6, on the final tree. One gate run's browser suite timed out twice while the machine's load average stood near 300 from other applications; run again once the load fell, it passed.
+
+Reviews: Codex was unavailable, so each round used independent Sonnet reviewers on a frozen snapshot of the tree. The runtime took six rounds; the review budget for which messages are new ended there.
+- A reviewer on the whole step required changes. It found a busy loop once an app was uninstalled everywhere, so the process could not be stopped. It also found a channel lost for good when its first read failed, and one failing message holding back a channel. Two kinds of loss went unreported: a burst bigger than a page and a writer set aside. The DID resolver had no SSRF guard or timeout on a server host, and one malformed request crashed the echo bot. All are fixed; the guard moved from the operator into `packages/net` rather than being copied, and the two session transports became one.
+- The next three rounds broke the page-based rule for which messages are new with keys a member chooses: a deletion sliding an old message in, a failed page answered twice, a future key silencing a channel or growing memory, a flood hiding the present, and history let in by an incomplete first read. Each was fixed and tested. They also found a second spin after a permanent loss (fixed), an unreadable channel darkening its workspace (each space is now followed on its own), and losses reported twice or mislabelled (fixed).
+- The fifth round showed the page-based rule could not be made sound against chosen keys. It was replaced by a window over writer keys, starting each read at the window's upper edge.
+- A sixth reviewer tried to break the window. It found a failed message that was then deleted pinning the window open, and a jump of the app's clock silencing a channel. Both are fixed: a held message expires after ten minutes, and the lower edge moves by no more than the time that really passed. It also found duplicate reports on one read (now once per read) and doc statements wider than the rule (corrected). Every property it showed untested now has a test that fails when the property is reverted.
+
+Left as known, with the R11 sync strategy as their place:
+- A message that becomes readable more than five seconds after its key's time (a writer's clock behind, or its host slow to report it) may be taken for old.
+- A member who floods a channel with future-keyed records makes each refresh of their own repo walk those records, about one listing per hundred.
+- A first read cut short by more than five pages within its five-second slack, followed by deletions, can give an app a message written in that slack.
+- An app is given what is new by its writers' keys. R11's strategy follows each writer's operations, and is where an app can be given what is new by its host's order instead.

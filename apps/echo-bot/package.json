@@ -1,0 +1,11 @@
+{
+  "name": "@flock/echo-bot",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./*": "./src/*.ts"
+  },
+  "dependencies": {
+    "@flock/client": "workspace:*"
+  }
+}

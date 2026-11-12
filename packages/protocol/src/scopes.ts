@@ -1,4 +1,4 @@
-import { COLLECTION, OPERATOR_METHOD, REPO_COLLECTION, SPACE_TYPE } from "./nsids";
+import { COLLECTION, OPERATOR_METHOD, REPO_COLLECTION, SPACE_TYPE, type SpaceType } from "./nsids";
 import { authorityCollections, memberCollections } from "./registry";
 
 // The OAuth scopes the app asks for, built from the registry: the one browser grant (the member set, the operator methods
@@ -49,11 +49,7 @@ export const OPERATOR_METHODS = Object.values(OPERATOR_METHOD);
 export function memberGrantScopes(serviceRef: string): string[] {
   return [
     ...DM_BROWSER_SCOPES,
-    ...[SPACE_TYPE.workspace, SPACE_TYPE.inbox, SPACE_TYPE.channel].flatMap((spaceType) => [
-      `space:${spaceType}?authority=*&action=read`,
-      // An acceptance is never withdrawn; a join request, a message and a reaction are.
-      `space:${spaceType}?authority=*&collection=${memberCollections(spaceType).join("&collection=")}&action=create&action=update${spaceType === SPACE_TYPE.workspace ? "" : "&action=delete"}`,
-    ]),
+    ...[SPACE_TYPE.workspace, SPACE_TYPE.inbox, SPACE_TYPE.channel].flatMap((spaceType) => [memberReadScope(spaceType), memberWriteScope(spaceType)]),
     operatorMethodsScope(OPERATOR_METHODS, serviceRef),
   ];
 }
@@ -61,4 +57,30 @@ export function memberGrantScopes(serviceRef: string): string[] {
 export function operatorMethodsScope(methods: readonly string[], serviceRef: string): string {
   const audience = serviceRef.replaceAll("%", "%25").replace("#", "%23");
   return `rpc?${methods.map((method) => `lxm=${method}`).join("&")}&aud=${audience}`;
+}
+
+/**
+ * The grant an app asks its own account for: read the workspace and channel spaces of any authority (its installs' member
+ * lists decide which), write a channel's messages and reactions, follow its spaces through the operator, and publish its
+ * declaration. No inbox and no DMs: an app is no person. Built from the registry, as the person's grant is.
+ */
+export function appGrantScopes(serviceRef: string): string[] {
+  return [
+    "atproto",
+    `repo:${REPO_COLLECTION.appDeclaration}?action=create&action=update`,
+    memberReadScope(SPACE_TYPE.workspace),
+    memberReadScope(SPACE_TYPE.channel),
+    memberWriteScope(SPACE_TYPE.channel),
+    operatorMethodsScope([OPERATOR_METHOD.getChanges], serviceRef),
+  ];
+}
+
+/** Reading a space of this type, of any authority: each space's member list decides which. */
+function memberReadScope(spaceType: SpaceType): string {
+  return `space:${spaceType}?authority=*&action=read`;
+}
+
+/** Writing the collections a member writes in a space of this type. An acceptance is never withdrawn; a join request, a message and a reaction are. */
+function memberWriteScope(spaceType: SpaceType): string {
+  return `space:${spaceType}?authority=*&collection=${memberCollections(spaceType).join("&collection=")}&action=create&action=update${spaceType === SPACE_TYPE.workspace ? "" : "&action=delete"}`;
 }

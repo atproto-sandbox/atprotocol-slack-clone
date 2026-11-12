@@ -4,7 +4,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { dmInboxUri } from "@flock/protocol/keys";
 import type { BrowserSessionConfig } from "../../browser/session";
 import type { DmClient, DmConversationSummary, DmInboxState, DmRequest } from "@flock/client/dm/dm-client";
-import { resolveHandle } from "../../browser/identity";
+import { resolveHandle } from "@flock/client/did-documents";
 import type { BrowserDmStore } from "@flock/client/dm/browser-store";
 import type { BrowserSessionStatus } from "../../browser/use-browser-session";
 import { applyAllowlistEdit, coMemberDids, describeSkippedSenders, runDmCycle, type UiWorkspace } from "@flock/client/dm/ui-logic";

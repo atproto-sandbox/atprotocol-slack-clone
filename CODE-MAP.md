@@ -82,8 +82,9 @@ packages/                 Libraries. protocol and client run in a browser: they 
                               (@atproto/lexicon) + the entry's meaning rule; records are open (unknown fields kept);
                               MAX_RECORD_BYTES bounds what a reader keeps.
     src/scopes.ts            Scope builders for member, authority and operator sessions, derived from the registry,
-                              DM_BROWSER_SCOPES (asserted disjoint from every server scope), and memberGrantScopes: the
-                              browser's one grant (member set, operator rpc, DM set).
+                              DM_BROWSER_SCOPES (asserted disjoint from every server scope), memberGrantScopes: the
+                              browser's one grant (member set, operator rpc, DM set), and appGrantScopes: an app's own
+                              grant (its declaration, channel reads and writes, getChanges only).
     src/workspace-summary.ts What a workspace is, summarized from its authority's records, and the v1 envelope check; the
                               engine and the operator both use it.
     src/bounded-json.ts, src/map-limited.ts
@@ -129,6 +130,17 @@ packages/                 Libraries. protocol and client run in a browser: they 
     src/feed.ts              ChangeFollower: follows spaces through getChanges in the order that loses nothing (head, sync,
                               follow), syncs changed and reset spaces, mints afresh for denied ones, and backs off a round
                               that could not finish.
+    src/did-documents.ts     The one DID resolver for every client, browser or Node: a DID document fetched with no
+                              redirects and a bounded body, cached; an account's PDS endpoint, KEM key and handle.
+    src/session-transport.ts The engine's transport for an account's OAuth session, the browser's and a Node app's alike;
+                              they differ only in the fetch they pass.
+    src/app-runtime.ts       An app's runtime (R9): runApp follows the channels its install grants it in each workspace it
+                              is told, gives it each new message from a person once (never an app's), follows grant
+                              changes, and reports every failure; appGrantScope, publishAppDeclaration.
+    src/node/                The client's only Node code (`@flock/client/node/*`, outside the browser lint rules and the
+                              no-Node typecheck; browser code may not import it): transport.ts (the session transport with
+                              every host reached through @flock/net) and oauth.ts (an app's OAuth client: confidential private_key_jwt
+                              over https, a loopback client in development, its session in an owner-only state file).
     src/views.ts             Snapshots (one immutable snapshot per key, with subscriptions, for useSyncExternalStore) and
                               LiveSpaces (each watched key bound to the spaces it reads and loaded again when the feed names
                               one; a watch stops on its AbortSignal; the live loop waits until a followed space has a cursor).
@@ -142,12 +154,17 @@ packages/                 Libraries. protocol and client run in a browser: they 
                               session), so it runs on the fake network too.
     src/independent-dm.ts    DMs (M6 independence proof).
   testing/  @flock/testing      The in-memory multi-host PDS network every engine and DM test runs on (fake-network.ts).
+  net/  @flock/net              Node only: how a server process reaches a host someone else named (safe-fetch.ts): https to a
+                              public address only (loopback in loopback development), the address checked is the one
+                              connected to, no redirect, a minute's timeout. The operator and a Node app both use it.
   deployment/  @flock/deployment
                              What the web app and the operator share about how they are deployed: the public URLs and
                               their rules (config.ts: APP_URL, OPERATOR_URL, PLC_URL, OPERATOR_SERVICE_REF; HTTPS unless
                               loopback) and the security headers every response carries (security-headers.ts).
 
 apps/
+  echo-bot/  @flock/echo-bot    The first app (R9): depends on @flock/client alone (a test pins it). `pnpm echo-bot sign-in
+                              <handle>` once, then `pnpm echo-bot run`; echo.ts is its answer and its runApp wiring.
   web/  @flock/web              The Next.js app (`pnpm dev` / `build` / `start` run `next` here). No database, no secret.
     next.config.ts           Security headers; the repository root's `.env` (Next itself reads only this app's directory).
     src/app/                 App Router: page.tsx (builds the browser session config and renders the client gate,
@@ -160,7 +177,7 @@ apps/
     src/browser/             The account's browser session (R6a, R6c): one OAuth grant through
                               @atproto/oauth-client-browser (session.ts: one client and one init per page, signIn,
                               signOut), sign-out (sign-out.ts: deletes the account's store and DM state and revokes the
-                              session), browser identity resolution, the client metadata builder, and useBrowserSession.
+                              session), the client metadata builder, and useBrowserSession (identities resolve through @flock/client/did-documents).
                               The page's and callback's config has one owner: src/app/browser-session-config.ts.
     src/lib/within.ts        A bounded wait, used by sign-out.
   operator/  @flock/operator    The workspace-authority operator: its own process at OPERATOR_URL.
@@ -205,7 +222,7 @@ apps/
     src/auth/                OAuth plumbing for the authority grant: the flow binding (oauth-flow.ts), the encrypted SQLite
                               stores (encrypted-store.ts, with a view that sees only the values it accepts), the
                               cross-process refresh lock, scope canonicalization.
-    src/atproto/             Server-side atproto: identity.ts (SSRF-guarded DID→PDS resolution), space-credential.ts (a
+    src/atproto/             Server-side atproto: identity.ts (DID→PDS resolution, every host reached through @flock/net), space-credential.ts (a
                               server adapter over the core), space-ops.ts, write-notification.ts, client.ts.
     src/lib/db.ts, dm-subscription.ts
                              The SQLite database and its migrations; DM change-notice subscriptions.
@@ -230,8 +247,8 @@ scripts/                  codegen-lex.mjs, backup-db.mjs, playground.ts, render-
   user-facing mode (`everyone` / `allowlist` / `nobody`).
 - The inbox declaration (`new.flock.dm.declaration`, a public record in the owner's own repo, written by `enableDms`) is how a sender learns a recipient has an inbox: the authority answers a stranger asking for the inbox like a missing space.
 - `backoff.ts` — the re-notify backoff schedule (1 min, 10 min, 1 h, 1 day, then stop).
-- The browser session, identity resolution and client metadata moved to `apps/web/src/browser` in R6a (one grant for the
-  workspace engine and the DMs).
+- The browser session and client metadata moved to `apps/web/src/browser` in R6a (one grant for the workspace engine and
+  the DMs); identity resolution is the client's (`packages/client/src/did-documents.ts`, R9b).
 - `browser-store.ts` — the `DmDeps.store` implementation: `localStorage`, per-DID prefixed,
   falling back to in-memory state (and saying so) when storage is unavailable.
 - `ui-logic.ts` — pure UI helpers (participant-input parsing, conversation labels/visibility,
@@ -257,7 +274,7 @@ operator or OAuth layers even by accident, and lint refuses a Node built-in in a
 - `pnpm test` — unit tests (`node --test` over every `*.test.ts` in `packages/*/src` and `apps/*/src`), plus `bdd/gate.test.ts`, which keeps the Gherkin features honest (below).
 - `pnpm typecheck` — the whole repository with Node types, then `packages/protocol` and `packages/client` with none (and a check that no `@types/node` reaches them).
 - `pnpm test:bdd` — builds, then runs the executable Gherkin scenarios in `features/` with `@cucumber/cucumber`, driving real browsers against a real pinned PDS network.
-- `pnpm test:acceptance` — builds, then runs `protocol-tests/{app-acceptance,reconcile-workspaces,dm-acceptance,authority-grant,platform-capabilities,engine-acceptance,feed-follow,apps}.test.ts` against a real pinned PDS network (needs `ATPROTO_PINNED_CHECKOUT`). `platform-capabilities` and `authority-grant` hold the platform refactor's capability checks (K1, K3, K7), `engine-acceptance` the engine's parity with the independent reader on two real hosts, `apps` (R9) an app installed, refused what it is not granted and uninstalled on two real hosts, and `feed-follow` (R5's gate) a cookie-less member following a channel live through `getChanges` with `next start` receiving the PDS's notices (`protocol-tests/support/app-server.ts`), all on the network-only helper `protocol-tests/support/pds-network.ts` (`actorTransport` builds the engine's transport for a real account).
+- `pnpm test:acceptance` — builds, then runs `protocol-tests/{app-acceptance,reconcile-workspaces,dm-acceptance,authority-grant,platform-capabilities,engine-acceptance,feed-follow,apps,echo-bot}.test.ts` against a real pinned PDS network (needs `ATPROTO_PINNED_CHECKOUT`). `platform-capabilities` and `authority-grant` hold the platform refactor's capability checks (K1, K3, K7), `engine-acceptance` the engine's parity with the independent reader on two real hosts, `apps` (R9) an app installed, refused what it is not granted and uninstalled on two real hosts, `echo-bot` (R9's gate) the echo bot answering through the feed and refused once uninstalled, and `feed-follow` (R5's gate) a cookie-less member following a channel live through `getChanges` with `next start` receiving the PDS's notices (`protocol-tests/support/app-server.ts`), all on the network-only helper `protocol-tests/support/pds-network.ts` (`actorTransport` builds the engine's transport for a real account).
 - `pnpm test:browser` — builds, then runs Playwright specs in `protocol-tests/browser/` (`--test-concurrency=1`, since the specs start real servers); `cross-origin.spec.ts` (K9) signs in through the real OAuth flow and sends every request from a separate web origin.
 - `pnpm test:performance` — `protocol-tests/{performance-envelope,dm-performance}.test.ts` (slow; the channel envelope test is ~30 minutes); each latest-100 read is repeated ten times and reported as median and p95.
 - `pnpm test:sync-budget` — `protocol-tests/sync-budget.ts` (K4, R4's gate): calls and time of the engine's first open, reopen and one new message at 20, 100 and 200 writers; it fails if a reopen's call count depends on the writer count.
@@ -296,10 +313,12 @@ Run: `pnpm test:bdd` (headless), `pnpm test:bdd:chrome` (visible Google Chrome),
   and report `truncated` rather than silently dropping data past a scan cap.
 - Concurrency is `packages/protocol/src/map-limited.ts` (fixed fan-out, currently 8 for DM/channel fan-out),
   not ad hoc `Promise.all` over unbounded arrays.
-- Package boundaries are dependency lists: protocol depends on no workspace package; client and reader on protocol (reader on
-  nothing else); the operator on protocol and deployment; the web app on client, protocol and deployment. No app imports
-  the other. Lint adds what a list cannot say: no Node built-ins or server configuration in browser code, member lists
-  changed only through `members.ts`, and no DM engine in the web app's route handlers (`apps/web/src/app/**/route.ts`).
+- Package boundaries are dependency lists: protocol and net depend on no workspace package; client on protocol and net (net
+  for its Node entry only); reader on protocol only; the operator on protocol, net and deployment; the web app on client,
+  protocol and deployment; the echo bot on client only. No app imports another. Lint adds what a list cannot say: no Node
+  built-ins or server configuration in browser code, no client Node entry or @flock/net in browser code or the web app,
+  member lists changed only through `members.ts`, and no DM engine in the web app's route handlers
+  (`apps/web/src/app/**/route.ts`).
 - DM invariants (no server session, no server cache, no app-decided access, independent-app
   parity) are treated as architectural constraints, not defaults to be revisited later; see
   `SPEC.md`'s "Direct-message invariants" and `.ai/plans/direct-messages.md` §1–§2.

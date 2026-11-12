@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DM_BROWSER_SCOPES, OPERATOR_METHODS, operatorMethodsScope, workspaceAuthorityScopes } from "./scopes";
+import { appGrantScopes, DM_BROWSER_SCOPES, OPERATOR_METHODS, operatorMethodsScope, workspaceAuthorityScopes } from "./scopes";
 
 const serviceRef = "did:web:slack.example#atproto_flock_operator";
 
@@ -42,4 +42,15 @@ test("DM_BROWSER_SCOPES is the exact DM part of the browser grant (M3)", () => {
 
 test("the workspace authority grant, which the server holds, never carries a DM scope", () => {
   for (const scope of workspaceAuthorityScopes()) assert.ok(!scope.includes("new.flock.dm"), scope);
+});
+
+test("an app asks for its declaration, channel reads and writes, and the change feed: no inbox and no DM", () => {
+  assert.deepEqual(appGrantScopes("did:web:operator.example#atproto_flock_operator"), [
+    "atproto",
+    "repo:new.flock.app.declaration?action=create&action=update",
+    "space:new.flock.workspace?authority=*&action=read",
+    "space:new.flock.channel?authority=*&action=read",
+    "space:new.flock.channel?authority=*&collection=new.flock.channel.message&collection=new.flock.channel.reaction&action=create&action=update&action=delete",
+    "rpc?lxm=new.flock.operator.getChanges&aud=did:web:operator.example%23atproto_flock_operator",
+  ]);
 });

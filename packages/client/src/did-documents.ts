@@ -2,7 +2,11 @@ import { DID_DOCUMENT_TTL_MS, kemKeyFromDidDocument } from "@flock/protocol/atpr
 import { readUpstreamJson } from "@flock/protocol/bounded-json";
 import { isDid } from "@flock/protocol/keys";
 
-export type BrowserIdentityConfig = { plcUrl: string; loopback: boolean };
+// DID documents fetched with no redirects and a bounded body, and cached: an account's PDS endpoint, its KEM key and its handle.
+// Fetch-only, so the browser and a Node app resolve identities the same way.
+
+/** Where `did:plc` documents come from, whether loopback hosts are allowed, and how other hosts are reached (the platform's fetch, unless given). */
+export type IdentityConfig = { plcUrl: string; loopback: boolean; fetch?: (request: Request) => Promise<Response> };
 
 const MAX_DID_DOCUMENT_BYTES = 256 * 1024;
 
@@ -17,7 +21,7 @@ type CacheEntry = { document: DidDocument; expiresAt: number };
 
 const documentCache = new Map<string, CacheEntry>();
 
-export function clearBrowserIdentityCache(): void {
+export function clearDidDocumentCache(): void {
   documentCache.clear();
 }
 
@@ -28,7 +32,7 @@ export function clearBrowserIdentityCache(): void {
  * host while the app itself runs on loopback development. Every fetch blocks
  * redirects and reads a bounded body.
  */
-export async function resolvePds(did: string, config: BrowserIdentityConfig): Promise<string> {
+export async function resolvePds(did: string, config: IdentityConfig): Promise<string> {
   const document = await resolveDidDocument(did, config);
   const service = findService(document, did, "#atproto_pds");
   if (typeof service.serviceEndpoint !== "string" || service.serviceEndpoint.length === 0) {
@@ -45,12 +49,12 @@ export async function resolvePds(did: string, config: BrowserIdentityConfig): Pr
 }
 
 /** The account's `#atproto_kem` did:key. `forceRefresh` skips the cached DID document, for a MAC that failed after a key rotation. */
-export async function resolveKemKey(did: string, config: BrowserIdentityConfig, forceRefresh = false): Promise<string> {
+export async function resolveKemKey(did: string, config: IdentityConfig, forceRefresh = false): Promise<string> {
   return kemKeyFromDidDocument(did, await resolveDidDocument(did, config, forceRefresh));
 }
 
 /** The account's handle from `alsoKnownAs` (`at://handle`), for display only. */
-export async function resolveHandle(did: string, config: BrowserIdentityConfig): Promise<string | null> {
+export async function resolveHandle(did: string, config: IdentityConfig): Promise<string | null> {
   const document = await resolveDidDocument(did, config);
   if (!Array.isArray(document.alsoKnownAs)) return null;
   for (const entry of document.alsoKnownAs) {
@@ -61,17 +65,14 @@ export async function resolveHandle(did: string, config: BrowserIdentityConfig):
   return null;
 }
 
-async function resolveDidDocument(did: string, config: BrowserIdentityConfig, forceRefresh = false): Promise<DidDocument> {
+async function resolveDidDocument(did: string, config: IdentityConfig, forceRefresh = false): Promise<DidDocument> {
   if (!isDid(did)) throw new TypeError("Invalid DID.");
   const now = Date.now();
   const cached = documentCache.get(did);
   if (!forceRefresh && cached && cached.expiresAt > now) return cached.document;
   const url = didDocumentUrl(did, config);
-  const response = await fetch(url, {
-    method: "GET",
-    redirect: "error",
-    headers: { accept: "application/did+ld+json,application/json" },
-  });
+  const init = { method: "GET", redirect: "error", headers: { accept: "application/did+ld+json,application/json" } } as const;
+  const response = config.fetch ? await config.fetch(new Request(url, init)) : await fetch(url, init);
   if (!response.ok) {
     await response.body?.cancel().catch(() => undefined);
     throw new Error(`Could not resolve ${did} (${response.status}).`);
@@ -87,7 +88,7 @@ async function resolveDidDocument(did: string, config: BrowserIdentityConfig, fo
   return document;
 }
 
-function didDocumentUrl(did: string, config: BrowserIdentityConfig): URL {
+function didDocumentUrl(did: string, config: IdentityConfig): URL {
   if (did.startsWith("did:plc:")) {
     let base: URL;
     try {

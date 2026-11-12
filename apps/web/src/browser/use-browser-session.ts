@@ -1,14 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { generateSpaceKey } from "@flock/protocol/atproto/space-key";
 import { createEngine, type Engine } from "@flock/client/engine";
+import { sessionTransport } from "@flock/client/session-transport";
 import { IndexedDbStore } from "@flock/client/indexeddb-store";
-import type { ClientTransport } from "@flock/client/transport";
 import { LiveSpaces, Snapshots } from "@flock/client/views";
 import { DmClient } from "@flock/client/dm/dm-client";
 import { createBrowserDmStore, type BrowserDmStore } from "@flock/client/dm/browser-store";
 import { within } from "../lib/within";
 import { ERASE_WITHIN_MS, signOutAccount, type SignOutResult } from "./sign-out";
-import { resolveKemKey, resolvePds } from "./identity";
 import type { BrowserSessionConfig } from "./session";
 
 /** How long a space stays in the browser store without being opened: the retention the server's cache had (30 days). */
@@ -51,7 +49,7 @@ export function useBrowserSession(did: string, config: BrowserSessionConfig): Br
     let made: Built | null = null;
     void (async () => {
       try {
-        const { restoreSession, sessionXrpcClient } = await import("./session");
+        const { restoreSession } = await import("./session");
         if (epoch.current !== run) return;
         setStatus("connecting");
         setError("");
@@ -61,15 +59,7 @@ export function useBrowserSession(did: string, config: BrowserSessionConfig): Br
           setStatus("disconnected");
           return;
         }
-        const identity = { plcUrl, loopback };
-        const transport: ClientTransport = {
-          did,
-          memberClient: sessionXrpcClient(session),
-          resolvePds: (target) => resolvePds(target, identity),
-          resolveKemKey: (target, forceRefresh) => resolveKemKey(target, identity, forceRefresh),
-          fetchEndpoint: (request) => fetch(request, { redirect: "error" }),
-          generateKey: generateSpaceKey,
-        };
+        const transport = sessionTransport(session, { plcUrl, loopback }, (request) => fetch(request, { redirect: "error" }));
         // A store another account left behind (a crash before its sign-out, or one another tab held at its sign-out) goes before
         // this account's opens. One a tab still holds open is not waited for: a later start deletes it.
         await within(IndexedDbStore.deleteOtherAccounts(did), ERASE_WITHIN_MS).catch(() => undefined);

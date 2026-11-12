@@ -58,13 +58,14 @@ export class WorkspaceClient {
     if (options.fresh) await this.deps.credentials.fresh(uri);
     const client = await this.deps.credentials.clientFor(uri, authorityDid);
     const scan = (collection: string, maxRecords: number) => listBoundedRecords(client, { space: uri, repo: authorityDid, collection, maxRecords });
-    const [profiles, directory, roster, admins] = await Promise.all([
+    const [profiles, directory, roster, admins, installs] = await Promise.all([
       scan(COLLECTION.workspaceProfile, 1),
       scan(COLLECTION.directory, WORKSPACE_ENVELOPE.authorityRecordScan),
       scan(COLLECTION.workspaceRoster, WORKSPACE_ENVELOPE.authorityRecordScan),
       scan(COLLECTION.admin, WORKSPACE_ENVELOPE.authorityRecordScan),
+      scan(COLLECTION.appInstall, WORKSPACE_ENVELOPE.authorityRecordScan),
     ]);
-    const summary = summarizeWorkspace(uri, this.deps.transport.did, { profiles, directory, roster, admins });
+    const summary = summarizeWorkspace(uri, this.deps.transport.did, { profiles, directory, roster, admins, installs });
     if (!summary) {
       await this.deps.lifecycle.dropSpace(uri);
       return null;

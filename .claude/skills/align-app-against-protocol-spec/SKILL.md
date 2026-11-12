@@ -52,7 +52,7 @@ Diff the PDS areas above and build a table "upstream change → app owner" (see 
 | DID and PDS resolution | `apps/operator/src/atproto/identity.ts` |
 | scope grammar, permission sets | `packages/protocol/src/scopes.ts` |
 | lexicons | `packages/protocol/lexicons/**` (the `new.flock.permissions.*` permission sets must keep matching `packages/protocol/src/scopes.ts`; a unit test checks it), generated `packages/protocol/src/lexicons/**` (`pnpm codegen:lex`) |
-| direct messages and their test double | `packages/client/src/dm/**` (browser side: `apps/web/src/browser/identity.ts`, `session.ts`), `packages/testing/src/fake-network.ts` (mirror the real PDS) |
+| direct messages and their test double | `packages/client/src/dm/**` (browser side: `packages/client/src/did-documents.ts`, `apps/web/src/browser/session.ts`), `packages/testing/src/fake-network.ts` (mirror the real PDS) |
 | workspaces, operator journal, independent reader | `packages/client/src/workspace-client.ts`, `apps/operator/src/operator/**`, `packages/reader/src/**` |
 
 Write `.ai/plans/protocol-drift-<short sha>.md` in the shape of the newest one: what changed and where it hits us, decisions needed from the owner, out of scope, phases P0 to P8, risks. Present it and wait for approval before implementing. Product decisions (for example what a departing member's history does) go to the owner; do not decide them in the plan.
