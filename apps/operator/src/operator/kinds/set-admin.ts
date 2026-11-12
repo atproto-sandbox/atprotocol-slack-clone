@@ -6,6 +6,7 @@ import type { OperatorActor } from "../actor";
 import { activeAdmins, getOwnerRecord, writeRoster } from "../workspace-state";
 import type { OperationKind } from "./kind";
 import { putListMember } from "../members";
+import { readInstall } from "../membership";
 
 export const setAdminKind: OperationKind = {
   kind: "setAdmin",
@@ -18,6 +19,7 @@ export const setAdminKind: OperationKind = {
 
 async function setAdmin(actor: OperatorActor, context: OperationContext, subject: string, active: boolean): Promise<void> {
   if (subject === actor.workspace.authorityDid) throw new OperationRejectedError("The workspace authority's bootstrap admin state cannot be changed.");
+  if ((await readInstall(actor, subject))?.active) throw new OperationRejectedError("An installed app is not an admin.");
   const roster = await getOwnerRecord(actor.session, actor.workspace.uri, COLLECTION.workspaceRoster, subjectKey(subject));
   if (active) {
     const workspaceMember = (await listSpaceMembers(actor.session, actor.workspace.uri)).some((member) =>

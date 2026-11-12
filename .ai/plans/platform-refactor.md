@@ -1004,3 +1004,68 @@ Reviews: Codex was unavailable, so each round used independent Sonnet reviewers 
 - A third reviewer approved with minor follow-ups: the account could still create again, and so administer, a workspace a creator had made under it (every creation now verifies the workspace is new); no test of a crashed runner's claim (added); comment, lexicon and doc wording (fixed); and the two recorded below.
 
 Follow-ups, not done here: the operator's creation recovery, like an admin's recovery before it, audits a row it cannot run on every pass (every minute from the reconcile job), and `audit_event` has no retention; and the method's refusal of a caller with no approval before the account's grant is restored is unit-tested as a function, not at its call site, since the answer is the same 403 either way.
+
+### R9a (2026-11-11): apps in the protocol and the operator
+
+Done (design: `.ai/plans/r9-apps-progress.md`):
+- **Records.**
+  - `new.flock.app.install` sits in the workspace space, written by the authority and keyed by the app's DID: its channels, each read and optionally write, who installed it, and when. It is the grant.
+  - `new.flock.app.declaration` sits in the app's own repo: a name and a description. It is a label. The operator does not read it, as it reads no account's repo but a join request's; r9b's admin screen reads it before an install.
+  - Both are in the registry, so the authority scope now names the install collection.
+  - `WORKSPACE_ENVELOPE` gains `apps: 20` and `memberList: 220`, the one bound for every member-list scan.
+- **One membership model** (`apps/operator/src/operator/membership.ts`) owns who belongs in each member list, and with which bits:
+  - the workspace space: the people, and active apps reading;
+  - the inbox: the people, admins also reading, and no app;
+  - a channel: its people, and the apps granted it with their bits; nobody once archived.
+  - `currentWorkspaceMembers` (the check before a channel is created or changed) and reconcile take their expected lists from it.
+  - `transitionChannel` keeps a granted app's bits through a change of visibility.
+  - `archiveChannel` first ends each install's grant of the channel, then removes everyone.
+  - The roster-only convergence check it replaces is gone.
+- **Three operations** (`kinds/app-access.ts`), each writing the install record first and then moving the app's entries toward it. The comparison is against the live member lists, so a resume needs nothing remembered:
+  - `installApp` refuses the authority, a person on the roster, a channel that is not open, another grant of an installed app, and a twenty-first app.
+  - `updateAppAccess` changes an installed app's channels.
+  - `uninstallApp` removes it everywhere.
+  - `inviteMember`, `removeMember` and `setAdmin` refuse an installed app.
+  - No decision on a join request moves an installed app. It is refused before anything is read of the request, so neither the approval nor the clean-up of a stale one restores the account as the person it was.
+  - Where an app belongs is one function, `appAccess`, used by the expected lists and by the app's own operations.
+- **Reauthorization:** an authority grant without the install collection answers the first install as any first step short of a scope does (`execute`'s "the authority must approve its permission again"), and leaves no row; the same operation succeeds after the account approves again.
+- **Measured:** after `uninstallApp`, a space credential the app already held still reads until it expires. The pinned PDS issues credentials for 600 s, so the residual is up to ten minutes, as for a removed person (`docs/operations.md`, "Apps").
+
+Tests:
+- **Unit:**
+  - the model, each row;
+  - each operation's refusals;
+  - install, update and uninstall stopped at every write and resumed with none repeated;
+  - a reconcile while an uninstall is stopped after its record, which writes nothing for the app, and the app gone once the host is back;
+  - with an app installed: a public and a private channel created, one made public and private again, one archived (ending the grant in the record), a person invited and removed, and a reconcile, each leaving the app where its record says;
+  - the reauthorization path;
+  - a visibility change putting back a lost app entry;
+  - an archive stopped after ending a grant;
+  - an uninstall freeing one of the 20 slots;
+  - a repeat install keeping its installer;
+  - the `channels` field rule;
+  - the app declaration;
+  - both decisions on a join request refused for an installed app;
+  - `setAdmin` refusing it either way.
+- **Acceptance on the real PDS network** (`protocol-tests/apps.test.ts`):
+  - the install refused for a grant short of the install scope, and done after approving again;
+  - the app reading and writing its granted channel and refused another at the authority;
+  - a read-only grant's writes, and an acceptance in the workspace space, never listed as a writer's;
+  - after uninstall: in no list, denied by `getChanges` at once, refused a new credential, and the held credential still reading, issued for 600 s.
+- **The envelope:** an install at exactly 200 people, after which a reconcile finds every list as the model expects and changes nothing (`apps.test.ts`, the people set up directly).
+
+Found on the way:
+- **The pinned PDS keeps the write bit at the authority.** A member without it writes into its own repo unrefused. The authority (`putMember` without write calls `removeWriter`, and the write check gates the writer set) lists it as no writer, so no reader syncs what it wrote. The acceptance test asserts this for a read-only grant and for the workspace space.
+  - An app is therefore never a writer of the workspace space. Its acceptance record is never listed, and it cannot find its workspaces the way a person does.
+  - r9b tells the bot its workspaces.
+- The pinned provider issues only scope strings the client metadata declares, so the acceptance test cannot mint a grant with the pre-r9a scope. It uses a consent that left out the workspace records' permission, which is the same refusal at the same first step.
+- The fake authority PDS had no `removeMember`; its intercept now sees each request's collection.
+- **The 200-person install moved out of the performance envelope.** It was first added to the envelope test, whose run here failed before reaching it: the pinned PDS's SQLite hit `SQLITE_IOERR_SHMSIZE` while writing the envelope's reactions, on a disk that other tools' caches had filled. The install does not need the envelope's four million records, so it has a test of its own and the envelope test is unchanged.
+
+Gate: unit 626/626; typecheck and lint clean, and `protocol-tests/` typechecks; acceptance 22/22 (`apps.test.ts` included) and browser 6/6; BDD 66/66 (473 steps), no screen changed; all on the final operator and protocol code, the build included. `apps.test.ts` was then run again with the 200-person case (6/6, 28 s); only that test changed after the gate.
+
+Reviews: Codex was unavailable, so each round used independent Sonnet reviewers on a frozen snapshot of the tree.
+- A reviewer on the whole step approved with follow-ups. It found `applyAppAccess` re-encoding where an app belongs, beside the model (now one function, `appAccess`); test gaps it closed with probes of its own (a visibility change putting back a lost app entry, the `channels` rule, an archive stopped midway, the twentieth slot freed by an uninstall, `setAdmin`, and an app's write refused at the PDS); a join request able to remove an installed app; the declaration untested; a repeat install rewriting who installed the app; a nested `$type` refused; and doc errors. All are fixed. Writing the PDS test showed the write bit lives in the authority's writer set, not at the writer's host; the test asserts that instead.
+- A reviewer on that delta approved with follow-ups. The join-request guard was untested, and the clean-up of a stale approval could still restore an app as the person it was; the guard now runs before anything is read, and both decisions are tested. `setAdmin` still accepted demoting an app; it refuses it either way. It also found a declaration bound untested, a spread order, and two doc passages; all are fixed.
+
+Follow-ups, not done here: an uninstalled app's install record stays (inactive) and counts against the 1,000-record scan of the workspace's authority records; and the residual of a credential an app already held is the protocol's, as for a person.

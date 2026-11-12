@@ -3,7 +3,8 @@ import { channelUri } from "@flock/protocol/keys";
 import { COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
 import { OperationRejectedError, type OperationContext } from "../journal";
 import type { OperatorActor } from "../actor";
-import { currentWorkspaceMembers, directoryRecords, writeRoster } from "../workspace-state";
+import { currentWorkspaceMembers } from "../membership";
+import { directoryRecords, writeRoster } from "../workspace-state";
 import type { OperationKind, OperatorRequest } from "./kind";
 import { putListMember } from "../members";
 

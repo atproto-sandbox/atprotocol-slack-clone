@@ -8,6 +8,7 @@ import {
 } from "../workspace-state";
 import type { OperationKind, OperatorRequest } from "./kind";
 import { putListMember, removeListMember } from "../members";
+import { readInstall } from "../membership";
 
 export const decideJoinRequestKind: OperationKind = {
   kind: "decideJoinRequest",
@@ -30,6 +31,9 @@ async function decideJoinRequest(
   const inbox = inboxUri(actor.workspace.authorityDid, actor.workspace.skey);
   const parsed = parseJoinRequestUri(operation.request, actor.workspace.authorityDid, inbox);
   if (!parsed) throw new OperationRejectedError("Join request must refer to this workspace inbox.");
+  // An installed app's channels are its install record's: no decision on a request it wrote as a person moves it, nor does
+  // the clean-up of a stale approval restore it as that person.
+  if ((await readInstall(actor, parsed.repo))?.active) throw new OperationRejectedError("An installed app is given channels by changing its access, not by a join request.");
   const matchingChannels = (await directoryRecords(actor)).filter((record) =>
     requestRecordKey(channelUri(actor.workspace.authorityDid, record.value.skey), parsed.repo) === parsed.rkey);
   if (matchingChannels.length !== 1) throw new OperationRejectedError("Join request key is not canonical for this workspace.");

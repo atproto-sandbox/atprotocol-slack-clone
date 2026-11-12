@@ -47,6 +47,10 @@ const FIXTURES: Record<Collection, Fixture> = {
     record: { subject: MEMBER, active: true, updatedAt: NOW },
     context: { authorityDid: AUTHORITY, spaceUri: WORKSPACE, repoDid: AUTHORITY, rkey: subjectKey(MEMBER) },
   },
+  [COLLECTION.appInstall]: {
+    record: { subject: MEMBER, active: true, channels: [{ skey: "acme-general", write: true }], installedBy: AUTHORITY, installedAt: NOW, updatedAt: NOW },
+    context: { authorityDid: AUTHORITY, spaceUri: WORKSPACE, repoDid: AUTHORITY, rkey: subjectKey(MEMBER) },
+  },
   [COLLECTION.acceptance]: {
     record: { workspace: WORKSPACE, createdAt: NOW },
     context: { authorityDid: AUTHORITY, spaceUri: WORKSPACE, repoDid: MEMBER, rkey: acceptanceRecordKey(WORKSPACE) },
@@ -171,7 +175,7 @@ type SemanticCase = { collection: Collection; breaks: string; record?: Record<st
 
 const SEMANTIC_CASES: SemanticCase[] = [
   // Wrong author.
-  ...[COLLECTION.workspaceProfile, COLLECTION.directory, COLLECTION.workspaceRoster, COLLECTION.admin, COLLECTION.joinDecision, COLLECTION.channelRoster]
+  ...[COLLECTION.workspaceProfile, COLLECTION.directory, COLLECTION.workspaceRoster, COLLECTION.admin, COLLECTION.appInstall, COLLECTION.joinDecision, COLLECTION.channelRoster]
     .map((collection): SemanticCase => ({ collection, breaks: "authored by a member", context: { repoDid: MEMBER }, reason: /wrong author/ })),
   ...[COLLECTION.dmHeader, COLLECTION.dmMessage, COLLECTION.dmReaction]
     .map((collection): SemanticCase => ({ collection, breaks: "authored by someone other than the half owner", context: { repoDid: MEMBER }, reason: /half owner/ })),
@@ -187,6 +191,8 @@ const SEMANTIC_CASES: SemanticCase[] = [
   { collection: COLLECTION.directory, breaks: "a key other than its skey", context: { rkey: "acme-random" }, reason: /directory key/ },
   { collection: COLLECTION.workspaceRoster, breaks: "a key other than its subject's", context: { rkey: subjectKey(AUTHORITY) }, reason: /roster key/ },
   { collection: COLLECTION.admin, breaks: "a key other than its subject's", context: { rkey: subjectKey(AUTHORITY) }, reason: /roster key/ },
+  { collection: COLLECTION.appInstall, breaks: "a key other than its subject's", context: { rkey: subjectKey(AUTHORITY) }, reason: /roster key/ },
+  { collection: COLLECTION.appInstall, breaks: "a channel granted twice", record: { channels: [{ skey: "acme-general", write: true }, { skey: "acme-general", write: false }] }, reason: /each channel once/ },
   { collection: COLLECTION.channelRoster, breaks: "a key other than its subject's", context: { rkey: subjectKey(AUTHORITY) }, reason: /roster key/ },
   { collection: COLLECTION.acceptance, breaks: "a key for another workspace", context: { rkey: acceptanceRecordKey(workspaceUri(AUTHORITY, "other")) }, reason: /acceptance key/ },
   { collection: COLLECTION.joinRequest, breaks: "another member's request key", context: { rkey: requestRecordKey(CHANNEL, AUTHORITY) }, reason: /not canonical/ },

@@ -14,7 +14,7 @@ import { validateSpaceRecord } from "@flock/protocol/registry";
 import { assertBoundedRecordPage, listBoundedMembers } from "@flock/protocol/atproto/record-pages";
 import { isSpaceAlreadyExists, XrpcError } from "@flock/protocol/atproto/xrpc";
 import { requireSpaceAuthority, spaceRecordUri, spaceUri } from "@flock/protocol/keys";
-import { WorkspaceEnvelopeError } from "@flock/protocol/workspace-summary";
+import { WORKSPACE_ENVELOPE, WorkspaceEnvelopeError } from "@flock/protocol/workspace-summary";
 
 export async function ensureMemberListSpace(
   session: OAuthSession,
@@ -67,8 +67,8 @@ export async function removeSpaceMember(session: OAuthSession, space: string, di
 }
 
 export async function listSpaceMembers(session: OAuthSession, space: string): Promise<ListMembers.Member[]> {
-  const result = await listBoundedMembers(sessionClient(session), { space, maxMembers: 200 });
-  if (result.truncated) throw new WorkspaceEnvelopeError("PDS member list exceeds the 200-member v1 scan limit; operator state may be incomplete.");
+  const result = await listBoundedMembers(sessionClient(session), { space, maxMembers: WORKSPACE_ENVELOPE.memberList });
+  if (result.truncated) throw new WorkspaceEnvelopeError(`PDS member list exceeds its ${WORKSPACE_ENVELOPE.memberList}-entry scan limit (people and apps); operator state may be incomplete.`);
   return result.members;
 }
 

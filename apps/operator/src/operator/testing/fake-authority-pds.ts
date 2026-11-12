@@ -8,7 +8,7 @@ export type FakeMember = { did: string; read: boolean; write: boolean };
 
 export type FakeAuthorityPds = {
   session: OAuthSession;
-  /** Every write, in order, as `createSpace <uri>`, `putRecord <space> <collection>/<rkey>` or `putMember <space> <did>`. */
+  /** Every write, in order, as `createSpace <uri>`, `putRecord <space> <collection>/<rkey>`, `putMember <space> <did>` or `removeMember <space> <did>`. */
   writes: string[];
   /** Every request, in order, as `<method> <space> [<collection>]`. */
   calls: string[];
@@ -23,7 +23,7 @@ type RequestBody = Record<string, string> & { record: Record<string, unknown>; r
 export type FakeAuthorityPdsOptions = {
   onWrite?: () => void;
   /** Answers a request in place of the fake (a refusal, an outage), or returns undefined to let the fake answer it. */
-  intercept?: (method: string) => Response | undefined;
+  intercept?: (method: string, target: { space?: string; collection?: string }) => Response | undefined;
 };
 
 export function fakeAuthorityPds(did: string, options: FakeAuthorityPdsOptions = {}): FakeAuthorityPds {
@@ -61,8 +61,9 @@ export function fakeAuthorityPds(did: string, options: FakeAuthorityPdsOptions =
       const method = url.pathname.replace("/xrpc/", "");
       const params = url.searchParams;
       const body = init?.body ? JSON.parse(String(init.body)) as RequestBody : undefined;
-      calls.push([method, body?.space ?? params.get("space"), body?.collection ?? params.get("collection")].filter(Boolean).join(" "));
-      const intercepted = options.intercept?.(method);
+      const target = { space: body?.space ?? params.get("space") ?? undefined, collection: body?.collection ?? params.get("collection") ?? undefined };
+      calls.push([method, target.space, target.collection].filter(Boolean).join(" "));
+      const intercepted = options.intercept?.(method, target);
       if (intercepted) return intercepted;
       switch (method) {
         case "com.atproto.space.createSpace": {
@@ -95,6 +96,10 @@ export function fakeAuthorityPds(did: string, options: FakeAuthorityPdsOptions =
         case "com.atproto.memberspace.putMember":
           write(`putMember ${body!.space} ${body!.did}`);
           memberMap(body!.space).set(body!.did, { did: body!.did, read: body!.read, write: body!.write });
+          return Response.json({});
+        case "com.atproto.memberspace.removeMember":
+          write(`removeMember ${body!.space} ${body!.did}`);
+          memberMap(body!.space).delete(body!.did);
           return Response.json({});
         default:
           throw new Error(`unexpected request: ${path}`);

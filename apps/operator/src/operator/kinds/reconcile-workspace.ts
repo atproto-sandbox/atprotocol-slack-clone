@@ -4,6 +4,7 @@ import { COLLECTION } from "@flock/protocol/nsids";
 import type { OperationContext } from "../journal";
 import type { OperatorActor } from "../actor";
 import { activeAdmins, activePrivateRoster, activeRoster, directoryRecords, writeRoster } from "../workspace-state";
+import { activeInstalls, expectedChannelList, expectedInboxList, expectedWorkspaceList, listMatches, type Access } from "../membership";
 import type { OperationKind } from "./kind";
 import { putListMember, removeListMember } from "../members";
 
@@ -26,29 +27,25 @@ async function reconcileWorkspace(actor: OperatorActor, context: OperationContex
   const inbox = inboxUri(actor.workspace.authorityDid, actor.workspace.skey);
   const members = await activeRoster(actor);
   const admins = await activeAdmins(actor);
-  await reconcileSpace(actor, context, "workspace", workspace, new Map([...members].map((did) => [did, { read: true, write: true }])));
-  await reconcileSpace(actor, context, "inbox", inbox, new Map([...members].map((did) => [did, { read: admins.has(did), write: true }])));
+  const installs = await activeInstalls(actor);
+  await reconcileSpace(actor, context, "workspace", workspace, expectedWorkspaceList(members, installs));
+  await reconcileSpace(actor, context, "inbox", inbox, expectedInboxList(members, admins));
   const channels = (await directoryRecords(actor)).sort((left, right) => left.value.skey.localeCompare(right.value.skey));
   for (const channel of channels) {
     const space = channelUri(actor.workspace.authorityDid, channel.value.skey);
     if (channel.value.visibility === "transitioning") continue;
     if (channel.value.visibility === "archived") {
-      await reconcileSpace(actor, context, `archived-${channel.value.skey}`, space, new Map());
+      await reconcileSpace(actor, context, `archived-${channel.value.skey}`, space, expectedChannelList(channel.value, members, new Set(), installs));
       for (const did of await activePrivateRoster(actor, space)) {
         await context.step(`archived-${channel.value.skey}-deactivate-roster-${did}`, () => writeRoster(actor, space, did, false, COLLECTION.channelRoster));
       }
       continue;
     }
-    let desiredDids: Set<string>;
-    if (channel.value.visibility === "public") desiredDids = members;
-    else {
-      const privateRoster = await activePrivateRoster(actor, space);
-      desiredDids = new Set([...privateRoster].filter((did) => members.has(did)));
-      for (const did of privateRoster) if (!members.has(did)) {
-        await context.step(`channel-${channel.value.skey}-deactivate-stale-roster-${did}`, () => writeRoster(actor, space, did, false, COLLECTION.channelRoster));
-      }
+    const privateRoster = channel.value.visibility === "private" ? await activePrivateRoster(actor, space) : new Set<string>();
+    for (const did of privateRoster) if (!members.has(did)) {
+      await context.step(`channel-${channel.value.skey}-deactivate-stale-roster-${did}`, () => writeRoster(actor, space, did, false, COLLECTION.channelRoster));
     }
-    await reconcileSpace(actor, context, `channel-${channel.value.skey}`, space, new Map([...desiredDids].map((did) => [did, { read: true, write: true }])));
+    await reconcileSpace(actor, context, `channel-${channel.value.skey}`, space, expectedChannelList(channel.value, members, privateRoster, installs));
   }
 }
 
@@ -57,7 +54,7 @@ async function reconcileSpace(
   context: OperationContext,
   label: string,
   space: string,
-  desired: Map<string, { read: boolean; write: boolean }>,
+  desired: ReadonlyMap<string, Access>,
 ): Promise<void> {
   const current = await listSpaceMembers(actor.session, space);
   const authorityDid = actor.workspace.authorityDid;
@@ -74,10 +71,6 @@ async function reconcileSpace(
     }
   }
   await context.step(`${label}-verified`, async () => {
-    const actual = (await listSpaceMembers(actor.session, space)).filter((member) => member.did !== authorityDid);
-    if (actual.length !== desiredNonOwner.size || [...desiredNonOwner].some(([did, access]) => {
-      const member = actual.find((entry) => entry.did === did);
-      return !member || member.read !== access.read || member.write !== access.write;
-    })) throw new Error(`Membership reconciliation has not converged for ${label}.`);
+    if (!listMatches(desired, await listSpaceMembers(actor.session, space), authorityDid)) throw new Error(`Membership reconciliation has not converged for ${label}.`);
   });
 }

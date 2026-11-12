@@ -6,13 +6,17 @@ import type { OperatorActor } from "../actor";
 import { activePrivateRoster, getOwnerRecord, writeRoster } from "../workspace-state";
 import type { OperationKind } from "./kind";
 import { removeListMember } from "../members";
+import { activeInstalls, writeInstall } from "../membership";
 
 export const archiveChannelKind: OperationKind = {
   kind: "archiveChannel",
   required: ["skey"],
   actor: "admin",
   submittedThrough: "execute",
-  steps: ["channel-archive-transition", "channel-archive-remove-{did}", "channel-archive-roster-{did}", "channel-archive-verified", "channel-archive-final"],
+  steps: [
+    "channel-archive-transition", "channel-archive-remove-{did}", "channel-archive-roster-{did}", "channel-archive-verified", "channel-archive-final",
+    "channel-archive-app-{did}",
+  ],
   run: (actor, context, request) => archiveChannel(actor, context, request.skey as string),
   archivesSpaces: (actor, request) => [channelUri(actor.workspace.authorityDid, String(request.skey))],
 };
@@ -25,6 +29,13 @@ async function archiveChannel(actor: OperatorActor, context: OperationContext, s
   await context.step("channel-archive-transition", () => putAuthorityRecord(actor.session, actor.workspace.uri, COLLECTION.directory, skey, {
     skey, name: directory.name, visibility: "transitioning",
   }).then(() => undefined));
+  // An app's grant of the channel ends with it, in its install record first, as every change of an app's access is made.
+  for (const install of (await activeInstalls(actor)).values()) {
+    if (!install.channels.has(skey)) continue;
+    const channels = new Map(install.channels);
+    channels.delete(skey);
+    await context.step(`channel-archive-app-${install.subject}`, () => writeInstall(actor, { ...install, channels }));
+  }
   const members = await listSpaceMembers(actor.session, space);
   for (const member of members) {
     await context.step(`channel-archive-remove-${member.did}`, () => removeListMember(actor.session, space, member.did));

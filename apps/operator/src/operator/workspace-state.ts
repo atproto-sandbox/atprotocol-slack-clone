@@ -11,7 +11,6 @@ import { parseSpaceRecordUri, subjectKey } from "@flock/protocol/keys";
 import { COLLECTION, type Collection } from "@flock/protocol/nsids";
 import { validateSpaceRecord } from "@flock/protocol/registry";
 import { WORKSPACE_ENVELOPE, WorkspaceEnvelopeError } from "@flock/protocol/workspace-summary";
-import { OperationRejectedError } from "./journal";
 import type { OperatorActor } from "./actor";
 
 // What the operator reads and writes of a workspace's state, shared by every operation kind: the authority's own records
@@ -80,35 +79,6 @@ export async function activeRoster(actor: OperatorActor): Promise<Set<string>> {
   }).valid && row.value.active === true && typeof row.value.subject === "string" ? [row.value.subject] : []));
   if (members.size > 200) throw new WorkspaceEnvelopeError("The active workspace roster exceeds 200 members.");
   return members;
-}
-
-export async function currentWorkspaceMembers(actor: OperatorActor): Promise<Set<string>> {
-  const [roster, pdsMembers] = await Promise.all([
-    activeRoster(actor),
-    listSpaceMembers(actor.session, actor.workspace.uri),
-  ]);
-  assertWorkspaceRosterMatchesPds(roster, pdsMembers, actor.workspace.authorityDid);
-  return roster;
-}
-
-export function assertWorkspaceRosterMatchesPds(
-  roster: ReadonlySet<string>,
-  pdsMembers: ReadonlyArray<{ did: string; read: boolean; write: boolean }>,
-  authorityDid: string,
-): void {
-  for (const did of roster) {
-    if (did === authorityDid) continue;
-    const member = pdsMembers.find((entry) => entry.did === did);
-    if (!member || !member.read || !member.write) {
-      throw new OperationRejectedError("Workspace roster has not converged with PDS membership.");
-    }
-  }
-  for (const member of pdsMembers) {
-    if (member.did === authorityDid || (!member.read && !member.write)) continue;
-    if (!roster.has(member.did) || !member.read || !member.write) {
-      throw new OperationRejectedError("Workspace roster has not converged with PDS membership.");
-    }
-  }
 }
 
 export async function activeAdmins(actor: OperatorActor): Promise<Set<string>> {

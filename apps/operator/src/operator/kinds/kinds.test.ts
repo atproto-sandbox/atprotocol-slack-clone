@@ -42,12 +42,15 @@ const PERSISTED_KINDS = {
     required: ["skey", "visibility"], optional: ["members"], actor: "admin", submittedThrough: "execute",
     steps: [
       "channel-set-transitioning", "channel-public-add-{did}", "channel-remove-{did}", "channel-roster-inactive-{did}", "channel-private-add-{did}",
-      "channel-roster-active-{did}", "channel-visibility-verified", "channel-set-final-visibility",
+      "channel-roster-active-{did}", "channel-visibility-verified", "channel-set-final-visibility", "channel-app-{did}",
     ],
   },
   archiveChannel: {
     required: ["skey"], optional: [], actor: "admin", submittedThrough: "execute",
-    steps: ["channel-archive-transition", "channel-archive-remove-{did}", "channel-archive-roster-{did}", "channel-archive-verified", "channel-archive-final"],
+    steps: [
+      "channel-archive-transition", "channel-archive-remove-{did}", "channel-archive-roster-{did}", "channel-archive-verified", "channel-archive-final",
+      "channel-archive-app-{did}",
+    ],
   },
   decideJoinRequest: {
     required: ["request", "requestId", "decision"], optional: [], actor: "admin", submittedThrough: "execute",
@@ -72,6 +75,18 @@ const PERSISTED_KINDS = {
       "channel-{skey}-set-{did}", "channel-{skey}-remove-{did}", "channel-{skey}-verified", "channel-{skey}-deactivate-stale-roster-{did}",
       "archived-{skey}-set-{did}", "archived-{skey}-remove-{did}", "archived-{skey}-verified", "archived-{skey}-deactivate-roster-{did}",
     ],
+  },
+  installApp: {
+    required: ["subject", "channels"], optional: [], actor: "admin", submittedThrough: "execute",
+    steps: ["app-install-record", "app-workspace-set", "app-workspace-remove", "app-channel-{skey}-set", "app-channel-{skey}-remove", "app-access-verified"],
+  },
+  updateAppAccess: {
+    required: ["subject", "channels"], optional: [], actor: "admin", submittedThrough: "execute",
+    steps: ["app-access-record", "app-workspace-set", "app-workspace-remove", "app-channel-{skey}-set", "app-channel-{skey}-remove", "app-access-verified"],
+  },
+  uninstallApp: {
+    required: ["subject"], optional: [], actor: "admin", submittedThrough: "execute",
+    steps: ["app-uninstall-record", "app-workspace-set", "app-workspace-remove", "app-channel-{skey}-set", "app-channel-{skey}-remove", "app-access-verified"],
   },
 };
 
@@ -141,7 +156,7 @@ test("every step a kind's run body records is a step that kind declares", async 
     for (const name of names) assert.ok(declared.some((matches) => matches(name)), `${file}: step "${name}" is not declared`);
     checked += calls.length;
   }
-  assert.equal(checked, 68, "every context.step call in the kind modules was checked");
+  assert.equal(checked, 78, "every context.step call in the kind modules was checked");
 });
 
 function isKind(value: unknown): value is { kind: string; steps: readonly string[] } {

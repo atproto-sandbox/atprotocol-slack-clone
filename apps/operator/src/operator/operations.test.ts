@@ -6,7 +6,7 @@ import { UpstreamResponseTooLargeError } from "@flock/protocol/bounded-json";
 import { XrpcError } from "@flock/protocol/atproto/xrpc";
 import { channelUri, inboxUri, requestRecordKey } from "@flock/protocol/keys";
 import { savedWorkspaceOperations, validateOperatorRequest } from "./operations";
-import { assertWorkspaceRosterMatchesPds, readJoinRequestRecord } from "./workspace-state";
+import { readJoinRequestRecord } from "./workspace-state";
 import type { OperatorActor } from "./actor";
 
 const actor = { workspace: { authorityDid: "did:plc:owner" } } as OperatorActor;
@@ -42,31 +42,6 @@ test("a kind outside the table, a wrong lexicon type, or a wrongly typed field i
 test("private visibility transitions require a selected member list", () => {
   assert.throws(() => validateOperatorRequest({ kind: "transitionChannel", skey: "general", visibility: "private" }, actor, "execute"), /selected member list/i);
   assert.deepEqual(validateOperatorRequest({ kind: "transitionChannel", skey: "general", visibility: "private", members: ["did:plc:member"] }, actor, "execute").request.members, ["did:plc:member"]);
-});
-
-test("workspace channel grants require the roster and live PDS membership to match", () => {
-  const authority = "did:plc:owner";
-  const member = "did:plc:member";
-  assert.doesNotThrow(() => assertWorkspaceRosterMatchesPds(
-    new Set([authority, member]),
-    [{ did: member, read: true, write: true }],
-    authority,
-  ));
-  assert.throws(() => assertWorkspaceRosterMatchesPds(
-    new Set([member]),
-    [],
-    authority,
-  ), /roster has not converged/i);
-  assert.throws(() => assertWorkspaceRosterMatchesPds(
-    new Set(),
-    [{ did: member, read: true, write: true }],
-    authority,
-  ), /roster has not converged/i);
-  assert.throws(() => assertWorkspaceRosterMatchesPds(
-    new Set([member]),
-    [{ did: member, read: true, write: false }],
-    authority,
-  ), /roster has not converged/i);
 });
 
 test("recovery keeps unreadable journal rows visible instead of silently skipping them", () => {
@@ -107,4 +82,21 @@ test("a join request from a repo that cannot be read for good reads as no curren
   assert.equal(await read(() => { throw new UpstreamResponseTooLargeError(8 * 1024 * 1024); }), null, "an answer larger than this app reads");
   await assert.rejects(read(() => { throw new XrpcError(500, "upstream failure", "InternalServerError"); }), /upstream failure/, "a host that is down still fails the operation so it can be retried");
   await assert.rejects(read(() => { throw new TypeError("fetch failed"); }), /fetch failed/, "an unreachable host still fails the operation so it can be retried");
+});
+
+test("an app's channels are each granted once, by key and write flag only", () => {
+  const install = (channels: unknown) => validateOperatorRequest({ kind: "installApp", subject: "did:plc:bot", channels }, actor, "execute");
+  assert.deepEqual(install([{ skey: "acme-general", write: true }]).request.channels, [{ skey: "acme-general", write: true }]);
+  assert.doesNotThrow(() => install([{ $type: "new.flock.operator.execute#channelGrant", skey: "acme-general", write: false }]), "the lexicon's own type");
+  for (const channels of [
+    [{ skey: "acme-general", write: true }, { skey: "acme-general", write: false }],
+    [{ skey: "acme-general", write: true, extra: 1 }],
+    [{ $type: "new.flock.other#grant", skey: "acme-general", write: true }],
+    [{ skey: "acme-general", write: "yes" }],
+    [{ skey: "acme-general" }],
+    [{ skey: "Not A Key!", write: true }],
+    Array.from({ length: 101 }, (_, index) => ({ skey: `acme-c${index}`, write: false })),
+    "acme-general",
+  ]) assert.throws(() => install(channels), /channels/i, JSON.stringify(channels).slice(0, 80));
+  assert.throws(() => validateOperatorRequest({ kind: "uninstallApp", subject: "did:plc:bot", channels: [] }, actor, "execute"), "uninstall takes no channels");
 });

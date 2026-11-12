@@ -6,6 +6,8 @@ import messageLexicon from "../lexicons/new/flock/channel/message.json";
 import reactionLexicon from "../lexicons/new/flock/channel/reaction.json";
 import directoryLexicon from "../lexicons/new/flock/directory.json";
 import dmDeclarationLexicon from "../lexicons/new/flock/dm/declaration.json";
+import appDeclarationLexicon from "../lexicons/new/flock/app/declaration.json";
+import appInstallLexicon from "../lexicons/new/flock/app/install.json";
 import dmHeaderLexicon from "../lexicons/new/flock/dm/header.json";
 import dmMessageLexicon from "../lexicons/new/flock/dm/message.json";
 import dmReactionLexicon from "../lexicons/new/flock/dm/reaction.json";
@@ -81,6 +83,15 @@ export const REGISTRY: { readonly [C in Collection]: CollectionEntry } = {
   },
   [COLLECTION.workspaceRoster]: { spaceType: SPACE_TYPE.workspace, author: "authority", key: "derived", sync: "all", semantic: subjectKeyed },
   [COLLECTION.admin]: { spaceType: SPACE_TYPE.workspace, author: "authority", key: "derived", sync: "all", semantic: subjectKeyed },
+  [COLLECTION.appInstall]: {
+    spaceType: SPACE_TYPE.workspace, author: "authority", key: "derived", sync: "all",
+    semantic: (record, context) => {
+      const keyed = subjectKeyed(record, context);
+      if (!keyed.valid) return keyed;
+      const skeys = (record.channels as Array<{ skey: string }>).map((grant) => grant.skey);
+      return new Set(skeys).size === skeys.length ? VALID : invalid("an app install grants each channel once");
+    },
+  },
   [COLLECTION.acceptance]: {
     spaceType: SPACE_TYPE.workspace, author: "member", key: "derived", sync: "all",
     semantic: (record, context) => parseSpaceUri(String(record.workspace))?.type === SPACE_TYPE.workspace && context.rkey === acceptanceRecordKey(String(record.workspace))
@@ -179,7 +190,7 @@ export function isRegisteredCollection(collection: string): collection is Collec
 const LEXICONS = new Lexicons([
   workspaceProfileLexicon, directoryLexicon, workspaceRosterLexicon, adminLexicon, acceptanceLexicon, joinRequestLexicon,
   joinDecisionLexicon, messageLexicon, reactionLexicon, channelRosterLexicon, dmRequestLexicon, dmHeaderLexicon,
-  dmMessageLexicon, dmReactionLexicon, dmDeclarationLexicon,
+  dmMessageLexicon, dmReactionLexicon, dmDeclarationLexicon, appInstallLexicon, appDeclarationLexicon,
 ].map((document) => parseLexiconDoc(document)));
 
 /** The shape a published lexicon gives a record, and nothing more: no author, key or reference rule. */
@@ -212,6 +223,16 @@ export function validateDmDeclaration(value: unknown): RecordValidation {
   if (!isPlainObject(value)) return invalid("DM declaration must be an object");
   if (value.$type !== REPO_COLLECTION.dmDeclaration) return invalid("DM declaration has the wrong type");
   return validateRecordShape(REPO_COLLECTION.dmDeclaration, value);
+}
+
+/**
+ * `app.declaration`: the record an app account publishes in its own public repo (key `self`) with the name people see. It is a
+ * label, never a grant; an admin's app checks it before installing the account.
+ */
+export function validateAppDeclaration(value: unknown): RecordValidation {
+  if (!isPlainObject(value)) return invalid("app declaration must be an object");
+  if (value.$type !== REPO_COLLECTION.appDeclaration) return invalid("app declaration has the wrong type");
+  return validateRecordShape(REPO_COLLECTION.appDeclaration, value);
 }
 
 export function validateMessageParent(

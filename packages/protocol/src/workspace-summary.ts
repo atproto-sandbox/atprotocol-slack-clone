@@ -6,7 +6,7 @@ import { validateSpaceRecord } from "./registry";
 // read model and the operator both read the same records and summarize them here, so they agree on the workspace and on
 // when admin changes must pause.
 
-export const WORKSPACE_ENVELOPE = { members: 200, channels: 100, authorityRecordScan: 1_000 } as const;
+export const WORKSPACE_ENVELOPE = { members: 200, apps: 20, memberList: 220, channels: 100, authorityRecordScan: 1_000 } as const;
 
 export type WorkspaceSummary = {
   uri: string;

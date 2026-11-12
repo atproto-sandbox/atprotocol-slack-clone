@@ -226,10 +226,12 @@ function inMemoryStore<V>(entries = new Map<string, V>()) {
 }
 
 /** Mints the same kind of session for the workspace-authority client and stores it in the grant table, as a completed authority flow does. */
-export async function storeAuthorityGrant(pds: TestPds, did: string, keyLabel: string): Promise<{ accessToken: string }> {
+/** Stores an authority grant approved for `did`: with the scope the operator asks for, or `scope`, a narrower one it once asked for. */
+export async function storeAuthorityGrant(pds: TestPds, did: string, keyLabel: string, options: { scope?: string } = {}): Promise<{ accessToken: string }> {
   const [{ authorityClientMetadata }, { oauthSqliteStore }] = await Promise.all([import("@flock/operator/operator/authority-grant"), import("@flock/operator/auth/encrypted-store")]);
   const metadata = authorityClientMetadata();
-  const { saved, accessToken } = await mintProviderSession(pds, did, { clientId: metadata.client_id, redirectUri: metadata.redirect_uris[0], scope: metadata.scope }, keyLabel);
+  const scope = options.scope ?? metadata.scope;
+  const { saved, accessToken } = await mintProviderSession(pds, did, { clientId: metadata.client_id, redirectUri: metadata.redirect_uris[0], scope }, keyLabel);
   await oauthSqliteStore("authority_grant").set(did, saved);
   return { accessToken };
 }

@@ -61,6 +61,11 @@ The `request` object is discriminated by `kind` and rejects missing or extra fie
 | `#leaveChannel` | `skey` | Remove only the verified caller from that private channel. |
 | `#reconcileWorkspace` | none | Resume journaled operations, then reconcile stable membership against current authority records. |
 | `#decideJoinRequest` | `request: AT-URI`, `requestId: TID`, `decision: approve \| deny` | Apply only to the matching current request generation. |
+| `#installApp` | `subject: DID`, `channels: [{ skey, write }]` | Write the app's install record, then make it a reader of the workspace space and a member of each granted channel, writing where granted. Refuses the workspace account, a person on the roster, a channel that is not public or private, another grant of an installed app, and a 21st app. |
+| `#updateAppAccess` | `subject: DID`, `channels: [{ skey, write }]` | Rewrite an installed app's channels, then move its entries to match. |
+| `#uninstallApp` | `subject: DID` | Mark the install inactive, then remove the app from every member list. |
+
+An installed app is not a person: `#inviteMember`, `#removeMember` and `#setAdmin` refuse it, and a join request never takes a channel from it. `#transitionChannel` keeps a granted app in the channel with its bits, `#archiveChannel` ends every app's grant of the channel before removing its members, and `#reconcileWorkspace` places apps from their install records.
 
 Response wraps the journal view in `operation`:
 

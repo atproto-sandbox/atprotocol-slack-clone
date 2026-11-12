@@ -3,7 +3,8 @@ import { channelUri } from "@flock/protocol/keys";
 import { COLLECTION } from "@flock/protocol/nsids";
 import { OperationRejectedError, type OperationContext } from "../journal";
 import type { OperatorActor } from "../actor";
-import { activePrivateRoster, currentWorkspaceMembers, getOwnerRecord, writeRoster } from "../workspace-state";
+import { activeInstalls, currentWorkspaceMembers, listMatches, expectedChannelList } from "../membership";
+import { activePrivateRoster, getOwnerRecord, writeRoster } from "../workspace-state";
 import type { OperationKind, OperatorRequest } from "./kind";
 import { putListMember, removeListMember } from "../members";
 
@@ -15,7 +16,7 @@ export const transitionChannelKind: OperationKind = {
   submittedThrough: "execute",
   steps: [
     "channel-set-transitioning", "channel-public-add-{did}", "channel-remove-{did}", "channel-roster-inactive-{did}", "channel-private-add-{did}",
-    "channel-roster-active-{did}", "channel-visibility-verified", "channel-set-final-visibility",
+    "channel-roster-active-{did}", "channel-visibility-verified", "channel-set-final-visibility", "channel-app-{did}",
   ],
   validate(request) {
     if (request.visibility === "private" && !Array.isArray(request.members)) throw new Error("Private transition requires the selected member list.");
@@ -33,8 +34,12 @@ async function transitionChannel(
   if (directory.visibility === "archived") throw new OperationRejectedError("Archived channels cannot change visibility.");
   const space = channelUri(actor.workspace.authorityDid, operation.skey);
   const activeMembers = await currentWorkspaceMembers(actor);
+  const installs = await activeInstalls(actor);
   const selected = operation.visibility === "public" ? [...activeMembers] : (operation.members ?? []);
   if (operation.visibility === "private" && selected.some((did) => !activeMembers.has(did))) throw new OperationRejectedError("Private channels can include only active workspace members.");
+  // The channel's list once it has its new visibility: the selected people, and the apps granted it, which keep their bits.
+  const expected = new Map([...expectedChannelList({ skey: operation.skey, visibility: operation.visibility }, activeMembers, new Set(selected), installs)]
+    .filter(([did]) => did !== actor.workspace.authorityDid));
   await context.step("channel-set-transitioning", async () => {
     await putAuthorityRecord(actor.session, actor.workspace.uri, COLLECTION.directory, operation.skey, {
       skey: operation.skey, name: directory.name, visibility: "transitioning",
@@ -45,8 +50,17 @@ async function transitionChannel(
   if (operation.visibility === "public") {
     for (const did of desired) await context.step(`channel-public-add-${did}`, () => putListMember(actor.session, space, did, true, true));
   }
+  for (const [did, access] of expected) {
+    if (desired.has(did)) continue;
+    const current = currentMembers.find((member) => member.did === did);
+    if (current?.read !== access.read || current.write !== access.write) {
+      await context.step(`channel-app-${did}`, () => putListMember(actor.session, space, did, access.read, access.write));
+    }
+  }
   for (const member of currentMembers) {
-    if (!desired.has(member.did)) await context.step(`channel-remove-${member.did}`, () => removeListMember(actor.session, space, member.did));
+    if (!expected.has(member.did)) {
+      await context.step(`channel-remove-${member.did}`, () => removeListMember(actor.session, space, member.did));
+    }
   }
   if (operation.visibility === "private") {
     const roster = await activePrivateRoster(actor, space);
@@ -60,12 +74,7 @@ async function transitionChannel(
     }
   }
   await context.step("channel-visibility-verified", async () => {
-    const actual = (await listSpaceMembers(actor.session, space)).filter((member) => member.did !== actor.workspace.authorityDid);
-    const actualByDid = new Map(actual.map((member) => [member.did, member]));
-    if (actualByDid.size !== desired.size || actualByDid.size !== actual.length || [...desired].some((did) => {
-      const member = actualByDid.get(did);
-      return !member || !member.read || !member.write;
-    })) {
+    if (!listMatches(expected, await listSpaceMembers(actor.session, space), actor.workspace.authorityDid)) {
       throw new Error("Channel member list has not converged.");
     }
     if (operation.visibility === "private") {

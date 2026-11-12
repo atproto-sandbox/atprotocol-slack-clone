@@ -189,7 +189,12 @@ apps/
                               dispatches through, and kinds/kinds.test.ts pins every persisted kind, field and step name.
                               create-workspace.ts creates a workspace for its creator (its first admin and member) under
                               its account; bootstrap-workspace.ts only resumes rows begun before it. Their shared space
-                              and record actions are src/operator/workspace-spaces.ts.
+                              and record actions are src/operator/workspace-spaces.ts. app-access.ts installs, changes and
+                              uninstalls an app: its install record first, then its member-list entries.
+    src/operator/membership.ts
+                             The one owner of who belongs in each member list, and with which bits: people from the roster,
+                              admins and private rosters, apps from their install records (read and written here). Every
+                              operation that moves a list, reconcile included, takes its expected list from here.
     src/operator/operations.ts, actor.ts, security.ts
                              Request validation and execution; who an operation runs for; service-auth verification with
                               each method's token lifetime and authorizeOperationActor.
@@ -252,7 +257,7 @@ operator or OAuth layers even by accident, and lint refuses a Node built-in in a
 - `pnpm test` — unit tests (`node --test` over every `*.test.ts` in `packages/*/src` and `apps/*/src`), plus `bdd/gate.test.ts`, which keeps the Gherkin features honest (below).
 - `pnpm typecheck` — the whole repository with Node types, then `packages/protocol` and `packages/client` with none (and a check that no `@types/node` reaches them).
 - `pnpm test:bdd` — builds, then runs the executable Gherkin scenarios in `features/` with `@cucumber/cucumber`, driving real browsers against a real pinned PDS network.
-- `pnpm test:acceptance` — builds, then runs `protocol-tests/{app-acceptance,reconcile-workspaces,dm-acceptance,authority-grant,platform-capabilities,engine-acceptance,feed-follow}.test.ts` against a real pinned PDS network (needs `ATPROTO_PINNED_CHECKOUT`). `platform-capabilities` and `authority-grant` hold the platform refactor's capability checks (K1, K3, K7), `engine-acceptance` the engine's parity with the independent reader on two real hosts, and `feed-follow` (R5's gate) a cookie-less member following a channel live through `getChanges` with `next start` receiving the PDS's notices (`protocol-tests/support/app-server.ts`), all on the network-only helper `protocol-tests/support/pds-network.ts` (`actorTransport` builds the engine's transport for a real account).
+- `pnpm test:acceptance` — builds, then runs `protocol-tests/{app-acceptance,reconcile-workspaces,dm-acceptance,authority-grant,platform-capabilities,engine-acceptance,feed-follow,apps}.test.ts` against a real pinned PDS network (needs `ATPROTO_PINNED_CHECKOUT`). `platform-capabilities` and `authority-grant` hold the platform refactor's capability checks (K1, K3, K7), `engine-acceptance` the engine's parity with the independent reader on two real hosts, `apps` (R9) an app installed, refused what it is not granted and uninstalled on two real hosts, and `feed-follow` (R5's gate) a cookie-less member following a channel live through `getChanges` with `next start` receiving the PDS's notices (`protocol-tests/support/app-server.ts`), all on the network-only helper `protocol-tests/support/pds-network.ts` (`actorTransport` builds the engine's transport for a real account).
 - `pnpm test:browser` — builds, then runs Playwright specs in `protocol-tests/browser/` (`--test-concurrency=1`, since the specs start real servers); `cross-origin.spec.ts` (K9) signs in through the real OAuth flow and sends every request from a separate web origin.
 - `pnpm test:performance` — `protocol-tests/{performance-envelope,dm-performance}.test.ts` (slow; the channel envelope test is ~30 minutes); each latest-100 read is repeated ten times and reported as median and p95.
 - `pnpm test:sync-budget` — `protocol-tests/sync-budget.ts` (K4, R4's gate): calls and time of the engine's first open, reopen and one new message at 20, 100 and 200 writers; it fails if a reopen's call count depends on the writer count.

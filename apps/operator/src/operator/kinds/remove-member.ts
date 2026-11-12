@@ -5,6 +5,7 @@ import type { OperatorActor } from "../actor";
 import { activeAdmins, assertNoMembership, directoryRecords, hasActiveAdminRecord, writeRoster } from "../workspace-state";
 import type { OperationKind } from "./kind";
 import { removeListMember } from "../members";
+import { readInstall } from "../membership";
 
 const REMOVAL_STEPS = [
   "remove-inbox-membership", "remove-channel-{skey}", "remove-workspace-membership", "deactivate-workspace-roster", "deactivate-admin", "removal-verified",
@@ -31,6 +32,7 @@ export const leaveWorkspaceKind: OperationKind = {
 
 async function removeMember(actor: OperatorActor, context: OperationContext, subject: string): Promise<void> {
   if (subject === actor.workspace.authorityDid) throw new OperationRejectedError("The workspace authority cannot be removed.");
+  if ((await readInstall(actor, subject))?.active) throw new OperationRejectedError("An installed app is removed with uninstallApp.");
   const admins = await activeAdmins(actor);
   const subjectIsEffectiveAdmin = admins.has(subject);
   const subjectHasActiveAdminRecord = await hasActiveAdminRecord(actor, subject);

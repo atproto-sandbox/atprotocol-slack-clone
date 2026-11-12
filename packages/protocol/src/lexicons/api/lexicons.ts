@@ -2392,6 +2392,9 @@ export const schemaDict = {
               'leaveWorkspace',
               'leaveChannel',
               'reconcileWorkspace',
+              'installApp',
+              'updateAppAccess',
+              'uninstallApp',
             ],
           },
           subject: {
@@ -2424,6 +2427,14 @@ export const schemaDict = {
             },
             maxLength: 200,
           },
+          channels: {
+            type: 'array',
+            items: {
+              type: 'ref',
+              ref: 'lex:new.flock.operator.execute#channelGrant',
+            },
+            maxLength: 100,
+          },
           request: {
             type: 'string',
             format: 'at-uri',
@@ -2435,6 +2446,22 @@ export const schemaDict = {
           decision: {
             type: 'string',
             knownValues: ['approve', 'deny'],
+          },
+        },
+      },
+      channelGrant: {
+        type: 'object',
+        description:
+          'A channel an app is granted by installApp or updateAppAccess: read, and write when `write` is true.',
+        required: ['skey', 'write'],
+        properties: {
+          skey: {
+            type: 'string',
+            minLength: 1,
+            maxLength: 128,
+          },
+          write: {
+            type: 'boolean',
           },
         },
       },

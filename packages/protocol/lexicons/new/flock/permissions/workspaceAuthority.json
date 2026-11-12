@@ -8,7 +8,7 @@
       "detail": "Manage the workspace's spaces and authority-owned records. Message and request records remain outside this grant.",
       "permissions": [
         { "type": "permission", "resource": "space", "spaceType": "new.flock.workspace", "action": ["read_self", "read"], "manage": ["create", "update"] },
-        { "type": "permission", "resource": "space", "spaceType": "new.flock.workspace", "collection": ["new.flock.workspace.profile", "new.flock.directory", "new.flock.workspace.roster", "new.flock.admin"], "action": ["create", "update", "delete"] },
+        { "type": "permission", "resource": "space", "spaceType": "new.flock.workspace", "collection": ["new.flock.workspace.profile", "new.flock.directory", "new.flock.workspace.roster", "new.flock.admin", "new.flock.app.install"], "action": ["create", "update", "delete"] },
         { "type": "permission", "resource": "space", "spaceType": "new.flock.inbox", "action": ["read_self", "read"], "manage": ["create", "update"] },
         { "type": "permission", "resource": "space", "spaceType": "new.flock.inbox", "collection": ["new.flock.joinDecision"], "action": ["create", "update", "delete"] },
         { "type": "permission", "resource": "space", "spaceType": "new.flock.channel", "action": ["read_self", "read"], "manage": ["create", "update"] },

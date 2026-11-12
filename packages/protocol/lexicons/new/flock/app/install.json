@@ -1,0 +1,32 @@
+{
+  "lexicon": 1,
+  "id": "new.flock.app.install",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "An app installed in a workspace: written by the workspace authority in the workspace space, keyed by the app's DID. It is the grant. An active install makes the app a reader of the workspace space and a member of each channel listed, with write where granted. Clients read it to mark the account as an app.",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": ["subject", "active", "channels", "installedBy", "installedAt", "updatedAt"],
+        "properties": {
+          "subject": { "type": "string", "format": "did" },
+          "active": { "type": "boolean" },
+          "channels": { "type": "array", "maxLength": 100, "items": { "type": "ref", "ref": "#channelGrant" } },
+          "installedBy": { "type": "string", "format": "did" },
+          "installedAt": { "type": "string", "format": "datetime" },
+          "updatedAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    },
+    "channelGrant": {
+      "type": "object",
+      "description": "One channel an app may read, and write when `write` is true. There is no write-only grant.",
+      "required": ["skey", "write"],
+      "properties": {
+        "skey": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "write": { "type": "boolean" }
+      }
+    }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "lexicon": 1,
+  "id": "new.flock.app.declaration",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "Published in an app account's own public repo to say it is an app, with the name people see. It is a label, never a grant: what an app may read and write is its install record in each workspace.",
+      "key": "literal:self",
+      "record": {
+        "type": "object",
+        "required": ["name", "createdAt"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 640, "maxGraphemes": 64 },
+          "description": { "type": "string", "maxLength": 3000, "maxGraphemes": 300 },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

@@ -2,6 +2,7 @@ import type { OAuthSession } from "@atproto/oauth-client-node";
 import { listSpaceMembers } from "../atproto/space-ops";
 import { inboxUri, isDid, isSkey, isTid } from "@flock/protocol/keys";
 import { OPERATOR_METHOD } from "@flock/protocol/nsids";
+import { WORKSPACE_ENVELOPE } from "@flock/protocol/workspace-summary";
 import { parseWorkspaceRef, type OperatorActor, type WorkspaceRef } from "./actor";
 import { AuthorityReauthorizationRequiredError } from "./authority-grant";
 import { OperatorAuthError } from "./errors";
@@ -162,6 +163,8 @@ export const FIELD_RULES: Record<string, (value: unknown, actor: OperatorActor) 
   name: (value) => typeof value === "string" && value.trim().length >= 1 && Array.from(value).length <= 80 ? null : "Channel name must contain 1 to 80 characters.",
   visibility: (value) => value === "public" || value === "private" ? null : "Invalid channel visibility.",
   members: (value) => Array.isArray(value) && value.length <= 200 && value.every(isDid) && new Set(value).size === value.length ? null : "Channel members must be at most 200 unique DIDs.",
+  channels: (value) => Array.isArray(value) && value.length <= WORKSPACE_ENVELOPE.channels && value.every(isChannelGrant) &&
+    new Set(value.map((grant) => grant.skey)).size === value.length ? null : `An app's channels must be at most ${WORKSPACE_ENVELOPE.channels} channels, each once, with a write flag.`,
   request: (value, actor) => typeof value === "string" && parseJoinRequestUri(value, actor.workspace.authorityDid, inboxUri(actor.workspace.authorityDid, actor.workspace.skey))
     ? null : "Invalid join request URI.",
   requestId: (value) => typeof value === "string" && isTid(value) ? null : "Invalid request generation.",
@@ -191,6 +194,12 @@ export function validateOperatorRequest(value: unknown, actor: OperatorActor, so
   const request = value as OperatorRequest;
   kind.validate?.(request);
   return { kind, request };
+}
+
+/** One channel an app is granted: its key and a write flag, and nothing else but the lexicon's own type, if a client names it. */
+function isChannelGrant(value: unknown): value is { skey: string; write: boolean } {
+  if (!isPlainObject(value) || !isSkey(value.skey) || typeof value.write !== "boolean") return false;
+  return Object.keys(value).every((key) => key === "skey" || key === "write" || (key === "$type" && value.$type === `${OPERATOR_METHOD.execute}#channelGrant`));
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

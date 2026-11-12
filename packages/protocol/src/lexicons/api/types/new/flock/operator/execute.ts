@@ -82,6 +82,9 @@ export interface OperationRequest {
     | 'leaveWorkspace'
     | 'leaveChannel'
     | 'reconcileWorkspace'
+    | 'installApp'
+    | 'updateAppAccess'
+    | 'uninstallApp'
     | (string & {})
   subject?: string
   active?: boolean
@@ -89,6 +92,7 @@ export interface OperationRequest {
   name?: string
   visibility?: 'public' | 'private' | (string & {})
   members?: string[]
+  channels?: ChannelGrant[]
   request?: string
   requestId?: string
   decision?: 'approve' | 'deny' | (string & {})
@@ -102,6 +106,23 @@ export function isOperationRequest<V>(v: V) {
 
 export function validateOperationRequest<V>(v: V) {
   return validate<OperationRequest & V>(v, id, hashOperationRequest)
+}
+
+/** A channel an app is granted by installApp or updateAppAccess: read, and write when `write` is true. */
+export interface ChannelGrant {
+  $type?: 'new.flock.operator.execute#channelGrant'
+  skey: string
+  write: boolean
+}
+
+const hashChannelGrant = 'channelGrant'
+
+export function isChannelGrant<V>(v: V) {
+  return is$typed(v, id, hashChannelGrant)
+}
+
+export function validateChannelGrant<V>(v: V) {
+  return validate<ChannelGrant & V>(v, id, hashChannelGrant)
 }
 
 export interface Operation {

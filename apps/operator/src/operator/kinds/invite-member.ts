@@ -4,6 +4,7 @@ import type { OperatorActor } from "../actor";
 import { activeRoster, assertMembership, directoryRecords, writeRoster } from "../workspace-state";
 import type { OperationKind } from "./kind";
 import { putListMember } from "../members";
+import { readInstall } from "../membership";
 
 export const inviteMemberKind: OperationKind = {
   kind: "inviteMember",
@@ -16,6 +17,7 @@ export const inviteMemberKind: OperationKind = {
 
 async function inviteMember(actor: OperatorActor, context: OperationContext, subject: string): Promise<void> {
   if (subject === actor.workspace.authorityDid) throw new OperationRejectedError("The workspace authority is already an implicit member.");
+  if ((await readInstall(actor, subject))?.active) throw new OperationRejectedError("An installed app is not invited as a person; change its access instead.");
   const workspace = actor.workspace.uri;
   const inbox = inboxUri(actor.workspace.authorityDid, actor.workspace.skey);
   const channels = await directoryRecords(actor);

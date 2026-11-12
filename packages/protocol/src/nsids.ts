@@ -24,6 +24,7 @@ export const COLLECTION = {
   workspaceRoster: nsid("workspace.roster"),
   admin: nsid("admin"),
   acceptance: nsid("acceptance"),
+  appInstall: nsid("app.install"),
   joinRequest: nsid("joinRequest"),
   joinDecision: nsid("joinDecision"),
   message: nsid("channel.message"),
@@ -38,6 +39,7 @@ export const COLLECTION = {
 /** Records that live in an account's own public repo. */
 export const REPO_COLLECTION = {
   dmDeclaration: nsid("dm.declaration"),
+  appDeclaration: nsid("app.declaration"),
 } as const;
 
 export const OPERATOR_METHOD = {
