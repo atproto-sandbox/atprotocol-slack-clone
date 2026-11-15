@@ -501,6 +501,17 @@ While applying it I found and fixed an inconsistency the reviews had not raised:
 
 Not re-reviewed: this round's change and that correction. The raw output of all five rounds is in `.ai/reviews/codex-plan-review-platform-refactor.md`.
 
+### Independent project review (agy CLI 1.5.5, `gemini-4-carbon-high`; 2026-11-10; advice, no verdict)
+
+A static review of commit `6a3dbd2` (R0 to R3) and of this plan. Its defects and the evidence behind its main advice were checked against the code; the report with that check and the raw output is `.ai/reviews/gemini-project-review-6a3dbd2.md`. The owner agreed to four fixes and three amendments, all made on `feat/platform-refactor-review-fixes` (`a14fc48`, `07ed0ee`) and reviewed there by two Sonnet passes (`.ai/reviews/sonnet-code-review-review-fixes-6a3dbd2.md`). That branch was never merged here, and R6 to R9b were built without it.
+
+- **The four fixes** were ported onto the package layout on 2026-11-15, after R9c; see "Review fixes ported" under the outcome below.
+- **The three amendments** were written for phases that were then built without them. Checked against the code on 2026-11-15, none holds:
+  - R6's gate (`script-src` without `'unsafe-inline'`, before the browser held the member grant and channel history): `packages/deployment/src/security-headers.ts` still sends `script-src 'self' 'unsafe-inline'`.
+  - R7's CORS rule (any origin, no credentials, for the methods a service token authenticates): the operator answers the one web origin only (`allowWebOrigin` in `apps/operator/src/operator/server.ts`), so a third-party browser client cannot call it.
+  - R8's scheduled work without an admin: the reconcile job still acts as an admin, calling `requireActiveWorkspaceAdmin` for the authority (`apps/operator/scripts/reconcile-workspaces.ts`), and a workspace created under a dedicated account gives its authority no admin or roster record, so the job's reconcile of such a workspace is refused. No test covers that case.
+- **Raised and not adopted**, each still open: D14 for apps (an uninstall hides everything the app wrote); the lock and journal keyed by authority; declaring the app collections in the authority scope before R9; splitting R11; CI and a run with PDS rate limits on; and four of its eight defects (`createChannel` under a new operation id joining an existing channel of the same name, an acceptance record not checked against its space, an extra refresh after `after=0`, and the lint boundary missing relative imports).
+
 ## Outcome and departures from this plan
 
 ### R0 (2026-11-09)
@@ -1134,3 +1145,31 @@ Left as known, with the R11 sync strategy as their place:
 - A member who floods a channel with future-keyed records makes each refresh of their own repo walk those records, about one listing per hundred.
 - A first read cut short by more than five pages within its five-second slack, followed by deletions, can give an app a message written in that slack.
 - An app is given what is new by its writers' keys. R11's strategy follows each writer's operations, and is where an app can be given what is new by its host's order instead.
+
+### R9c (2026-11-15): the people's view of apps
+
+Done (design: `.ai/plans/r9-apps-progress.md`, "r9c"):
+- **The Apps panel** (`apps/web/src/app/ui/apps-panel.tsx`), in the workspace home for admins: each install with its declared name (read from the app's own repo, its DID when it has none) and each channel it may read, or read and write. Installing takes a handle or a DID and the channels, and installs only an account whose repo holds a valid `new.flock.app.declaration`. Changing access reuses the form; removal first says that the app's earlier messages leave every channel's view.
+- **The marker.** A message whose author is an active install shows "APP" after the author, as text (`channel-view.tsx`).
+- **The client** reads an account's declaration from its own repo through the engine's transport, bounded, and resolves a typed handle through the signed-in account's own host (`WorkspaceClient.appDeclaration`, `resolveAccount`). `runOperation` says whether the operation completed, and the form keeps what the admin typed when it did not.
+
+Tests: unit for the declaration read (a declared app, a person, an invalid declaration, a failing host) and the account an admin types. **The gate** (`features/apps.feature`, through the real UI, the echo bot running in the BDD process with a session minted for its account): an admin installs it in #general, a member posts and sees its answer marked as an app's, and the admin removes it with the warning shown and the answer leaves the view.
+
+Gate (commit `56b2fea`): typecheck and lint clean; unit 680/680; BDD 67/67 (482 steps), the new scenario included; acceptance 24/24; browser 6/6. The suites ran one at a time, and the vnode table stayed at or below 23% referenced throughout.
+
+Review (2026-11-15, by the session that committed it, reading every changed file): one defect, fixed in `16ccc98` (a refused install reset the form, though `runOperation` already said whether it completed), and a comment naming the wrong host for handle resolution, corrected. Not reviewed by a second model; the branch's final review (below) covers it.
+
+### Review fixes ported (2026-11-15)
+
+The four fixes of `a14fc48` were ported onto the package layout (`eb82ba6`), not merged, since R7b had moved every file they touch:
+- Outbound requests: R9b's `@flock/net` already ends each request at its deadline (a minute, not the 30 seconds of the original). The pinned agent's own fixed timeouts are now off, so that deadline is the only limit and a timeout ends as the `TimeoutError` the journal does not retry under the lock. The original's longer limit for the web app's own `execute` call has no place here: the browser calls the operator directly.
+- One run of an operation starts no step once it has held the workspace lock for three minutes (`apps/operator/src/operator/journal.ts`).
+- A left DM is off the list and not announced again, and starting it again readmits the others (`packages/client/src/dm/dm-client.ts`).
+- The submitter of a request that ends their own role may send it again (`endsOwnRole`, `authorizeSubmittedOperation`); the operator's `execute` passes the operation id. The original's change to the web app's own execute route has no counterpart: that route is gone.
+- A channel name has one length rule: the lexicons already agreed, and the operator's field rule now asks the registry (`fitsDirectoryName`).
+
+Two findings of the R9b security review were fixed with them (`49bacca`): the app's OAuth client reached any address through the library's default fetch, and now goes through `@flock/net` like the rest of a Node app; and the echo bot logged messages others chose as they were, and now escapes their control characters.
+
+Gate (commit `16ccc98`): typecheck and lint clean; unit 695/695; BDD 67/67 (482 steps); acceptance 24/24; browser 6/6; the suites one at a time, the vnode table at or below 26% referenced. The new OAuth test fails with the safe fetch taken out (one connection made to the private host) and passes with it.
+
+Not covered by a test: that a caller's deadline longer than a minute applies, now that the agent's own limits are off (it would take more than a minute to show).

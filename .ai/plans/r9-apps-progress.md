@@ -177,7 +177,7 @@ workspaces the way a person does. An app is told its workspaces, and reads its i
 
 ## r9c: the people's view of apps
 
-Status: implemented; gate and review below in the plan's "### R9c" section once committed.
+Status: done. Outcome, gate and review: the plan's "### R9c" section.
 
 - `WorkspaceSummary.installs` (from r9b) drives both parts.
 - **Admin screen.** An "Apps" section lists each install: its declared name (read from its repo, its DID when
