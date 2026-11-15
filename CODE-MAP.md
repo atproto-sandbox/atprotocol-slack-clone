@@ -140,7 +140,8 @@ packages/                 Libraries. protocol and client run in a browser: they 
     src/node/                The client's only Node code (`@flock/client/node/*`, outside the browser lint rules and the
                               no-Node typecheck; browser code may not import it): transport.ts (the session transport with
                               every host reached through @flock/net) and oauth.ts (an app's OAuth client: confidential private_key_jwt
-                              over https, a loopback client in development, its session in an owner-only state file).
+                              over https, a loopback client in development, its session in an owner-only state file, and
+                              every host it reaches, the account's own PDS included, reached through @flock/net too).
     src/views.ts             Snapshots (one immutable snapshot per key, with subscriptions, for useSyncExternalStore) and
                               LiveSpaces (each watched key bound to the spaces it reads and loaded again when the feed names
                               one; a watch stops on its AbortSignal; the live loop waits until a followed space has a cursor).

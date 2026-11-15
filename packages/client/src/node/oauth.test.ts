@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { chmodSync, mkdtempSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
@@ -32,6 +34,27 @@ test("an app serves its metadata and only its public keys, and answers nothing e
   assert.deepEqual(published.keys.map((entry) => entry.kid), ["k1"]);
   assert.equal(published.keys.some((entry) => "d" in entry), false, "no private part is published");
   assert.equal(await answerAppOAuthRoute(client, new URL("/anything", "https://bot.example")), null);
+});
+
+test("off loopback, an app's OAuth client reaches no host at a private address, not even to resolve the account it signs in", async () => {
+  // #given a host on a private address that counts every connection made to it, named as the PLC directory
+  let connections = 0;
+  const server = createServer(() => undefined).on("connection", () => { connections += 1; });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  const key = (await JoseKey.generate(["ES256"], "k1")).privateJwk!;
+  const client = await appOAuthClient({ appUrl: "https://bot.example", keys: [key], name: "Echo", scope: SCOPE, plcUrl: `https://127.0.0.1:${port}`, stateFile: join(directory, "private.json") });
+  try {
+    // #when the app starts a sign-in for an account whose DID document that host would serve
+    const signIn = client.authorize("did:plc:abcdefghijklmnopqrstuvwx");
+
+    // #then the sign-in fails without any connection to it
+    await assert.rejects(signIn);
+    assert.equal(connections, 0);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
 });
 
 test("the state file keeps sessions and states apart, readable by its owner only, and forgets what is deleted", async () => {

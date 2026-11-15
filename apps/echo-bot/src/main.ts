@@ -6,6 +6,7 @@ import { nodeTransport } from "@flock/client/node/transport";
 import type { NodeOAuthClient, OAuthSession } from "@flock/client/node/oauth";
 import { readEchoBotConfig, type EchoBotConfig } from "./config";
 import { startEchoBot } from "./echo";
+import { failureLine } from "./failure-line";
 
 // `sign-in <handle>` signs the bot's account in once; `run` answers in the workspaces it was installed in. Both serve the
 // bot's OAuth client metadata and keys at ECHO_BOT_URL, which the account's PDS reads at sign-in and at every refresh.
@@ -48,7 +49,7 @@ async function run(oauth: NodeOAuthClient, settings: EchoBotConfig): Promise<voi
     workspaces: settings.workspaces,
     signal: controller.signal,
     onError: (error) => {
-      process.stderr.write(`echo-bot: ${error instanceof Error ? error.message : String(error)}\n`);
+      process.stderr.write(failureLine(error));
       if (isSessionLost(error)) {
         process.stderr.write("echo-bot: the account's session is gone; sign the bot in again.\n");
         process.exitCode = 1;
@@ -77,7 +78,7 @@ async function serve(oauth: NodeOAuthClient, settings: EchoBotConfig, signedIn: 
       response.writeHead(answer.status, { "content-type": answer.type }).end(answer.body);
       if (answer.session) signedIn(answer.session);
     }, (error: unknown) => {
-      process.stderr.write(`echo-bot: ${error instanceof Error ? error.message : String(error)}\n`);
+      process.stderr.write(failureLine(error));
       response.writeHead(400, { "content-type": "text/plain; charset=utf-8" }).end("The sign-in could not be completed.");
     });
   });

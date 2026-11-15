@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { chmod, lstat, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { JoseKey, NodeOAuthClient, TokenInvalidError, TokenRefreshError, TokenRevokedError, type Jwk, type NodeSavedSession, type NodeSavedState, type OAuthSession } from "@atproto/oauth-client-node";
+import { safeFetch } from "@flock/net/safe-fetch";
 
 export type { Jwk, NodeOAuthClient, OAuthSession };
 
@@ -55,12 +56,19 @@ export function appClientMetadata(config: Pick<AppOAuthConfig, "appUrl" | "keys"
   };
 }
 
+/**
+ * The app's OAuth client. Every host it reaches (the account's PDS and authorization server, the identity hosts and the PLC
+ * directory) is reached through `@flock/net`: these are hosts someone else named, in a DID document or a server's metadata, and
+ * the library's own default fetch would reach any address. Loopback hosts are allowed in loopback development only.
+ */
 export async function appOAuthClient(config: AppOAuthConfig): Promise<NodeOAuthClient> {
   const file = new StateFile(config.stateFile);
+  const loopback = new URL(config.appUrl).protocol === "http:";
   return new NodeOAuthClient({
     clientMetadata: appClientMetadata(config),
     keyset: await Promise.all(config.keys.map((key) => JoseKey.fromImportable(key, key.kid))),
-    allowHttp: new URL(config.appUrl).protocol === "http:",
+    allowHttp: loopback,
+    fetch: safeFetch(() => loopback),
     plcDirectoryUrl: config.plcUrl,
     stateStore: file.store<NodeSavedState>("states"),
     sessionStore: file.store<NodeSavedSession>("sessions"),
