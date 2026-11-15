@@ -383,6 +383,8 @@ Gate: the bot's package imports nothing but `packages/client`; it answers in a g
 
 An app inbox space per install (members write, the app reads; the join-request pattern), `new.flock.app.command` and `new.flock.app.action` records, a `blocks` field on messages with text as the fallback, client rendering, and a first-party webhooks app. Detailed in its own plan after R9's gate, because the block vocabulary and the command model deserve their own review.
 
+Its plan: `.ai/plans/r10-interactions-progress.md` (proposed 2026-11-15; owner approval pending).
+
 ### R11. UI surfaces and tasks — XL, the existing plan revised first
 
 `.ai/plans/platform-extensions-tasks.md` P4 to P9, with these changes: its P2 registry and P3 kernel work are done by R2 and R4; the merge model lives in `packages/protocol`; the complete and verified sync strategy is designed and built in `packages/client` with its own conformance tests (concurrent listings, commit races, resets, superseded oplog values); clocks are stamped by the writing client, since no server writes for a member; per-entity write serialization happens in the engine. URL routing for channels, messages and extension views belongs here.
