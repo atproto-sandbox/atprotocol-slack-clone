@@ -105,6 +105,11 @@ test("the workspace authority grant outlives the creator's sign-in session", asy
         workspace: created.workspace, operationId, request: { kind: "createChannel", skey: `k8-${operationId}`, name: "k8", visibility: "public" },
       }) as { operation?: { state?: string } };
       assert.equal(answer.operation?.state, "completed", "an admin administers the workspace after every admin signed out");
+
+      // and the scheduled reconcile job runs for it, though its account holds no admin record: the read-only check while
+      // mutations are paused, and the reconcile itself
+      await runReconcileJob(pds, created.workspace);
+      await runReconcileJob(pds, created.workspace, { paused: false });
     });
 
     await t.test("a session restored before the authority approves again cannot use or delete the grant that replaced it", async () => {
@@ -232,10 +237,15 @@ async function adminOperations(pds: PdsNetwork, workspace: WorkspaceUnderTest): 
   };
 }
 
-async function runReconcileJob(pds: PdsNetwork, workspaceUri: string): Promise<void> {
+/** Runs the reconcile job as the scheduler does: by default with mutations paused (its read-only check), or the reconcile itself. */
+async function runReconcileJob(pds: PdsNetwork, workspaceUri: string, options: { paused?: boolean } = {}): Promise<void> {
+  const paused = options.paused ?? true;
+  const env = { ...process.env, DATABASE_PATH: pds.databasePath };
+  if (paused) env.FLOCK_ADMIN_MUTATIONS_PAUSED = "true";
+  else delete env.FLOCK_ADMIN_MUTATIONS_PAUSED;
   const child = spawn(process.execPath, ["--import", "tsx", "apps/operator/scripts/reconcile-workspaces.ts"], {
     cwd: process.cwd(),
-    env: { ...process.env, DATABASE_PATH: pds.databasePath, FLOCK_ADMIN_MUTATIONS_PAUSED: "true" },
+    env,
     stdio: ["ignore", "pipe", "pipe"],
   });
   let output = "";
@@ -247,7 +257,8 @@ async function runReconcileJob(pds: PdsNetwork, workspaceUri: string): Promise<v
   });
   // The job covers every journaled workspace in the database; only this workspace's own line decides the outcome.
   const lines = output.trim().split("\n").filter((line) => line.includes(workspaceUri));
-  if (!lines.some((line) => line.startsWith(`${workspaceUri}: authority session and admin access verified`))) {
+  const expected = paused ? `${workspaceUri}: authority session verified; mutations paused` : `${workspaceUri}: completed`;
+  if (!lines.some((line) => line === expected)) {
     throw new Error(`reconcile exited ${exitCode}: ${lines.join(" | ") || "no line for this workspace"}`);
   }
 }

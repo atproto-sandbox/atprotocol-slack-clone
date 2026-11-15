@@ -1,5 +1,5 @@
 import { hasAuthorityGrant, restoreAuthorityGrant } from "../src/operator/authority-grant";
-import { requireActiveWorkspaceAdmin } from "../src/operator/security";
+import { requireWorkspaceOperator } from "../src/operator/security";
 import { executeOperatorOperation, resumePendingWorkspaceCreations } from "../src/operator/operations";
 import { listJournaledWorkspaces, listStalledOperations } from "../src/operator/journal";
 import { tidNow } from "@flock/protocol/keys";
@@ -32,9 +32,10 @@ async function main() {
       continue;
     }
     try {
+      // The job is the operator itself, not an admin: a workspace under a dedicated account gives its authority no admin record.
       if (mutationsPaused) {
-        await requireActiveWorkspaceAdmin(workspace.uri, workspace.authorityDid);
-        process.stdout.write(`${workspace.uri}: authority session and admin access verified; mutations paused\n`);
+        await requireWorkspaceOperator(workspace.uri);
+        process.stdout.write(`${workspace.uri}: authority session verified; mutations paused\n`);
         continue;
       }
       const session = await restoreAuthorityGrant(workspace.authorityDid);
@@ -44,7 +45,7 @@ async function main() {
         failed = true;
         continue;
       }
-      const actor = await requireActiveWorkspaceAdmin(workspace.uri, session.did);
+      const actor = await requireWorkspaceOperator(workspace.uri);
       await assertOperatorWorkspaceWithinEnvelope(actor);
       const operation = await executeOperatorOperation(actor, tidNow(), { kind: "reconcileWorkspace" }, registrationDeps);
       process.stdout.write(`${workspace.uri}: ${operation.state}\n`);

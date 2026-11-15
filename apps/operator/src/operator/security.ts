@@ -107,6 +107,19 @@ export async function requireActiveWorkspaceAdmin(
   return { did: actorDid, session, workspace, canRecoverOperations: true };
 }
 
+/**
+ * The operator itself, for its scheduled reconcile job: the workspace authority's grant, with the authority as the journal and
+ * audit principal. A workspace created under a dedicated account (R8) gives its authority no admin or roster record, so this
+ * actor is not checked as an admin. It proves the grant reads the workspace (its profile), and the job runs `reconcileWorkspace`
+ * with it, and the recovery an admin's operation would do, nothing else.
+ */
+export async function requireWorkspaceOperator(workspaceUri: string): Promise<OperatorActor> {
+  const workspace = parseWorkspaceRef(workspaceUri);
+  const session = await restoreAuthorityGrant(workspace.authorityDid);
+  if (!(await getOwnerRecord(session, workspace.uri, COLLECTION.workspaceProfile, "self"))) throw new OperatorAuthError("The authority's grant does not read this workspace.");
+  return { did: workspace.authorityDid, session, workspace, canRecoverOperations: true };
+}
+
 async function hasCurrentMembership(session: OAuthSession, space: string, did: string, allowDegradedLookup: boolean): Promise<boolean> {
   if (!allowDegradedLookup) {
     return (await listSpaceMembers(session, space)).some((member) => member.did === did && member.read && member.write);

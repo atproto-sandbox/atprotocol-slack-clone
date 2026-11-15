@@ -474,7 +474,7 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
       const journalBeforePausedCheck = restoredStateDb.prepare("SELECT workspace, actor, operation_id, state, steps_json, updated_at FROM operation ORDER BY workspace, actor, operation_id").all();
       const pausedCheck = await runReconciliation(restoredPath);
       assert.equal(pausedCheck.exitCode, 0, pausedCheck.stderr);
-      assert.match(pausedCheck.stdout, /authority session and admin access verified; mutations paused/);
+      assert.match(pausedCheck.stdout, /authority session verified; mutations paused/);
       assert.deepEqual(
         restoredStateDb.prepare("SELECT workspace, actor, operation_id, state, steps_json, updated_at FROM operation ORDER BY workspace, actor, operation_id").all(),
         journalBeforePausedCheck,
