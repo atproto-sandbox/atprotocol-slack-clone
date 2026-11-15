@@ -9,6 +9,7 @@ committed and reviewed as its own PR in the stack.
 | Round | Reviewer | Verdict | Outcome |
 |---|---|---|---|
 | 1 | agy CLI, `gemini-4-carbon-high` | REVISE (18 blocking, 2 not) | Every finding checked against the code; all held and are answered below: the operator's feed and notice sweep, scopes and scope drift, the self-owned authority, registry limits, the client APIs the plan needs, the webhooks app's identity client, the pin, the inbox key, the privacy boundary, forged click values, cross-workspace commands, click semantics, removed members, the webhooks app's security, step order, inactive inboxes, the kind table, the envelope test, the composer, and managing hooks on a page only. |
+| 2 | agy CLI, `gemini-4-carbon-high` | REVISE (15 of round 1's 18 confirmed resolved; 6 blocking, 3 not) | Checked against the code; all held. Answered: the scope-drift reduction made exact (collectionless reads, `authority`, `manage`); declarations read with their commands and given to the composer; token syntax in semantic code (lexicons have no pattern) and the declaration's command fields bounded; the webhooks app checking the write grant itself and validating bodies before any request; the admin re-checked on every request, the identity client's shape and the cookie key; inboxes missing before R10 skipped until reconcile creates them, with a stricter fake host; member-list writes through `members.ts`; steps that diff on entry; a command's `parent` checked. |
 
 ## Baseline and order
 
@@ -17,8 +18,10 @@ platform worktree, not on this branch). The stack is then `main` ← `feat/platf
 the migration ← `feat/r10-interactions`, and R10 is rebased onto the migration before R10a starts. What R10 takes from the new
 pin: batch membership (`putMembers`/`removeMembers`, up to 100 members per call), notice registration inside
 `authorizeSpaceSync` (the operator registers a space by authorizing a sync with a `notify` endpoint and token), and space
-declarations carrying `title`. Every membership write goes through the owner functions in `apps/operator/src/atproto/space-ops.ts`
-and every registration through `apps/operator/src/operator/registrations.ts`, so R10 adds calls there and nowhere else.
+declarations carrying `title`. Every membership write goes through `apps/operator/src/operator/members.ts` (a lint rule keeps it the only caller of the
+member-list writes in `space-ops.ts`, since it drops the change feed's cached list), which gains batch writers that the rule
+names too, and every registration goes through `apps/operator/src/operator/registrations.ts`, so R10 adds calls there and
+nowhere else.
 
 If you decline D6, R10a is built on `5d88b414` instead: one `putMember` per member, `registerNotify` per space, `name` on the
 declaration, and R10a's gate must show the 20-inbox operations within the run limit (see R10a) before R10b starts.
@@ -86,6 +89,14 @@ A new space type `new.flock.app.inbox`, owned by the workspace authority, one pe
   - `reconcileWorkspace` reads **every** valid install record: for an active one it creates a missing inbox and moves its list
     to the expected one; for an inactive one it empties the list. So an install made before R10 gets its inbox from the next
     reconcile, and an interrupted uninstall is finished by it.
+  - **An inbox may not exist yet** (an install made before R10, D8). Every step that touches an inbox's list first checks the
+    space exists (`spaceExists`): `inviteMember`, `removeMember`, `leaveWorkspace` and `uninstallApp` skip a missing inbox, and
+    `reconcileWorkspace` creates the missing inbox of an active install and skips that of an inactive one. So no operation
+    fails on, or waits behind, an inbox that was never made. The operator's test host (`fake-authority-pds.ts`) answers
+    `SpaceNotFound` for a member-list call on a space that does not exist, as the real host does, so a test cannot hide it.
+  - **A step that makes several calls diffs on entry.** `app-inbox-set` and `app-inbox-remove` read the inbox's current list and
+    write only what differs, so a run stopped inside one repeats no write when it resumes. The verifying steps
+    (`app-access-verified`, `member-state-verified`, `removal-verified`) check the inboxes that exist as well.
   - The kind table (`kinds.test.ts`, `PERSISTED_KINDS`) gains these steps on `installApp`, `uninstallApp`, `inviteMember`,
     `removeMember`, `leaveWorkspace` and `reconcileWorkspace`. No step is renamed or removed, so a pending pre-R10 row replays:
     its recorded steps are still declared, and the new ones run. The table update is deliberate and reviewed with R10a.
@@ -94,27 +105,35 @@ A new space type `new.flock.app.inbox`, owned by the workspace authority, one pe
   adds the inbox of every active install, so a lost registration is restored and an inactive inbox's is dropped. `getChanges`
   admits a follower of an inbox when its member list does (`FOLLOWED_BY_MEMBER_LIST` in `member-access.ts` gains the type).
 - **Envelope:** at most 20 inboxes per workspace (one per install, D13), each at most the roster (200). With batches of 100, an
-  install writes its list in two calls, an invite or removal one call per active inbox (at most 20), and a reconcile of 20
-  drifted inboxes at most 40.
+  install writes its list (up to 200 people and the app) in three calls, an invite or removal one call per active inbox (at
+  most 20), and a reconcile of 20 drifted inboxes at most 60.
 
 ### Commands
 
-- **Declared** in the app's declaration: `commands: [{ name, description, usage }]`, at most 25, names unique, each a token
-  `[a-z0-9-]{1,32}`. The declaration stays a label, never a grant. `publishAppDeclaration` compares the commands too, so a
-  changed command list is published.
+- **Declared** in the app's declaration: an optional `commands` array of at most 25 `{ name, description?, usage? }`: `name` a
+  token `[a-z0-9-]{1,32}`, unique in the list; `description` up to 300 graphemes (1,200 bytes); `usage` up to 100 graphemes
+  (400 bytes). The declaration stays a label, never a grant. Lexicons have no pattern for a string, so the token syntax and the
+  uniqueness are checked in code: in `validateAppDeclaration` (the declaration is a repo record, outside the space registry).
+  `publishAppDeclaration` compares the commands too, so a changed command list is published.
+- **Read** by the people's client with their commands: `WorkspaceClient.appDeclaration` returns `commands` (its
+  `AppDeclaration` type gains them), and the workspace shell loads and caches the declaration of every active install once per
+  workspace, shared by the Apps panel and the channel view, and tolerating an app whose host cannot be reached (its commands
+  are then not offered).
 - **Run** by writing `new.flock.app.command` in the app's inbox: `{ command, text, channel, parent?, createdAt }`. `text` may be
   empty (a command without arguments) and is bounded like a message's. `channel` is a channel space URI of the same authority;
-  `parent`, if given, a message in that channel. Nothing is written into the channel.
+  `parent`, if given, a message in that channel. Nothing is written into the channel. The command name is a token checked in
+  the registry's semantic rule for `app.command`.
 - **Offered** in a channel's composer only for an app granted that channel. A message that starts with `/` is a command: one
   naming a single offered command goes to that app; a name two offered apps declare needs the picker; a name no offered app
-  declares is not sent, and the composer says so. Text that starts with `/` is sent as a message by starting it with `//` (one
-  `/` is kept).
+  declares is not sent, and the composer says so; while the declarations of the channel's apps are still loading, a message
+  starting with `/` is held, not sent. Text that starts with `/` is sent as a message by starting it with `//` (one `/` is kept).
 - **Answered** in the channel, as the app's message, where it may write. An app that may only read the channel cannot answer
   there; the person sees "sent to <app>" (no ephemeral answers in R10, D3).
 - **Checked by the app's SDK** before the app's handler runs, against state read fresh for that poll (below): the command is one
   the app declares; its author is on the workspace's roster; `channel` is a channel of **the workspace this inbox belongs to**,
-  granted to the app; for a private channel, the author is on its roster (read fresh, `ChannelClient.roster`). Anything else is
-  dropped and reported through `onError`.
+  granted to the app; for a private channel, the author is on its roster (read fresh, `ChannelClient.roster`); a `parent`, if
+  given, is a top-level message of that channel (read by `getMessage`), so an app answering in the thread does not fail on it.
+  Anything else is dropped and reported through `onError`.
 
 ### Blocks
 
@@ -125,7 +144,7 @@ A new space type `new.flock.app.inbox`, owned by the workspace authority, one pe
   - `#divider`;
   - `#actions` `{ elements }`: 1 to 5 `#button` `{ actionId, label, value?, style? }`: `actionId` a token `[a-zA-Z0-9_-]{1,64}`
     unique across every button in the message, `label` up to 75 graphemes (300 bytes), `value` up to 2,000 bytes, `style`
-    `primary` or `danger`.
+    `primary` or `danger`. The `actionId` syntax and uniqueness are checked in the registry's semantic rule for messages.
   The whole message stays within the 64 KiB record limit (`MAX_RECORD_BYTES`).
 - **Rendered only for an app's message**: a message whose author is an active install of the workspace (the APP marker's test).
   A person's message shows its `text` only, whatever `blocks` it carries, so no person can show a button that seems to be an
@@ -158,7 +177,8 @@ A new space type `new.flock.app.inbox`, owned by the workspace authority, one pe
   `blocks` (an edit can replace or clear them, not only the text); a public `ChannelClient.getMessage(ref, uri)` reads one
   message by `getRecord` with a verified MAC, so a click on any message, however old, is checked; and an `AppInboxClient` in
   the engine writes and retracts a member's command or action as `requestJoin` writes a join request (no credential, no local
-  store), and syncs an inbox for an app.
+  store), and syncs an inbox for an app; and `validateMessageInput({ text, blocks })`, a synchronous check of a message's
+  content against the registry, for an app that takes content from outside (the webhooks app).
 - `publishAppDeclaration` takes the commands. The echo bot gains `/echo <text>` (answered in the channel) and an `Again` button.
 
 ### The people's client (`apps/web`)
@@ -173,10 +193,17 @@ A new space type `new.flock.app.inbox`, owned by the workspace authority, one pe
     and no collection token (it writes no record there); `workspaceAuthorityScopes` builds that shape for a type whose
     authority collections are empty.
 - **Scope drift** (a session from before R10 lacks the new member scope). `missingScopes` in `apps/web/src/browser/session.ts`
-  skips every `space:` token today, because the host rewrites `authority` and expands reads. It learns them: each requested
-  `space:` token is reduced to its space type and its (collection, action) pairs, and is covered when the granted tokens of
-  that type cover every pair, whatever their `authority`. Its tests refuse over-acceptance: a missing pair, a read taken for a
-  write, another space type. A session without the inbox scope is then sent through consent once. For a Node app, a
+  skips every `space:` token today, because the host rewrites `authority=self` to the account's DID and expands a read to its
+  type's collections. It learns them, exactly:
+  - each `space:` token, requested or granted, is reduced to its space type, its authority (`*`, or the account itself for
+    `self` or its own DID), its record actions, its `manage` values, and its collections, where a token naming no collection
+    means every collection of its type (`spaceCollections(spaceType)`, new in the registry: the type's member and authority
+    collections);
+  - a requested token is covered when one granted token of the same type covers it whole: its authority (a granted `*` covers
+    `*` and the account; the account covers only the account), every action, every `manage` value and every collection;
+  - its tests: today's granted sessions are covered (no consent loop), and it refuses a missing collection, a read taken for a
+    write, a missing `manage` value, a self-only grant for an `authority=*` request, and another space type.
+  A session without the inbox scope is then sent through consent once. For a Node app, a
   `ScopeMissingError` from its own host counts as a lost session (`isSessionLost`), so the echo bot stops and says to sign in
   again.
 
@@ -187,12 +214,18 @@ its own admin page. It runs no commands and follows no inbox; it posts messages 
 
 - **Its admin page**, served by the app:
   - **Sign-in** with atproto OAuth through a second, identity-only client (`atproto` scope), from a new helper in
-    `packages/client/src/node/` with its own paths (`/admin/oauth/client-metadata.json`, `/admin/oauth/callback`), so it never
-    collides with the app's own client. Its sign-in state is bound to the browser by a cookie, expires after ten minutes, and is
+    `packages/client/src/node/` built like the app's own (`appClientMetadata`'s shape: confidential with the app's keys over
+    https, a loopback client in development) but at its own paths (`/admin/oauth/client-metadata.json`, `/admin/oauth/jwks.json`,
+    `/admin/oauth/callback`), so it never collides with the app's own client. Its sign-in state is bound to the browser by a cookie, expires after ten minutes, and is
     capped (a hundred pending sign-ins; more are refused). After the callback the app checks that the DID is an active admin of
     a workspace the app is installed in (it reads the workspace space it already reads), revokes the OAuth session at once (only
     the identity was needed), and sets its own session cookie: signed, `HttpOnly`, `SameSite=Strict`, `Secure` off loopback,
-    thirty minutes.
+    thirty minutes. Cookies are signed with a key made at random when the process starts (admins sign in again after a
+    restart).
+  - **Every request re-checks**, on a workspace summary read afresh: the DID is among the admins **and** on the roster (the
+    summary lists admin records as they are, so a person whose removal stopped between its roster and admin steps would still
+    be listed as an admin), and for a private channel's hooks, on its roster (read afresh). A demoted or removed admin loses the
+    page at their next request.
   - **What it does**: lists the hooks of the channels the app may write in that admin's workspaces, and creates, rotates and
     revokes them, each by a `POST` carrying a CSRF token and checked for its `Origin`. For a private channel the admin must
     also be on its roster. A new or rotated hook's URL is shown once, in the `POST`'s answer; only `sha256` of its secret is
@@ -204,9 +237,13 @@ its own admin page. It runs no commands and follows no inbox; it posts messages 
   - the secret is compared in constant time **before** anything else answers, and an unknown hook, a wrong secret and a revoked
     hook all get the same `404`; failed attempts are rate-limited per address and in total;
   - a valid hook is rate-limited per hook (`429` only once the secret matched);
-  - the body is `{ text, blocks? }` and nothing else; the message is built from it (`$type`, `text`, `blocks`, `createdAt`),
-    validated by the registry, and posted as the app's in the hook's channel. A channel the app can no longer write refuses the
-    hook (`404`), and its hooks are listed as such on the page.
+  - the body is `{ text, blocks? }` and nothing else, checked by a synchronous validator `@flock/client` exports for a message's
+    content (`validateMessageInput`, over the registry), so a bad body is a `400` before any request is made;
+  - the app's **write grant is checked first**, on a summary read afresh: its install is active and grants the hook's channel
+    with write, and the channel is open. The host would accept the app's write either way (a member without the write bit can
+    still write into its own repo; nobody lists it), so a send alone proves nothing. A channel the app can no longer write
+    refuses the hook (`404`), and its hooks are listed as such on the page;
+  - the message is built from the body (`$type`, `text`, `blocks`, `createdAt`) and posted as the app's in the hook's channel.
 
 ## Decisions I will take unless you object
 
@@ -232,11 +269,15 @@ its own admin page. It runs no commands and follows no inbox; it posts messages 
   button `actionId`s are unique across a message; declaration command names are unique. Whether a command is declared is the
   SDK's check, not the registry's.
 - `membership.ts`: `expectedAppInboxList`. The operator steps and orders above in `installApp`, `uninstallApp`, `inviteMember`,
-  `removeMember`, `leaveWorkspace`, `reconcileWorkspace`; the kind table; `member-access.ts` and `registrations.ts`.
+  `removeMember`, `leaveWorkspace`, `reconcileWorkspace`, with the missing-inbox checks and the diff on entry; the kind table;
+  `member-access.ts` and `registrations.ts`; batch writers in `members.ts` and the lint rule's names; the strict test host.
+- The new lexicons registered in the registry's lexicon set (`LEXICONS` in `registry.ts`: code generation covers only the
+  operator's and `com.atproto` lexicons); `spaceCollections` in the registry.
 - Scopes and permission sets for members, apps and the authority, and `workspaceAuthorityScopes` for a type without authority
   collections.
 - **Tests:** unit for the lexicons, the semantics and the key; the membership table with inboxes, active and inactive; every
-  changed kind resumed after a stop at every step with no write repeated; a pending pre-R10 row replayed; the self-owned
+  changed kind resumed after a stop at every step, inside a multi-call step too, with no write repeated; a pending pre-R10 row
+  replayed; every changed kind with an install made before R10 (no inbox), active and inactive, completing without error; the self-owned
   authority left out of every inbox list; install with a grant that lacks the new type discarded with nothing written; the
   sweep keeping an active inbox's registration and dropping an inactive one's; `getChanges` admitting the app to its inbox; the
   authority scope shape.
@@ -251,10 +292,13 @@ its own admin page. It runs no commands and follows no inbox; it posts messages 
 - `key-window.ts` (moved), the inbox following, `onCommand`/`onAction` with their checks, fresh state and throttle; optional
   handlers; `ChannelClient` `blocks`, `getMessage`; `AppInboxClient`; `publishAppDeclaration` with commands; `isSessionLost`
   on a missing scope; the echo bot's `/echo` and `Again`.
-- The composer's commands, blocks rendering, clicks; `missingScopes` for `space:` tokens.
+- The workspace shell's declaration cache; the composer's commands, blocks rendering, clicks; `missingScopes` for `space:`
+  tokens with `spaceCollections`.
 - **Tests:** unit for each check (an undeclared command, an author off the roster, a removed author still in a stale summary, a
   private channel's outsider, a channel of another workspace of the same authority, a click on someone else's message, on a
-  button that is gone, on a message older than any page, an action naming a value it does not have, the throttle); blocks
+  button that is gone, on a message older than any page, an extra `value` written into an action ignored for the button's own,
+  a command whose `parent` is missing or a reply, the throttle); declarations read with their commands, and a `/` message held
+  while they load; blocks
   rendering (an app's rendered, a person's as text); the composer's command rules; `missingScopes` coverage and its
   over-acceptance cases; the key window's existing tests in their new home.
 - **Gate (BDD, real UI):** a member types `/echo hello` in #general and sees the echo bot's answer, and no command message
@@ -266,11 +310,13 @@ its own admin page. It runs no commands and follows no inbox; it posts messages 
 
 - `apps/webhooks`, the identity-only OAuth helper, the admin page, the hooks file, the hook endpoint.
 - **Tests:** unit for the secret (shown once, hashed at rest, compared in constant time), the sign-in state (browser-bound,
-  expiring, capped), the session cookie, CSRF and `Origin` checks, the headers, the admin and private-roster checks, the body
-  bounds and validation, the identical answers for unknown, wrong and revoked, and the rate limits' order.
+  expiring, capped), the session cookie and its key, CSRF and `Origin` checks, the headers, the admin check on every request
+  (an admin record without a roster record refused; a demotion effective at the next request), the private-roster check, the
+  body bounds and validation before any request, the write-grant check, the identical answers for unknown, wrong and revoked,
+  and the rate limits' order.
 - **Gate (acceptance):** an admin signs in on the page, creates a hook for #general and sees its URL once; a member who is not an
   admin is refused the page; a `POST` to the URL appears in #general as the app's message; a wrong secret and a revoked hook
-  get the same answer; after the app loses write in #general the hook is refused.
+  get the same answer; after the admin changes the app to read-only in #general the hook is refused and nothing is written.
 
 Each step: typecheck, lint, unit, acceptance, browser and the full BDD suite, one at a time, then an independent review of the
 step's diff before its PR is marked ready.
