@@ -11,6 +11,7 @@ committed and reviewed as its own PR in the stack.
 | 1 | agy CLI, `gemini-4-carbon-high` | REVISE (18 blocking, 2 not) | Every finding checked against the code; all held and are answered below: the operator's feed and notice sweep, scopes and scope drift, the self-owned authority, registry limits, the client APIs the plan needs, the webhooks app's identity client, the pin, the inbox key, the privacy boundary, forged click values, cross-workspace commands, click semantics, removed members, the webhooks app's security, step order, inactive inboxes, the kind table, the envelope test, the composer, and managing hooks on a page only. |
 | 2 | agy CLI, `gemini-4-carbon-high` | REVISE (15 of round 1's 18 confirmed resolved; 6 blocking, 3 not) | Checked against the code; all held. Answered: the scope-drift reduction made exact (collectionless reads, `authority`, `manage`); declarations read with their commands and given to the composer; token syntax in semantic code (lexicons have no pattern) and the declaration's command fields bounded; the webhooks app checking the write grant itself and validating bodies before any request; the admin re-checked on every request, the identity client's shape and the cookie key; inboxes missing before R10 skipped until reconcile creates them, with a stricter fake host; member-list writes through `members.ts`; steps that diff on entry; a command's `parent` checked. |
 | 3 | agy CLI, `gemini-4-carbon-high` | REVISE (round 2's fixes confirmed but two; 3 blocking, 5 not) | Checked against the code; all held. Answered: `workspace.json` gains `app.install` (a drift R9a left, which the exact scope check would have turned into a consent loop), `spaceCollections` counts every author kind, and a test keeps each space lexicon's collections equal to the registry's; the workspace authority admitted to private channels it owns; inboxes created by reconcile registered at once, the sweep listing only inboxes that exist, and `updateAppAccess` skipping a missing one. Also taken: `isAccessLost` no longer swallows a missing scope; block `$type`s exported; the app's commands passed to its runtime; the composer's command checks; channels in transition excluded. |
+| 4 | agy CLI, `gemini-4-carbon-high` | REVISE (round 3's fixes confirmed; 1 blocking, 4 not) | Checked against the code; held. Answered: a workspace whose authority grant predates R10 (it lacks the inbox type, so it never made an inbox, and the host answers `getSpace` with a missing scope, not "not found") is handled without a stalled operation: an inbox check that reads a missing scope as no inbox, reconcile creating an inbox only when the grant covers the type (and otherwise reconciling the rest and warning), and re-approval asked by `installApp` and `updateAppAccess` at their first step. Also taken: the declaration read bound raised to the record limit; `getMessage` checking a reply's parent; nothing kept in memory for a channel an app only posts to; hooks whose private channel the app can no longer read shown as unavailable. |
 
 ## Baseline and order
 
@@ -90,17 +91,27 @@ A new space type `new.flock.app.inbox`, owned by the workspace authority, one pe
   - `reconcileWorkspace` reads **every** valid install record: for an active one it creates a missing inbox and moves its list
     to the expected one; for an inactive one it empties the list. So an install made before R10 gets its inbox from the next
     reconcile, and an interrupted uninstall is finished by it.
-  - **An inbox may not exist yet** (an install made before R10, D8). Every step that touches an inbox's list first checks the
-    space exists (`spaceExists`): `inviteMember`, `removeMember`, `leaveWorkspace`, `updateAppAccess` and `uninstallApp` skip a
-    missing inbox, and `reconcileWorkspace` creates the missing inbox of an active install (and registers its notices at once,
-    below) and skips that of an inactive one. So no operation
+  - **An inbox may not exist yet** (an install made before R10, D8), and the authority's grant may predate the inbox type. The
+    grant is asked for whole (`authorityGrantScope`), so a grant without the type has never made an inbox, and the host answers
+    its `getSpace` for one with a missing scope, not "not found". So every step that touches an inbox's list first asks
+    `appInboxState` (in `space-ops.ts`, beside `spaceExists`): `present`, `missing` (the grant covers the type and there is no
+    inbox), or `uncovered` (the grant predates the type, so there is no inbox either):
+    - `inviteMember`, `removeMember`, `leaveWorkspace`, `uninstallApp` and the notice sweep skip an inbox that is not present;
+    - `reconcileWorkspace` creates a `missing` inbox of an active install (and registers its notices at once, below) and
+      skips an absent one of an inactive install. With an `uncovered` grant it creates nothing and goes on reconciling the
+      workspace's other spaces; the scheduled job reports that the workspace account must approve again for the app's
+      commands to work, as a warning, not a stalled operation;
+    - `installApp` (also when run again on an existing install) and `updateAppAccess` start with `app-inbox-space`, which
+      creates the inbox if it is missing, so an admin changing an app's access on an old grant is asked for the re-approval
+      too, with nothing written;
+    - none of these can leave a half-applied row on a missing scope, since the only step that needs the new type comes first. So no operation
     fails on, or waits behind, an inbox that was never made. The operator's test host (`fake-authority-pds.ts`) answers
     `SpaceNotFound` for a member-list call on a space that does not exist, as the real host does, so a test cannot hide it.
   - **A step that makes several calls diffs on entry.** `app-inbox-set` and `app-inbox-remove` read the inbox's current list and
     write only what differs, so a run stopped inside one repeats no write when it resumes. The verifying steps
     (`app-access-verified`, `member-state-verified`, `removal-verified`) check the inboxes that exist as well.
-  - The kind table (`kinds.test.ts`, `PERSISTED_KINDS`) gains these steps on `installApp`, `uninstallApp`, `inviteMember`,
-    `removeMember`, `leaveWorkspace` and `reconcileWorkspace`. No step is renamed or removed, so a pending pre-R10 row replays:
+  - The kind table (`kinds.test.ts`, `PERSISTED_KINDS`) gains these steps on `installApp`, `updateAppAccess`, `uninstallApp`,
+    `inviteMember`, `removeMember`, `leaveWorkspace` and `reconcileWorkspace`. No step is renamed or removed, so a pending pre-R10 row replays:
     its recorded steps are still declared, and the new ones run. The table update is deliberate and reviewed with R10a.
 - **Notices and the feed.** The operator registers each active inbox's notices like a channel's (`createsSpaces` on
   `installApp`, `archivesSpaces` on `uninstallApp`). `reconcileWorkspace` registers each inbox it creates, through
@@ -121,7 +132,8 @@ A new space type `new.flock.app.inbox`, owned by the workspace authority, one pe
   uniqueness are checked in code: in `validateAppDeclaration` (the declaration is a repo record, outside the space registry).
   `publishAppDeclaration` compares the commands too, so a changed command list is published.
 - **Read** by the people's client with their commands: `WorkspaceClient.appDeclaration` returns `commands` (its
-  `AppDeclaration` type gains them), and the workspace shell loads and caches the declaration of every active install once per
+  `AppDeclaration` type gains them, and its read bound rises from 16 KiB to the 64 KiB record limit, since 25 commands at their
+  bounds take about 42 KiB), and the workspace shell loads and caches the declaration of every active install once per
   workspace, shared by the Apps panel and the channel view, and tolerating an app whose host cannot be reached (its commands
   are then not offered).
 - **Run** by writing `new.flock.app.command` in the app's inbox: `{ command, text, channel, parent?, createdAt }`. `text` may be
@@ -187,7 +199,9 @@ A new space type `new.flock.app.inbox`, owned by the workspace authority, one pe
   It excludes `ScopeMissingError`, which then reaches `isSessionLost`.
 - **Client additions** an app needs from `@flock/client` alone (its boundary test holds): `ChannelClient.send` and `edit` take
   `blocks` (an edit can replace or clear them, not only the text); a public `ChannelClient.getMessage(ref, uri)` reads one
-  message by `getRecord` with a verified MAC, so a click on any message, however old, is checked; and an `AppInboxClient` in
+  message by `getRecord` with a verified MAC, checking a reply's parent as `edit` does, so a click on any message, however old
+  and in a thread or not, is checked; an app's own write is applied to the local store only for a channel it follows for
+  messages, so a runtime that only posts (the webhooks app, or one without `onMessage`) keeps nothing it sends in memory; and an `AppInboxClient` in
   the engine writes and retracts a member's command or action as `requestJoin` writes a join request (no credential, no local
   store), and syncs an inbox for an app; the block `$type`s (defined in `nsids.ts`, where every `new.flock.` literal lives, and
   re-exported, with typed constructors, so an app builds blocks from `@flock/client` alone); and `validateMessageInput({ text, blocks })`, a synchronous check of a message's
@@ -242,7 +256,8 @@ its own admin page. It runs no commands and follows no inbox; it posts messages 
   - **Every request re-checks**, on a workspace summary read afresh: the DID is among the admins **and** on the roster (the
     summary lists admin records as they are, so a person whose removal stopped between its roster and admin steps would still
     be listed as an admin), and for a private channel's hooks, the authority or on its roster (read afresh). A demoted or removed
-    admin loses the page at their next request.
+    admin loses the page at their next request. A private channel whose roster the app can no longer read (its grant
+    removed, or the channel archived or in transition) has its hooks listed as unavailable, and they cannot be managed or used.
   - **What it does**: lists the hooks of the channels the app may write in that admin's workspaces, and creates, rotates and
     revokes them, each by a `POST` carrying a CSRF token and checked for its `Origin`. For a private channel the admin must
     also be on its roster. A new or rotated hook's URL is shown once, in the `POST`'s answer; only `sha256` of its secret is
@@ -297,7 +312,10 @@ its own admin page. It runs no commands and follows no inbox; it posts messages 
 - **Tests:** unit for the lexicons, the semantics and the key; the membership table with inboxes, active and inactive; every
   changed kind resumed after a stop at every step, inside a multi-call step too, with no write repeated; a pending pre-R10 row
   replayed; every changed kind, `updateAppAccess` too, with an install made before R10 (no inbox), active and inactive,
-  completing without error; an inbox created by reconcile registered for notices before the operation completes, and the sweep
+  completing without error, both with an authority grant that covers the inbox type and with one that predates it (the
+  operation either skips the inbox or is discarded at its first step for re-approval, never left pending; the sweep goes on
+  renewing the workspace's other spaces, and a reconcile on an old grant completes for every other space and reports the
+  warning); `appInboxState` telling `present`, `missing` and `uncovered` apart; an inbox created by reconcile registered for notices before the operation completes, and the sweep
   raising no failure for an inbox not yet made; the space lexicons' collections equal to the registry's; the self-owned
   authority left out of every inbox list; install with a grant that lacks the new type discarded with nothing written; the
   sweep keeping an active inbox's registration and dropping an inactive one's; `getChanges` admitting the app to its inbox; the
@@ -305,7 +323,9 @@ its own admin page. It runs no commands and follows no inbox; it posts messages 
 - **Gate (acceptance, real PDS network):** after an install, a member's command record in the inbox is read by the app, and a
   second member and a non-authority admin are refused it; a person removed from the workspace is no longer listed as a writer
   there; after an uninstall the inbox list is empty, its registration gone, and the app refused by `getChanges` and the host; a
-  reconcile gives a pre-R10 install its inbox. **The envelope:** with 20 installs at a 200-person roster, `inviteMember`,
+  reconcile gives a pre-R10 install its inbox; with an authority grant from before R10, a reconcile completes (warning that
+  the account must approve again), an `updateAppAccess` asks for re-approval with nothing written, and an invite and a removal
+  complete; after the re-approval, the next reconcile creates the inbox. **The envelope:** with 20 installs at a 200-person roster, `inviteMember`,
   `removeMember` and `reconcileWorkspace` (of 20 drifted inboxes) each finish within the run limit.
 
 ### R10b: the SDK and the client
