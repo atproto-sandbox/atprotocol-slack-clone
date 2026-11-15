@@ -184,3 +184,33 @@ test("the kinds that create or archive spaces name them, so the operator registe
     assert.equal(kind.createsSpaces ?? kind.archivesSpaces, undefined, `${kind.kind} neither creates nor archives a space`);
   }
 });
+
+test("only a request that takes away its submitter's own role says so", () => {
+  const ME = "did:plc:me";
+  const OTHER = "did:plc:other";
+  const ends = (request: { kind: string } & Record<string, unknown>) => operationKind(request.kind)?.endsOwnRole?.(request, ME) ?? false;
+
+  // #then exactly four kinds have the rule
+  assert.deepEqual(
+    Object.values(OPERATION_KINDS).filter((kind) => kind.endsOwnRole).map((kind) => kind.kind).sort(),
+    ["leaveChannel", "leaveWorkspace", "removeMember", "setAdmin"],
+  );
+
+  // #then a leave always does, and a removal or demotion only when it names the submitter
+  for (const request of [
+    { kind: "leaveWorkspace" }, { kind: "leaveChannel", skey: "design" },
+    { kind: "removeMember", subject: ME }, { kind: "setAdmin", subject: ME, active: false },
+  ]) assert.equal(ends(request), true, JSON.stringify(request));
+  for (const request of [
+    { kind: "removeMember", subject: OTHER }, { kind: "setAdmin", subject: OTHER, active: false }, { kind: "setAdmin", subject: ME, active: true },
+  ]) assert.equal(ends(request), false, JSON.stringify(request));
+});
+
+test("the request lexicon gives a channel name the limits of the directory record that will carry it", () => {
+  const lexicons = fileURLToPath(new URL("../../../../../packages/protocol/lexicons/new/flock/", import.meta.url));
+  const lexicon = (path: string) => JSON.parse(readFileSync(join(lexicons, path), "utf8"));
+  assert.deepEqual(
+    lexicon("operator/execute.json").defs.operationRequest.properties.name,
+    lexicon("directory.json").defs.main.record.properties.name,
+  );
+});

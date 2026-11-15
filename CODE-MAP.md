@@ -203,10 +203,13 @@ apps/
                               on it) is creationAdmission in kinds/create-workspace.ts.
     src/operator/journal.ts  runJournaledOperation: the workspace lock, the operation row (an admission that verifies under
                               the lock, then admits in the insert transaction, and restores what let the row in), declared
-                              step names, resume by name and request hash, and "waiting for the authority's approval";
-                              operationView.
+                              step names, resume by name and request hash, "waiting for the authority's approval", and
+                              the three-minute limit after which a run starts no further step; operationView.
     src/operator/kinds/      One file per operation kind; kinds/index.ts is the table every request and journal row
                               dispatches through, and kinds/kinds.test.ts pins every persisted kind, field and step name.
+                              A kind whose request takes away its submitter's own role says so (endsOwnRole):
+                              authorizeSubmittedOperation in src/operator/security.ts lets that submitter send the
+                              journaled operation again after current state refuses them.
                               create-workspace.ts creates a workspace for its creator (its first admin and member) under
                               its account; bootstrap-workspace.ts only resumes rows begun before it. Their shared space
                               and record actions are src/operator/workspace-spaces.ts. app-access.ts installs, changes and
@@ -245,7 +248,9 @@ scripts/                  codegen-lex.mjs, backup-db.mjs, playground.ts, render-
 - `dm-client.ts` — `DmClient`: the isomorphic DM engine (inbox/policy, discovery, start/accept,
   messages/reactions, `readConversation`'s k-way merge, leave/delete, re-notify). Constructed
   with injected transports (`memberClient`, `resolvePds`, `fetchEndpoint`, `generateKey`,
-  `store`), so the same class runs in the browser and in Node tests/acceptance.
+  `store`), so the same class runs in the browser and in Node tests/acceptance. `leave` removes
+  the other participants from the caller's half and hides the conversation in the local store
+  (off the list, not re-announced); starting a conversation with the same people readmits them.
 - `request-policy.ts` — pure mapping between the inbox memberspace `publicWrite` flag/member state and the
   user-facing mode (`everyone` / `allowlist` / `nobody`).
 - The inbox declaration (`new.flock.dm.declaration`, a public record in the owner's own repo, written by `enableDms`) is how a sender learns a recipient has an inbox: the authority answers a stranger asking for the inbox like a missing space.

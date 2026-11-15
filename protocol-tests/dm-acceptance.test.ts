@@ -160,6 +160,12 @@ test("DM acceptance: 1:1, group, dropped-notification recovery, all with the ser
     assert.equal(afterLeave.halves[bob.did], "missing", "leaving removes alice from bob's own half");
     await assertDmParity(alice, afterLeave, started.convKey, started.participants);
 
+    const rejoined = await bobDm.startConversation([alice.did]);
+    assert.equal(rejoined.convKey, started.convKey, "starting it again is the same conversation");
+    const afterRejoin = await dmFor(alice).readConversation(started.convKey, started.participants);
+    assert.equal(afterRejoin.halves[bob.did], "ok", "the PDS readmits a member it removed, and mints for them again");
+    await assertDmParity(alice, afterRejoin, started.convKey, started.participants);
+
     await aliceDm.deleteEverything(started.convKey);
     const afterDelete = await dmFor(bob).readConversation(started.convKey, started.participants);
     assert.equal(afterDelete.halves[alice.did], "deleted");

@@ -110,8 +110,10 @@ function pinnedAgent(url: URL, addresses: Array<{ address: string; family: numbe
   const agent = new Agent({
     connect: { lookup: lookupPinned },
     connectTimeout: 10_000,
-    headersTimeout: RESPONSE_TIMEOUT_MS,
-    bodyTimeout: RESPONSE_TIMEOUT_MS,
+    // Every request carries its own deadline (`safeFetch`), which is the one that applies: a fixed limit here would end a
+    // request its caller gave longer, as an error the operator's journal retries under the workspace lock.
+    headersTimeout: 0,
+    bodyTimeout: 0,
     autoSelectFamily: true,
     keepAliveTimeout: 10_000,
     keepAliveMaxTimeout: 10_000,

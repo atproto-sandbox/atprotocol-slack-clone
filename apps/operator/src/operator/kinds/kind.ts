@@ -26,6 +26,11 @@ export type OperationKind = {
   validate?(request: OperatorRequest): void;
   /** For a member-started kind: checks against current PDS state that this member may run it. */
   authorizeMember?(actor: OperatorActor, request: OperatorRequest): Promise<void>;
+  /**
+   * Whether running this request takes away the role that let `actorDid` start it. Only such a request may be sent again by
+   * a submitter the workspace's current state refuses, since a retry of it has to get past that refusal.
+   */
+  endsOwnRole?(request: OperatorRequest, actorDid: string): boolean;
   run(actor: OperatorActor, context: OperationContext, request: OperatorRequest): Promise<void>;
   /** The spaces a completed run created, whose change notices the operator then registers for. */
   createsSpaces?(actor: OperatorActor, request: OperatorRequest): string[];

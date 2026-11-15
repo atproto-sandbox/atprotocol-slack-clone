@@ -73,3 +73,18 @@ test("a request whose host answers too slowly is given up at its deadline, its b
     await close(server);
   }
 });
+
+test("a request whose host never answers ends at its deadline as a timeout, which the operator does not retry under its lock", async () => {
+  // #given a host that accepts the connection and never answers
+  const { server, port } = await listen(() => undefined);
+  try {
+    // #when a request is sent to it with a short deadline
+    const sent = safeFetch(loopbackDevelopment, 300)(`http://127.0.0.1:${port}/silent`);
+
+    // #then it ends as a timeout, before any answer
+    await assert.rejects(sent, { name: "TimeoutError" });
+  } finally {
+    server.closeAllConnections();
+    await close(server);
+  }
+});

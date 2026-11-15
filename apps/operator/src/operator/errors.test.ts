@@ -4,6 +4,16 @@ import { TokenRefreshError } from "@atproto/oauth-client-node";
 import { OAuthRequestLockError } from "../auth/oauth-request-lock";
 import { XrpcError } from "@flock/protocol/atproto/xrpc";
 import { OperatorInfrastructureError, isTransientOperatorInfrastructureError, operatorHttpFailure, operatorInfrastructureHttpStatus } from "./errors";
+import { isTransientOperationError } from "./journal";
+
+test("a request that ran out of time is a temporary upstream failure, and is not run again in a loop under the workspace lock", () => {
+  // #given the error a request's deadline ends it with
+  const timedOut = new DOMException("The operation was aborted due to timeout", "TimeoutError");
+
+  // #then the operator answers it as a temporary upstream failure, and a journaled run does not retry it
+  assert.equal(operatorHttpFailure(timedOut)?.name, "UpstreamUnavailable");
+  assert.equal(isTransientOperationError(timedOut), false);
+});
 
 test("operator infrastructure failures are distinct from authorization and validation errors", () => {
   assert.equal(isTransientOperatorInfrastructureError(new OperatorInfrastructureError()), true);

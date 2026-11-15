@@ -17,6 +17,7 @@ export const removeMemberKind: OperationKind = {
   actor: "admin",
   submittedThrough: "execute",
   steps: REMOVAL_STEPS,
+  endsOwnRole: (request, actorDid) => request.subject === actorDid,
   run: (actor, context, request) => removeMember(actor, context, request.subject as string),
 };
 
@@ -27,6 +28,7 @@ export const leaveWorkspaceKind: OperationKind = {
   actor: "member",
   submittedThrough: "execute",
   steps: REMOVAL_STEPS,
+  endsOwnRole: () => true,
   run: (actor, context) => removeMember(actor, context, actor.did),
 };
 

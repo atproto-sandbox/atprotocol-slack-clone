@@ -61,6 +61,8 @@ export type DmRequest = { convKey: string; participants: string[]; sender: strin
 
 export type DmConversationSummary = { convKey: string; participants: string[] };
 
+type DmHeader = { convKey: string; participants: string[]; createdAt: string };
+
 export type DmSkippedSenders = {
   oversizedWriters: string[];
   failedWriters: Array<{ did: string; reason: string }>;
@@ -277,7 +279,7 @@ export class DmClient {
     if (halves.truncated) throw new Error("Own DM conversation count exceeds the bounded scan limit.");
     const own = await mapLimited(halves.spaces, FANOUT, async (space): Promise<DmConversationSummary | null> => {
       const parsed = parseDmConversationUri(space.uri);
-      if (!parsed) return null;
+      if (!parsed || await this.hasLeft(parsed.convKey)) return null;
       const header = await this.getValidatedOwnHeader(space.uri);
       if (!header) return null;
       return { convKey: parsed.convKey, participants: header.participants };
@@ -291,7 +293,7 @@ export class DmClient {
     const participants = canonicalParticipants([...dids, this.deps.did]);
     if (participants.length > MAX_PARTICIPANTS) throw new RangeError(`DM conversations are capped at ${MAX_PARTICIPANTS} participants.`);
     const existing = await this.findExistingHalf(participants);
-    if (existing) return { convKey: existing, participants, delivery: {} };
+    if (existing) return { convKey: existing.convKey, participants, delivery: await this.rejoin(existing) };
 
     const convKey = tidNow(this.now());
     const half = dmConversationUri(this.deps.did, convKey);
@@ -469,6 +471,10 @@ export class DmClient {
 
   // --- Leaving and deleting ---
 
+  /**
+   * Stops sharing this account's half and hides the conversation on this device: it leaves the list and is no longer
+   * re-announced. The half and its messages stay, so starting a conversation with the same people brings it back (`rejoin`).
+   */
   async leave(convKey: string): Promise<void> {
     const half = dmConversationUri(this.deps.did, convKey);
     const members = await listBoundedMembers(this.deps.memberClient, { space: half, maxMembers: MAX_PARTICIPANTS });
@@ -476,6 +482,30 @@ export class DmClient {
     await mapLimited(members.members, FANOUT, (member) =>
       this.deps.memberClient.procedure("com.atproto.memberspace.removeMember", { space: half, did: member.did }));
     await this.deps.store.set(hiddenConversationKey(convKey), "1");
+  }
+
+  private async hasLeft(convKey: string): Promise<boolean> {
+    return (await this.deps.store.get(hiddenConversationKey(convKey))) !== null;
+  }
+
+  /**
+   * Undoes `leave` on a half this account still owns: readmits the participants it removed, shows the conversation again,
+   * and sends the request again to a readmitted participant who has no half yet. A half nobody was removed from is untouched.
+   */
+  private async rejoin(header: DmHeader): Promise<Record<string, DmDelivery>> {
+    const half = dmConversationUri(this.deps.did, header.convKey);
+    const members = await listBoundedMembers(this.deps.memberClient, { space: half, maxMembers: MAX_PARTICIPANTS });
+    if (members.truncated) throw new Error("DM conversation member count exceeds the bounded scan limit.");
+    const readers = new Set(members.members.filter((member) => member.read).map((member) => member.did));
+    const removed = header.participants.filter((did) => did !== this.deps.did && !readers.has(did));
+    await mapLimited(removed, FANOUT, (did) =>
+      this.deps.memberClient.procedure("com.atproto.memberspace.putMember", { space: half, did, read: true, write: false }));
+    await this.deps.store.delete(hiddenConversationKey(header.convKey));
+    const delivery: Record<string, DmDelivery> = {};
+    await mapLimited(removed, FANOUT, async (recipient) => {
+      if (await this.isPending(recipient, header.convKey)) delivery[recipient] = await this.sendRequest(recipient, header.convKey, header.participants, header.createdAt);
+    });
+    return delivery;
   }
 
   async deleteEverything(convKey: string): Promise<void> {
@@ -489,6 +519,8 @@ export class DmClient {
     const halves = await listBoundedSpaces(this.deps.memberClient, { spaceType: SPACE_TYPE.dmConversation, maxSpaces: MAX_OWN_CONVERSATIONS });
     if (halves.truncated) throw new Error("Own DM conversation count exceeds the bounded scan limit.");
     await mapLimited(halves.spaces, FANOUT, async (space) => {
+      const parsed = parseDmConversationUri(space.uri);
+      if (!parsed || await this.hasLeft(parsed.convKey)) return;
       const header = await this.getValidatedOwnHeader(space.uri);
       if (!header) return;
       const others = header.participants.filter((did) => did !== this.deps.did);
@@ -634,18 +666,22 @@ export class DmClient {
     }
   }
 
-  private async findExistingHalf(participants: readonly string[]): Promise<string | null> {
+  /** This account's half for exactly these participants. Two can exist (both sides started at once): one still in use wins over one that was left. */
+  private async findExistingHalf(participants: readonly string[]): Promise<DmHeader | null> {
     const halves = await listBoundedSpaces(this.deps.memberClient, { spaceType: SPACE_TYPE.dmConversation, maxSpaces: MAX_OWN_CONVERSATIONS });
     if (halves.truncated) throw new Error("Own DM conversation count exceeds the bounded scan limit.");
+    let left: DmHeader | null = null;
     for (const space of halves.spaces) {
       const header = await this.getValidatedOwnHeader(space.uri);
-      if (header && sameParticipants(header.participants, participants)) return header.convKey;
+      if (!header || !sameParticipants(header.participants, participants)) continue;
+      if (!(await this.hasLeft(header.convKey))) return header;
+      left ??= header;
     }
-    return null;
+    return left;
   }
 
   /** Fetches the caller's own header for `space` and validates it, returning `null` for a missing or invalid record. */
-  private async getValidatedOwnHeader(space: string): Promise<{ convKey: string; participants: string[]; createdAt: string } | null> {
+  private async getValidatedOwnHeader(space: string): Promise<DmHeader | null> {
     const header = await this.getOwnRecord(space, COLLECTION.dmHeader, "self");
     if (!header) return null;
     const validation = validateSpaceRecord(COLLECTION.dmHeader, header, {

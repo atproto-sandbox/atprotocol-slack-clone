@@ -98,7 +98,7 @@ export const OPERATOR_METHODS: Readonly<Record<string, OperatorMethodDefinition>
       if (typeof body.workspace !== "string" || typeof body.operationId !== "string" || !OPERATION_ID.test(body.operationId)) {
         throw new MethodError(400, "InvalidRequest", "Workspace URI and protocol TID operation ID are required.");
       }
-      const actor = await requireWorkspaceActorForOperation(body.workspace, did, body.request);
+      const actor = await requireWorkspaceActorForOperation(body.workspace, did, body.operationId, body.request);
       await assertOperatorWorkspaceWithinEnvelope(actor);
       const operation = await executeOperatorOperation(actor, body.operationId, body.request, registrationDeps);
       if (operation.authorizationRequired) {

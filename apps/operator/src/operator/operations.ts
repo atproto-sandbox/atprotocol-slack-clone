@@ -2,6 +2,7 @@ import type { OAuthSession } from "@atproto/oauth-client-node";
 import { listSpaceMembers } from "../atproto/space-ops";
 import { inboxUri, isDid, isSkey, isTid } from "@flock/protocol/keys";
 import { OPERATOR_METHOD } from "@flock/protocol/nsids";
+import { fitsDirectoryName } from "@flock/protocol/registry";
 import { WORKSPACE_ENVELOPE } from "@flock/protocol/workspace-summary";
 import { parseWorkspaceRef, type OperatorActor, type WorkspaceRef } from "./actor";
 import { AuthorityReauthorizationRequiredError } from "./authority-grant";
@@ -160,7 +161,7 @@ export const FIELD_RULES: Record<string, (value: unknown, actor: OperatorActor) 
   creator: (value) => isDid(value) ? null : "Invalid creator DID.",
   active: (value) => typeof value === "boolean" ? null : "Admin state must be boolean.",
   skey: (value) => isSkey(value) ? null : "Invalid channel key.",
-  name: (value) => typeof value === "string" && value.trim().length >= 1 && Array.from(value).length <= 80 ? null : "Channel name must contain 1 to 80 characters.",
+  name: (value) => typeof value === "string" && value.trim().length >= 1 && fitsDirectoryName(value) ? null : "Channel name must contain 1 to 80 characters.",
   visibility: (value) => value === "public" || value === "private" ? null : "Invalid channel visibility.",
   members: (value) => Array.isArray(value) && value.length <= 200 && value.every(isDid) && new Set(value).size === value.length ? null : "Channel members must be at most 200 unique DIDs.",
   channels: (value) => Array.isArray(value) && value.length <= WORKSPACE_ENVELOPE.channels && value.every(isChannelGrant) &&
