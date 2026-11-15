@@ -10,6 +10,7 @@ committed and reviewed as its own PR in the stack.
 |---|---|---|---|
 | 1 | agy CLI, `gemini-4-carbon-high` | REVISE (18 blocking, 2 not) | Every finding checked against the code; all held and are answered below: the operator's feed and notice sweep, scopes and scope drift, the self-owned authority, registry limits, the client APIs the plan needs, the webhooks app's identity client, the pin, the inbox key, the privacy boundary, forged click values, cross-workspace commands, click semantics, removed members, the webhooks app's security, step order, inactive inboxes, the kind table, the envelope test, the composer, and managing hooks on a page only. |
 | 2 | agy CLI, `gemini-4-carbon-high` | REVISE (15 of round 1's 18 confirmed resolved; 6 blocking, 3 not) | Checked against the code; all held. Answered: the scope-drift reduction made exact (collectionless reads, `authority`, `manage`); declarations read with their commands and given to the composer; token syntax in semantic code (lexicons have no pattern) and the declaration's command fields bounded; the webhooks app checking the write grant itself and validating bodies before any request; the admin re-checked on every request, the identity client's shape and the cookie key; inboxes missing before R10 skipped until reconcile creates them, with a stricter fake host; member-list writes through `members.ts`; steps that diff on entry; a command's `parent` checked. |
+| 3 | agy CLI, `gemini-4-carbon-high` | REVISE (round 2's fixes confirmed but two; 3 blocking, 5 not) | Checked against the code; all held. Answered: `workspace.json` gains `app.install` (a drift R9a left, which the exact scope check would have turned into a consent loop), `spaceCollections` counts every author kind, and a test keeps each space lexicon's collections equal to the registry's; the workspace authority admitted to private channels it owns; inboxes created by reconcile registered at once, the sweep listing only inboxes that exist, and `updateAppAccess` skipping a missing one. Also taken: `isAccessLost` no longer swallows a missing scope; block `$type`s exported; the app's commands passed to its runtime; the composer's command checks; channels in transition excluded. |
 
 ## Baseline and order
 
@@ -90,8 +91,9 @@ A new space type `new.flock.app.inbox`, owned by the workspace authority, one pe
     to the expected one; for an inactive one it empties the list. So an install made before R10 gets its inbox from the next
     reconcile, and an interrupted uninstall is finished by it.
   - **An inbox may not exist yet** (an install made before R10, D8). Every step that touches an inbox's list first checks the
-    space exists (`spaceExists`): `inviteMember`, `removeMember`, `leaveWorkspace` and `uninstallApp` skip a missing inbox, and
-    `reconcileWorkspace` creates the missing inbox of an active install and skips that of an inactive one. So no operation
+    space exists (`spaceExists`): `inviteMember`, `removeMember`, `leaveWorkspace`, `updateAppAccess` and `uninstallApp` skip a
+    missing inbox, and `reconcileWorkspace` creates the missing inbox of an active install (and registers its notices at once,
+    below) and skips that of an inactive one. So no operation
     fails on, or waits behind, an inbox that was never made. The operator's test host (`fake-authority-pds.ts`) answers
     `SpaceNotFound` for a member-list call on a space that does not exist, as the real host does, so a test cannot hide it.
   - **A step that makes several calls diffs on entry.** `app-inbox-set` and `app-inbox-remove` read the inbox's current list and
@@ -101,8 +103,11 @@ A new space type `new.flock.app.inbox`, owned by the workspace authority, one pe
     `removeMember`, `leaveWorkspace` and `reconcileWorkspace`. No step is renamed or removed, so a pending pre-R10 row replays:
     its recorded steps are still declared, and the new ones run. The table update is deliberate and reviewed with R10a.
 - **Notices and the feed.** The operator registers each active inbox's notices like a channel's (`createsSpaces` on
-  `installApp`, `archivesSpaces` on `uninstallApp`), and the sweep keeps them: `activeWorkspaceSpaces` in `registrations.ts`
-  adds the inbox of every active install, so a lost registration is restored and an inactive inbox's is dropped. `getChanges`
+  `installApp`, `archivesSpaces` on `uninstallApp`). `reconcileWorkspace` registers each inbox it creates, through
+  `registrations.ts` as `afterOperation` does (a kind's `createsSpaces` is computed from its request, and reconcile's inboxes
+  are known only when it runs), and drops the registration of an inactive one. The sweep keeps them: `activeWorkspaceSpaces`
+  adds the inbox of every active install **that exists**, so a lost registration is restored, an inactive inbox's is dropped,
+  and an inbox not yet made raises no registration failure. `getChanges`
   admits a follower of an inbox when its member list does (`FOLLOWED_BY_MEMBER_LIST` in `member-access.ts` gains the type).
 - **Envelope:** at most 20 inboxes per workspace (one per install, D13), each at most the roster (200). With batches of 100, an
   install writes its list (up to 200 people and the app) in three calls, an invite or removal one call per active inbox (at
@@ -126,12 +131,15 @@ A new space type `new.flock.app.inbox`, owned by the workspace authority, one pe
 - **Offered** in a channel's composer only for an app granted that channel. A message that starts with `/` is a command: one
   naming a single offered command goes to that app; a name two offered apps declare needs the picker; a name no offered app
   declares is not sent, and the composer says so; while the declarations of the channel's apps are still loading, a message
-  starting with `/` is held, not sent. Text that starts with `/` is sent as a message by starting it with `//` (one `/` is kept).
+  starting with `/` is held, not sent. A command is not offered in a channel this person cannot read (a private channel that
+  refused them), and in a thread only as a reply to its top-level message, since the app would drop anything else. Text that starts with `/` is sent as a message by starting it with `//` (one `/` is kept).
 - **Answered** in the channel, as the app's message, where it may write. An app that may only read the channel cannot answer
   there; the person sees "sent to <app>" (no ephemeral answers in R10, D3).
 - **Checked by the app's SDK** before the app's handler runs, against state read fresh for that poll (below): the command is one
   the app declares; its author is on the workspace's roster; `channel` is a channel of **the workspace this inbox belongs to**,
-  granted to the app; for a private channel, the author is on its roster (read fresh, `ChannelClient.roster`); a `parent`, if
+  granted to the app and `public` or `private` (a channel in transition is neither, and is refused); for a private channel,
+  the author is the workspace's authority or on its roster (read fresh, `ChannelClient.roster`: the operator never writes the
+  authority to a channel roster, though it owns the channel); a `parent`, if
   given, is a top-level message of that channel (read by `getMessage`), so an app answering in the thread does not fail on it.
   Anything else is dropped and reported through `onError`.
 
@@ -154,9 +162,9 @@ A new space type `new.flock.app.inbox`, owned by the workspace authority, one pe
   `value` as its own message holds it. The button is disabled while its action is being written, so one click is one action;
   each click is its own record (TID key), so a button an app means to be pressed again (`Again`) works, and an app that wants a
   button pressed once enforces it, usually by editing its message.
-- **Checked by the app's SDK**: the message is the app's own and is in `channel`, `channel` is in the inbox's workspace, the
-  author can read it (roster, or the private roster), and the message, read fresh and verified, still has a button with that
-  `actionId`.
+- **Checked by the app's SDK**: the message is the app's own and is in `channel`, `channel` is in the inbox's workspace and is
+  `public` or `private`, the author can read it (on the roster; for a private channel, the authority or on its roster), and the
+  message, read fresh and verified, still has a button with that `actionId`.
 
 ### The app's SDK (`packages/client`)
 
@@ -172,12 +180,17 @@ A new space type `new.flock.app.inbox`, owned by the workspace authority, one pe
 - **The window over writer keys moves into its own module** (`packages/client/src/key-window.ts`), used by channel messages and
   inbox records alike; R9b's tests move with it unchanged. A second copy would be the drift the code map warns against.
 - **`AppRuntimeInput`**: `onMessage`, `onCommand` and `onAction` are each optional; a runtime with no `onMessage` follows no
-  channel for messages (it still follows the workspace for its grants).
+  channel for messages (it still follows the workspace for its grants). It takes the app's `commands` (the same list it
+  publishes in its declaration), which is what an incoming command is checked against.
+- **A missing scope is not lost access.** `isAccessLost` (`space-credential-core.ts`) treats every 401 and 403 as lost access,
+  a `ScopeMissingError` included, so the change feed and discovery would unfollow a space where the session only lacks a scope.
+  It excludes `ScopeMissingError`, which then reaches `isSessionLost`.
 - **Client additions** an app needs from `@flock/client` alone (its boundary test holds): `ChannelClient.send` and `edit` take
   `blocks` (an edit can replace or clear them, not only the text); a public `ChannelClient.getMessage(ref, uri)` reads one
   message by `getRecord` with a verified MAC, so a click on any message, however old, is checked; and an `AppInboxClient` in
   the engine writes and retracts a member's command or action as `requestJoin` writes a join request (no credential, no local
-  store), and syncs an inbox for an app; and `validateMessageInput({ text, blocks })`, a synchronous check of a message's
+  store), and syncs an inbox for an app; the block `$type`s (defined in `nsids.ts`, where every `new.flock.` literal lives, and
+  re-exported, with typed constructors, so an app builds blocks from `@flock/client` alone); and `validateMessageInput({ text, blocks })`, a synchronous check of a message's
   content against the registry, for an app that takes content from outside (the webhooks app).
 - `publishAppDeclaration` takes the commands. The echo bot gains `/echo <text>` (answered in the channel) and an `Again` button.
 
@@ -197,8 +210,12 @@ A new space type `new.flock.app.inbox`, owned by the workspace authority, one pe
   type's collections. It learns them, exactly:
   - each `space:` token, requested or granted, is reduced to its space type, its authority (`*`, or the account itself for
     `self` or its own DID), its record actions, its `manage` values, and its collections, where a token naming no collection
-    means every collection of its type (`spaceCollections(spaceType)`, new in the registry: the type's member and authority
-    collections);
+    means every collection of its type (`spaceCollections(spaceType)`, new in the registry: every registered collection of that
+    type, whatever its author kind: member, authority or half-owner);
+  - the host expands a granted read to the collections the type's space lexicon lists, so those lists must equal the registry's:
+    `workspace.json` gains `new.flock.app.install` (missing since R9a), and a registry test asserts that every space lexicon's
+    `collections` equals `spaceCollections` for its type;
+  - `restoreSession` passes the session's DID, so `missingScopes` knows which DID is the account itself;
   - a requested token is covered when one granted token of the same type covers it whole: its authority (a granted `*` covers
     `*` and the account; the account covers only the account), every action, every `manage` value and every collection;
   - its tests: today's granted sessions are covered (no consent loop), and it refuses a missing collection, a read taken for a
@@ -224,8 +241,8 @@ its own admin page. It runs no commands and follows no inbox; it posts messages 
     restart).
   - **Every request re-checks**, on a workspace summary read afresh: the DID is among the admins **and** on the roster (the
     summary lists admin records as they are, so a person whose removal stopped between its roster and admin steps would still
-    be listed as an admin), and for a private channel's hooks, on its roster (read afresh). A demoted or removed admin loses the
-    page at their next request.
+    be listed as an admin), and for a private channel's hooks, the authority or on its roster (read afresh). A demoted or removed
+    admin loses the page at their next request.
   - **What it does**: lists the hooks of the channels the app may write in that admin's workspaces, and creates, rotates and
     revokes them, each by a `POST` carrying a CSRF token and checked for its `Origin`. For a private channel the admin must
     also be on its roster. A new or rotated hook's URL is shown once, in the `POST`'s answer; only `sha256` of its secret is
@@ -240,7 +257,7 @@ its own admin page. It runs no commands and follows no inbox; it posts messages 
   - the body is `{ text, blocks? }` and nothing else, checked by a synchronous validator `@flock/client` exports for a message's
     content (`validateMessageInput`, over the registry), so a bad body is a `400` before any request is made;
   - the app's **write grant is checked first**, on a summary read afresh: its install is active and grants the hook's channel
-    with write, and the channel is open. The host would accept the app's write either way (a member without the write bit can
+    with write, and the channel is `public` or `private` (not in transition, not archived). The host would accept the app's write either way (a member without the write bit can
     still write into its own repo; nobody lists it), so a send alone proves nothing. A channel the app can no longer write
     refuses the hook (`404`), and its hooks are listed as such on the page;
   - the message is built from the body (`$type`, `text`, `blocks`, `createdAt`) and posted as the app's in the hook's channel.
@@ -272,12 +289,16 @@ its own admin page. It runs no commands and follows no inbox; it posts messages 
   `removeMember`, `leaveWorkspace`, `reconcileWorkspace`, with the missing-inbox checks and the diff on entry; the kind table;
   `member-access.ts` and `registrations.ts`; batch writers in `members.ts` and the lint rule's names; the strict test host.
 - The new lexicons registered in the registry's lexicon set (`LEXICONS` in `registry.ts`: code generation covers only the
-  operator's and `com.atproto` lexicons); `spaceCollections` in the registry.
+  operator's and `com.atproto` lexicons); `spaceCollections` in the registry; `new.flock.app.install` added to `workspace.json`'s
+  collections and the test that every space lexicon lists exactly its registry collections; the block `$type`s in `nsids.ts`.
+- `reconcileWorkspace`'s registration of the inboxes it creates; `activeWorkspaceSpaces` listing only inboxes that exist.
 - Scopes and permission sets for members, apps and the authority, and `workspaceAuthorityScopes` for a type without authority
   collections.
 - **Tests:** unit for the lexicons, the semantics and the key; the membership table with inboxes, active and inactive; every
   changed kind resumed after a stop at every step, inside a multi-call step too, with no write repeated; a pending pre-R10 row
-  replayed; every changed kind with an install made before R10 (no inbox), active and inactive, completing without error; the self-owned
+  replayed; every changed kind, `updateAppAccess` too, with an install made before R10 (no inbox), active and inactive,
+  completing without error; an inbox created by reconcile registered for notices before the operation completes, and the sweep
+  raising no failure for an inbox not yet made; the space lexicons' collections equal to the registry's; the self-owned
   authority left out of every inbox list; install with a grant that lacks the new type discarded with nothing written; the
   sweep keeping an active inbox's registration and dropping an inactive one's; `getChanges` admitting the app to its inbox; the
   authority scope shape.
@@ -293,12 +314,13 @@ its own admin page. It runs no commands and follows no inbox; it posts messages 
   handlers; `ChannelClient` `blocks`, `getMessage`; `AppInboxClient`; `publishAppDeclaration` with commands; `isSessionLost`
   on a missing scope; the echo bot's `/echo` and `Again`.
 - The workspace shell's declaration cache; the composer's commands, blocks rendering, clicks; `missingScopes` for `space:`
-  tokens with `spaceCollections`.
+  tokens with `spaceCollections`, the session's DID passed in.
 - **Tests:** unit for each check (an undeclared command, an author off the roster, a removed author still in a stale summary, a
   private channel's outsider, a channel of another workspace of the same authority, a click on someone else's message, on a
   button that is gone, on a message older than any page, an extra `value` written into an action ignored for the button's own,
-  a command whose `parent` is missing or a reply, the throttle); declarations read with their commands, and a `/` message held
-  while they load; blocks
+  a command whose `parent` is missing or a reply, a channel in transition, the workspace authority in a private channel it
+  owns, the throttle); `isAccessLost` refusing a missing scope; declarations read with their commands, a `/` message held while
+  they load, and no command offered where the person cannot read or not on a top-level message; blocks
   rendering (an app's rendered, a person's as text); the composer's command rules; `missingScopes` coverage and its
   over-acceptance cases; the key window's existing tests in their new home.
 - **Gate (BDD, real UI):** a member types `/echo hello` in #general and sees the echo bot's answer, and no command message
@@ -311,7 +333,8 @@ its own admin page. It runs no commands and follows no inbox; it posts messages 
 - `apps/webhooks`, the identity-only OAuth helper, the admin page, the hooks file, the hook endpoint.
 - **Tests:** unit for the secret (shown once, hashed at rest, compared in constant time), the sign-in state (browser-bound,
   expiring, capped), the session cookie and its key, CSRF and `Origin` checks, the headers, the admin check on every request
-  (an admin record without a roster record refused; a demotion effective at the next request), the private-roster check, the
+  (an admin record without a roster record refused; a demotion effective at the next request), the private-channel check (the
+  authority admitted, an outsider refused), a channel in transition refused, the
   body bounds and validation before any request, the write-grant check, the identical answers for unknown, wrong and revoked,
   and the rate limits' order.
 - **Gate (acceptance):** an admin signs in on the page, creates a hook for #general and sees its URL once; a member who is not an
