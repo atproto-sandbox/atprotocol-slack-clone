@@ -29,7 +29,7 @@ export function createOperatorApp(methods: Readonly<Record<string, OperatorMetho
     for (const { key, value } of OPERATOR_SECURITY_HEADERS) res.set(key, value);
     next();
   });
-  app.use("/xrpc", allowWebOrigin(appUrl.origin));
+  app.use("/xrpc", allowAnyOrigin());
 
   app.get("/.well-known/did.json", (_req, res) => {
     const hash = operatorServiceRef.indexOf("#");
@@ -147,20 +147,22 @@ function cookieOf(req: Request, name: string): string | undefined {
   return undefined;
 }
 
-/** CORS for the one web origin: its browsers call the methods with a bearer service token, so the preflight admits that header. */
-function allowWebOrigin(origin: string) {
+/**
+ * CORS for the methods: any origin. A bearer service token is what authorizes a call, and nothing under `/xrpc` reads a cookie
+ * or any other credential a browser adds by itself, so an origin adds nothing to check, and a third-party browser client calls
+ * the operator as the web app does. Credentials are never allowed, and the answer is the same for every origin. The authority
+ * flow, which uses a cookie of its own, is outside `/xrpc` and sends no CORS headers.
+ */
+function allowAnyOrigin() {
   return (req: Request, res: Response, next: NextFunction) => {
-    res.vary("origin");
-    if (req.headers.origin === origin) {
-      res.set("access-control-allow-origin", origin);
-      if (req.method === "OPTIONS") {
-        res.set({
-          "access-control-allow-methods": "GET, POST",
-          "access-control-allow-headers": "authorization, content-type",
-          "access-control-max-age": String(PREFLIGHT_MAX_AGE_SECONDS),
-        }).status(204).end();
-        return;
-      }
+    res.set("access-control-allow-origin", "*");
+    if (req.method === "OPTIONS") {
+      res.set({
+        "access-control-allow-methods": "GET, POST",
+        "access-control-allow-headers": "authorization, content-type",
+        "access-control-max-age": String(PREFLIGHT_MAX_AGE_SECONDS),
+      }).status(204).end();
+      return;
     }
     next();
   };

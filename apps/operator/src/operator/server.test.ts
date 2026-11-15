@@ -14,7 +14,7 @@ import { OperatorAuthError } from "./errors";
 import type { OperatorMethodDefinition } from "./methods";
 import { createOperatorApp } from "./server";
 
-// The operator's HTTP surface as a browser and a caller's host meet it: its did:web document, CORS for the web origin only,
+// The operator's HTTP surface as a browser and a caller's host meet it: its did:web document, CORS for any origin on the methods and none on the authority flow,
 // its security headers, the lexicon checks in front of its methods, and the authority flow's navigations.
 
 const DIRECTORY = mkdtempSync(join(tmpdir(), "operator-server-test-"));
@@ -64,20 +64,21 @@ test("the did:web document names the operator at its own origin", async () => {
   assertSecurityHeaders(response);
 });
 
-test("the methods admit the web origin's browsers, with a bearer token, and no other origin", async () => {
+test("the methods admit a browser of any origin with a bearer token, the same for every origin, and never with credentials", async () => {
   const preflight = (origin: string) => fetch(EXECUTE, {
     method: "OPTIONS",
     headers: { origin, "access-control-request-method": "POST", "access-control-request-headers": "authorization, content-type" },
   });
-  const web = await preflight(WEB_ORIGIN);
-  assert.equal(web.status, 204);
-  assert.equal(web.headers.get("access-control-allow-origin"), WEB_ORIGIN);
-  assert.equal(web.headers.get("access-control-allow-headers"), "authorization, content-type");
-  assert.equal(web.headers.get("access-control-allow-methods"), "GET, POST");
-
-  const elsewhere = await preflight("https://elsewhere.example");
-  assert.equal(elsewhere.headers.get("access-control-allow-origin"), null);
-  assert.equal(elsewhere.headers.get("access-control-allow-headers"), null);
+  // #then the web app and a third-party client on another origin get the same answer
+  for (const origin of [WEB_ORIGIN, "https://third-party.example"]) {
+    const answer = await preflight(origin);
+    assert.equal(answer.status, 204, origin);
+    assert.equal(answer.headers.get("access-control-allow-origin"), "*", origin);
+    assert.equal(answer.headers.get("access-control-allow-headers"), "authorization, content-type", origin);
+    assert.equal(answer.headers.get("access-control-allow-methods"), "GET, POST", origin);
+    assert.equal(answer.headers.get("access-control-allow-credentials"), null, origin);
+    assert.doesNotMatch(answer.headers.get("vary") ?? "", /origin/i, origin);
+  }
 });
 
 test("a call without a service token is refused as an XRPC error, with the security headers", async () => {
@@ -88,7 +89,7 @@ test("a call without a service token is refused as an XRPC error, with the secur
   });
   assert.equal(response.status, 403);
   assert.deepEqual(await response.json(), { error: "Unauthorized", message: "Bearer service authorization is required." });
-  assert.equal(response.headers.get("access-control-allow-origin"), WEB_ORIGIN);
+  assert.equal(response.headers.get("access-control-allow-origin"), "*");
   assertSecurityHeaders(response);
 });
 
@@ -116,10 +117,12 @@ test("only a navigation starts the authority flow, and a ticket that is not vali
   assert.equal(head.status, 405);
   assert.equal(head.headers.get("allow"), "GET");
 
-  const start = await fetch(`${base}${AUTHORITY_FLOW_PATHS.start}?ticket=not-a-ticket`, { redirect: "manual" });
+  const start = await fetch(`${base}${AUTHORITY_FLOW_PATHS.start}?ticket=not-a-ticket`, { redirect: "manual", headers: { origin: "https://third-party.example" } });
   assert.equal(start.status, 302);
   assert.equal(start.headers.get("location"), `${WEB_ORIGIN}/?authority=failed`);
   assert.equal(start.headers.get("set-cookie"), null);
+  // The flow works on its own cookie, so no page on any origin may read its answers.
+  assert.equal(start.headers.get("access-control-allow-origin"), null);
 });
 
 test("a callback whose flow cookie is not valid percent-encoding fails the flow and clears the cookie", async () => {

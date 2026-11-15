@@ -161,13 +161,15 @@ packages/                 Libraries. protocol and client run in a browser: they 
   deployment/  @flock/deployment
                              What the web app and the operator share about how they are deployed: the public URLs and
                               their rules (config.ts: APP_URL, OPERATOR_URL, PLC_URL, OPERATOR_SERVICE_REF; HTTPS unless
-                              loopback) and the security headers every response carries (security-headers.ts).
+                              loopback) and the security headers (security-headers.ts): the fixed ones every response carries, and the web app's
+                              per-request Content-Security-Policy (a script nonce, no inline script).
 
 apps/
   echo-bot/  @flock/echo-bot    The first app (R9): depends on @flock/client alone (a test pins it). `pnpm echo-bot sign-in
                               <handle>` once, then `pnpm echo-bot run`; echo.ts is its answer and its runApp wiring.
   web/  @flock/web              The Next.js app (`pnpm dev` / `build` / `start` run `next` here). No database, no secret.
-    next.config.ts           Security headers; the repository root's `.env` (Next itself reads only this app's directory).
+    next.config.ts           The fixed security headers; the repository root's `.env` (Next itself reads only this app's directory).
+    src/proxy.ts             Each page's Content-Security-Policy, with a nonce made for the request (Next puts it on its scripts).
     src/app/                 App Router: page.tsx (builds the browser session config and renders the client gate,
                               ui/account-gate.tsx), layout.tsx, oauth/ (the sign-in callback page, client-only, and the
                               browser client's metadata). The server has no member routes and no member session.
@@ -188,7 +190,7 @@ apps/
     src/config.ts            What only the operator reads: its database path, its encryption key, the authority client's
                               signing keys (the shared URLs come from @flock/deployment).
     src/operator/server.ts, main.ts, methods.ts
-                             The process: xrpc-server with the app's lexicons, CORS for the web origin, the authority flow,
+                             The process: xrpc-server with the app's lexicons, CORS for any origin on the methods, the authority flow,
                               did:web; the methods as transport-free functions and describeFailure.
     src/operator/authority-grant.ts
                              The one owner of the workspace authority grant: its own OAuth client (confidential
@@ -274,7 +276,7 @@ operator or OAuth layers even by accident, and lint refuses a Node built-in in a
 - `pnpm operator` (`apps/operator/src/operator/main.ts`) — the operator's own process at `OPERATOR_URL`: `apps/operator/src/operator/server.ts` serves its
   methods (`apps/operator/src/operator/methods.ts`: `execute`, `getOperation`, `listInboxWriters`, `getChanges`, `createWorkspace`,
   `startAuthorityFlow`, `listStalledOperations`, each authenticated by a PDS-issued service token, and the two notices) on
-  `@atproto/xrpc-server` with the app's lexicons, CORS for the web origin only, the authority flow (`/authority/*`) and its
+  `@atproto/xrpc-server` with the app's lexicons, CORS for any origin on the methods (none on the authority flow), the authority flow (`/authority/*`) and its
   `did:web` document; it runs the notice-registration sweep at start.
 - `pnpm playground` (`scripts/playground.ts`) — a local copy of the whole stack with ready-made accounts, for trying the app by hand (`ATPROTO_PINNED_CHECKOUT` must point at the built pinned checkout).
 - `pnpm reconcile` (`apps/operator/scripts/reconcile-workspaces.ts`) — the scheduled membership-reconciliation job (`docs/operations.md`).
