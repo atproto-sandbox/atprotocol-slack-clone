@@ -49,7 +49,7 @@ export class WorkspaceClient {
     return { name, ...(description === undefined ? {} : { description }) };
   }
 
-  /** The DID an admin means by an account they typed: a DID as it is, or a handle resolved by the account's own host. */
+  /** The DID an admin means by an account they typed: a DID as it is, or a handle resolved by the signed-in account's own host. */
   async resolveAccount(account: string): Promise<string> {
     const input = account.trim().replace(/^@/, "");
     if (isDid(input)) return input;

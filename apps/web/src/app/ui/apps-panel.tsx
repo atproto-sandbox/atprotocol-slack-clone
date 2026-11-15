@@ -57,8 +57,8 @@ export function AppsPanel({ activeWorkspace, busy, workspaceDegraded, runOperati
         return;
       }
       const grants = Object.entries(access).filter(([, level]) => level !== "none").map(([skey, level]) => ({ skey, write: level === "write" }));
-      await runOperation({ kind: editing ? "updateAppAccess" : "installApp", subject, channels: grants });
-      reset();
+      // A refused or unfinished install keeps the form as the admin filled it; runOperation has shown why.
+      if (await runOperation({ kind: editing ? "updateAppAccess" : "installApp", subject, channels: grants })) reset();
     } catch (caught) {
       setError(messageOf(caught));
     }
