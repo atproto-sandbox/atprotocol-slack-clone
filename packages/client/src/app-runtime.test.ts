@@ -35,6 +35,11 @@ function fakeApp(installs: Installs, delays: { refollowDelayMs?: number; retryDe
     incomplete: false,
     setAside: [] as Array<{ did: string; reason: string; permanent: boolean }>,
     refusal: null as unknown,
+    /** How many of the next workspace reads fail as a passing failure. */
+    failingSummaries: 0,
+    summaries: 0,
+    /** The workspace's people (its active roster). */
+    members: [PERSON],
     denied: [] as string[],
     lost: new Set<string>(),
     getChanges: 0,
@@ -54,7 +59,12 @@ function fakeApp(installs: Installs, delays: { refollowDelayMs?: number; retryDe
         summary: async () => {
           if (state.lost.has(WORKSPACE)) throw new SpaceCredentialError("lost", 403, "NotAuthorized");
           if (state.refusal) throw state.refusal;
-          return { installs: state.installs };
+          state.summaries += 1;
+          if (state.failingSummaries > 0) {
+            state.failingSummaries -= 1;
+            throw new Error("the workspace could not be read");
+          }
+          return { installs: state.installs, members: state.members.map((did) => ({ did, active: true })) };
         },
       } as never,
       channels: {
@@ -121,6 +131,65 @@ test("an app is given no app's message, its own or another's", async () => {
   app.change(GENERAL);
   await app.runtime.poll();
   assert.deepEqual(app.texts(), ["hi"]);
+});
+
+test("an app installed since the grants were read is not given for a person, though the workspace's read failed in that poll", async () => {
+  // #given the app following #general, then another app installed there that posts at once, beside a person
+  const app = fakeApp([{ did: APP, channels: [{ skey: "acme-general", write: true }] }]);
+  await app.runtime.poll();
+  app.state.installs = [...app.state.installs, { did: OTHER_APP, channels: [{ skey: "acme-general", write: true }] }];
+  app.post("acme-general", message(OTHER_APP, "beep"), message(PERSON, "hi"));
+
+  // #when the feed reports both spaces changed and the workspace's own read fails
+  app.state.failingSummaries = 1;
+  app.change(WORKSPACE, GENERAL);
+  await app.runtime.poll();
+
+  // #then the new app's message is not given: the unknown author made the runtime read the grants again first
+  assert.deepEqual(app.texts(), ["hi"]);
+});
+
+test("an app installed since the grants were read is not given for a person when its channel is read before its workspace", async () => {
+  // #given the app following #general, then another app installed there that posts at once
+  const app = fakeApp([{ did: APP, channels: [{ skey: "acme-general", write: true }] }]);
+  await app.runtime.poll();
+  app.state.installs = [...app.state.installs, { did: OTHER_APP, channels: [{ skey: "acme-general", write: true }] }];
+  app.post("acme-general", message(OTHER_APP, "beep"));
+
+  // #when the feed reports the channel before the workspace
+  app.change(GENERAL, WORKSPACE);
+  await app.runtime.poll();
+
+  // #then nothing is given
+  assert.deepEqual(app.texts(), []);
+});
+
+test("a known author costs no extra read of the workspace, and a read the refresh cannot make gives nothing until the next change", async () => {
+  // #given the app following #general
+  const app = fakeApp([{ did: APP, channels: [{ skey: "acme-general", write: true }] }]);
+  await app.runtime.poll();
+  const reads = app.state.summaries;
+
+  // #when a person of the workspace writes
+  app.post("acme-general", message(PERSON, "hi"));
+  app.change(GENERAL);
+  await app.runtime.poll();
+
+  // #then it is given without reading the workspace again
+  assert.deepEqual([app.texts(), app.state.summaries], [["hi"], reads]);
+
+  // #when someone not yet known writes and the workspace cannot be read
+  app.state.members = [PERSON, "did:plc:newperson"];
+  app.post("acme-general", message("did:plc:newperson", "hello all"));
+  app.state.failingSummaries = 1;
+  app.change(GENERAL);
+  await app.runtime.poll();
+
+  // #then nothing is given yet, and the next change gives it
+  assert.deepEqual(app.texts(), ["hi"]);
+  app.change(GENERAL);
+  await app.runtime.poll();
+  assert.deepEqual(app.texts(), ["hi", "hello all"]);
 });
 
 test("a burst bigger than a page is given whole, and one beyond the pages followed back is reported", async () => {

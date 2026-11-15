@@ -22,6 +22,14 @@ test("outside loopback development, plain http and private, loopback or metadata
   await assert.rejects(safeFetch(production)("https://[::1]:2583/xrpc/x"), /non-public address/i);
 });
 
+test("an IPv6 address that a translation or tunnel turns into an IPv4 one is refused, whatever IPv4 address it carries", async () => {
+  // #then NAT64's well-known prefix (here, the metadata address), 6to4, Teredo, IPv4-compatible and the 6to4 relay are all refused
+  for (const endpoint of [
+    "https://[64:ff9b::a9fe:a9fe]", "https://[64:ff9b::a00:1]", "https://[2002:a00:1::1]",
+    "https://[2001:0:4136:e378:8000:63bf:3fff:fdd2]", "https://[::a9fe:a9fe]", "https://192.88.99.1",
+  ]) await assert.rejects(assertSafeEndpoint(endpoint, production), /non-public address/i, endpoint);
+});
+
 test("loopback development reaches its loopback host, at the address it checked", async () => {
   const { server, port } = await listen((_request, response) => {
     response.writeHead(200, { "content-type": "text/plain" });

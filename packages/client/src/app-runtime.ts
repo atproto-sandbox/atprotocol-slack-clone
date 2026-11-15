@@ -121,6 +121,8 @@ export class AppRuntime {
   private readonly channels = new Map<string, ChannelState>();
   /** Every active app of each workspace, the app itself among them: no app's message is given to an app. */
   private readonly apps = new Map<string, ReadonlySet<string>>();
+  /** Each workspace's people (its active roster) as last read: with `apps`, who an author is known to be. */
+  private readonly people = new Map<string, ReadonlySet<string>>();
   /** When the runtime may next try to follow each space it does not follow, and how many passing failures in a row it met. */
   private readonly nextAttempt = new Map<string, number>();
   private readonly failures = new Map<string, number>();
@@ -232,8 +234,10 @@ export class AppRuntime {
    * is followed no more.
    */
   private async readGrants(workspace: string): Promise<void> {
-    const installs = (await this.input.engine.workspaces.summary(workspace, { fresh: true }))?.installs ?? [];
+    const summary = await this.input.engine.workspaces.summary(workspace, { fresh: true });
+    const installs = summary?.installs ?? [];
     this.apps.set(workspace, new Set(installs.map((install) => install.did)));
+    this.people.set(workspace, new Set((summary?.members ?? []).map((member) => member.did)));
     const authorityDid = parseWorkspaceUri(workspace)!.authorityDid;
     const granted = new Map((installs.find((install) => install.did === this.input.did)?.channels ?? [])
       .map(({ skey, write }): [string, Grant] => [channelUri(authorityDid, skey), { channel: { workspace, skey }, write }]));
@@ -292,12 +296,27 @@ export class AppRuntime {
       page = await this.input.engine.channels.readPage(grant.channel, { before: page.next });
     }
     complete &&= passing.size === 0;
-    if (deliver) this.reportRead(space, state, { complete, passing: passing.size, permanent, capped });
+    let canWrite = grant.write;
+    if (deliver) {
+      // An author known neither as a person nor as an app (one installed, or a person who joined, since the grants were last
+      // read) means reading them again before any message is given: the workspace's own read may have failed in this poll, or
+      // come after this channel's, and a new app's message must not be taken for a person's. A failed read fails this one,
+      // which the next change tries again; a read that ended this channel's grant gives nothing.
+      const workspace = grant.channel.workspace;
+      const known = (did: string) => this.people.get(workspace)?.has(did) === true || this.apps.get(workspace)?.has(did) === true;
+      if (fresh.some((message) => !known(message.repo))) {
+        await this.readGrants(workspace);
+        const current = this.grants.get(space);
+        if (!current) return;
+        canWrite = current.write;
+      }
+      this.reportRead(space, state, { complete, passing: passing.size, permanent, capped });
+    }
     const apps = this.apps.get(grant.channel.workspace) ?? new Set<string>();
     for (const message of fresh.sort((left, right) => left.rkey.localeCompare(right.rkey))) {
       if (deliver && !apps.has(message.repo)) {
         try {
-          await this.input.onMessage({ channel: grant.channel, canWrite: grant.write, message });
+          await this.input.onMessage({ channel: grant.channel, canWrite, message });
         } catch (error) {
           this.input.onError(error);
           const attempt = state.attempts.get(message.uri) ?? { rkey: message.rkey, count: 0, since: elapsed };

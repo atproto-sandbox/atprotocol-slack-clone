@@ -56,7 +56,8 @@ export function AppsPanel({ activeWorkspace, busy, workspaceDegraded, runOperati
         setError(`That account has not declared itself an app: an app publishes ${REPO_COLLECTION.appDeclaration} in its own repo.`);
         return;
       }
-      const grants = Object.entries(access).filter(([, level]) => level !== "none").map(([skey, level]) => ({ skey, write: level === "write" }));
+      // Only a channel still listed can be granted: one archived or in transition since it was chosen is left out, not sent.
+      const grants = channels.flatMap(({ skey }) => access[skey] && access[skey] !== "none" ? [{ skey, write: access[skey] === "write" }] : []);
       // A refused or unfinished install keeps the form as the admin filled it; runOperation has shown why.
       if (await runOperation({ kind: editing ? "updateAppAccess" : "installApp", subject, channels: grants })) reset();
     } catch (caught) {

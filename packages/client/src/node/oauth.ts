@@ -26,6 +26,17 @@ export type AppOAuthConfig = {
 
 export const APP_OAUTH_PATHS = { clientMetadata: "/oauth/client-metadata.json", jwks: "/oauth/jwks.json", callback: "/oauth/callback" } as const;
 
+/**
+ * Whether the app runs on loopback: plain http on 127.0.0.1 or [::1], loopback development only (RFC 8252 names a loopback
+ * client by its address). Any other app URL must be https: a plain-http app elsewhere is refused, not taken for loopback.
+ */
+function isLoopbackApp(appUrl: string): boolean {
+  const url = new URL(appUrl);
+  if (url.protocol === "https:") return false;
+  if (url.protocol === "http:" && (url.hostname === "127.0.0.1" || url.hostname === "[::1]")) return true;
+  throw new Error("An app is reached over https, or over http on 127.0.0.1 or [::1] in loopback development.");
+}
+
 export function appClientMetadata(config: Pick<AppOAuthConfig, "appUrl" | "keys" | "name" | "scope">) {
   const origin = new URL(config.appUrl).origin;
   const redirectUri = `${origin}${APP_OAUTH_PATHS.callback}`;
@@ -37,7 +48,7 @@ export function appClientMetadata(config: Pick<AppOAuthConfig, "appUrl" | "keys"
     response_types: ["code"] as ["code"],
     dpop_bound_access_tokens: true,
   };
-  if (new URL(config.appUrl).protocol === "http:") {
+  if (isLoopbackApp(config.appUrl)) {
     return {
       ...common,
       client_id: `http://localhost?${new URLSearchParams({ scope: config.scope, redirect_uri: redirectUri }).toString()}`,
@@ -63,7 +74,7 @@ export function appClientMetadata(config: Pick<AppOAuthConfig, "appUrl" | "keys"
  */
 export async function appOAuthClient(config: AppOAuthConfig): Promise<NodeOAuthClient> {
   const file = new StateFile(config.stateFile);
-  const loopback = new URL(config.appUrl).protocol === "http:";
+  const loopback = isLoopbackApp(config.appUrl);
   return new NodeOAuthClient({
     clientMetadata: appClientMetadata(config),
     keyset: await Promise.all(config.keys.map((key) => JoseKey.fromImportable(key, key.kid))),

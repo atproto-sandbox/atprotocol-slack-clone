@@ -24,6 +24,17 @@ test("on loopback an app is a public loopback client; over https a confidential 
   assert.equal(confidential.token_endpoint_auth_method, "private_key_jwt");
 });
 
+test("an app on plain http is a loopback client only on a loopback address; elsewhere it is refused, not taken for one", async () => {
+  // #then 127.0.0.1 and [::1] are loopback clients
+  for (const appUrl of ["http://127.0.0.1:3002", "http://[::1]:3002"]) assert.equal(appClientMetadata({ appUrl, keys: [], name: "Echo", scope: SCOPE }).token_endpoint_auth_method, "none", appUrl);
+
+  // #then a plain-http app anywhere else, `localhost` included, is refused by its metadata and by its client
+  for (const appUrl of ["http://bot.internal:8787", "http://10.0.0.8:3002", "http://localhost:3002"]) {
+    assert.throws(() => appClientMetadata({ appUrl, keys: [], name: "Echo", scope: SCOPE }), /https, or over http on 127\.0\.0\.1/, appUrl);
+    await assert.rejects(appOAuthClient({ appUrl, keys: [], name: "Echo", scope: SCOPE, plcUrl: "https://plc.example", stateFile: join(directory, "refused.json") }), /https, or over http on 127\.0\.0\.1/, appUrl);
+  }
+});
+
 test("an app serves its metadata and only its public keys, and answers nothing else", async () => {
   const key = (await JoseKey.generate(["ES256"], "k1")).privateJwk!;
   const client = await appOAuthClient({ appUrl: "https://bot.example", keys: [key], name: "Echo", scope: SCOPE, plcUrl: "https://plc.example", stateFile: join(directory, "served.json") });
