@@ -42,6 +42,7 @@ After(async function (this: AppWorld, scenario) {
     this.attach(`App server output (tail):\n${this.fixture.serverOutput().slice(-4_000)}`, "text/plain");
   }
   try {
+    for (const stop of this.teardown.splice(0)) await stop();
     await this.closeActors();
   } finally {
     await saveSessionClips(this, scenario);

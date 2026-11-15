@@ -174,6 +174,9 @@ apps/
                               through dm-context.tsx / dm-session-bridge.tsx. The shell's data are the engine's keyed live
                               views, read through use-live-view.ts (useSyncExternalStore): use-discovery.ts,
                               use-channel-content.ts, use-admin-views.ts; selection.ts derives what is shown.
+                              apps-panel.tsx is the admins' view of the workspace's apps (install only an account that
+                              declares itself one, change access, remove after saying its messages leave the view);
+                              channel-view.tsx marks an installed app's messages "APP".
     src/browser/             The account's browser session (R6a, R6c): one OAuth grant through
                               @atproto/oauth-client-browser (session.ts: one client and one init per page, signIn,
                               signOut), sign-out (sign-out.ts: deletes the account's store and DM state and revokes the
@@ -289,7 +292,8 @@ features/*.feature        scenarios; @unbound = no step definitions yet (needs a
 bdd/steps/*.steps.ts      step definitions per feature, written as what a person does and sees
 bdd/support/ui.ts         shared helpers, one per user action (sign in, consent, create, invite, join)
 bdd/support/*-ui.ts       per-feature helpers (channels, private requests, lifecycle, independent app, DMs)
-bdd/support/world.ts      per-scenario world: fresh accounts and browser contexts, PDS reads, read-only app DB
+bdd/support/world.ts      per-scenario world: fresh accounts and browser contexts, PDS reads, read-only app DB, and a
+                          teardown list for what a scenario runs in this process (features/apps.feature runs the echo bot)
 bdd/support/hooks.ts      starts the shared fixture once; BDD_HEADED=1 BDD_BROWSER_CHANNEL=chrome opens real Chrome
 bdd/gate.test.ts          runs in `pnpm test`: the @unbound count may only go down, every @unbound says why,
                           every bound scenario (including @slow) has a definition for every step

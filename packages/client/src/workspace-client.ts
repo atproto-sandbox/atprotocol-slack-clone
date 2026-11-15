@@ -2,9 +2,10 @@ import { listAllSpaceUris, listBoundedRecords, listBoundedRepos } from "@flock/p
 import { isAccessLost, isSpaceDeleted } from "@flock/protocol/atproto/space-credential-core";
 import { isMissingXrpcResource } from "@flock/protocol/atproto/xrpc";
 import { mapLimited } from "@flock/protocol/map-limited";
-import { acceptanceRecordKey, decisionRecordKey, inboxUri, parseWorkspaceUri } from "@flock/protocol/keys";
-import { COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
-import { validateSpaceRecord } from "@flock/protocol/registry";
+import { readUpstreamJson } from "@flock/protocol/bounded-json";
+import { acceptanceRecordKey, decisionRecordKey, inboxUri, isDid, parseWorkspaceUri } from "@flock/protocol/keys";
+import { COLLECTION, REPO_COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
+import { validateAppDeclaration, validateSpaceRecord } from "@flock/protocol/registry";
 import { summarizeWorkspace, WORKSPACE_ENVELOPE, WorkspaceEnvelopeError, workspaceDegradedMessage, type WorkspaceSummary } from "@flock/protocol/workspace-summary";
 import type { CredentialCache } from "./credentials";
 import { readWriterJoinRequests, type InboxJoinRequest, type SkippedInboxWriter } from "./inbox-requests";
@@ -14,6 +15,10 @@ import { transportNow, type ClientTransport } from "./transport";
 
 const MAX_DISCOVERABLE_WORKSPACES = 1_000;
 const MAX_INBOX_WRITERS = 2_000;
+const MAX_DECLARATION_BYTES = 16 * 1024;
+
+/** What an app account says it is, in its own repo: the name people see. A label, never a grant. */
+export type AppDeclaration = { name: string; description?: string };
 
 export type WorkspaceCandidate = { uri: string; authorityDid: string; skey: string };
 export type WorkspaceDiscovery = { workspaces: WorkspaceSummary[]; candidates: WorkspaceCandidate[] };
@@ -23,6 +28,35 @@ export type WorkspaceClientDeps = { transport: ClientTransport; credentials: Cre
 /** The member's workspaces: finding them, accepting an invitation, and an admin's view of the inbox. */
 export class WorkspaceClient {
   constructor(private readonly deps: WorkspaceClientDeps) {}
+
+  /**
+   * The account's app declaration, read from its own public repo, or null when it has none (or an invalid one). An admin's app
+   * installs no account without one, and shows its name.
+   */
+  async appDeclaration(did: string): Promise<AppDeclaration | null> {
+    if (!isDid(did)) throw new TypeError("An app is named by its DID.");
+    const url = new URL("/xrpc/com.atproto.repo.getRecord", await this.deps.transport.resolvePds(did));
+    for (const [name, value] of Object.entries({ repo: did, collection: REPO_COLLECTION.appDeclaration, rkey: "self" })) url.searchParams.set(name, value);
+    const response = await this.deps.transport.fetchEndpoint(new Request(url, { headers: { accept: "application/json" } }));
+    const body = await readUpstreamJson<{ value?: unknown; error?: string }>(response, MAX_DECLARATION_BYTES);
+    if (!response.ok) {
+      if (body?.error === "RecordNotFound") return null;
+      throw new Error(`Could not read the app declaration of ${did} (${response.status}).`);
+    }
+    const value = body?.value;
+    if (!validateAppDeclaration(value).valid) return null;
+    const { name, description } = value as { name: string; description?: string };
+    return { name, ...(description === undefined ? {} : { description }) };
+  }
+
+  /** The DID an admin means by an account they typed: a DID as it is, or a handle resolved by the account's own host. */
+  async resolveAccount(account: string): Promise<string> {
+    const input = account.trim().replace(/^@/, "");
+    if (isDid(input)) return input;
+    const { did } = await this.deps.transport.memberClient.query<{ did: string }>("com.atproto.identity.resolveHandle", { handle: input });
+    if (!isDid(did)) throw new Error(`The handle ${input} did not resolve to a DID.`);
+    return did;
+  }
 
   /**
    * Every workspace the account can see, read from its authority's records. A workspace whose credential is refused is an

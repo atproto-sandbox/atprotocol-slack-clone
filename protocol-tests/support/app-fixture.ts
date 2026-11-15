@@ -8,6 +8,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Keypair } from "@atproto/crypto";
 import { createFixtureTempRoot } from "../fixture-temp";
+import { mintAppSession, type OAuthProviderHost } from "./pds-network";
 
 // A complete local stack for driving the real app: two in-memory PDS hosts plus a PLC directory from the
 // pinned atproto checkout, this app's lexicons published to the fixture's lexicon authority, and `next start`
@@ -21,7 +22,7 @@ type TestAgent = {
     createSession(input: Record<string, unknown>): Promise<{ data: { accessJwt: string } }>;
   }; repo: { createRecord(input: Record<string, unknown>, options: { headers: { authorization: string } }): Promise<unknown> } } };
 };
-type TestPds = { url: string; getAgent(): TestAgent; ctx: { actorStore: { keypair(did: string): Promise<Keypair> } } };
+type TestPds = { url: string; getAgent(): TestAgent; ctx: { actorStore: { keypair(did: string): Promise<Keypair> } } & OAuthProviderHost["ctx"] };
 type TestNetwork = { pds: TestPds; extraPdses: TestPds[]; plc: { url: string }; close(): Promise<void>; lexiconAuthority?: { did: string } };
 
 export type FixtureAccount = { handle: string; did: string; password: string; host: 0 | 1; pdsUrl: string; accessJwt: string };
@@ -36,6 +37,8 @@ export type AppFixture = {
   plcUrl: string;
   pdsUrls: readonly [string, string];
   createAccount(handle: string, host: 0 | 1, password?: string): Promise<FixtureAccount>;
+  /** An app account's own OAuth session with the app's grant, restored through the app's OAuth client and `stateFile`, as its sign-in leaves it. */
+  appSession(account: FixtureAccount, serviceRef: string, stateFile: string): ReturnType<typeof mintAppSession>;
   /** A second, fully independent app instance (own port, own database, own encryption key) on the same PDS network. */
   startSecondApp(options?: { env?: Record<string, string> }): Promise<SecondApp>;
   /** The credential's own header and claims, re-signed with new claims by the authority's signing key on `authorityHost`: a genuinely expired (or extended) credential that keeps its jti and DPoP binding. */
@@ -112,6 +115,8 @@ export async function startAppFixture(options: { preferredPort?: number } = {}):
         });
         return { handle, did: created.data.did, password, host, pdsUrl: hosts[host].url, accessJwt: created.data.accessJwt };
       },
+      appSession: (account, serviceRef, stateFile) =>
+        mintAppSession(hosts[account.host], account.did, { serviceRef, plcUrl: net.plc.url, stateFile }, `app-${account.handle}`),
       startSecondApp: (secondOptions) => launch(`second-app-${servers.length}`, undefined, secondOptions?.env),
       async resignSpaceCredential(authorityHost, credential, claims) {
         const [header, payload] = credential.split(".");

@@ -10,6 +10,7 @@ import { InviteBanner } from "./invite-banner";
 import { SessionProvider, useBrowserSessionContext } from "./session-context";
 import { Sidebar } from "./sidebar";
 import { WorkspaceHome } from "./workspace-home";
+import type { AppDirectory } from "./apps-panel";
 import { WorkspaceOnboarding } from "./workspace-onboarding";
 import { channelKey, useChannelContent } from "./use-channel-content";
 import { useAdminViews } from "./use-admin-views";
@@ -57,6 +58,11 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const resumedRef = useRef(false);
+  /** The engine's reads of an app account, for the Apps panel: its declaration, and the DID of an account an admin typed. */
+  const appDirectory = useMemo<AppDirectory | null>(() => engine ? {
+    declaration: (appDid) => engine.workspaces.appDeclaration(appDid),
+    resolve: (account) => engine.workspaces.resolveAccount(account),
+  } : null, [engine]);
 
   // Already a member: the invitation has been used, so it is no longer offered.
   const listed = useCallback((discovery: WorkspaceDiscovery) => {
@@ -289,11 +295,11 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
     await connectInvitation(inviteUri);
   }
 
-  async function runOperation(request: Record<string, unknown>, workspace = activeWorkspace?.uri, operationId = makeTid()) {
-    if (!workspace) return;
+  async function runOperation(request: Record<string, unknown>, workspace = activeWorkspace?.uri, operationId = makeTid()): Promise<boolean> {
+    if (!workspace) return false;
     if (activeWorkspace?.uri === workspace && activeWorkspace.degradedReasons.length) {
       setError(`Workspace mutations are paused in degraded mode. ${activeWorkspace.degradedReasons.join(" ")}`);
-      return;
+      return false;
     }
     const pending = { workspace, operationId, request };
     setPendingOperation(pending);
@@ -317,20 +323,22 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
       } else if (activeChannel?.workspace === workspace) await live?.reload(channelKey(activeChannel));
       // What an operation changes for an admin: the inbox's requests and the stalled operations.
       admin.reload();
+      return operation.state === "completed";
     } catch (caught) {
       setStatus("");
       if (needsAuthorityApproval(caught)) {
         // The operator's grant for this workspace lapsed. Any admin may open its renewal, which only a sign-in as the workspace
         // account completes; the operation stays pending to retry.
         const authority = parsePastedWorkspaceUri(workspace)?.authorityDid;
-        if (!authority) { setError(messageOf(caught)); return; }
+        if (!authority) { setError(messageOf(caught)); return false; }
         setStatus(authority === did
           ? "Opening the permission screen. Approve it, then retry the pending operation."
           : "Opening the permission screen. Sign in there as the workspace account and approve it, then retry the pending operation.");
         await approveAuthority({ purpose: "reauthorize", authority }).catch((grantFailure) => { setStatus(""); setError(messageOf(grantFailure)); });
-        return;
+        return false;
       }
       setError(messageOf(caught));
+      return false;
     } finally { setBusy(false); }
   }
 
@@ -413,7 +421,7 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
           {sessionStatus === "ready" && <>
           {!dmView && workspacesLoaded && invitedTo && !workspaces.some((workspace) => workspace.uri === invitedTo) && <InviteBanner workspace={invitedTo} busy={busy} join={() => void connectInvitation(invitedTo)} dismiss={dismissInvitation} />}
           {!dmView && !activeWorkspace && <WorkspaceOnboarding busy={busy} workspaceName={workspaceName} setWorkspaceName={setWorkspaceName} workspaceAccount={workspaceAccount} setWorkspaceAccount={setWorkspaceAccount} inviteUri={inviteUri} setInviteUri={setInviteUri} createWorkspace={createWorkspace} beginAccept={beginAccept} />}
-          {!dmView && activeWorkspace && (!activeChannel || activeChannel.workspace !== activeUri) && <WorkspaceHome did={did} activeWorkspace={activeWorkspace} busy={busy} workspaceDegraded={workspaceDegraded} inbox={inboxView?.requests ?? []} inboxLoaded={inboxView !== undefined && !inboxView.refused} inboxPermissionMissing={inboxView?.refused === true} runOperation={runOperation} leaveWorkspace={leaveWorkspace} syncInbox={syncInbox} setStatus={setStatus} setError={setError} />}
+          {!dmView && activeWorkspace && (!activeChannel || activeChannel.workspace !== activeUri) && <WorkspaceHome did={did} apps={appDirectory} activeWorkspace={activeWorkspace} busy={busy} workspaceDegraded={workspaceDegraded} inbox={inboxView?.requests ?? []} inboxLoaded={inboxView !== undefined && !inboxView.refused} inboxPermissionMissing={inboxView?.refused === true} runOperation={runOperation} leaveWorkspace={leaveWorkspace} syncInbox={syncInbox} setStatus={setStatus} setError={setError} />}
           {!dmView && activeChannel?.workspace === activeUri && <ChannelView did={did} activeChannel={activeChannel} activeWorkspace={activeWorkspace} busy={busy} workspaceDegraded={workspaceDegraded} requestSubmitted={requestSubmitted} content={openContent.content} loadOlder={openContent.loadOlder} reload={openContent.reload} messageText={messageText} setMessageText={setMessageText} replyTo={replyTo} setReplyTo={setReplyTo} runOperation={runOperation} leaveChannel={leaveChannel} requestPrivateAccess={requestPrivateAccess} sendMessage={sendMessage} toggleReaction={toggleReaction} editMessage={editMessage} deleteMessage={deleteMessage} setError={setError} />}
           {dmView && <DmStage />}
           </>}

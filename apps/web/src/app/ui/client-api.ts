@@ -9,7 +9,8 @@ export type Reaction = { repo: string; value: { subject?: string; emoji?: string
 export type InboxRequest = { uri: string; repoDid: string; channelSkey: string; channelName: string; requestId: string; createdAt: string };
 export type ChannelSelection = { workspace: string; skey: string; name: string; visibility: string };
 export type PendingOperation = { workspace: string; operationId: string; request: Record<string, unknown> };
-export type RunOperation = (request: Record<string, unknown>, workspace?: string, operationId?: string) => Promise<void>;
+/** Submits an operator operation and says whether it completed; a refusal, a pending or failed run, or a pause is shown, not thrown. */
+export type RunOperation = (request: Record<string, unknown>, workspace?: string, operationId?: string) => Promise<boolean>;
 
 export const TRANSITIONING_STATUS = "This channel is transitioning. Sync and posting are paused until its access changes finish.";
 

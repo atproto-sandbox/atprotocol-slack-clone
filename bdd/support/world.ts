@@ -43,6 +43,8 @@ export class AppWorld extends World {
   scratch = new Map<string, unknown>();
   startedAt = Date.now();
   readonly contexts: BrowserContext[] = [];
+  /** What a scenario started outside its browsers (an app running in this process), stopped when the scenario ends. */
+  readonly teardown: Array<() => Promise<void>> = [];
   /** Pages in creation order with the label of the session they belong to, for the optional session recording. */
   readonly clips: Array<{ page: Page; label: string; startedAt: number }> = [];
   private readonly recordings = new Set<Promise<void>>();
