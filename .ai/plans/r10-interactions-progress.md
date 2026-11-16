@@ -12,6 +12,7 @@ committed and reviewed as its own PR in the stack.
 | 2 | agy CLI, `gemini-4-carbon-high` | REVISE (15 of round 1's 18 confirmed resolved; 6 blocking, 3 not) | Checked against the code; all held. Answered: the scope-drift reduction made exact (collectionless reads, `authority`, `manage`); declarations read with their commands and given to the composer; token syntax in semantic code (lexicons have no pattern) and the declaration's command fields bounded; the webhooks app checking the write grant itself and validating bodies before any request; the admin re-checked on every request, the identity client's shape and the cookie key; inboxes missing before R10 skipped until reconcile creates them, with a stricter fake host; member-list writes through `members.ts`; steps that diff on entry; a command's `parent` checked. |
 | 3 | agy CLI, `gemini-4-carbon-high` | REVISE (round 2's fixes confirmed but two; 3 blocking, 5 not) | Checked against the code; all held. Answered: `workspace.json` gains `app.install` (a drift R9a left, which the exact scope check would have turned into a consent loop), `spaceCollections` counts every author kind, and a test keeps each space lexicon's collections equal to the registry's; the workspace authority admitted to private channels it owns; inboxes created by reconcile registered at once, the sweep listing only inboxes that exist, and `updateAppAccess` skipping a missing one. Also taken: `isAccessLost` no longer swallows a missing scope; block `$type`s exported; the app's commands passed to its runtime; the composer's command checks; channels in transition excluded. |
 | 4 | agy CLI, `gemini-4-carbon-high` | REVISE (round 3's fixes confirmed; 1 blocking, 4 not) | Checked against the code; held. Answered: a workspace whose authority grant predates R10 (it lacks the inbox type, so it never made an inbox, and the host answers `getSpace` with a missing scope, not "not found") is handled without a stalled operation: an inbox check that reads a missing scope as no inbox, reconcile creating an inbox only when the grant covers the type (and otherwise reconciling the rest and warning), and re-approval asked by `installApp` and `updateAppAccess` at their first step. Also taken: the declaration read bound raised to the record limit; `getMessage` checking a reply's parent; nothing kept in memory for a channel an app only posts to; hooks whose private channel the app can no longer read shown as unavailable. |
+| 5 | agy CLI, `gemini-4-carbon-high` | REVISE (round 4's fix confirmed but one part; 2 blocking, 3 not) | Checked against the code and the browsers' rules; held. Answered: `updateAppAccess` now fills an inbox it creates and registers its notices, and reconcile registers any present inbox that is not; the webhooks app's sign-in works under its own policy (no form redirect off-site, `SameSite=Lax` cookies) and its gate runs in a real browser. Also taken: inboxes followed only by an app that handles commands or clicks; reconcile's registrations made through the deps an operation is given; a click checked against the app's current grant. |
 
 ## Baseline and order
 
@@ -103,9 +104,11 @@ A new space type `new.flock.app.inbox`, owned by the workspace authority, one pe
       commands to work, as a warning, not a stalled operation;
     - `installApp` (also when run again on an existing install) and `updateAppAccess` start with `app-inbox-space`, which
       creates the inbox if it is missing, so an admin changing an app's access on an old grant is asked for the re-approval
-      too, with nothing written;
-    - none of these can leave a half-applied row on a missing scope, since the only step that needs the new type comes first. So no operation
-    fails on, or waits behind, an inbox that was never made. The operator's test host (`fake-authority-pds.ts`) answers
+      too, with nothing written. Both then run `app-inbox-set`, which writes nothing to an inbox already right and fills one
+      just created, and both name the inbox in `createsSpaces`, so its notices are registered when they complete (registering
+      is idempotent);
+    - none of these can leave a half-applied row on a missing scope, since the only step that needs the new type comes first.
+    So no operation fails on, or waits behind, an inbox that was never made. The operator's test host (`fake-authority-pds.ts`) answers
     `SpaceNotFound` for a member-list call on a space that does not exist, as the real host does, so a test cannot hide it.
   - **A step that makes several calls diffs on entry.** `app-inbox-set` and `app-inbox-remove` read the inbox's current list and
     write only what differs, so a run stopped inside one repeats no write when it resumes. The verifying steps
@@ -114,9 +117,11 @@ A new space type `new.flock.app.inbox`, owned by the workspace authority, one pe
     `inviteMember`, `removeMember`, `leaveWorkspace` and `reconcileWorkspace`. No step is renamed or removed, so a pending pre-R10 row replays:
     its recorded steps are still declared, and the new ones run. The table update is deliberate and reviewed with R10a.
 - **Notices and the feed.** The operator registers each active inbox's notices like a channel's (`createsSpaces` on
-  `installApp`, `archivesSpaces` on `uninstallApp`). `reconcileWorkspace` registers each inbox it creates, through
-  `registrations.ts` as `afterOperation` does (a kind's `createsSpaces` is computed from its request, and reconcile's inboxes
-  are known only when it runs), and drops the registration of an inactive one. The sweep keeps them: `activeWorkspaceSpaces`
+  `installApp` and `updateAppAccess`, `archivesSpaces` on `uninstallApp`). After a `reconcileWorkspace`, `afterOperation`
+  registers the inbox of every active install that is present and not registered (one it created, or one another operation
+  created), and drops the registration of every inactive one: a kind's `createsSpaces` is computed from its request alone,
+  and reconcile's inboxes are known only when it runs, so this is a hook of its own in `registrations.ts`. It runs with the
+  registration deps the operation was given, so a unit test that gives none registers nothing. The sweep keeps them: `activeWorkspaceSpaces`
   adds the inbox of every active install **that exists**, so a lost registration is restored, an inactive inbox's is dropped,
   and an inbox not yet made raises no registration failure. `getChanges`
   admits a follower of an inbox when its member list does (`FOLLOWED_BY_MEMBER_LIST` in `member-access.ts` gains the type).
@@ -174,13 +179,15 @@ A new space type `new.flock.app.inbox`, owned by the workspace authority, one pe
   `value` as its own message holds it. The button is disabled while its action is being written, so one click is one action;
   each click is its own record (TID key), so a button an app means to be pressed again (`Again`) works, and an app that wants a
   button pressed once enforces it, usually by editing its message.
-- **Checked by the app's SDK**: the message is the app's own and is in `channel`, `channel` is in the inbox's workspace and is
-  `public` or `private`, the author can read it (on the roster; for a private channel, the authority or on its roster), and the
+- **Checked by the app's SDK**: the message is the app's own and is in `channel`, `channel` is in the inbox's workspace, is
+  `public` or `private`, and is granted to the app on the summary read fresh (a credential the app still holds for a channel
+  whose grant just ended does not count; `onAction` gets `canWrite` as `onCommand` does), the author can read it (on the roster; for a private channel, the authority or on its roster), and the
   message, read fresh and verified, still has a button with that `actionId`.
 
 ### The app's SDK (`packages/client`)
 
-- **Inbox records.** `runApp` follows each active install's inbox beside the workspace space and the granted channels, reads
+- **Inbox records.** When the app gives `onCommand` or `onAction`, `runApp` follows each active install's inbox beside the
+  workspace space and the granted channels (an app with neither follows no inbox), reads
   both collections through the engine's sync core (`SyncCore`), and gives each new command (`onCommand`) and action (`onAction`)
   once, by the key window. When an install becomes inactive its inbox is unfollowed with its channels (`readGrants`, `forget`).
 - **Fresh state for checks.** When a poll brings inbox records, the SDK reads the workspace summary afresh once for that poll,
@@ -247,11 +254,16 @@ its own admin page. It runs no commands and follows no inbox; it posts messages 
   - **Sign-in** with atproto OAuth through a second, identity-only client (`atproto` scope), from a new helper in
     `packages/client/src/node/` built like the app's own (`appClientMetadata`'s shape: confidential with the app's keys over
     https, a loopback client in development) but at its own paths (`/admin/oauth/client-metadata.json`, `/admin/oauth/jwks.json`,
-    `/admin/oauth/callback`), so it never collides with the app's own client. Its sign-in state is bound to the browser by a cookie, expires after ten minutes, and is
+    `/admin/oauth/callback`), so it never collides with the app's own client. The handle form posts to the app, which answers
+    with a page holding a link to the account's authorization page, not a redirect: a browser applies `form-action` to a form's
+    redirects too, and the page's policy keeps `form-action 'self'`. Its sign-in state is bound to the browser by a cookie
+    (`SameSite=Lax`, so the browser sends it on the top-level return from the account's host), expires after ten minutes, and is
     capped (a hundred pending sign-ins; more are refused). After the callback the app checks that the DID is an active admin of
     a workspace the app is installed in (it reads the workspace space it already reads), revokes the OAuth session at once (only
-    the identity was needed), and sets its own session cookie: signed, `HttpOnly`, `SameSite=Strict`, `Secure` off loopback,
-    thirty minutes. Cookies are signed with a key made at random when the process starts (admins sign in again after a
+    the identity was needed), and sets its own session cookie: signed, `HttpOnly`, `SameSite=Lax`, `Secure` off loopback,
+    thirty minutes. `Lax`, not `Strict`: the callback is reached by a cross-site redirect chain, and a `Strict` cookie set there
+    is withheld from the page it redirects to. Every change is a `POST` with a CSRF token and an `Origin` check, and no `GET`
+    shows a secret, so `Lax` gives nothing away. Cookies are signed with a key made at random when the process starts (admins sign in again after a
     restart).
   - **Every request re-checks**, on a workspace summary read afresh: the DID is among the admins **and** on the roster (the
     summary lists admin records as they are, so a person whose removal stopped between its roster and admin steps would still
@@ -311,7 +323,8 @@ its own admin page. It runs no commands and follows no inbox; it posts messages 
   collections.
 - **Tests:** unit for the lexicons, the semantics and the key; the membership table with inboxes, active and inactive; every
   changed kind resumed after a stop at every step, inside a multi-call step too, with no write repeated; a pending pre-R10 row
-  replayed; every changed kind, `updateAppAccess` too, with an install made before R10 (no inbox), active and inactive,
+  replayed; `updateAppAccess` on an install without an inbox creating, filling and registering it; reconcile registering a
+  present inbox that is not registered, and registering nothing without deps; every changed kind, `updateAppAccess` too, with an install made before R10 (no inbox), active and inactive,
   completing without error, both with an authority grant that covers the inbox type and with one that predates it (the
   operation either skips the inbox or is discarded at its first step for re-approval, never left pending; the sweep goes on
   renewing the workspace's other spaces, and a reconcile on an old grant completes for every other space and reports the
@@ -325,7 +338,8 @@ its own admin page. It runs no commands and follows no inbox; it posts messages 
   there; after an uninstall the inbox list is empty, its registration gone, and the app refused by `getChanges` and the host; a
   reconcile gives a pre-R10 install its inbox; with an authority grant from before R10, a reconcile completes (warning that
   the account must approve again), an `updateAppAccess` asks for re-approval with nothing written, and an invite and a removal
-  complete; after the re-approval, the next reconcile creates the inbox. **The envelope:** with 20 installs at a 200-person roster, `inviteMember`,
+  complete; after the re-approval, retrying the `updateAppAccess` creates and fills the inbox and the app is given commands
+  through it, and the next reconcile creates the inbox of any other install. **The envelope:** with 20 installs at a 200-person roster, `inviteMember`,
   `removeMember` and `reconcileWorkspace` (of 20 drifted inboxes) each finish within the run limit.
 
 ### R10b: the SDK and the client
@@ -357,8 +371,9 @@ its own admin page. It runs no commands and follows no inbox; it posts messages 
   authority admitted, an outsider refused), a channel in transition refused, the
   body bounds and validation before any request, the write-grant check, the identical answers for unknown, wrong and revoked,
   and the rate limits' order.
-- **Gate (acceptance):** an admin signs in on the page, creates a hook for #general and sees its URL once; a member who is not an
-  admin is refused the page; a `POST` to the URL appears in #general as the app's message; a wrong secret and a revoked hook
+- **Gate (browser and acceptance):** in a real browser (the browser suite, Chromium, under the page's own policy and cookies),
+  an admin signs in on the page, creates a hook for #general and sees its URL once; a member who is not an admin is refused the
+  page; a `POST` to the URL appears in #general as the app's message; a wrong secret and a revoked hook
   get the same answer; after the admin changes the app to read-only in #general the hook is refused and nothing is written.
 
 Each step: typecheck, lint, unit, acceptance, browser and the full BDD suite, one at a time, then an independent review of the
