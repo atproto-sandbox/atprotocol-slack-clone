@@ -8,7 +8,7 @@ import { describeRepoFailure } from "@flock/protocol/atproto/repo-failure";
 import { mintSpaceCredential } from "../atproto/space-credential";
 import { getConfig } from "@flock/deployment/config";
 import { getRawDb } from "../lib/db";
-import { appInboxUri, channelUri, inboxUri, requireSpaceAuthority } from "@flock/protocol/keys";
+import { appInboxUri, channelUri, inboxUri, parseAppInboxUri, requireSpaceAuthority } from "@flock/protocol/keys";
 import { parseWorkspaceRef, type OperatorActor } from "./actor";
 import { restoreAuthorityGrant } from "./authority-grant";
 import { isRegisteredSpace } from "./member-access";
@@ -68,7 +68,10 @@ export async function afterOperation(
   deps: RegistrationDeps = registrationDeps,
 ): Promise<void> {
   if (view.state !== "completed") return;
-  for (const space of kind.createsSpaces?.(actor, request) ?? []) await registerSpace(actor.session, actor.workspace.uri, space, deps);
+  for (const space of kind.createsSpaces?.(actor, request) ?? []) {
+    if (parseAppInboxUri(space) && await appInboxState(actor.session, space) !== "present") continue;
+    await registerSpace(actor.session, actor.workspace.uri, space, deps);
+  }
   for (const space of kind.archivesSpaces?.(actor, request) ?? []) await unregisterSpace(actor.session, space, deps);
   if (request.kind === "reconcileWorkspace") await syncReconciledInboxRegistrations(actor, deps);
 }

@@ -593,11 +593,13 @@ test("pre-R10 installs without an inbox (active and inactive) work under both co
       } as unknown as OperatorActor["session"] };
       const afterThrowOpId = tidNow();
       await completes(executeOperatorOperation(afterThrowActor, afterThrowOpId, { kind: "reconcileWorkspace" }, deps));
+      assert.deepEqual(registered, [secondInbox], "secondInbox registered before thirdInbox's getSpace threw");
       const auditFailure = getRawDb().prepare("SELECT event FROM audit_event WHERE operation_id = ? AND event = 'operationRegistrationFailed'").get(afterThrowOpId) as { event: string } | undefined;
       assert.equal(auditFailure?.event, "operationRegistrationFailed", "post-completion registration read failure is audited without failing execute");
 
+      registered.length = 0;
       await completes(run({ kind: "reconcileWorkspace" }, tidNow(), true));
-      assert.ok((registered as string[]).includes(secondInbox), "reconcile with registration deps registers the present unregistered inbox");
+      assert.deepEqual(registered, [thirdInbox], "the next reconcile registers the remaining unregistered inbox");
       assert.equal(await hasUncoveredAppInbox(owner), false);
     }
     blockInboxScope = false;
