@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
 import { JoseKey, TokenRefreshError } from "@atproto/oauth-client-node";
+import { XrpcError } from "@flock/protocol/atproto/xrpc";
 import { answerAppOAuthRoute, APP_OAUTH_PATHS, appClientMetadata, appOAuthClient, isSessionLost, StateFile } from "./oauth";
 
 const directory = mkdtempSync(join(tmpdir(), "app-oauth-test-"));
@@ -79,8 +80,10 @@ test("the state file keeps sessions and states apart, readable by its owner only
   assert.equal(await file.store("states").get("s1"), undefined);
 });
 
-test("a refused refresh means the app must sign in again; another failure does not", () => {
+test("a refused refresh or a missing scope means the app must sign in again; another failure does not", () => {
   assert.equal(isSessionLost(new TokenRefreshError("did:plc:app", "refused")), true);
+  assert.equal(isSessionLost(new XrpcError(403, 'Missing required scope "space:new.flock.app.inbox"', "ScopeMissingError")), true);
+  assert.equal(isSessionLost(new XrpcError(403, "Forbidden", "Forbidden")), false);
   assert.equal(isSessionLost(new Error("network")), false);
 });
 

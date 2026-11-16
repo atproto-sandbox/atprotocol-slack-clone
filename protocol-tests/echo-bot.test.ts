@@ -19,7 +19,7 @@ test("the echo bot answers a person within one poll, and once uninstalled is den
   let running: Promise<void> | undefined;
   try {
     server = await startOperatorServer();
-    const [{ restoreAuthorityGrant }, { createWorkspace }, { registrationDeps }, { requireActiveWorkspaceAdmin }, { executeOperatorOperation }, { listSpaceMembers }, { tidNow }, { createEngine }, { nodeTransport }, { startEchoBot }, { isAccessLost }] = await Promise.all([
+    const [{ restoreAuthorityGrant }, { createWorkspace }, { registrationDeps }, { requireActiveWorkspaceAdmin }, { executeOperatorOperation }, { listSpaceMembers }, { tidNow }, { createEngine }, { nodeTransport }, { ECHO_BOT_COMMANDS, startEchoBot }, { isAccessLost }] = await Promise.all([
       import("@flock/operator/operator/authority-grant"), import("@flock/operator/operator/kinds/create-workspace"), import("@flock/operator/operator/registrations"),
       import("@flock/operator/operator/security"), import("@flock/operator/operator/operations"), import("@flock/operator/atproto/space-ops"), import("@flock/protocol/keys"),
       import("@flock/client/engine"), import("@flock/client/node/transport"), import("@flock/echo-bot/echo"), import("@flock/protocol/atproto/space-credential-core"),
@@ -44,7 +44,7 @@ test("the echo bot answers a person within one poll, and once uninstalled is den
     const transport = nodeTransport(session, { plcUrl: pds.plcUrl, loopback: true });
     const engine = createEngine(transport, { operator: { serviceRef: pds.serviceRef, endpoint: server.url } });
     // (`echo-bot run` publishes the bot's declaration first, with the app's own grant)
-    await publishAppDeclaration(transport, { name: "Echo", description: "Answers each message with its text." });
+    await publishAppDeclaration(transport, { name: "Echo", description: "Answers each message with its text.", commands: ECHO_BOT_COMMANDS });
     const declared = await transport.memberClient.query<{ value: unknown }>("com.atproto.repo.getRecord", { repo: bot.did, collection: "new.flock.app.declaration", rkey: "self" });
     assert.equal(validateAppDeclaration(declared.value).valid, true, "the bot's declaration is published and valid");
     const feed = engine.operator!;

@@ -19,7 +19,7 @@ import type * as GetDelegationToken from "../lexicons/api/types/com/atproto/spac
 import { readUpstreamJson, readUpstreamText } from "../bounded-json";
 import { isDid, parseSpaceUri, spaceRecordUri, type Did } from "../keys";
 import type { SpaceKey } from "./space-key";
-import { AtprotoClient, MAX_XRPC_RESPONSE_BYTES, XrpcError } from "./xrpc";
+import { AtprotoClient, isScopeMissingError, MAX_XRPC_RESPONSE_BYTES, XrpcError } from "./xrpc";
 
 /** The PDS default lifetime of a space credential; the protocol ceiling is one hour. */
 export const SPACE_CREDENTIAL_LIFETIME_MS = 10 * 60 * 1000;
@@ -70,9 +70,11 @@ export function isSpaceDeleted(error: unknown): boolean {
  * Whether a failure means this account can no longer read the space, so whatever it cached from the space must be
  * dropped: the credential was refused or the space was deleted. `exchangeSpaceCredential` reports every refusal to issue a
  * credential as 401 or 403, including the `SpaceNotFound` the reference authority gives a user the policy does not
- * authorize, so a removed member's refusal lands here. A record read that returns 404 is only a missing record.
+ * authorize, so a removed member's refusal lands here. A record read that returns 404 is only a missing record, and a
+ * `ScopeMissingError` from the account's own host means the session lacks an OAuth scope, not that the space refused it.
  */
 export function isAccessLost(error: unknown): boolean {
+  if (isScopeMissingError(error)) return false;
   return isSpaceDeleted(error) || (typeof error === "object" && error !== null && "status" in error && (error.status === 401 || error.status === 403));
 }
 

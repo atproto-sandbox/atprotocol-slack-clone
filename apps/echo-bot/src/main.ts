@@ -5,7 +5,7 @@ import { answerAppOAuthRoute, appOAuthClient, isSessionLost } from "@flock/clien
 import { nodeTransport } from "@flock/client/node/transport";
 import type { NodeOAuthClient, OAuthSession } from "@flock/client/node/oauth";
 import { readEchoBotConfig, type EchoBotConfig } from "./config";
-import { startEchoBot } from "./echo";
+import { ECHO_BOT_COMMANDS, startEchoBot } from "./echo";
 import { failureLine } from "./failure-line";
 
 // `sign-in <handle>` signs the bot's account in once; `run` answers in the workspaces it was installed in. Both serve the
@@ -38,9 +38,9 @@ async function run(oauth: NodeOAuthClient, settings: EchoBotConfig): Promise<voi
   if (settings.workspaces.length === 0) throw new Error("ECHO_BOT_WORKSPACES lists the workspaces the bot was installed in.");
   const server = await serve(oauth, settings, () => undefined);
   const transport = nodeTransport(await oauth.restore(settings.did), { plcUrl: settings.plcUrl, loopback: new URL(settings.appUrl).protocol === "http:" });
-  const engine = createEngine(transport, { operator: { serviceRef: settings.operatorServiceRef, endpoint: settings.operatorUrl } });
+  const engine = createEngine(transport, { applyOwnWrites: false, operator: { serviceRef: settings.operatorServiceRef, endpoint: settings.operatorUrl } });
   if (!engine.operator) throw new Error("The engine has no operator.");
-  await publishAppDeclaration(transport, { name: "Echo", description: "Answers each message with its text." });
+  await publishAppDeclaration(transport, { name: "Echo", description: "Answers each message with its text.", commands: ECHO_BOT_COMMANDS });
   const controller = new AbortController();
   for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => controller.abort());
   await startEchoBot({

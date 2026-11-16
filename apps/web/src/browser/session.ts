@@ -1,6 +1,8 @@
 import type { AtprotoDid, HandleResolver, OAuthSession } from "@atproto/oauth-client-browser";
 import { buildBrowserClientMetadata } from "./client-metadata";
 import { readUpstreamText } from "@flock/protocol/bounded-json";
+import { SPACE_TYPE, type SpaceType } from "@flock/protocol/nsids";
+import { spaceCollections } from "@flock/protocol/registry";
 
 /** What the browser session is built from: the app's origin, the PLC, the one grant, and the operator (its DID and where it serves). */
 export type BrowserSessionConfig = { appUrl: string; plcUrl: string; scope: string; serviceRef: string; operatorUrl: string; loopback: boolean };
@@ -109,17 +111,111 @@ export async function restoreSession(config: BrowserSessionConfig): Promise<OAut
   const session = await initialized(config);
   if (!session) return null;
   const { scope } = await session.getTokenInfo(false);
-  return missingScopes(scope, config.scope).length > 0 ? null : session;
+  return missingScopes(scope, config.scope, session.did).length > 0 ? null : session;
+}
+
+type ReducedSpaceScope = {
+  spaceType: string;
+  authority: string;
+  skey: string;
+  actions: ReadonlySet<string>;
+  manage: ReadonlySet<string>;
+  collections: ReadonlySet<string>;
+};
+
+const KNOWN_SPACE_TYPES: ReadonlySet<string> = new Set(Object.values(SPACE_TYPE));
+const SPACE_PARAM_KEYS: ReadonlySet<string> = new Set(["authority", "skey", "collection", "action", "manage"]);
+const VALID_SPACE_ACTIONS: ReadonlySet<string> = new Set(["read_self", "read", "create", "update", "delete"]);
+const VALID_MANAGE_OPS: ReadonlySet<string> = new Set(["create", "update", "delete"]);
+
+function reduceSpaceScope(token: string, accountDid: string): ReducedSpaceScope | null {
+  if (!token.startsWith("space:")) return null;
+  const body = token.slice("space:".length);
+  const queryIndex = body.indexOf("?");
+  const spaceType = queryIndex === -1 ? body : body.slice(0, queryIndex);
+  const query = queryIndex === -1 ? "" : body.slice(queryIndex + 1);
+  if (!spaceType || query.includes("?")) return null;
+
+  const params = new URLSearchParams(query);
+  for (const key of params.keys()) {
+    if (!SPACE_PARAM_KEYS.has(key)) return null;
+  }
+  if (params.getAll("authority").length > 1 || params.getAll("skey").length > 1) return null;
+
+  const rawAuthority = params.get("authority") ?? "self";
+  if (!rawAuthority) return null;
+  const authority = rawAuthority === "*"
+    ? "*"
+    : rawAuthority === "self" || rawAuthority === accountDid
+      ? "account"
+      : `did:${rawAuthority}`;
+
+  const skey = params.get("skey") ?? "*";
+  if (!skey) return null;
+
+  const rawActions = params.getAll("action");
+  const actionList = rawActions.length > 0 ? rawActions : ["read", "create", "update", "delete"];
+  if (actionList.some((action) => !VALID_SPACE_ACTIONS.has(action))) return null;
+  const actions = new Set(actionList);
+  if (actions.has("read")) actions.add("read_self");
+
+  const rawManage = params.getAll("manage");
+  if (rawManage.some((op) => !VALID_MANAGE_OPS.has(op))) return null;
+  const manage = new Set(rawManage);
+
+  const rawCollections = params.getAll("collection");
+  if (rawCollections.some((collection) => !collection)) return null;
+  const collections = rawCollections.length > 0
+    ? new Set(rawCollections)
+    : KNOWN_SPACE_TYPES.has(spaceType)
+      ? new Set(spaceCollections(spaceType as SpaceType))
+      : new Set([`__all__:${spaceType}`]);
+
+  return { spaceType, authority, skey, actions, manage, collections };
+}
+
+function coversSpaceScope(granted: ReducedSpaceScope, requested: ReducedSpaceScope): boolean {
+  if (granted.spaceType !== "*" && granted.spaceType !== requested.spaceType) return false;
+  if (granted.authority !== "*" && granted.authority !== requested.authority) return false;
+  if (granted.skey !== "*" && granted.skey !== requested.skey) return false;
+  for (const action of requested.actions) {
+    if (!granted.actions.has(action)) return false;
+  }
+  for (const op of requested.manage) {
+    if (!granted.manage.has(op)) return false;
+  }
+  if (granted.collections.has("*")) return true;
+  for (const collection of requested.collections) {
+    if (!granted.collections.has(collection)) return false;
+  }
+  return true;
 }
 
 /**
- * The scope tokens in `required` that `granted` does not contain. `space:` tokens are not compared: the PDS rewrites them when it
- * grants them (`authority=self` becomes the account's DID, and a read grant gains the collection list), so a granted token never
- * equals the requested one. The other tokens (`atproto`, `repo:`, `rpc:`) are returned as requested.
+ * The scope tokens in `required` that `granted` does not cover for `accountDid`. Non-`space:` tokens (`atproto`, `repo:`,
+ * `rpc:`) must be present verbatim; each `space:` token is reduced to its space type, authority (`*` or the account itself for
+ * `self` / `accountDid`), `skey`, actions, `manage` ops and collections (expanding collectionless tokens with
+ * `spaceCollections`), and must be covered whole by at least one granted `space:` token.
  */
-export function missingScopes(granted: string, required: string): string[] {
-  const have = new Set(granted.split(/\s+/).filter(Boolean));
-  return required.split(/\s+/).filter((token) => token !== "" && !token.startsWith("space:")).filter((token) => !have.has(token));
+export function missingScopes(granted: string, required: string, accountDid: string): string[] {
+  const grantedTokens = granted.split(/\s+/).filter(Boolean);
+  const haveExact = new Set(grantedTokens);
+  const grantedSpaces = grantedTokens
+    .filter((token) => token.startsWith("space:"))
+    .flatMap((token) => {
+      const reduced = reduceSpaceScope(token, accountDid);
+      return reduced ? [reduced] : [];
+    });
+
+  return required
+    .split(/\s+/)
+    .filter(Boolean)
+    .filter((token) => {
+      if (!token.startsWith("space:")) return !haveExact.has(token);
+      const requested = reduceSpaceScope(token, accountDid);
+      if (!requested) return true;
+      return !grantedSpaces.some((candidate) => coversSpaceScope(candidate, requested));
+    });
 }
 
 /** Signs the account out of this browser: its session is revoked at its host. */

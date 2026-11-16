@@ -275,6 +275,7 @@ test("isAccessLost recognizes authorization failures and a deleted space, not a 
   assert.equal(isSpaceDeleted(new SpaceCredentialError("denied", 403, "UserNotAuthorized")), false);
   assert.equal(isSpaceDeleted({ status: 410 }), false, "only the authority's SpaceDeleted answer counts, not any 410");
   assert.equal(isAccessLost({ status: 403 }), true);
+  assert.equal(isAccessLost(new XrpcError(403, 'Missing required scope "space:new.flock.app.inbox"', "ScopeMissingError")), false, "a missing OAuth scope is not lost space access");
   assert.equal(isAccessLost({ status: 404 }), false, "a record read that is not found is only a missing record");
   assert.equal(isAccessLost(new Error("boom")), false);
 });

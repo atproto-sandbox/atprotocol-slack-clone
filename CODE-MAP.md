@@ -124,9 +124,13 @@ packages/                 Libraries. protocol and client run in a browser: they 
                               bracketed refresh, backfill, set-aside writers, bounds, completeness.
     src/lifecycle.ts         When held copies stop being served: lost access, deletion, unlisted workspaces, archived
                               channels, the retention sweep (sign-out deletes the whole store: apps/web/src/browser/sign-out.ts).
-    src/channel-client.ts, src/workspace-client.ts, src/operator-client.ts
+    src/channel-client.ts, src/workspace-client.ts, src/app-inbox-client.ts, src/operator-client.ts
                              The member's operations, each rule of the route table owned here; engine.ts wires them.
+                              app-inbox-client.ts sends/retracts commands and clicks for members and syncs inboxes for apps.
                               operator-client.ts calls every operator method, reusing one long-poll token for getChanges.
+    src/blocks.ts, src/key-window.ts
+                             Typed block constructors, synchronous validateMessageInput over the registry, and the shared
+                              writer-key window used by channel messages and app-inbox records alike.
     src/feed.ts              ChangeFollower: follows spaces through getChanges in the order that loses nothing (head, sync,
                               follow), syncs changed and reset spaces, mints afresh for denied ones, and backs off a round
                               that could not finish.
@@ -134,9 +138,10 @@ packages/                 Libraries. protocol and client run in a browser: they 
                               redirects and a bounded body, cached; an account's PDS endpoint, KEM key and handle.
     src/session-transport.ts The engine's transport for an account's OAuth session, the browser's and a Node app's alike;
                               they differ only in the fetch they pass.
-    src/app-runtime.ts       An app's runtime (R9): runApp follows the channels its install grants it in each workspace it
-                              is told, gives it each new message from a person once (never an app's), follows grant
-                              changes, and reports every failure; appGrantScope, publishAppDeclaration.
+    src/app-runtime.ts       An app's runtime (R9, R10b): runApp follows the channels and app inboxes its install grants it
+                              in each workspace it is told, gives it each new message, slash command and button click from a
+                              person once (verified against fresh workspace and private-roster state, and throttled per
+                              author), follows grant changes, and reports every failure; appGrantScope, publishAppDeclaration.
     src/node/                The client's only Node code (`@flock/client/node/*`, outside the browser lint rules and the
                               no-Node typecheck; browser code may not import it): transport.ts (the session transport with
                               every host reached through @flock/net) and oauth.ts (an app's OAuth client: confidential private_key_jwt
@@ -179,7 +184,8 @@ apps/
                               use-channel-content.ts, use-admin-views.ts; selection.ts derives what is shown.
                               apps-panel.tsx is the admins' view of the workspace's apps (install only an account that
                               declares itself one, change access, remove after saying its messages leave the view);
-                              channel-view.tsx marks an installed app's messages "APP".
+                              channel-view.tsx marks an installed app's messages "APP", renders app blocks and dispatches
+                              slash commands and button clicks through interactions.ts.
     src/browser/             The account's browser session (R6a, R6c): one OAuth grant through
                               @atproto/oauth-client-browser (session.ts: one client and one init per page, signIn,
                               signOut), sign-out (sign-out.ts: deletes the account's store and DM state and revokes the
