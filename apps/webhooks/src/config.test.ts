@@ -18,11 +18,13 @@ test("readWebhooksConfig derives port, loopback host, workspaces, and a separate
   assert.equal(cfg.host, "127.0.0.1");
   assert.equal(cfg.port, 3003);
   assert.equal(cfg.loopback, true);
+  assert.equal(cfg.trustProxy, false);
   assert.equal(cfg.hooksFile, "./.webhooks-session.json.hooks.json");
   assert.deepEqual(cfg.workspaces, [
     "at://did:plc:a/space/new.flock.workspace/acme",
     "at://did:plc:b/space/new.flock.workspace/beta",
   ]);
+  assert.equal(readWebhooksConfig({ ...BASE, WEBHOOKS_TRUST_PROXY: "true" }).trustProxy, true);
 });
 
 test("readWebhooksConfig refuses plain http off loopback, https without keys, and sharing stateFile with hooksFile", () => {

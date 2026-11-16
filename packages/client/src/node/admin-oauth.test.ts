@@ -80,3 +80,61 @@ test("createAdminIdentityOAuth serves public keys only and blocks private-addres
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
+
+test("completeSignIn enforces matching pending state and appState and revokes the identity session immediately", async () => {
+  const oauth = await createAdminIdentityOAuth({
+    appUrl: "http://127.0.0.1:3003",
+    keys: [],
+    name: "Webhooks Admin",
+    plcUrl: "http://127.0.0.1:2584",
+  });
+
+  let callbackCalls = 0;
+  let signOutCalls = 0;
+  let nextReturnedAppState = "app-ok";
+  (oauth.client as unknown as { callback: (params: URLSearchParams) => Promise<unknown> }).callback = async (params) => {
+    callbackCalls += 1;
+    const state = params.get("state")!;
+    await oauth.states.del(state);
+    return {
+      session: {
+        did: "did:plc:verifiedadmin",
+        signOut: async () => {
+          signOutCalls += 1;
+        },
+      },
+      state: nextReturnedAppState,
+    };
+  };
+
+  // 1. Missing or mismatched pending state is refused BEFORE calling client.callback.
+  await oauth.states.set("p-state-1", { appState: "app-ok" } as never);
+  await assert.rejects(
+    oauth.completeSignIn(new URLSearchParams({ code: "c", state: "wrong-state" }), { state: "p-state-1", appState: "app-ok" }),
+    /missing, expired, or does not match/,
+  );
+  await assert.rejects(
+    oauth.completeSignIn(new URLSearchParams({ code: "c", state: "p-state-1" }), { state: "p-state-1", appState: "wrong-app" }),
+    /missing, expired, or does not match/,
+  );
+  assert.equal(callbackCalls, 0);
+
+  // 2. Callback returning a mismatched appState rejects AND still revokes the session via signOut().
+  nextReturnedAppState = "tampered-app-state";
+  await assert.rejects(
+    oauth.completeSignIn(new URLSearchParams({ code: "c", state: "p-state-1" }), { state: "p-state-1", appState: "app-ok" }),
+    /did not match this browser/,
+  );
+  assert.equal(callbackCalls, 1);
+  assert.equal(signOutCalls, 1, "identity session is signed out even when callback state check fails");
+
+  // 3. Valid callback returns the verified DID and revokes the OAuth session immediately.
+  await oauth.states.set("p-state-2", { appState: "app-ok-2" } as never);
+  nextReturnedAppState = "app-ok-2";
+  const completed = await oauth.completeSignIn(new URLSearchParams({ code: "c", state: "p-state-2" }), {
+    state: "p-state-2",
+    appState: "app-ok-2",
+  });
+  assert.deepEqual(completed, { did: "did:plc:verifiedadmin" });
+  assert.equal(signOutCalls, 2, "identity session is revoked immediately after callback");
+});

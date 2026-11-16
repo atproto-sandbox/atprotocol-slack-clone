@@ -1,8 +1,9 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { isIP } from "node:net";
 import { validateMessageInput, type MessageBlock } from "@flock/client/blocks";
 import type { Engine } from "@flock/client/engine";
-import { ChannelUnavailableError, isAccessLost } from "@flock/client/errors";
-import { ADMIN_OAUTH_PATHS, PendingSignInCapError, type AdminIdentityOAuth } from "@flock/client/node/admin-oauth";
+import { ChannelUnavailableError, isAccessLost, WorkspaceEnvelopeError } from "@flock/client/errors";
+import { ADMIN_OAUTH_PATHS, ADMIN_STATE_TTL_MS, PendingSignInCapError, type AdminIdentityOAuth } from "@flock/client/node/admin-oauth";
 import { answerAppOAuthRoute, type NodeOAuthClient } from "@flock/client/node/oauth";
 import type { WorkspaceSummary } from "@flock/client/workspace-client";
 import {
@@ -19,7 +20,7 @@ import {
   verifySessionCookie,
 } from "./cookies";
 import { failureLine } from "./failure-line";
-import type { HooksStore } from "./hooks-store";
+import { MAX_HOOKS_PER_WORKSPACE, type HooksStore } from "./hooks-store";
 import {
   renderAdminDashboard,
   renderAuthorizeLinkPage,
@@ -33,6 +34,7 @@ import { RateLimiter } from "./rate-limit";
 
 export const ADMIN_CSP = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'";
 export const MAX_HOOK_BODY_BYTES = 64 * 1024;
+export const DEFAULT_LOGIN_PER_ADDRESS = 10;
 const MAX_FORM_BODY_BYTES = 16 * 1024;
 
 const ADMIN_SECURITY_HEADERS: Readonly<Record<string, string>> = {
@@ -59,14 +61,17 @@ export type WebhooksHandlerDeps = {
   hooks: HooksStore;
   adminOAuth: AdminIdentityOAuth;
   appOAuth?: NodeOAuthClient;
+  trustProxy?: boolean;
   cookieKey?: Buffer;
   now?: () => number;
   onError?: (error: unknown) => void;
   limits?: {
     loginPerAddress?: number;
+    loginWindowMs?: number;
     failedHooksPerAddress?: number;
     failedHooksTotal?: number;
     validHookPerMinute?: number;
+    maxHooksPerWorkspace?: number;
     windowMs?: number;
   };
 };
@@ -74,12 +79,21 @@ export type WebhooksHandlerDeps = {
 export function createWebhooksHandler(deps: WebhooksHandlerDeps): (request: IncomingMessage, response: ServerResponse) => void {
   const origin = new URL(deps.appUrl).origin;
   const secureCookies = new URL(deps.appUrl).protocol === "https:";
+  const trustProxy = deps.trustProxy === true;
   const cookieKey = deps.cookieKey ?? createProcessCookieKey();
   const now = deps.now ?? Date.now;
   const onError = deps.onError ?? ((error) => process.stderr.write(failureLine(error)));
   const windowMs = deps.limits?.windowMs ?? 60_000;
+  const loginWindowMs = deps.limits?.loginWindowMs ?? ADMIN_STATE_TTL_MS;
+  const maxHooksPerWorkspace = deps.limits?.maxHooksPerWorkspace ?? MAX_HOOKS_PER_WORKSPACE;
 
-  const loginLimiter = new RateLimiter({ max: deps.limits?.loginPerAddress ?? 15, windowMs, now });
+  // Sized over the pending sign-in lifetime (`ADMIN_STATE_TTL_MS`, 10 minutes) with a sliding window so a single client
+  // address can hold at most `DEFAULT_LOGIN_PER_ADDRESS` (10) pending states, strictly below `MAX_PENDING_ADMIN_STATES` (100).
+  const loginLimiter = new RateLimiter({
+    max: deps.limits?.loginPerAddress ?? DEFAULT_LOGIN_PER_ADDRESS,
+    windowMs: loginWindowMs,
+    now,
+  });
   const failedPerAddress = new RateLimiter({ max: deps.limits?.failedHooksPerAddress ?? 30, windowMs, now });
   const failedGlobal = new RateLimiter({ max: deps.limits?.failedHooksTotal ?? 300, windowMs, now });
   const perHookLimiter = new RateLimiter({ max: deps.limits?.validHookPerMinute ?? 30, windowMs, now });
@@ -190,7 +204,7 @@ export function createWebhooksHandler(deps: WebhooksHandlerDeps): (request: Inco
     const matchedHook = await deps.hooks.verifySecret(id, secret);
     if (!matchedHook) {
       request.resume();
-      const addressAllowed = failedPerAddress.admit(clientAddress(request));
+      const addressAllowed = failedPerAddress.admit(clientAddress(request, trustProxy));
       const totalAllowed = failedGlobal.admit("global");
       if (!addressAllowed || !totalAllowed) {
         sendJson(response, 429, { error: "RateLimitExceeded" });
@@ -232,6 +246,11 @@ export function createWebhooksHandler(deps: WebhooksHandlerDeps): (request: Inco
       return;
     }
 
+    if (!deps.workspaces.includes(matchedHook.workspace)) {
+      sendNotFound(response);
+      return;
+    }
+
     // Fresh write-grant and channel-visibility check BEFORE posting.
     const summary = await readFreshSummary(matchedHook.workspace);
     const ownInstall = summary?.installs.find((install) => install.did === deps.appDid);
@@ -264,9 +283,9 @@ export function createWebhooksHandler(deps: WebhooksHandlerDeps): (request: Inco
       sendHtml(response, 403, renderErrorPage("Forbidden", "Origin check failed."));
       return;
     }
-    if (!loginLimiter.admit(clientAddress(request))) {
+    if (!loginLimiter.admit(clientAddress(request, trustProxy))) {
       request.resume();
-      sendHtml(response, 429, renderLoginPage({ error: "Too many sign-in attempts from this address. Wait a minute and try again." }));
+      sendHtml(response, 429, renderLoginPage({ error: "Too many sign-in attempts from this address. Wait a few minutes and try again." }));
       return;
     }
     const form = await readFormBody(request);
@@ -423,6 +442,19 @@ export function createWebhooksHandler(deps: WebhooksHandlerDeps): (request: Inco
         );
         return;
       }
+      if ((await deps.hooks.listActiveForWorkspace(workspaceUri)).length >= maxHooksPerWorkspace) {
+        sendHtml(
+          response,
+          400,
+          renderAdminDashboard({
+            did: session.did,
+            csrf: session.csrf,
+            workspaces,
+            error: `This workspace already has the maximum of ${maxHooksPerWorkspace} active webhooks.`,
+          }),
+        );
+        return;
+      }
       const created = await deps.hooks.create({
         workspace: workspaceUri,
         channelSkey: channel.skey,
@@ -569,7 +601,9 @@ export function createWebhooksHandler(deps: WebhooksHandlerDeps): (request: Inco
                 admitted: viewerDid === summary.authorityDid || members.includes(viewerDid),
               }))
               .catch((error: unknown): { readable: false } => {
-                if (error instanceof ChannelUnavailableError || isAccessLost(error)) return { readable: false };
+                if (error instanceof ChannelUnavailableError || error instanceof WorkspaceEnvelopeError || isAccessLost(error)) {
+                  return { readable: false };
+                }
                 throw error;
               });
           }
@@ -594,7 +628,9 @@ export function createWebhooksHandler(deps: WebhooksHandlerDeps): (request: Inco
       for (const hook of storedHooks) {
         const dir = directory.get(hook.channelSkey);
         const channelName = dir?.name ?? hook.channelName;
-        const isPrivate = dir ? dir.visibility === "private" : hook.privateChannel;
+        const isPrivate = dir
+          ? dir.visibility === "private" || (dir.visibility === "transitioning" && hook.privateChannel)
+          : hook.privateChannel;
         const writeGrant = grants.get(hook.channelSkey);
 
         if (isPrivate) {
@@ -739,8 +775,66 @@ function hasSameOriginHeader(request: IncomingMessage, expectedOrigin: string): 
   return typeof request.headers.origin === "string" && request.headers.origin === expectedOrigin;
 }
 
-function clientAddress(request: IncomingMessage): string {
-  return request.socket.remoteAddress ?? "unknown";
+export function normalizeClientAddress(raw: string): string {
+  const trimmed = raw.trim();
+  const mappedPrefix = "::ffff:";
+  const candidate = trimmed.toLowerCase().startsWith(mappedPrefix) ? trimmed.slice(mappedPrefix.length) : trimmed;
+  const version = isIP(candidate);
+  if (version === 4) return candidate;
+  if (version === 6) {
+    const groups = expandIpv6(candidate);
+    if (!groups) return candidate.toLowerCase();
+    if (groups.slice(0, 7).every((g) => g === "0000") && groups[7] === "0001") return "::1";
+    return `${groups[0]}:${groups[1]}:${groups[2]}:${groups[3]}::/64`;
+  }
+  return trimmed || "unknown";
+}
+
+function expandIpv6(address: string): string[] | null {
+  const withoutZone = address.split("%")[0]!;
+  const halves = withoutZone.split("::");
+  if (halves.length > 2) return null;
+  const parsePart = (part: string): string[] | null => {
+    if (!part) return [];
+    const tokens = part.split(":");
+    const out: string[] = [];
+    for (const token of tokens) {
+      if (token.includes(".")) {
+        if (isIP(token) !== 4) return null;
+        const octets = token.split(".").map((n) => Number(n));
+        out.push(((octets[0]! << 8) | octets[1]!).toString(16).padStart(4, "0"));
+        out.push(((octets[2]! << 8) | octets[3]!).toString(16).padStart(4, "0"));
+      } else {
+        out.push(token.toLowerCase().padStart(4, "0"));
+      }
+    }
+    return out;
+  };
+  const left = parsePart(halves[0] ?? "");
+  const right = halves.length === 2 ? parsePart(halves[1] ?? "") : [];
+  if (!left || !right) return null;
+  if (halves.length === 1) return left.length === 8 ? left : null;
+  const missing = 8 - (left.length + right.length);
+  if (missing < 1) return null;
+  return [...left, ...Array.from({ length: missing }, () => "0000"), ...right];
+}
+
+function clientAddress(request: IncomingMessage, trustProxy: boolean): string {
+  if (trustProxy) {
+    const xff = request.headers["x-forwarded-for"];
+    const headerValue = Array.isArray(xff) ? xff.at(-1) : xff;
+    if (typeof headerValue === "string") {
+      const entries = headerValue.split(",").map((part) => part.trim()).filter(Boolean);
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const entry = entries[i]!;
+        const candidate = entry.toLowerCase().startsWith("::ffff:") ? entry.slice(7) : entry;
+        if (isIP(candidate) !== 0) {
+          return normalizeClientAddress(entry);
+        }
+      }
+    }
+  }
+  return normalizeClientAddress(request.socket.remoteAddress ?? "unknown");
 }
 
 function mediaType(contentType: string | undefined): string {

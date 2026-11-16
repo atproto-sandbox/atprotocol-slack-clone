@@ -1,13 +1,18 @@
 const DEFAULT_WINDOW_MS = 60_000;
 const MAX_TRACKED_KEYS = 10_000;
 
+type Bucket = {
+  timestamps: number[];
+  head: number;
+};
+
 /**
- * Bounded per-key window rate limiter. Expired buckets are pruned on access, and if more than `MAX_TRACKED_KEYS` active keys
- * accumulate (for instance, spoofed client addresses behind a misconfigured network), the oldest entry is evicted so memory
- * stays bounded.
+ * Bounded per-key sliding-window rate limiter. Stores timestamps per key (up to `max` active entries per key) so callers
+ * cannot burst `2 * max` across a fixed-window boundary, and caps active keys at `MAX_TRACKED_KEYS` by evicting expired or
+ * oldest buckets.
  */
 export class RateLimiter {
-  private readonly buckets = new Map<string, { startedAt: number; count: number }>();
+  private readonly buckets = new Map<string, Bucket>();
   private readonly maxCount: number;
   private readonly windowMs: number;
   private readonly now: () => number;
@@ -19,24 +24,48 @@ export class RateLimiter {
   }
 
   admit(key: string): boolean {
+    if (this.maxCount <= 0) return false;
     const now = this.now();
-    const existing = this.buckets.get(key);
-    if (existing && now - existing.startedAt < this.windowMs && now >= existing.startedAt) {
-      if (existing.count >= this.maxCount) return false;
-      existing.count += 1;
+    let bucket = this.buckets.get(key);
+    if (bucket) {
+      this.pruneBucket(bucket, now);
+      if (bucket.timestamps.length - bucket.head >= this.maxCount) {
+        return false;
+      }
+      if (bucket.head >= 32 && bucket.head * 2 >= bucket.timestamps.length) {
+        bucket.timestamps = bucket.timestamps.slice(bucket.head);
+        bucket.head = 0;
+      }
+      bucket.timestamps.push(now);
       return true;
     }
-    this.buckets.delete(key);
+
     if (this.buckets.size >= MAX_TRACKED_KEYS) {
       for (const [candidate, entry] of this.buckets) {
-        if (now - entry.startedAt >= this.windowMs || now < entry.startedAt) this.buckets.delete(candidate);
+        this.pruneBucket(entry, now);
+        if (entry.head >= entry.timestamps.length) {
+          this.buckets.delete(candidate);
+        }
       }
       if (this.buckets.size >= MAX_TRACKED_KEYS) {
         const oldest = this.buckets.keys().next().value;
         if (oldest !== undefined) this.buckets.delete(oldest);
       }
     }
-    this.buckets.set(key, { startedAt: now, count: 1 });
+
+    bucket = { timestamps: [now], head: 0 };
+    this.buckets.set(key, bucket);
     return true;
+  }
+
+  private pruneBucket(bucket: Bucket, now: number): void {
+    while (bucket.head < bucket.timestamps.length) {
+      const ts = bucket.timestamps[bucket.head]!;
+      if (now - ts >= this.windowMs || now < ts) {
+        bucket.head += 1;
+      } else {
+        break;
+      }
+    }
   }
 }

@@ -1,4 +1,5 @@
 export { isAccessLost } from "@flock/protocol/atproto/space-credential-core";
+export { WorkspaceEnvelopeError } from "@flock/protocol/workspace-summary";
 
 /** A channel the directory marks as transitioning or archived: no new reads or writes until it is public or private again. */
 export class ChannelUnavailableError extends Error {

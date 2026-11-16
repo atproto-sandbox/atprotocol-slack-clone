@@ -70,6 +70,7 @@ async function run(oauth: NodeOAuthClient, settings: WebhooksConfig): Promise<vo
       hooks,
       adminOAuth,
       appOAuth: oauth,
+      trustProxy: settings.trustProxy,
       onError: (error) => {
         process.stderr.write(failureLine(error));
         if (isSessionLost(error)) {

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
@@ -57,4 +57,17 @@ test("HooksStore narrows overly wide permissions and refuses symlinks", async ()
   const link = join(directory, "linked-hooks.json");
   symlinkSync(plain, link);
   await assert.rejects(new HooksStore(link).listActiveForWorkspace(WORKSPACE), /plain file, not a link/);
+
+  // Once warmed up, verifySecret serves from the in-memory cache without re-reading disk on every unauthenticated call.
+  const cachedPath = join(directory, "cached-hooks.json");
+  const cachedStore = new HooksStore(cachedPath);
+  const { hook, secret } = await cachedStore.create({
+    workspace: WORKSPACE,
+    channelSkey: "acme-general",
+    channelName: "general",
+    privateChannel: false,
+    createdBy: "did:plc:admin",
+  });
+  unlinkSync(cachedPath);
+  assert.equal((await cachedStore.verifySecret(hook.id, secret))?.id, hook.id, "serves from memory cache without disk read");
 });

@@ -6,6 +6,8 @@ const DUMMY_DIGEST = createHash("sha256").update("flock-webhooks-dummy-secret", 
 const HOOK_ID_PATTERN = /^[A-Za-z0-9_-]{22}$/;
 const SECRET_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 
+export const MAX_HOOKS_PER_WORKSPACE = 100;
+
 export type StoredHook = {
   id: string;
   workspace: string;
@@ -22,11 +24,12 @@ export type StoredHook = {
 /**
  * Owner-only (`0o600`), symlink-refusing, atomic JSON store for incoming webhook metadata, stored beside (never inside) the
  * app's OAuth state file. Only `sha256(secret)` is ever written to disk; plaintext secrets exist only in the return value of
- * `create` and `rotate`.
+ * `create` and `rotate`. Parsed entries are cached in memory after the first read and updated atomically on `change()`.
  */
 export class HooksStore {
   private queue: Promise<unknown> = Promise.resolve();
   private leftovers?: Promise<void>;
+  private cached?: Record<string, StoredHook>;
 
   constructor(
     private readonly path: string,
@@ -120,6 +123,7 @@ export class HooksStore {
   }
 
   private async readAll(): Promise<Record<string, StoredHook>> {
+    if (this.cached) return this.cached;
     await (this.leftovers ??= this.clearLeftovers());
     try {
       const file = await lstat(this.path);
@@ -129,10 +133,13 @@ export class HooksStore {
       const raw = parsed.hooks ?? {};
       const clean: Record<string, StoredHook> = Object.create(null) as Record<string, StoredHook>;
       for (const [key, value] of Object.entries(raw)) clean[key] = value;
+      this.cached = clean;
       return clean;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        return Object.create(null) as Record<string, StoredHook>;
+        const empty = Object.create(null) as Record<string, StoredHook>;
+        this.cached = empty;
+        return empty;
       }
       throw error;
     }
@@ -150,12 +157,15 @@ export class HooksStore {
 
   private change(apply: (hooks: Record<string, StoredHook>) => void): Promise<void> {
     const next = this.queue.then(async () => {
-      const hooks = await this.readAll();
-      apply(hooks);
+      const current = await this.readAll();
+      const working: Record<string, StoredHook> = Object.create(null) as Record<string, StoredHook>;
+      for (const [key, value] of Object.entries(current)) working[key] = value;
+      apply(working);
       const temporary = `${this.path}.${randomUUID()}.tmp`;
       try {
-        await writeFile(temporary, JSON.stringify({ hooks }), { mode: 0o600, flag: "wx" });
+        await writeFile(temporary, JSON.stringify({ hooks: working }), { mode: 0o600, flag: "wx" });
         await rename(temporary, this.path);
+        this.cached = working;
       } catch (error) {
         await unlink(temporary).catch(() => undefined);
         throw error;

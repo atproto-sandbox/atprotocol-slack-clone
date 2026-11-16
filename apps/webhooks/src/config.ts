@@ -9,6 +9,7 @@ export type WebhooksConfig = {
   host: string | undefined;
   port: number;
   loopback: boolean;
+  trustProxy: boolean;
   keys: Jwk[];
   stateFile: string;
   hooksFile: string;
@@ -47,6 +48,7 @@ export function readWebhooksConfig(env: Readonly<Record<string, string | undefin
     host: loopback ? appUrl.hostname.replace(/^\[|\]$/g, "") : undefined,
     port,
     loopback,
+    trustProxy: env.WEBHOOKS_TRUST_PROXY?.trim() === "true",
     keys,
     stateFile,
     hooksFile,
