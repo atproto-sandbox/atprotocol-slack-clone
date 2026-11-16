@@ -84,10 +84,19 @@ export class WorkspaceDeclarationCache {
   forWorkspace(workspaceUri: string, installDids: readonly string[]): WorkspaceDeclarations {
     const map = this.entries.get(workspaceUri);
     const snapshot: Record<string, AppDeclarationEntry> = {};
+    if (map) {
+      for (const [did, entry] of map) snapshot[did] = entry;
+    }
     for (const did of installDids) {
-      snapshot[did] = map?.get(did) ?? { status: "loading" };
+      snapshot[did] ??= { status: "loading" };
     }
     return snapshot;
+  }
+
+  snapshotOf(workspaceUri: string): WorkspaceDeclarations {
+    const map = this.entries.get(workspaceUri);
+    if (!map) return {};
+    return Object.fromEntries(map);
   }
 
   private setEntry(workspaceUri: string, did: string, entry: AppDeclarationEntry): void {
@@ -118,12 +127,9 @@ export function channelCommandContext(input: {
     return { canOffer: false, loading: false, offered: [] };
   }
   if (content?.refused) return { canOffer: false, loading: false, offered: [] };
-  if (
-    channel.visibility === "private" &&
-    viewerDid !== workspace.authorityDid &&
-    !(content?.roster?.includes(viewerDid) ?? false)
-  ) {
-    return { canOffer: false, loading: false, offered: [] };
+  if (channel.visibility === "private" && viewerDid !== workspace.authorityDid) {
+    if (content === undefined) return { canOffer: true, loading: true, offered: [] };
+    if (!(content.roster?.includes(viewerDid) ?? false)) return { canOffer: false, loading: false, offered: [] };
   }
   if (replyTo !== "") {
     const target = (content?.messages ?? []).find((message) => message.uri === replyTo);

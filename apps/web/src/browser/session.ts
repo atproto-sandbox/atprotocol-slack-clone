@@ -148,7 +148,7 @@ function reduceSpaceScope(token: string, accountDid: string): ReducedSpaceScope 
     ? "*"
     : rawAuthority === "self" || rawAuthority === accountDid
       ? "account"
-      : `did:${rawAuthority}`;
+      : `foreign:${rawAuthority}`;
 
   const skey = params.get("skey") ?? "*";
   if (!skey) return null;

@@ -15,7 +15,9 @@ import { transportNow, type ClientTransport } from "./transport";
 
 const MAX_DISCOVERABLE_WORKSPACES = 1_000;
 const MAX_INBOX_WRITERS = 2_000;
-const MAX_DECLARATION_BYTES = MAX_RECORD_BYTES;
+// Allows the `com.atproto.repo.getRecord` `{ uri, cid, value }` wrapper around a full 64 KiB declaration record;
+// `validateAppDeclaration` still enforces `MAX_RECORD_BYTES` on `value` itself.
+const MAX_DECLARATION_BYTES = MAX_RECORD_BYTES + 4 * 1024;
 
 /** A slash command an app advertises in its public declaration. */
 export type DeclaredCommand = { name: string; description?: string; usage?: string };

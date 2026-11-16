@@ -64,8 +64,10 @@ export function ChannelView(props: ChannelViewProps) {
 
   function handleTextChange(next: string) {
     const bounded = Array.from(next).slice(0, 10_000).join("");
+    const prevToken = messageText.startsWith("/") && !messageText.startsWith("//") ? (messageText.slice(1).split(/\s+/)[0] ?? "") : "";
+    const nextToken = bounded.startsWith("/") && !bounded.startsWith("//") ? (bounded.slice(1).split(/\s+/)[0] ?? "") : "";
     setMessageText(bounded);
-    if (chosenCommandApp && !bounded.startsWith("/")) setChosenCommandApp(null);
+    if (chosenCommandApp && (!nextToken || nextToken !== prevToken)) setChosenCommandApp(null);
   }
 
   function chooseCommand(commandName: string, appDid: string) {

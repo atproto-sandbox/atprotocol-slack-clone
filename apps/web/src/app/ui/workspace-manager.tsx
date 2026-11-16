@@ -103,11 +103,11 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
     const workspaceUri = activeWorkspace.uri;
     const installDids = activeWorkspace.installs.map((install) => install.did);
     const syncSnapshot = () => {
-      const next = cache.forWorkspace(workspaceUri, installDids);
+      const next = cache.snapshotOf(workspaceUri);
       setDeclarationsByWorkspace((current) => ({ ...current, [workspaceUri]: next }));
     };
-    syncSnapshot();
     cache.ensureWorkspace(workspaceUri, installDids, (appDid) => engine.workspaces.appDeclaration(appDid), syncSnapshot);
+    syncSnapshot();
   }, [engine, activeWorkspace]);
 
   /** Empties what a person was typing in the open channel, and whether they had asked to join it. */

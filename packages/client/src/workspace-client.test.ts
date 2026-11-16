@@ -170,9 +170,9 @@ test("appDeclaration reads 25 commands at their maximum bounds (~42 KiB) and rej
   network.createAccount(ALICE, "pds1");
   network.createAccount(appDid, "pds2");
   const commands = Array.from({ length: 25 }, (_, index) => ({
-    name: `cmd-${index}-${"a".repeat(20)}`,
-    description: "é".repeat(300),
-    usage: "x".repeat(100),
+    name: `cmd-${String(index).padStart(2, "0")}-${"a".repeat(25)}`,
+    description: "👍".repeat(300),
+    usage: "👍".repeat(100),
   }));
   const base = transportFor(network, ALICE);
   let storedRecord: Record<string, unknown> = {

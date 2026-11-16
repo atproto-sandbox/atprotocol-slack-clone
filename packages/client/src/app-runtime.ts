@@ -172,7 +172,7 @@ export async function runApp(input: AppRuntimeInput & { signal: AbortSignal }): 
 }
 
 type Grant = { channel: ChannelRef; write: boolean };
-type AuthorWindow = { windowStart: number; count: number; reported: boolean };
+type AuthorWindow = { windowStart: number; count: number; seen: Set<string>; reported: boolean };
 
 export class AppRuntime {
   private readonly follower: ChangeFollower;
@@ -483,7 +483,7 @@ export class AppRuntime {
     },
     record: AppInboxRecord,
   ): Promise<void> {
-    if (!this.admitAuthorRecord(space, record.repo)) return;
+    if (!this.admitAuthorRecord(space, record.repo, record.uri)) return;
     if (!context.roster.has(record.repo) || context.apps.has(record.repo)) {
       this.dropInboxRecord(record.uri, `author ${record.repo} is not on ${workspace}'s active roster`);
       return;
@@ -606,7 +606,7 @@ export class AppRuntime {
     });
   }
 
-  private admitAuthorRecord(space: string, repo: string): boolean {
+  private admitAuthorRecord(space: string, repo: string, uri: string): boolean {
     const now = this.clock.now();
     let perAuthor = this.throttles.get(space);
     if (!perAuthor) {
@@ -618,11 +618,15 @@ export class AppRuntime {
     }
     let current = perAuthor.get(repo);
     if (!current) {
-      current = { windowStart: now, count: 0, reported: false };
+      current = { windowStart: now, count: 0, seen: new Set(), reported: false };
       perAuthor.set(repo, current);
     }
+    if (current.seen.has(uri)) return true;
     current.count += 1;
-    if (current.count <= this.maxRecordsPerAuthor) return true;
+    if (current.count <= this.maxRecordsPerAuthor) {
+      current.seen.add(uri);
+      return true;
+    }
     if (!current.reported) {
       current.reported = true;
       this.input.onError(new Error(`${space}: ${repo} exceeded ${this.maxRecordsPerAuthor} inbox records per minute; excess records are dropped.`));
