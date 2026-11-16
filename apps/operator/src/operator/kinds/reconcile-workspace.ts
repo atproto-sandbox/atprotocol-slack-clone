@@ -116,7 +116,8 @@ async function reconcileAppInbox(
     });
   }
   await context.step(`app-inbox-${install.subject}-verified`, async () => {
-    if (!listMatches(desired, await listSpaceMembers(actor.session, inbox), authorityDid)) {
+    const finalList = needsSet || needsRemove ? await listSpaceMembers(actor.session, inbox) : current;
+    if (!listMatches(desired, finalList, authorityDid)) {
       throw new Error(`Membership reconciliation has not converged for app-inbox-${install.subject}.`);
     }
   });

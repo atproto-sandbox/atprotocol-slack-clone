@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { appGrantScopes, DM_BROWSER_SCOPES, OPERATOR_METHODS, operatorMethodsScope, workspaceAuthorityScopes } from "./scopes";
+import { appGrantScopes, DM_BROWSER_SCOPES, memberGrantScopes, OPERATOR_METHODS, operatorMethodsScope, workspaceAuthorityScopes } from "./scopes";
 
 const serviceRef = "did:web:slack.example#atproto_flock_operator";
 
@@ -55,5 +55,13 @@ test("an app asks for its declaration, workspace/channel/app-inbox reads, channe
     "space:new.flock.channel?authority=*&collection=new.flock.channel.message&collection=new.flock.channel.reaction&action=create&action=update&action=delete",
     "space:new.flock.app.inbox?authority=*&action=read",
     "rpc?lxm=new.flock.operator.getChanges&aud=did:web:operator.example%23atproto_flock_operator",
+  ]);
+});
+
+test("a member's browser grant creates and deletes commands and actions in app inboxes, with no read and no update", () => {
+  const scopes = memberGrantScopes(serviceRef);
+  const appInboxScopes = scopes.filter((scope) => scope.startsWith("space:new.flock.app.inbox?"));
+  assert.deepEqual(appInboxScopes, [
+    "space:new.flock.app.inbox?authority=*&collection=new.flock.app.command&collection=new.flock.app.action&action=create&action=delete",
   ]);
 });

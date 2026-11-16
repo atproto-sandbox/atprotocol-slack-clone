@@ -38,7 +38,7 @@ export async function executeOperatorOperation(
   if (actor.canRecoverOperations) await resumeRecoverableOperations(actor, operationId, registration);
   else if (pending.length > 0) throw new OperationBusyError("Pending admin operations must be recovered by an active admin before member leave can proceed.");
   const view = await runJournaledOperation(actor, operationId, request, kind.steps, (context) => kind.run(actor, context, request));
-  if (registration) await afterOperation(actor, kind, request, view, registration);
+  if (registration) await safeAfterOperation(actor, actor, operationId, kind, request, view, registration);
   return view;
 }
 
@@ -65,12 +65,7 @@ async function resumeRecoverableOperations(actor: OperatorActor, currentOperatio
       auditOperationEvent(actor, row.operationId, "operationResumeFailed", { originalActor: row.actor, error: error instanceof Error ? error.message : "Unknown error" });
     }
     if (completed && registration) {
-      try {
-        await afterOperation(completed.priorActor, completed.kind, completed.request, completed.view, registration);
-      } catch (error) {
-        // The operation is done; only its notice registration is not, and the sweep makes it.
-        auditOperationEvent(actor, row.operationId, "operationRegistrationFailed", { error: error instanceof Error ? error.message : "Unknown error" });
-      }
+      await safeAfterOperation(actor, completed.priorActor, row.operationId, completed.kind, completed.request, completed.view, registration);
     }
   }
   // Nothing else may run until the authority approves what the pending operations need.
@@ -138,10 +133,27 @@ export async function resumePendingWorkspaceCreations(grant: OAuthSession, works
     const { kind, request } = started;
     const admission = kind === createWorkspaceKind ? creationAdmission(actor, String(request.name), row.operationId) : undefined;
     const view = await runJournaledOperation(actor, row.operationId, request, kind.steps, (context) => kind.run(actor, context, request), { admission });
-    if (registration) await afterOperation(actor, kind, request, view, registration);
+    if (registration) await safeAfterOperation(operator, actor, row.operationId, kind, request, view, registration);
     results.push(creationResult(actor, row.operationId, view));
   }
   return results;
+}
+
+async function safeAfterOperation(
+  auditActor: OperatorActor,
+  operationActor: OperatorActor,
+  operationId: string,
+  kind: Pick<OperationKind, "createsSpaces" | "archivesSpaces">,
+  request: OperatorRequest,
+  view: OperationView,
+  registration: RegistrationDeps,
+): Promise<void> {
+  try {
+    await afterOperation(operationActor, kind, request, view, registration);
+  } catch (error) {
+    // The operation is done; only its notice registration is not, and the sweep makes it.
+    auditOperationEvent(auditActor, operationId, "operationRegistrationFailed", { error: error instanceof Error ? error.message : "Unknown error" });
+  }
 }
 
 /**

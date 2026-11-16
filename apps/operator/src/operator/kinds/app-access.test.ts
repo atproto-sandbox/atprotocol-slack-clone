@@ -126,14 +126,14 @@ test("only an installed app's access changes or goes, and an installed app is ne
 });
 
 const RESUMED = [
-  { label: "install", installed: false, request: (general: string) => ({ kind: "installApp", subject: BOT, channels: [{ skey: general, write: true }] }), writes: 6, after: "rw" },
-  { label: "update", installed: true, request: (general: string) => ({ kind: "updateAppAccess", subject: BOT, channels: [{ skey: general, write: false }] }), writes: 2, after: "r" },
-  { label: "uninstall", installed: true, request: () => ({ kind: "uninstallApp", subject: BOT }), writes: 5, after: "-" },
+  { label: "install", installed: false, request: (general: string) => ({ kind: "installApp", subject: BOT, channels: [{ skey: general, write: true }] }), stops: 6, writes: 6, after: "rw" },
+  { label: "update", installed: true, request: (general: string) => ({ kind: "updateAppAccess", subject: BOT, channels: [{ skey: general, write: false }] }), stops: 3, writes: 2, after: "r" },
+  { label: "uninstall", installed: true, request: () => ({ kind: "uninstallApp", subject: BOT }), stops: 5, writes: 5, after: "-" },
 ];
 
 for (const scenario of RESUMED) {
   test(`an app's ${scenario.label} stopped at any write resumes, repeating none`, async () => {
-    for (let index = 0; index < scenario.writes; index += 1) {
+    for (let index = 0; index < scenario.stops; index += 1) {
       // #given an outage from this write of the operation on (it outlasts the journal's own retries)
       let armed = false;
       let succeeded = 0;
@@ -343,7 +343,7 @@ test("the self-owned workspace authority is never written into an app inbox, and
 test("inviteMember, removeMember, leaveWorkspace and reconcileWorkspace resume after a stop at any write, repeating none", async () => {
   // inviteMember, removeMember and leaveWorkspace with two active apps
   for (const mode of ["invite", "remove", "leave"] as const) {
-    const expectedWrites = mode === "invite" ? 6 : 6;
+    const expectedWrites = 6;
     for (let index = 0; index < expectedWrites; index += 1) {
       let armed = false;
       let succeeded = 0;
@@ -417,6 +417,8 @@ test("inviteMember, removeMember, leaveWorkspace and reconcileWorkspace resume a
     const writes = pds.writes.slice(before);
     assert.equal(writes.length, 5, `reconcile ${index}: ${writes.join(", ")}`);
     assert.equal(new Set(writes).size, writes.length, `reconcile ${index}: no write repeated`);
+    const inactiveRemovals = writes.filter((write) => write.startsWith(`removeMember ${inactiveInbox} `));
+    assert.deepEqual(inactiveRemovals, [`removeMember ${inactiveInbox} ${inactiveBot}`, `removeMember ${inactiveInbox} ${PERSON}`], "reconcile removes the app before writers");
     const activeInbox = appInboxUri(OWNER, owner.workspace.skey, BOT);
     assert.equal(pds.membersOf(activeInbox).size, 2);
     assert.equal(pds.membersOf(inactiveInbox).size, 0);
@@ -454,6 +456,42 @@ test("pending pre-R10 journal rows replay cleanly with the new inbox steps", asy
   insertPending(OWNER, inviteId, inviteReq, ["member-workspace", "member-inbox-writer"]);
   await completes(run(inviteReq, inviteId));
   assert.deepEqual(pds.membersOf(inbox).get(OTHER), { did: OTHER, read: false, write: true });
+
+  // A pre-R10 pending installApp and updateAppAccess row replaying under an old (uncovered) authority grant finishes without wedging the workspace
+  const oldGrantBot = "did:plc:oldgrant-bot";
+  let blockOldInbox = true;
+  const oldGrantWs = await workspace("Apps PreR10 Replay OldGrant", (method, target) => {
+    if (!blockOldInbox) return undefined;
+    if (method === "com.atproto.space.createSpace" && target.space === undefined) return SCOPE_MISSING();
+    if (method === "com.atproto.space.getSpace" && target.space?.includes("/new.flock.app.inbox/")) return SCOPE_MISSING();
+    return undefined;
+  });
+  oldGrantWs.pds.recordsOf(oldGrantWs.owner.workspace.uri, COLLECTION.appInstall).set(subjectKey(oldGrantBot), {
+    $type: COLLECTION.appInstall, subject: oldGrantBot, active: true, channels: [{ skey: oldGrantWs.general, write: false }], installedBy: OWNER, installedAt: nowIso, updatedAt: nowIso,
+  });
+  const oldInstallId = tidNow();
+  const oldInstallReq = { kind: "installApp", subject: oldGrantBot, channels: [{ skey: oldGrantWs.general, write: false }] };
+  const oldHash = requestDigest({ workspace: oldGrantWs.owner.workspace.uri, request: oldInstallReq });
+  getRawDb().prepare(`INSERT INTO operation (workspace, workspace_uri, actor, operation_id, request_hash, request_json, state, steps_json, error, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, 'pre-r10 outage', ?, ?)`)
+    .run(OWNER, oldGrantWs.owner.workspace.uri, OWNER, oldInstallId, oldHash, canonicalJson({ workspace: oldGrantWs.owner.workspace.uri, request: oldInstallReq }), JSON.stringify(["app-install-record"]), nowSec, nowSec);
+  await completes(oldGrantWs.run({ kind: "reconcileWorkspace" }));
+  assert.equal(rowOf(oldInstallId)?.state, "completed", "pre-R10 pending installApp recovered without wedging on uncovered inbox");
+  assert.equal(placements(oldGrantWs.pds, oldGrantWs.owner, oldGrantBot)[oldGrantWs.general], "r");
+
+  const oldUpdateId = tidNow();
+  const oldUpdateReq = { kind: "updateAppAccess", subject: oldGrantBot, channels: [{ skey: oldGrantWs.general, write: true }] };
+  const oldUpdateHash = requestDigest({ workspace: oldGrantWs.owner.workspace.uri, request: oldUpdateReq });
+  oldGrantWs.pds.recordsOf(oldGrantWs.owner.workspace.uri, COLLECTION.appInstall).set(subjectKey(oldGrantBot), {
+    $type: COLLECTION.appInstall, subject: oldGrantBot, active: true, channels: [{ skey: oldGrantWs.general, write: true }], installedBy: OWNER, installedAt: nowIso, updatedAt: nowIso,
+  });
+  getRawDb().prepare(`INSERT INTO operation (workspace, workspace_uri, actor, operation_id, request_hash, request_json, state, steps_json, error, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, 'pre-r10 outage', ?, ?)`)
+    .run(OWNER, oldGrantWs.owner.workspace.uri, OWNER, oldUpdateId, oldUpdateHash, canonicalJson({ workspace: oldGrantWs.owner.workspace.uri, request: oldUpdateReq }), JSON.stringify(["app-access-record"]), nowSec, nowSec);
+  await completes(oldGrantWs.run({ kind: "reconcileWorkspace" }));
+  assert.equal(rowOf(oldUpdateId)?.state, "completed", "pre-R10 pending updateAppAccess recovered without wedging on uncovered inbox");
+  assert.equal(placements(oldGrantWs.pds, oldGrantWs.owner, oldGrantBot)[oldGrantWs.general], "rw");
+  blockOldInbox = false;
 });
 
 test("pre-R10 installs without an inbox (active and inactive) work under both covering and pre-R10 authority grants", async () => {
@@ -502,8 +540,10 @@ test("pre-R10 installs without an inbox (active and inactive) work under both co
       assert.equal(rowOf(updateId), undefined);
       assert.deepEqual(pds.writes.slice(before), []);
 
-      // reconcileWorkspace completes for every other space and reports that app inbox approval is needed
+      // reconcileWorkspace completes for every other space (fixing drift there) and reports that app inbox approval is needed
+      pds.membersOf(owner.workspace.uri).delete(PERSON);
       await completes(run({ kind: "reconcileWorkspace" }));
+      assert.deepEqual(pds.membersOf(owner.workspace.uri).get(PERSON), { did: PERSON, read: true, write: true }, "workspace drift fixed under old grant");
       assert.equal(await hasUncoveredAppInbox(owner), true);
 
       // uninstallApp on an old grant skips the inbox and completes
@@ -531,8 +571,33 @@ test("pre-R10 installs without an inbox (active and inactive) work under both co
       assert.deepEqual(pds.membersOf(secondInbox).get(secondPreR10), { did: secondPreR10, read: true, write: false });
       assert.equal(await appInboxState(pds.session, appInboxUri(OWNER, owner.workspace.skey, inactiveBot)), "missing", "inactive pre-R10 install keeps no inbox");
 
+      // A transient PDS error inside afterOperation after reconcileWorkspace completed is audited without failing executeOperatorOperation
+      const thirdPreR10 = "did:plc:third-prer10";
+      pds.recordsOf(owner.workspace.uri, COLLECTION.appInstall).set(subjectKey(thirdPreR10), {
+        $type: COLLECTION.appInstall, subject: thirdPreR10, active: true, channels: [], installedBy: OWNER, installedAt: nowIso, updatedAt: nowIso,
+      });
+      pds.membersOf(owner.workspace.uri).set(thirdPreR10, { did: thirdPreR10, read: true, write: false });
+      const thirdInbox = appInboxUri(OWNER, owner.workspace.skey, thirdPreR10);
+      pds.membersOf(thirdInbox).set(PERSON, { did: PERSON, read: false, write: true }).set(thirdPreR10, { did: thirdPreR10, read: true, write: false });
+      let getSpaceCount = 0;
+      const afterThrowActor: OperatorActor = { ...owner, session: {
+        did: OWNER,
+        fetchHandler: async (path: string, init?: RequestInit) => {
+          const parsedUrl = new URL(path, "https://pds.invalid");
+          if (parsedUrl.pathname.endsWith("/com.atproto.space.getSpace") && parsedUrl.searchParams.get("space") === thirdInbox) {
+            getSpaceCount += 1;
+            if (getSpaceCount >= 2) return OUTAGE();
+          }
+          return pds.session.fetchHandler(path, init);
+        },
+      } as unknown as OperatorActor["session"] };
+      const afterThrowOpId = tidNow();
+      await completes(executeOperatorOperation(afterThrowActor, afterThrowOpId, { kind: "reconcileWorkspace" }, deps));
+      const auditFailure = getRawDb().prepare("SELECT event FROM audit_event WHERE operation_id = ? AND event = 'operationRegistrationFailed'").get(afterThrowOpId) as { event: string } | undefined;
+      assert.equal(auditFailure?.event, "operationRegistrationFailed", "post-completion registration read failure is audited without failing execute");
+
       await completes(run({ kind: "reconcileWorkspace" }, tidNow(), true));
-      assert.deepEqual(registered, [secondInbox], "reconcile with registration deps registers the present unregistered inbox");
+      assert.ok((registered as string[]).includes(secondInbox), "reconcile with registration deps registers the present unregistered inbox");
       assert.equal(await hasUncoveredAppInbox(owner), false);
     }
     blockInboxScope = false;

@@ -1,7 +1,7 @@
 # R10 progress: interactions, blocks, webhooks
 
 Plan: `.ai/plans/platform-refactor.md`, "### R10" and "### Apps" in the target design. This file is R10's own plan, which that
-section asks for before any code. **Status: proposed, owner approval pending. Nothing implemented.** Independent review: READY at round 7 (below). Three steps, each gated,
+section asks for before any code. **Status: in progress on `5d88b414` (`feat/r10-interactions`; R10a implemented and gated).** Independent plan review: READY at round 7 (below). Three steps, each gated,
 committed and reviewed as its own PR in the stack.
 
 ## Review history

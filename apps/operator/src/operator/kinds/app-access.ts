@@ -59,10 +59,13 @@ async function installApp(actor: OperatorActor, context: OperationContext, subje
   if (!installs.has(subject) && installs.size >= WORKSPACE_ENVELOPE.apps) throw new OperationRejectedError(`Workspace app limit reached (${WORKSPACE_ENVELOPE.apps}).`);
   // A repeat of the same install keeps who installed it and when.
   const install: AppInstall = existing?.active ? existing : { subject, active: true, channels, installedBy: actor.did, installedAt: new Date().toISOString() };
-  await context.step("app-inbox-space", () => ensureAppInboxSpace(actor, subject));
+  // A pending pre-R10 row already wrote its install record; under a pre-R10 grant it finishes its other entries without wedging on the inbox.
+  const inbox = appInboxUri(actor.workspace.authorityDid, actor.workspace.skey, subject);
+  const skipUncoveredReplay = context.completedSteps.includes("app-install-record") && await appInboxState(actor.session, inbox) === "uncovered";
+  if (!skipUncoveredReplay) await context.step("app-inbox-space", () => ensureAppInboxSpace(actor, subject));
   await context.step("app-install-record", () => writeInstall(actor, install));
-  await context.step("app-inbox-set", () => syncAppInboxMembers(actor, install));
-  await applyAppAccess(actor, context, install, true);
+  if (!skipUncoveredReplay) await context.step("app-inbox-set", () => syncAppInboxMembers(actor, install));
+  await applyAppAccess(actor, context, install, !skipUncoveredReplay);
 }
 
 async function updateAppAccess(actor: OperatorActor, context: OperationContext, subject: string, channels: ReadonlyMap<string, boolean>): Promise<void> {
@@ -70,10 +73,12 @@ async function updateAppAccess(actor: OperatorActor, context: OperationContext, 
   if (!existing?.active) throw new OperationRejectedError("This app is not installed.");
   await assertGrantable(actor, subject, channels);
   const install: AppInstall = { ...existing, channels };
-  await context.step("app-inbox-space", () => ensureAppInboxSpace(actor, subject));
+  const inbox = appInboxUri(actor.workspace.authorityDid, actor.workspace.skey, subject);
+  const skipUncoveredReplay = context.completedSteps.includes("app-access-record") && await appInboxState(actor.session, inbox) === "uncovered";
+  if (!skipUncoveredReplay) await context.step("app-inbox-space", () => ensureAppInboxSpace(actor, subject));
   await context.step("app-access-record", () => writeInstall(actor, install));
-  await context.step("app-inbox-set", () => syncAppInboxMembers(actor, install));
-  await applyAppAccess(actor, context, install, true);
+  if (!skipUncoveredReplay) await context.step("app-inbox-set", () => syncAppInboxMembers(actor, install));
+  await applyAppAccess(actor, context, install, !skipUncoveredReplay);
 }
 
 async function uninstallApp(actor: OperatorActor, context: OperationContext, subject: string): Promise<void> {

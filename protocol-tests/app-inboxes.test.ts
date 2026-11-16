@@ -48,8 +48,9 @@ test("app inboxes on the pinned PDS: member command writes, app-only reads, remo
       { isAccessLost },
       { sessionClient },
       { resolvePds },
-      { appInboxState, listSpaceMembers, putAuthorityRecord, putSpaceMember },
+      { appInboxState, listSpaceMembers, putAuthorityRecord, putSpaceMember, removeSpaceMember },
       { isRegisteredSpace },
+      { recordWriteNotification },
       { getRawDb },
       keys,
     ] = await Promise.all([
@@ -62,6 +63,7 @@ test("app inboxes on the pinned PDS: member command writes, app-only reads, remo
       import("@flock/operator/atproto/identity"),
       import("@flock/operator/atproto/space-ops"),
       import("@flock/operator/operator/member-access"),
+      import("@flock/operator/operator/notices"),
       import("@flock/operator/lib/db"),
       import("@flock/protocol/keys"),
     ]);
@@ -140,7 +142,10 @@ test("app inboxes on the pinned PDS: member command writes, app-only reads, remo
       );
       assert.deepEqual([read.value.command, read.value.text], ["echo", "secret command"]);
 
-      // Both another member and the non-authority admin are refused at the host (and lack read scope on their browser grant).
+      // Record a notice for appOneInbox so getChanges checks admission both before and after reading notices and returns without waiting.
+      recordWriteNotification({ space: appOneInbox, repo: memberOne.did, repoRev: cmdRkey });
+
+      // Both another member and the non-authority admin are refused at the host and by getChanges.
       for (const [label, session, actor] of [
         ["second member", memberTwoBrowser.session, memberTwo],
         ["non-authority admin", adminBrowser.session, adminActor],
@@ -159,9 +164,12 @@ test("app inboxes on the pinned PDS: member command writes, app-only reads, remo
         assert.deepEqual(feed.denied, [appOneInbox], `${label} is denied by getChanges`);
       }
 
-      // The installed app is admitted by getChanges.
-      const appFeed = await callOperatorMethod(appOneSession, pds.serviceRef, "new.flock.operator.getChanges", {}, { follow: [] }) as { head: string };
-      assert.ok(typeof appFeed.head === "string");
+      // The installed app follows appOneInbox through getChanges and is admitted (not denied) and given the notice cursor.
+      const appFeed = await callOperatorMethod(appOneSession, pds.serviceRef, "new.flock.operator.getChanges", {}, {
+        follow: [{ space: appOneInbox, after: "0" }],
+      }) as { head: string; denied: string[]; changed: Array<{ space: string; cursor: string }> };
+      assert.deepEqual(appFeed.denied, [], "installed app is admitted to its inbox by getChanges");
+      assert.deepEqual(appFeed.changed.map((entry) => entry.space), [appOneInbox]);
     });
 
     await t.test("a person removed from the workspace is no longer listed as a writer in the app inbox", async () => {
@@ -216,15 +224,18 @@ test("app inboxes on the pinned PDS: member command writes, app-only reads, remo
       assert.notEqual(preR10Scope, authorityClientMetadata().scope);
       await storeAuthorityGrant(pds.hosts[0], authority.did, "r10-prer10-grant", { scope: preR10Scope });
 
-      // Under the pre-R10 grant: invite and removal complete, scheduled reconcile completes and warns, updateAppAccess asks for re-approval with nothing written.
+      // Under the pre-R10 grant: invite and removal complete, scheduled reconcile fixes drift in other spaces and warns, updateAppAccess asks for re-approval with nothing written.
       const extraMember = await pds.createActor("r10extra", 0);
       assert.equal((await execute(keys.tidNow(), { kind: "inviteMember", subject: extraMember.did })).operation?.state, "completed");
       assert.equal((await execute(keys.tidNow(), { kind: "removeMember", subject: extraMember.did })).operation?.state, "completed");
 
+      await removeSpaceMember(await restoreAuthorityGrant(authority.did), created.channel, memberTwo.did);
       const job = await runReconcileCli(pds);
       assert.equal(job.exitCode, 0, `reconcile stderr: ${job.stderr}`);
       assert.match(job.stdout, new RegExp(`${created.workspace.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}: completed`));
       assert.match(job.stderr, /WARN .*must approve its permission again/);
+      const channelAfterReconcile = await listSpaceMembers(await restoreAuthorityGrant(authority.did), created.channel);
+      assert.equal(channelAfterReconcile.some((m) => m.did === memberTwo.did && m.read && m.write), true, "channel drift repaired under pre-R10 grant");
 
       const updateId = keys.tidNow();
       const updateReq = { kind: "updateAppAccess", subject: appTwo.did, channels: [{ skey: generalSkey, write: false }] };

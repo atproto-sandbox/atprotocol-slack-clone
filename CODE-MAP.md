@@ -8,10 +8,10 @@ A Slack-style team workspace built directly on atproto (AT Protocol) permissione
              BROWSER  (apps/web)                       WEB SERVER (apps/web, Next)           EACH ACCOUNT'S PDS
   ┌─────────────────────────────────────┐      ┌──────────────────────────────────┐   ┌──────────────────────────────┐
   │ React UI: apps/web/src/app/ui       │◀────▶│ page.tsx, layout.tsx, the        │   │ new.flock.workspace/.channel/│
-  │  workspace-manager, sidebar,        │      │ oauth callback page and the      │   │  .inbox spaces; directory,   │
-  │  channel-view, dm-*.tsx             │      │ browser client's metadata.       │   │  roster, admin; channel      │
-  │                                     │      │ No database, no secret.          │   │  messages and reactions      │
-  │ Browser session: apps/web/src/      │      └──────────────────────────────────┘   │ (member lists ARE the read   │
+  │  workspace-manager, sidebar,        │      │ oauth callback page and the      │   │  .inbox/.app.inbox spaces;   │
+  │  channel-view, dm-*.tsx             │      │ browser client's metadata.       │   │  directory, roster, admin,   │
+  │                                     │      │ No database, no secret.          │   │  commands, actions, channel  │
+  │ Browser session: apps/web/src/      │      └──────────────────────────────────┘   │  messages and reactions      │
   │  browser (one OAuth grant: member   │                                             │  gate)                       │
   │  set, operator rpc, DM set),        │      OPERATOR (apps/operator, own process,  ├──────────────────────────────┤
   │  IndexedDB, non-extractable keys    │      own origin)                            │ new.flock.dm.inbox (self);   │
@@ -216,7 +216,8 @@ apps/
                               create-workspace.ts creates a workspace for its creator (its first admin and member) under
                               its account; bootstrap-workspace.ts only resumes rows begun before it. Their shared space
                               and record actions are src/operator/workspace-spaces.ts. app-access.ts installs, changes and
-                              uninstalls an app: its install record first, then its member-list entries.
+                              uninstalls an app: its inbox space first on install/change, then its install record and
+                              member-list entries; on uninstall, its record first, then app-first inbox removal and entries.
     src/operator/membership.ts
                              The one owner of who belongs in each member list, and with which bits: people from the roster,
                               admins and private rosters, apps from their install records (read and written here). Every
