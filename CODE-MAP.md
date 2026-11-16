@@ -144,9 +144,11 @@ packages/                 Libraries. protocol and client run in a browser: they 
                               author), follows grant changes, and reports every failure; appGrantScope, publishAppDeclaration.
     src/node/                The client's only Node code (`@flock/client/node/*`, outside the browser lint rules and the
                               no-Node typecheck; browser code may not import it): transport.ts (the session transport with
-                              every host reached through @flock/net) and oauth.ts (an app's OAuth client: confidential private_key_jwt
+                              every host reached through @flock/net), oauth.ts (an app's OAuth client: confidential private_key_jwt
                               over https, a loopback client in development, its session in an owner-only state file, and
-                              every host it reaches, the account's own PDS included, reached through @flock/net too).
+                              every host it reaches, the account's own PDS included, reached through @flock/net too), and
+                              admin-oauth.ts (an app's second, identity-only `atproto` OAuth client at `/admin/oauth/*` for
+                              signing people into its own admin page, with capped ten-minute states and immediate revocation).
     src/views.ts             Snapshots (one immutable snapshot per key, with subscriptions, for useSyncExternalStore) and
                               LiveSpaces (each watched key bound to the spaces it reads and loaded again when the feed names
                               one; a watch stops on its AbortSignal; the live loop waits until a followed space has a cursor).
@@ -170,8 +172,13 @@ packages/                 Libraries. protocol and client run in a browser: they 
                               per-request Content-Security-Policy (a script nonce, no inline script).
 
 apps/
-  echo-bot/  @flock/echo-bot    The first app (R9): depends on @flock/client alone (a test pins it). `pnpm echo-bot sign-in
-                              <handle>` once, then `pnpm echo-bot run`; echo.ts is its answer and its runApp wiring.
+  echo-bot/  @flock/echo-bot    The first app (R9, R10b): depends on @flock/client alone (a test pins it). `pnpm echo-bot sign-in
+                              <handle>` once, then `pnpm echo-bot run`; echo.ts handles channel messages, `/echo` and `Again`.
+  webhooks/  @flock/webhooks    The incoming-webhooks app (R10c): depends on @flock/client alone (boundary.test.ts pins it).
+                              `pnpm webhooks sign-in <handle>` once, then `pnpm webhooks run`; serves `/admin` (identity-only
+                              OAuth sign-in, SameSite=Lax cookies, scriptless CSP, fresh admin/roster/private-channel checks,
+                              owner-only SHA-256 hooks file) and `POST /hooks/<id>/<secret>` (constant-time secret check,
+                              64 KiB stream bound, synchronous validateMessageInput, fresh write-grant check).
   web/  @flock/web              The Next.js app (`pnpm dev` / `build` / `start` run `next` here). No database, no secret.
     next.config.ts           The fixed security headers; the repository root's `.env` (Next itself reads only this app's directory).
     src/proxy.ts             Each page's Content-Security-Policy, with a nonce made for the request (Next puts it on its scripts).
@@ -285,6 +292,7 @@ operator or OAuth layers even by accident, and lint refuses a Node built-in in a
   `startAuthorityFlow`, `listStalledOperations`, each authenticated by a PDS-issued service token, and the two notices) on
   `@atproto/xrpc-server` with the app's lexicons, CORS for any origin on the methods (none on the authority flow), the authority flow (`/authority/*`) and its
   `did:web` document; it runs the notice-registration sweep at start.
+- `pnpm echo-bot` (`apps/echo-bot/src/main.ts`) and `pnpm webhooks` (`apps/webhooks/src/main.ts`) — first-party apps built on `@flock/client` alone (`sign-in <handle>`, then `run`).
 - `pnpm playground` (`scripts/playground.ts`) — a local copy of the whole stack with ready-made accounts, for trying the app by hand (`ATPROTO_PINNED_CHECKOUT` must point at the built pinned checkout).
 - `pnpm reconcile` (`apps/operator/scripts/reconcile-workspaces.ts`) — the scheduled membership-reconciliation job (`docs/operations.md`).
 - `pnpm authority` (`apps/operator/scripts/authority-grant.ts`) — generate an authority client key, or revoke an authority grant.
@@ -292,8 +300,8 @@ operator or OAuth layers even by accident, and lint refuses a Node built-in in a
 - `pnpm test` — unit tests (`node --test` over every `*.test.ts` in `packages/*/src` and `apps/*/src`), plus `bdd/gate.test.ts`, which keeps the Gherkin features honest (below).
 - `pnpm typecheck` — the whole repository with Node types, then `packages/protocol` and `packages/client` with none (and a check that no `@types/node` reaches them).
 - `pnpm test:bdd` — builds, then runs the executable Gherkin scenarios in `features/` with `@cucumber/cucumber`, driving real browsers against a real pinned PDS network.
-- `pnpm test:acceptance` — builds, then runs `protocol-tests/{app-acceptance,reconcile-workspaces,dm-acceptance,authority-grant,platform-capabilities,engine-acceptance,feed-follow,apps,echo-bot}.test.ts` against a real pinned PDS network (needs `ATPROTO_PINNED_CHECKOUT`). `platform-capabilities` and `authority-grant` hold the platform refactor's capability checks (K1, K3, K7), `engine-acceptance` the engine's parity with the independent reader on two real hosts, `apps` (R9) an app installed, refused what it is not granted and uninstalled on two real hosts, `echo-bot` (R9's gate) the echo bot answering through the feed and refused once uninstalled, and `feed-follow` (R5's gate) a cookie-less member following a channel live through `getChanges` with `next start` receiving the PDS's notices (`protocol-tests/support/app-server.ts`), all on the network-only helper `protocol-tests/support/pds-network.ts` (`actorTransport` builds the engine's transport for a real account).
-- `pnpm test:browser` — builds, then runs Playwright specs in `protocol-tests/browser/` (`--test-concurrency=1`, since the specs start real servers); `cross-origin.spec.ts` (K9) signs in through the real OAuth flow and sends every request from a separate web origin.
+- `pnpm test:acceptance` — builds, then runs `protocol-tests/{app-acceptance,reconcile-workspaces,dm-acceptance,authority-grant,platform-capabilities,engine-acceptance,feed-follow,apps,echo-bot,app-inboxes}.test.ts` against a real pinned PDS network (needs `ATPROTO_PINNED_CHECKOUT`). `platform-capabilities` and `authority-grant` hold the platform refactor's capability checks (K1, K3, K7), `engine-acceptance` the engine's parity with the independent reader on two real hosts, `apps` (R9) an app installed, refused what it is not granted and uninstalled on two real hosts, `echo-bot` (R9's gate) the echo bot answering through the feed and refused once uninstalled, `app-inboxes` (R10a's gate) per-install app inboxes, pre-R10 reconcile/grants and the 20-install 200-person envelope, and `feed-follow` (R5's gate) a cookie-less member following a channel live through `getChanges` with `next start` receiving the PDS's notices (`protocol-tests/support/app-server.ts`), all on the network-only helper `protocol-tests/support/pds-network.ts` (`actorTransport` builds the engine's transport for a real account).
+- `pnpm test:browser` — builds, then runs Playwright specs in `protocol-tests/browser/` (`--test-concurrency=1`, since the specs start real servers); `cross-origin.spec.ts` (K9) signs in through the real OAuth flow and sends every request from a separate web origin, and `webhooks.spec.ts` (R10c's gate) exercises the webhooks admin page and incoming hook endpoint in Chromium.
 - `pnpm test:performance` — `protocol-tests/{performance-envelope,dm-performance}.test.ts` (slow; the channel envelope test is ~30 minutes); each latest-100 read is repeated ten times and reported as median and p95.
 - `pnpm test:sync-budget` — `protocol-tests/sync-budget.ts` (K4, R4's gate): calls and time of the engine's first open, reopen and one new message at 20, 100 and 200 writers; it fails if a reopen's call count depends on the writer count.
 
@@ -334,7 +342,7 @@ Run: `pnpm test:bdd` (headless), `pnpm test:bdd:chrome` (visible Google Chrome),
   not ad hoc `Promise.all` over unbounded arrays.
 - Package boundaries are dependency lists: protocol and net depend on no workspace package; client on protocol and net (net
   for its Node entry only); reader on protocol only; the operator on protocol, net and deployment; the web app on client,
-  protocol and deployment; the echo bot on client only. No app imports another. Lint adds what a list cannot say: no Node
+  protocol and deployment; the echo bot and the webhooks app on client only. No app imports another. Lint adds what a list cannot say: no Node
   built-ins or server configuration in browser code, no client Node entry or @flock/net in browser code or the web app,
   member lists changed only through `members.ts`, and no DM engine in the web app's route handlers
   (`apps/web/src/app/**/route.ts`).

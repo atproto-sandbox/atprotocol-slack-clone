@@ -50,6 +50,9 @@ importers:
       '@flock/web':
         specifier: workspace:*
         version: link:apps/web
+      '@flock/webhooks':
+        specifier: workspace:*
+        version: link:apps/webhooks
       better-sqlite3:
         specifier: 12.6.0
         version: 12.6.0
@@ -173,6 +176,12 @@ importers:
       fake-indexeddb:
         specifier: 6.2.6
         version: 6.2.6
+
+  apps/webhooks:
+    dependencies:
+      '@flock/client':
+        specifier: workspace:*
+        version: link:../../packages/client
 
   packages/client:
     dependencies:

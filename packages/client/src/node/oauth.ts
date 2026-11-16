@@ -31,7 +31,7 @@ export const APP_OAUTH_PATHS = { clientMetadata: "/oauth/client-metadata.json", 
  * Whether the app runs on loopback: plain http on 127.0.0.1 or [::1], loopback development only (RFC 8252 names a loopback
  * client by its address). Any other app URL must be https: a plain-http app elsewhere is refused, not taken for loopback.
  */
-function isLoopbackApp(appUrl: string): boolean {
+export function isLoopbackApp(appUrl: string): boolean {
   const url = new URL(appUrl);
   if (url.protocol === "https:") return false;
   if (url.protocol === "http:" && (url.hostname === "127.0.0.1" || url.hostname === "[::1]")) return true;

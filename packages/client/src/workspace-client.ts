@@ -8,6 +8,8 @@ import { COLLECTION, REPO_COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
 import { MAX_RECORD_BYTES, validateAppDeclaration, validateSpaceRecord } from "@flock/protocol/registry";
 import { summarizeWorkspace, WORKSPACE_ENVELOPE, WorkspaceEnvelopeError, workspaceDegradedMessage, type WorkspaceSummary } from "@flock/protocol/workspace-summary";
 import type { CredentialCache } from "./credentials";
+
+export type { WorkspaceSummary };
 import { readWriterJoinRequests, type InboxJoinRequest, type SkippedInboxWriter } from "./inbox-requests";
 import type { Lifecycle } from "./lifecycle";
 import type { OperatorClient } from "./operator-client";
