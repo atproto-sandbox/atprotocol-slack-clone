@@ -8,6 +8,13 @@ const SECRET_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 
 export const MAX_HOOKS_PER_WORKSPACE = 100;
 
+export class WorkspaceHookCapError extends Error {
+  constructor(readonly maxHooks: number) {
+    super(`This workspace already has the maximum of ${maxHooks} active webhooks.`);
+    this.name = "WorkspaceHookCapError";
+  }
+}
+
 export type StoredHook = {
   id: string;
   workspace: string;
@@ -30,6 +37,7 @@ export class HooksStore {
   private queue: Promise<unknown> = Promise.resolve();
   private leftovers?: Promise<void>;
   private cached?: Record<string, StoredHook>;
+  private loading?: Promise<Record<string, StoredHook>>;
 
   constructor(
     private readonly path: string,
@@ -71,10 +79,12 @@ export class HooksStore {
     channelName: string;
     privateChannel: boolean;
     createdBy: string;
+    maxForWorkspace?: number;
   }): Promise<{ hook: StoredHook; secret: string }> {
     const id = randomBytes(16).toString("base64url");
     const secret = randomBytes(32).toString("base64url");
     const timestamp = new Date(this.now()).toISOString();
+    const maxHooks = input.maxForWorkspace ?? MAX_HOOKS_PER_WORKSPACE;
     const hook: StoredHook = {
       id,
       workspace: input.workspace,
@@ -87,6 +97,10 @@ export class HooksStore {
       updatedAt: timestamp,
     };
     await this.change((hooks) => {
+      const activeCount = Object.values(hooks).filter(
+        (entry) => entry.workspace === input.workspace && entry.revokedAt === undefined,
+      ).length;
+      if (activeCount >= maxHooks) throw new WorkspaceHookCapError(maxHooks);
       hooks[id] = hook;
     });
     return { hook, secret };
@@ -122,8 +136,15 @@ export class HooksStore {
     return revoked;
   }
 
-  private async readAll(): Promise<Record<string, StoredHook>> {
-    if (this.cached) return this.cached;
+  private readAll(): Promise<Record<string, StoredHook>> {
+    if (this.cached) return Promise.resolve(this.cached);
+    this.loading ??= this.loadCold().finally(() => {
+      this.loading = undefined;
+    });
+    return this.loading;
+  }
+
+  private async loadCold(): Promise<Record<string, StoredHook>> {
     await (this.leftovers ??= this.clearLeftovers());
     try {
       const file = await lstat(this.path);
@@ -133,13 +154,11 @@ export class HooksStore {
       const raw = parsed.hooks ?? {};
       const clean: Record<string, StoredHook> = Object.create(null) as Record<string, StoredHook>;
       for (const [key, value] of Object.entries(raw)) clean[key] = value;
-      this.cached = clean;
-      return clean;
+      return (this.cached ??= clean);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
         const empty = Object.create(null) as Record<string, StoredHook>;
-        this.cached = empty;
-        return empty;
+        return (this.cached ??= empty);
       }
       throw error;
     }

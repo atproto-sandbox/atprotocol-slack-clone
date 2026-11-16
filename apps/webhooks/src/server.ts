@@ -20,7 +20,7 @@ import {
   verifySessionCookie,
 } from "./cookies";
 import { failureLine } from "./failure-line";
-import { MAX_HOOKS_PER_WORKSPACE, type HooksStore } from "./hooks-store";
+import { MAX_HOOKS_PER_WORKSPACE, WorkspaceHookCapError, type HooksStore } from "./hooks-store";
 import {
   renderAdminDashboard,
   renderAuthorizeLinkPage,
@@ -442,26 +442,32 @@ export function createWebhooksHandler(deps: WebhooksHandlerDeps): (request: Inco
         );
         return;
       }
-      if ((await deps.hooks.listActiveForWorkspace(workspaceUri)).length >= maxHooksPerWorkspace) {
-        sendHtml(
-          response,
-          400,
-          renderAdminDashboard({
-            did: session.did,
-            csrf: session.csrf,
-            workspaces,
-            error: `This workspace already has the maximum of ${maxHooksPerWorkspace} active webhooks.`,
-          }),
-        );
-        return;
+      let created: Awaited<ReturnType<HooksStore["create"]>>;
+      try {
+        created = await deps.hooks.create({
+          workspace: workspaceUri,
+          channelSkey: channel.skey,
+          channelName: channel.name,
+          privateChannel: channel.visibility === "private",
+          createdBy: session.did,
+          maxForWorkspace: maxHooksPerWorkspace,
+        });
+      } catch (error) {
+        if (error instanceof WorkspaceHookCapError) {
+          sendHtml(
+            response,
+            400,
+            renderAdminDashboard({
+              did: session.did,
+              csrf: session.csrf,
+              workspaces,
+              error: error.message,
+            }),
+          );
+          return;
+        }
+        throw error;
       }
-      const created = await deps.hooks.create({
-        workspace: workspaceUri,
-        channelSkey: channel.skey,
-        channelName: channel.name,
-        privateChannel: channel.visibility === "private",
-        createdBy: session.did,
-      });
       const updatedWorkspaces = await loadAdminWorkspaces(session.did);
       sendHtml(
         response,
