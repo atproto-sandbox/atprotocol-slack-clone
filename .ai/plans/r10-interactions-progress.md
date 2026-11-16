@@ -1,7 +1,7 @@
 # R10 progress: interactions, blocks, webhooks
 
 Plan: `.ai/plans/platform-refactor.md`, "### R10" and "### Apps" in the target design. This file is R10's own plan, which that
-section asks for before any code. **Status: proposed, owner approval pending. Nothing implemented.** Three steps, each gated,
+section asks for before any code. **Status: proposed, owner approval pending. Nothing implemented.** Independent review: READY at round 7 (below). Three steps, each gated,
 committed and reviewed as its own PR in the stack.
 
 ## Review history
@@ -14,6 +14,7 @@ committed and reviewed as its own PR in the stack.
 | 4 | agy CLI, `gemini-4-carbon-high` | REVISE (round 3's fixes confirmed; 1 blocking, 4 not) | Checked against the code; held. Answered: a workspace whose authority grant predates R10 (it lacks the inbox type, so it never made an inbox, and the host answers `getSpace` with a missing scope, not "not found") is handled without a stalled operation: an inbox check that reads a missing scope as no inbox, reconcile creating an inbox only when the grant covers the type (and otherwise reconciling the rest and warning), and re-approval asked by `installApp` and `updateAppAccess` at their first step. Also taken: the declaration read bound raised to the record limit; `getMessage` checking a reply's parent; nothing kept in memory for a channel an app only posts to; hooks whose private channel the app can no longer read shown as unavailable. |
 | 5 | agy CLI, `gemini-4-carbon-high` | REVISE (round 4's fix confirmed but one part; 2 blocking, 3 not) | Checked against the code and the browsers' rules; held. Answered: `updateAppAccess` now fills an inbox it creates and registers its notices, and reconcile registers any present inbox that is not; the webhooks app's sign-in works under its own policy (no form redirect off-site, `SameSite=Lax` cookies) and its gate runs in a real browser. Also taken: inboxes followed only by an app that handles commands or clicks; reconcile's registrations made through the deps an operation is given; a click checked against the app's current grant. |
 | 6 | agy CLI, `gemini-4-carbon-high` | REVISE (all of round 5 confirmed; 1 blocking, 3 not) | Checked against the Fetch standard; held: a page sent with `Referrer-Policy: no-referrer` makes the browser send `Origin: null` on its own form `POST`s, so the `Origin` check would refuse every change. The admin page uses `same-origin`. Also taken: sign-in starts rate-limited per address; reconcile drops only registrations that exist; new test files and the webhooks package wired into the root scripts. |
+| 7 | agy CLI, `gemini-4-carbon-high` | **READY** (all of round 6 confirmed; 0 blocking, 2 not) | Both non-blocking points taken afterwards, not re-reviewed: R9's tests that simulate an older authority grant now withhold the inbox type too, and expect the inbox before the install record; an app's own writes are kept out of the local store by an explicit engine option set by app runtimes, so a member's own write still shows before its host lists it. |
 
 ## Baseline and order
 
@@ -208,10 +209,12 @@ A new space type `new.flock.app.inbox`, owned by the workspace authority, one pe
 - **Client additions** an app needs from `@flock/client` alone (its boundary test holds): `ChannelClient.send` and `edit` take
   `blocks` (an edit can replace or clear them, not only the text); a public `ChannelClient.getMessage(ref, uri)` reads one
   message by `getRecord` with a verified MAC, checking a reply's parent as `edit` does, so a click on any message, however old
-  and in a thread or not, is checked; an app's own write is applied to the local store only for a channel it follows for
-  messages, so a runtime that only posts (the webhooks app, or one without `onMessage`) keeps nothing it sends in memory; and an `AppInboxClient` in
+  and in a thread or not, is checked; a runtime that only posts (the webhooks app, or one without `onMessage`) keeps nothing it
+  sends in memory (the engine option below); and an `AppInboxClient` in
   the engine writes and retracts a member's command or action as `requestJoin` writes a join request (no credential, no local
-  store), and syncs an inbox for an app; the block `$type`s (defined in `nsids.ts`, where every `new.flock.` literal lives, and
+  store), and syncs an inbox for an app; an engine option (`applyOwnWrites`, on by default and turned off by `runApp` and the webhooks
+  app) that keeps an app's own writes out of its local store, while a member's own write still shows before its host lists it;
+  the block `$type`s (defined in `nsids.ts`, where every `new.flock.` literal lives, and
   re-exported, with typed constructors, so an app builds blocks from `@flock/client` alone); and `validateMessageInput({ text, blocks })`, a synchronous check of a message's
   content against the registry, for an app that takes content from outside (the webhooks app).
 - `publishAppDeclaration` takes the commands. The echo bot gains `/echo <text>` (answered in the channel) and an `Again` button.
@@ -325,6 +328,9 @@ its own admin page. It runs no commands and follows no inbox; it posts messages 
 - `reconcileWorkspace`'s registration of the inboxes it creates; `activeWorkspaceSpaces` listing only inboxes that exist.
 - Scopes and permission sets for members, apps and the authority, and `workspaceAuthorityScopes` for a type without authority
   collections.
+- R9's tests that this changes: those simulating an authority grant from before R9 withhold the inbox type as well as
+  `new.flock.app.install` (a real grant then lacked both), in `app-access.test.ts` and `protocol-tests/apps.test.ts`, and the
+  first write of an install is now the inbox's `createSpace`, then the install record.
 - **Tests:** unit for the lexicons, the semantics and the key; the membership table with inboxes, active and inactive; every
   changed kind resumed after a stop at every step, inside a multi-call step too, with no write repeated; a pending pre-R10 row
   replayed; `updateAppAccess` on an install without an inbox creating, filling and registering it; reconcile registering a
