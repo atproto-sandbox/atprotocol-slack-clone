@@ -19,7 +19,9 @@ test("apps at the pinned PDS: installed after reauthorizing, reading only what i
     const owner = await pds.createActor("r9owner", 0);
     const { authorityClientMetadata } = await import("@flock/operator/operator/authority-grant");
     const withoutWorkspaceRecords = authorityClientMetadata().scope.split(" ")
-      .filter((scope) => !(scope.startsWith("space:new.flock.workspace?") && scope.includes("collection=new.flock.app.install"))).join(" ");
+      .filter((scope) => !(scope.startsWith("space:new.flock.workspace?") && scope.includes("collection=new.flock.app.install"))
+        && !scope.startsWith("space:new.flock.app.inbox?"))
+      .join(" ");
     assert.notEqual(withoutWorkspaceRecords, authorityClientMetadata().scope, "the narrower grant lacks the install collection");
     await storeAuthorityGrant(pds.hosts[0], owner.did, "r9-grant-dpop");
     const created = await createWorkspace(await restoreAuthorityGrant(owner.did), { creator: owner.did, name: "Apps", operationId: keys.tidNow() });
@@ -107,7 +109,8 @@ test("apps at the pinned PDS: installed after reauthorizing, reading only what i
 
       // then it is in no list, the feed denies it at once, and the authority refuses it a credential
       const grant = await restoreAuthorityGrant(owner.did);
-      for (const space of [created.workspace, created.channel, other]) {
+      const appInbox = keys.appInboxUri(owner.did, keys.parseWorkspaceUri(created.workspace)!.skey, app.did);
+      for (const space of [created.workspace, created.channel, other, appInbox]) {
         assert.equal((await listSpaceMembers(grant, space)).some((member) => member.did === app.did), false, `not in ${space}`);
       }
       const started = Date.now();

@@ -3,6 +3,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { appInboxUri } from "@flock/protocol/keys";
 import { stepMatcher } from "../journal";
 import { FIELD_RULES } from "../operations";
 import { OPERATION_KINDS, operationKind } from "./index";
@@ -24,11 +25,11 @@ const PERSISTED_KINDS = {
   },
   inviteMember: {
     required: ["subject"], optional: [], actor: "admin", submittedThrough: "execute",
-    steps: ["member-workspace", "member-inbox-writer", "member-public-channel-{skey}", "member-workspace-roster", "member-state-verified"],
+    steps: ["member-workspace", "member-inbox-writer", "member-app-inbox-{app}", "member-public-channel-{skey}", "member-workspace-roster", "member-state-verified"],
   },
   removeMember: {
     required: ["subject"], optional: [], actor: "admin", submittedThrough: "execute",
-    steps: ["remove-inbox-membership", "remove-channel-{skey}", "remove-workspace-membership", "deactivate-workspace-roster", "deactivate-admin", "removal-verified"],
+    steps: ["remove-inbox-membership", "remove-app-inbox-{app}", "remove-channel-{skey}", "remove-workspace-membership", "deactivate-workspace-roster", "deactivate-admin", "removal-verified"],
   },
   setAdmin: {
     required: ["subject", "active"], optional: [], actor: "admin", submittedThrough: "execute",
@@ -62,7 +63,7 @@ const PERSISTED_KINDS = {
   },
   leaveWorkspace: {
     required: [], optional: [], actor: "member", submittedThrough: "execute",
-    steps: ["remove-inbox-membership", "remove-channel-{skey}", "remove-workspace-membership", "deactivate-workspace-roster", "deactivate-admin", "removal-verified"],
+    steps: ["remove-inbox-membership", "remove-app-inbox-{app}", "remove-channel-{skey}", "remove-workspace-membership", "deactivate-workspace-roster", "deactivate-admin", "removal-verified"],
   },
   leaveChannel: {
     required: ["skey"], optional: [], actor: "member", submittedThrough: "execute",
@@ -74,19 +75,20 @@ const PERSISTED_KINDS = {
       "workspace-set-{did}", "workspace-remove-{did}", "workspace-verified", "inbox-set-{did}", "inbox-remove-{did}", "inbox-verified",
       "channel-{skey}-set-{did}", "channel-{skey}-remove-{did}", "channel-{skey}-verified", "channel-{skey}-deactivate-stale-roster-{did}",
       "archived-{skey}-set-{did}", "archived-{skey}-remove-{did}", "archived-{skey}-verified", "archived-{skey}-deactivate-roster-{did}",
+      "app-inbox-{did}-space", "app-inbox-{did}-set", "app-inbox-{did}-remove", "app-inbox-{did}-verified",
     ],
   },
   installApp: {
     required: ["subject", "channels"], optional: [], actor: "admin", submittedThrough: "execute",
-    steps: ["app-install-record", "app-workspace-set", "app-workspace-remove", "app-channel-{skey}-set", "app-channel-{skey}-remove", "app-access-verified"],
+    steps: ["app-inbox-space", "app-install-record", "app-inbox-set", "app-workspace-set", "app-workspace-remove", "app-channel-{skey}-set", "app-channel-{skey}-remove", "app-access-verified"],
   },
   updateAppAccess: {
     required: ["subject", "channels"], optional: [], actor: "admin", submittedThrough: "execute",
-    steps: ["app-access-record", "app-workspace-set", "app-workspace-remove", "app-channel-{skey}-set", "app-channel-{skey}-remove", "app-access-verified"],
+    steps: ["app-inbox-space", "app-access-record", "app-inbox-set", "app-workspace-set", "app-workspace-remove", "app-channel-{skey}-set", "app-channel-{skey}-remove", "app-access-verified"],
   },
   uninstallApp: {
     required: ["subject"], optional: [], actor: "admin", submittedThrough: "execute",
-    steps: ["app-uninstall-record", "app-workspace-set", "app-workspace-remove", "app-channel-{skey}-set", "app-channel-{skey}-remove", "app-access-verified"],
+    steps: ["app-uninstall-record", "app-inbox-remove", "app-workspace-set", "app-workspace-remove", "app-channel-{skey}-set", "app-channel-{skey}-remove", "app-access-verified"],
   },
 };
 
@@ -156,7 +158,7 @@ test("every step a kind's run body records is a step that kind declares", async 
     for (const name of names) assert.ok(declared.some((matches) => matches(name)), `${file}: step "${name}" is not declared`);
     checked += calls.length;
   }
-  assert.equal(checked, 78, "every context.step call in the kind modules was checked");
+  assert.equal(checked, 89, "every context.step call in the kind modules was checked");
 });
 
 function isKind(value: unknown): value is { kind: string; steps: readonly string[] } {
@@ -180,7 +182,12 @@ test("the kinds that create or archive spaces name them, so the operator registe
   ]);
   assert.deepEqual(operationKind("createChannel")!.createsSpaces!(actor, { kind: "createChannel", skey: "design" }), [`at://${owner}/space/new.flock.channel/acme-design`]);
   assert.deepEqual(operationKind("archiveChannel")!.archivesSpaces!(actor, { kind: "archiveChannel", skey: "acme-design" }), [`at://${owner}/space/new.flock.channel/acme-design`]);
-  for (const kind of Object.values(OPERATION_KINDS).filter((entry) => !["bootstrapWorkspace", "createWorkspace", "createChannel", "archiveChannel"].includes(entry.kind))) {
+  assert.deepEqual(operationKind("installApp")!.createsSpaces!(actor, { kind: "installApp", subject: "did:plc:bot", channels: [] }), [appInboxUri(owner, "acme", "did:plc:bot")]);
+  assert.deepEqual(operationKind("updateAppAccess")!.createsSpaces!(actor, { kind: "updateAppAccess", subject: "did:plc:bot", channels: [] }), [appInboxUri(owner, "acme", "did:plc:bot")]);
+  assert.deepEqual(operationKind("uninstallApp")!.archivesSpaces!(actor, { kind: "uninstallApp", subject: "did:plc:bot" }), [appInboxUri(owner, "acme", "did:plc:bot")]);
+  for (const kind of Object.values(OPERATION_KINDS).filter((entry) => ![
+    "bootstrapWorkspace", "createWorkspace", "createChannel", "archiveChannel", "installApp", "updateAppAccess", "uninstallApp",
+  ].includes(entry.kind))) {
     assert.equal(kind.createsSpaces ?? kind.archivesSpaces, undefined, `${kind.kind} neither creates nor archives a space`);
   }
 });

@@ -6,6 +6,8 @@ import messageLexicon from "../lexicons/new/flock/channel/message.json";
 import reactionLexicon from "../lexicons/new/flock/channel/reaction.json";
 import directoryLexicon from "../lexicons/new/flock/directory.json";
 import dmDeclarationLexicon from "../lexicons/new/flock/dm/declaration.json";
+import appActionLexicon from "../lexicons/new/flock/app/action.json";
+import appCommandLexicon from "../lexicons/new/flock/app/command.json";
 import appDeclarationLexicon from "../lexicons/new/flock/app/declaration.json";
 import appInstallLexicon from "../lexicons/new/flock/app/install.json";
 import dmHeaderLexicon from "../lexicons/new/flock/dm/header.json";
@@ -24,6 +26,7 @@ import {
   dmConversationUri,
   isDid,
   isTid,
+  parseChannelUri,
   parseDmConversationUri,
   parseDmInboxUri,
   parseDmMessageUri,
@@ -34,7 +37,7 @@ import {
   spaceRecordUri,
   subjectKey,
 } from "./keys";
-import { COLLECTION, REPO_COLLECTION, SPACE_TYPE, type Collection, type SpaceType } from "./nsids";
+import { BLOCK_TYPE, COLLECTION, REPO_COLLECTION, SPACE_TYPE, type Collection, type SpaceType } from "./nsids";
 
 // The one table of the records this app reads and writes in spaces: which space type holds each collection, who may author
 // it, how its key is formed, how a client syncs it, and the rules about meaning that a schema cannot express. Validation has
@@ -98,6 +101,31 @@ export const REGISTRY: { readonly [C in Collection]: CollectionEntry } = {
       ? VALID
       : invalid("acceptance key must match its workspace"),
   },
+  [COLLECTION.appCommand]: {
+    spaceType: SPACE_TYPE.appInbox, author: "member", key: "tid", sync: "window",
+    semantic: (record, context) => {
+      if (!isCommandName(record.command)) return invalid("command name must match [a-z0-9-]{1,32}");
+      const channel = parseChannelUri(String(record.channel));
+      if (!channel || channel.authorityDid !== context.authorityDid || channelUri(channel.authorityDid, channel.skey) !== record.channel) {
+        return invalid("command channel must be a canonical channel URI of this authority");
+      }
+      if (record.parent === undefined) return VALID;
+      const parent = parseSpaceRecordUri(String(record.parent), String(record.channel), COLLECTION.message);
+      return parent && isTid(parent.rkey) ? VALID : invalid("command parent must be a canonical message URI in its channel");
+    },
+  },
+  [COLLECTION.appAction]: {
+    spaceType: SPACE_TYPE.appInbox, author: "member", key: "tid", sync: "window",
+    semantic: (record, context) => {
+      if (!isActionId(record.actionId)) return invalid("actionId must match [a-zA-Z0-9_-]{1,64}");
+      const channel = parseChannelUri(String(record.channel));
+      if (!channel || channel.authorityDid !== context.authorityDid || channelUri(channel.authorityDid, channel.skey) !== record.channel) {
+        return invalid("action channel must be a canonical channel URI of this authority");
+      }
+      const message = parseSpaceRecordUri(String(record.message), String(record.channel), COLLECTION.message);
+      return message && isTid(message.rkey) ? VALID : invalid("action target must be a canonical message URI in its channel");
+    },
+  },
   [COLLECTION.joinRequest]: {
     spaceType: SPACE_TYPE.inbox, author: "member", key: "derived", sync: "all",
     semantic: (record, context) => context.rkey === requestRecordKey(channelUri(context.authorityDid, String(record.channelSkey)), context.repoDid)
@@ -115,9 +143,13 @@ export const REGISTRY: { readonly [C in Collection]: CollectionEntry } = {
   },
   [COLLECTION.message]: {
     spaceType: SPACE_TYPE.channel, author: "member", key: "tid", sync: "window",
-    semantic: (record, context) => record.parent === undefined
-      ? VALID
-      : validateMessageParent(String(record.parent), context.spaceUri, context.knownTopLevelMessages ?? new Set(), context.knownMessages ?? new Set()),
+    semantic: (record, context) => {
+      const blocks = validateMessageBlocks(record.blocks);
+      if (!blocks.valid) return blocks;
+      return record.parent === undefined
+        ? VALID
+        : validateMessageParent(String(record.parent), context.spaceUri, context.knownTopLevelMessages ?? new Set(), context.knownMessages ?? new Set());
+    },
   },
   [COLLECTION.reaction]: {
     spaceType: SPACE_TYPE.channel, author: "member", key: "derived", sync: "all",
@@ -183,6 +215,22 @@ export function memberCollections(spaceType: SpaceType): Collection[] {
   return collectionsWhere((entry) => entry.spaceType === spaceType && entry.author === "member");
 }
 
+/** Every registered collection of a space type, whatever its author kind: what the space lexicon lists and a read grant expands to. */
+export function spaceCollections(spaceType: SpaceType): Collection[] {
+  return collectionsWhere((entry) => entry.spaceType === spaceType);
+}
+
+const COMMAND_NAME_PATTERN = /^[a-z0-9-]{1,32}$/;
+const ACTION_ID_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
+
+export function isCommandName(value: unknown): value is string {
+  return typeof value === "string" && COMMAND_NAME_PATTERN.test(value);
+}
+
+export function isActionId(value: unknown): value is string {
+  return typeof value === "string" && ACTION_ID_PATTERN.test(value);
+}
+
 export function isRegisteredCollection(collection: string): collection is Collection {
   return Object.hasOwn(REGISTRY, collection);
 }
@@ -190,7 +238,8 @@ export function isRegisteredCollection(collection: string): collection is Collec
 const LEXICONS = new Lexicons([
   workspaceProfileLexicon, directoryLexicon, workspaceRosterLexicon, adminLexicon, acceptanceLexicon, joinRequestLexicon,
   joinDecisionLexicon, messageLexicon, reactionLexicon, channelRosterLexicon, dmRequestLexicon, dmHeaderLexicon,
-  dmMessageLexicon, dmReactionLexicon, dmDeclarationLexicon, appInstallLexicon, appDeclarationLexicon,
+  dmMessageLexicon, dmReactionLexicon, dmDeclarationLexicon, appInstallLexicon, appDeclarationLexicon, appCommandLexicon,
+  appActionLexicon,
 ].map((document) => parseLexiconDoc(document)));
 
 /** The shape a published lexicon gives a record, and nothing more: no author, key or reference rule. */
@@ -231,13 +280,38 @@ export function validateDmDeclaration(value: unknown): RecordValidation {
 }
 
 /**
- * `app.declaration`: the record an app account publishes in its own public repo (key `self`) with the name people see. It is a
- * label, never a grant; an admin's app checks it before installing the account.
+ * `app.declaration`: the record an app account publishes in its own public repo (key `self`) with the name people see and the
+ * slash commands it offers. It is a label, never a grant; an admin's app checks it before installing the account.
  */
 export function validateAppDeclaration(value: unknown): RecordValidation {
   if (!isPlainObject(value)) return invalid("app declaration must be an object");
   if (value.$type !== REPO_COLLECTION.appDeclaration) return invalid("app declaration has the wrong type");
-  return validateRecordShape(REPO_COLLECTION.appDeclaration, value);
+  if (new TextEncoder().encode(JSON.stringify(value)).length > MAX_RECORD_BYTES) return invalid("app declaration exceeds the size limit");
+  const shape = validateRecordShape(REPO_COLLECTION.appDeclaration, value);
+  if (!shape.valid) return shape;
+  if (value.commands === undefined) return VALID;
+  const seen = new Set<string>();
+  for (const command of value.commands as Array<Record<string, unknown>>) {
+    if (!isCommandName(command.name)) return invalid("declared command name must match [a-z0-9-]{1,32}");
+    if (seen.has(command.name)) return invalid("declared command names must be unique");
+    seen.add(command.name);
+  }
+  return VALID;
+}
+
+export function validateMessageBlocks(blocks: unknown): RecordValidation {
+  if (!Array.isArray(blocks)) return VALID;
+  const seen = new Set<string>();
+  for (const block of blocks) {
+    if (!isPlainObject(block) || block.$type !== BLOCK_TYPE.actions || !Array.isArray(block.elements)) continue;
+    for (const element of block.elements) {
+      if (!isPlainObject(element)) continue;
+      if (!isActionId(element.actionId)) return invalid("button actionId must match [a-zA-Z0-9_-]{1,64}");
+      if (seen.has(element.actionId)) return invalid("button actionIds must be unique across a message");
+      seen.add(element.actionId);
+    }
+  }
+  return VALID;
 }
 
 export function validateMessageParent(

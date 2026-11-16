@@ -49,6 +49,7 @@ function workspacePds(options?: FakeAuthorityPdsOptions) {
     pds.recordsOf(WORKSPACE.uri, COLLECTION.directory).set(skey, { $type: COLLECTION.directory, skey, name: skey, visibility });
   }
   pds.membersOf(channelUri(OWNER, PRIVATE_SKEY)).set(MEMBER, { did: MEMBER, read: true, write: true });
+  pds.membersOf(channelUri(OWNER, PUBLIC_SKEY)).set(ADMIN, { did: ADMIN, read: true, write: true }).set(MEMBER, { did: MEMBER, read: true, write: true });
   return pds;
 }
 

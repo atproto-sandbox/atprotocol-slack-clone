@@ -12,7 +12,7 @@ import { mintSpaceCredential } from "./space-credential";
 import { isMemberListOnly, memberspacePolicy } from "@flock/protocol/atproto/space-policy";
 import { validateSpaceRecord } from "@flock/protocol/registry";
 import { assertBoundedRecordPage, listBoundedMembers } from "@flock/protocol/atproto/record-pages";
-import { isSpaceAlreadyExists, XrpcError } from "@flock/protocol/atproto/xrpc";
+import { isScopeMissingError, isSpaceAlreadyExists, XrpcError } from "@flock/protocol/atproto/xrpc";
 import { requireSpaceAuthority, spaceRecordUri, spaceUri } from "@flock/protocol/keys";
 import { WORKSPACE_ENVELOPE, WorkspaceEnvelopeError } from "@flock/protocol/workspace-summary";
 
@@ -48,6 +48,24 @@ export async function spaceExists(session: OAuthSession, space: string): Promise
   }
 }
 
+export type AppInboxState = "present" | "missing" | "uncovered";
+
+/**
+ * Whether an install's inbox exists at its authority: `present`, `missing` (the grant covers the type and the space has not
+ * been created), or `uncovered` (the authority's grant predates the inbox type, so `getSpace` is refused for a missing scope
+ * and no inbox was ever created).
+ */
+export async function appInboxState(session: OAuthSession, space: string): Promise<AppInboxState> {
+  try {
+    await sessionClient(session).query<GetSpace.OutputSchema>("com.atproto.space.getSpace", { space });
+    return "present";
+  } catch (error) {
+    if (error instanceof XrpcError && error.code === "SpaceNotFound") return "missing";
+    if (isScopeMissingError(error)) return "uncovered";
+    throw error;
+  }
+}
+
 export async function putSpaceMember(
   session: OAuthSession,
   space: string,
@@ -60,10 +78,26 @@ export async function putSpaceMember(
   );
 }
 
+export async function putSpaceMembers(
+  session: OAuthSession,
+  space: string,
+  members: ReadonlyArray<{ did: string; read: boolean; write: boolean }>,
+): Promise<void> {
+  for (const member of members) {
+    await putSpaceMember(session, space, member.did, member.read, member.write);
+  }
+}
+
 export async function removeSpaceMember(session: OAuthSession, space: string, did: string): Promise<void> {
   await sessionClient(session).procedure<RemoveMember.InputSchema, unknown>(
     "com.atproto.memberspace.removeMember", { space, did },
   );
+}
+
+export async function removeSpaceMembers(session: OAuthSession, space: string, dids: readonly string[]): Promise<void> {
+  for (const did of dids) {
+    await removeSpaceMember(session, space, did);
+  }
 }
 
 export async function listSpaceMembers(session: OAuthSession, space: string): Promise<ListMembers.Member[]> {

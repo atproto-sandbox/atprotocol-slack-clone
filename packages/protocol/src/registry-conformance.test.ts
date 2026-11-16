@@ -5,10 +5,10 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { Lexicons, type LexiconDoc } from "@atproto/lexicon";
 import {
-  acceptanceRecordKey, channelUri, decisionRecordKey, dmConversationUri, dmInboxUri, inboxUri, reactionRecordKey, requestRecordKey,
-  spaceRecordUri, subjectKey, workspaceUri,
+  acceptanceRecordKey, appInboxUri, channelUri, decisionRecordKey, dmConversationUri, dmInboxUri, inboxUri, reactionRecordKey,
+  requestRecordKey, spaceRecordUri, subjectKey, workspaceUri,
 } from "./keys";
-import { COLLECTION, type Collection } from "./nsids";
+import { BLOCK_TYPE, COLLECTION, type Collection } from "./nsids";
 import { REGISTRY, validateRecordShape, validateSpaceRecord, type RecordContext } from "./registry";
 
 // The registry's two validation layers checked against the published lexicon documents: shape agrees with `@atproto/lexicon`
@@ -19,6 +19,8 @@ const MEMBER = "did:plc:member";
 const NOW = "2026-11-01T12:00:00.000Z";
 const WORKSPACE = workspaceUri(AUTHORITY, "acme");
 const INBOX = inboxUri(AUTHORITY, "acme");
+const APP = "did:plc:bot";
+const APP_INBOX = appInboxUri(AUTHORITY, "acme", APP);
 const CHANNEL = channelUri(AUTHORITY, "acme-general");
 const OTHER_CHANNEL = channelUri(AUTHORITY, "acme-random");
 const MESSAGE = spaceRecordUri(CHANNEL, MEMBER, COLLECTION.message, "2222222222222");
@@ -54,6 +56,14 @@ const FIXTURES: Record<Collection, Fixture> = {
   [COLLECTION.acceptance]: {
     record: { workspace: WORKSPACE, createdAt: NOW },
     context: { authorityDid: AUTHORITY, spaceUri: WORKSPACE, repoDid: MEMBER, rkey: acceptanceRecordKey(WORKSPACE) },
+  },
+  [COLLECTION.appCommand]: {
+    record: { command: "echo", text: "hello", channel: CHANNEL, createdAt: NOW },
+    context: { authorityDid: AUTHORITY, spaceUri: APP_INBOX, repoDid: MEMBER, rkey: "222222222222c" },
+  },
+  [COLLECTION.appAction]: {
+    record: { message: MESSAGE, actionId: "again_1", channel: CHANNEL, createdAt: NOW },
+    context: { authorityDid: AUTHORITY, spaceUri: APP_INBOX, repoDid: MEMBER, rkey: "222222222222d" },
   },
   [COLLECTION.joinRequest]: {
     record: { channelSkey: "acme-general", requestId: "2222222222226", createdAt: NOW },
@@ -187,6 +197,8 @@ const SEMANTIC_CASES: SemanticCase[] = [
   { collection: COLLECTION.workspaceProfile, breaks: "a key other than self", context: { rkey: "other" }, reason: /must be self/ },
   { collection: COLLECTION.dmHeader, breaks: "a key other than self", context: { rkey: "other" }, reason: /must be self/ },
   { collection: COLLECTION.message, breaks: "a key that is not a TID", context: { rkey: "self" }, reason: /TID/ },
+  { collection: COLLECTION.appCommand, breaks: "a key that is not a TID", context: { rkey: "self" }, reason: /TID/ },
+  { collection: COLLECTION.appAction, breaks: "a key that is not a TID", context: { rkey: "self" }, reason: /TID/ },
   { collection: COLLECTION.dmMessage, breaks: "a key that is not a TID", context: { rkey: "self" }, reason: /TID/ },
   { collection: COLLECTION.directory, breaks: "a key other than its skey", context: { rkey: "acme-random" }, reason: /directory key/ },
   { collection: COLLECTION.workspaceRoster, breaks: "a key other than its subject's", context: { rkey: subjectKey(AUTHORITY) }, reason: /roster key/ },
@@ -214,6 +226,33 @@ const SEMANTIC_CASES: SemanticCase[] = [
   { collection: COLLECTION.dmReaction, breaks: "a target in another conversation", record: { subject: spaceRecordUri(dmConversationUri(MEMBER, "222222222222b"), MEMBER, COLLECTION.dmMessage, "2222222222225") }, reason: /in this conversation/ },
   // A nested reply.
   { collection: COLLECTION.message, breaks: "a reply to a reply", record: { parent: REPLY }, reason: /nested replies/ },
+  // Blocks and interactions.
+  {
+    collection: COLLECTION.message,
+    breaks: "duplicate button actionIds across blocks",
+    record: {
+      blocks: [
+        { $type: BLOCK_TYPE.actions, elements: [{ actionId: "same", label: "One" }] },
+        { $type: BLOCK_TYPE.actions, elements: [{ actionId: "same", label: "Two" }] },
+      ],
+    },
+    reason: /unique/,
+  },
+  {
+    collection: COLLECTION.message,
+    breaks: "a button actionId outside the token syntax",
+    record: { blocks: [{ $type: BLOCK_TYPE.actions, elements: [{ actionId: "bad id!", label: "One" }] }] },
+    reason: /actionId/,
+  },
+  { collection: COLLECTION.appCommand, breaks: "a command name outside the token syntax", record: { command: "Echo_1" }, reason: /command name/ },
+  { collection: COLLECTION.appCommand, breaks: "a channel of another authority", record: { channel: channelUri("did:plc:other", "acme-general") }, reason: /channel URI of this authority/ },
+  { collection: COLLECTION.appCommand, breaks: "a non-channel space as channel", record: { channel: WORKSPACE }, reason: /channel URI of this authority/ },
+  { collection: COLLECTION.appCommand, breaks: "a parent in another channel", record: { parent: spaceRecordUri(OTHER_CHANNEL, MEMBER, COLLECTION.message, "2222222222222") }, reason: /canonical message URI in its channel/ },
+  { collection: COLLECTION.appCommand, breaks: "a parent with a non-TID key", record: { parent: spaceRecordUri(CHANNEL, MEMBER, COLLECTION.message, "notatid") }, reason: /canonical message URI in its channel/ },
+  { collection: COLLECTION.appAction, breaks: "an actionId outside the token syntax", record: { actionId: "bad id!" }, reason: /actionId/ },
+  { collection: COLLECTION.appAction, breaks: "a channel of another authority", record: { channel: channelUri("did:plc:other", "acme-general") }, reason: /channel URI of this authority/ },
+  { collection: COLLECTION.appAction, breaks: "a message in another channel", record: { message: spaceRecordUri(OTHER_CHANNEL, MEMBER, COLLECTION.message, "2222222222222") }, reason: /canonical message URI in its channel/ },
+  { collection: COLLECTION.appAction, breaks: "a message with a non-TID key", record: { message: spaceRecordUri(CHANNEL, MEMBER, COLLECTION.message, "notatid") }, reason: /canonical message URI in its channel/ },
   // Participants.
   { collection: COLLECTION.dmRequest, breaks: "participants not in canonical order", record: { participants: [AUTHORITY, MEMBER] }, reason: /canonical/ },
   { collection: COLLECTION.dmRequest, breaks: "participants without the sender", record: { participants: [AUTHORITY, "did:plc:third"] }, reason: /sender and the inbox owner/ },

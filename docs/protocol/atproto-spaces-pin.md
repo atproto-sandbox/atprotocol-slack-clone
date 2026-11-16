@@ -171,6 +171,8 @@ space:new.flock.channel?authority=self&skey=*&action=read_self
 space:new.flock.channel?authority=self&skey=*&action=read
 space:new.flock.channel?authority=self&skey=*&action=read_self&manage=create&manage=update
 space:new.flock.channel?authority=self&skey=*&collection=new.flock.channel.roster&action=create&action=update&action=delete
+
+space:new.flock.app.inbox?authority=self&skey=*&action=read_self&action=read&manage=create&manage=update
 ```
 
 The operator has no message, reaction, or join-request write scope. Human admin clients request three exact RPC grants, replacing `OPERATOR_DID` with the DID that publishes `#atproto_flock_operator`:
@@ -194,5 +196,6 @@ For each hashed rkey, calculate SHA-256 over UTF-8 bytes and encode the 32-byte 
 | `a-` acceptance | Canonical workspace URI |
 | `x-` reaction | Canonical message URI, NUL byte, emoji, NUL byte, author DID |
 | `q-` decision | Canonical request URI |
+| `i-` app inbox skey | Workspace `skey`, NUL byte, canonical app DID |
 
 Each string is already required to be valid UTF-8 and contain no NUL. URI values are parsed and serialized to the canonical atproto URI form before hashing. The workspace directory uses the literal channel `skey`; a request generation remains a fresh TID in the record value. The full canonical rule is also in the [PRD](../prd/atproto-slack-clone.md#lexicons-and-current-record-rules).

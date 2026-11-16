@@ -10,7 +10,7 @@ import { restoreAuthorityGrant } from "./authority-grant";
 /** How long a space's member list answers who may follow it before it is read again (D12). */
 export const MEMBER_LIST_TTL_MS = 60_000;
 
-const FOLLOWED_BY_MEMBER_LIST: ReadonlySet<string> = new Set([SPACE_TYPE.workspace, SPACE_TYPE.inbox, SPACE_TYPE.channel]);
+const FOLLOWED_BY_MEMBER_LIST: ReadonlySet<string> = new Set([SPACE_TYPE.workspace, SPACE_TYPE.inbox, SPACE_TYPE.channel, SPACE_TYPE.appInbox]);
 
 export type MemberAccessDeps = {
   /** Whether the operator registered (or tried to register) its notice sink for the space: it knows the space exists. */

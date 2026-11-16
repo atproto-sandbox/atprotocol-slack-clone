@@ -11,8 +11,62 @@
         "properties": {
           "text": { "type": "string", "minLength": 1, "maxLength": 40000, "maxGraphemes": 10000 },
           "createdAt": { "type": "string", "format": "datetime" },
-          "parent": { "type": "string", "format": "at-uri" }
+          "parent": { "type": "string", "format": "at-uri" },
+          "blocks": {
+            "type": "array",
+            "maxLength": 20,
+            "items": {
+              "type": "union",
+              "refs": ["#section", "#context", "#divider", "#actions"],
+              "closed": true
+            }
+          }
         }
+      }
+    },
+    "section": {
+      "type": "object",
+      "required": ["text"],
+      "properties": {
+        "text": { "type": "string", "minLength": 1, "maxLength": 12000, "maxGraphemes": 3000 }
+      }
+    },
+    "context": {
+      "type": "object",
+      "required": ["elements"],
+      "properties": {
+        "elements": {
+          "type": "array",
+          "minLength": 1,
+          "maxLength": 10,
+          "items": { "type": "string", "minLength": 1, "maxLength": 1200, "maxGraphemes": 300 }
+        }
+      }
+    },
+    "divider": {
+      "type": "object",
+      "properties": {}
+    },
+    "actions": {
+      "type": "object",
+      "required": ["elements"],
+      "properties": {
+        "elements": {
+          "type": "array",
+          "minLength": 1,
+          "maxLength": 5,
+          "items": { "type": "ref", "ref": "#button" }
+        }
+      }
+    },
+    "button": {
+      "type": "object",
+      "required": ["actionId", "label"],
+      "properties": {
+        "actionId": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "label": { "type": "string", "minLength": 1, "maxLength": 300, "maxGraphemes": 75 },
+        "value": { "type": "string", "maxLength": 2000 },
+        "style": { "type": "string", "enum": ["primary", "danger"] }
       }
     }
   }

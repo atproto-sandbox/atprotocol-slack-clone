@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { channelUri, dmConversationUri, dmInboxUri, inboxUri, workspaceUri } from "@flock/protocol/keys";
+import { appInboxUri, channelUri, dmConversationUri, dmInboxUri, inboxUri, workspaceUri } from "@flock/protocol/keys";
 import { dropMemberList, MEMBER_LIST_TTL_MS, mayFollow, type MemberAccessDeps } from "./member-access";
 
 // Who may follow a space's changes: the feed authorization rows of the plan's R5 tests, against an injected member list.
@@ -92,4 +92,25 @@ test("a space the operator never registered is denied before any grant is restor
   assert.equal(await mayFollow(UNREGISTERED, MEMBER, access), false);
   assert.equal(await mayFollow(UNREGISTERED, OWNER, access), false, "not its authority either: the operator does not know the space");
   assert.deepEqual(reads, []);
+});
+
+test("an app inbox admits the installed app (read only) and the authority, and denies write-only roster members and admins", async () => {
+  const app = "did:plc:bot";
+  const admin = "did:plc:admin";
+  const appInbox = appInboxUri(OWNER, "acme", app);
+  const unregisteredAppInbox = appInboxUri(OWNER, "acme", "did:plc:otherbot");
+  const { access } = deps(
+    new Map([
+      [appInbox, [{ did: app, read: true, write: false }, { did: MEMBER, read: false, write: true }, { did: admin, read: false, write: true }]],
+      [unregisteredAppInbox, [{ did: "did:plc:otherbot", read: true, write: false }]],
+    ]),
+    { now: 1_000_000 },
+    (space) => space !== UNREGISTERED && space !== unregisteredAppInbox,
+  );
+  assert.equal(await mayFollow(appInbox, app, access), true, "the app has read=true");
+  assert.equal(await mayFollow(appInbox, OWNER, access), true, "the authority owns the space");
+  assert.equal(await mayFollow(appInbox, MEMBER, access), false, "roster writers cannot follow");
+  assert.equal(await mayFollow(appInbox, admin, access), false, "non-authority admins cannot follow");
+  assert.equal(await mayFollow(appInbox, OUTSIDER, access), false);
+  assert.equal(await mayFollow(unregisteredAppInbox, "did:plc:otherbot", access), false, "an unregistered inbox is denied");
 });

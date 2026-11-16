@@ -91,13 +91,18 @@ export function fakeAuthorityPds(did: string, options: FakeAuthorityPdsOptions =
           const collection = params.get("collection")!;
           return Response.json({ records: [...recordMap(params.get("space")!, collection)].map(([rkey, value]) => ({ collection, rkey, value })) });
         }
-        case "com.atproto.memberspace.listMembers":
-          return Response.json({ members: [...memberMap(params.get("space")!).values()] });
+        case "com.atproto.memberspace.listMembers": {
+          const space = params.get("space")!;
+          if (!spaces.has(space)) return Response.json({ error: "SpaceNotFound", message: "Space not found" }, { status: 400 });
+          return Response.json({ members: [...memberMap(space).values()] });
+        }
         case "com.atproto.memberspace.putMember":
+          if (!spaces.has(body!.space)) return Response.json({ error: "SpaceNotFound", message: "Space not found" }, { status: 400 });
           write(`putMember ${body!.space} ${body!.did}`);
           memberMap(body!.space).set(body!.did, { did: body!.did, read: body!.read, write: body!.write });
           return Response.json({});
         case "com.atproto.memberspace.removeMember":
+          if (!spaces.has(body!.space)) return Response.json({ error: "SpaceNotFound", message: "Space not found" }, { status: 400 });
           write(`removeMember ${body!.space} ${body!.did}`);
           memberMap(body!.space).delete(body!.did);
           return Response.json({});

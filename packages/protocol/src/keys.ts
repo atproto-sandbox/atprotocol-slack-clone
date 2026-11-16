@@ -63,6 +63,14 @@ export function inboxUri(authorityDid: string, skey = "workspace"): string {
   return spaceUri(authorityDid, SPACE_TYPE.inbox, skey);
 }
 
+export function appInboxSkey(workspaceSkey: string, appDid: string): string {
+  return `i-${recordKeyHash(joinParts(workspaceSkey, appDid))}`;
+}
+
+export function appInboxUri(authorityDid: string, workspaceSkey: string, appDid: string): string {
+  return spaceUri(authorityDid, SPACE_TYPE.appInbox, appInboxSkey(workspaceSkey, appDid));
+}
+
 export function channelUri(authorityDid: string, skey: string): string {
   return spaceUri(authorityDid, SPACE_TYPE.channel, skey);
 }
@@ -144,6 +152,12 @@ export function parseWorkspaceUri(uri: string): { authorityDid: Did; skey: strin
 export function parseChannelUri(uri: string): { authorityDid: Did; skey: string } | null {
   const parsed = parseSpaceUri(uri);
   return parsed?.type === SPACE_TYPE.channel ? { authorityDid: parsed.authorityDid, skey: parsed.skey } : null;
+}
+
+/** An app inbox space URI's authority and skey, or null for any other URI. */
+export function parseAppInboxUri(uri: string): { authorityDid: Did; skey: string } | null {
+  const parsed = parseSpaceUri(uri);
+  return parsed?.type === SPACE_TYPE.appInbox ? { authorityDid: parsed.authorityDid, skey: parsed.skey } : null;
 }
 
 export function spaceRecordUri(spaceUri: string, repoDid: string, collection: string, rkey: string): string {

@@ -30,7 +30,7 @@ const NO_APP_LAYER = {
 };
 const MEMBER_LIST_WRITES = {
   group: ["**/atproto/space-ops"],
-  importNames: ["putSpaceMember", "removeSpaceMember"],
+  importNames: ["putSpaceMember", "putSpaceMembers", "removeSpaceMember", "removeSpaceMembers"],
   message: "The operator changes member lists through apps/operator/src/operator/members.ts, which drops the change feed's cached list.",
 };
 const NO_CLIENT_NODE_ENTRY = {

@@ -51,6 +51,15 @@ export function expectedInboxList(roster: ReadonlySet<string>, admins: ReadonlyS
   return new Map([...roster].map((did): [string, Access] => [did, { read: admins.has(did), write: true }]));
 }
 
+/** An app's inbox: while the install is active, every roster person writes and only the app reads; when inactive, nobody. */
+export function expectedAppInboxList(roster: ReadonlySet<string>, install: Pick<AppInstall, "subject" | "active">): Map<string, Access> {
+  if (!install.active) return new Map();
+  return new Map<string, Access>([
+    ...[...roster].map((did): [string, Access] => [did, { read: false, write: true }]),
+    [install.subject, { read: true, write: false }],
+  ]);
+}
+
 /**
  * A channel: a public one's people are the roster, a private one's are its roster's members who are still on the workspace
  * roster, an archived one has nobody; and every active app that is granted it, with its grant's bits, unless it is archived.
@@ -100,15 +109,21 @@ export async function currentWorkspaceMembers(actor: OperatorActor): Promise<Set
   return roster;
 }
 
-/** The workspace's active installs, by app DID; an inactive one grants nothing. */
-export async function activeInstalls(actor: OperatorActor): Promise<Map<string, AppInstall>> {
+/** Every valid install record in the workspace, active or not, by app DID. */
+export async function allInstalls(actor: OperatorActor): Promise<Map<string, AppInstall>> {
   const rows = await listOwnerRecords(actor.session, actor.workspace.uri, COLLECTION.appInstall);
   const installs = new Map(rows.flatMap((row) => {
     const install = parseInstall(actor, row.rkey, row.value);
-    return install?.active ? [[install.subject, install] as const] : [];
+    return install ? [[install.subject, install] as const] : [];
   }));
-  if (installs.size > WORKSPACE_ENVELOPE.apps) throw new WorkspaceEnvelopeError(`The active app count exceeds ${WORKSPACE_ENVELOPE.apps}.`);
+  const activeCount = [...installs.values()].filter((install) => install.active).length;
+  if (activeCount > WORKSPACE_ENVELOPE.apps) throw new WorkspaceEnvelopeError(`The active app count exceeds ${WORKSPACE_ENVELOPE.apps}.`);
   return installs;
+}
+
+/** The workspace's active installs, by app DID; an inactive one grants nothing. */
+export async function activeInstalls(actor: OperatorActor): Promise<Map<string, AppInstall>> {
+  return new Map([...await allInstalls(actor)].filter(([, install]) => install.active));
 }
 
 /** An app's install record, active or not, or null when it has none. */

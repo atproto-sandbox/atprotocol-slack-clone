@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { expectedChannelList, expectedInboxList, expectedWorkspaceList, listMatches, type AppInstall } from "./membership";
+import { expectedAppInboxList, expectedChannelList, expectedInboxList, expectedWorkspaceList, listMatches, type AppInstall } from "./membership";
 
 const AUTHORITY = "did:plc:authority";
 const ADMIN = "did:plc:admin";
@@ -38,6 +38,28 @@ test("a private channel holds its roster's people who are still on the workspace
 
 test("an archived channel holds nobody, an app granted it included", () => {
   assert.deepEqual(expectedChannelList({ skey: "acme-general", visibility: "archived" }, ROSTER, new Set([PERSON]), INSTALLS), new Map());
+});
+
+test("an app inbox holds every roster person as a writer and the app as its only reader while active, and nobody when inactive", () => {
+  const active = install({ "acme-general": true });
+  const expected = expectedAppInboxList(ROSTER, active);
+  assert.deepEqual(expected, new Map([
+    [AUTHORITY, { read: false, write: true }],
+    [ADMIN, { read: false, write: true }],
+    [PERSON, { read: false, write: true }],
+    [BOT, { read: true, write: false }],
+  ]));
+  assert.equal(
+    listMatches(expected, [{ did: ADMIN, read: false, write: true }, { did: PERSON, read: false, write: true }, { did: BOT, read: true, write: false }], AUTHORITY),
+    true,
+    "the workspace authority is never written to the list and is left out of convergence",
+  );
+  assert.equal(
+    listMatches(expected, [{ did: ADMIN, read: true, write: true }, { did: PERSON, read: false, write: true }, { did: BOT, read: true, write: false }], AUTHORITY),
+    false,
+    "an admin has no read in an app inbox",
+  );
+  assert.deepEqual(expectedAppInboxList(ROSTER, { ...active, active: false }), new Map());
 });
 
 test("a member list matches when it holds exactly the expected entries and bits, the authority and bitless entries aside", () => {
