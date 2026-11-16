@@ -13,6 +13,7 @@ committed and reviewed as its own PR in the stack.
 | 3 | agy CLI, `gemini-4-carbon-high` | REVISE (round 2's fixes confirmed but two; 3 blocking, 5 not) | Checked against the code; all held. Answered: `workspace.json` gains `app.install` (a drift R9a left, which the exact scope check would have turned into a consent loop), `spaceCollections` counts every author kind, and a test keeps each space lexicon's collections equal to the registry's; the workspace authority admitted to private channels it owns; inboxes created by reconcile registered at once, the sweep listing only inboxes that exist, and `updateAppAccess` skipping a missing one. Also taken: `isAccessLost` no longer swallows a missing scope; block `$type`s exported; the app's commands passed to its runtime; the composer's command checks; channels in transition excluded. |
 | 4 | agy CLI, `gemini-4-carbon-high` | REVISE (round 3's fixes confirmed; 1 blocking, 4 not) | Checked against the code; held. Answered: a workspace whose authority grant predates R10 (it lacks the inbox type, so it never made an inbox, and the host answers `getSpace` with a missing scope, not "not found") is handled without a stalled operation: an inbox check that reads a missing scope as no inbox, reconcile creating an inbox only when the grant covers the type (and otherwise reconciling the rest and warning), and re-approval asked by `installApp` and `updateAppAccess` at their first step. Also taken: the declaration read bound raised to the record limit; `getMessage` checking a reply's parent; nothing kept in memory for a channel an app only posts to; hooks whose private channel the app can no longer read shown as unavailable. |
 | 5 | agy CLI, `gemini-4-carbon-high` | REVISE (round 4's fix confirmed but one part; 2 blocking, 3 not) | Checked against the code and the browsers' rules; held. Answered: `updateAppAccess` now fills an inbox it creates and registers its notices, and reconcile registers any present inbox that is not; the webhooks app's sign-in works under its own policy (no form redirect off-site, `SameSite=Lax` cookies) and its gate runs in a real browser. Also taken: inboxes followed only by an app that handles commands or clicks; reconcile's registrations made through the deps an operation is given; a click checked against the app's current grant. |
+| 6 | agy CLI, `gemini-4-carbon-high` | REVISE (all of round 5 confirmed; 1 blocking, 3 not) | Checked against the Fetch standard; held: a page sent with `Referrer-Policy: no-referrer` makes the browser send `Origin: null` on its own form `POST`s, so the `Origin` check would refuse every change. The admin page uses `same-origin`. Also taken: sign-in starts rate-limited per address; reconcile drops only registrations that exist; new test files and the webhooks package wired into the root scripts. |
 
 ## Baseline and order
 
@@ -119,7 +120,7 @@ A new space type `new.flock.app.inbox`, owned by the workspace authority, one pe
 - **Notices and the feed.** The operator registers each active inbox's notices like a channel's (`createsSpaces` on
   `installApp` and `updateAppAccess`, `archivesSpaces` on `uninstallApp`). After a `reconcileWorkspace`, `afterOperation`
   registers the inbox of every active install that is present and not registered (one it created, or one another operation
-  created), and drops the registration of every inactive one: a kind's `createsSpaces` is computed from its request alone,
+  created), and drops the registration of every inactive one that is registered: a kind's `createsSpaces` is computed from its request alone,
   and reconcile's inboxes are known only when it runs, so this is a hook of its own in `registrations.ts`. It runs with the
   registration deps the operation was given, so a unit test that gives none registers nothing. The sweep keeps them: `activeWorkspaceSpaces`
   adds the inbox of every active install **that exists**, so a lost registration is restored, an inactive inbox's is dropped,
@@ -258,7 +259,8 @@ its own admin page. It runs no commands and follows no inbox; it posts messages 
     with a page holding a link to the account's authorization page, not a redirect: a browser applies `form-action` to a form's
     redirects too, and the page's policy keeps `form-action 'self'`. Its sign-in state is bound to the browser by a cookie
     (`SameSite=Lax`, so the browser sends it on the top-level return from the account's host), expires after ten minutes, and is
-    capped (a hundred pending sign-ins; more are refused). After the callback the app checks that the DID is an active admin of
+    capped (a hundred pending sign-ins; more are refused), and starting one is rate-limited per address, so one client cannot
+    fill the cap. After the callback the app checks that the DID is an active admin of
     a workspace the app is installed in (it reads the workspace space it already reads), revokes the OAuth session at once (only
     the identity was needed), and sets its own session cookie: signed, `HttpOnly`, `SameSite=Lax`, `Secure` off loopback,
     thirty minutes. `Lax`, not `Strict`: the callback is reached by a cross-site redirect chain, and a `Strict` cookie set there
@@ -274,7 +276,9 @@ its own admin page. It runs no commands and follows no inbox; it posts messages 
     revokes them, each by a `POST` carrying a CSRF token and checked for its `Origin`. For a private channel the admin must
     also be on its roster. A new or rotated hook's URL is shown once, in the `POST`'s answer; only `sha256` of its secret is
     stored, in the app's own hooks file (owner-only, beside, not inside, its OAuth state file).
-  - **Headers**: `Cache-Control: no-store`, `Referrer-Policy: no-referrer`, and `Content-Security-Policy: default-src 'none';
+  - **Headers**: `Cache-Control: no-store`, `Referrer-Policy: same-origin` (no referrer leaves the page, and its own form `POST`s
+    still carry their real `Origin`: under `no-referrer` a browser sends `Origin: null` on them, which the check must refuse),
+    and `Content-Security-Policy: default-src 'none';
     style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'` (the page runs no script).
 - **A hook** is `POST /hooks/<id>/<secret>`:
   - only `application/json`, at most 64 KiB read from the stream before parsing;
@@ -376,7 +380,9 @@ its own admin page. It runs no commands and follows no inbox; it posts messages 
   page; a `POST` to the URL appears in #general as the app's message; a wrong secret and a revoked hook
   get the same answer; after the admin changes the app to read-only in #general the hook is refused and nothing is written.
 
-Each step: typecheck, lint, unit, acceptance, browser and the full BDD suite, one at a time, then an independent review of the
+Each new acceptance or browser spec is added to the root `test:acceptance` or `test:browser` list (they name their files), and
+`@flock/webhooks` to the root dependencies that `protocol-tests/` may import. Each step: typecheck, lint, unit, acceptance,
+browser and the full BDD suite, one at a time, then an independent review of the
 step's diff before its PR is marked ready.
 
 ## Risks
