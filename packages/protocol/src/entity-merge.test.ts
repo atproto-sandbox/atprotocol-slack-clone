@@ -553,8 +553,39 @@ test("cycle detection removes back-edges deterministically and supports project 
   });
   const mergedProj = mergeProject(project, [clearEdit]);
   assert.ok(mergedProj);
+  assert.equal(mergedProj.name, "Core");
   assert.equal(mergedProj.description, undefined);
   assert.equal(mergedProj.color, "#222222");
+
+  // Sequential projectEdit omitting name preserves an earlier rename, and concurrent color-only edit does not conflict on name.
+  const renameEdit = makeProjectEdit(project.uri, ALICE, tidFor(10), {
+    t: hlcAt(5),
+    s: [opRef(ALICE, tidFor(1))],
+    name: "Renamed",
+  });
+  const sequentialColorOnly = makeProjectEdit(project.uri, BOB, tidFor(11), {
+    t: hlcAt(15),
+    s: [opRef(ALICE, tidFor(1)), opRef(ALICE, tidFor(10))],
+    color: "#333333",
+  });
+  const mergedSequential = mergeProject(project, [renameEdit, sequentialColorOnly]);
+  assert.ok(mergedSequential);
+  assert.equal(mergedSequential.name, "Renamed");
+  assert.equal(mergedSequential.color, "#333333");
+  assert.deepEqual(mergedSequential.otherVersions, {});
+  assert.deepEqual(mergedSequential.activities, []);
+
+  const concurrentColorOnly = makeProjectEdit(project.uri, CAROL, tidFor(12), {
+    t: hlcAt(20),
+    s: [opRef(ALICE, tidFor(1))],
+    color: "#444444",
+  });
+  const mergedConcurrent = mergeProject(project, [renameEdit, concurrentColorOnly]);
+  assert.ok(mergedConcurrent);
+  assert.equal(mergedConcurrent.name, "Renamed");
+  assert.equal(mergedConcurrent.color, "#444444");
+  assert.deepEqual(mergedConcurrent.otherVersions, {});
+  assert.deepEqual(mergedConcurrent.activities, []);
 
   // Tampered cycle between edit1 (t=10) and edit2 (t=20): edge edit2 -> edit1 is removed deterministically.
   const edit1 = makeProjectEdit(project.uri, ALICE, tidFor(3), {

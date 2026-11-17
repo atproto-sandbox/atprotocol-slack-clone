@@ -486,7 +486,10 @@ export function mergeProject(
   const nameRes = resolveScalarField(
     dag,
     ops,
-    (op) => ({ touched: true, value: (op.value as { name?: string }).name }),
+    (op) => {
+      const v = (op.value as { name?: string }).name;
+      return v !== undefined ? { touched: true, value: v } : { touched: false, value: undefined };
+    },
     "project",
     root.uri,
     "name",

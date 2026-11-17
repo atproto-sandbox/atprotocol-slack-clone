@@ -241,6 +241,7 @@ test("extSpaceSkey and tasksSpaceUri derive bounded colon-separated keys and par
   assert.equal(parseTasksSpaceUri("at://did:plc:owner/space/new.flock.channel/general"), null);
   assert.equal(parseTasksSpaceUri("at://did:plc:owner/space/new.flock.ext.other/x"), null);
   assert.equal(parseExtSpaceUri("at://did:plc:owner/space/new.flock.channel/general"), null);
+  assert.equal(parseExtSpaceUri("at://did:plc:owner/space/new.flock.channel/general", "new.flock.channel"), null);
   assert.equal(parseExtSpaceUri("at://did:plc:owner/space/new.flock.ext./x"), null);
   assert.equal(parseExtSpaceUri(uri, "new.flock.ext.other"), null);
   assert.notEqual(tasksSpaceUri("did:plc:owner", "other"), uri);
