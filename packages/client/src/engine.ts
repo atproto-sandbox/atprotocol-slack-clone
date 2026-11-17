@@ -1,6 +1,7 @@
 import { AppInboxClient } from "./app-inbox-client";
 import { ChannelClient } from "./channel-client";
 import { CredentialCache } from "./credentials";
+import { TasksClient } from "./ext/tasks";
 import { withIdentityCache } from "./identity";
 import { Lifecycle } from "./lifecycle";
 import { MemoryStore } from "./memory-store";
@@ -9,6 +10,7 @@ import type { SyncStore } from "./store";
 import { SyncCore, type SyncOptions } from "./sync";
 import { transportNow, type ClientTransport } from "./transport";
 import { WorkspaceClient } from "./workspace-client";
+import { WriteQueue } from "./write-queue";
 
 export type Engine = {
   credentials: CredentialCache;
@@ -17,6 +19,8 @@ export type Engine = {
   channels: ChannelClient;
   workspaces: WorkspaceClient;
   appInboxes: AppInboxClient;
+  tasks: TasksClient;
+  writeQueue: WriteQueue;
   operator?: OperatorClient;
 };
 
@@ -36,6 +40,7 @@ export function createEngine(
   const lifecycle = new Lifecycle(store, () => transportNow(transport));
   const credentials = new CredentialCache(transport, (space) => lifecycle.dropSpace(space));
   const sync = new SyncCore({ transport, credentials, store, options: input.options });
+  const writeQueue = new WriteQueue({ store, now: () => transportNow(transport) });
   return {
     credentials,
     sync,
@@ -43,6 +48,15 @@ export function createEngine(
     channels: new ChannelClient({ transport, credentials, sync, lifecycle, applyOwnWrites: input.applyOwnWrites }),
     workspaces: new WorkspaceClient({ transport, credentials, lifecycle }),
     appInboxes: new AppInboxClient({ transport, sync }),
+    tasks: new TasksClient({
+      transport,
+      credentials,
+      sync,
+      lifecycle,
+      writeQueue,
+      applyOwnWrites: input.applyOwnWrites,
+    }),
+    writeQueue,
     ...(input.operator ? { operator: new OperatorClient(transport, input.operator) } : {}),
   };
 }

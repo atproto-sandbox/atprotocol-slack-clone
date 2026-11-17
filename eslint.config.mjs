@@ -14,8 +14,41 @@ const WEB_REACT_VERSION = JSON.parse(readFileSync(new URL("./apps/web/package.js
 const BROWSER_CODE = ["packages/protocol/src/**/*.{ts,tsx}", "packages/client/src/**/*.{ts,tsx}", "apps/web/src/browser/**/*.{ts,tsx}"];
 /** Tests and test fixtures, which run under Node's test runner and may use a package's dev dependencies. */
 const NODE_TESTS = ["**/*.test.{ts,tsx}", "packages/client/src/testing/**"];
+const BROWSER_TEST_FILES = [
+  "packages/protocol/src/**/*.test.{ts,tsx}",
+  "packages/client/src/**/*.test.{ts,tsx}",
+  "packages/client/src/testing/**/*.{ts,tsx}",
+  "apps/web/src/browser/**/*.test.{ts,tsx}",
+];
 /** The client's Node entry (`@flock/client/node/*`): an app's OAuth session and transport, for apps that run on Node. */
 const CLIENT_NODE_ENTRY = ["packages/client/src/node/**"];
+/** D11.11: entity-merge may only be imported by Tasks extension client, independent Tasks reader, entity-merge tests, and parity/protocol tests. */
+const ENTITY_MERGE_ALLOWED = [
+  "packages/protocol/src/entity-merge*.ts",
+  "packages/client/src/ext/tasks/**",
+  "packages/reader/src/independent-tasks*.ts",
+  "packages/client/src/tasks-reader-parity.test.ts",
+  "protocol-tests/**",
+];
+/** D11.11: extension modules must remain isolated behind engine.tasks and extension UI boundaries. */
+const EXTENSION_IMPORT_ALLOWED = [
+  "packages/client/src/ext/tasks/**",
+  "packages/client/src/engine.ts",
+  "packages/client/src/tasks-reader-parity.test.ts",
+  "apps/web/src/app/ui/ext/tasks/**",
+  "apps/web/src/app/(shell)/**/ext/tasks/**",
+  "apps/web/src/app/ui/workspace-manager.tsx",
+  "apps/web/src/app/ui/client-api.{ts,tsx}",
+  "protocol-tests/**",
+];
+const ALL_BOUNDARY_SOURCE = [
+  "packages/*/src/**/*.{ts,tsx}",
+  "apps/*/src/**/*.{ts,tsx}",
+  "apps/*/scripts/**/*.ts",
+  "apps/*/next.config.ts",
+  "bdd/**/*.ts",
+  "scripts/**/*.{ts,mjs}",
+];
 const NO_NODE_BUILTINS = {
   group: ["node:*"],
   message: "This code runs in a browser and cannot import Node built-ins.",
@@ -41,6 +74,30 @@ const NO_DM_IMPORT = {
   group: ["@flock/client/dm/*"],
   message: "M6 independence proof: this module must not import the DM engine (see .ai/plans/dm-tasks/m6.md).",
 };
+const NO_ENTITY_MERGE_IMPORT = {
+  group: ["@flock/protocol/entity-merge*", "**/entity-merge*", "./entity-merge*", "../entity-merge*"],
+  message: "D11.11: entity-merge may only be imported by Tasks extension client, independent Tasks reader, entity-merge tests, and parity/protocol tests.",
+};
+const NO_EXTENSION_IMPORT = {
+  group: ["@flock/client/ext/*", "@flock/client/ext", "**/ext/*", "./ext/*", "../ext/*", "!**/lexicons/**"],
+  message: "D11.11: extension modules must remain isolated behind engine.tasks and extension UI boundaries.",
+};
+const NO_ENTITY_MERGE_DYNAMIC_IMPORT = {
+  selector: "ImportExpression[source.value=/entity-merge/], ImportExpression:has(TemplateElement[value.raw=/entity-merge/])",
+  message: "D11.11: dynamic import of entity-merge is forbidden outside Tasks extension and independent reader boundaries.",
+};
+const NO_EXTENSION_DYNAMIC_IMPORT = {
+  selector:
+    "ImportExpression[source.value=/^(?!.*\\/lexicons\\/)(?:.*(?:^|\\/)ext(?:\\/|$)|@flock\\/client\\/ext(?:\\/|$))/], ImportExpression:has(TemplateElement[value.raw=/^(?!.*\\/lexicons\\/)(?:.*(?:^|\\/)ext(?:\\/|$)|@flock\\/client\\/ext(?:\\/|$))/])",
+  message: "D11.11: dynamic import of client/UI extensions is forbidden outside extension boundaries.",
+};
+
+function restrictedBoundaryRules(patterns, syntax = []) {
+  return {
+    ...(patterns.length > 0 ? { "no-restricted-imports": ["error", { patterns }] } : {}),
+    ...(syntax.length > 0 ? { "no-restricted-syntax": ["error", ...syntax] } : {}),
+  };
+}
 
 export default defineConfig([
   ...nextVitals,
@@ -55,6 +112,12 @@ export default defineConfig([
     },
   },
   {
+    files: ["packages/client/src/eslint-boundaries.test.ts"],
+    rules: {
+      "import/no-extraneous-dependencies": ["error", { includeTypes: true, devDependencies: true, packageDir: [".", "./packages/client"] }],
+    },
+  },
+  {
     // The root's own code (the suites and scripts) is held to the root's package.json, test code throughout.
     files: ["bdd/**/*.ts", "protocol-tests/**/*.ts", "scripts/**/*.{ts,mjs}"],
     ignores: ["protocol-tests/atproto/**"],
@@ -63,41 +126,118 @@ export default defineConfig([
     },
   },
   {
-    // Browser code and its tests: neither the server's configuration nor the UI above it. (Listed before the next block,
-    // which replaces this rule for non-test files and repeats these patterns.)
-    files: BROWSER_CODE,
-    rules: {
-      "no-restricted-imports": ["error", { patterns: [NO_SERVER_CONFIG, NO_APP_LAYER] }],
-    },
+    // D11.11 baseline: block entity-merge and ext/* everywhere outside their explicit allowlists.
+    // Every more-specific block below spreads all applicable patterns rather than shadowing this baseline.
+    files: ALL_BOUNDARY_SOURCE,
+    ignores: [...ENTITY_MERGE_ALLOWED, ...EXTENSION_IMPORT_ALLOWED],
+    rules: restrictedBoundaryRules(
+      [NO_ENTITY_MERGE_IMPORT, NO_EXTENSION_IMPORT],
+      [NO_ENTITY_MERGE_DYNAMIC_IMPORT, NO_EXTENSION_DYNAMIC_IMPORT],
+    ),
   },
   {
+    // Independent Tasks reader may import entity-merge, never client/UI extensions.
+    files: ["packages/reader/src/independent-tasks*.ts"],
+    rules: restrictedBoundaryRules([NO_EXTENSION_IMPORT], [NO_EXTENSION_DYNAMIC_IMPORT]),
+  },
+  {
+    // Browser tests/fixtures (except entity-merge tests, ext/tasks tests, and tasks-reader-parity.test.ts).
+    files: BROWSER_TEST_FILES,
+    ignores: [...ENTITY_MERGE_ALLOWED, ...EXTENSION_IMPORT_ALLOWED],
+    rules: restrictedBoundaryRules(
+      [NO_SERVER_CONFIG, NO_APP_LAYER, NO_ENTITY_MERGE_IMPORT, NO_EXTENSION_IMPORT],
+      [NO_ENTITY_MERGE_DYNAMIC_IMPORT, NO_EXTENSION_DYNAMIC_IMPORT],
+    ),
+  },
+  {
+    files: ["packages/protocol/src/entity-merge*.test.ts"],
+    rules: restrictedBoundaryRules(
+      [NO_SERVER_CONFIG, NO_APP_LAYER, NO_EXTENSION_IMPORT],
+      [NO_EXTENSION_DYNAMIC_IMPORT],
+    ),
+  },
+  {
+    files: ["packages/client/src/ext/tasks/**/*.test.ts", "packages/client/src/tasks-reader-parity.test.ts"],
+    rules: restrictedBoundaryRules([NO_SERVER_CONFIG, NO_APP_LAYER]),
+  },
+  {
+    // The client's Node entry (non-test): may import node:* and @flock/net, never server config, app layer, entity-merge, or ext/*.
+    files: CLIENT_NODE_ENTRY,
+    ignores: NODE_TESTS,
+    rules: restrictedBoundaryRules(
+      [NO_SERVER_CONFIG, NO_APP_LAYER, NO_ENTITY_MERGE_IMPORT, NO_EXTENSION_IMPORT],
+      [NO_ENTITY_MERGE_DYNAMIC_IMPORT, NO_EXTENSION_DYNAMIC_IMPORT],
+    ),
+  },
+  {
+    // Browser production code outside entity-merge and ext/tasks boundaries.
     files: BROWSER_CODE,
-    ignores: [...NODE_TESTS, ...CLIENT_NODE_ENTRY],
-    rules: {
-      "no-restricted-imports": ["error", { patterns: [NO_NODE_BUILTINS, NO_SERVER_CONFIG, NO_APP_LAYER, NO_CLIENT_NODE_ENTRY] }],
-    },
+    ignores: [...NODE_TESTS, ...CLIENT_NODE_ENTRY, ...ENTITY_MERGE_ALLOWED, ...EXTENSION_IMPORT_ALLOWED],
+    rules: restrictedBoundaryRules(
+      [NO_NODE_BUILTINS, NO_SERVER_CONFIG, NO_APP_LAYER, NO_CLIENT_NODE_ENTRY, NO_ENTITY_MERGE_IMPORT, NO_EXTENSION_IMPORT],
+      [NO_ENTITY_MERGE_DYNAMIC_IMPORT, NO_EXTENSION_DYNAMIC_IMPORT],
+    ),
+  },
+  {
+    files: ["packages/protocol/src/entity-merge*.ts"],
+    ignores: NODE_TESTS,
+    rules: restrictedBoundaryRules(
+      [NO_NODE_BUILTINS, NO_SERVER_CONFIG, NO_APP_LAYER, NO_CLIENT_NODE_ENTRY, NO_EXTENSION_IMPORT],
+      [NO_EXTENSION_DYNAMIC_IMPORT],
+    ),
+  },
+  {
+    files: ["packages/client/src/engine.ts"],
+    rules: restrictedBoundaryRules(
+      [NO_NODE_BUILTINS, NO_SERVER_CONFIG, NO_APP_LAYER, NO_CLIENT_NODE_ENTRY, NO_ENTITY_MERGE_IMPORT],
+      [NO_ENTITY_MERGE_DYNAMIC_IMPORT],
+    ),
+  },
+  {
+    files: ["packages/client/src/ext/tasks/**/*.{ts,tsx}"],
+    ignores: NODE_TESTS,
+    rules: restrictedBoundaryRules([NO_NODE_BUILTINS, NO_SERVER_CONFIG, NO_APP_LAYER, NO_CLIENT_NODE_ENTRY]),
   },
   {
     files: ["apps/operator/src/**/*.{ts,tsx}"],
     ignores: ["apps/operator/src/operator/members.ts"],
-    rules: {
-      "no-restricted-imports": ["error", { patterns: [MEMBER_LIST_WRITES] }],
-    },
+    rules: restrictedBoundaryRules(
+      [MEMBER_LIST_WRITES, NO_ENTITY_MERGE_IMPORT, NO_EXTENSION_IMPORT],
+      [NO_ENTITY_MERGE_DYNAMIC_IMPORT, NO_EXTENSION_DYNAMIC_IMPORT],
+    ),
   },
   {
-    // The web app, above its browser code, is no Node process either.
+    files: ["apps/web/src/app/ui/ext/tasks/**/*.test.{ts,tsx}", "apps/web/src/app/(shell)/**/ext/tasks/**/*.test.{ts,tsx}"],
+    rules: restrictedBoundaryRules([NO_ENTITY_MERGE_IMPORT], [NO_ENTITY_MERGE_DYNAMIC_IMPORT]),
+  },
+  {
+    // The web app, above its browser code, is no Node process and stays isolated from ext/* and entity-merge outside extension UI boundaries.
     files: ["apps/web/src/**/*.{ts,tsx}"],
-    ignores: ["apps/web/src/browser/**", ...NODE_TESTS],
-    rules: {
-      "no-restricted-imports": ["error", { patterns: [NO_CLIENT_NODE_ENTRY] }],
-    },
+    ignores: ["apps/web/src/browser/**", ...NODE_TESTS, ...EXTENSION_IMPORT_ALLOWED, "apps/web/src/app/**/route.{ts,tsx}"],
+    rules: restrictedBoundaryRules(
+      [NO_CLIENT_NODE_ENTRY, NO_ENTITY_MERGE_IMPORT, NO_EXTENSION_IMPORT],
+      [NO_ENTITY_MERGE_DYNAMIC_IMPORT, NO_EXTENSION_DYNAMIC_IMPORT],
+    ),
   },
   {
-    // M6: DMs never touch server routes, tables, or cache. No route handler the web app's server has (the sign-in client's
-    // metadata) may import the DM engine.
+    files: [
+      "apps/web/src/app/ui/ext/tasks/**/*.{ts,tsx}",
+      "apps/web/src/app/(shell)/**/ext/tasks/**/*.{ts,tsx}",
+      "apps/web/src/app/ui/workspace-manager.tsx",
+      "apps/web/src/app/ui/client-api.{ts,tsx}",
+    ],
+    ignores: NODE_TESTS,
+    rules: restrictedBoundaryRules(
+      [NO_CLIENT_NODE_ENTRY, NO_ENTITY_MERGE_IMPORT],
+      [NO_ENTITY_MERGE_DYNAMIC_IMPORT],
+    ),
+  },
+  {
+    // M6 + D11.11: Route handlers never touch DMs, Node-only client entries, entity-merge, or extension modules.
     files: ["apps/web/src/app/**/route.{ts,tsx}"],
-    rules: {
-      "no-restricted-imports": ["error", { patterns: [NO_DM_IMPORT, NO_CLIENT_NODE_ENTRY] }],
-    },
+    rules: restrictedBoundaryRules(
+      [NO_DM_IMPORT, NO_CLIENT_NODE_ENTRY, NO_ENTITY_MERGE_IMPORT, NO_EXTENSION_IMPORT],
+      [NO_ENTITY_MERGE_DYNAMIC_IMPORT, NO_EXTENSION_DYNAMIC_IMPORT],
+    ),
   },
 ]);

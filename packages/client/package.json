@@ -3,6 +3,8 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./ext/tasks": "./src/ext/tasks/index.ts",
+    "./ext/tasks/*": "./src/ext/tasks/*.ts",
     "./*": "./src/*.ts"
   },
   "dependencies": {
