@@ -34,7 +34,7 @@ export const DM_BROWSER_SCOPES: readonly string[] = [
  * authority.
  */
 export function workspaceAuthorityScopes(): string[] {
-  return [SPACE_TYPE.workspace, SPACE_TYPE.inbox, SPACE_TYPE.channel, SPACE_TYPE.appInbox].flatMap((spaceType) => {
+  return [SPACE_TYPE.workspace, SPACE_TYPE.inbox, SPACE_TYPE.channel, SPACE_TYPE.appInbox, SPACE_TYPE.tasks].flatMap((spaceType) => {
     const collections = authorityCollections(spaceType);
     return [
       `space:${spaceType}?authority=self&skey=*&action=read_self&action=read&manage=create&manage=update`,
@@ -48,15 +48,15 @@ export function workspaceAuthorityScopes(): string[] {
 export const OPERATOR_METHODS = Object.values(OPERATOR_METHOD);
 
 /**
- * The one grant a person gives the app in the browser (R6), requested once at sign-in: read every workspace, inbox and
- * channel of any authority, with each space's member list as the gate (D5); write the collections a member writes there, and
- * create or delete commands and actions in app inboxes without reading them; call the operator's methods; and the DM set.
- * Built from the registry, so a collection added there is asked for here.
+ * The one grant a person gives the app in the browser (R6), requested once at sign-in: read every workspace, inbox,
+ * channel and extension space of any authority, with each space's member list as the gate (D5); write the collections a
+ * member writes there, and create or delete commands and actions in app inboxes without reading them; call the operator's
+ * methods; and the DM set. Built from the registry, so a collection added there is asked for here.
  */
 export function memberGrantScopes(serviceRef: string): string[] {
   return [
     ...DM_BROWSER_SCOPES,
-    ...[SPACE_TYPE.workspace, SPACE_TYPE.inbox, SPACE_TYPE.channel].flatMap((spaceType) => [memberReadScope(spaceType), memberWriteScope(spaceType)]),
+    ...[SPACE_TYPE.workspace, SPACE_TYPE.inbox, SPACE_TYPE.channel, SPACE_TYPE.tasks].flatMap((spaceType) => [memberReadScope(spaceType), memberWriteScope(spaceType)]),
     memberWriteScope(SPACE_TYPE.appInbox),
     operatorMethodsScope(OPERATOR_METHODS, serviceRef),
   ];

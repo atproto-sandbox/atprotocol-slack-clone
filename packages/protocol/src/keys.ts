@@ -1,6 +1,6 @@
 import { sha256 } from "@noble/hashes/sha2";
 import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils";
-import { COLLECTION, SPACE_TYPE } from "./nsids";
+import { COLLECTION, NAMESPACE, SPACE_TYPE } from "./nsids";
 
 const BASE32 = "abcdefghijklmnopqrstuvwxyz234567";
 const TID_BASE32 = "234567abcdefghijklmnopqrstuvwxyz";
@@ -69,6 +69,18 @@ export function appInboxSkey(workspaceSkey: string, appDid: string): string {
 
 export function appInboxUri(authorityDid: string, workspaceSkey: string, appDid: string): string {
   return spaceUri(authorityDid, SPACE_TYPE.appInbox, appInboxSkey(workspaceSkey, appDid));
+}
+
+export function extSpaceSkey(workspaceSkey: string, extId: string): string {
+  return `x-${recordKeyHash(`${extId}:${workspaceSkey}`)}`;
+}
+
+export function extSpaceUri(authorityDid: string, workspaceSkey: string, extId: string, spaceType: string): string {
+  return spaceUri(authorityDid, spaceType, extSpaceSkey(workspaceSkey, extId));
+}
+
+export function tasksSpaceUri(authorityDid: string, workspaceSkey: string): string {
+  return extSpaceUri(authorityDid, workspaceSkey, "tasks", SPACE_TYPE.tasks);
 }
 
 export function channelUri(authorityDid: string, skey: string): string {
@@ -158,6 +170,21 @@ export function parseChannelUri(uri: string): { authorityDid: Did; skey: string 
 export function parseAppInboxUri(uri: string): { authorityDid: Did; skey: string } | null {
   const parsed = parseSpaceUri(uri);
   return parsed?.type === SPACE_TYPE.appInbox ? { authorityDid: parsed.authorityDid, skey: parsed.skey } : null;
+}
+
+/** An extension space URI's authority, space type, and skey (optionally filtered to `spaceType`), or null for any other URI. */
+export function parseExtSpaceUri(uri: string, spaceType?: string): { authorityDid: Did; type: string; skey: string } | null {
+  const parsed = parseSpaceUri(uri);
+  if (!parsed) return null;
+  if (spaceType !== undefined) return parsed.type === spaceType ? parsed : null;
+  const extPrefix = `${NAMESPACE}.ext.`;
+  return parsed.type.startsWith(extPrefix) && parsed.type.length > extPrefix.length ? parsed : null;
+}
+
+/** A Tasks extension space URI's authority and skey, or null for any other URI. */
+export function parseTasksSpaceUri(uri: string): { authorityDid: Did; skey: string } | null {
+  const parsed = parseSpaceUri(uri);
+  return parsed?.type === SPACE_TYPE.tasks ? { authorityDid: parsed.authorityDid, skey: parsed.skey } : null;
 }
 
 export function spaceRecordUri(spaceUri: string, repoDid: string, collection: string, rkey: string): string {

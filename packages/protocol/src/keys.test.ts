@@ -10,6 +10,8 @@ import {
   DM_INBOX_SKEY,
   dmConversationUri,
   dmInboxUri,
+  extSpaceSkey,
+  extSpaceUri,
   isDid,
   isSkey,
   parseAppInboxUri,
@@ -18,8 +20,10 @@ import {
   parseDmInboxUri,
   parseDmMessageUri,
   parseDmSpaceUri,
+  parseExtSpaceUri,
   parseSpaceRecordUri,
   parseSpaceUri,
+  parseTasksSpaceUri,
   parseWorkspaceUri,
   reactionRecordKey,
   recordKeyHash,
@@ -29,6 +33,7 @@ import {
   spaceRecordUri,
   stableHash,
   subjectKey,
+  tasksSpaceUri,
   tidNow,
 } from "./keys";
 
@@ -216,4 +221,37 @@ test("appInboxUri derives a fixed 105-character colon-separated key per (workspa
   const longestKey = appInboxSkey(longestWorkspaceSkey, "did:plc:bot");
   assert.equal(longestKey.length, 105);
   assert.equal(isSkey(longestKey), true);
+});
+
+test("extSpaceSkey and tasksSpaceUri derive bounded colon-separated keys and parse strictly", () => {
+  const skey = extSpaceSkey("workspace", "tasks");
+  assert.equal(skey, "x-y:v:r:5:7:s:p:h:i:u:s:o:s:t:f:i:g:b:s:h:t:g:o:n:5:7:b:p:w:v:f:x:b:r:p:p:j:n:x:g:x:y:f:d:g:q:k:b:7:3:r:q");
+  assert.equal(skey, `x-${recordKeyHash("tasks:workspace")}`);
+  assert.equal(skey.length, 105);
+  assert.equal(isSkey(skey), true);
+  assert.match(skey, /^x-[a-z2-7](?::[a-z2-7]){51}$/);
+
+  const uri = tasksSpaceUri("did:plc:owner", "workspace");
+  assert.equal(uri, `at://did:plc:owner/space/new.flock.ext.tasks/${skey}`);
+  assert.equal(extSpaceUri("did:plc:owner", "workspace", "tasks", "new.flock.ext.tasks"), uri);
+  assert.deepEqual(parseTasksSpaceUri(uri), { authorityDid: "did:plc:owner", skey });
+  assert.deepEqual(parseExtSpaceUri(uri), { authorityDid: "did:plc:owner", type: "new.flock.ext.tasks", skey });
+  assert.deepEqual(parseExtSpaceUri(uri, "new.flock.ext.tasks"), { authorityDid: "did:plc:owner", type: "new.flock.ext.tasks", skey });
+
+  assert.equal(parseTasksSpaceUri("at://did:plc:owner/space/new.flock.channel/general"), null);
+  assert.equal(parseTasksSpaceUri("at://did:plc:owner/space/new.flock.ext.other/x"), null);
+  assert.equal(parseExtSpaceUri("at://did:plc:owner/space/new.flock.channel/general"), null);
+  assert.equal(parseExtSpaceUri("at://did:plc:owner/space/new.flock.ext./x"), null);
+  assert.equal(parseExtSpaceUri(uri, "new.flock.ext.other"), null);
+  assert.notEqual(tasksSpaceUri("did:plc:owner", "other"), uri);
+  assert.notEqual(extSpaceSkey("workspace", "other"), skey);
+
+  const longestWorkspaceSkey = "w".repeat(128);
+  const longestExtKey = extSpaceSkey(longestWorkspaceSkey, "tasks");
+  assert.equal(longestExtKey.length, 105);
+  assert.equal(isSkey(longestExtKey), true);
+  assert.deepEqual(parseTasksSpaceUri(tasksSpaceUri("did:plc:owner", longestWorkspaceSkey)), {
+    authorityDid: "did:plc:owner",
+    skey: longestExtKey,
+  });
 });

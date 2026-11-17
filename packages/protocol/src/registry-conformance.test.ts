@@ -6,8 +6,9 @@ import test from "node:test";
 import { Lexicons, type LexiconDoc } from "@atproto/lexicon";
 import {
   acceptanceRecordKey, appInboxUri, channelUri, decisionRecordKey, dmConversationUri, dmInboxUri, inboxUri, reactionRecordKey,
-  requestRecordKey, spaceRecordUri, subjectKey, workspaceUri,
+  requestRecordKey, spaceRecordUri, subjectKey, tasksSpaceUri, workspaceUri,
 } from "./keys";
+import { extSpaceUriFor } from "./extensions";
 import { BLOCK_TYPE, COLLECTION, type Collection } from "./nsids";
 import { REGISTRY, validateRecordShape, validateSpaceRecord, type RecordContext } from "./registry";
 
@@ -31,6 +32,13 @@ const OTHER_HALF = dmConversationUri(MEMBER, CONV_KEY);
 const DM_MESSAGE = spaceRecordUri(OTHER_HALF, MEMBER, COLLECTION.dmMessage, "2222222222225");
 const PARTICIPANTS = [MEMBER, AUTHORITY];
 const JOIN_REQUEST = spaceRecordUri(INBOX, MEMBER, COLLECTION.joinRequest, requestRecordKey(CHANNEL, MEMBER));
+const TASKS = tasksSpaceUri(AUTHORITY, "acme");
+const OTHER_TASKS = tasksSpaceUri(AUTHORITY, "other");
+const PROJECT = spaceRecordUri(TASKS, MEMBER, COLLECTION.taskProject, "222222222222e");
+const TASK = spaceRecordUri(TASKS, MEMBER, COLLECTION.task, "222222222222f");
+const PARENT_TASK = spaceRecordUri(TASKS, MEMBER, COLLECTION.task, "222222222222g");
+const HLC_T = "001700000000000.0000";
+const OP_REF_A = "a".repeat(32);
 
 type Fixture = { record: Record<string, unknown>; context: RecordContext };
 
@@ -64,6 +72,59 @@ const FIXTURES: Record<Collection, Fixture> = {
   [COLLECTION.appAction]: {
     record: { message: MESSAGE, actionId: "again_1", channel: CHANNEL, createdAt: NOW },
     context: { authorityDid: AUTHORITY, spaceUri: APP_INBOX, repoDid: MEMBER, rkey: "222222222222d" },
+  },
+  [COLLECTION.extInstall]: {
+    record: {
+      extId: "tasks",
+      active: true,
+      space: extSpaceUriFor(AUTHORITY, "acme", "tasks"),
+      cleanupComplete: false,
+      enabledBy: AUTHORITY,
+      enabledAt: NOW,
+      updatedAt: NOW,
+    },
+    context: { authorityDid: AUTHORITY, spaceUri: WORKSPACE, repoDid: AUTHORITY, rkey: "tasks" },
+  },
+  [COLLECTION.taskProject]: {
+    record: { name: "Roadmap", description: "Q4 milestones", color: "#3b82f6", t: HLC_T, createdAt: NOW },
+    context: { authorityDid: AUTHORITY, spaceUri: TASKS, repoDid: MEMBER, rkey: "222222222222e" },
+  },
+  [COLLECTION.taskProjectEdit]: {
+    record: { subject: PROJECT, t: "001700000000001.0000", s: [OP_REF_A], name: "Roadmap v2" },
+    context: { authorityDid: AUTHORITY, spaceUri: TASKS, repoDid: MEMBER, rkey: "222222222222h" },
+  },
+  [COLLECTION.task]: {
+    record: {
+      title: "Ship R11",
+      description: "Implement pure causal merge",
+      status: "todo",
+      priority: "high",
+      project: PROJECT,
+      dueDate: NOW,
+      parent: PARENT_TASK,
+      assignees: [MEMBER],
+      labels: ["protocol"],
+      t: HLC_T,
+      createdAt: NOW,
+    },
+    context: { authorityDid: AUTHORITY, spaceUri: TASKS, repoDid: MEMBER, rkey: "222222222222f" },
+  },
+  [COLLECTION.taskEdit]: {
+    record: {
+      subject: TASK,
+      t: "001700000000002.0000",
+      s: [OP_REF_A],
+      title: "Ship R11 now",
+      status: "in_progress",
+      priority: "urgent",
+      addAssignees: [AUTHORITY],
+      addLabels: ["urgent"],
+    },
+    context: { authorityDid: AUTHORITY, spaceUri: TASKS, repoDid: MEMBER, rkey: "222222222222i" },
+  },
+  [COLLECTION.taskComment]: {
+    record: { subject: TASK, body: "Looks good", createdAt: NOW },
+    context: { authorityDid: AUTHORITY, spaceUri: TASKS, repoDid: MEMBER, rkey: "222222222222j" },
   },
   [COLLECTION.joinRequest]: {
     record: { channelSkey: "acme-general", requestId: "2222222222226", createdAt: NOW },
@@ -185,7 +246,7 @@ type SemanticCase = { collection: Collection; breaks: string; record?: Record<st
 
 const SEMANTIC_CASES: SemanticCase[] = [
   // Wrong author.
-  ...[COLLECTION.workspaceProfile, COLLECTION.directory, COLLECTION.workspaceRoster, COLLECTION.admin, COLLECTION.appInstall, COLLECTION.joinDecision, COLLECTION.channelRoster]
+  ...[COLLECTION.workspaceProfile, COLLECTION.directory, COLLECTION.workspaceRoster, COLLECTION.admin, COLLECTION.appInstall, COLLECTION.extInstall, COLLECTION.joinDecision, COLLECTION.channelRoster]
     .map((collection): SemanticCase => ({ collection, breaks: "authored by a member", context: { repoDid: MEMBER }, reason: /wrong author/ })),
   ...[COLLECTION.dmHeader, COLLECTION.dmMessage, COLLECTION.dmReaction]
     .map((collection): SemanticCase => ({ collection, breaks: "authored by someone other than the half owner", context: { repoDid: MEMBER }, reason: /half owner/ })),
@@ -200,6 +261,11 @@ const SEMANTIC_CASES: SemanticCase[] = [
   { collection: COLLECTION.appCommand, breaks: "a key that is not a TID", context: { rkey: "self" }, reason: /TID/ },
   { collection: COLLECTION.appAction, breaks: "a key that is not a TID", context: { rkey: "self" }, reason: /TID/ },
   { collection: COLLECTION.dmMessage, breaks: "a key that is not a TID", context: { rkey: "self" }, reason: /TID/ },
+  { collection: COLLECTION.taskProject, breaks: "a key that is not a TID", context: { rkey: "self" }, reason: /TID/ },
+  { collection: COLLECTION.taskProjectEdit, breaks: "a key that is not a TID", context: { rkey: "self" }, reason: /TID/ },
+  { collection: COLLECTION.task, breaks: "a key that is not a TID", context: { rkey: "self" }, reason: /TID/ },
+  { collection: COLLECTION.taskEdit, breaks: "a key that is not a TID", context: { rkey: "self" }, reason: /TID/ },
+  { collection: COLLECTION.taskComment, breaks: "a key that is not a TID", context: { rkey: "self" }, reason: /TID/ },
   { collection: COLLECTION.directory, breaks: "a key other than its skey", context: { rkey: "acme-random" }, reason: /directory key/ },
   { collection: COLLECTION.workspaceRoster, breaks: "a key other than its subject's", context: { rkey: subjectKey(AUTHORITY) }, reason: /roster key/ },
   { collection: COLLECTION.admin, breaks: "a key other than its subject's", context: { rkey: subjectKey(AUTHORITY) }, reason: /roster key/ },
@@ -265,13 +331,67 @@ const SEMANTIC_CASES: SemanticCase[] = [
   })),
   // Blank text.
   { collection: COLLECTION.dmMessage, breaks: "text that is only spaces", record: { text: "   " }, reason: /blank/ },
+  // Extension install & Tasks collections.
+  { collection: COLLECTION.extInstall, breaks: "an unknown extension id", record: { extId: "notes" }, context: { rkey: "notes" }, reason: /unknown extension id/ },
+  { collection: COLLECTION.extInstall, breaks: "a key other than extId", context: { rkey: "other" }, reason: /must equal extId/ },
+  { collection: COLLECTION.extInstall, breaks: "a space URI for another workspace", record: { space: OTHER_TASKS }, reason: /canonical workspace extension space/ },
+  { collection: COLLECTION.extInstall, breaks: "an enabledBy DID longer than the bound", record: { enabledBy: `did:plc:${"a".repeat(1_500)}` }, reason: /length bound/ },
+  { collection: COLLECTION.taskProject, breaks: "blank project name", record: { name: "   " }, reason: /blank/ },
+  { collection: COLLECTION.taskProject, breaks: "malformed HLC string", record: { t: "a".repeat(20) }, reason: /HLC/ },
+  { collection: COLLECTION.taskProject, breaks: "HLC below MIN_HLC_MS", record: { t: "000999999999999.0000" }, reason: /HLC/ },
+  { collection: COLLECTION.taskProjectEdit, breaks: "subject in another tasks space", record: { subject: spaceRecordUri(OTHER_TASKS, MEMBER, COLLECTION.taskProject, "222222222222e") }, reason: /canonical project URI/ },
+  { collection: COLLECTION.taskProjectEdit, breaks: "subject of wrong collection", record: { subject: TASK }, reason: /canonical project URI/ },
+  { collection: COLLECTION.taskProjectEdit, breaks: "subject with non-TID key", record: { subject: spaceRecordUri(TASKS, MEMBER, COLLECTION.taskProject, "notatid") }, reason: /canonical project URI/ },
+  { collection: COLLECTION.taskProjectEdit, breaks: "malformed HLC string", record: { t: "a".repeat(20) }, reason: /HLC/ },
+  { collection: COLLECTION.taskProjectEdit, breaks: "non-hex opRef in s", record: { s: ["z".repeat(32)] }, reason: /hex opRefs/ },
+  { collection: COLLECTION.taskProjectEdit, breaks: "duplicate opRef in s", record: { s: [OP_REF_A, OP_REF_A] }, reason: /unique/ },
+  { collection: COLLECTION.taskProjectEdit, breaks: "sTruncated set to false", record: { sTruncated: false }, reason: /sTruncated/ },
+  { collection: COLLECTION.taskProjectEdit, breaks: "clearDescription set to false", record: { clearDescription: false }, reason: /clearDescription/ },
+  { collection: COLLECTION.taskProjectEdit, breaks: "both description and clearDescription set", record: { description: "x", clearDescription: true }, reason: /cannot set both/ },
+  { collection: COLLECTION.taskProjectEdit, breaks: "blank project name", record: { name: "   " }, reason: /blank/ },
+  { collection: COLLECTION.taskProjectEdit, breaks: "no-op projectEdit with zero mutations", record: { name: undefined }, reason: /at least one mutation/ },
+  { collection: COLLECTION.task, breaks: "blank task title", record: { title: "   " }, reason: /blank/ },
+  { collection: COLLECTION.task, breaks: "malformed HLC string", record: { t: "a".repeat(20) }, reason: /HLC/ },
+  { collection: COLLECTION.task, breaks: "project in another tasks space", record: { project: spaceRecordUri(OTHER_TASKS, MEMBER, COLLECTION.taskProject, "222222222222e") }, reason: /canonical project URI/ },
+  { collection: COLLECTION.task, breaks: "parent in another tasks space", record: { parent: spaceRecordUri(OTHER_TASKS, MEMBER, COLLECTION.task, "222222222222g") }, reason: /canonical task URI/ },
+  { collection: COLLECTION.task, breaks: "itself as parent", record: { parent: TASK }, reason: /itself/ },
+  { collection: COLLECTION.task, breaks: "duplicate assignees", record: { assignees: [MEMBER, MEMBER] }, reason: /unique/ },
+  { collection: COLLECTION.task, breaks: "assignee DID longer than the bound", record: { assignees: [`did:plc:${"a".repeat(1_500)}`] }, reason: /length bound/ },
+  { collection: COLLECTION.task, breaks: "blank label", record: { labels: ["   "] }, reason: /blank/ },
+  { collection: COLLECTION.task, breaks: "duplicate labels", record: { labels: ["bug", "bug"] }, reason: /unique/ },
+  { collection: COLLECTION.taskEdit, breaks: "subject in another tasks space", record: { subject: spaceRecordUri(OTHER_TASKS, MEMBER, COLLECTION.task, "222222222222f") }, reason: /canonical task URI/ },
+  { collection: COLLECTION.taskEdit, breaks: "subject of wrong collection", record: { subject: PROJECT }, reason: /canonical task URI/ },
+  { collection: COLLECTION.taskEdit, breaks: "subject with non-TID key", record: { subject: spaceRecordUri(TASKS, MEMBER, COLLECTION.task, "notatid") }, reason: /canonical task URI/ },
+  { collection: COLLECTION.taskEdit, breaks: "malformed HLC string", record: { t: "a".repeat(20) }, reason: /HLC/ },
+  { collection: COLLECTION.taskEdit, breaks: "HLC below MIN_HLC_MS", record: { t: "000999999999999.0000" }, reason: /HLC/ },
+  { collection: COLLECTION.taskEdit, breaks: "non-hex opRef in s", record: { s: ["g".repeat(32)] }, reason: /hex opRefs/ },
+  { collection: COLLECTION.taskEdit, breaks: "duplicate opRef in s", record: { s: [OP_REF_A, OP_REF_A] }, reason: /unique/ },
+  { collection: COLLECTION.taskEdit, breaks: "sTruncated set to false", record: { sTruncated: false }, reason: /sTruncated/ },
+  { collection: COLLECTION.taskEdit, breaks: "clearDescription set to false", record: { clearDescription: false }, reason: /clearDescription/ },
+  { collection: COLLECTION.taskEdit, breaks: "clearProject set to false", record: { clearProject: false }, reason: /clearProject/ },
+  { collection: COLLECTION.taskEdit, breaks: "clearDueDate set to false", record: { clearDueDate: false }, reason: /clearDueDate/ },
+  { collection: COLLECTION.taskEdit, breaks: "clearParent set to false", record: { clearParent: false }, reason: /clearParent/ },
+  { collection: COLLECTION.taskEdit, breaks: "both description and clearDescription set", record: { description: "x", clearDescription: true }, reason: /cannot set both/ },
+  { collection: COLLECTION.taskEdit, breaks: "both project and clearProject set", record: { project: PROJECT, clearProject: true }, reason: /cannot set both/ },
+  { collection: COLLECTION.taskEdit, breaks: "both dueDate and clearDueDate set", record: { dueDate: NOW, clearDueDate: true }, reason: /cannot set both/ },
+  { collection: COLLECTION.taskEdit, breaks: "both parent and clearParent set", record: { parent: PARENT_TASK, clearParent: true }, reason: /cannot set both/ },
+  { collection: COLLECTION.taskEdit, breaks: "blank task title", record: { title: "   " }, reason: /blank/ },
+  { collection: COLLECTION.taskEdit, breaks: "project in another tasks space", record: { project: spaceRecordUri(OTHER_TASKS, MEMBER, COLLECTION.taskProject, "222222222222e") }, reason: /canonical project URI/ },
+  { collection: COLLECTION.taskEdit, breaks: "parent in another tasks space", record: { parent: spaceRecordUri(OTHER_TASKS, MEMBER, COLLECTION.task, "222222222222g") }, reason: /canonical task URI/ },
+  { collection: COLLECTION.taskEdit, breaks: "parent equal to subject", record: { parent: TASK }, reason: /equal subject/ },
+  { collection: COLLECTION.taskEdit, breaks: "overlapping addAssignees and removeAssignees", record: { addAssignees: [MEMBER], removeAssignees: [MEMBER] }, reason: /disjoint/ },
+  { collection: COLLECTION.taskEdit, breaks: "overlapping addLabels and removeLabels", record: { addLabels: ["bug"], removeLabels: ["bug"] }, reason: /disjoint/ },
+  { collection: COLLECTION.taskEdit, breaks: "no-op taskEdit with zero mutations", record: { title: undefined, status: undefined, priority: undefined, addAssignees: undefined, addLabels: undefined }, reason: /at least one mutation/ },
+  { collection: COLLECTION.taskComment, breaks: "subject in another tasks space", record: { subject: spaceRecordUri(OTHER_TASKS, MEMBER, COLLECTION.task, "222222222222f") }, reason: /canonical task URI/ },
+  { collection: COLLECTION.taskComment, breaks: "subject with non-TID key", record: { subject: spaceRecordUri(TASKS, MEMBER, COLLECTION.task, "notatid") }, reason: /canonical task URI/ },
+  { collection: COLLECTION.taskComment, breaks: "blank comment body", record: { body: "   " }, reason: /blank/ },
 ];
 
 test("semantic rejection: a well-shaped record that breaks any meaning rule is rejected for that rule", () => {
   for (const testCase of SEMANTIC_CASES) {
     // #given a fixture changed in one way that keeps its shape
     const { record, context } = FIXTURES[testCase.collection];
-    const value = { ...record, ...testCase.record };
+    const value = Object.fromEntries(Object.entries({ ...record, ...testCase.record }).filter(([, v]) => v !== undefined));
     const label = `${testCase.collection}: ${testCase.breaks}`;
     assert.equal(validateRecordShape(testCase.collection, value).valid, true, `${label} is well-shaped`);
 

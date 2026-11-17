@@ -1,0 +1,25 @@
+{
+  "lexicon": 1,
+  "id": "new.flock.ext.tasks.projectEdit",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["subject", "t", "s"],
+        "properties": {
+          "subject": { "type": "string", "format": "at-uri" },
+          "t": { "type": "string", "minLength": 20, "maxLength": 20 },
+          "s": { "type": "array", "maxLength": 256, "items": { "type": "string", "minLength": 32, "maxLength": 32 } },
+          "sTruncated": { "type": "boolean" },
+          "name": { "type": "string", "minLength": 1, "maxLength": 320, "maxGraphemes": 80 },
+          "description": { "type": "string", "minLength": 1, "maxLength": 40000, "maxGraphemes": 10000 },
+          "clearDescription": { "type": "boolean" },
+          "color": { "type": "string", "minLength": 1, "maxLength": 32 },
+          "deleted": { "type": "boolean" }
+        }
+      }
+    }
+  }
+}

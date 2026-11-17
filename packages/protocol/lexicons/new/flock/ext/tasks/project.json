@@ -1,0 +1,21 @@
+{
+  "lexicon": 1,
+  "id": "new.flock.ext.tasks.project",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["name", "t", "createdAt"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 320, "maxGraphemes": 80 },
+          "description": { "type": "string", "minLength": 1, "maxLength": 40000, "maxGraphemes": 10000 },
+          "color": { "type": "string", "minLength": 1, "maxLength": 32 },
+          "t": { "type": "string", "minLength": 20, "maxLength": 20 },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

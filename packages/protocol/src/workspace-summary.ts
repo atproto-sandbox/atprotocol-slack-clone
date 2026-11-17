@@ -1,3 +1,4 @@
+import type { ExtensionId } from "./extensions";
 import { channelUri, parseWorkspaceUri } from "./keys";
 import { COLLECTION } from "./nsids";
 import { validateSpaceRecord } from "./registry";
@@ -6,7 +7,33 @@ import { validateSpaceRecord } from "./registry";
 // read model and the operator both read the same records and summarize them here, so they agree on the workspace and on
 // when admin changes must pause.
 
-export const WORKSPACE_ENVELOPE = { members: 200, apps: 20, memberList: 220, channels: 100, authorityRecordScan: 1_000 } as const;
+export const WORKSPACE_ENVELOPE = {
+  members: 200,
+  apps: 20,
+  extensions: 20,
+  memberList: 220,
+  channels: 100,
+  taskProjects: 100,
+  tasks: 2_000,
+  maxAncestorRefs: 256,
+  maxCommentsPerTask: 200,
+  maxStarArchiveBytes: 16 * 1024 * 1024,
+  maxStarRecords: 20_000,
+  maxRepoOpsPages: 128,
+  maxListRecordsRetry: 3,
+  authorityRecordScan: 1_000,
+} as const;
+
+export type WorkspaceExtensionSummary = {
+  extId: ExtensionId;
+  active: boolean;
+  space: string;
+  cleanupComplete: boolean;
+  enabledBy: string;
+  enabledAt: string;
+  updatedAt: string;
+  disabledAt?: string;
+};
 
 export type WorkspaceSummary = {
   uri: string;
@@ -19,13 +46,22 @@ export type WorkspaceSummary = {
   channels: Array<{ uri: string; skey: string; name: string; visibility: string }>;
   /** The active apps: each account the workspace installed, and the channels it may read, writing where `write` is true. */
   installs: Array<{ did: string; channels: Array<{ skey: string; write: boolean }> }>;
+  /** Valid extension install records (both enabled and disabled) written by the workspace authority. */
+  extensions?: WorkspaceExtensionSummary[];
   degradedReasons: string[];
 };
 
 /** One collection of the authority's records, as a bounded scan returned it. */
 export type ScannedRecords = { records: Array<{ rkey: string; value: Record<string, unknown> }>; truncated: boolean };
 
-export type WorkspaceRecords = { profiles: ScannedRecords; directory: ScannedRecords; roster: ScannedRecords; admins: ScannedRecords; installs: ScannedRecords };
+export type WorkspaceRecords = {
+  profiles: ScannedRecords;
+  directory: ScannedRecords;
+  roster: ScannedRecords;
+  admins: ScannedRecords;
+  installs: ScannedRecords;
+  extInstalls?: ScannedRecords;
+};
 
 export class WorkspaceEnvelopeError extends Error {
   readonly status = 409;
@@ -68,6 +104,20 @@ export function summarizeWorkspace(uri: string, viewerDid: string, records: Work
     did: String(value.subject),
     channels: (value.channels as Array<{ skey: string; write: boolean }>).filter(({ skey }) => open.has(skey)).map(({ skey, write }) => ({ skey, write })),
   }] : []);
+  const extInstallRecords = records.extInstalls ?? { records: [], truncated: false };
+  const extensions: WorkspaceExtensionSummary[] = valid(COLLECTION.extInstall, extInstallRecords)
+    .map(({ value }) => ({
+      extId: value.extId as ExtensionId,
+      active: value.active === true,
+      space: String(value.space),
+      cleanupComplete: value.cleanupComplete === true,
+      enabledBy: String(value.enabledBy),
+      enabledAt: String(value.enabledAt),
+      updatedAt: String(value.updatedAt),
+      ...(typeof value.disabledAt === "string" ? { disabledAt: value.disabledAt } : {}),
+    }))
+    .sort((left, right) => left.extId.localeCompare(right.extId));
+  const activeExtensions = extensions.filter((extension) => extension.active).length;
   const scan = WORKSPACE_ENVELOPE.authorityRecordScan;
   const degradedReasons = [
     records.profiles.truncated && "Workspace profile records exceed the expected single-record limit.",
@@ -75,10 +125,12 @@ export function summarizeWorkspace(uri: string, viewerDid: string, records: Work
     records.roster.truncated && `The workspace roster exceeds the ${scan}-record scan limit; the member list may be incomplete.`,
     records.admins.truncated && `Admin records exceed the ${scan}-record scan limit; the admin list may be incomplete.`,
     records.installs.truncated && `App install records exceed the ${scan}-record scan limit; the app list may be incomplete.`,
+    extInstallRecords.truncated && `Extension install records exceed the ${scan}-record scan limit; the extension list may be incomplete.`,
     members.size > WORKSPACE_ENVELOPE.members && `The active workspace roster exceeds ${WORKSPACE_ENVELOPE.members} members.`,
     channels.length > WORKSPACE_ENVELOPE.channels && `The active channel count exceeds ${WORKSPACE_ENVELOPE.channels} channels.`,
     admins.length > WORKSPACE_ENVELOPE.members && `The active admin count exceeds ${WORKSPACE_ENVELOPE.members} members.`,
     installs.length > WORKSPACE_ENVELOPE.apps && `The active app count exceeds ${WORKSPACE_ENVELOPE.apps}.`,
+    activeExtensions > WORKSPACE_ENVELOPE.extensions && `The active extension count exceeds ${WORKSPACE_ENVELOPE.extensions}.`,
   ].filter((reason): reason is string => typeof reason === "string");
   return {
     uri,
@@ -90,6 +142,7 @@ export function summarizeWorkspace(uri: string, viewerDid: string, records: Work
     members: [...members].map((did) => ({ did, active: true })).sort((left, right) => left.did.localeCompare(right.did)),
     channels: channels.sort((left, right) => left.name.localeCompare(right.name)),
     installs: installs.sort((left, right) => left.did.localeCompare(right.did)),
+    extensions,
     degradedReasons,
   };
 }

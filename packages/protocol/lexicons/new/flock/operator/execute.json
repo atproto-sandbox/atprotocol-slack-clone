@@ -28,10 +28,11 @@
       "description": "The server validates the required fields for each kind and rejects extra or missing fields.",
       "required": ["kind"],
       "properties": {
-        "kind": { "type": "string", "knownValues": ["inviteMember", "removeMember", "setAdmin", "createChannel", "transitionChannel", "archiveChannel", "decideJoinRequest", "leaveWorkspace", "leaveChannel", "reconcileWorkspace", "installApp", "updateAppAccess", "uninstallApp"] },
+        "kind": { "type": "string", "knownValues": ["inviteMember", "removeMember", "setAdmin", "createChannel", "transitionChannel", "archiveChannel", "decideJoinRequest", "leaveWorkspace", "leaveChannel", "reconcileWorkspace", "installApp", "updateAppAccess", "uninstallApp", "enableExtension", "disableExtension"] },
         "subject": { "type": "string", "format": "did" },
         "active": { "type": "boolean" },
         "skey": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "extId": { "type": "string", "minLength": 1, "maxLength": 64 },
         "name": { "type": "string", "minLength": 1, "maxLength": 320, "maxGraphemes": 80 },
         "visibility": { "type": "string", "knownValues": ["public", "private"] },
         "members": { "type": "array", "items": { "type": "string", "format": "did" }, "maxLength": 200 },

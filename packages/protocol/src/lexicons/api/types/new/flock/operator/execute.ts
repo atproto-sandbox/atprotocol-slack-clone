@@ -85,10 +85,13 @@ export interface OperationRequest {
     | 'installApp'
     | 'updateAppAccess'
     | 'uninstallApp'
+    | 'enableExtension'
+    | 'disableExtension'
     | (string & {})
   subject?: string
   active?: boolean
   skey?: string
+  extId?: string
   name?: string
   visibility?: 'public' | 'private' | (string & {})
   members?: string[]

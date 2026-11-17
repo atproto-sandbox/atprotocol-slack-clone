@@ -14,10 +14,17 @@ import dmHeaderLexicon from "../lexicons/new/flock/dm/header.json";
 import dmMessageLexicon from "../lexicons/new/flock/dm/message.json";
 import dmReactionLexicon from "../lexicons/new/flock/dm/reaction.json";
 import dmRequestLexicon from "../lexicons/new/flock/dm/request.json";
+import extInstallLexicon from "../lexicons/new/flock/ext/install.json";
+import taskCommentLexicon from "../lexicons/new/flock/ext/tasks/comment.json";
+import taskProjectLexicon from "../lexicons/new/flock/ext/tasks/project.json";
+import taskProjectEditLexicon from "../lexicons/new/flock/ext/tasks/projectEdit.json";
+import taskLexicon from "../lexicons/new/flock/ext/tasks/task.json";
+import taskEditLexicon from "../lexicons/new/flock/ext/tasks/taskEdit.json";
 import joinDecisionLexicon from "../lexicons/new/flock/joinDecision.json";
 import joinRequestLexicon from "../lexicons/new/flock/joinRequest.json";
 import workspaceProfileLexicon from "../lexicons/new/flock/workspace/profile.json";
 import workspaceRosterLexicon from "../lexicons/new/flock/workspace/roster.json";
+import { extSpaceUriFor, isExtensionId } from "./extensions";
 import {
   acceptanceRecordKey,
   canonicalParticipants,
@@ -32,6 +39,7 @@ import {
   parseDmMessageUri,
   parseSpaceRecordUri,
   parseSpaceUri,
+  parseWorkspaceUri,
   reactionRecordKey,
   requestRecordKey,
   spaceRecordUri,
@@ -124,6 +132,46 @@ export const REGISTRY: { readonly [C in Collection]: CollectionEntry } = {
       }
       const message = parseSpaceRecordUri(String(record.message), String(record.channel), COLLECTION.message);
       return message && isTid(message.rkey) ? VALID : invalid("action target must be a canonical message URI in its channel");
+    },
+  },
+  [COLLECTION.extInstall]: {
+    spaceType: SPACE_TYPE.workspace, author: "authority", key: "derived", sync: "all",
+    semantic: (record, context) => {
+      const workspace = parseWorkspaceUri(context.spaceUri);
+      if (!workspace) return invalid("extension install must be scoped to a workspace space");
+      if (!isExtensionId(record.extId)) return invalid("unknown extension id");
+      if (context.rkey !== record.extId) return invalid("extension install key must equal extId");
+      if (record.space !== extSpaceUriFor(context.authorityDid, workspace.skey, record.extId)) {
+        return invalid("extension space URI does not match canonical workspace extension space");
+      }
+      return isDid(record.enabledBy) ? VALID : invalid("enabledBy must be a DID within the length bound");
+    },
+  },
+  [COLLECTION.taskProject]: {
+    spaceType: SPACE_TYPE.tasks, author: "member", key: "tid", sync: "all",
+    semantic: (record) => {
+      if (String(record.name).trim().length < 1) return invalid("project name must not be blank");
+      return isHlcTimestamp(record.t) ? VALID : invalid("invalid HLC timestamp");
+    },
+  },
+  [COLLECTION.taskProjectEdit]: {
+    spaceType: SPACE_TYPE.tasks, author: "member", key: "tid", sync: "all",
+    semantic: (record, context) => validateProjectEdit(record, context),
+  },
+  [COLLECTION.task]: {
+    spaceType: SPACE_TYPE.tasks, author: "member", key: "tid", sync: "all",
+    semantic: (record, context) => validateTaskRecord(record, context),
+  },
+  [COLLECTION.taskEdit]: {
+    spaceType: SPACE_TYPE.tasks, author: "member", key: "tid", sync: "all",
+    semantic: (record, context) => validateTaskEdit(record, context),
+  },
+  [COLLECTION.taskComment]: {
+    spaceType: SPACE_TYPE.tasks, author: "member", key: "tid", sync: "all",
+    semantic: (record, context) => {
+      const subject = parseSpaceRecordUri(String(record.subject), context.spaceUri, COLLECTION.task);
+      if (!subject || !isTid(subject.rkey)) return invalid("comment subject must be a canonical task URI in this tasks space");
+      return String(record.body).trim().length >= 1 ? VALID : invalid("comment body must not be blank");
     },
   },
   [COLLECTION.joinRequest]: {
@@ -239,7 +287,7 @@ const LEXICONS = new Lexicons([
   workspaceProfileLexicon, directoryLexicon, workspaceRosterLexicon, adminLexicon, acceptanceLexicon, joinRequestLexicon,
   joinDecisionLexicon, messageLexicon, reactionLexicon, channelRosterLexicon, dmRequestLexicon, dmHeaderLexicon,
   dmMessageLexicon, dmReactionLexicon, dmDeclarationLexicon, appInstallLexicon, appDeclarationLexicon, appCommandLexicon,
-  appActionLexicon,
+  appActionLexicon, extInstallLexicon, taskProjectLexicon, taskProjectEditLexicon, taskLexicon, taskEditLexicon, taskCommentLexicon,
 ].map((document) => parseLexiconDoc(document)));
 
 /** The shape a published lexicon gives a record, and nothing more: no author, key or reference rule. */
@@ -378,6 +426,147 @@ function canonicalDmParticipants(value: unknown): string[] | null {
 
 function sameParticipants(left: unknown, right: unknown): boolean {
   return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+const HLC_PATTERN = /^(\d{15})\.([0-9a-f]{4})$/;
+const HLC_MIN_MS = 1_000_000_000_000;
+const HLC_MAX_MS = 999_999_999_999_999;
+const OP_REF_PATTERN = /^[0-9a-f]{32}$/;
+
+function isHlcTimestamp(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  const match = HLC_PATTERN.exec(value);
+  if (!match) return false;
+  const ms = Number(match[1]);
+  return Number.isSafeInteger(ms) && ms >= HLC_MIN_MS && ms <= HLC_MAX_MS;
+}
+
+function validateOpRefList(value: unknown): RecordValidation {
+  if (!Array.isArray(value)) return invalid("s must be an array");
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (typeof item !== "string" || !OP_REF_PATTERN.test(item)) return invalid("s entries must be 32-char lowercase hex opRefs");
+    if (seen.has(item)) return invalid("s entries must be unique");
+    seen.add(item);
+  }
+  return VALID;
+}
+
+function validateClearPairs(record: Record<string, unknown>, pairs: readonly [string, string][]): RecordValidation {
+  for (const [valueKey, clearKey] of pairs) {
+    if (record[clearKey] === false) return invalid(`${clearKey} must be true or omitted`);
+    if (record[valueKey] !== undefined && record[clearKey] === true) {
+      return invalid(`cannot set both ${valueKey} and ${clearKey}`);
+    }
+  }
+  return VALID;
+}
+
+function validateDidSet(value: unknown, fieldName: string): RecordValidation {
+  if (!Array.isArray(value)) return VALID;
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (!isDid(item)) return invalid(`${fieldName} entries must be DIDs within the length bound`);
+    if (seen.has(item)) return invalid(`${fieldName} entries must be unique`);
+    seen.add(item);
+  }
+  return VALID;
+}
+
+function validateLabelSet(value: unknown, fieldName: string): RecordValidation {
+  if (!Array.isArray(value)) return VALID;
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (typeof item !== "string" || item.trim().length < 1) return invalid(`${fieldName} entries must not be blank`);
+    if (seen.has(item)) return invalid(`${fieldName} entries must be unique`);
+    seen.add(item);
+  }
+  return VALID;
+}
+
+function validateDisjointSets(left: unknown, right: unknown, label: string): RecordValidation {
+  if (!Array.isArray(left) || !Array.isArray(right)) return VALID;
+  const leftSet = new Set(left);
+  return right.some((item) => leftSet.has(item)) ? invalid(`${label} must be disjoint`) : VALID;
+}
+
+function validateProjectEdit(record: Record<string, unknown>, context: RecordContext): RecordValidation {
+  const subject = parseSpaceRecordUri(String(record.subject), context.spaceUri, COLLECTION.taskProject);
+  if (!subject || !isTid(subject.rkey)) return invalid("projectEdit subject must be a canonical project URI in this tasks space");
+  if (!isHlcTimestamp(record.t)) return invalid("invalid HLC timestamp");
+  const refs = validateOpRefList(record.s);
+  if (!refs.valid) return refs;
+  if (record.sTruncated === false) return invalid("sTruncated must be true or omitted");
+  const clears = validateClearPairs(record, [["description", "clearDescription"]]);
+  if (!clears.valid) return clears;
+  if (record.name !== undefined && String(record.name).trim().length < 1) return invalid("project name must not be blank");
+  const hasMutation = record.name !== undefined || record.description !== undefined || record.clearDescription === true
+    || record.color !== undefined || record.deleted !== undefined;
+  return hasMutation ? VALID : invalid("projectEdit must carry at least one mutation");
+}
+
+function validateTaskRecord(record: Record<string, unknown>, context: RecordContext): RecordValidation {
+  if (String(record.title).trim().length < 1) return invalid("task title must not be blank");
+  if (!isHlcTimestamp(record.t)) return invalid("invalid HLC timestamp");
+  if (record.project !== undefined) {
+    const project = parseSpaceRecordUri(String(record.project), context.spaceUri, COLLECTION.taskProject);
+    if (!project || !isTid(project.rkey)) return invalid("task project must be a canonical project URI in this tasks space");
+  }
+  if (record.parent !== undefined) {
+    const parent = parseSpaceRecordUri(String(record.parent), context.spaceUri, COLLECTION.task);
+    if (!parent || !isTid(parent.rkey)) return invalid("task parent must be a canonical task URI in this tasks space");
+    const selfUri = spaceRecordUri(context.spaceUri, context.repoDid, COLLECTION.task, context.rkey);
+    if (record.parent === selfUri) return invalid("task parent must not be the task itself");
+  }
+  const assignees = validateDidSet(record.assignees, "assignees");
+  if (!assignees.valid) return assignees;
+  return validateLabelSet(record.labels, "labels");
+}
+
+function validateTaskEdit(record: Record<string, unknown>, context: RecordContext): RecordValidation {
+  const subject = parseSpaceRecordUri(String(record.subject), context.spaceUri, COLLECTION.task);
+  if (!subject || !isTid(subject.rkey)) return invalid("taskEdit subject must be a canonical task URI in this tasks space");
+  if (!isHlcTimestamp(record.t)) return invalid("invalid HLC timestamp");
+  const refs = validateOpRefList(record.s);
+  if (!refs.valid) return refs;
+  if (record.sTruncated === false) return invalid("sTruncated must be true or omitted");
+  const clears = validateClearPairs(record, [
+    ["description", "clearDescription"],
+    ["project", "clearProject"],
+    ["dueDate", "clearDueDate"],
+    ["parent", "clearParent"],
+  ]);
+  if (!clears.valid) return clears;
+  if (record.title !== undefined && String(record.title).trim().length < 1) return invalid("task title must not be blank");
+  if (record.project !== undefined) {
+    const project = parseSpaceRecordUri(String(record.project), context.spaceUri, COLLECTION.taskProject);
+    if (!project || !isTid(project.rkey)) return invalid("taskEdit project must be a canonical project URI in this tasks space");
+  }
+  if (record.parent !== undefined) {
+    const parent = parseSpaceRecordUri(String(record.parent), context.spaceUri, COLLECTION.task);
+    if (!parent || !isTid(parent.rkey)) return invalid("taskEdit parent must be a canonical task URI in this tasks space");
+    if (record.parent === record.subject) return invalid("taskEdit parent must not equal subject");
+  }
+  for (const check of [
+    validateDidSet(record.addAssignees, "addAssignees"),
+    validateDidSet(record.removeAssignees, "removeAssignees"),
+    validateDisjointSets(record.addAssignees, record.removeAssignees, "addAssignees and removeAssignees"),
+    validateLabelSet(record.addLabels, "addLabels"),
+    validateLabelSet(record.removeLabels, "removeLabels"),
+    validateDisjointSets(record.addLabels, record.removeLabels, "addLabels and removeLabels"),
+  ]) {
+    if (!check.valid) return check;
+  }
+  const hasMutation = record.title !== undefined || record.description !== undefined || record.clearDescription === true
+    || record.status !== undefined || record.priority !== undefined || record.project !== undefined
+    || record.clearProject === true || record.dueDate !== undefined || record.clearDueDate === true
+    || record.parent !== undefined || record.clearParent === true
+    || (Array.isArray(record.addAssignees) && record.addAssignees.length > 0)
+    || (Array.isArray(record.removeAssignees) && record.removeAssignees.length > 0)
+    || (Array.isArray(record.addLabels) && record.addLabels.length > 0)
+    || (Array.isArray(record.removeLabels) && record.removeLabels.length > 0)
+    || record.deleted !== undefined;
+  return hasMutation ? VALID : invalid("taskEdit must carry at least one mutation");
 }
 
 function invalid(reason: string): RecordValidation {

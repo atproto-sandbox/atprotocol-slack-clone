@@ -1,0 +1,27 @@
+{
+  "lexicon": 1,
+  "id": "new.flock.ext.tasks.task",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["title", "status", "priority", "t", "createdAt"],
+        "properties": {
+          "title": { "type": "string", "minLength": 1, "maxLength": 1200, "maxGraphemes": 300 },
+          "description": { "type": "string", "minLength": 1, "maxLength": 40000, "maxGraphemes": 10000 },
+          "status": { "type": "string", "enum": ["backlog", "todo", "in_progress", "done", "canceled"] },
+          "priority": { "type": "string", "enum": ["none", "low", "medium", "high", "urgent"] },
+          "project": { "type": "string", "format": "at-uri" },
+          "dueDate": { "type": "string", "format": "datetime" },
+          "parent": { "type": "string", "format": "at-uri" },
+          "assignees": { "type": "array", "maxLength": 32, "items": { "type": "string", "format": "did" } },
+          "labels": { "type": "array", "maxLength": 32, "items": { "type": "string", "minLength": 1, "maxLength": 128, "maxGraphemes": 32 } },
+          "t": { "type": "string", "minLength": 20, "maxLength": 20 },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}
