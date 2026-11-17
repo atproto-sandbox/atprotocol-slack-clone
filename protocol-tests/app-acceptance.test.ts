@@ -60,7 +60,7 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     assert.ok((await fixtureLexiconManager.getSpacesFromScope("space:com.example.group?authority=did:plc:fixture&skey=workspace&action=read")).has("com.example.group"), "the PDS lexicon authority resolves its built-in space declaration");
     const appSpaceTypes = await fixtureLexiconManager.getSpacesFromScope("space:new.flock.workspace?authority=did:plc:fixture&skey=workspace&action=read");
     assert.deepEqual(appSpaceTypes.get("new.flock.workspace")?.collections, [
-      "new.flock.workspace.profile", "new.flock.directory", "new.flock.workspace.roster", "new.flock.admin", "new.flock.app.install", "new.flock.acceptance",
+      "new.flock.workspace.profile", "new.flock.directory", "new.flock.workspace.roster", "new.flock.admin", "new.flock.app.install", "new.flock.ext.install", "new.flock.acceptance",
     ], "the pinned OAuth provider resolves the app's published workspace space declaration");
     const appInboxTypes = await fixtureLexiconManager.getSpacesFromScope("space:new.flock.app.inbox?authority=did:plc:fixture&skey=inbox&action=read");
     assert.deepEqual(appInboxTypes.get("new.flock.app.inbox")?.collections, [
