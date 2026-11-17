@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { COMMIT_DIGEST_BYTES, LTHASH_STATE_BYTES, type StoredRecord, type SyncStore, type WriterCommit } from "../store";
+import { COMMIT_DIGEST_BYTES, LTHASH_STATE_BYTES, SyncStoreError, type StoredRecord, type SyncStore, type WriterCommit } from "../store";
 import { channelUri } from "@flock/protocol/keys";
 import { COLLECTION } from "@flock/protocol/nsids";
 
@@ -283,6 +283,11 @@ export function storeContract(name: string, open: () => Promise<SyncStore>): voi
       dismissedIds: ["other-2"],
       updatedAt: 300,
     });
+
+    await assert.rejects(() => store.putActivityState({ accountDid: "", space: SPACE, seenIds: [], dismissedIds: [], updatedAt: 1 }), SyncStoreError);
+    await assert.rejects(() => store.putActivityState({ accountDid: account, space: "", seenIds: [], dismissedIds: [], updatedAt: 1 }), SyncStoreError);
+    await assert.rejects(() => store.markActivitySeen("", SPACE, ["e"]), SyncStoreError);
+    await assert.rejects(() => store.dismissActivity(account, "", ["e"]), SyncStoreError);
 
     await store.purgeSpace(SPACE);
     assert.equal(await store.getActivityState(account, SPACE), undefined);

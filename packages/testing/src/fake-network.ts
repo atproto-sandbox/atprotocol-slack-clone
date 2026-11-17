@@ -583,7 +583,7 @@ export class FakeNetwork {
   private listSpaces(params: Record<string, unknown>, auth: FakeAuth) {
     const did = this.requireSelf(auth);
     const all = [...this.spaces.values()]
-      .filter((space) => !space.deleted && (space.ownerDid === did || space.repos.has(did)))
+      .filter((space) => !space.deleted && (space.ownerDid === did || space.repoRevs.has(did)))
       .filter((space) => params.spaceType === undefined || space.type === params.spaceType)
       .filter((space) => params.did === undefined || space.ownerDid === params.did)
       .map((space) => ({ uri: `at://${space.ownerDid}/space/${space.type}/${space.skey}` }));
@@ -642,7 +642,7 @@ export class FakeNetwork {
   private async createRecord(params: Record<string, unknown>, auth: FakeAuth) {
     const space = typeof params.space === "string" ? this.spaces.get(params.space) : undefined;
     const rkey = typeof params.rkey === "string" ? params.rkey : fakeTid(++this.revCounter);
-    if (space && !space.deleted && this.repoCollections(space, String(params.repo)).get(String(params.collection))?.has(rkey)) {
+    if (space && !space.deleted && space.repos.get(String(params.repo))?.get(String(params.collection))?.has(rkey)) {
       throw new FakeXrpcError(400, "RecordAlreadyExists", "Record already exists");
     }
     return this.putRecord({ ...params, rkey }, auth);
@@ -658,9 +658,9 @@ export class FakeNetwork {
     if (writes.length > 200) throw new FakeXrpcError(400, "InvalidRequest", "Too many writes. Max: 200");
     if (writes.length === 0) return { results: [] };
 
-    const existingCollections = this.repoCollections(space, repo);
+    const existingCollections = space.repos.get(repo);
     const staged = new Map<string, Map<string, RecordEntry>>();
-    for (const [col, entries] of existingCollections) staged.set(col, new Map(entries));
+    for (const [col, entries] of existingCollections ?? []) staged.set(col, new Map(entries));
 
     const rev = this.nextRev();
     const ops: FakeRepoOp[] = [];
@@ -723,7 +723,7 @@ export class FakeNetwork {
     const space = this.requireSpace(params.space);
     if (space.deleted) throw new FakeXrpcError(400, "SpaceNotFound", "Space not found");
     if (space.repoRevs.has(repo)) {
-      this.repoCollections(space, repo).clear();
+      space.repos.get(repo)?.clear();
       space.oplogs.set(repo, []);
       space.repoRevs.set(repo, this.nextRev());
       this.recordWrite(space, repo);
@@ -790,7 +790,7 @@ export class FakeNetwork {
     const space = this.requireSpace(params.space);
     const collection = String(params.collection);
     const rkey = String(params.rkey);
-    const entries = this.repoCollections(space, repo).get(collection);
+    const entries = space.repos.get(repo)?.get(collection);
     const existing = entries?.get(rkey);
     entries?.delete(rkey);
     const rev = this.nextRev();
@@ -870,7 +870,7 @@ export class FakeNetwork {
     const collection = String(params.collection);
     const rkey = String(params.rkey);
     const sharedSecret = own && !requestHeaders?.has(WANT_MAC_HEADER) ? undefined : await this.macSecret("com.atproto.space.getRecord", repo, requestHeaders);
-    const record = space.deleted ? undefined : this.repoCollections(space, repo).get(collection)?.get(rkey);
+    const record = space.deleted ? undefined : space.repos.get(repo)?.get(collection)?.get(rkey);
     if (!record) throw new FakeXrpcError(400, "RecordNotFound", "Record not found");
     const uri = `${spaceUri(space)}/${repo}/${collection}/${rkey}`;
     return new WithHeaders(
@@ -906,7 +906,7 @@ export class FakeNetwork {
 
     const encoder = new TextEncoder();
     const entries: Array<{ keyBytes: Uint8Array; collection: string; rkey: string; value: Record<string, unknown> }> = [];
-    for (const [collection, records] of this.repoCollections(space, repo)) {
+    for (const [collection, records] of space.repos.get(repo) ?? []) {
       for (const [rkey, entry] of records) {
         entries.push({ keyBytes: encoder.encode(`${collection}/${rkey}`), collection, rkey, value: entry.value });
       }
@@ -937,7 +937,7 @@ export class FakeNetwork {
   private commitFor(space: FakeSpace, repo: string) {
     const rev = space.repoRevs.get(repo);
     if (space.deleted || !rev) throw new FakeXrpcError(400, "RepoNotFound", "Repo not found");
-    const records = [...this.repoCollections(space, repo)].flatMap(([collection, entries]) =>
+    const records = [...(space.repos.get(repo) ?? [])].flatMap(([collection, entries]) =>
       [...entries].map(([rkey, entry]) => ({ collection: collection as never, rkey: rkey as never, cid: entry.cid })));
     return RepoCommit.fromRecords(records).toCommit({ space: spaceUri(space) as never, repo: repo as never, rev });
   }
@@ -962,15 +962,17 @@ export class FakeNetwork {
     const prefix = `${spaceUri(space)}/${repo}`;
     const all: Array<{ uri: string; collection: string; rkey: string; entry: RecordEntry }> = [];
     if (!space.deleted) {
-      const collections = this.repoCollections(space, repo);
-      if (collection !== undefined) {
-        for (const [rkey, entry] of collections.get(collection)?.entries() ?? []) {
-          all.push({ uri: `${prefix}/${collection}/${rkey}`, collection, rkey, entry });
-        }
-      } else {
-        for (const [col, entries] of collections) {
-          for (const [rkey, entry] of entries) {
-            all.push({ uri: `${prefix}/${col}/${rkey}`, collection: col, rkey, entry });
+      const collections = space.repos.get(repo);
+      if (collections) {
+        if (collection !== undefined) {
+          for (const [rkey, entry] of collections.get(collection)?.entries() ?? []) {
+            all.push({ uri: `${prefix}/${collection}/${rkey}`, collection, rkey, entry });
+          }
+        } else {
+          for (const [col, entries] of collections) {
+            for (const [rkey, entry] of entries) {
+              all.push({ uri: `${prefix}/${col}/${rkey}`, collection: col, rkey, entry });
+            }
           }
         }
       }
@@ -1021,9 +1023,9 @@ export class FakeNetwork {
       return true;
     });
     const page = filtered.slice(0, limit);
-    const collections = this.repoCollections(space, repo);
+    const collections = space.repos.get(repo);
     const ops = page.map((op) => {
-      const live = space.deleted ? undefined : collections.get(op.collection)?.get(op.rkey);
+      const live = space.deleted ? undefined : collections?.get(op.collection)?.get(op.rkey);
       const value = !excludeValues && op.cid !== null && live && live.cid.toString() === op.cid ? live.value : undefined;
       return {
         rev: op.rev,

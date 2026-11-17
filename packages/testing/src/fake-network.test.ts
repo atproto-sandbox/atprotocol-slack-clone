@@ -597,3 +597,40 @@ test("FakeNetwork fault injection hooks exercise mid-read races, pruned oplog, f
   assert.equal(await verifyRecordCid(tamperedList.records[0]!.collection, tamperedList.records[0]!.rkey, tamperedList.records[0]!.value, tamperedList.records[0]!.cid), false);
   await assert.rejects(client.query("com.atproto.space.getLatestCommit", { space: SPACE, repo: OWNER }), SpaceMacError);
 });
+
+test("reading or deleting an unwritten member repo does not mutate space.repos or pollute listSpaces", async () => {
+  const { network, deps } = await setup(undefined, { $type: MEMBERSPACE_POLICY, publicRead: true, publicWrite: true });
+  const cred = await mintSpaceCredentialWith(deps, SPACE);
+  const readerClient = network.clientFor(READER);
+  const pds2 = "https://fake-pds.test/pds2";
+  const memberClient = cred.client(pds2);
+
+  assert.deepEqual(await readerClient.query<{ spaces: Array<{ uri: string }> }>("com.atproto.space.listSpaces", {}), { spaces: [] });
+
+  // Probe READER's unwritten repo across every read endpoint (and no-op delete/clear).
+  assert.deepEqual(await memberClient.query("com.atproto.space.listRepoOps", { space: SPACE, repo: READER }), { ops: [] });
+  assert.deepEqual(await memberClient.query("com.atproto.space.listRecords", { space: SPACE, repo: READER }), { records: [] });
+  await assert.rejects(
+    memberClient.query("com.atproto.space.getRecord", { space: SPACE, repo: READER, collection: "new.flock.dm.request", rkey: "missing" }),
+    { status: 400, code: "RecordNotFound" },
+  );
+  await assert.rejects(
+    cred.fetchVerifiedRepoStar(pds2, { space: SPACE, repo: READER, maxBytes: 64 * 1024, maxRecords: 10 }),
+    { status: 400, code: "RepoNotFound" },
+  );
+  await assert.rejects(
+    memberClient.query("com.atproto.space.getLatestCommit", { space: SPACE, repo: READER }),
+    { status: 400, code: "RepoNotFound" },
+  );
+  await readerClient.procedure("com.atproto.space.deleteRecord", { space: SPACE, repo: READER, collection: "new.flock.dm.request", rkey: "missing" });
+  await readerClient.procedure("com.atproto.space.clearRecords", { space: SPACE, repo: READER });
+
+  // Unwritten repo reads/no-op deletes must NEVER add READER to listSpaces.
+  assert.deepEqual(await readerClient.query<{ spaces: Array<{ uri: string }> }>("com.atproto.space.listSpaces", {}), { spaces: [] });
+
+  // Once READER actually writes a record, listSpaces includes the space.
+  await network.writeAs(READER, SPACE, "new.flock.dm.request", "m1", { text: "hello" });
+  assert.deepEqual(await readerClient.query<{ spaces: Array<{ uri: string }> }>("com.atproto.space.listSpaces", {}), {
+    spaces: [{ uri: SPACE }],
+  });
+});

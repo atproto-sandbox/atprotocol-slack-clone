@@ -169,8 +169,12 @@ export class MemoryStore implements SyncStore {
   }
 
   async putActivityState(state: ActivityState): Promise<void> {
-    const next = cloneActivityState(state);
-    this.activities.set(compositeKey(next.accountDid, next.space), next);
+    try {
+      const next = cloneActivityState(state);
+      this.activities.set(compositeKey(next.accountDid, next.space), next);
+    } catch (error) {
+      throw asStoreError(error);
+    }
   }
 
   async markActivitySeen(accountDid: string, space: string, eventIds: readonly string[], updatedAt = Date.now()): Promise<ActivityState> {
@@ -188,17 +192,21 @@ export class MemoryStore implements SyncStore {
     eventIds: readonly string[],
     updatedAt: number,
   ): ActivityState {
-    const key = compositeKey(accountDid, space);
-    const current = this.activities.get(key);
-    const next = cloneActivityState({
-      accountDid,
-      space,
-      seenIds: field === "seenIds" ? dedupeIds([...(current?.seenIds ?? []), ...eventIds]) : current?.seenIds ?? [],
-      dismissedIds: field === "dismissedIds" ? dedupeIds([...(current?.dismissedIds ?? []), ...eventIds]) : current?.dismissedIds ?? [],
-      updatedAt: Math.max(current?.updatedAt ?? 0, updatedAt),
-    });
-    this.activities.set(key, next);
-    return clone(next);
+    try {
+      const key = compositeKey(accountDid, space);
+      const current = this.activities.get(key);
+      const next = cloneActivityState({
+        accountDid,
+        space,
+        seenIds: field === "seenIds" ? dedupeIds([...(current?.seenIds ?? []), ...eventIds]) : current?.seenIds ?? [],
+        dismissedIds: field === "dismissedIds" ? dedupeIds([...(current?.dismissedIds ?? []), ...eventIds]) : current?.dismissedIds ?? [],
+        updatedAt: Math.max(current?.updatedAt ?? 0, updatedAt),
+      });
+      this.activities.set(key, next);
+      return clone(next);
+    } catch (error) {
+      throw asStoreError(error);
+    }
   }
 
   async clear(): Promise<void> {

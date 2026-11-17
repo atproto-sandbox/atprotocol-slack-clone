@@ -1,4 +1,4 @@
-import { cloneActivityState, cloneWriterState, commitAllowed, dedupeIds, emptyWriterState, mergeMonotonicClock, nextWriterState, SyncStoreError, type ActivityState, type ClockPatch, type ClockState, type IdentityEntry, type IdentityKind, type SpaceState, type StoredRecord, type SyncStore, type WriterCommit, type WriterState } from "./store";
+import { cloneActivityState, cloneWriterState, commitAllowed, emptyWriterState, mergeMonotonicClock, nextWriterState, SyncStoreError, type ActivityState, type ClockPatch, type ClockState, type IdentityEntry, type IdentityKind, type SpaceState, type StoredRecord, type SyncStore, type WriterCommit, type WriterState } from "./store";
 
 // The browser's store for workspace, inbox and channel spaces (D10): one IndexedDB database per account, so a sign-out
 // deletes one database and a different account's start deletes databases that are not its own.
@@ -127,14 +127,7 @@ export class IndexedDbStore implements SyncStore {
   }
 
   async putActivityState(state: ActivityState): Promise<void> {
-    const next: ActivityState = {
-      accountDid: state.accountDid,
-      space: state.space,
-      seenIds: dedupeIds(state.seenIds),
-      dismissedIds: dedupeIds(state.dismissedIds),
-      updatedAt: state.updatedAt,
-    };
-    await this.write(["activity"], (stores) => settle(stores.activity!.put(next)));
+    await this.write(["activity"], (stores) => settle(stores.activity!.put(cloneActivityState(state))));
   }
 
   markActivitySeen(accountDid: string, space: string, eventIds: readonly string[], updatedAt = Date.now()): Promise<ActivityState> {
@@ -154,15 +147,13 @@ export class IndexedDbStore implements SyncStore {
   ): Promise<ActivityState> {
     return this.write(["activity"], async (stores) => {
       const current = await settle<ActivityState | undefined>(stores.activity!.get([accountDid, space]));
-      const next: ActivityState = {
+      const next = cloneActivityState({
         accountDid,
         space,
-        seenIds: field === "seenIds" ? dedupeIds([...(current?.seenIds ?? []), ...eventIds]) : dedupeIds(current?.seenIds ?? []),
-        dismissedIds: field === "dismissedIds"
-          ? dedupeIds([...(current?.dismissedIds ?? []), ...eventIds])
-          : dedupeIds(current?.dismissedIds ?? []),
+        seenIds: field === "seenIds" ? [...(current?.seenIds ?? []), ...eventIds] : (current?.seenIds ?? []),
+        dismissedIds: field === "dismissedIds" ? [...(current?.dismissedIds ?? []), ...eventIds] : (current?.dismissedIds ?? []),
         updatedAt: Math.max(current?.updatedAt ?? 0, updatedAt),
-      };
+      });
       await settle(stores.activity!.put(next));
       return cloneActivityState(next);
     });
