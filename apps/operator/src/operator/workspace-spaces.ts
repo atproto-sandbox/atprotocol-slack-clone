@@ -1,5 +1,6 @@
 import type { OAuthSession } from "@atproto/oauth-client-node";
 import { ensureMemberListSpace, putAuthorityRecord } from "../atproto/space-ops";
+import { extSpaceSkeyFor, getExtension, type ExtensionId } from "@flock/protocol/extensions";
 import { inboxUri, stableHash } from "@flock/protocol/keys";
 import { COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
 
@@ -43,4 +44,9 @@ export async function writeWorkspaceProfile(session: OAuthSession, workspace: st
 export async function writeGeneralDirectory(session: OAuthSession, workspace: string, skey: string): Promise<void> {
   const general = generalKey(skey);
   await putAuthorityRecord(session, workspace, COLLECTION.directory, general, { skey: general, name: "general", visibility: "public" });
+}
+
+export async function ensureExtensionSpace(session: OAuthSession, workspaceSkey: string, extId: ExtensionId): Promise<string> {
+  const manifest = getExtension(extId);
+  return ensureMemberListSpace(session, manifest.spaceType, extSpaceSkeyFor(workspaceSkey, extId));
 }

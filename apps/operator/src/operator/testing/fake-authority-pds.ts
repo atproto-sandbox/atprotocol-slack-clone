@@ -1,5 +1,6 @@
 import type { OAuthSession } from "@atproto/oauth-client-node";
 import { memberspacePolicy } from "@flock/protocol/atproto/space-policy";
+import { parseSpaceUri } from "@flock/protocol/keys";
 
 // An authority's PDS held in memory, for operator unit tests: the spaces, records and member lists an operation reads and
 // writes through the authority's session. Production code never imports it.
@@ -23,7 +24,7 @@ type RequestBody = Record<string, string> & { record: Record<string, unknown>; r
 export type FakeAuthorityPdsOptions = {
   onWrite?: () => void;
   /** Answers a request in place of the fake (a refusal, an outage), or returns undefined to let the fake answer it. */
-  intercept?: (method: string, target: { space?: string; collection?: string }) => Response | undefined;
+  intercept?: (method: string, target: { space?: string; collection?: string; spaceType?: string }) => Response | undefined;
 };
 
 export function fakeAuthorityPds(did: string, options: FakeAuthorityPdsOptions = {}): FakeAuthorityPds {
@@ -61,7 +62,13 @@ export function fakeAuthorityPds(did: string, options: FakeAuthorityPdsOptions =
       const method = url.pathname.replace("/xrpc/", "");
       const params = url.searchParams;
       const body = init?.body ? JSON.parse(String(init.body)) as RequestBody : undefined;
-      const target = { space: body?.space ?? params.get("space") ?? undefined, collection: body?.collection ?? params.get("collection") ?? undefined };
+      const space = body?.space ?? params.get("space") ?? undefined;
+      const spaceType = body?.spaceType ?? (space ? parseSpaceUri(space)?.type : undefined);
+      const target = {
+        space,
+        collection: body?.collection ?? params.get("collection") ?? undefined,
+        ...(spaceType ? { spaceType } : {}),
+      };
       calls.push([method, target.space, target.collection].filter(Boolean).join(" "));
       const intercepted = options.intercept?.(method, target);
       if (intercepted) return intercepted;

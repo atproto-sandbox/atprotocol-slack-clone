@@ -1,4 +1,4 @@
-import { parseSpaceUri } from "@flock/protocol/keys";
+import { parseExtSpaceUri, parseSpaceUri } from "@flock/protocol/keys";
 import { SPACE_TYPE } from "@flock/protocol/nsids";
 import type { SyncStore } from "./store";
 
@@ -26,9 +26,28 @@ export class Lifecycle {
 
   /** After a directory read: a workspace's channels that are archived or gone from the directory go. */
   async keepChannels(workspace: string, current: readonly string[]): Promise<void> {
-    const keep = new Set(current);
+    await this.keepWorkspaceSpaces(workspace, { channels: current });
+  }
+
+  /**
+   * After reading a workspace's directory and extension installs: keeps its active channels and active extension spaces,
+   * and purges archived/removed channels and disabled extension spaces. Passing a string array keeps only those channels
+   * and extension spaces; passing an object updates only the subsets whose scans were complete.
+   */
+  async keepWorkspaceSpaces(
+    workspace: string,
+    current: readonly string[] | { channels?: readonly string[]; extensions?: readonly string[] },
+  ): Promise<void> {
+    const spaces = isStringList(current) ? { channels: current, extensions: current } : current;
+    const keepChannels = spaces.channels ? new Set(spaces.channels) : undefined;
+    const keepExtensions = spaces.extensions ? new Set(spaces.extensions) : undefined;
     for (const state of await this.store.listSpaces()) {
-      if (state.workspace === workspace && parseSpaceUri(state.space)?.type === SPACE_TYPE.channel && !keep.has(state.space)) {
+      if (state.workspace !== workspace) continue;
+      const parsed = parseSpaceUri(state.space);
+      if (!parsed) continue;
+      if (parsed.type === SPACE_TYPE.channel && keepChannels && !keepChannels.has(state.space)) {
+        await this.store.purgeSpace(state.space);
+      } else if (parseExtSpaceUri(state.space) && keepExtensions && !keepExtensions.has(state.space)) {
         await this.store.purgeSpace(state.space);
       }
     }
@@ -40,4 +59,10 @@ export class Lifecycle {
     for (const state of await this.store.listSpaces()) if (state.lastOpenedAt < cutoff) await this.store.purgeSpace(state.space);
   }
 
+}
+
+function isStringList(
+  value: readonly string[] | { channels?: readonly string[]; extensions?: readonly string[] },
+): value is readonly string[] {
+  return Array.isArray(value);
 }

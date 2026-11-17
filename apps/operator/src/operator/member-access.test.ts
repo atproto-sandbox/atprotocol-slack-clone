@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { appInboxUri, channelUri, dmConversationUri, dmInboxUri, inboxUri, workspaceUri } from "@flock/protocol/keys";
+import { appInboxUri, channelUri, dmConversationUri, dmInboxUri, inboxUri, tasksSpaceUri, workspaceUri } from "@flock/protocol/keys";
 import { dropMemberList, MEMBER_LIST_TTL_MS, mayFollow, type MemberAccessDeps } from "./member-access";
 
 // Who may follow a space's changes: the feed authorization rows of the plan's R5 tests, against an injected member list.
@@ -113,4 +113,25 @@ test("an app inbox admits the installed app (read only) and the authority, and d
   assert.equal(await mayFollow(appInbox, admin, access), false, "non-authority admins cannot follow");
   assert.equal(await mayFollow(appInbox, OUTSIDER, access), false);
   assert.equal(await mayFollow(unregisteredAppInbox, "did:plc:otherbot", access), false, "an unregistered inbox is denied");
+});
+
+test("a Tasks extension space admits registered members with read=true and the authority, and dropMemberList clears revoked access immediately", async () => {
+  const tasks = tasksSpaceUri(OWNER, "acme");
+  const unregisteredTasks = tasksSpaceUri(OWNER, "unregistered");
+  const lists = new Map<string, Member[]>([
+    [tasks, [{ did: MEMBER, read: true, write: true }, { did: "did:plc:writeonly", read: false, write: true }]],
+    [unregisteredTasks, [{ did: MEMBER, read: true, write: true }]],
+  ]);
+  const { access } = deps(lists, { now: 1_000_000 }, (space) => space !== UNREGISTERED && space !== unregisteredTasks);
+
+  assert.equal(await mayFollow(tasks, MEMBER, access), true);
+  assert.equal(await mayFollow(tasks, OWNER, access), true);
+  assert.equal(await mayFollow(tasks, "did:plc:writeonly", access), false);
+  assert.equal(await mayFollow(tasks, OUTSIDER, access), false);
+  assert.equal(await mayFollow(unregisteredTasks, MEMBER, access), false);
+
+  lists.set(tasks, []);
+  assert.equal(await mayFollow(tasks, MEMBER, access), true, "cached within TTL");
+  dropMemberList(tasks);
+  assert.equal(await mayFollow(tasks, MEMBER, access), false, "dropMemberList invalidates immediately");
 });

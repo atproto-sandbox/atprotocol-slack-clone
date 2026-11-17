@@ -27,8 +27,17 @@ export type DeclaredCommand = { name: string; description?: string; usage?: stri
 /** What an app account says it is, in its own repo: the name people see and the commands it offers. A label, never a grant. */
 export type AppDeclaration = { name: string; description?: string; commands?: DeclaredCommand[] };
 
+export type WorkspaceCompleteness = {
+  rosterComplete: boolean;
+  extensionsComplete: boolean;
+  invalidRosterRecords: number;
+  invalidExtInstallRecords: number;
+};
+
+export type DiscoveredWorkspace = WorkspaceSummary & WorkspaceCompleteness;
+
 export type WorkspaceCandidate = { uri: string; authorityDid: string; skey: string };
-export type WorkspaceDiscovery = { workspaces: WorkspaceSummary[]; candidates: WorkspaceCandidate[] };
+export type WorkspaceDiscovery = { workspaces: DiscoveredWorkspace[]; candidates: WorkspaceCandidate[] };
 
 export type WorkspaceClientDeps = { transport: ClientTransport; credentials: CredentialCache; lifecycle: Lifecycle };
 
@@ -105,33 +114,49 @@ export class WorkspaceClient {
   }
 
   /**
-   * One workspace, or null when its authority records are invalid. Its channels no longer in the directory are dropped, unless
-   * the directory scan stopped at its bound. `fresh` mints a new credential, so a removal or deletion is noticed now.
+   * One workspace, or null when its authority records are invalid. Its channels no longer in the directory and extension
+   * spaces no longer active are dropped, unless their respective scans stopped at their bounds. `fresh` mints a new
+   * credential, so a removal or deletion is noticed now.
    */
-  async summary(uri: string, options: { fresh?: boolean } = {}): Promise<WorkspaceSummary | null> {
+  async summary(uri: string, options: { fresh?: boolean } = {}): Promise<DiscoveredWorkspace | null> {
     const workspace = parseWorkspaceUri(uri);
     if (!workspace) return null;
     const { authorityDid } = workspace;
     if (options.fresh) await this.deps.credentials.fresh(uri);
     const client = await this.deps.credentials.clientFor(uri, authorityDid);
     const scan = (collection: string, maxRecords: number) => listBoundedRecords(client, { space: uri, repo: authorityDid, collection, maxRecords });
-    const [profiles, directory, roster, admins, installs] = await Promise.all([
+    const [profiles, directory, roster, admins, installs, extInstalls] = await Promise.all([
       scan(COLLECTION.workspaceProfile, 1),
       scan(COLLECTION.directory, WORKSPACE_ENVELOPE.authorityRecordScan),
       scan(COLLECTION.workspaceRoster, WORKSPACE_ENVELOPE.authorityRecordScan),
       scan(COLLECTION.admin, WORKSPACE_ENVELOPE.authorityRecordScan),
       scan(COLLECTION.appInstall, WORKSPACE_ENVELOPE.authorityRecordScan),
+      scan(COLLECTION.extInstall, WORKSPACE_ENVELOPE.authorityRecordScan),
     ]);
-    const summary = summarizeWorkspace(uri, this.deps.transport.did, { profiles, directory, roster, admins, installs });
+    const summary = summarizeWorkspace(uri, this.deps.transport.did, { profiles, directory, roster, admins, installs, extInstalls });
     if (!summary) {
       await this.deps.lifecycle.dropSpace(uri);
       return null;
     }
-    if (!directory.truncated) await this.deps.lifecycle.keepChannels(uri, summary.channels.map((channel) => channel.uri));
-    return summary;
+    const invalidRosterRecords = countInvalidAuthorityRecords(COLLECTION.workspaceRoster, roster.records, authorityDid, uri);
+    const invalidExtInstallRecords = countInvalidAuthorityRecords(COLLECTION.extInstall, extInstalls.records, authorityDid, uri);
+    const activeExtensions = (summary.extensions ?? []).filter((ext) => ext.active);
+    const rosterComplete = !roster.truncated && invalidRosterRecords === 0 && summary.members.length <= WORKSPACE_ENVELOPE.members;
+    const extensionsComplete = !extInstalls.truncated && invalidExtInstallRecords === 0 && activeExtensions.length <= WORKSPACE_ENVELOPE.extensions;
+    await this.deps.lifecycle.keepWorkspaceSpaces(uri, {
+      ...(directory.truncated ? {} : { channels: summary.channels.map((channel) => channel.uri) }),
+      ...(extInstalls.truncated ? {} : { extensions: activeExtensions.map((ext) => ext.space) }),
+    });
+    return {
+      ...summary,
+      rosterComplete,
+      extensionsComplete,
+      invalidRosterRecords,
+      invalidExtInstallRecords,
+    };
   }
 
-  async requireSummary(uri: string): Promise<WorkspaceSummary> {
+  async requireSummary(uri: string): Promise<DiscoveredWorkspace> {
     const summary = await this.summary(uri);
     if (!summary) throw new Error("Workspace could not be read or contains invalid authority records.");
     return summary;
@@ -192,4 +217,18 @@ export class WorkspaceClient {
       skipped: perWriter.flatMap((result) => (result.skipped ? [result.skipped] : [])),
     };
   }
+}
+
+function countInvalidAuthorityRecords(
+  collection: string,
+  records: ReadonlyArray<{ rkey: string; value: Record<string, unknown> }>,
+  authorityDid: string,
+  spaceUri: string,
+): number {
+  return records.filter((record) => !validateSpaceRecord(collection, record.value, {
+    authorityDid,
+    spaceUri,
+    repoDid: authorityDid,
+    rkey: record.rkey,
+  }).valid).length;
 }

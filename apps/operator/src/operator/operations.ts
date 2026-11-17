@@ -1,5 +1,6 @@
 import type { OAuthSession } from "@atproto/oauth-client-node";
 import { listSpaceMembers } from "../atproto/space-ops";
+import { isExtensionId } from "@flock/protocol/extensions";
 import { inboxUri, isDid, isSkey, isTid } from "@flock/protocol/keys";
 import { OPERATOR_METHOD } from "@flock/protocol/nsids";
 import { fitsDirectoryName } from "@flock/protocol/registry";
@@ -173,6 +174,7 @@ export const FIELD_RULES: Record<string, (value: unknown, actor: OperatorActor) 
   creator: (value) => isDid(value) ? null : "Invalid creator DID.",
   active: (value) => typeof value === "boolean" ? null : "Admin state must be boolean.",
   skey: (value) => isSkey(value) ? null : "Invalid channel key.",
+  extId: (value) => isExtensionId(value) ? null : "Unknown extension id.",
   name: (value) => typeof value === "string" && value.trim().length >= 1 && fitsDirectoryName(value) ? null : "Channel name must contain 1 to 80 characters.",
   visibility: (value) => value === "public" || value === "private" ? null : "Invalid channel visibility.",
   members: (value) => Array.isArray(value) && value.length <= 200 && value.every(isDid) && new Set(value).size === value.length ? null : "Channel members must be at most 200 unique DIDs.",

@@ -4,8 +4,10 @@ import { acceptFailure } from "./accept-errors";
 import { createEngine } from "./engine";
 import { OperatorRemoteError, type OperatorService } from "./operator-client";
 import type { ClientTransport } from "./transport";
+import { memberspacePolicy } from "@flock/protocol/atproto/space-policy";
+import { extSpaceUriFor } from "@flock/protocol/extensions";
 import { channelUri, decisionRecordKey, requestRecordKey, spaceRecordUri } from "@flock/protocol/keys";
-import { COLLECTION, OPERATOR_METHOD, REPO_COLLECTION } from "@flock/protocol/nsids";
+import { COLLECTION, OPERATOR_METHOD, REPO_COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
 import { AUTHORITY, createWorkspace, transportFor, writeMessage } from "./testing/engine-fixture";
 import { FakeNetwork } from "@flock/testing/fake-network";
 
@@ -200,4 +202,149 @@ test("appDeclaration reads 25 commands at their maximum bounds (~42 KiB) and rej
   // Duplicate command names make the declaration invalid, returning null.
   storedRecord = { ...storedRecord, commands: [{ name: "dup" }, { name: "dup" }] };
   assert.equal(await alice.workspaces.appDeclaration(appDid), null);
+});
+
+test("operator client exposes enableExtension and disableExtension over execute", async () => {
+  const network = new FakeNetwork();
+  const requests: Array<{ method: string; body: unknown }> = [];
+  const base = transportFor(network, ALICE);
+  const transport: ClientTransport = {
+    ...base,
+    fetchEndpoint: async (request) => {
+      const url = new URL(request.url);
+      if (url.origin !== OPERATOR.endpoint) return network.fetchEndpoint(request);
+      const method = url.pathname.replace("/xrpc/", "");
+      const body = request.body ? JSON.parse(await request.clone().text()) : undefined;
+      requests.push({ method, body });
+      return Response.json({
+        operation: {
+          operationId: (body as { operationId: string }).operationId,
+          requestHash: "0".repeat(64),
+          state: "completed",
+          completedSteps: [],
+          updatedAt: "2026-11-16T00:00:00.000Z",
+        },
+      });
+    },
+  };
+  const { operator } = createEngine(transport, { operator: OPERATOR });
+  const op1 = await operator!.enableExtension("at://did:plc:authority/space/new.flock.workspace/acme", "tasks", "222222222222a");
+  const op2 = await operator!.disableExtension("at://did:plc:authority/space/new.flock.workspace/acme", "tasks", "222222222222b");
+  assert.equal(op1.operation.state, "completed");
+  assert.equal(op2.operation.state, "completed");
+  assert.deepEqual(requests, [
+    {
+      method: OPERATOR_METHOD.execute,
+      body: { workspace: "at://did:plc:authority/space/new.flock.workspace/acme", operationId: "222222222222a", request: { kind: "enableExtension", extId: "tasks" } },
+    },
+    {
+      method: OPERATOR_METHOD.execute,
+      body: { workspace: "at://did:plc:authority/space/new.flock.workspace/acme", operationId: "222222222222b", request: { kind: "disableExtension", extId: "tasks" } },
+    },
+  ]);
+});
+
+test("WorkspaceClient discovers extensions, tracks completeness flags against invalid/truncated records, and purges disabled extension spaces", async () => {
+  const network = new FakeNetwork();
+  const fixture = await createWorkspace(network, {
+    members: [ALICE, BOB],
+    channels: [{ skey: "general", visibility: "public" }],
+  });
+  const tasksSpace = extSpaceUriFor(AUTHORITY, "acme", "tasks");
+  const owner = network.clientFor(AUTHORITY);
+  await owner.procedure("com.atproto.space.createSpace", { spaceType: SPACE_TYPE.tasks, skey: tasksSpace.split("/").at(-1)!, policy: memberspacePolicy() });
+  await owner.procedure("com.atproto.memberspace.putMember", { space: tasksSpace, did: ALICE, read: true, write: true });
+  const nowIso = "2026-11-16T00:00:00.000Z";
+  await network.writeAs(AUTHORITY, fixture.workspace, COLLECTION.extInstall, "tasks", {
+    extId: "tasks", active: true, space: tasksSpace, cleanupComplete: false, enabledBy: AUTHORITY, enabledAt: nowIso, updatedAt: nowIso,
+  });
+
+  const alice = createEngine(transportFor(network, ALICE));
+  await alice.sync.store.putSpace({
+    space: tasksSpace,
+    spaceRev: "1",
+    writers: [{ did: ALICE, repoRev: "1" }],
+    writersListedAt: 1_000,
+    workspace: fixture.workspace,
+    lastOpenedAt: 1_000,
+  });
+
+  // Active extension is discovered with complete roster and extension flags, and space is retained in store.
+  const activeDiscovery = await alice.workspaces.discover();
+  const activeSummary = activeDiscovery.workspaces[0]!;
+  assert.deepEqual(activeSummary.extensions, [{
+    extId: "tasks", active: true, space: tasksSpace, cleanupComplete: false, enabledBy: AUTHORITY, enabledAt: nowIso, updatedAt: nowIso,
+  }]);
+  assert.equal(activeSummary.rosterComplete, true);
+  assert.equal(activeSummary.extensionsComplete, true);
+  assert.equal(activeSummary.invalidRosterRecords, 0);
+  assert.equal(activeSummary.invalidExtInstallRecords, 0);
+  assert.notEqual(await alice.sync.store.getSpace(tasksSpace), undefined, "active extension space is retained");
+
+  // Malformed roster record and malformed ext.install record drop completeness flags so Tasks never trusts partial authority scans.
+  await network.writeAs(AUTHORITY, fixture.workspace, COLLECTION.workspaceRoster, "bad-rkey", {
+    subject: BOB, active: true, updatedAt: nowIso,
+  });
+  await network.writeAs(AUTHORITY, fixture.workspace, COLLECTION.extInstall, "bad-ext", {
+    extId: "tasks", active: true, space: tasksSpace, enabledBy: AUTHORITY, enabledAt: nowIso, updatedAt: nowIso,
+  });
+  const malformedSummary = await alice.workspaces.summary(fixture.workspace);
+  assert.equal(malformedSummary?.rosterComplete, false);
+  assert.equal(malformedSummary?.extensionsComplete, false);
+  assert.equal(malformedSummary?.invalidRosterRecords, 1);
+  assert.equal(malformedSummary?.invalidExtInstallRecords, 1);
+
+  // Truncated ext.install scan marks extensionsComplete=false and does NOT purge cached extension space prematurely.
+  const baseTransport = transportFor(network, ALICE);
+  let forceExtTruncated = true;
+  let extPage = 0;
+  const truncatedEngine = createEngine({
+    ...baseTransport,
+    fetchEndpoint: async (request) => {
+      const url = new URL(request.url);
+      if (forceExtTruncated && url.pathname === "/xrpc/com.atproto.space.listRecords" && url.searchParams.get("collection") === COLLECTION.extInstall) {
+        const page = extPage++;
+        if (page < 2) {
+          return Response.json({
+            records: Array.from({ length: 500 }, (_, index) => ({
+              collection: COLLECTION.extInstall,
+              rkey: `ext-${page * 500 + index}`,
+              value: { $type: COLLECTION.extInstall, extId: `ext-${page * 500 + index}` },
+            })),
+            cursor: `p${page + 1}`,
+          });
+        }
+        return Response.json({
+          records: [{ collection: COLLECTION.extInstall, rkey: "ext-1000", value: { $type: COLLECTION.extInstall, extId: "ext-1000" } }],
+        });
+      }
+      return baseTransport.fetchEndpoint(request);
+    },
+  }, { store: alice.sync.store });
+  const truncatedSummary = await truncatedEngine.workspaces.summary(fixture.workspace);
+  assert.equal(truncatedSummary?.extensionsComplete, false);
+  assert.match((truncatedSummary?.degradedReasons ?? []).join(" "), /extension list may be incomplete/);
+  assert.notEqual(await alice.sync.store.getSpace(tasksSpace), undefined, "truncated extension scan does not purge space");
+  forceExtTruncated = false;
+
+  // Disabling the extension purges its space from the store on summary()!
+  await network.writeAs(AUTHORITY, fixture.workspace, COLLECTION.extInstall, "tasks", {
+    extId: "tasks", active: false, space: tasksSpace, cleanupComplete: true, enabledBy: AUTHORITY, enabledAt: nowIso, updatedAt: nowIso, disabledAt: nowIso,
+  });
+  const disabledSummary = await alice.workspaces.summary(fixture.workspace);
+  assert.equal(disabledSummary?.extensions?.[0]?.active, false);
+  assert.equal(disabledSummary?.extensions?.[0]?.cleanupComplete, true);
+  assert.equal(await alice.sync.store.getSpace(tasksSpace), undefined, "disabled extension space is purged");
+
+  // Re-enable, put space back in store, and verify removing ALICE from workspace purges extension space on discover().
+  await network.writeAs(AUTHORITY, fixture.workspace, COLLECTION.extInstall, "tasks", {
+    extId: "tasks", active: true, space: tasksSpace, cleanupComplete: false, enabledBy: AUTHORITY, enabledAt: nowIso, updatedAt: nowIso,
+  });
+  await alice.sync.store.putSpace({
+    space: tasksSpace, spaceRev: "2", writers: [], writersListedAt: 2_000, workspace: fixture.workspace, lastOpenedAt: 2_000,
+  });
+  await owner.procedure("com.atproto.memberspace.removeMember", { space: fixture.workspace, did: ALICE });
+  network.advanceClock(11 * 60 * 1000);
+  await alice.workspaces.discover();
+  assert.equal(await alice.sync.store.getSpace(tasksSpace), undefined, "losing workspace purges dependent extension space");
 });

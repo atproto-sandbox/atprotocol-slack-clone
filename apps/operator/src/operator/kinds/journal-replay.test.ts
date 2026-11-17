@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after, before } from "node:test";
 import { closeDb, getRawDb } from "../../lib/db";
+import { extSpaceUriFor } from "@flock/protocol/extensions";
 import { canonicalJson, channelUri, inboxUri, requestDigest, stableHash, subjectKey, workspaceUri } from "@flock/protocol/keys";
-import { COLLECTION } from "@flock/protocol/nsids";
+import { COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
 import type { OperatorActor } from "../actor";
 import { AuthorityReauthorizationRequiredError } from "../authority-grant";
 import { executeOperatorOperation } from "../operations";
@@ -194,4 +195,124 @@ test("resumed operations register the spaces they created, as a new one does", a
   assert.equal(result?.state, "completed");
   assert.deepEqual(resumedBootstrap.registered, [bootstrap, inboxUri(OWNER, bootstrap.split("/").at(-1)!), channelUri(OWNER, `${bootstrap.split("/").at(-1)!}-general`)]);
   assert.deepEqual(resumedChannel.registered, [channelUri(OWNER, "zeta-design"), channelUri(OWNER, "zeta-random")]);
+});
+
+test("partially completed pre-R11 inviteMember and removeMember rows replay cleanly without touching extensions or repeating steps (D11.8)", async () => {
+  // #given a pre-R11 workspace with a legacy authority grant lacking SPACE_TYPE.tasks
+  const scopeMissingTasks = (method: string, target: { space?: string; spaceType?: string }) =>
+    target.spaceType === SPACE_TYPE.tasks || (method === "com.atproto.space.createSpace" && target.spaceType === SPACE_TYPE.tasks)
+      ? Response.json({ error: "ScopeMissingError", message: `Missing required scope "space:${SPACE_TYPE.tasks}"` }, { status: 403 })
+      : undefined;
+  const { workspace, pds, owner } = seededWorkspace("eta", scopeMissingTasks);
+  const member = "did:plc:prer11member";
+  const inbox = inboxUri(OWNER, "eta");
+  const general = channelUri(OWNER, "eta-general");
+  pds.membersOf(inbox);
+  pds.membersOf(general);
+  pds.recordsOf(workspace, COLLECTION.directory).set("eta-general", {
+    $type: COLLECTION.directory, skey: "eta-general", name: "general", visibility: "public",
+  });
+
+  // Pre-R11 partial inviteMember stopped after member-inbox-writer
+  pds.membersOf(workspace).set(member, { did: member, read: true, write: true });
+  pds.membersOf(inbox).set(member, { did: member, read: false, write: true });
+  const inviteReq = { kind: "inviteMember", subject: member };
+  const inviteId = "222222222223a";
+  writePreKindTableRow({
+    workspace,
+    actor: ADMIN,
+    operationId: inviteId,
+    requestHash: requestDigest({ workspace, request: inviteReq }),
+    request: inviteReq,
+    steps: ["member-workspace", "member-inbox-writer"],
+  });
+
+  // Resuming via reconcileWorkspace completes inviteMember without touching Tasks or repeating member-workspace/member-inbox-writer
+  const writesBeforeInviteResume = pds.writes.length;
+  const afterInvite = await executeOperatorOperation(owner, "222222222223b", { kind: "reconcileWorkspace" });
+  assert.equal(afterInvite.state, "completed");
+  assert.equal(journalRow(inviteId).state, "completed");
+  assert.deepEqual(JSON.parse(journalRow(inviteId).steps_json), [
+    "member-workspace", "member-inbox-writer", "member-public-channel-eta-general", "member-workspace-roster", "member-state-verified",
+  ]);
+  assert.equal(pds.writes.slice(writesBeforeInviteResume).some((w) => w.includes(`putMember ${workspace} ${member}`)), false);
+  assert.equal(pds.writes.slice(writesBeforeInviteResume).some((w) => w.includes(`putMember ${inbox} ${member}`)), false);
+  assert.deepEqual(pds.membersOf(general).get(member), { did: member, read: true, write: true });
+
+  // Pre-R11 partial removeMember stopped after remove-inbox-membership on a workspace with a cleanly disabled extension (cleanupComplete: true)
+  const tasksSpace = extSpaceUriFor(OWNER, "eta", "tasks");
+  pds.recordsOf(workspace, COLLECTION.extInstall).set("tasks", {
+    $type: COLLECTION.extInstall,
+    extId: "tasks",
+    active: false,
+    space: tasksSpace,
+    cleanupComplete: true,
+    enabledBy: OWNER,
+    enabledAt: "2026-11-01T00:00:00.000Z",
+    updatedAt: "2026-11-02T00:00:00.000Z",
+    disabledAt: "2026-11-02T00:00:00.000Z",
+  });
+  pds.membersOf(inbox).delete(member);
+  const removeReq = { kind: "removeMember", subject: member };
+  const removeId = "222222222223c";
+  writePreKindTableRow({
+    workspace,
+    actor: ADMIN,
+    operationId: removeId,
+    requestHash: requestDigest({ workspace, request: removeReq }),
+    request: removeReq,
+    steps: ["remove-inbox-membership"],
+  });
+
+  const writesBeforeRemoveResume = pds.writes.length;
+  const afterRemove = await executeOperatorOperation(owner, "222222222223d", { kind: "reconcileWorkspace" });
+  assert.equal(afterRemove.state, "completed");
+  assert.equal(journalRow(removeId).state, "completed");
+  assert.equal(pds.writes.slice(writesBeforeRemoveResume).some((w) => w.includes(`removeMember ${inbox} ${member}`)), false);
+  assert.equal(pds.recordsOf(workspace, COLLECTION.workspaceRoster).get(subjectKey(member))?.active, false);
+});
+
+test("a partially completed removeMember row with an uncleaned extension refuses completion under a legacy grant until re-consent", async () => {
+  let blockTasksScope = true;
+  const { workspace, pds, owner } = seededWorkspace("theta", (_method, target) =>
+    blockTasksScope && target.spaceType === SPACE_TYPE.tasks
+      ? Response.json({ error: "ScopeMissingError", message: `Missing required scope "space:${SPACE_TYPE.tasks}"` }, { status: 403 })
+      : undefined,
+  );
+  const member = "did:plc:theta-member";
+  const inbox = inboxUri(OWNER, "theta");
+  const tasksSpace = extSpaceUriFor(OWNER, "theta", "tasks");
+  pds.membersOf(inbox);
+  pds.recordsOf(workspace, COLLECTION.workspaceRoster).set(subjectKey(member), {
+    $type: COLLECTION.workspaceRoster, subject: member, active: true, updatedAt: "2026-11-01T00:00:00.000Z",
+  });
+  pds.recordsOf(workspace, COLLECTION.extInstall).set("tasks", {
+    $type: COLLECTION.extInstall, extId: "tasks", active: false, space: tasksSpace, cleanupComplete: false,
+    enabledBy: OWNER, enabledAt: "2026-11-01T00:00:00.000Z", updatedAt: "2026-11-02T00:00:00.000Z", disabledAt: "2026-11-02T00:00:00.000Z",
+  });
+  pds.membersOf(tasksSpace).set(member, { did: member, read: true, write: true });
+  pds.membersOf(workspace).set(member, { did: member, read: true, write: true });
+  const removeReq = { kind: "removeMember", subject: member };
+  const removeId = "222222222223e";
+  writePreKindTableRow({
+    workspace,
+    actor: ADMIN,
+    operationId: removeId,
+    requestHash: requestDigest({ workspace, request: removeReq }),
+    request: removeReq,
+    steps: ["remove-inbox-membership"],
+  });
+
+  // Attempting a new operation fails recovery with AuthorityReauthorizationRequiredError and leaves the row pending
+  await assert.rejects(executeOperatorOperation(owner, "222222222223f", { kind: "reconcileWorkspace" }), AuthorityReauthorizationRequiredError);
+  assert.equal(journalRow(removeId).state, "pending");
+  assert.equal(pds.recordsOf(workspace, COLLECTION.workspaceRoster).get(subjectKey(member))?.active, true);
+
+  // After re-consent, recovery finishes removing the member from Tasks and deactivating the roster
+  blockTasksScope = false;
+  const recovered = await executeOperatorOperation(owner, "222222222223g", { kind: "reconcileWorkspace" });
+  assert.equal(recovered.state, "completed");
+  assert.equal(journalRow(removeId).state, "completed");
+  assert.equal(pds.membersOf(tasksSpace).has(member), false);
+  assert.equal(pds.recordsOf(workspace, COLLECTION.workspaceRoster).get(subjectKey(member))?.active, false);
 });
