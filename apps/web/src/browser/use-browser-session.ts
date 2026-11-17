@@ -80,7 +80,11 @@ export function useBrowserSession(did: string, config: BrowserSessionConfig): Br
         // Spaces not opened for the retention period go, which bounds what is kept for spaces an account no longer reads.
         await engine.lifecycle.sweep(STORE_RETENTION_MS);
         const snapshots = new Snapshots();
-        const live = new LiveSpaces(snapshots, { operator: engine.operator!, credentials: engine.credentials });
+        const live = new LiveSpaces(snapshots, {
+          operator: engine.operator!,
+          credentials: engine.credentials,
+          onSpaceChanged: (space) => engine.sync.markSpaceStale(space),
+        });
         const store = createBrowserDmStore(did);
         if (epoch.current !== run) {
           syncStore.close();
