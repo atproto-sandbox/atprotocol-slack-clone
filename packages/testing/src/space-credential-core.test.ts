@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { COMMIT_MAC_TYPE, LTHASH_STATE_BYTES, MAC_HEADER, RECORD_MAC_TYPE, RepoCommit, RepoVerificationError, SpaceMacError, StarParseError, WANT_MAC_HEADER, parseMacHeader, serializeRecord } from "@atproto/space";
+import { COMMIT_MAC_TYPE, LTHASH_STATE_BYTES, MAC_HEADER, RECORD_MAC_TYPE, RepoCommit, RepoVerificationError, SpaceMacError, StarParseError, WANT_MAC_HEADER, parseMacHeader, serializeRecord, serializeRepo } from "@atproto/space";
 import { UpstreamResponseTooLargeError } from "@flock/protocol/bounded-json";
 import { FakeNetwork } from "./fake-network";
 import { dmInboxUri } from "@flock/protocol/keys";
-import { RepoStarLimitError, credentialLifetimeMs, exchangeSpaceCredential, isAccessLost, isCredentialRefused, isSpaceDeleted, listVerifiedBoundedRecords, mintSpaceCredentialWith, parseCid, serializedRecordBytes, SPACE_CREDENTIAL_LIFETIME_MS, SPACE_CREDENTIAL_RENEW_BEFORE_MS, SpaceCredentialError, verifyRecordCid, verifyRecordCidWithSize, type SpaceCredential } from "@flock/protocol/atproto/space-credential-core";
+import { RepoStarLimitError, computeStarArchiveBytes, credentialLifetimeMs, exchangeSpaceCredential, isAccessLost, isCredentialRefused, isSpaceDeleted, listVerifiedBoundedRecords, mintSpaceCredentialWith, parseCid, serializedRecordBytes, SPACE_CREDENTIAL_LIFETIME_MS, SPACE_CREDENTIAL_RENEW_BEFORE_MS, SpaceCredentialError, starEntryBytes, starHeaderBytes, varintByteLength, verifyRecordCid, verifyRecordCidWithSize, type SpaceCredential } from "@flock/protocol/atproto/space-credential-core";
 import { MEMBERSPACE_POLICY } from "@flock/protocol/atproto/space-policy";
 import { XrpcError } from "@flock/protocol/atproto/xrpc";
 
@@ -688,23 +688,54 @@ test("listVerifiedBoundedRecords enforces aggregate byte and record limits acros
   const oneSize = await serializedRecordBytes(COLLECTION, "r0", { text: `${payloadText}-0` });
   assert.ok(oneSize > 400);
 
-  // Within both caps succeeds and returns accurate totalBytes.
+  const rawStarBytes = await credential.fetchVerifiedRepoStar(PDS1, { space: SPACE, repo: OWNER, maxBytes: 1024 * 1024, maxRecords: 100 });
+  const encodedStarChunks: Uint8Array[] = [];
+  const serializedEntries = await Promise.all(
+    rawStarBytes.records.map(async (entry) =>
+      serializeRecord(entry.collection as never, entry.rkey as never, entry.record as never),
+    ),
+  );
+  // Note: serializeRepo sorts lexicographically; r0..r5 are already sorted.
+  serializedEntries.sort((a, b) => (a.rkey < b.rkey ? -1 : a.rkey > b.rkey ? 1 : 0));
+  for await (const chunk of serializeRepo(rawStarBytes.commit, serializedEntries)) encodedStarChunks.push(chunk);
+  const expectedArchiveBytes = encodedStarChunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+
+  const emptyChunks: Uint8Array[] = [];
+  for await (const chunk of serializeRepo(rawStarBytes.commit, [])) emptyChunks.push(chunk);
+  assert.equal(await starHeaderBytes(rawStarBytes.commit), emptyChunks.reduce((sum, chunk) => sum + chunk.byteLength, 0));
+
+  // Within both caps succeeds and returns exact STAR archive byte length matching serializeRepo!
   const full = await listVerifiedBoundedRecords(credential.client(PDS1), {
     space: SPACE,
     repo: OWNER,
     maxRecords: 10,
-    maxBytes: oneSize * 10,
+    maxBytes: expectedArchiveBytes,
+    commit: rawStarBytes.commit,
   });
   assert.equal(full.records.length, 6);
-  assert.equal(full.totalBytes, oneSize * 6);
+  assert.equal(full.totalBytes, expectedArchiveBytes);
+  assert.equal(
+    await computeStarArchiveBytes(rawStarBytes.commit, full.records),
+    expectedArchiveBytes,
+    "computeStarArchiveBytes must match serializeRepo byteLength byte-for-byte",
+  );
+  assert.equal(varintByteLength(0), 1);
+  assert.equal(varintByteLength(127), 1);
+  assert.equal(varintByteLength(128), 2);
+  assert.equal(
+    (await starHeaderBytes(rawStarBytes.commit)) +
+      full.records.reduce((acc, rec) => acc + starEntryBytes(rec.collection, rec.rkey, rec.byteLength), 0),
+    expectedArchiveBytes,
+  );
 
-  // > maxBytes aborts immediately with RepoStarLimitError("bytes", maxBytes).
+  // maxBytes = expectedArchiveBytes - 1 rejects right at the exact STAR byte boundary.
   await assert.rejects(
     listVerifiedBoundedRecords(credential.client(PDS1), {
       space: SPACE,
       repo: OWNER,
       maxRecords: 100,
-      maxBytes: oneSize * 3,
+      maxBytes: expectedArchiveBytes - 1,
+      commit: rawStarBytes.commit,
     }),
     (error) => error instanceof RepoStarLimitError && error instanceof UpstreamResponseTooLargeError && error.kind === "bytes",
   );

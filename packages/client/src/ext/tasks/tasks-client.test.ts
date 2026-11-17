@@ -741,3 +741,83 @@ test("own optimistic writes preserve listRepoOps LtHash delta continuity and dis
     TasksExtensionDisabledError,
   );
 });
+
+test("workspaces.summary invalidates workspace snapshot cleanly and cross-engine disableExtension handles warm member 10m expiry and authority writes/deleteComment (Codex R2-#3 + Carbon R2-M2)", async () => {
+  const network = new FakeNetwork();
+  const { workspace, tasksSpace } = await setupTasksWorkspace(network, { members: [ALICE, BOB] });
+
+  const owner = createEngine(transportFor(network, AUTHORITY));
+  const alice = createEngine(transportFor(network, ALICE));
+  const bob = createEngine(transportFor(network, BOB));
+
+  // 1. Seed warm caches with Tasks enabled and zero writer repos on tasksSpace!
+  const ownerInit = await owner.tasks.readSpace(workspace);
+  assert.equal(ownerInit.enabled, true);
+  assert.equal(ownerInit.tasks.length, 0);
+  const bobInit = await bob.tasks.readSpace(workspace);
+  assert.equal(bobInit.enabled, true);
+  assert.equal(bobInit.tasks.length, 0);
+
+  // Create one comment as authority before disabling so we can test authority deleteComment refusal too.
+  const seededTask = await owner.tasks.createTask(workspace, { title: "Owner pre-disable task" });
+  const seededComment = await owner.tasks.addComment(workspace, {
+    taskUri: seededTask.uri,
+    body: "Owner pre-disable comment",
+  });
+
+  // Also test zero-writer-repo summary coherency on alice (never wrote to tasksSpace, read empty tasksSpace).
+  assert.equal((await alice.tasks.readSpace(workspace)).enabled, true);
+
+  // 2. Disable Tasks out-of-band on PDS (simulating another admin/engine) and revoke non-authority members just like extension-access removeExtraMembers.
+  await network.writeAs(AUTHORITY, workspace, COLLECTION.extInstall, "tasks", {
+    extId: "tasks",
+    space: tasksSpace,
+    active: false,
+    enabledBy: AUTHORITY,
+    enabledAt: TIMESTAMP,
+    updatedAt: TIMESTAMP,
+    disabledAt: TIMESTAMP,
+  });
+  for (const did of [ALICE, BOB]) {
+    await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMember", {
+      space: tasksSpace,
+      did,
+    });
+  }
+
+  // Codex R2-#3: ordinary alice.workspaces.summary() (NO fresh: true) invalidates workspace snapshot so next readSpace sees enabled: false!
+  const aliceSummary = await alice.workspaces.summary(workspace);
+  assert.equal(aliceSummary?.extensions?.find((e) => e.extId === "tasks")?.active, false);
+  const aliceTasksAfterSummary = await alice.tasks.readSpace(workspace);
+  assert.equal(aliceTasksAfterSummary.enabled, false);
+
+  // Carbon R2-M2 read path: Bob's cached 60m snapshot has only AUTHORITY or {} in prevListedSet; advance clock past 10m credential expiry (still inside 60m truth interval).
+  network.advanceClock(15 * 60_000);
+  const bobAfterDisable = await bob.tasks.readSpace(workspace);
+  assert.equal(bobAfterDisable.enabled, false, "warm member readSpace returns { enabled: false } instead of throwing SpaceCredentialError(403)");
+  assert.equal(bobAfterDisable.complete, true);
+
+  // Carbon R2-M2 write path: authorityDid (even with warm snapshot) must reject createTask AND deleteComment with TasksExtensionDisabledError without mutating tasksSpace!
+  await assert.rejects(
+    () => owner.tasks.createTask(workspace, { title: "Must not write as authority after disable" }),
+    TasksExtensionDisabledError,
+  );
+  await assert.rejects(
+    () => owner.tasks.deleteComment(workspace, seededComment.uri),
+    TasksExtensionDisabledError,
+  );
+  const tasksRecords = await network.clientFor(AUTHORITY).query<{ records: Array<{ collection: string; rkey: string }> }>(
+    "com.atproto.space.listRecords",
+    { space: tasksSpace, repo: AUTHORITY },
+  );
+  assert.equal(
+    tasksRecords.records.some((r) => r.collection === COLLECTION.taskComment),
+    true,
+    "deleteComment must NOT delete comment when Tasks extension is disabled",
+  );
+  assert.equal(
+    tasksRecords.records.filter((r) => r.collection === COLLECTION.task).length,
+    1,
+    "createTask must NOT write task when Tasks extension is disabled",
+  );
+});

@@ -38,7 +38,11 @@ export class MemoryStore implements SyncStore {
   }
 
   async putSpace(state: SpaceState): Promise<void> {
-    this.spaces.set(state.space, clone(state));
+    const existing = this.spaces.get(state.space);
+    const nextSeq = Math.max(existing?.invalidationSeq ?? 0, state.invalidationSeq ?? 0);
+    const next = clone(state);
+    if (nextSeq > 0) next.invalidationSeq = nextSeq;
+    this.spaces.set(state.space, next);
   }
 
   async listSpaces(): Promise<SpaceState[]> {
@@ -78,6 +82,12 @@ export class MemoryStore implements SyncStore {
     const key = writerKey(change.space, change.repo);
     const current = this.writers.get(key);
     if (change.epoch !== undefined && change.epoch !== this.epochOf(change.space)) return false;
+    if (
+      change.expectedInvalidationSeq !== undefined &&
+      (this.spaces.get(change.space)?.invalidationSeq ?? 0) !== change.expectedInvalidationSeq
+    ) {
+      return false;
+    }
     if (!commitAllowed(current, change)) return false;
 
     // Validate and prepare all mutations before applying any so a validation failure leaves the store unchanged.
@@ -121,6 +131,24 @@ export class MemoryStore implements SyncStore {
     this.writers.set(key, next);
     if (nextClock) this.clocks.set(nextClock.key, nextClock.state);
     return true;
+  }
+
+  async invalidateSpace(space: string, extraRepos: readonly string[] = []): Promise<void> {
+    const currentSpace = this.spaces.get(space);
+    const nextSpace: SpaceState = currentSpace
+      ? { ...clone(currentSpace), writersListedAt: null, invalidationSeq: (currentSpace.invalidationSeq ?? 0) + 1 }
+      : { space, spaceRev: null, writers: [], writersListedAt: null, workspace: null, lastOpenedAt: 0, invalidationSeq: 1 };
+    this.spaces.set(space, nextSpace);
+    const repos = new Set<string>(extraRepos);
+    for (const writer of this.writers.values()) {
+      if (writer.space === space) repos.add(writer.repo);
+    }
+    for (const repo of repos) {
+      const key = writerKey(space, repo);
+      const currentWriter = this.writers.get(key);
+      const staleChange: WriterCommit = { space, repo, expectedGeneration: null, markStale: true };
+      this.writers.set(key, nextWriterState(currentWriter, staleChange, currentWriter?.optimisticOverlay));
+    }
   }
 
   private epochOf(space: string): string {

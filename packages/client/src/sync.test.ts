@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { LTHASH_STATE_BYTES, RepoCommit, serializedRecordBytes, SpaceMacError } from "@flock/protocol/atproto/space-credential-core";
+import { memberspacePolicy } from "@flock/protocol/atproto/space-policy";
 import { extSpaceUriFor } from "@flock/protocol/extensions";
 import { subjectKey, tidNow } from "@flock/protocol/keys";
 import { COLLECTION } from "@flock/protocol/nsids";
@@ -952,7 +953,7 @@ test("JSON fallback and incremental oplog growth enforce cumulative byte limits 
     const network = new FakeNetwork();
     const space = await createChannel(network, "oplog-limit", [ALICE, BOB, READER]);
     await writeMessage(network, ALICE, space, 1, "alice-ok");
-    await writeMessage(network, BOB, space, 1, "bob-1");
+    await writeMessage(network, BOB, space, 1, `bob-1-${"x".repeat(420)}`);
     const budget = 1024;
 
     const { core, store } = syncFor(network, READER);
@@ -963,9 +964,7 @@ test("JSON fallback and incremental oplog growth enforce cumulative byte limits 
     });
     assert.equal(initial.complete, true);
 
-    await writeMessage(network, BOB, space, 2, `bob-2-${"y".repeat(400)}`);
-    await writeMessage(network, BOB, space, 3, `bob-3-${"y".repeat(400)}`);
-    await writeMessage(network, BOB, space, 4, `bob-4-${"y".repeat(400)}`);
+    await writeMessage(network, BOB, space, 2, `bob-2-${"y".repeat(420)}`);
     const calls = await countCalls(network, async () => {
       const next = await core.syncVerifiedSpace({
         space,
@@ -1021,9 +1020,22 @@ test("followRepoOps keeps initial baseline sticky across baseline failures and e
     assert.equal(poll2.complete, false);
     assert.equal(delivered.length, 0);
 
-    // Recover Bob's MAC and run a deliver:true poll: historical commands MUST NOT execute.
+    // Recover Bob's MAC: unrelated ticks stay backed off before truthIntervalMs, then truthIntervalMs recovers cleanly without replaying historical commands.
     corruptBobMac = false;
     network.interceptResponse = undefined;
+    const backedOffCalls = await countCalls(network, async () => {
+      const earlyPoll = await core.followRepoOps({
+        space,
+        collections: [COLLECTION.message],
+        deliver: true,
+        onEvent: async (ev) => { delivered.push(String(ev.value.text)); },
+      });
+      assert.equal(earlyPoll.complete, false);
+      assert.equal(earlyPoll.setAside.some((entry) => entry.did === BOB && entry.permanent), true);
+    });
+    assert.equal(backedOffCalls["com.atproto.space.getLatestCommit"] ?? 0, 0, "permanent baseline failure does not hammer PDS before truthIntervalMs");
+
+    network.advanceClock(core.options.truthIntervalMs);
     const poll3 = await core.followRepoOps({
       space,
       collections: [COLLECTION.message],
@@ -1115,5 +1127,397 @@ test("followRepoOps keeps initial baseline sticky across baseline failures and e
     });
     assert.deepEqual(postRecovery.delivered.map((d) => String(d.value.text)), ["fresh-minute-13-cmd"]);
     void errors;
+  }
+
+  // Transient baseline 503 recovers immediately on the next deliver:true tick without waiting truthIntervalMs and without replaying historical commands.
+  {
+    const network = new FakeNetwork();
+    const space = await createChannel(network, "transient-baseline", [ALICE, BOB, READER]);
+    await writeMessage(network, BOB, space, 1, "historical-503");
+    network.setHostReachable(BOB, false);
+    const { core } = syncFor(network, READER);
+    const delivered: string[] = [];
+    const basePoll = await core.followRepoOps({
+      space,
+      collections: [COLLECTION.message],
+      deliver: false,
+      onEvent: async (ev) => { delivered.push(String(ev.value.text)); },
+    });
+    assert.equal(basePoll.complete, false);
+    network.setHostReachable(BOB, true);
+    const recovered = await core.followRepoOps({
+      space,
+      collections: [COLLECTION.message],
+      deliver: true,
+      onEvent: async (ev) => { delivered.push(String(ev.value.text)); },
+    });
+    assert.equal(recovered.complete, true);
+    assert.equal(delivered.length, 0);
+  }
+});
+
+test("fetchRepoOpsPages aborts multi-page listRepoOps early on staging payload overflow in syncVerifiedSpace and followRepoOps (Codex R2-#1 / Carbon R2-M1)", async () => {
+  // 1. syncVerifiedSpace falls back cleanly to streaming STAR before fetching cursor pages beyond maxPayloadBytes.
+  {
+    const network = new FakeNetwork();
+    const space = await createChannel(network, "staging-cap-sync", [ALICE, BOB, READER]);
+    await writeMessage(network, BOB, space, 1, "bob-seed");
+    const { core } = syncFor(network, READER);
+    assert.equal((await core.syncVerifiedSpace({ space, collections: [COLLECTION.message] })).complete, true);
+
+    await writeMessage(network, BOB, space, 2, "bob-trigger");
+    const cursorsRequested: Array<string | undefined> = [];
+    const largeChunk = "z".repeat(4_800_000);
+    network.interceptResponse = ({ method, params, response }) => {
+      if (method === "com.atproto.space.listRepoOps" && params.repo === BOB) {
+        const cursor = typeof params.cursor === "string" ? params.cursor : undefined;
+        cursorsRequested.push(cursor);
+        const pageNum = cursor === undefined ? 1 : Number(cursor.replace("p", ""));
+        return new Response(
+          JSON.stringify({
+            ops: [
+              { rev: `rev-${pageNum}`, idx: 0, collection: COLLECTION.message, rkey: key(pageNum + 2), cid: "bafyreigbtj4x7ip5legnfznqu3bdr24v6s2s6x2f3b5f6r6x5c7u6o2t3y", prev: null, value: { text: largeChunk } },
+            ],
+            ...(pageNum < 10 ? { cursor: `p${pageNum + 1}` } : {}),
+          }),
+          { status: 200, headers: response.headers },
+        );
+      }
+      return response;
+    };
+
+    const res = await core.syncVerifiedSpace({ space, collections: [COLLECTION.message] });
+    assert.equal(res.complete, true, "falls back cleanly via STAR to actual host state");
+    assert.ok(cursorsRequested.length >= 3 && cursorsRequested.length <= 4, `aborted early at <=4 pages (~16 MiB staging cap), fetched ${cursorsRequested.length}`);
+    assert.equal(cursorsRequested.includes("p6"), false, "remaining cursor pages were never fetched");
+  }
+
+  // 2. followRepoOps aborts multi-page listRepoOps early and triggers bounded reset instead of buffering unbounded pages in RAM.
+  {
+    const network = new FakeNetwork();
+    const space = await createChannel(network, "staging-cap-follow", [ALICE, READER]);
+    await writeMessage(network, ALICE, space, 1, "seed");
+    const { core } = syncFor(network, READER);
+    assert.equal((await core.followRepoOps({ space, collections: [COLLECTION.message], deliver: false, onEvent: async () => undefined })).complete, true);
+
+    await writeMessage(network, ALICE, space, 2, "alice-trigger");
+    const cursorsRequested: Array<string | undefined> = [];
+    const largeChunk = "w".repeat(4_800_000);
+    network.interceptResponse = ({ method, params, response }) => {
+      if (method === "com.atproto.space.listRepoOps" && params.repo === ALICE) {
+        const cursor = typeof params.cursor === "string" ? params.cursor : undefined;
+        cursorsRequested.push(cursor);
+        const pageNum = cursor === undefined ? 1 : Number(cursor.replace("p", ""));
+        return new Response(
+          JSON.stringify({
+            ops: [
+              { rev: `rev-${pageNum}`, idx: 0, collection: COLLECTION.message, rkey: key(pageNum + 2), cid: "bafyreigbtj4x7ip5legnfznqu3bdr24v6s2s6x2f3b5f6r6x5c7u6o2t3y", prev: null, value: { text: largeChunk } },
+            ],
+            ...(pageNum < 10 ? { cursor: `p${pageNum + 1}` } : {}),
+          }),
+          { status: 200, headers: response.headers },
+        );
+      }
+      return response;
+    };
+
+    const resets: string[] = [];
+    const poll = await core.followRepoOps({
+      space,
+      collections: [COLLECTION.message],
+      deliver: true,
+      onEvent: async () => undefined,
+      onReset: (notice) => resets.push(notice.reason),
+    });
+    assert.equal(poll.kind, "reset");
+    assert.ok(cursorsRequested.length >= 3 && cursorsRequested.length <= 4, `aborted followRepoOps paging early at ${cursorsRequested.length} pages`);
+    assert.equal(cursorsRequested.includes("p6"), false);
+    assert.match(resets[0]!, /payload byte staging bound/);
+  }
+});
+
+test("cold in-flight generation-0 syncVerifiedWorkspaceSnapshot cannot commit stale state past concurrent markSpaceStale (Codex R2-#2)", async () => {
+  const network = new FakeNetwork();
+  const fixture = await createWorkspace(network, { members: [ALICE], channels: [{ skey: "general", visibility: "public" }] });
+  const tasksSpace = extSpaceUriFor(AUTHORITY, "acme", "tasks");
+  await network.clientFor(AUTHORITY).procedure("com.atproto.space.createSpace", {
+    spaceType: "new.flock.ext.tasks",
+    skey: "acme-tasks",
+    policy: memberspacePolicy(),
+  });
+  await network.writeAs(AUTHORITY, fixture.workspace, COLLECTION.extInstall, "tasks", {
+    extId: "tasks",
+    space: tasksSpace,
+    active: true,
+    enabledBy: AUTHORITY,
+    enabledAt: "2026-11-10T12:00:00.000Z",
+    updatedAt: "2026-11-10T12:00:00.000Z",
+  });
+
+  const { core } = syncFor(network, ALICE);
+  assert.equal(await core.store.getSpace(fixture.workspace), undefined);
+  assert.equal(await core.store.getWriter(fixture.workspace, AUTHORITY), undefined);
+
+  let releaseStaleStar!: () => void;
+  const staleStarGate = new Promise<void>((resolve) => {
+    releaseStaleStar = resolve;
+  });
+  let markPaused!: () => void;
+  const paused = new Promise<void>((resolve) => {
+    markPaused = resolve;
+  });
+  let pausedOnce = false;
+  network.interceptResponse = async ({ method, params, response }) => {
+    if (!pausedOnce && method === "com.atproto.space.getRepo" && params.space === fixture.workspace && response.ok) {
+      pausedOnce = true;
+      markPaused();
+      await staleStarGate;
+    }
+    return response;
+  };
+
+  // Start cold workspace snapshot sync (generation 0, invalidationSeq 0).
+  const snapshotPromise = core.syncVerifiedWorkspaceSnapshot(fixture.workspace, { truthIntervalMs: core.options.truthIntervalMs });
+  await Promise.race([
+    paused,
+    snapshotPromise.then(() => {
+      throw new Error("syncVerifiedWorkspaceSnapshot finished before getRepo intercepted");
+    }),
+  ]);
+
+  // Concurrently disable Tasks and call markSpaceStale(workspace) while old valid STAR snapshot is delayed in flight.
+  await network.writeAs(AUTHORITY, fixture.workspace, COLLECTION.extInstall, "tasks", {
+    extId: "tasks",
+    space: tasksSpace,
+    active: false,
+    enabledBy: AUTHORITY,
+    enabledAt: "2026-11-10T12:00:00.000Z",
+    updatedAt: "2026-11-10T12:01:00.000Z",
+    disabledAt: "2026-11-10T12:01:00.000Z",
+  });
+  await core.markSpaceStale(fixture.workspace);
+  releaseStaleStar();
+
+  const snapshot = await snapshotPromise;
+  const tasksExt = snapshot.extensions.find((ext) => ext.extId === "tasks");
+  assert.equal(tasksExt?.active, false, "cold generation-0 commit refused stale snapshot and retried to observe active: false");
+  const persistedExt = await core.store.getRecord(fixture.workspace, AUTHORITY, COLLECTION.extInstall, "tasks");
+  assert.equal(persistedExt?.value.active, false);
+});
+
+test("followRepoOps isolates failed initial writers from new joiners, tracks permanent backoff, recovers hold-expiry post-floor commands, and skips genesis replay after permanent failures (Codex R2-#4/#5 + Carbon R2-H2)", async () => {
+  // 1. Codex R2-#4 + Carbon R2-H2 Trace 1: Alice baselines + Bob fails permanently (RepoDeactivated) -> Carol joins on deliver:true and delivers immediately without hammering Bob.
+  {
+    const network = new FakeNetwork();
+    const space = await createChannel(network, "r2h2-trace1", [ALICE, BOB, READER]);
+    await writeMessage(network, ALICE, space, 1, "alice-historical");
+    await writeMessage(network, BOB, space, 1, "bob-pre-deactivation");
+    network.setAccountState(BOB, "deactivated");
+
+    const { core } = syncFor(network, READER);
+    const delivered: Array<{ repo: string; text: string }> = [];
+    const basePoll = await core.followRepoOps({
+      space,
+      collections: [COLLECTION.message],
+      deliver: false,
+      onEvent: async (ev) => { delivered.push({ repo: ev.repo, text: String(ev.value.text) }); },
+    });
+    assert.equal(basePoll.complete, false);
+    assert.deepEqual(basePoll.setAside.map((s) => ({ did: s.did, permanent: s.permanent })), [{ did: BOB, permanent: true }]);
+    assert.equal(delivered.length, 0);
+
+    // Carol joins after initial baseline while Bob is still deactivated!
+    network.createAccount(CAROL, "pds2");
+    await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.putMember", {
+      space,
+      did: CAROL,
+      read: true,
+      write: true,
+    });
+    await network.writeAs(CAROL, space, COLLECTION.message, tidNow(network.now(), 0), {
+      text: "carol-first-live-command",
+      createdAt: "2026-11-10T12:00:00.000Z",
+    });
+
+    const carolCalls = await countCalls(network, async () => {
+      const carolPoll = await core.followRepoOps({
+        space,
+        collections: [COLLECTION.message],
+        deliver: true,
+        onEvent: async (ev) => { delivered.push({ repo: ev.repo, text: String(ev.value.text) }); },
+      });
+      assert.deepEqual(carolPoll.delivered.map((d) => String(d.value.text)), ["carol-first-live-command"]);
+      assert.equal(carolPoll.setAside.some((s) => s.did === BOB && s.permanent), true);
+    });
+    assert.equal(delivered.length, 1);
+    // Verify Bob's deactivated PDS was NOT polled during Carol's deliver:true tick (only Carol's PDS + authority).
+    assert.equal(carolCalls["com.atproto.space.getLatestCommit"] ?? 0, 0);
+    assert.equal(carolCalls["com.atproto.space.listRecords"] ?? 0, 0);
+  }
+
+  // 2. Codex R2-#5: min-0 baseline -> min-1 fail (cmd-m1) -> min-11.1 hold expiry -> min-11.5 write (cmd-m11-5) -> min-12 recovery drops cmd-m1 and delivers cmd-m11-5 (with retry!).
+  {
+    const network = new FakeNetwork();
+    const space = await createChannel(network, "codex5-floor", [ALICE, BOB, READER]);
+    let elapsed = 0;
+    const clock = { now: () => network.now(), elapsed: () => elapsed };
+    const advance = (ms: number) => {
+      network.advanceClock(ms);
+      elapsed += ms;
+    };
+    await network.writeAs(BOB, space, COLLECTION.message, tidNow(network.now(), 0), {
+      text: "bob-seed",
+      createdAt: "2026-11-10T12:00:00.000Z",
+    });
+
+    const { core } = syncFor(network, READER);
+    const delivered: string[] = [];
+    const resets: string[] = [];
+    await core.followRepoOps({ space, collections: [COLLECTION.message], deliver: false, clock, onEvent: async () => undefined });
+
+    // Minute 1: write cmd-m1 and go unreachable (503).
+    advance(60_000);
+    await network.writeAs(BOB, space, COLLECTION.message, tidNow(network.now(), 0), {
+      text: "cmd-m1",
+      createdAt: "2026-11-10T12:01:00.000Z",
+    });
+    network.setHostReachable(BOB, false);
+    const failPoll = await core.followRepoOps({
+      space,
+      collections: [COLLECTION.message],
+      deliver: true,
+      clock,
+      onEvent: async (ev) => { delivered.push(String(ev.value.text)); },
+      onReset: (n) => resets.push(n.repo),
+    });
+    assert.equal(failPoll.complete, false);
+    assert.equal(resets.length, 0);
+
+    // Minute 11.1 (> MAX_HOLD_MS = 10 min): failed poll expires hold and records floor at 11.1m.
+    advance(10 * 60_000 + 6_000);
+    const expiryPoll = await core.followRepoOps({
+      space,
+      collections: [COLLECTION.message],
+      deliver: true,
+      clock,
+      onEvent: async (ev) => { delivered.push(String(ev.value.text)); },
+      onReset: (n) => resets.push(n.repo),
+    });
+    assert.equal(expiryPoll.kind, "reset");
+    assert.deepEqual(resets, [BOB]);
+    assert.equal(delivered.length, 0);
+
+    // Minute 11.5: cmd-m11-5 written AFTER expiry poll while Bob recovers.
+    advance(24_000);
+    await network.writeAs(BOB, space, COLLECTION.message, tidNow(network.now(), 0), {
+      text: "cmd-m11-5",
+      createdAt: "2026-11-10T12:11:30.000Z",
+    });
+
+    // Minute 12: Bob recovers; handler fails once on cmd-m11-5 to verify retry safety, then succeeds at 12.1!
+    advance(30_000);
+    network.setHostReachable(BOB, true);
+    let failDeliveryOnce = true;
+    const recoveryPoll1 = await core.followRepoOps({
+      space,
+      collections: [COLLECTION.message],
+      deliver: true,
+      clock,
+      onEvent: async (ev) => {
+        if (failDeliveryOnce) {
+          failDeliveryOnce = false;
+          throw new Error("transient delivery error");
+        }
+        delivered.push(String(ev.value.text));
+      },
+      onReset: (n) => resets.push(n.repo),
+    });
+    assert.equal(recoveryPoll1.delivered.length, 0);
+
+    advance(6_000);
+    const recoveryPoll2 = await core.followRepoOps({
+      space,
+      collections: [COLLECTION.message],
+      deliver: true,
+      clock,
+      onEvent: async (ev) => { delivered.push(String(ev.value.text)); },
+      onReset: (n) => resets.push(n.repo),
+    });
+    assert.deepEqual(recoveryPoll2.delivered.map((d) => String(d.value.text)), ["cmd-m11-5"]);
+    assert.deepEqual(delivered, ["cmd-m11-5"], "drops expired cmd-m1 and delivers post-expiry cmd-m11-5 without duplicating");
+    assert.equal(resets.length, 1, "no extra reset emitted on minute 12 recovery");
+
+    // Subsequent write at minute 13 resumes incremental listRepoOps delta.
+    advance(60_000);
+    await network.writeAs(BOB, space, COLLECTION.message, tidNow(network.now(), 0), {
+      text: "cmd-m13",
+      createdAt: "2026-11-10T12:13:00.000Z",
+    });
+    const postPoll = await core.followRepoOps({
+      space,
+      collections: [COLLECTION.message],
+      deliver: true,
+      clock,
+      onEvent: async (ev) => { delivered.push(String(ev.value.text)); },
+    });
+    assert.deepEqual(postPoll.delivered.map((d) => String(d.value.text)), ["cmd-m13"]);
+  }
+
+  // 3. Carbon R2-H2 Trace 2: post-baseline RepoTakendown (permanent failure) at min 1 -> restored at min 21 does NOT replay genesis oplog or cmd-m1.
+  {
+    const network = new FakeNetwork();
+    const space = await createChannel(network, "r2h2-trace2", [ALICE, BOB, READER]);
+    let elapsed = 0;
+    const clock = { now: () => network.now(), elapsed: () => elapsed };
+    const advance = (ms: number) => {
+      network.advanceClock(ms);
+      elapsed += ms;
+    };
+    await network.writeAs(BOB, space, COLLECTION.message, tidNow(network.now(), 0), {
+      text: "bob-initial",
+      createdAt: "2026-11-10T12:00:00.000Z",
+    });
+
+    const { core } = syncFor(network, READER);
+    const delivered: string[] = [];
+    const resets: string[] = [];
+    await core.followRepoOps({ space, collections: [COLLECTION.message], deliver: false, clock, onEvent: async () => undefined });
+
+    // Minute 1: Bob writes cmd-m1 while account gets suspended/takendown (permanent: true).
+    advance(60_000);
+    await network.writeAs(BOB, space, COLLECTION.message, tidNow(network.now(), 0), {
+      text: "cmd-m1-suspended",
+      createdAt: "2026-11-10T12:01:00.000Z",
+    });
+    network.setAccountState(BOB, "takendown");
+    const suspPoll = await core.followRepoOps({
+      space,
+      collections: [COLLECTION.message],
+      deliver: true,
+      clock,
+      onEvent: async (ev) => { delivered.push(String(ev.value.text)); },
+    });
+    assert.deepEqual(suspPoll.setAside.map((s) => ({ did: s.did, permanent: s.permanent })), [{ did: BOB, permanent: true }]);
+
+    // Minute 21: Bob is unsuspended; recovery must NOT fetch listRepoOps(since: undefined) or execute cmd-m1-suspended.
+    advance(20 * 60_000);
+    network.setAccountState(BOB, "active");
+    let genesisListRepoOpsCalled = false;
+    network.beforeListRepoOps = ({ since }) => {
+      if (since === undefined) genesisListRepoOpsCalled = true;
+    };
+    await core.markSpaceStale(space);
+    const restorePoll = await core.followRepoOps({
+      space,
+      collections: [COLLECTION.message],
+      deliver: true,
+      clock,
+      onEvent: async (ev) => { delivered.push(String(ev.value.text)); },
+      onReset: (n) => resets.push(n.repo),
+    });
+    assert.equal(genesisListRepoOpsCalled, false, "must NOT replay genesis listRepoOps after post-baseline permanent failure");
+    assert.equal(restorePoll.kind, "reset");
+    assert.deepEqual(resets, [BOB]);
+    assert.equal(delivered.length, 0, "must NOT execute pre-suspension cmd-m1-suspended");
   }
 });

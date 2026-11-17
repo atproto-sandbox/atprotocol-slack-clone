@@ -13,6 +13,8 @@ import {
   listVerifiedBoundedRecords,
   parseCidSafe,
   serializedRecordBytes,
+  starEntryBytes,
+  starHeaderBytes,
   verifyRecordCid,
   verifyRecordCidWithSize,
   type Cid,
@@ -21,7 +23,7 @@ import {
 } from "@flock/protocol/atproto/space-credential-core";
 import { XrpcError, type AtprotoClient } from "@flock/protocol/atproto/xrpc";
 import { mapLimited } from "@flock/protocol/map-limited";
-import { isDid, parseSpaceUri, parseWorkspaceUri, spaceRecordUri } from "@flock/protocol/keys";
+import { isDid, parseSpaceUri, parseWorkspaceUri, spaceRecordUri, tidNow } from "@flock/protocol/keys";
 import { COLLECTION } from "@flock/protocol/nsids";
 import { validateSpaceRecord } from "@flock/protocol/registry";
 import {
@@ -203,6 +205,7 @@ const WORKSPACE_AUTHORITY_COLLECTIONS = [
 ] as const;
 
 const MAX_OPS_SEEN_ENTRIES = 100_000;
+const utf8Encoder = new TextEncoder();
 
 type RepoFollowAttempt = {
   uri: string;
@@ -219,13 +222,19 @@ type RepoFollowState = {
   attempts: Map<string, RepoFollowAttempt>;
   unbaselined: boolean;
   stale: boolean;
+  checkedAt: number | null;
+  permanentFailure: boolean;
+  permanentFailedListedRev: string | null;
+  permanentAside: SetAside | null;
+  resetOnBaseline: boolean;
   /** Elapsed clock timestamp when transient fetch failures began for this baselined writer (`MAX_HOLD_MS`). */
   holdStartedAt: number | null;
+  /** Wall-clock `tidNow(expiryNow, 0)` floor recorded when hold expires so recovery drops pre-expiry commands and delivers post-expiry ones. */
+  expiredFloorRkey: string | null;
 };
 
 type SpaceFollowState = {
-  baselined: boolean;
-  listedOnce: boolean;
+  needsInitialWriterSeed: boolean;
   lastCheckedAt: number | null;
   repos: Map<string, RepoFollowState>;
   seen: Set<string>;
@@ -300,6 +309,7 @@ export class SyncCore {
     const now = this.now();
     const intervalMs = input.truthIntervalMs ?? this.options.truthIntervalMs;
     const stored = await this.deps.store.getSpace(space);
+    const startInvalidationSeq = stored?.invalidationSeq ?? 0;
     const state: SpaceState = stored ?? { space, spaceRev: null, writers: [], writersListedAt: null, workspace: input.workspace ?? null, lastOpenedAt: now };
     const client = await this.deps.credentials.clientFor(space, authorityDid);
     const held = new Map((await this.deps.store.listWriters(space)).map((writer) => [writer.repo, writer]));
@@ -345,6 +355,11 @@ export class SyncCore {
     else if (!ownPending) state.ownWriteAt = null;
     state.lastOpenedAt = now;
     if (input.workspace !== undefined) state.workspace = input.workspace;
+    const latestInvalidationSeq = (await this.deps.store.getSpace(space))?.invalidationSeq ?? 0;
+    if (latestInvalidationSeq !== startInvalidationSeq) {
+      state.writersListedAt = null;
+      this.opened.delete(space);
+    }
     await this.deps.store.putSpace(state);
     const listed = new Set(state.writers.map((writer) => writer.did));
     const writers = [...state.writers].sort((left, right) => (left.repoRev < right.repoRev ? 1 : left.repoRev > right.repoRev ? -1 : 0));
@@ -359,17 +374,11 @@ export class SyncCore {
     if (follower) follower.stale = true;
   }
 
-  /** Marks every tracked writer (including unwritten probes) in `space` stale so the next sync re-probes them. */
+  /** Marks every tracked writer (including unpersisted workspace authority / probes) in `space` stale and bumps `invalidationSeq`. */
   async markSpaceStale(space: string): Promise<void> {
-    const spaceState = await this.deps.store.getSpace(space);
-    if (spaceState && spaceState.writersListedAt !== null) {
-      await this.deps.store.putSpace({ ...spaceState, writersListedAt: null });
-    }
+    const extraRepos = parseWorkspaceUri(space) ? [authorityOf(space)] : [];
+    await this.deps.store.invalidateSpace(space, extraRepos);
     this.opened.delete(space);
-    const writers = await this.deps.store.listWriters(space);
-    for (const writer of writers) {
-      await this.deps.store.commit({ space, repo: writer.repo, expectedGeneration: null, markStale: true });
-    }
     const follower = this.opsFollowers.get(space);
     if (follower) {
       for (const repo of follower.repos.values()) repo.stale = true;
@@ -600,8 +609,7 @@ export class SyncCore {
     let spaceFollow = this.opsFollowers.get(input.space);
     if (!spaceFollow) {
       spaceFollow = {
-        baselined: input.deliver,
-        listedOnce: false,
+        needsInitialWriterSeed: !input.deliver,
         lastCheckedAt: null,
         repos: new Map(),
         seen: new Set(),
@@ -638,7 +646,15 @@ export class SyncCore {
         }
       }
     }
-    spaceFollow.listedOnce = true;
+
+    if (spaceFollow.needsInitialWriterSeed) {
+      for (const repo of writersList) {
+        if (!spaceFollow.repos.has(repo)) {
+          spaceFollow.repos.set(repo, createRepoFollowState(true));
+        }
+      }
+      spaceFollow.needsInitialWriterSeed = false;
+    }
 
     const listedRepoRevs = new Map<string, string>();
     if (input.writers === undefined) {
@@ -658,39 +674,55 @@ export class SyncCore {
       nextSetHash?: Uint8Array;
       nextCids?: Map<string, Cid>;
       silentSeenKeys: string[];
+      clearExpiredFloor?: boolean;
       reset?: RepoOpsResetNotice;
       aside?: SetAside;
     };
 
     const writersToCheck = writersList.filter((repo) => {
       const existing = spaceFollow.repos.get(repo);
-      if (!existing || existing.unbaselined || existing.stale || existing.attempts.size > 0 || existing.holdStartedAt !== null) return true;
+      if (!existing) return true;
+      const listedRev = listedRepoRevs.get(repo);
+      if (existing.permanentFailure) {
+        const writerIntervalElapsed =
+          existing.checkedAt === null || now - existing.checkedAt < 0 || now - existing.checkedAt >= intervalMs;
+        const listedRevChanged =
+          listedRev !== undefined &&
+          (existing.permanentFailedListedRev === null || listedRev > existing.permanentFailedListedRev);
+        return !input.deliver || existing.stale || writerIntervalElapsed || reportedSet.has(repo) || listedRevChanged;
+      }
+      if (
+        existing.unbaselined ||
+        existing.stale ||
+        existing.attempts.size > 0 ||
+        existing.holdStartedAt !== null ||
+        existing.expiredFloorRkey !== null
+      ) {
+        return true;
+      }
       if (!input.deliver || intervalElapsed) return true;
       if (reportedSet.has(repo)) return true;
-      const listedRev = listedRepoRevs.get(repo);
       return listedRev !== undefined && (existing.rev === null || listedRev > existing.rev);
     });
+    const writersToCheckSet = new Set(writersToCheck);
 
     const prepared = await mapLimited(writersToCheck, this.options.concurrency, async (repo): Promise<PreparedRepoBatch> => {
       let repoState = spaceFollow.repos.get(repo);
       if (!repoState) {
-        repoState = {
-          rev: null,
-          setHash: new Uint8Array(LTHASH_STATE_BYTES),
-          cids: new Map(),
-          attempts: new Map(),
-          unbaselined: !input.deliver || !spaceFollow.baselined,
-          stale: false,
-          holdStartedAt: null,
-        };
+        repoState = createRepoFollowState(!input.deliver);
         spaceFollow.repos.set(repo, repoState);
       }
+      repoState.checkedAt = now;
 
       const shouldBaselineOnly = !input.deliver || repoState.unbaselined;
       const holdExpired = !shouldBaselineOnly && repoState.holdStartedAt !== null && elapsed - repoState.holdStartedAt >= MAX_HOLD_MS;
       try {
-        await this.resolveValidPds(repo);
+        const pdsUrl = await this.resolveValidPds(repo);
         if (shouldBaselineOnly || holdExpired) {
+          const emitReset = holdExpired || repoState.resetOnBaseline;
+          const resetReason = holdExpired
+            ? `held missing writer expired after ${MAX_HOLD_MS / 60_000} minutes`
+            : "permanently failed writer recovered";
           const baseline = await this.fetchOpsBaseline(input.space, repo, {
             allowTrustedEmpty: !listedSet.has(repo) && repoState.rev === null,
             signal: input.signal,
@@ -701,18 +733,77 @@ export class SyncCore {
           repoState.attempts.clear();
           repoState.unbaselined = false;
           repoState.stale = false;
+          repoState.permanentFailure = false;
+          repoState.permanentFailedListedRev = null;
+          repoState.permanentAside = null;
+          repoState.resetOnBaseline = false;
           repoState.holdStartedAt = null;
+          repoState.expiredFloorRkey = null;
           for (const key of baseline.seenKeys) recordSeenKey(spaceFollow.seen, key);
-          const reset: RepoOpsResetNotice | undefined = holdExpired
+          const reset: RepoOpsResetNotice | undefined = emitReset
             ? {
                 kind: "reset",
                 space: input.space,
                 repo,
-                reason: `held missing writer expired after ${MAX_HOLD_MS / 60_000} minutes`,
+                reason: resetReason,
                 rev: baseline.rev,
               }
             : undefined;
           return { repo, repoState, events: [], silentSeenKeys: [], ...(reset ? { reset } : {}) };
+        }
+
+        if (repoState.expiredFloorRkey !== null) {
+          const recovered = await this.recoverFullVerifiedRepo({
+            space: input.space,
+            repo,
+            pdsUrl,
+            maxBytes: WORKSPACE_ENVELOPE.maxStarArchiveBytes,
+            maxRecords: WORKSPACE_ENVELOPE.maxStarRecords,
+            signal: input.signal,
+          });
+          const minCutoff = tidNow(Math.max(0, Math.floor(now - MAX_HOLD_MS)), 0);
+          const cutoff = maxRkey(repoState.expiredFloorRkey, minCutoff);
+          const nextCids = new Map<string, Cid>();
+          const silentSeenKeys: string[] = [];
+          const events: RepoOpsEvent[] = [];
+          for (const entry of recovered.records) {
+            const parsedCid = parseCidSafe(entry.cid);
+            if (!parsedCid) throw new SpaceMacError(`Invalid CID recovered for ${repo}.`);
+            nextCids.set(pathKey(entry.collection, entry.rkey), parsedCid);
+            const uri = spaceRecordUri(input.space, repo, entry.collection, entry.rkey);
+            const seenKey = seenKeyOf(uri, entry.cid);
+            if (entry.rkey < cutoff || !collectionsSet.has(entry.collection) || spaceFollow.seen.has(seenKey)) {
+              silentSeenKeys.push(seenKey);
+              continue;
+            }
+            events.push({
+              space: input.space,
+              repo,
+              collection: entry.collection,
+              rkey: entry.rkey,
+              uri,
+              cid: entry.cid,
+              rev: recovered.commit.rev,
+              value: entry.value,
+            });
+          }
+          events.sort((left, right) => (left.rkey < right.rkey ? -1 : left.rkey > right.rkey ? 1 : left.uri < right.uri ? -1 : left.uri > right.uri ? 1 : 0));
+          repoState.stale = false;
+          repoState.holdStartedAt = null;
+          repoState.permanentFailure = false;
+          repoState.permanentFailedListedRev = null;
+          repoState.permanentAside = null;
+          repoState.resetOnBaseline = false;
+          return {
+            repo,
+            repoState,
+            events,
+            commitRev: recovered.commit.rev,
+            nextSetHash: recovered.setHash,
+            nextCids,
+            silentSeenKeys,
+            clearExpiredFloor: true,
+          };
         }
 
         const replay = await this.fetchAndReplayOpsForFollow({
@@ -734,13 +825,22 @@ export class SyncCore {
           repoState.cids = baseline.cids;
           repoState.attempts.clear();
           repoState.stale = false;
+          repoState.permanentFailure = false;
+          repoState.permanentFailedListedRev = null;
+          repoState.permanentAside = null;
+          repoState.resetOnBaseline = false;
           repoState.holdStartedAt = null;
+          repoState.expiredFloorRkey = null;
           for (const key of baseline.seenKeys) recordSeenKey(spaceFollow.seen, key);
           const reset: RepoOpsResetNotice = { kind: "reset", space: input.space, repo, reason: replay.reason, rev: baseline.rev };
           return { repo, repoState, events: [], silentSeenKeys: [], reset };
         }
         repoState.stale = false;
         repoState.holdStartedAt = null;
+        repoState.permanentFailure = false;
+        repoState.permanentFailedListedRev = null;
+        repoState.permanentAside = null;
+        repoState.resetOnBaseline = false;
         return {
           repo,
           repoState,
@@ -764,17 +864,42 @@ export class SyncCore {
           repoState.cids = new Map();
           repoState.unbaselined = false;
           repoState.stale = false;
+          repoState.permanentFailure = false;
+          repoState.permanentFailedListedRev = null;
+          repoState.permanentAside = null;
+          repoState.resetOnBaseline = false;
           repoState.holdStartedAt = null;
+          repoState.expiredFloorRkey = null;
           return { repo, repoState, events: [], silentSeenKeys: [] };
         }
         if (failure.permanent) {
+          const wasPreviouslyBaselined = !repoState.unbaselined || repoState.expiredFloorRkey !== null;
           repoState.rev = null;
           repoState.setHash = new Uint8Array(LTHASH_STATE_BYTES);
           repoState.cids = new Map();
           repoState.attempts.clear();
           repoState.holdStartedAt = null;
-          repoState.unbaselined ||= !input.deliver || !spaceFollow.baselined;
-        } else if (!repoState.unbaselined) {
+          repoState.permanentFailure = true;
+          repoState.permanentFailedListedRev = listedRepoRevs.get(repo) ?? null;
+          const aside: SetAside = { did: repo, reason: failure.reason, permanent: true };
+          repoState.permanentAside = aside;
+          if (wasPreviouslyBaselined) {
+            repoState.unbaselined = true;
+            repoState.resetOnBaseline = true;
+            repoState.expiredFloorRkey = maxRkey(repoState.expiredFloorRkey, tidNow(Math.floor(now), 0));
+          }
+          return {
+            repo,
+            repoState,
+            events: [],
+            silentSeenKeys: [],
+            aside,
+          };
+        }
+        repoState.permanentFailure = false;
+        repoState.permanentFailedListedRev = null;
+        repoState.permanentAside = null;
+        if (!repoState.unbaselined) {
           repoState.holdStartedAt ??= elapsed;
           if (elapsed - repoState.holdStartedAt >= MAX_HOLD_MS) {
             repoState.rev = null;
@@ -782,7 +907,7 @@ export class SyncCore {
             repoState.cids = new Map();
             repoState.attempts.clear();
             repoState.holdStartedAt = null;
-            repoState.unbaselined = true;
+            repoState.expiredFloorRkey = maxRkey(repoState.expiredFloorRkey, tidNow(Math.floor(now), 0));
             return {
               repo,
               repoState,
@@ -795,7 +920,7 @@ export class SyncCore {
                 reason: `held missing writer expired after ${MAX_HOLD_MS / 60_000} minutes`,
                 rev: null,
               },
-              aside: { did: repo, reason: failure.reason, permanent: failure.permanent },
+              aside: { did: repo, reason: failure.reason, permanent: false },
             };
           }
         }
@@ -804,19 +929,22 @@ export class SyncCore {
           repoState,
           events: [],
           silentSeenKeys: [],
-          aside: { did: repo, reason: failure.reason, permanent: failure.permanent },
+          aside: { did: repo, reason: failure.reason, permanent: false },
         };
       }
     });
 
     const resets = prepared.flatMap((batch) => (batch.reset ? [batch.reset] : []));
-    const setAside = prepared.flatMap((batch) => (batch.aside ? [batch.aside] : []));
+    const skippedAsides: SetAside[] = [];
+    for (const repo of writersList) {
+      if (writersToCheckSet.has(repo)) continue;
+      const existing = spaceFollow.repos.get(repo);
+      if (existing?.permanentFailure && existing.permanentAside) {
+        skippedAsides.push(existing.permanentAside);
+      }
+    }
+    const setAside = [...prepared.flatMap((batch) => (batch.aside ? [batch.aside] : [])), ...skippedAsides];
 
-    spaceFollow.baselined ||=
-      spaceFollow.listedOnce &&
-      setAside.length === 0 &&
-      writersToCheck.length === writersList.length &&
-      writersList.every((did) => spaceFollow.repos.get(did)?.unbaselined === false);
     if (intervalElapsed) spaceFollow.lastCheckedAt = now;
     for (const reset of resets) {
       input.onReset?.(reset);
@@ -885,6 +1013,7 @@ export class SyncCore {
         batch.repoState.rev = batch.commitRev ?? null;
         batch.repoState.setHash = batch.nextSetHash;
         batch.repoState.cids = batch.nextCids;
+        if (batch.clearExpiredFloor) batch.repoState.expiredFloorRkey = null;
         for (const key of batch.silentSeenKeys) recordSeenKey(spaceFollow.seen, key);
       }
     }
@@ -923,6 +1052,7 @@ export class SyncCore {
     let currentState = initial;
     for (let casAttempt = 0; casAttempt < WORKSPACE_ENVELOPE.maxListRecordsRetry; casAttempt += 1) {
       if ((await this.deps.store.epoch(input.space)) !== input.epoch) return { repo: input.repo };
+      const startInvalidationSeq = (await this.deps.store.getSpace(input.space))?.invalidationSeq ?? 0;
       currentState = await this.deps.store.getWriter(input.space, input.repo);
       const state = currentState ?? emptyWriterState(input.space, input.repo);
       let validPds: string | null = null;
@@ -947,6 +1077,7 @@ export class SyncCore {
               space: input.space,
               repo: input.repo,
               expectedGeneration: state.generation,
+              expectedInvalidationSeq: startInvalidationSeq,
               rev: delta.commit.rev,
               epoch: input.epoch,
               next: {
@@ -982,6 +1113,7 @@ export class SyncCore {
           space: input.space,
           repo: input.repo,
           expectedGeneration: state.generation,
+          expectedInvalidationSeq: startInvalidationSeq,
           rev: recovered.commit.rev,
           epoch: input.epoch,
           next: {
@@ -1010,6 +1142,7 @@ export class SyncCore {
               space: input.space,
               repo: input.repo,
               expectedGeneration: state.generation,
+              expectedInvalidationSeq: startInvalidationSeq,
               epoch: input.epoch,
               next: {
                 syncedRev: null,
@@ -1156,7 +1289,10 @@ export class SyncCore {
 
     let paged: { ops: RawRepoOp[]; commit: Commit };
     try {
-      paged = await this.fetchRepoOpsPages(space, repo, syncedRev, false, input.signal);
+      paged = await this.fetchRepoOpsPages(space, repo, syncedRev, false, input.signal, {
+        maxOps: Math.max(1, input.maxRecords) * 2,
+        maxPayloadBytes: input.maxBytes,
+      });
     } catch (error) {
       if (error instanceof DeltaFallbackError || error instanceof UnsignedEmptyRepoOpsError || isUnsupportedEndpointError(error)) {
         return { applied: false };
@@ -1217,17 +1353,20 @@ export class SyncCore {
       }
     }
 
-    // Enforce aggregate 20,000-record and 16 MiB CBOR byte caps over all surviving live records (matching cold STAR).
+    // Enforce aggregate 20,000-record and exact 16 MiB STAR archive byte caps over all surviving live records (matching cold STAR).
     if (replayed.stagedCids.size > input.maxRecords) {
       throw new RepoStarLimitError("records", input.maxRecords);
     }
-    let liveBytes = 0;
+    let liveBytes = await starHeaderBytes(paged.commit);
+    if (liveBytes > input.maxBytes) {
+      throw new RepoStarLimitError("bytes", input.maxBytes, liveBytes);
+    }
     const byCol = new Map<string, StoredRecord[]>();
     for (const [path] of replayed.stagedCids) {
       const live = liveRecords.get(path);
       if (!live) continue;
-      const bytes = touchedBytes.get(path) ?? await serializedRecordBytes(live.collection, live.rkey, live.value);
-      liveBytes += bytes;
+      const recordBytes = touchedBytes.get(path) ?? await serializedRecordBytes(live.collection, live.rkey, live.value);
+      liveBytes += starEntryBytes(live.collection, live.rkey, recordBytes);
       if (liveBytes > input.maxBytes) {
         throw new RepoStarLimitError("bytes", input.maxBytes, liveBytes);
       }
@@ -1251,10 +1390,12 @@ export class SyncCore {
     since: string | undefined,
     excludeValues: boolean,
     signal?: AbortSignal,
+    bounds?: { maxOps?: number; maxPayloadBytes?: number },
   ): Promise<{ ops: RawRepoOp[]; commit: Commit }> {
     return this.withCredentialRetry(space, repo, async (_credential, client) => {
       const ops: RawRepoOp[] = [];
       const seenCursors = new Set<string>();
+      let payloadBytes = 0;
       let cursor: string | undefined;
       for (let pageIndex = 0; pageIndex < WORKSPACE_ENVELOPE.maxRepoOpsPages; pageIndex += 1) {
         if (signal?.aborted) throw signal.reason ?? new Error("Aborted.");
@@ -1269,7 +1410,22 @@ export class SyncCore {
         if (!page || typeof page !== "object" || !Array.isArray(page.ops) || page.ops.length > 500) {
           throw new DeltaFallbackError("Malformed listRepoOps page.");
         }
-        ops.push(...(page.ops as RawRepoOp[]));
+        const pageOps = page.ops as RawRepoOp[];
+        if (bounds?.maxOps !== undefined && ops.length + pageOps.length > bounds.maxOps) {
+          throw new DeltaFallbackError("listRepoOps exceeded cumulative op staging bound.");
+        }
+        if (bounds?.maxPayloadBytes !== undefined) {
+          for (const rawOp of pageOps) {
+            const val = rawOp && typeof rawOp === "object" ? (rawOp as { value?: unknown }).value : undefined;
+            if (val !== undefined && val !== null) {
+              payloadBytes += utf8Encoder.encode(JSON.stringify(val)).byteLength;
+              if (payloadBytes > bounds.maxPayloadBytes) {
+                throw new DeltaFallbackError("listRepoOps exceeded cumulative payload byte staging bound.");
+              }
+            }
+          }
+        }
+        ops.push(...pageOps);
         if (page.commit !== undefined) {
           const commit = decodeCommitResponse(page.commit, space, repo);
           if (!commit || page.cursor !== undefined) throw new DeltaFallbackError("Malformed final listRepoOps commit.");
@@ -1351,6 +1507,7 @@ export class SyncCore {
           repo: input.repo,
           maxRecords: input.maxRecords,
           maxBytes: input.maxBytes,
+          commit: beforeCommit,
         });
         const afterCommit = await latestCommit(client, input.space, input.repo);
         return { beforeCommit, listed, afterCommit };
@@ -1454,7 +1611,10 @@ export class SyncCore {
     const { space, repo, repoState } = input;
     let paged: { ops: RawRepoOp[]; commit: Commit };
     try {
-      paged = await this.fetchRepoOpsPages(space, repo, repoState.rev ?? undefined, false, input.signal);
+      paged = await this.fetchRepoOpsPages(space, repo, repoState.rev ?? undefined, false, input.signal, {
+        maxOps: WORKSPACE_ENVELOPE.maxStarRecords * 2,
+        maxPayloadBytes: WORKSPACE_ENVELOPE.maxStarArchiveBytes,
+      });
     } catch (error) {
       if (error instanceof UnsignedEmptyRepoOpsError) {
         if (repoState.rev === null && !input.listed.has(repo)) {
@@ -1483,6 +1643,7 @@ export class SyncCore {
       baseRev: repoState.rev,
       baseSetHash: repoState.setHash,
       baseCids: repoState.cids,
+      maxRecords: WORKSPACE_ENVELOPE.maxStarRecords,
     });
     if (!replayed.ok) {
       return { kind: "reset", reason: replayed.reason };
@@ -2423,6 +2584,28 @@ function mergeFollowQueues<T extends { aside?: SetAside; events: readonly RepoOp
     if (chosen.index >= chosen.batch.events.length) cursors.splice(bestPos, 1);
   }
   return merged;
+}
+
+function createRepoFollowState(unbaselined: boolean): RepoFollowState {
+  return {
+    rev: null,
+    setHash: new Uint8Array(LTHASH_STATE_BYTES),
+    cids: new Map(),
+    attempts: new Map(),
+    unbaselined,
+    stale: false,
+    checkedAt: null,
+    permanentFailure: false,
+    permanentFailedListedRev: null,
+    permanentAside: null,
+    resetOnBaseline: false,
+    holdStartedAt: null,
+    expiredFloorRkey: null,
+  };
+}
+
+function maxRkey(existing: string | null, candidate: string): string {
+  return existing === null || candidate > existing ? candidate : existing;
 }
 
 function reportFollowSetAside(

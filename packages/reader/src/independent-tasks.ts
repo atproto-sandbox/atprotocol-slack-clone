@@ -6,7 +6,9 @@ import { classifyVerifiedRepoFailure, MAX_LISTED_SET_ASIDE } from "@flock/protoc
 import {
   listVerifiedBoundedRecords,
   mintSpaceCredentialWith,
+  RepoStarLimitError,
   SpaceCredentialError,
+  starHeaderBytes,
   type SpaceCredential,
   type SpaceCredentialDeps,
 } from "@flock/protocol/atproto/space-credential-core";
@@ -615,6 +617,10 @@ async function readVerifiedRepo(
       })),
     );
     if (repoCommit.matches(commit)) {
+      const actualBytes = (await starHeaderBytes(commit)) + listed.recordsBytes;
+      if (actualBytes > input.maxBytes) {
+        throw new RepoStarLimitError("bytes", input.maxBytes, actualBytes);
+      }
       return listed.records.map((record) => ({
         collection: record.collection,
         rkey: record.rkey,

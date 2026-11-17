@@ -1,4 +1,4 @@
-import { verifyRecordCid } from "@flock/protocol/atproto/space-credential-core";
+import { isAccessLost, verifyRecordCid } from "@flock/protocol/atproto/space-credential-core";
 import { isMissingXrpcResource } from "@flock/protocol/atproto/xrpc";
 import {
   advanceHlc,
@@ -759,6 +759,7 @@ export class TasksClient {
     }
 
     await this.writeQueue.withEntityLock(did, commentUri, async () => {
+      await this.ensureSyncedForWrite(workspaceUri);
       await this.deps.credentials.fresh(tasksSpace);
       try {
         await this.deps.transport.memberClient.procedure("com.atproto.space.deleteRecord", {
@@ -1114,12 +1115,12 @@ export class TasksClient {
   ): Promise<SyncedTasksContext | { disabled: TasksSpaceView }> {
     const existing = this.inFlightSync.get(workspaceUri);
     if (existing) {
-      if (!options.fresh && options.truthIntervalMs === undefined && (!forWrite || !this.syncedWorkspaces.has(workspaceUri))) {
+      if (!forWrite && !options.fresh && options.truthIntervalMs === undefined) {
         return existing;
       }
       await existing.catch(() => undefined);
     }
-    const run = this.executeSpaceSync(workspaceUri, options).then((result) => {
+    const run = this.executeSpaceSync(workspaceUri, options, forWrite).then((result) => {
       if (!("disabled" in result)) {
         this.syncedWorkspaces.add(workspaceUri);
       }
@@ -1138,12 +1139,14 @@ export class TasksClient {
   private async executeSpaceSync(
     workspaceUri: string,
     options: TasksReadOptions,
+    forWrite = false,
   ): Promise<SyncedTasksContext | { disabled: TasksSpaceView }> {
     const { authorityDid, tasksSpace } = requireWorkspaceTasksSpace(workspaceUri);
     const defaultTruthInterval = this.deps.sync.options.truthIntervalMs;
 
     // When Tasks was not yet known enabled in this store, re-check the workspace authority snapshot immediately so
-    // enabling Tasks does not wait out the truth interval. Once enabled, warm reopens honor truthIntervalMs (`D11.13`).
+    // enabling Tasks does not wait out the truth interval. Writes also force a live workspace authority check so
+    // cross-engine disableExtension rejects immediately, while idle warm reopens honor truthIntervalMs (`D11.13`).
     const cachedExt = await this.deps.sync.store.getRecord(
       workspaceUri,
       authorityDid,
@@ -1153,7 +1156,7 @@ export class TasksClient {
     const cachedEnabled =
       cachedExt?.value.active === true && cachedExt?.value.space === tasksSpace;
     const snapshotTruthInterval =
-      options.fresh === true
+      forWrite || options.fresh === true
         ? 0
         : options.truthIntervalMs !== undefined
           ? options.truthIntervalMs
@@ -1163,7 +1166,7 @@ export class TasksClient {
 
     let snapshot = await this.deps.sync.syncVerifiedWorkspaceSnapshot(workspaceUri, {
       truthIntervalMs: snapshotTruthInterval,
-      fresh: options.fresh,
+      fresh: forWrite ? true : options.fresh,
       signal: options.signal,
     });
 
@@ -1215,19 +1218,35 @@ export class TasksClient {
     const prevSpaceState = await this.deps.sync.store.getSpace(tasksSpace);
     const prevListedSet = new Set(prevSpaceState?.writers.map((writer) => writer.did) ?? []);
     const spaceSyncTruthInterval = options.fresh ? 0 : (options.truthIntervalMs ?? defaultTruthInterval);
-    let spaceSync = await this.deps.sync.syncVerifiedSpace({
-      space: tasksSpace,
-      collections: TASKS_COLLECTIONS,
-      verifiedRosterMembers: snapshot.rosterMembers,
-      workspaceSnapshotComplete: snapshot.workspaceSnapshotComplete,
-      includeAuthority: false,
-      workspace: workspaceUri,
-      truthIntervalMs: spaceSyncTruthInterval,
-      fullWriterScan: true,
-      maxStarBytes: options.maxStarArchiveBytes,
-      maxStarRecords: options.maxStarRecords,
-      signal: options.signal,
-    });
+    let spaceSync: VerifiedSpaceSyncResult;
+    try {
+      spaceSync = await this.deps.sync.syncVerifiedSpace({
+        space: tasksSpace,
+        collections: TASKS_COLLECTIONS,
+        verifiedRosterMembers: snapshot.rosterMembers,
+        workspaceSnapshotComplete: snapshot.workspaceSnapshotComplete,
+        includeAuthority: false,
+        workspace: workspaceUri,
+        truthIntervalMs: spaceSyncTruthInterval,
+        fullWriterScan: true,
+        maxStarBytes: options.maxStarArchiveBytes,
+        maxStarRecords: options.maxStarRecords,
+        signal: options.signal,
+      });
+    } catch (error) {
+      if (snapshotTruthInterval !== 0 && isAccessLost(error)) {
+        const refreshed = await this.deps.sync.syncVerifiedWorkspaceSnapshot(workspaceUri, {
+          truthIntervalMs: 0,
+          fresh: true,
+          signal: options.signal,
+        });
+        const refreshedExt = refreshed.extensions.find((ext) => ext.extId === "tasks") ?? null;
+        if (!(refreshedExt !== null && refreshedExt.active === true && refreshedExt.space === tasksSpace)) {
+          return buildDisabled(refreshed);
+        }
+      }
+      throw error;
+    }
 
     if (snapshotTruthInterval !== 0) {
       const listedSet = new Set(spaceSync.listedWriters);

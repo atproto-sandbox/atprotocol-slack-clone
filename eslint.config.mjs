@@ -83,12 +83,13 @@ const NO_EXTENSION_IMPORT = {
   message: "D11.11: extension modules must remain isolated behind engine.tasks and extension UI boundaries.",
 };
 const NO_ENTITY_MERGE_DYNAMIC_IMPORT = {
-  selector: "ImportExpression[source.value=/entity-merge/], ImportExpression:has(TemplateElement[value.raw=/entity-merge/])",
+  selector:
+    "ImportExpression[source.value=/entity-merge/], ImportExpression:has(TemplateElement[value.raw=/entity-merge/]), ImportExpression:has(TemplateElement[value.cooked=/entity-merge/])",
   message: "D11.11: dynamic import of entity-merge is forbidden outside Tasks extension and independent reader boundaries.",
 };
 const NO_EXTENSION_DYNAMIC_IMPORT = {
   selector:
-    "ImportExpression[source.value=/^(?!.*\\/lexicons\\/)(?:.*(?:^|\\/)ext(?:\\/|$)|@flock\\/client\\/ext(?:\\/|$))/], ImportExpression:has(TemplateElement[value.raw=/^(?!.*\\/lexicons\\/)(?:.*(?:^|\\/)ext(?:\\/|$)|@flock\\/client\\/ext(?:\\/|$))/])",
+    "ImportExpression[source.value=/^(?!.*\\/lexicons\\/)(?:.*(?:^|\\/)ext(?:\\/|$)|@flock\\/client\\/ext(?:\\/|$))/], ImportExpression:has(TemplateElement[value.raw=/^(?!.*\\/lexicons\\/)(?:.*(?:^|\\/)ext(?:\\/|$)|@flock\\/client\\/ext(?:\\/|$))/]), ImportExpression:has(TemplateElement[value.cooked=/^(?!.*\\/lexicons\\/)(?:.*(?:^|\\/)ext(?:\\/|$)|@flock\\/client\\/ext(?:\\/|$))/])",
   message: "D11.11: dynamic import of client/UI extensions is forbidden outside extension boundaries.",
 };
 const NO_COMPUTED_DYNAMIC_IMPORT = {

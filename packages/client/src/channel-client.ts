@@ -147,18 +147,20 @@ export class ChannelClient {
     };
   }
 
-  /** Reads one message in `ref` with a verified MAC, checking a reply's parent as `edit` does, or null when missing or invalid. */
+  /** Reads one message in `ref` with a verified MAC, checking writer membership (D14) and a reply's parent, or null when missing or invalid. */
   async getMessage(ref: ChannelRef, uri: string): Promise<ChannelMessage | null> {
     const { authorityDid, space } = await this.readable(ref);
     const target = parseSpaceRecordUri(uri, space, COLLECTION.message);
     if (!target) return null;
+    const writers = new Set((await this.deps.sync.writers(space, { workspace: ref.workspace })).map((writer) => writer.did));
+    if (!writers.has(target.repo)) return null;
     const record = await this.verifiedMessageRecord(space, target.repo, target.rkey);
     if (!record) return null;
     const known = new Set<string>();
     if (record.value.parent !== undefined) {
       if (typeof record.value.parent !== "string") return null;
       const parentTarget = parseSpaceRecordUri(record.value.parent, space, COLLECTION.message);
-      if (!parentTarget) return null;
+      if (!parentTarget || !writers.has(parentTarget.repo)) return null;
       const parent = await this.verifiedMessageRecord(space, parentTarget.repo, parentTarget.rkey);
       if (
         !parent ||

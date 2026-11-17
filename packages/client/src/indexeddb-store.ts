@@ -85,7 +85,12 @@ export class IndexedDbStore implements SyncStore {
   }
 
   async putSpace(state: SpaceState): Promise<void> {
-    await this.write(["spaces"], async (stores) => { await settle(stores.spaces!.put(state)); });
+    await this.write(["spaces"], async (stores) => {
+      const existing = await settle<SpaceState | undefined>(stores.spaces!.get(state.space));
+      const nextSeq = Math.max(existing?.invalidationSeq ?? 0, state.invalidationSeq ?? 0);
+      const next = nextSeq > 0 ? { ...state, invalidationSeq: nextSeq } : state;
+      await settle(stores.spaces!.put(next));
+    });
   }
 
   async listSpaces(): Promise<SpaceState[]> {
@@ -185,9 +190,15 @@ export class IndexedDbStore implements SyncStore {
   }
 
   async commit(change: WriterCommit): Promise<boolean> {
-    const storeNames: StoreName[] = change.clock ? ["writers", "records", "meta", "clock"] : ["writers", "records", "meta"];
+    const storeNames: StoreName[] = ["writers", "records", "meta"];
+    if (change.clock) storeNames.push("clock");
+    if (change.expectedInvalidationSeq !== undefined) storeNames.push("spaces");
     return this.write(storeNames, async (stores) => {
       if (change.epoch !== undefined && change.epoch !== await epochOf(stores.meta!, change.space)) return false;
+      if (change.expectedInvalidationSeq !== undefined) {
+        const spaceState = await settle<SpaceState | undefined>(stores.spaces!.get(change.space));
+        if ((spaceState?.invalidationSeq ?? 0) !== change.expectedInvalidationSeq) return false;
+      }
       const current = await settle<WriterState | undefined>(stores.writers!.get([change.space, change.repo]));
       if (!commitAllowed(current, change)) return false;
       const missingKeys = missingOptimisticKeys(current, change);
@@ -223,6 +234,28 @@ export class IndexedDbStore implements SyncStore {
       if (nextClock) pending.push(settle(stores.clock!.put(nextClock)));
       await Promise.all(pending);
       return true;
+    });
+  }
+
+  async invalidateSpace(space: string, extraRepos: readonly string[] = []): Promise<void> {
+    await this.write(["spaces", "writers"], async (stores) => {
+      const [currentSpace, existingWriters] = await Promise.all([
+        settle<SpaceState | undefined>(stores.spaces!.get(space)),
+        settle<WriterState[]>(stores.writers!.index("space").getAll(space)),
+      ]);
+      const nextSpace: SpaceState = currentSpace
+        ? { ...currentSpace, writersListedAt: null, invalidationSeq: (currentSpace.invalidationSeq ?? 0) + 1 }
+        : { space, spaceRev: null, writers: [], writersListedAt: null, workspace: null, lastOpenedAt: 0, invalidationSeq: 1 };
+      const byRepo = new Map(existingWriters.map((writer) => [writer.repo, writer]));
+      const repos = new Set<string>([...byRepo.keys(), ...extraRepos]);
+      const pending: Array<Promise<unknown>> = [settle(stores.spaces!.put(nextSpace))];
+      for (const repo of repos) {
+        const currentWriter = byRepo.get(repo);
+        const staleChange: WriterCommit = { space, repo, expectedGeneration: null, markStale: true };
+        const nextWriter = nextWriterState(currentWriter, staleChange, currentWriter?.optimisticOverlay);
+        pending.push(settle(stores.writers!.put(nextWriter)));
+      }
+      await Promise.all(pending);
     });
   }
 

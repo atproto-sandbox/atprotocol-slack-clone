@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
+import { serializedRecordBytes } from "@flock/protocol/atproto/space-credential-core";
 import { memberspacePolicy } from "@flock/protocol/atproto/space-policy";
 import { advanceHlc, buildEditClosure, MAX_ANCESTOR_REFS, opRef } from "@flock/protocol/entity-merge";
-import { spaceRecordUri, subjectKey, tasksSpaceUri } from "@flock/protocol/keys";
+import { spaceRecordUri, subjectKey, tasksSpaceUri, tidNow } from "@flock/protocol/keys";
 import { COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
+import { WORKSPACE_ENVELOPE } from "@flock/protocol/workspace-summary";
 import { readIndependentTasksSpace, type IndependentTasksReadResult } from "@flock/reader/independent-tasks";
 import { FakeNetwork } from "@flock/testing/fake-network";
 import { createEngine } from "./engine";
@@ -439,5 +441,133 @@ test("engine.tasks and readIndependentTasksSpace match on RepoStarLimitError and
       indVerify,
       "cold STAR verification failure parity",
     );
+  }
+
+  // 3. Codex R2-#6 exact 16 MiB boundary parity: < 16 MiB CBOR record values where STAR framing pushes archive > 16 MiB
+  //    MUST reject identically with permanent setAside across cold STAR, cold JSON fallback (501), and warm listRepoOps delta!
+  {
+    const network = new FakeNetwork();
+    const { workspace, tasksSpace } = await createTasksFixture(network, { members: [ALICE, BOB], skey: "star-16mib-boundary" });
+    const alice = createEngine(transportFor(network, ALICE));
+    const reader = transportFor(network, ALICE);
+
+    await alice.tasks.createTask(workspace, { title: "Alice seed task" });
+
+    const maxBytes = WORKSPACE_ENVELOPE.maxStarArchiveBytes; // 16 * 1024 * 1024
+    const totalCount = 2_100;
+    const baseCount = 2_070;
+
+    let hlc = "";
+    const makeTaskRecord = (idx: number, descLen: number) => {
+      hlc = advanceHlc({ ownLast: hlc || null, wallNowMs: BASE_HLC_MS + idx * 10 });
+      const rkey = tidNow(BASE_HLC_MS + idx * 10, 0);
+      const value = {
+        $type: COLLECTION.task,
+        title: `Task ${String(idx).padStart(4, "0")}`,
+        status: "todo",
+        priority: "none",
+        description: "d".repeat(descLen),
+        t: hlc,
+        createdAt: TIMESTAMP,
+      };
+      return { collection: COLLECTION.task, rkey, value };
+    };
+
+    // Calibrate record size so 2,100 CBOR record values sum to (16 MiB - 1 KiB), strictly < 16 MiB in raw values
+    // while STAR framing (~95 KiB across 2,100 entries + header) pushes total STAR archive > 16 MiB.
+    const probe = makeTaskRecord(0, 7_900);
+    const probeCborBytes = await serializedRecordBytes(probe.collection, probe.rkey, probe.value);
+    const overheadPerRecord = probeCborBytes - 7_900;
+    const targetTotalValuesBytes = maxBytes - 1024; // 16 MiB - 1 KiB
+    const perRecordDesc = Math.floor((targetTotalValuesBytes - totalCount * overheadPerRecord) / totalCount);
+
+    hlc = "";
+    const allRecords: Array<{ collection: string; rkey: string; value: Record<string, unknown> }> = [];
+    let sumValueBytes = 0;
+    for (let i = 0; i < totalCount; i += 1) {
+      const descLen = i < totalCount - 1
+        ? perRecordDesc
+        : Math.max(100, targetTotalValuesBytes - sumValueBytes - overheadPerRecord);
+      const rec = makeTaskRecord(i, descLen);
+      sumValueBytes += await serializedRecordBytes(rec.collection, rec.rkey, rec.value);
+      allRecords.push(rec);
+    }
+    assert.ok(sumValueBytes <= maxBytes - 512 && sumValueBytes >= maxBytes - 2048, `raw CBOR values=${sumValueBytes} near 16 MiB - 1 KiB`);
+
+    // Import first 2,070 records (well under 16 MiB even with STAR framing) so Alice's warm cache syncs cleanly.
+    await network.importRepoAs(BOB, tasksSpace, allRecords.slice(0, baseCount));
+    const warmInitial = await alice.tasks.readSpace(workspace, { fresh: true });
+    assert.equal(warmInitial.complete, true);
+    assert.equal(warmInitial.tasks.length, baseCount + 1);
+
+    // Add final 30 records (~240 KiB delta) so CBOR values stay <= 16 MiB - 1 KiB while STAR archive crosses 16 MiB.
+    await network.applyWritesAs(
+      BOB,
+      tasksSpace,
+      allRecords.slice(baseCount).map((rec) => ({
+        action: "create" as const,
+        collection: rec.collection,
+        rkey: rec.rkey,
+        value: rec.value,
+      })),
+    );
+
+    // 1) Warm Engine incremental listRepoOps delta rejects directly with 0 getRepo STAR calls and purges Bob's cache.
+    let warmDelta!: TasksSpaceView;
+    const warmCalls = await countCalls(network, async () => {
+      warmDelta = await alice.tasks.readSpace(workspace);
+    });
+    assert.equal(warmCalls["com.atproto.space.getRepo"] ?? 0, 0, "warm delta rejects at exact STAR boundary without getRepo call");
+    assert.deepEqual(warmDelta.setAside, [
+      { did: BOB, reason: "its answer is larger than this app reads", permanent: true },
+    ]);
+    assert.equal(warmDelta.tasks.some((t) => t.repo === BOB), false);
+
+    // 2) Cold STAR (Engine + Independent Reader) matches warm delta parity.
+    const coldStarReader = await readIndependentTasksSpace(reader, workspace);
+    const coldStarEngine = await createEngine(transportFor(network, ALICE)).tasks.readSpace(workspace);
+    assertTasksParity(warmDelta, coldStarReader, "16 MiB STAR boundary warm delta vs cold STAR reader");
+    assertTasksParity(coldStarEngine, coldStarReader, "16 MiB STAR boundary cold STAR engine vs reader");
+
+    // 3) Cold JSON fallback (getRepo -> 501) on BOTH Engine and Independent Reader matches cold STAR & warm delta parity.
+    network.interceptResponse = ({ method, params, response }) => {
+      if (method === "com.atproto.space.getRepo" && params.space === tasksSpace && params.repo === BOB && response.ok) {
+        return new Response(JSON.stringify({ error: "MethodNotImplemented", message: "no getRepo" }), {
+          status: 501,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return response;
+    };
+    const coldFallbackReader = await readIndependentTasksSpace(reader, workspace);
+    const coldFallbackEngine = await createEngine(transportFor(network, ALICE)).tasks.readSpace(workspace);
+    assertTasksParity(coldFallbackEngine, coldFallbackReader, "16 MiB STAR boundary cold JSON fallback engine vs reader");
+    assertTasksParity(coldFallbackEngine, coldStarReader, "16 MiB STAR boundary cold JSON fallback vs cold STAR");
+  }
+
+  // 4. Carbon R2-M2 parity: cross-engine disableExtension with no non-authority writers still matches independent reader after 10m credential expiry.
+  {
+    const network = new FakeNetwork();
+    const { workspace, tasksSpace } = await createTasksFixture(network, { members: [ALICE, BOB], skey: "disable-parity" });
+    const bob = createEngine(transportFor(network, BOB));
+    const reader = transportFor(network, BOB);
+
+    assert.equal((await bob.tasks.readSpace(workspace)).enabled, true);
+
+    await network.writeAs(AUTHORITY, workspace, COLLECTION.extInstall, "tasks", {
+      extId: "tasks",
+      space: tasksSpace,
+      active: false,
+      updatedAt: TIMESTAMP,
+      disabledAt: TIMESTAMP,
+    });
+    await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMember", { space: tasksSpace, did: ALICE });
+    await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMember", { space: tasksSpace, did: BOB });
+
+    network.advanceClock(15 * 60_000);
+    const warmBob = await bob.tasks.readSpace(workspace);
+    const coldReader = await readIndependentTasksSpace(reader, workspace);
+    assert.equal(warmBob.enabled, false);
+    assertTasksParity(warmBob, coldReader, "cross-engine disableExtension after credential expiry");
   }
 });

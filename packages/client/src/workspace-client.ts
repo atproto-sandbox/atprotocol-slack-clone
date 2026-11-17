@@ -129,8 +129,8 @@ export class WorkspaceClient {
     const { authorityDid } = workspace;
     if (options.fresh) {
       await this.deps.credentials.fresh(uri);
-      await this.deps.sync?.markSpaceStale(uri);
     }
+    await this.deps.sync?.markSpaceStale(uri);
     const client = await this.deps.credentials.clientFor(uri, authorityDid);
     const scan = (collection: string, maxRecords: number) => listBoundedRecords(client, { space: uri, repo: authorityDid, collection, maxRecords });
     const [profiles, directory, roster, admins, installs, extInstalls] = await Promise.all([

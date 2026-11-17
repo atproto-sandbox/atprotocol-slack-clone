@@ -71,6 +71,8 @@ export type SpaceState = {
   lastOpenedAt: number;
   /** When the account last wrote here and the authority had not yet listed the write; absent when nothing is pending. */
   ownWriteAt?: number | null;
+  /** Incremented atomically on `invalidateSpace` (`markSpaceStale`) so cold generation-0 syncs cannot commit stale reads. */
+  invalidationSeq?: number;
 };
 
 /** A DID's PDS host, or its `#atproto_kem` key, as its DID document said when it was resolved. */
@@ -111,6 +113,8 @@ export type WriterCommit = {
   rev?: string | null;
   /** The space epoch the change was computed under; a purge since then refuses it, so a read cannot bring a purged space back. */
   epoch?: string;
+  /** The space's `invalidationSeq` captured before reads began; refused atomically if `invalidateSpace` ran meanwhile. */
+  expectedInvalidationSeq?: number;
   /** The writer's state after the change; omitted with `markStale`, which keeps the stored state and only marks it stale. */
   next?: Omit<WriterState, "space" | "repo" | "generation">;
   /** Marks the stored state stale, atomically: a hint, or an own write applied before its host's listing shows it. */
@@ -138,8 +142,10 @@ export interface SyncStore {
   counts(space: string, collection: string): Promise<Map<string, number>>;
   /** Advanced by every purge of the space and by `clear`. */
   epoch(space: string): Promise<string>;
-  /** Applies `change` atomically, and only if its epoch, generation and revision checks pass. Returns whether it applied. */
+  /** Applies `change` atomically, and only if its epoch, invalidation sequence, generation and revision checks pass. Returns whether it applied. */
   commit(change: WriterCommit): Promise<boolean>;
+  /** Atomically clears writer listing freshness, increments `invalidationSeq`, and marks every tracked or extra repo stale. */
+  invalidateSpace(space: string, extraRepos?: readonly string[]): Promise<void>;
   /** Drops a writer's records; its state becomes an empty tombstone with an advanced generation. */
   purgeWriter(space: string, repo: string): Promise<void>;
   /** Drops a space's records and state; its writers become tombstones with advanced generations. */

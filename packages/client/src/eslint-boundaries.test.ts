@@ -241,6 +241,18 @@ test("D11.11: computed dynamic import() specifiers are blocked while static lite
     );
   }
 
+  // Escaped zero-expression template dynamic imports must still match via TemplateElement[value.cooked].
+  await assertForbidden(
+    "packages/client/src/channel-client.ts",
+    "export const p = import(`./\\x65xt/tasks`);\n",
+    "D11.11",
+  );
+  await assertForbidden(
+    "packages/client/src/channel-client.ts",
+    "export const p = import(`./entity-\\u006derge`);\n",
+    "D11.11",
+  );
+
   // Static literal and expressionless template dynamic imports stay permitted.
   await assertAllowed(
     "packages/client/src/channel-client.ts",

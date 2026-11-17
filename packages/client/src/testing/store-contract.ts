@@ -55,6 +55,33 @@ export function storeContract(name: string, open: () => Promise<SyncStore>): voi
     assert.deepEqual([state.syncedRev, state.generation], refreshed ? ["r6", 3] : ["r5", 2]);
   });
 
+  test(`${name}: invalidateSpace bumps invalidationSeq atomically, marks unpersisted extraRepos stale, and blocks stale expectedInvalidationSeq commits`, async () => {
+    const store = await open();
+    // Cold space with no SpaceState or WriterState yet: invalidationSeq starts at 0.
+    assert.equal(await store.getSpace(SPACE), undefined);
+    assert.equal(await store.getWriter(SPACE, "did:plc:auth"), undefined);
+
+    await store.invalidateSpace(SPACE, ["did:plc:auth"]);
+    const invalidatedSpace = (await store.getSpace(SPACE))!;
+    assert.equal(invalidatedSpace.invalidationSeq, 1);
+    assert.equal(invalidatedSpace.writersListedAt, null);
+    const invalidatedWriter = (await store.getWriter(SPACE, "did:plc:auth"))!;
+    assert.equal(invalidatedWriter.stale, true);
+    assert.equal(invalidatedWriter.generation, 1);
+
+    // Pre-invalidation generation-0 commit fails BOTH expectedGeneration AND expectedInvalidationSeq!
+    assert.equal(await store.commit(commit("did:plc:auth", 0, { expectedInvalidationSeq: 0 })), false);
+    // Even on an unrelated cold repo with generation 0, expectedInvalidationSeq: 0 is rejected atomically.
+    assert.equal(await store.commit(commit("did:plc:cold2", 0, { expectedInvalidationSeq: 0 })), false);
+    // Commit matching current invalidationSeq: 1 and generation: 1 succeeds and clears stale.
+    assert.equal(await store.commit(commit("did:plc:auth", 1, { expectedInvalidationSeq: 1 })), true);
+    assert.equal((await store.getWriter(SPACE, "did:plc:auth"))!.stale, false);
+
+    // putSpace must never regress invalidationSeq.
+    await store.putSpace({ space: SPACE, spaceRev: null, writers: [], writersListedAt: 100, workspace: null, lastOpenedAt: 100 });
+    assert.equal((await store.getSpace(SPACE))!.invalidationSeq, 1);
+  });
+
   test(`${name}: a commit with a revision older than the stored one is refused`, async () => {
     const store = await open();
     await store.commit(commit("did:plc:w", 0, { rev: "r5", next: { syncedRev: "r5", checkedAt: 1, stale: false, coverage: {} } }));

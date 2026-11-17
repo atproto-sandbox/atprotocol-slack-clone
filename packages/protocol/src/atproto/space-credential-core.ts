@@ -14,6 +14,7 @@ import {
   formatWantMacHeader,
   parseMacHeader,
   serializeRecord,
+  serializeRepo,
   verifyCommit,
   verifyRecord,
   verifyRepoStar,
@@ -441,15 +442,71 @@ export async function verifyRecordCid(
 
 const MAX_VERIFIED_RECORD_PAGES = 128;
 
+const PLACEHOLDER_TID_REV = "2222222222222";
+const STAR_COMMIT_VERSION = 1;
+const COMMIT_DIGEST_BYTE_LENGTH = 32;
+const starPathEncoder = new TextEncoder();
+
+/** Returns the shortest unsigned LEB128 varint byte length used by `@atproto/car`'s `encodeVarInt` / STAR framing. */
+export function varintByteLength(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new RangeError("Varint value must be a non-negative safe integer.");
+  }
+  let n = value;
+  let bytes = 1;
+  while (n >= 0x80) {
+    n = Math.floor(n / 128);
+    bytes += 1;
+  }
+  return bytes;
+}
+
+/** Exact STAR-lite v1 archive header byte length (`STAR_MAGIC` + varint + CBOR `{ $type: "atproto-space-repo", ...commit }`). */
+export async function starHeaderBytes(commit: Commit): Promise<number> {
+  let total = 0;
+  for await (const chunk of serializeRepo(commit, [])) {
+    total += chunk.byteLength;
+  }
+  return total;
+}
+
+/** Exact STAR-lite v1 per-record entry byte length (`varint(keyLen) + keyBytes + varint(valLen) + valLen`). */
+export function starEntryBytes(collection: string, rkey: string, valueByteLength: number): number {
+  const keyByteLength = starPathEncoder.encode(`${collection}/${rkey}`).byteLength;
+  return varintByteLength(keyByteLength) + keyByteLength + varintByteLength(valueByteLength) + valueByteLength;
+}
+
+/** Exact STAR-lite v1 archive byte length matching `@atproto/space`'s `serializeRepo(commit, records)`. */
+export async function computeStarArchiveBytes(
+  commit: Commit,
+  entries: ReadonlyArray<{ collection: string; rkey: string; byteLength: number }>,
+): Promise<number> {
+  let total = await starHeaderBytes(commit);
+  for (const entry of entries) {
+    total += starEntryBytes(entry.collection, entry.rkey, entry.byteLength);
+  }
+  return total;
+}
+
+function defaultStarHeaderCommit(space: string, repo: string): Commit {
+  return {
+    ver: STAR_COMMIT_VERSION,
+    space: space as Commit["space"],
+    repo: repo as Commit["repo"],
+    rev: PLACEHOLDER_TID_REV,
+    data: new Uint8Array(COMMIT_DIGEST_BYTE_LENGTH),
+  };
+}
+
 /**
  * Pages `com.atproto.space.listRecords` for one repo while verifying every record's CID and enforcing
- * aggregate `maxRecords` and serialized DRISL CBOR `maxBytes` caps page-by-page so oversized repos abort
+ * aggregate `maxRecords` and exact STAR-lite archive byte `maxBytes` caps page-by-page so oversized repos abort
  * immediately with `RepoStarLimitError` before fetching additional pages.
  */
 export async function listVerifiedBoundedRecords(
   client: AtprotoClient,
-  input: { space: string; repo: string; collection?: string; maxRecords: number; maxBytes: number },
-): Promise<{ records: VerifiedBoundedRecord[]; totalBytes: number }> {
+  input: { space: string; repo: string; collection?: string; maxRecords: number; maxBytes: number; commit?: Commit },
+): Promise<{ records: VerifiedBoundedRecord[]; totalBytes: number; recordsBytes: number }> {
   if (!Number.isSafeInteger(input.maxRecords) || input.maxRecords < 0) {
     throw new RangeError("Verified record limit must be a non-negative safe integer.");
   }
@@ -460,9 +517,14 @@ export async function listVerifiedBoundedRecords(
   const records: VerifiedBoundedRecord[] = [];
   const seenCursors = new Set<string>();
   const seenKeys = new Set<string>();
-  let totalBytes = 0;
+  const headerBytes = await starHeaderBytes(input.commit ?? defaultStarHeaderCommit(input.space, input.repo));
+  let recordsBytes = 0;
+  let totalBytes = headerBytes;
   let pages = 0;
   let cursor: string | undefined;
+  if (totalBytes > input.maxBytes) {
+    throw new RepoStarLimitError("bytes", input.maxBytes, totalBytes);
+  }
 
   do {
     const remaining = input.maxRecords - records.length;
@@ -506,7 +568,9 @@ export async function listVerifiedBoundedRecords(
       if (!parsedCid || !verified.ok) {
         throw new SpaceMacError(`Record ${entry.collection}/${entry.rkey} for ${input.repo} failed CID verification.`);
       }
-      totalBytes += verified.byteLength;
+      const entryBytes = starEntryBytes(entry.collection, entry.rkey, verified.byteLength);
+      recordsBytes += entryBytes;
+      totalBytes += entryBytes;
       if (totalBytes > input.maxBytes) {
         throw new RepoStarLimitError("bytes", input.maxBytes, totalBytes);
       }
@@ -552,7 +616,7 @@ export async function listVerifiedBoundedRecords(
     }
   }
 
-  return { records, totalBytes };
+  return { records, totalBytes, recordsBytes };
 }
 
 /** The response a caller sees once its body has been read and verified. The length and encoding headers described the wire bytes. */
