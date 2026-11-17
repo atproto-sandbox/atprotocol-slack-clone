@@ -205,6 +205,11 @@ const WORKSPACE_AUTHORITY_COLLECTIONS = [
 ] as const;
 
 const MAX_OPS_SEEN_ENTRIES = 100_000;
+const MAX_REPO_OP_CURSOR_LENGTH = 1_024;
+const MAX_REPO_OP_REV_LENGTH = 64;
+const MAX_REPO_OP_COLLECTION_LENGTH = 317;
+const MAX_REPO_OP_RKEY_LENGTH = 512;
+const MAX_REPO_OP_CID_LENGTH = 256;
 const utf8Encoder = new TextEncoder();
 
 type RepoFollowAttempt = {
@@ -221,7 +226,8 @@ type RepoFollowState = {
   cids: Map<string, Cid>;
   attempts: Map<string, RepoFollowAttempt>;
   unbaselined: boolean;
-  stale: boolean;
+  staleSeq: number;
+  ackedStaleSeq: number;
   checkedAt: number | null;
   permanentFailure: boolean;
   permanentFailedListedRev: string | null;
@@ -371,7 +377,7 @@ export class SyncCore {
   async markStale(space: string, repo: string): Promise<void> {
     await this.deps.store.commit({ space, repo, expectedGeneration: null, markStale: true });
     const follower = this.opsFollowers.get(space)?.repos.get(repo);
-    if (follower) follower.stale = true;
+    if (follower) follower.staleSeq += 1;
   }
 
   /** Marks every tracked writer (including unpersisted workspace authority / probes) in `space` stale and bumps `invalidationSeq`. */
@@ -381,7 +387,7 @@ export class SyncCore {
     this.opened.delete(space);
     const follower = this.opsFollowers.get(space);
     if (follower) {
-      for (const repo of follower.repos.values()) repo.stale = true;
+      for (const repo of follower.repos.values()) repo.staleSeq += 1;
     }
   }
 
@@ -683,17 +689,18 @@ export class SyncCore {
       const existing = spaceFollow.repos.get(repo);
       if (!existing) return true;
       const listedRev = listedRepoRevs.get(repo);
+      const stalePending = isRepoFollowStale(existing);
       if (existing.permanentFailure) {
         const writerIntervalElapsed =
           existing.checkedAt === null || now - existing.checkedAt < 0 || now - existing.checkedAt >= intervalMs;
         const listedRevChanged =
           listedRev !== undefined &&
           (existing.permanentFailedListedRev === null || listedRev > existing.permanentFailedListedRev);
-        return !input.deliver || existing.stale || writerIntervalElapsed || reportedSet.has(repo) || listedRevChanged;
+        return !input.deliver || stalePending || writerIntervalElapsed || reportedSet.has(repo) || listedRevChanged;
       }
       if (
         existing.unbaselined ||
-        existing.stale ||
+        stalePending ||
         existing.attempts.size > 0 ||
         existing.holdStartedAt !== null ||
         existing.expiredFloorRkey !== null
@@ -713,6 +720,7 @@ export class SyncCore {
         spaceFollow.repos.set(repo, repoState);
       }
       repoState.checkedAt = now;
+      const seenStaleSeq = repoState.staleSeq;
 
       const shouldBaselineOnly = !input.deliver || repoState.unbaselined;
       const holdExpired = !shouldBaselineOnly && repoState.holdStartedAt !== null && elapsed - repoState.holdStartedAt >= MAX_HOLD_MS;
@@ -732,7 +740,7 @@ export class SyncCore {
           repoState.cids = baseline.cids;
           repoState.attempts.clear();
           repoState.unbaselined = false;
-          repoState.stale = false;
+          repoState.ackedStaleSeq = Math.max(repoState.ackedStaleSeq, seenStaleSeq);
           repoState.permanentFailure = false;
           repoState.permanentFailedListedRev = null;
           repoState.permanentAside = null;
@@ -788,7 +796,7 @@ export class SyncCore {
             });
           }
           events.sort((left, right) => (left.rkey < right.rkey ? -1 : left.rkey > right.rkey ? 1 : left.uri < right.uri ? -1 : left.uri > right.uri ? 1 : 0));
-          repoState.stale = false;
+          repoState.ackedStaleSeq = Math.max(repoState.ackedStaleSeq, seenStaleSeq);
           repoState.holdStartedAt = null;
           repoState.permanentFailure = false;
           repoState.permanentFailedListedRev = null;
@@ -824,7 +832,7 @@ export class SyncCore {
           repoState.setHash = baseline.setHash;
           repoState.cids = baseline.cids;
           repoState.attempts.clear();
-          repoState.stale = false;
+          repoState.ackedStaleSeq = Math.max(repoState.ackedStaleSeq, seenStaleSeq);
           repoState.permanentFailure = false;
           repoState.permanentFailedListedRev = null;
           repoState.permanentAside = null;
@@ -835,7 +843,7 @@ export class SyncCore {
           const reset: RepoOpsResetNotice = { kind: "reset", space: input.space, repo, reason: replay.reason, rev: baseline.rev };
           return { repo, repoState, events: [], silentSeenKeys: [], reset };
         }
-        repoState.stale = false;
+        repoState.ackedStaleSeq = Math.max(repoState.ackedStaleSeq, seenStaleSeq);
         repoState.holdStartedAt = null;
         repoState.permanentFailure = false;
         repoState.permanentFailedListedRev = null;
@@ -858,12 +866,12 @@ export class SyncCore {
           hadSyncedRev: repoState.rev !== null,
         });
         if (!failure) throw error;
+        repoState.ackedStaleSeq = Math.max(repoState.ackedStaleSeq, seenStaleSeq);
         if (failure.kind === "empty") {
           repoState.rev = null;
           repoState.setHash = new Uint8Array(LTHASH_STATE_BYTES);
           repoState.cids = new Map();
           repoState.unbaselined = false;
-          repoState.stale = false;
           repoState.permanentFailure = false;
           repoState.permanentFailedListedRev = null;
           repoState.permanentAside = null;
@@ -1161,7 +1169,16 @@ export class SyncCore {
         if (error instanceof ChangingWriterError) return { repo: input.repo, changing: true };
         const failure = classifyVerifiedRepoFailure(error);
         if (!failure) throw error;
-        if (failure.permanent) await this.dropRecordsOnPermanentFailure(input.space, input.repo, state, input.collections, input.epoch);
+        if (failure.permanent) {
+          await this.dropRecordsOnPermanentFailure(
+            input.space,
+            input.repo,
+            state,
+            input.collections,
+            input.epoch,
+            startInvalidationSeq,
+          );
+        }
         return { repo: input.repo, setAside: { did: input.repo, reason: failure.reason, permanent: failure.permanent } };
       }
     }
@@ -1189,27 +1206,27 @@ export class SyncCore {
     state: WriterState,
     collections: readonly string[],
     epoch: string,
+    expectedInvalidationSeq: number,
   ): Promise<void> {
-    // When a writer had a verified syncedRev !== null and disappeared (`RepoNotFound` while omitted from listRepos),
-    // clear held records/setHash/coverage while keeping `syncedRev` non-null so subsequent reads continue failing closed.
-    if (state.syncedRev !== null) {
-      const emptyReplace = buildFullReplaceMap(space, repo, [], [...Object.keys(state.coverage), ...collections]);
-      await this.deps.store.commit({
-        space,
-        repo,
-        expectedGeneration: state.generation,
-        epoch,
-        next: {
-          syncedRev: state.syncedRev,
-          checkedAt: null,
-          stale: false,
-          coverage: {},
-        },
-        replace: emptyReplace,
-      });
-      return;
-    }
-    await this.deps.store.purgeWriter(space, repo);
+    // Guard permanent-failure record cleanup with full CAS checks (`expectedGeneration`, `expectedInvalidationSeq`, `epoch`)
+    // so a delayed cold failure never erases newer verified records or WriterState committed concurrently.
+    const emptyReplace = buildFullReplaceMap(space, repo, [], [...Object.keys(state.coverage), ...collections]);
+    await this.deps.store.commit({
+      space,
+      repo,
+      expectedGeneration: state.generation,
+      expectedInvalidationSeq,
+      epoch,
+      next: {
+        // When `state.syncedRev !== null`, preserve non-null `syncedRev` so subsequent reads keep failing closed
+        // on unauthenticated 400 `RepoNotFound`; for cold failures (`syncedRev === null`), leave `syncedRev: null`.
+        syncedRev: state.syncedRev,
+        checkedAt: null,
+        stale: false,
+        coverage: {},
+      },
+      replace: emptyReplace,
+    });
   }
 
   private async resolveValidPds(did: string): Promise<string> {
@@ -1392,10 +1409,11 @@ export class SyncCore {
     signal?: AbortSignal,
     bounds?: { maxOps?: number; maxPayloadBytes?: number },
   ): Promise<{ ops: RawRepoOp[]; commit: Commit }> {
+    const maxPayloadBytes = bounds?.maxPayloadBytes ?? WORKSPACE_ENVELOPE.maxStarArchiveBytes;
     return this.withCredentialRetry(space, repo, async (_credential, client) => {
       const ops: RawRepoOp[] = [];
       const seenCursors = new Set<string>();
-      let payloadBytes = 0;
+      let stagedBytes = 0;
       let cursor: string | undefined;
       for (let pageIndex = 0; pageIndex < WORKSPACE_ENVELOPE.maxRepoOpsPages; pageIndex += 1) {
         if (signal?.aborted) throw signal.reason ?? new Error("Aborted.");
@@ -1410,22 +1428,48 @@ export class SyncCore {
         if (!page || typeof page !== "object" || !Array.isArray(page.ops) || page.ops.length > 500) {
           throw new DeltaFallbackError("Malformed listRepoOps page.");
         }
-        const pageOps = page.ops as RawRepoOp[];
-        if (bounds?.maxOps !== undefined && ops.length + pageOps.length > bounds.maxOps) {
+        if (
+          page.cursor !== undefined &&
+          (typeof page.cursor !== "string" || page.cursor.length > MAX_REPO_OP_CURSOR_LENGTH)
+        ) {
+          throw new DeltaFallbackError("Malformed or oversized listRepoOps cursor.");
+        }
+        if (bounds?.maxOps !== undefined && ops.length + page.ops.length > bounds.maxOps) {
           throw new DeltaFallbackError("listRepoOps exceeded cumulative op staging bound.");
         }
-        if (bounds?.maxPayloadBytes !== undefined) {
-          for (const rawOp of pageOps) {
-            const val = rawOp && typeof rawOp === "object" ? (rawOp as { value?: unknown }).value : undefined;
-            if (val !== undefined && val !== null) {
-              payloadBytes += utf8Encoder.encode(JSON.stringify(val)).byteLength;
-              if (payloadBytes > bounds.maxPayloadBytes) {
-                throw new DeltaFallbackError("listRepoOps exceeded cumulative payload byte staging bound.");
-              }
-            }
+        if (typeof page.cursor === "string") {
+          stagedBytes += utf8Encoder.encode(page.cursor).byteLength;
+          if (stagedBytes > maxPayloadBytes) {
+            throw new DeltaFallbackError("listRepoOps exceeded cumulative payload byte staging bound.");
           }
         }
-        ops.push(...pageOps);
+        const projectedOps: RawRepoOp[] = [];
+        for (const rawOp of page.ops as unknown[]) {
+          if (!isValidRawOp(rawOp)) {
+            throw new DeltaFallbackError("Malformed or oversized op entry in listRepoOps.");
+          }
+          stagedBytes +=
+            utf8Encoder.encode(rawOp.rev).byteLength +
+            utf8Encoder.encode(rawOp.collection).byteLength +
+            utf8Encoder.encode(rawOp.rkey).byteLength +
+            (rawOp.cid !== null ? utf8Encoder.encode(rawOp.cid).byteLength : 0) +
+            (rawOp.prev !== null ? utf8Encoder.encode(rawOp.prev).byteLength : 0);
+          if (!excludeValues && rawOp.value !== undefined && rawOp.value !== null) {
+            stagedBytes += utf8Encoder.encode(JSON.stringify(rawOp.value)).byteLength;
+          }
+          if (stagedBytes > maxPayloadBytes) {
+            throw new DeltaFallbackError("listRepoOps exceeded cumulative payload byte staging bound.");
+          }
+          projectedOps.push({
+            rev: rawOp.rev,
+            collection: rawOp.collection,
+            rkey: rawOp.rkey,
+            cid: rawOp.cid,
+            prev: rawOp.prev,
+            ...(!excludeValues && rawOp.value !== undefined ? { value: rawOp.value } : {}),
+          });
+        }
+        ops.push(...projectedOps);
         if (page.commit !== undefined) {
           const commit = decodeCommitResponse(page.commit, space, repo);
           if (!commit || page.cursor !== undefined) throw new DeltaFallbackError("Malformed final listRepoOps commit.");
@@ -2517,11 +2561,17 @@ function isValidPdsEndpointUrl(value: string): boolean {
 function isValidRawOp(op: unknown): op is RawRepoOp {
   if (!op || typeof op !== "object" || Array.isArray(op)) return false;
   const candidate = op as Record<string, unknown>;
-  if (typeof candidate.rev !== "string" || candidate.rev.length === 0) return false;
-  if (typeof candidate.collection !== "string" || candidate.collection.length === 0) return false;
-  if (typeof candidate.rkey !== "string" || candidate.rkey.length === 0) return false;
-  if (candidate.cid !== null && typeof candidate.cid !== "string") return false;
-  if (candidate.prev !== null && typeof candidate.prev !== "string") return false;
+  if (typeof candidate.rev !== "string" || candidate.rev.length === 0 || candidate.rev.length > MAX_REPO_OP_REV_LENGTH) return false;
+  if (
+    typeof candidate.collection !== "string" ||
+    candidate.collection.length === 0 ||
+    candidate.collection.length > MAX_REPO_OP_COLLECTION_LENGTH
+  ) {
+    return false;
+  }
+  if (typeof candidate.rkey !== "string" || candidate.rkey.length === 0 || candidate.rkey.length > MAX_REPO_OP_RKEY_LENGTH) return false;
+  if (candidate.cid !== null && (typeof candidate.cid !== "string" || candidate.cid.length > MAX_REPO_OP_CID_LENGTH)) return false;
+  if (candidate.prev !== null && (typeof candidate.prev !== "string" || candidate.prev.length > MAX_REPO_OP_CID_LENGTH)) return false;
   return true;
 }
 
@@ -2593,7 +2643,8 @@ function createRepoFollowState(unbaselined: boolean): RepoFollowState {
     cids: new Map(),
     attempts: new Map(),
     unbaselined,
-    stale: false,
+    staleSeq: 0,
+    ackedStaleSeq: 0,
     checkedAt: null,
     permanentFailure: false,
     permanentFailedListedRev: null,
@@ -2602,6 +2653,10 @@ function createRepoFollowState(unbaselined: boolean): RepoFollowState {
     holdStartedAt: null,
     expiredFloorRkey: null,
   };
+}
+
+function isRepoFollowStale(state: RepoFollowState): boolean {
+  return state.staleSeq > state.ackedStaleSeq;
 }
 
 function maxRkey(existing: string | null, candidate: string): string {

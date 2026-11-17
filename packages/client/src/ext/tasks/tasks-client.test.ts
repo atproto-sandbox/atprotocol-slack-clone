@@ -15,6 +15,7 @@ import {
   EntityNotFoundError,
   StaleEntityContextError,
   TasksExtensionDisabledError,
+  TasksWorkspaceUnavailableError,
 } from "./index";
 
 Object.assign(globalThis, { IDBKeyRange });
@@ -686,6 +687,8 @@ test("own optimistic writes preserve listRepoOps LtHash delta continuity and dis
             extId: "tasks",
             space: tasksSpace,
             active: false,
+            enabledBy: AUTHORITY,
+            enabledAt: TIMESTAMP,
             updatedAt: TIMESTAMP,
             disabledAt: TIMESTAMP,
           });
@@ -820,4 +823,81 @@ test("workspaces.summary invalidates workspace snapshot cleanly and cross-engine
     1,
     "createTask must NOT write task when Tasks extension is disabled",
   );
+});
+
+test("ensureSyncedForWrite refuses writes when live workspace snapshot verification fails while allowing writes when only non-authority Tasks writer is set aside (Codex R3-#4)", async () => {
+  const network = new FakeNetwork();
+  const { workspace, tasksSpace } = await setupTasksWorkspace(network, { members: [ALICE, BOB] });
+
+  const owner = createEngine(transportFor(network, AUTHORITY));
+  const alice = createEngine(transportFor(network, ALICE));
+
+  // Warm cache says enabled: true for both owner and alice.
+  const seededTask = await owner.tasks.createTask(workspace, { title: "Seeded task" });
+  const seededComment = await owner.tasks.addComment(workspace, { taskUri: seededTask.uri, body: "Seeded comment" });
+  assert.equal((await alice.tasks.readSpace(workspace)).enabled, true);
+
+  // Another admin disables Tasks, AND workspace listRepoOps/getRepo transiently returns 503 while tasksSpace endpoints stay reachable!
+  await network.writeAs(AUTHORITY, workspace, COLLECTION.extInstall, "tasks", {
+    extId: "tasks",
+    space: tasksSpace,
+    active: false,
+    enabledBy: AUTHORITY,
+    enabledAt: TIMESTAMP,
+    updatedAt: TIMESTAMP,
+    disabledAt: TIMESTAMP,
+  });
+
+  network.interceptResponse = ({ method, params, response }) => {
+    if (
+      params.space === workspace &&
+      (method === "com.atproto.space.listRepoOps" || method === "com.atproto.space.getRepo")
+    ) {
+      return new Response(JSON.stringify({ error: "UpstreamUnavailable", message: "transient 503" }), { status: 503 });
+    }
+    return response;
+  };
+
+  await assert.rejects(
+    () => owner.tasks.createTask(workspace, { title: "Must not write on incomplete workspace verification" }),
+    TasksWorkspaceUnavailableError,
+  );
+  await assert.rejects(
+    () => owner.tasks.deleteComment(workspace, seededComment.uri),
+    TasksWorkspaceUnavailableError,
+  );
+  network.interceptResponse = undefined;
+
+  const afterRefused = await network.clientFor(AUTHORITY).query<{ records: Array<{ collection: string }> }>(
+    "com.atproto.space.listRecords",
+    { space: tasksSpace, repo: AUTHORITY },
+  );
+  assert.equal(afterRefused.records.filter((r) => r.collection === COLLECTION.task).length, 1);
+  assert.equal(afterRefused.records.some((r) => r.collection === COLLECTION.taskComment), true);
+
+  // Re-enable Tasks and verify that a transient 503 affecting ONLY non-authority member BOB's Tasks PDS does NOT block ALICE's write!
+  await network.writeAs(AUTHORITY, workspace, COLLECTION.extInstall, "tasks", {
+    extId: "tasks",
+    space: tasksSpace,
+    active: true,
+    enabledBy: AUTHORITY,
+    enabledAt: TIMESTAMP,
+    updatedAt: TIMESTAMP,
+  });
+  await network.writeAs(BOB, tasksSpace, COLLECTION.task, "3kbbbbbbbbbbb", {
+    title: "Bob task before 503",
+    status: "todo",
+    priority: "none",
+    t: "1700000000000-0001-b",
+    createdAt: TIMESTAMP,
+  });
+  network.interceptResponse = ({ params, response }) => {
+    if (params.space === tasksSpace && params.repo === BOB) {
+      return new Response(JSON.stringify({ error: "UpstreamUnavailable", message: "bob pds 503" }), { status: 503 });
+    }
+    return response;
+  };
+  const aliceCreated = await alice.tasks.createTask(workspace, { title: "Alice write succeeds with Bob setAside" });
+  network.interceptResponse = undefined;
+  assert.equal(aliceCreated.task.title, "Alice write succeeds with Bob setAside");
 });

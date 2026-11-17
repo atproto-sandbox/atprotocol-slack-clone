@@ -22,6 +22,7 @@ export {
   TASKS_COLLECTIONS,
   TasksClient,
   TasksExtensionDisabledError,
+  TasksWorkspaceUnavailableError,
   type AddCommentInput,
   type CommentWriteResult,
   type CreateProjectInput,

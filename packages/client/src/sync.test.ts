@@ -1521,3 +1521,255 @@ test("followRepoOps isolates failed initial writers from new joiners, tracks per
     assert.equal(delivered.length, 0, "must NOT execute pre-suspension cmd-m1-suspended");
   }
 });
+
+test("fetchRepoOpsPages strips unknown fields, rejects oversized headers/cursors on page 1, and enforces cumulative metadata byte caps (Codex R3-#1 / Carbon R3-M1)", async () => {
+  const network = new FakeNetwork();
+  const space = await createChannel(network, "r3m1-metadata", [BOB, READER]);
+  await writeMessage(network, BOB, space, 1, "bob-seed");
+  const { core } = syncFor(network, READER);
+  assert.equal((await core.syncVerifiedSpace({ space, collections: [COLLECTION.message] })).complete, true);
+
+  // 1. Unknown properties (`padding`) are stripped immediately from staged ops, and valid commit returns clean projected objects.
+  network.interceptResponse = async ({ method, params, response }) => {
+    if (method === "com.atproto.space.listRepoOps" && params.repo === BOB && response.ok) {
+      const body = (await response.json()) as { ops: Array<Record<string, unknown>>; commit: unknown };
+      return new Response(
+        JSON.stringify({
+          ...body,
+          ops: [
+            {
+              rev: "3k11111111111",
+              collection: COLLECTION.message,
+              rkey: key(2),
+              cid: null,
+              prev: null,
+              value: null,
+              padding: "p".repeat(128_000),
+            },
+          ],
+        }),
+        { status: 200, headers: response.headers },
+      );
+    }
+    return response;
+  };
+  const projected = await (core as unknown as {
+    fetchRepoOpsPages(space: string, repo: string, since: string | undefined, excludeValues: boolean): Promise<{ ops: Array<Record<string, unknown>> }>;
+  }).fetchRepoOpsPages(space, BOB, undefined, false);
+  assert.equal(projected.ops.length, 1);
+  assert.equal("padding" in projected.ops[0]!, false, "unknown extra fields must be stripped before retention");
+  assert.deepEqual(Object.keys(projected.ops[0]!).sort(), ["cid", "collection", "prev", "rev", "rkey", "value"]);
+
+  // 2. Oversized op header field (`rkey` > 512 chars) and oversized cursor (> 1024 chars) abort on page 1 without fetching cursor p2.
+  for (const label of ["oversized-rkey", "oversized-cursor"] as const) {
+    const cursors: Array<string | undefined> = [];
+    await writeMessage(network, BOB, space, label === "oversized-rkey" ? 3 : 4, `trigger-${label}`);
+    network.interceptResponse = ({ method, params, response }) => {
+      if (method === "com.atproto.space.listRepoOps" && params.repo === BOB) {
+        cursors.push(typeof params.cursor === "string" ? params.cursor : undefined);
+        const huge = "x".repeat(1_200);
+        return new Response(
+          JSON.stringify({
+            ops: [
+              {
+                rev: "3k22222222222",
+                collection: COLLECTION.message,
+                rkey: label === "oversized-rkey" ? huge : key(10),
+                cid: null,
+                prev: null,
+                value: null,
+              },
+            ],
+            cursor: label === "oversized-cursor" ? huge : "p2",
+          }),
+          { status: 200, headers: response.headers },
+        );
+      }
+      return response;
+    };
+    const res = await core.syncVerifiedSpace({ space, collections: [COLLECTION.message] });
+    assert.equal(res.complete, true, `${label}: cleanly falls back to STAR`);
+    assert.deepEqual(cursors, [undefined], `${label}: aborted on page 1 without fetching p2`);
+  }
+
+  // 3. Cumulative metadata-only (value: null) op header + cursor bytes exceeding maxStarBytes abort pagination early before fetching later pages.
+  await writeMessage(network, BOB, space, 5, "trigger-meta-cap");
+  const metaCursors: Array<string | undefined> = [];
+  network.interceptResponse = ({ method, params, response }) => {
+    if (method === "com.atproto.space.listRepoOps" && params.repo === BOB) {
+      const cursor = typeof params.cursor === "string" ? params.cursor : undefined;
+      metaCursors.push(cursor);
+      const pageNum = cursor === undefined ? 1 : Number(cursor.replace("m", ""));
+      return new Response(
+        JSON.stringify({
+          ops: Array.from({ length: 4 }, (_, i) => ({
+            rev: "3k33333333333",
+            collection: COLLECTION.message,
+            rkey: `r-${pageNum}-${i}-${"k".repeat(400)}`,
+            cid: null,
+            prev: null,
+            value: null,
+          })),
+          ...(pageNum < 10 ? { cursor: `m${pageNum + 1}` } : {}),
+        }),
+        { status: 200, headers: response.headers },
+      );
+    }
+    return response;
+  };
+  const limited = await core.syncVerifiedSpace({ space, collections: [COLLECTION.message], maxStarBytes: 4_000 });
+  assert.equal(limited.complete, true);
+  assert.ok(metaCursors.length >= 2 && metaCursors.length <= 3, `metadata byte cap aborted early at ${metaCursors.length} pages`);
+  assert.equal(metaCursors.includes("m5"), false);
+});
+
+test("delayed cold-sync permanent failure cleanup never erases a newer concurrent verified commit on a shared store (Codex R3-#2)", async () => {
+  const network = new FakeNetwork();
+  const space = await createChannel(network, "r3-cas-purge", [BOB, READER]);
+  await writeMessage(network, BOB, space, 1, "valid-verified-message");
+
+  const sharedStore = new MemoryStore();
+  const { core: core1 } = syncFor(network, READER, { store: sharedStore });
+  const { core: core2 } = syncFor(network, READER, { store: sharedStore });
+
+  // Intercept core1's cold STAR fetch: strip ATProto MAC on the delayed attempt #1, while letting core2 succeed cleanly!
+  let releaseDelayedFailure!: () => void;
+  const delayedFailureGate = new Promise<void>((resolve) => {
+    releaseDelayedFailure = resolve;
+  });
+  let markPaused!: () => void;
+  const paused = new Promise<void>((resolve) => {
+    markPaused = resolve;
+  });
+  let pausedCore1 = false;
+  let corruptNextGetRepo = true;
+  network.interceptResponse = async ({ method, params, response }) => {
+    if (corruptNextGetRepo && method === "com.atproto.space.getRepo" && params.repo === BOB && response.ok) {
+      if (!pausedCore1) {
+        pausedCore1 = true;
+        markPaused();
+        await delayedFailureGate;
+      }
+      // Return a permanently forged / corrupted STAR body after delay so core1 fails with permanent verification error!
+      return new Response(new Uint8Array(64).fill(0xfe), { status: 200, headers: response.headers });
+    }
+    return response;
+  };
+
+  // 1. Start core1 cold sync (captures syncedRev: null, generation: 0, invalidationSeq: 0), pausing before commit.
+  const core1Promise = core1.syncVerifiedSpace({ space, collections: [COLLECTION.message], maxStarRecords: 100 });
+  await paused;
+
+  // 2. Invalidate space, turn off fault injection for core2, and run core2 on the shared store to commit valid verified state!
+  corruptNextGetRepo = false;
+  await sharedStore.invalidateSpace(space);
+  const core2Result = await core2.syncVerifiedSpace({ space, collections: [COLLECTION.message] });
+  assert.equal(core2Result.complete, true);
+  assert.equal(core2Result.records.some((r) => r.repo === BOB && r.value.text === "valid-verified-message"), true);
+
+  // 3. Re-enable forged response for core1's remaining retry attempts and release delayed failure.
+  corruptNextGetRepo = true;
+  releaseDelayedFailure();
+  const core1Result = await core1Promise;
+  assert.equal(core1Result.setAside.some((s) => s.did === BOB && s.permanent), true);
+
+  // 4. Shared store MUST still hold core2's valid verified records and non-null syncedRev!
+  const persistedBobRecords = await sharedStore.records(space, COLLECTION.message, BOB);
+  assert.equal(persistedBobRecords.length, 1);
+  assert.equal(persistedBobRecords[0]!.value.text, "valid-verified-message");
+  const persistedBobState = await sharedStore.getWriter(space, BOB);
+  assert.ok(persistedBobState?.syncedRev);
+});
+
+test("followRepoOps consumes stale hints on permanent failures without defeating backoff, while preserving new hints arriving mid-poll (Codex R3-#3)", async () => {
+  // (a) baseline Bob -> markSpaceStale -> deactivate Bob -> 1 check consumes stale hint -> Alice-only ticks do not re-poll Bob.
+  {
+    const network = new FakeNetwork();
+    const space = await createChannel(network, "r3-stale-backoff", [ALICE, BOB, READER]);
+    await writeMessage(network, ALICE, space, 1, "alice-seed");
+    await writeMessage(network, BOB, space, 1, "bob-seed");
+
+    const { core } = syncFor(network, READER);
+    assert.equal((await core.followRepoOps({ space, collections: [COLLECTION.message], deliver: false, onEvent: async () => undefined })).complete, true);
+
+    await core.markSpaceStale(space);
+    network.setAccountState(BOB, "deactivated");
+    const firstDownCalls = await countCalls(network, async () => {
+      const poll1 = await core.followRepoOps({ space, collections: [COLLECTION.message], deliver: true, onEvent: async () => undefined });
+      assert.equal(poll1.complete, false);
+      assert.equal(poll1.setAside.some((s) => s.did === BOB && s.permanent), true);
+    });
+    assert.ok((firstDownCalls["com.atproto.space.listRepoOps"] ?? 0) >= 1, "stale hint triggers one recheck");
+
+    // Subsequent Alice-only ticks must NOT re-poll deactivated Bob before truthIntervalMs!
+    for (let i = 2; i <= 4; i += 1) {
+      await writeMessage(network, ALICE, space, i, `alice-live-${i}`);
+      let bobCalls = 0;
+      network.interceptResponse = ({ params, response }) => {
+        if (params.space === space && params.repo === BOB) bobCalls += 1;
+        return response;
+      };
+      const tick = await core.followRepoOps({ space, collections: [COLLECTION.message], deliver: true, onEvent: async () => undefined });
+      network.interceptResponse = undefined;
+      assert.equal(tick.delivered.length, 1);
+      assert.equal(bobCalls, 0, `tick ${i} must NOT hammer permanently failed Bob after stale hint was consumed`);
+    }
+  }
+
+  // (b) markSpaceStale arriving mid-flight while Bob's poll is running IS preserved for the next poll!
+  {
+    const network = new FakeNetwork();
+    const space = await createChannel(network, "r3-midpoll-stale", [ALICE, BOB, READER]);
+    await writeMessage(network, BOB, space, 1, "bob-seed");
+    const { core } = syncFor(network, READER);
+    assert.equal((await core.followRepoOps({ space, collections: [COLLECTION.message], deliver: false, onEvent: async () => undefined })).complete, true);
+
+    await core.markSpaceStale(space);
+    let releaseMidPoll!: () => void;
+    const midPollGate = new Promise<void>((resolve) => {
+      releaseMidPoll = resolve;
+    });
+    let markInFlight!: () => void;
+    const inFlight = new Promise<void>((resolve) => {
+      markInFlight = resolve;
+    });
+    let pausedBob = false;
+    network.interceptResponse = async ({ method, params, response }) => {
+      if (method === "com.atproto.space.listRepoOps" && params.repo === BOB && response.ok && !pausedBob) {
+        pausedBob = true;
+        markInFlight();
+        await midPollGate;
+      }
+      return response;
+    };
+
+    const poll1Promise = core.followRepoOps({ space, collections: [COLLECTION.message], deliver: true, onEvent: async () => undefined });
+    await inFlight;
+    // New stale hint lands mid-flight while poll1 is in progress, AND Bob becomes deactivated after poll1 starts.
+    await core.markSpaceStale(space);
+    network.setAccountState(BOB, "deactivated");
+    releaseMidPoll();
+    const poll1 = await poll1Promise;
+    network.interceptResponse = undefined;
+    assert.equal(poll1.complete, true);
+
+    // Poll 2 MUST check Bob once for the preserved mid-poll stale hint, then consume it by Poll 3!
+    let bobPoll2Calls = 0;
+    network.interceptResponse = ({ params, response }) => {
+      if (params.space === space && params.repo === BOB) bobPoll2Calls += 1;
+      return response;
+    };
+    const poll2 = await core.followRepoOps({ space, collections: [COLLECTION.message], deliver: true, onEvent: async () => undefined });
+    assert.ok(bobPoll2Calls >= 1, "mid-poll markSpaceStale must trigger recheck on poll2");
+    assert.equal(poll2.setAside.some((s) => s.did === BOB && s.permanent), true);
+
+    let bobPoll3Calls = 0;
+    network.interceptResponse = ({ params, response }) => {
+      if (params.space === space && params.repo === BOB) bobPoll3Calls += 1;
+      return response;
+    };
+    await core.followRepoOps({ space, collections: [COLLECTION.message], deliver: true, onEvent: async () => undefined });
+    network.interceptResponse = undefined;
+    assert.equal(bobPoll3Calls, 0, "consumed mid-poll hint must not loop on poll3");
+  }
+});

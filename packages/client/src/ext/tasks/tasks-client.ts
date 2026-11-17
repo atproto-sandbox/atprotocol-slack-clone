@@ -225,6 +225,13 @@ export class TasksExtensionDisabledError extends Error {
   }
 }
 
+export class TasksWorkspaceUnavailableError extends Error {
+  constructor(workspaceUri: string, reason?: string) {
+    super(reason ?? `Workspace state could not be verified for ${workspaceUri}.`);
+    this.name = "TasksWorkspaceUnavailableError";
+  }
+}
+
 export class EntityNotFoundError extends Error {
   constructor(readonly entityKind: "project" | "task" | "comment", readonly entityUri: string) {
     super(`${entityKind} not found: ${entityUri}`);
@@ -1105,6 +1112,9 @@ export class TasksClient {
     if ("disabled" in synced) {
       throw new TasksExtensionDisabledError(workspaceUri, synced.disabled.degradedReasons[0]);
     }
+    if (!synced.snapshot.workspaceSnapshotComplete) {
+      throw new TasksWorkspaceUnavailableError(workspaceUri, synced.snapshot.reason);
+    }
     return synced;
   }
 
@@ -1121,7 +1131,7 @@ export class TasksClient {
       await existing.catch(() => undefined);
     }
     const run = this.executeSpaceSync(workspaceUri, options, forWrite).then((result) => {
-      if (!("disabled" in result)) {
+      if (!("disabled" in result) && result.snapshot.workspaceSnapshotComplete) {
         this.syncedWorkspaces.add(workspaceUri);
       }
       return result;
@@ -1209,6 +1219,10 @@ export class TasksClient {
         },
       };
     };
+
+    if (forWrite && !snapshot.workspaceSnapshotComplete) {
+      throw new TasksWorkspaceUnavailableError(workspaceUri, snapshot.reason);
+    }
 
     let extInstall = snapshot.extensions.find((ext) => ext.extId === "tasks") ?? null;
     if (!(extInstall !== null && extInstall.active === true && extInstall.space === tasksSpace)) {
