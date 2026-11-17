@@ -5,7 +5,7 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChannelView } from "./channel-view";
 import { acceptFailure } from "@flock/client/accept-errors";
-import { captureInviteLink, INVITE_LINK_KEY, isAccessFailure, makeTid, needsAuthorityApproval, WORKSPACE_OPERATION_KEY, workspaceCreationFrom, workspaceOperationIdFor, messageOf, parsePastedWorkspaceUri, type Message, type PendingOperation, type WorkspaceCreationInput } from "./client-api";
+import { captureInviteLink, INVITE_LINK_KEY, isAccessFailure, makeTid, needsAuthorityApproval, WORKSPACE_OPERATION_KEY, workspaceCreationFrom, workspaceOperationIdFor, messageOf, parsePastedWorkspaceUri, resolveScopedReplyTo, type Message, type PendingOperation, type PermalinkResolution, type ScopedReplyDraft, type WorkspaceCreationInput } from "./client-api";
 import { DmProvider, type DmView } from "./dm-context";
 import type { ExtensionToggleOutcome } from "./extensions-panel";
 import { TasksWorkspaceView } from "./ext/tasks/tasks-workspace-view";
@@ -32,8 +32,6 @@ import type { WorkspaceSummary } from "@flock/protocol/workspace-summary";
 // The DM stage renders only client-side; see the note in sidebar.tsx.
 const DmStage = dynamic(() => import("./dm-stage").then((mod) => mod.DmStage), { ssr: false });
 
-const MAX_PERMALINK_PAGES = 5;
-
 /** The signed-in account's app: its browser session restored once, and the workspace, channel and DM views on top of it. */
 export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: BrowserSessionConfig }) {
   return (
@@ -55,6 +53,7 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
     const encoded = searchParams.toString();
     return encoded ? `?${encoded}` : "";
   }, [searchParams]);
+  const routeKey = `${pathname}${searchString}`;
   const parsedRoute = useMemo(() => parseRoute(pathname, searchString), [pathname, searchString]);
   const routeWorkspaceUri =
     parsedRoute && (parsedRoute.kind === "workspace" || parsedRoute.kind === "channel" || parsedRoute.kind === "message" || parsedRoute.kind === "tasks")
@@ -75,7 +74,9 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
   const [declarationsByWorkspace, setDeclarationsByWorkspace] = useState<Record<string, WorkspaceDeclarations>>({});
   const declarationCacheRef = useRef<WorkspaceDeclarationCache | null>(null);
   const declarationEngineRef = useRef<typeof engine>(null);
-  const [replyTo, setReplyTo] = useState("");
+  const [replyDraft, setReplyDraft] = useState<ScopedReplyDraft | null>(null);
+  const [permalinkLookup, setPermalinkLookup] = useState<{ channelKey: string; resolution: PermalinkResolution } | null>(null);
+  const [trackedChannelIdentity, setTrackedChannelIdentity] = useState<string | null>(null);
   const [requestSubmitted, setRequestSubmitted] = useState(false);
   const [pendingOperation, setPendingOperation] = useState<PendingOperation | null>(null);
   /** An operation went through in this page, so the admin's app keeps the workspace reconciled from then on. */
@@ -84,7 +85,6 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const resumedRef = useRef(false);
-  const permalinkPagesRef = useRef<{ uri: string; count: number }>({ uri: "", count: 0 });
   const navEpochRef = useRef(0);
   const navigateTo = useCallback((url: string, replace = false) => {
     navEpochRef.current += 1;
@@ -95,6 +95,10 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
   useEffect(() => {
     navEpochRef.current += 1;
   }, [pathname]);
+
+  if (replyDraft && replyDraft.routeKey !== routeKey) {
+    setReplyDraft(null);
+  }
 
   useEffect(() => {
     const bumpEpoch = () => { navEpochRef.current += 1; };
@@ -172,8 +176,19 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
 
   /** Empties what a person was typing in the open channel, and whether they had asked to join it. */
   const resetChannelInput = useCallback(() => {
-    setReplyTo(""); setMessageText(""); setChosenCommandApp(null); setComposerStatus(""); setRequestSubmitted(false);
+    setReplyDraft(null); setMessageText(""); setChosenCommandApp(null); setComposerStatus(""); setRequestSubmitted(false);
   }, []);
+
+  const activeChannelIdentity = activeChannel ? `${activeChannel.workspace} ${activeChannel.skey}` : null;
+  if (trackedChannelIdentity !== activeChannelIdentity) {
+    setTrackedChannelIdentity(activeChannelIdentity);
+    setReplyDraft(null);
+    setMessageText("");
+    setChosenCommandApp(null);
+    setComposerStatus("");
+    setRequestSubmitted(false);
+    setPermalinkLookup(null);
+  }
 
   const openDmView = useCallback((view: DmView | null) => {
     resetChannelInput();
@@ -192,8 +207,13 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
   const openContent = useChannelContent(session, did, activeChannel);
   const contentRefused = openContent.content.value?.refused !== undefined;
 
+  /** A write the account was refused (removed, the channel archived or paused) has the selection follow the workspace now. */
+  const rediscoverAfterAccessFailure = useCallback((caught: unknown) => {
+    if (isAccessFailure(caught)) void refreshWorkspaces().catch((err) => setError(messageOf(err)));
+  }, [refreshWorkspaces]);
+
   const routeThread = parsedRoute?.kind === "channel" ? (parsedRoute.thread ?? "") : "";
-  const effectiveReplyTo = replyTo || routeThread;
+  const effectiveReplyTo = resolveScopedReplyTo(routeKey, routeThread, replyDraft);
   const highlightedMessageUri =
     parsedRoute?.kind === "message"
       ? parsedRoute.messageUri
@@ -201,25 +221,116 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
         ? (parsedRoute.thread ?? null)
         : null;
 
-  useEffect(() => {
-    if (parsedRoute?.kind !== "message") return;
-    const targetUri = parsedRoute.messageUri;
-    const value = openContent.content.value;
-    if (!value || openContent.content.loading || value.refused) return;
-    if (value.messages.some((entry) => entry.uri === targetUri)) return;
-    if (value.next === undefined) return;
-    if (permalinkPagesRef.current.uri !== targetUri) {
-      permalinkPagesRef.current = { uri: targetUri, count: 0 };
-    }
-    if (permalinkPagesRef.current.count >= MAX_PERMALINK_PAGES) return;
-    permalinkPagesRef.current.count += 1;
-    void openContent.loadOlder();
-  }, [parsedRoute, openContent]);
+  const activeChannelWorkspace = activeChannel?.workspace ?? null;
+  const activeChannelSkey = activeChannel?.skey ?? null;
+  const activeChannelVisibility = activeChannel?.visibility ?? null;
+  const activeChannelKey =
+    activeChannelWorkspace && activeChannelSkey && activeChannelVisibility && activeChannelVisibility !== "transitioning"
+      ? channelKey({ workspace: activeChannelWorkspace, skey: activeChannelSkey, visibility: activeChannelVisibility })
+      : null;
+  const hasChannelValue = openContent.content.value !== undefined;
+  const channelRefused = Boolean(openContent.content.value?.refused);
+  const channelHasError = openContent.content.error !== undefined;
+  const channelLoading = openContent.content.loading;
+  const inLoadedWindow = Boolean(
+    highlightedMessageUri && openContent.content.value?.messages.some((entry) => entry.uri === highlightedMessageUri),
+  );
 
-  /** A write the account was refused (removed, the channel archived or paused) has the selection follow the workspace now. */
-  const rediscoverAfterAccessFailure = useCallback((caught: unknown) => {
-    if (isAccessFailure(caught)) void refreshWorkspaces().catch((err) => setError(messageOf(err)));
-  }, [refreshWorkspaces]);
+  if (!highlightedMessageUri && permalinkLookup !== null) {
+    setPermalinkLookup(null);
+  }
+
+  useEffect(() => {
+    if (
+      !highlightedMessageUri ||
+      !engine ||
+      !activeChannelWorkspace ||
+      !activeChannelSkey ||
+      !activeChannelKey ||
+      activeChannelVisibility === "transitioning" ||
+      !hasChannelValue ||
+      channelLoading ||
+      channelRefused ||
+      channelHasError ||
+      inLoadedWindow
+    ) {
+      return;
+    }
+    let cancelled = false;
+    const targetUri = highlightedMessageUri;
+    const ref = { workspace: activeChannelWorkspace, skey: activeChannelSkey };
+    void engine.channels.getMessage(ref, targetUri).then(
+      (found) => {
+        if (cancelled) return;
+        if (!found) {
+          setPermalinkLookup({ channelKey: activeChannelKey, resolution: { uri: targetUri, status: "not_found" } });
+          return;
+        }
+        const linked: Message = {
+          uri: found.uri,
+          rkey: found.rkey,
+          repo: found.repo,
+          value: found.value as Message["value"],
+          reactions: [],
+        };
+        setPermalinkLookup({
+          channelKey: activeChannelKey,
+          resolution: { uri: targetUri, status: "resolved", message: linked },
+        });
+      },
+      (caught: unknown) => {
+        if (cancelled) return;
+        rediscoverAfterAccessFailure(caught);
+        setPermalinkLookup({
+          channelKey: activeChannelKey,
+          resolution: { uri: targetUri, status: "error", message: messageOf(caught) },
+        });
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    engine,
+    activeChannelWorkspace,
+    activeChannelSkey,
+    activeChannelVisibility,
+    activeChannelKey,
+    highlightedMessageUri,
+    hasChannelValue,
+    channelLoading,
+    channelRefused,
+    channelHasError,
+    inLoadedWindow,
+    rediscoverAfterAccessFailure,
+  ]);
+
+  const activePermalinkResolution = useMemo<PermalinkResolution | null>(() => {
+    if (!highlightedMessageUri || !activeChannelKey) return null;
+    if (inLoadedWindow) {
+      return { uri: highlightedMessageUri, status: "resolved", message: null };
+    }
+    if (
+      permalinkLookup &&
+      permalinkLookup.channelKey === activeChannelKey &&
+      permalinkLookup.resolution.uri === highlightedMessageUri
+    ) {
+      return permalinkLookup.resolution;
+    }
+    if (hasChannelValue && !channelLoading && !channelRefused && !channelHasError) {
+      return { uri: highlightedMessageUri, status: "loading" };
+    }
+    return null;
+  }, [
+    highlightedMessageUri,
+    activeChannelKey,
+    inLoadedWindow,
+    permalinkLookup,
+    hasChannelValue,
+    channelLoading,
+    channelRefused,
+    channelHasError,
+  ]);
 
   /** Joins a workspace the account was added to: the browser writes the acceptance record to its own repo. */
   const acceptWorkspace = useCallback(async (workspace: string) => {
@@ -559,7 +670,7 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
   }
 
   function handleReplyToChange(nextUri: string) {
-    setReplyTo(nextUri);
+    setReplyDraft({ routeKey, uri: nextUri });
     if (!activeWorkspace || !activeChannel) return;
     if (parsedRoute?.kind === "channel") {
       // Only touch the URL when entering a thread or removing an existing ?thread= query param.
@@ -604,6 +715,7 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
     if (!engine || !activeWorkspace || !activeChannel || activeChannel.visibility === "transitioning") return;
     const sentWorkspace = activeWorkspace;
     const sentChannel = activeChannel;
+    const replyTarget = effectiveReplyTo || undefined;
     const sendEpoch = navEpochRef.current;
     const finishSentMessage = () => {
       // If the person navigated elsewhere while the PDS write finished, do not clobber the new route or URL.
@@ -618,9 +730,13 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
       ) {
         return;
       }
+      const encodedSearch = typeof window === "undefined" ? "" : new URLSearchParams(window.location.search).toString();
+      const liveRouteKey = typeof window === "undefined"
+        ? routeKey
+        : `${window.location.pathname}${encodedSearch ? `?${encodedSearch}` : ""}`;
       setMessageText("");
       setChosenCommandApp(null);
-      setReplyTo("");
+      setReplyDraft(liveRoute.thread ? { routeKey: liveRouteKey, uri: "" } : null);
       const cleanupUrl = sentThreadCleanupRoute(liveRoute, {
         authority: sentWorkspace.authorityDid,
         workspaceSkey: sentWorkspace.skey,
@@ -629,11 +745,19 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
       });
       if (cleanupUrl) router.replace(cleanupUrl);
     };
+    const linkedMessage =
+      activePermalinkResolution?.status === "resolved" ? activePermalinkResolution.message : null;
+    const commandContent =
+      openContent.content.value &&
+      linkedMessage &&
+      !openContent.content.value.messages.some((entry) => entry.uri === linkedMessage.uri)
+        ? { ...openContent.content.value, messages: [...openContent.content.value.messages, linkedMessage] }
+        : openContent.content.value;
     const context = channelCommandContext({
       workspace: activeWorkspace,
       channel: activeChannel,
       viewerDid: did,
-      content: openContent.content.value,
+      content: commandContent,
       replyTo: effectiveReplyTo,
       declarations: activeDeclarations,
     });
@@ -651,12 +775,12 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
     setBusy(true); setError(""); setComposerStatus("");
     try {
       if (resolution.kind === "command") {
-        await engine.appInboxes.sendCommand(sentChannel, resolution.appDid, resolution.command, resolution.text, effectiveReplyTo || undefined);
+        await engine.appInboxes.sendCommand(sentChannel, resolution.appDid, resolution.command, resolution.text, replyTarget);
         finishSentMessage();
         if (navEpochRef.current === sendEpoch) setComposerStatus(`Sent /${resolution.command} to ${resolution.appName}.`);
         return;
       }
-      await engine.channels.send(sentChannel, resolution.text, effectiveReplyTo || undefined);
+      await engine.channels.send(sentChannel, resolution.text, replyTarget);
       finishSentMessage();
       await live?.reload(channelKey(sentChannel));
     } catch (caught) {
@@ -825,6 +949,7 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
                   replyTo={effectiveReplyTo}
                   setReplyTo={handleReplyToChange}
                   highlightedMessageUri={highlightedMessageUri}
+                  permalinkResolution={activePermalinkResolution}
                   onOpenPermalink={openMessagePermalink}
                   runOperation={runOperation}
                   leaveChannel={leaveChannel}

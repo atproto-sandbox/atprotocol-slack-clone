@@ -10,6 +10,15 @@ export function tasksSnapshotKey(workspaceUri: string): string {
   return `tasks:${workspaceUri}`;
 }
 
+/**
+ * Returns the space URIs whose change-feed ticks should invalidate and reload the Tasks view: both the workspace space
+ * (roster/install/extension mutations) and the isolated Tasks space itself.
+ */
+export function tasksWatchedSpaces(workspaceUri: string | null, tasksSpaceUri: string | null): string[] {
+  if (!workspaceUri) return [];
+  return tasksSpaceUri ? [workspaceUri, tasksSpaceUri] : [workspaceUri];
+}
+
 type Session = { engine: Engine | null; live: LiveSpaces | null; snapshots: Snapshots | null };
 
 const TASKS_FALLBACK_POLL_MS = 60_000;
@@ -36,7 +45,7 @@ export function useTasksSpace(
     return engine.tasks.readSpace(workspaceUri);
   }, [engine, workspaceUri]);
 
-  useLiveKey(session, key, tasksSpaceUri ? [tasksSpaceUri] : [], load);
+  useLiveKey(session, key, tasksWatchedSpaces(workspaceUri, tasksSpaceUri), load);
 
   useEffect(() => {
     if (!live || !key) return;

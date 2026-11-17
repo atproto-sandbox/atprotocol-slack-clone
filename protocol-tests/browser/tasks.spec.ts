@@ -272,6 +272,76 @@ test("Tasks UI end-to-end: legacy authority CTA, enable extension, cross-repo pr
     await pageA.getByRole("tab", { name: "List" }).click();
     await pageA.getByRole("button", { name: "Alive Concurrent Edit", exact: true }).waitFor({ state: "visible" });
 
+    // 7. Codex #5 & #6: In-app project selector navigation clears projectContext/baseline; restoring Project B's
+    // concurrent name never modifies Project A, and saving a project edit diffs against opening baseline.
+    const createdProjA = await aliceEngine.tasks.createProject(workspaceUri, { name: "Project Alpha" });
+    const createdProjB = await aliceEngine.tasks.createProject(workspaceUri, { name: "Project Beta" });
+    const bobSpaceBeforeConflict = await bobEngine.tasks.readSpace(workspaceUri, { fresh: true });
+    const bobProjA = bobSpaceBeforeConflict.projects.find((entry) => entry.uri === createdProjA.uri);
+    const bobProjB = bobSpaceBeforeConflict.projects.find((entry) => entry.uri === createdProjB.uri);
+    assert.ok(bobProjA && bobProjB, "Bob sees both seeded projects before concurrent edits");
+
+    await aliceEngine.tasks.updateProject(workspaceUri, {
+      context: createdProjB.observedContext,
+      name: "Project Beta Alice",
+    });
+    await bobEngine.tasks.updateProject(workspaceUri, {
+      context: bobProjB.observedContext,
+      name: "Project Beta Bob",
+    });
+
+    await pageA.getByRole("button", { name: "Sync ↻" }).click();
+    const projectSelector = pageA.getByLabel("Project scope");
+    await projectSelector.locator(`option[value="${createdProjA.uri}"]`).waitFor({ state: "attached" });
+    await projectSelector.selectOption(createdProjA.uri);
+    await pageA.getByRole("heading", { name: "Project Alpha", exact: true }).waitFor({ state: "visible" });
+
+    // Edit Project Alpha -> save -> reopen and cancel -> switch via selector (NO page reload) to Project Beta -> restore.
+    await pageA.getByRole("button", { name: "Edit project", exact: true }).click();
+    await pageA.locator("#edit-project-name").fill("Project Alpha Edited");
+    await pageA.getByRole("button", { name: "Save project", exact: true }).click();
+    await pageA.getByText("Project updated.", { exact: true }).waitFor({ state: "visible" });
+    await pageA.getByRole("heading", { name: "Project Alpha Edited", exact: true }).waitFor({ state: "visible" });
+
+    await pageA.getByRole("button", { name: "Edit project", exact: true }).click();
+    await pageA.locator("#edit-project-name").fill("Unsaved Alpha Draft");
+    await pageA.getByRole("button", { name: "Cancel", exact: true }).click();
+    await pageA.locator("#edit-project-name").waitFor({ state: "hidden" });
+
+    await projectSelector.selectOption(createdProjB.uri);
+    const betaVersionDisclosure = pageA.locator(".tasks-project-banner .tasks-versions-disclosure");
+    await betaVersionDisclosure.waitFor({ state: "visible" });
+    await betaVersionDisclosure.locator("summary").click();
+    const restoredBetaName = (await betaVersionDisclosure.locator(".tasks-version-item strong").first().innerText()).trim();
+    await betaVersionDisclosure.getByRole("button", { name: "Restore this version" }).click();
+    await pageA.getByText("Restored project name.", { exact: true }).waitFor({ state: "visible" });
+    await pageA.getByRole("heading", { name: restoredBetaName, exact: true }).waitFor({ state: "visible" });
+    await betaVersionDisclosure.waitFor({ state: "hidden" });
+
+    // Switch back to Project Alpha via selector and confirm Project Alpha kept its exact edited name.
+    await projectSelector.selectOption(createdProjA.uri);
+    await pageA.getByRole("heading", { name: "Project Alpha Edited", exact: true }).waitFor({ state: "visible" });
+
+    // Codex #6 E2E: open Project Alpha editor (no description), Bob adds a description remotely, Alice renames only.
+    await pageA.getByRole("button", { name: "Edit project", exact: true }).click();
+    await pageA.locator("#edit-project-name").waitFor({ state: "visible" });
+    await bobEngine.tasks.updateProject(workspaceUri, {
+      context: bobProjA.observedContext,
+      description: "Bob remote project notes",
+    });
+    await pageA.getByRole("button", { name: "Sync ↻" }).click();
+    await pageA.locator(".tasks-project-banner").getByText("Bob remote project notes", { exact: true }).waitFor({ state: "visible" });
+    await pageA.locator("#edit-project-name").fill("Project Alpha Final");
+    await pageA.getByRole("button", { name: "Save project", exact: true }).click();
+    await pageA.getByText("Project updated.", { exact: true }).waitFor({ state: "visible" });
+
+    const finalSpace = await aliceEngine.tasks.readSpace(workspaceUri, { fresh: true });
+    const finalAlpha = finalSpace.projects.find((entry) => entry.uri === createdProjA.uri);
+    const finalBeta = finalSpace.projects.find((entry) => entry.uri === createdProjB.uri);
+    assert.equal(finalAlpha?.name, "Project Alpha Final", "Project Alpha retains its own edited name across Project Beta restore");
+    assert.equal(finalAlpha?.description, "Bob remote project notes", "saving name-only draft never clears concurrent remote description");
+    assert.equal(finalBeta?.name, restoredBetaName);
+
     await contextA.close();
     await contextB.close();
   } finally {

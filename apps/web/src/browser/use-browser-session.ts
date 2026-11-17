@@ -8,6 +8,7 @@ import { createBrowserDmStore, type BrowserDmStore } from "@flock/client/dm/brow
 import { captureReturnTo, RETURN_TO_KEY } from "../lib/return-to";
 import { within } from "../lib/within";
 import { ERASE_WITHIN_MS, signOutAccount, type SignOutResult } from "./sign-out";
+import { registerShellSession } from "./shell-lifecycle";
 import type { BrowserSessionConfig } from "./session";
 
 /** How long a space stays in the browser store without being opened: the retention the server's cache had (30 days). */
@@ -28,7 +29,7 @@ export type BrowserSessionState = {
   signOut: () => Promise<SignOutResult>;
 };
 
-type Built = { client: DmClient; store: BrowserDmStore; engine: Engine; snapshots: Snapshots; live: LiveSpaces; syncStore: IndexedDbStore };
+type Built = { client: DmClient; store: BrowserDmStore; engine: Engine; snapshots: Snapshots; live: LiveSpaces; syncStore: IndexedDbStore; releaseLifecycle: () => void };
 
 /**
  * Restores the browser-held session for the signed-in DID (one grant: the member set, the operator methods and the DM set)
@@ -69,6 +70,7 @@ export function useBrowserSession(did: string, config: BrowserSessionConfig): Br
           // What was built on the closed store goes, so nothing keeps reading it.
           epoch.current += 1;
           made?.live.stop();
+          made?.releaseLifecycle();
           if (builtRef.current === made) builtRef.current = null;
           setBuilt(null);
           setError("Another tab of this app signed out, or started another account, and closed this account's store. Reload to continue here.");
@@ -80,11 +82,12 @@ export function useBrowserSession(did: string, config: BrowserSessionConfig): Br
         const snapshots = new Snapshots();
         const live = new LiveSpaces(snapshots, { operator: engine.operator!, credentials: engine.credentials });
         const store = createBrowserDmStore(did);
-        made = { client: new DmClient({ ...transport, store }), store, engine, snapshots, live, syncStore };
         if (epoch.current !== run) {
           syncStore.close();
           return;
         }
+        const releaseLifecycle = registerShellSession(engine, live);
+        made = { client: new DmClient({ ...transport, store }), store, engine, snapshots, live, syncStore, releaseLifecycle };
         live.start();
         builtRef.current = made;
         setBuilt(made);
@@ -98,6 +101,7 @@ export function useBrowserSession(did: string, config: BrowserSessionConfig): Br
     return () => {
       epoch.current += 1;
       made?.live.stop();
+      made?.releaseLifecycle();
       made?.syncStore.close();
       if (builtRef.current === made) builtRef.current = null;
     };
@@ -130,6 +134,7 @@ export function useBrowserSession(did: string, config: BrowserSessionConfig): Br
     const current = builtRef.current;
     builtRef.current = null;
     current?.live.stop();
+    current?.releaseLifecycle();
     current?.syncStore.close();
     setBuilt(null);
     setStatus("disconnected");

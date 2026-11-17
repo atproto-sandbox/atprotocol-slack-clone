@@ -20,6 +20,6 @@ Feature: App Router URL routing and session return lifecycle
   Rule: Browser Back and Forward navigation keeps the persistent shell session alive
 
     Scenario: Back and Forward navigation moves across routes without remounting the shell
-      Given a signed-in member viewing a channel message permalink in the live shell
-      When the member navigates to Direct messages and moves Back and Forward in browser history
+      Given a signed-in member viewing a channel in a workspace with Tasks enabled in the live shell
+      When the member navigates across a message permalink, Tasks, Board, and Direct messages and moves Back and Forward in browser history
       Then each route renders its content while the shell stays continuously mounted

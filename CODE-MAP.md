@@ -125,9 +125,9 @@ packages/                 Libraries. protocol and client run in a browser: they 
                               DID_DOCUMENT_TTL_MS, six resolutions at once per origin in the process, each given up after
                               ten seconds; a failed MAC forces a fresh key. The ten-minute bound has one owner,
                               packages/protocol/src/atproto/kem-key.ts.
-    src/store.ts             SyncStore contract: records (with CID), per-writer state (coverage, syncedRev, 2048B `setHash`,
-                              32B `commitDigest`, generation), atomic `clock` reservation, per-DID `activity` seen/dismissed
-                              state, per-space state, and compare-and-set commits by generation, revision and space epoch.
+    src/store.ts             SyncStore contract: records (with CID), per-writer state (coverage, syncedRev, 2048B `LtHash` `setHash`
+                              via BLAKE3 XOF lane expansion, 32B SHA-256 `commitDigest`, generation), atomic `clock` reservation, per-DID
+                              `activity` seen/dismissed state, per-space state, and compare-and-set commits by generation, revision and space epoch.
     src/memory-store.ts, src/indexeddb-store.ts
                              The two stores: memory (DM spaces, tests) and IndexedDB (one database per account; `VERSION = 2`
                               guarded upgrade adding `clock` and `activity` while preserving v1 records and `meta` epochs).

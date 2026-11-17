@@ -5,6 +5,21 @@ import { ChannelUnavailableError } from "@flock/client/errors";
 import { OperatorRemoteError } from "@flock/client/operator-client";
 
 export type Message = { uri: string; rkey: string; repo: string; value: { text?: string; createdAt?: string; parent?: string; blocks?: unknown }; reactions?: Array<{ emoji: string; count: number; active: boolean }> };
+export type PermalinkResolution =
+  | { uri: string; status: "loading" }
+  | { uri: string; status: "resolved"; message: Message | null }
+  | { uri: string; status: "not_found" }
+  | { uri: string; status: "error"; message: string };
+export type ScopedReplyDraft = { routeKey: string; uri: string };
+
+/**
+ * Resolves the active composer reply target for `routeKey`, discarding any optimistic local reply draft created on a
+ * different route or channel so browser history transitions restore the destination URL's exact `?thread=` state.
+ */
+export function resolveScopedReplyTo(routeKey: string, routeThread: string, draft: ScopedReplyDraft | null): string {
+  if (draft && draft.routeKey === routeKey) return draft.uri;
+  return routeThread;
+}
 export type Reaction = { repo: string; value: { subject?: string; emoji?: string } };
 export type InboxRequest = { uri: string; repoDid: string; channelSkey: string; channelName: string; requestId: string; createdAt: string };
 export type ChannelSelection = { workspace: string; skey: string; name: string; visibility: string };

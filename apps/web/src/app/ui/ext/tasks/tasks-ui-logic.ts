@@ -3,6 +3,7 @@ import {
   TASK_STATUSES,
   type MergedProjectView,
   type MergedTaskView,
+  type ObservedEntityContext,
   type TaskActivityItem,
   type TaskPriority,
   type TaskStatus,
@@ -386,6 +387,13 @@ export type ProjectDraft = {
   color: string;
 };
 
+export type ProjectEditorState = {
+  projectUri: string;
+  baseline: MergedProjectView;
+  draft: ProjectDraft;
+  context: ObservedEntityContext;
+};
+
 export function projectToDraft(project: MergedProjectView): ProjectDraft {
   return {
     name: project.name,
@@ -394,23 +402,62 @@ export function projectToDraft(project: MergedProjectView): ProjectDraft {
   };
 }
 
-export function buildProjectUpdatePatch(
+/**
+ * Captures an immutable opening baseline snapshot, draft, and forked causal context when opening the project editor so
+ * concurrent remote changes cannot cause spurious clears and retained contexts cannot bleed across projects.
+ */
+export function openProjectEditor(
   project: MergedProjectView,
+  forkContext: (context: ObservedEntityContext) => ObservedEntityContext,
+): ProjectEditorState {
+  return {
+    projectUri: project.uri,
+    baseline: project,
+    draft: projectToDraft(project),
+    context: forkContext(project.observedContext),
+  };
+}
+
+/**
+ * Derives the causal context for restoring a project's concurrent version, rejecting any retained editor context from a
+ * different project or stale observation head in favor of a fresh fork from `targetProject`.
+ */
+export function resolveProjectRestoreContext(
+  targetProject: MergedProjectView,
+  retainedContext: ObservedEntityContext | null,
+  forkContext: (context: ObservedEntityContext) => ObservedEntityContext,
+): ObservedEntityContext {
+  if (
+    retainedContext &&
+    retainedContext.entityUri === targetProject.uri &&
+    retainedContext.maxHlc === targetProject.observedContext.maxHlc
+  ) {
+    return forkContext(retainedContext);
+  }
+  return forkContext(targetProject.observedContext);
+}
+
+/**
+ * Computes a minimal `UpdateProjectInput` mutation diff against the opening `baseline` snapshot, returning `null` when
+ * nothing changed so no empty `projectEdit` or spurious `clearDescription` for concurrent remote edits is submitted.
+ */
+export function buildProjectUpdatePatch(
+  baseline: MergedProjectView,
   draft: ProjectDraft,
 ): Omit<UpdateProjectInput, "context"> | null {
   const patch: Omit<UpdateProjectInput, "context"> = {};
   let changed = false;
 
   const trimmedName = draft.name.trim();
-  if (trimmedName && trimmedName !== project.name) {
+  if (trimmedName && trimmedName !== baseline.name) {
     patch.name = trimmedName;
     changed = true;
   }
 
-  const beforeDesc = project.description ?? "";
+  const beforeDesc = baseline.description ?? "";
   if (draft.description !== beforeDesc) {
     if (draft.description.length === 0) {
-      if (project.description !== undefined) {
+      if (baseline.description !== undefined) {
         patch.clearDescription = true;
         changed = true;
       }
@@ -421,7 +468,7 @@ export function buildProjectUpdatePatch(
   }
 
   const trimmedColor = draft.color.trim();
-  if (trimmedColor && trimmedColor !== (project.color ?? "")) {
+  if (trimmedColor && trimmedColor !== (baseline.color ?? "")) {
     patch.color = trimmedColor;
     changed = true;
   }

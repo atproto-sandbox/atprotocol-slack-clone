@@ -6,7 +6,6 @@ import type {
   FieldVersion,
   MergedProjectView,
   MergedTaskView,
-  ObservedEntityContext,
   ProjectScalarField,
   TaskPriority,
   TaskStatus,
@@ -28,14 +27,15 @@ import {
   DEFAULT_TASK_FILTER,
   DEFAULT_TASK_SORT,
   filterAndSortTasks,
+  openProjectEditor,
   PRIORITY_LABELS,
-  projectToDraft,
+  resolveProjectRestoreContext,
   shortDid,
   STATUS_LABELS,
   TASK_PRIORITIES,
   TASK_STATUSES,
   UNCERTAIN_ANCESTRY_WARNING,
-  type ProjectDraft,
+  type ProjectEditorState,
   type TaskFilterState,
   type TaskSortKey,
   type TaskSortState,
@@ -85,9 +85,7 @@ export function TasksWorkspaceView({
   const [newProjectDesc, setNewProjectDesc] = useState("");
   const [newProjectColor, setNewProjectColor] = useState("#7659c8");
 
-  const [editingProjectUri, setEditingProjectUri] = useState<string | null>(null);
-  const [projectDraft, setProjectDraft] = useState<ProjectDraft>({ name: "", description: "", color: "" });
-  const [projectContext, setProjectContext] = useState<ObservedEntityContext | null>(null);
+  const [projectEditor, setProjectEditor] = useState<ProjectEditorState | null>(null);
 
   const [creatingTask, setCreatingTask] = useState(false);
   const [newTaskTitle, setNewTaskTitle] = useState("");
@@ -103,7 +101,20 @@ export function TasksWorkspaceView({
   const spaceView = tasksView.value;
   const projectDirectory = useMemo(() => buildProjectDirectory(spaceView?.projects ?? []), [spaceView?.projects]);
   const selectedProject = route.view === "project" ? projectDirectory.byUri.get(route.projectUri) ?? null : null;
+  const selectedProjectUri = selectedProject?.uri ?? null;
   const selectedTask = route.view === "task" ? (spaceView?.tasks ?? []).find((t) => t.uri === route.taskUri) ?? null : null;
+
+  if (projectEditor && projectEditor.projectUri !== selectedProjectUri) {
+    setProjectEditor(null);
+  }
+
+  const activeProjectEditor =
+    selectedProject &&
+    projectEditor &&
+    projectEditor.projectUri === selectedProject.uri &&
+    projectEditor.context.entityUri === selectedProject.uri
+      ? projectEditor
+      : null;
 
   const effectiveFilter = useMemo<TaskFilterState>(() => {
     if (route.view === "project") {
@@ -175,6 +186,7 @@ export function TasksWorkspaceView({
   }
 
   function switchProjectScope(value: string) {
+    setProjectEditor(null);
     if (value === "all" || value === "none") {
       setFilter((current) => ({ ...current, projectUri: value }));
       if (route.view === "project" || route.view === "task" || route.view === "activity") {
@@ -229,28 +241,28 @@ export function TasksWorkspaceView({
   }
 
   function startEditProject(project: MergedProjectView) {
-    setEditingProjectUri(project.uri);
-    setProjectDraft(projectToDraft(project));
-    setProjectContext(engine.tasks.forkContext(project.observedContext));
+    setProjectEditor(openProjectEditor(project, (ctx) => engine.tasks.forkContext(ctx)));
   }
 
   async function submitEditProject(event: FormEvent, project: MergedProjectView) {
     event.preventDefault();
-    if (!projectContext) return;
-    const patch = buildProjectUpdatePatch(project, projectDraft);
+    if (!activeProjectEditor || activeProjectEditor.projectUri !== project.uri || activeProjectEditor.context.entityUri !== project.uri) {
+      setProjectEditor(null);
+      return;
+    }
+    const patch = buildProjectUpdatePatch(activeProjectEditor.baseline, activeProjectEditor.draft);
     if (!patch) {
-      setEditingProjectUri(null);
+      setProjectEditor(null);
       return;
     }
     setBusy(true);
     setError("");
     try {
-      const result = await engine.tasks.updateProject(workspace.uri, {
-        context: projectContext,
+      await engine.tasks.updateProject(workspace.uri, {
+        context: activeProjectEditor.context,
         ...patch,
       });
-      setProjectContext(result.observedContext);
-      setEditingProjectUri(null);
+      setProjectEditor(null);
       setStatus("Project updated.");
       await reload();
     } catch (caught) {
@@ -265,8 +277,12 @@ export function TasksWorkspaceView({
     setError("");
     try {
       const context = engine.tasks.forkContext(project.observedContext);
-      if (shouldDelete) await engine.tasks.deleteProject(workspace.uri, { context });
-      else await engine.tasks.restoreProject(workspace.uri, { context });
+      if (shouldDelete) {
+        setProjectEditor((cur) => (cur?.projectUri === project.uri ? null : cur));
+        await engine.tasks.deleteProject(workspace.uri, { context });
+      } else {
+        await engine.tasks.restoreProject(workspace.uri, { context });
+      }
       setStatus(shouldDelete ? "Project deleted." : "Project restored.");
       await reload();
     } catch (caught) {
@@ -284,7 +300,11 @@ export function TasksWorkspaceView({
     setBusy(true);
     setError("");
     try {
-      const context = projectContext ?? engine.tasks.forkContext(project.observedContext);
+      const context = resolveProjectRestoreContext(
+        project,
+        activeProjectEditor?.context ?? null,
+        (ctx) => engine.tasks.forkContext(ctx),
+      );
       const result = await engine.tasks.restoreFieldVersion(workspace.uri, {
         entityKind: "project",
         context,
@@ -292,8 +312,11 @@ export function TasksWorkspaceView({
         version,
       });
       if ("project" in result) {
-        setProjectContext(result.observedContext);
-        setProjectDraft(projectToDraft(result.project));
+        setProjectEditor((cur) =>
+          cur && cur.projectUri === project.uri
+            ? openProjectEditor(result.project, () => engine.tasks.forkContext(result.observedContext))
+            : null,
+        );
       }
       setStatus(`Restored project ${field}.`);
       await reload();
@@ -570,33 +593,51 @@ export function TasksWorkspaceView({
             ) : null,
           )}
 
-          {editingProjectUri === selectedProject.uri && (
+          {activeProjectEditor && (
             <form className="inline-form" onSubmit={(event) => void submitEditProject(event, selectedProject)}>
               <label htmlFor="edit-project-name">Project name</label>
               <input
                 id="edit-project-name"
-                value={projectDraft.name}
-                onChange={(event) => setProjectDraft((cur) => ({ ...cur, name: event.target.value }))}
+                value={activeProjectEditor.draft.name}
+                onChange={(event) =>
+                  setProjectEditor((cur) =>
+                    cur && cur.projectUri === selectedProject.uri
+                      ? { ...cur, draft: { ...cur.draft, name: event.target.value } }
+                      : cur,
+                  )
+                }
                 required
               />
               <label htmlFor="edit-project-desc">Project description</label>
               <textarea
                 id="edit-project-desc"
                 rows={2}
-                value={projectDraft.description}
-                onChange={(event) => setProjectDraft((cur) => ({ ...cur, description: event.target.value }))}
+                value={activeProjectEditor.draft.description}
+                onChange={(event) =>
+                  setProjectEditor((cur) =>
+                    cur && cur.projectUri === selectedProject.uri
+                      ? { ...cur, draft: { ...cur.draft, description: event.target.value } }
+                      : cur,
+                  )
+                }
               />
               <label htmlFor="edit-project-color">Project color</label>
               <input
                 id="edit-project-color"
-                value={projectDraft.color}
-                onChange={(event) => setProjectDraft((cur) => ({ ...cur, color: event.target.value }))}
+                value={activeProjectEditor.draft.color}
+                onChange={(event) =>
+                  setProjectEditor((cur) =>
+                    cur && cur.projectUri === selectedProject.uri
+                      ? { ...cur, draft: { ...cur.draft, color: event.target.value } }
+                      : cur,
+                  )
+                }
               />
               <div className="tasks-form-actions">
                 <button type="submit" className="primary-button" disabled={busy}>
                   Save project
                 </button>
-                <button type="button" className="text-button" onClick={() => setEditingProjectUri(null)}>
+                <button type="button" className="text-button" onClick={() => setProjectEditor(null)}>
                   Cancel
                 </button>
               </div>

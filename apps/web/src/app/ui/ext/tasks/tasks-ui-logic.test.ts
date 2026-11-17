@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { MergedProjectView, MergedTaskView, TaskActivityItem } from "@flock/client/ext/tasks";
+import type { MergedProjectView, MergedTaskView, ObservedEntityContext, TaskActivityItem } from "@flock/client/ext/tasks";
 import {
   buildProjectDirectory,
   buildProjectUpdatePatch,
@@ -15,8 +15,11 @@ import {
   filterAndSortTasks,
   groupTasksByStatus,
   isoToDateInput,
+  openProjectEditor,
+  resolveProjectRestoreContext,
   taskToDraft,
 } from "./tasks-ui-logic";
+import { tasksWatchedSpaces } from "./use-tasks-space";
 
 const ALICE = "did:plc:alice111111111111111111";
 const BOB = "did:plc:bob22222222222222222222";
@@ -228,4 +231,74 @@ test("filterActivities and describeActivityItem cover seen/dismissed filtering a
   assert.match(describeActivityItem(fieldItem, dir, taskMap).summary, /"Done", overwriting "In progress"/);
   assert.match(describeActivityItem(delItem, dir, taskMap).summary, /deleted this task/);
   assert.match(describeActivityItem(setItem, dir, taskMap).summary, /added "urgent"/);
+});
+
+test("resolveProjectRestoreContext rejects retained context targeting a different project or stale head (Codex #5)", () => {
+  const projA = makeProject({ rkey: "3kprojA", name: "Alpha" });
+  const projB = makeProject({ rkey: "3kprojB", name: "Beta" });
+  let forkSeq = 0;
+  const fork = (ctx: ObservedEntityContext): ObservedEntityContext => ({
+    ...ctx,
+    formChainId: `fork-${++forkSeq}`,
+  });
+
+  const editorA = openProjectEditor(projA, fork);
+  const restoredForB = resolveProjectRestoreContext(projB, editorA.context, fork);
+  assert.equal(restoredForB.entityUri, projB.uri, "must never inherit Project A's context when restoring Project B");
+  assert.equal(restoredForB.formChainId, "fork-2");
+
+  // Also reject a same-project retained context whose maxHlc is stale behind newly synced remote versions.
+  const staleEditorB = openProjectEditor(projB, fork);
+  const updatedProjB = makeProject({
+    rkey: "3kprojB",
+    name: "Beta",
+    maxHlc: "001700000000999.0000",
+    observedContext: {
+      ...projB.observedContext,
+      maxHlc: "001700000000999.0000",
+      baseClosure: ["a".repeat(32)],
+    },
+  });
+  const freshForB = resolveProjectRestoreContext(updatedProjB, staleEditorB.context, fork);
+  assert.equal(freshForB.maxHlc, "001700000000999.0000");
+  assert.deepEqual(freshForB.baseClosure, ["a".repeat(32)]);
+});
+
+test("project editor diffs against opening baseline so concurrent remote additions are not cleared (Codex #6)", () => {
+  // Trace from Codex #6:
+  // 1. Alice opens a project with no description.
+  const openingProject = makeProject({
+    rkey: "3kprojDiff",
+    name: "Alpha",
+    description: undefined,
+    color: "#7659c8",
+  });
+  const editor = openProjectEditor(openingProject, (ctx) => ({ ...ctx, formChainId: "edit-1" }));
+
+  // 2. While Alice's editor is open, Bob remotely adds a description (live selectedProject updates).
+  const liveProjectWithRemoteDesc = makeProject({
+    rkey: "3kprojDiff",
+    name: "Alpha",
+    description: "Bob added description",
+    color: "#7659c8",
+    maxHlc: "001700000000100.0000",
+  });
+  assert.equal(liveProjectWithRemoteDesc.description, "Bob added description");
+
+  // 3. Alice changes only the project name and saves.
+  const editedDraft = { ...editor.draft, name: "Alpha Renamed" };
+  const patch = buildProjectUpdatePatch(editor.baseline, editedDraft);
+  assert.deepEqual(
+    patch,
+    { name: "Alpha Renamed" },
+    "diffing against opening baseline must emit only { name } and never emit spurious clearDescription: true",
+  );
+});
+
+test("tasksWatchedSpaces includes workspaceUri alongside tasksSpaceUri so workspace mutations reload Tasks (Carbon H1)", () => {
+  const ws = "at://did:plc:auth/space/new.flock.workspace/acme";
+  const ts = "at://did:plc:auth/space/new.flock.ext.tasks/x-1";
+  assert.deepEqual(tasksWatchedSpaces(ws, ts), [ws, ts]);
+  assert.deepEqual(tasksWatchedSpaces(ws, null), [ws]);
+  assert.deepEqual(tasksWatchedSpaces(null, ts), []);
 });

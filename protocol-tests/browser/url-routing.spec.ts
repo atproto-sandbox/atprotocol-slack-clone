@@ -3,10 +3,11 @@ import test from "node:test";
 import { chromium, type Browser, type Page } from "@playwright/test";
 import { createEngine } from "@flock/client/engine";
 import { extSpaceUriFor } from "@flock/protocol/extensions";
-import { tidNow } from "@flock/protocol/keys";
+import { channelUri, tidNow } from "@flock/protocol/keys";
 import { COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
+import type { ShellLifecycleSnapshot } from "@flock/web/browser/shell-lifecycle";
 import { availablePort, startAppServer, startOperatorServer, type AppServer } from "../support/app-server";
-import { consent } from "../support/browser-app";
+import { consent, openChannel } from "../support/browser-app";
 import { actorTransport, combinedMemberScopes, mintBrowserSession, startPdsNetwork, storeAuthorityGrant, type NetworkActor } from "../support/pds-network";
 
 const WORKSPACE_NAME = "Routing Workspace";
@@ -64,10 +65,48 @@ test("App Router URL routing, loopback normalization, returnTo OAuth lifecycle, 
     });
     await bobEngine.workspaces.accept(workspaceUri);
     assert.equal((await aliceEngine.operator!.enableExtension(workspaceUri, "tasks")).operation.state, "completed");
+    assert.equal((await aliceEngine.operator!.execute({
+      workspace: workspaceUri,
+      operationId: tidNow(),
+      request: { kind: "createChannel", skey: "random", name: "random", visibility: "public" },
+    })).operation.state, "completed");
+    assert.equal((await aliceEngine.operator!.execute({
+      workspace: workspaceUri,
+      operationId: tidNow(),
+      request: { kind: "createChannel", skey: "archive", name: "archive", visibility: "public" },
+    })).operation.state, "completed");
 
-    // Seed channel messages (including older parent + reply) and a task + project for deep links.
+    // Seed channel messages (including older parent + reply), second channel, 610-message archive channel (>5 pages),
+    // and a task + project for deep links.
+    const randomSkey = `${workspaceSkey}-random`;
+    const archiveSkey = `${workspaceSkey}-archive`;
+    const randomSelection = { workspace: workspaceUri, skey: randomSkey, name: "random", visibility: "public" };
     const parentMsg = await aliceEngine.channels.send(channelSelection, "Root permalink message");
     await aliceEngine.channels.send(channelSelection, "Thread reply message", parentMsg.uri);
+    const randomMsg = await aliceEngine.channels.send(randomSelection, "Channel B reply parent");
+
+    const archiveSpace = channelUri(alice.did, archiveSkey);
+    const aliceTransport = actorTransport(pds, alice, aliceNodeSession.session);
+    const baseMs = Date.now() - 100_000;
+    const ancientRkey = tidNow(baseMs, 0);
+    const archiveWrites = Array.from({ length: 610 }, (_, idx) => ({
+      $type: "com.atproto.space.applyWrites#create",
+      collection: COLLECTION.message,
+      rkey: idx === 0 ? ancientRkey : tidNow(baseMs + idx, 0),
+      value: {
+        $type: COLLECTION.message,
+        text: idx === 0 ? "Ancient 610th message" : `Archive message #${idx}`,
+        createdAt: new Date(baseMs + idx).toISOString(),
+      },
+    }));
+    for (let start = 0; start < archiveWrites.length; start += 200) {
+      await aliceTransport.memberClient.procedure("com.atproto.space.applyWrites", {
+        space: archiveSpace,
+        repo: alice.did,
+        writes: archiveWrites.slice(start, start + 200),
+      });
+    }
+
     const projectRes = await aliceEngine.tasks.createProject(workspaceUri, { name: "Alpha Project" });
     const taskRes = await aliceEngine.tasks.createTask(workspaceUri, {
       title: "Deep link task",
@@ -88,10 +127,17 @@ test("App Router URL routing, loopback normalization, returnTo OAuth lifecycle, 
     const encAuth = encodeURIComponent(alice.did);
     const encWs = encodeURIComponent(workspaceSkey);
     const encCh = encodeURIComponent(generalSkey);
+    const encRandom = encodeURIComponent(randomSkey);
+    const encArchive = encodeURIComponent(archiveSkey);
     const encAlice = encodeURIComponent(alice.did);
     const parentRkey = parentMsg.uri.split("/").at(-1)!;
-    const threadUrl = `${app.url}/w/${encAuth}/${encWs}/c/${encCh}?thread=${encodeURIComponent(parentMsg.uri)}`;
+    const generalUrl = `${app.url}/w/${encAuth}/${encWs}/c/${encCh}`;
+    const threadUrl = `${generalUrl}?thread=${encodeURIComponent(parentMsg.uri)}`;
+    const randomUrl = `${app.url}/w/${encAuth}/${encWs}/c/${encRandom}`;
     const messagePermalinkUrl = `${app.url}/w/${encAuth}/${encWs}/c/${encCh}/m/${encAlice}/${encodeURIComponent(parentRkey)}`;
+    const ancientPermalinkUrl = `${app.url}/w/${encAuth}/${encWs}/c/${encArchive}/m/${encAlice}/${encodeURIComponent(ancientRkey)}`;
+    const missingPermalinkUrl = `${app.url}/w/${encAuth}/${encWs}/c/${encArchive}/m/${encAlice}/2222222222222`;
+    const tasksDeepUrl = `${app.url}/w/${encAuth}/${encWs}/ext/tasks`;
     const projectDeepUrl = `${app.url}/w/${encAuth}/${encWs}/ext/tasks/p/${encAlice}/${encodeURIComponent(projectRes.rkey)}`;
     const taskDeepUrl = `${app.url}/w/${encAuth}/${encWs}/ext/tasks/t/${encAlice}/${encodeURIComponent(taskRes.rkey)}`;
     const boardDeepUrl = `${app.url}/w/${encAuth}/${encWs}/ext/tasks/board`;
@@ -136,30 +182,142 @@ test("App Router URL routing, loopback normalization, returnTo OAuth lifecycle, 
     await page.getByText("Root permalink message", { exact: true }).waitFor({ state: "visible" });
     await page.getByText(`Replying to ${parentMsg.uri}`).waitFor({ state: "visible" });
 
-    // 3. Browser Back / Forward without tearing down the persistent (shell) layout.
-    await page.evaluate(() => {
-      (window as unknown as { __shellAlive?: string }).__shellAlive = "persistent-shell";
+    // 3. Codex #13: True React/DOM & Engine/LiveSpaces persistence across channel -> permalink -> Tasks -> Board -> DMs -> Back/Forward.
+    await page.waitForFunction(() => {
+      const state = (window as unknown as { __flockShellLifecycle?: ShellLifecycleSnapshot }).__flockShellLifecycle;
+      return Boolean(state?.gateToken && state?.engineToken && state?.liveToken);
     });
+    const initialShell = await page.evaluate(
+      () => ({ ...(window as unknown as { __flockShellLifecycle: ShellLifecycleSnapshot }).__flockShellLifecycle }),
+    );
+    assert.equal(initialShell.mountCount, 1);
+    assert.equal(initialShell.unmountCount, 0);
+    assert.equal(initialShell.sessionBuildCount, 1);
+    const appFrameHandle = await page.evaluateHandle(() => document.querySelector(".app-frame"));
+    const assertShellPersists = async (label: string) => {
+      const currentShell = await page.evaluate(
+        () => (window as unknown as { __flockShellLifecycle?: ShellLifecycleSnapshot }).__flockShellLifecycle,
+      );
+      assert.deepEqual(currentShell, initialShell, `${label}: shell mount/session/engine/live tokens must not change`);
+      assert.equal(
+        await appFrameHandle.evaluate((el) => el !== null && el === document.querySelector(".app-frame") && el.isConnected),
+        true,
+        `${label}: .app-frame DOM element must remain the exact same connected node`,
+      );
+    };
+
+    const rootCard = page.locator(".message-card").filter({ hasText: "Root permalink message" }).first();
+    await rootCard.getByRole("button", { name: "Link", exact: true }).click();
+    await page.waitForURL(messagePermalinkUrl, { timeout: 30_000 });
+    await page.locator('[data-highlighted="true"]').filter({ hasText: "Root permalink message" }).waitFor({ state: "visible" });
+    await assertShellPersists("channel -> permalink");
+
     await page.getByRole("button", { name: "Tasks", exact: true }).click();
-    await page.waitForURL(`${app.url}/w/${encAuth}/${encWs}/ext/tasks`, { timeout: 30_000 });
+    await page.waitForURL(tasksDeepUrl, { timeout: 30_000 });
     await page.getByText("Deep link task", { exact: true }).waitFor({ state: "visible" });
+    await assertShellPersists("permalink -> Tasks");
+
     await page.getByRole("tab", { name: "Board" }).click();
     await page.waitForURL(boardDeepUrl, { timeout: 30_000 });
     await page.getByRole("region", { name: "In progress" }).getByText("Deep link task", { exact: true }).waitFor({ state: "visible" });
+    await assertShellPersists("Tasks -> Board");
 
-    assert.equal(await page.evaluate(() => (window as unknown as { __shellAlive?: string }).__shellAlive), "persistent-shell");
+    await page.getByRole("button", { name: /New message/ }).click();
+    await page.waitForURL(`${app.url}/dm`, { timeout: 30_000 });
+    await page.getByLabel("Participant DIDs").waitFor({ state: "visible" });
+    await assertShellPersists("Board -> DMs");
+
     await page.goBack();
-    await page.waitForURL(`${app.url}/w/${encAuth}/${encWs}/ext/tasks`, { timeout: 30_000 });
-    assert.equal(await page.evaluate(() => (window as unknown as { __shellAlive?: string }).__shellAlive), "persistent-shell");
+    await page.waitForURL(boardDeepUrl, { timeout: 30_000 });
+    await page.getByRole("region", { name: "In progress" }).getByText("Deep link task", { exact: true }).waitFor({ state: "visible" });
+    await assertShellPersists("Back -> Board");
+
+    await page.goBack();
+    await page.waitForURL(tasksDeepUrl, { timeout: 30_000 });
+    await page.getByText("Deep link task", { exact: true }).waitFor({ state: "visible" });
+    await assertShellPersists("Back -> Tasks");
+
+    await page.goBack();
+    await page.waitForURL(messagePermalinkUrl, { timeout: 30_000 });
+    await page.locator('[data-highlighted="true"]').filter({ hasText: "Root permalink message" }).waitFor({ state: "visible" });
+    await assertShellPersists("Back -> Permalink");
+
+    await page.goBack();
+    await page.waitForURL(threadUrl, { timeout: 30_000 });
+    await page.getByText(`Replying to ${parentMsg.uri}`).waitFor({ state: "visible" });
+    await assertShellPersists("Back -> Channel");
+
+    await page.goForward();
+    await page.waitForURL(messagePermalinkUrl, { timeout: 30_000 });
+    await assertShellPersists("Forward -> Permalink");
+
+    await page.goForward();
+    await page.waitForURL(tasksDeepUrl, { timeout: 30_000 });
+    await assertShellPersists("Forward -> Tasks");
+
     await page.goForward();
     await page.waitForURL(boardDeepUrl, { timeout: 30_000 });
-    assert.equal(await page.evaluate(() => (window as unknown as { __shellAlive?: string }).__shellAlive), "persistent-shell");
+    await assertShellPersists("Forward -> Board");
 
-    // 4. Cold deep links & hard reloads: message permalink, project route, task detail, activity, DM.
+    await page.goForward();
+    await page.waitForURL(`${app.url}/dm`, { timeout: 30_000 });
+    await page.getByLabel("Participant DIDs").waitFor({ state: "visible" });
+    await assertShellPersists("Forward -> DMs");
+    await appFrameHandle.dispose();
+
+    // 3b. Codex #8: Replying in Channel A -> Channel B (select reply) -> Browser Back to Channel A restores Channel A's thread state.
+    await openChannel(page, "general");
+    await page.waitForURL(generalUrl, { timeout: 30_000 });
+    await page.locator(".message-card").filter({ hasText: "Root permalink message" }).first().getByRole("button", { name: "Reply", exact: true }).click();
+    await page.waitForURL(threadUrl, { timeout: 30_000 });
+    await page.getByText(`Replying to ${parentMsg.uri}`).waitFor({ state: "visible" });
+
+    await openChannel(page, "random");
+    await page.waitForURL(randomUrl, { timeout: 30_000 });
+    assert.equal(await page.locator(".message-compose").getByText(/Replying to/).count(), 0);
+    await page.locator(".message-card").filter({ hasText: "Channel B reply parent" }).first().getByRole("button", { name: "Reply", exact: true }).click();
+    await page.waitForURL(`${randomUrl}?thread=${encodeURIComponent(randomMsg.uri)}`, { timeout: 30_000 });
+    await page.getByText(`Replying to ${randomMsg.uri}`).waitFor({ state: "visible" });
+
+    await page.goBack();
+    await page.waitForURL(threadUrl, { timeout: 30_000 });
+    await page.getByText(`Replying to ${parentMsg.uri}`).waitFor({ state: "visible" });
+    assert.equal(await page.locator(".message-compose").getByText(randomMsg.uri).count(), 0, "Channel B reply target must not leak back into Channel A");
+
+    await page.getByPlaceholder("Write a message…").fill("Back-to-A thread reply");
+    await page.getByRole("button", { name: "Send", exact: true }).click();
+    await page.getByText("Back-to-A thread reply", { exact: true }).waitFor({ state: "visible" });
+    assert.equal(await page.locator(".form-error").count(), 0);
+    await page.waitForURL(generalUrl, { timeout: 30_000 });
+
+    // Also verify plain Channel A (no thread) -> Channel B (select reply) -> Back to plain Channel A -> send succeeds top-level.
+    await openChannel(page, "general");
+    await page.waitForURL(generalUrl, { timeout: 30_000 });
+    await openChannel(page, "random");
+    await page.waitForURL(randomUrl, { timeout: 30_000 });
+    await page.locator(".message-card").filter({ hasText: "Channel B reply parent" }).first().getByRole("button", { name: "Reply", exact: true }).click();
+    await page.waitForURL(`${randomUrl}?thread=${encodeURIComponent(randomMsg.uri)}`, { timeout: 30_000 });
+    await page.goBack();
+    await page.waitForURL(generalUrl, { timeout: 30_000 });
+    assert.equal(await page.locator(".message-compose").getByText(/Replying to/).count(), 0, "plain Channel A must not inherit Channel B reply");
+    await page.getByPlaceholder("Write a message…").fill("Back-to-A top-level send");
+    await page.getByRole("button", { name: "Send", exact: true }).click();
+    await page.getByText("Back-to-A top-level send", { exact: true }).waitFor({ state: "visible" });
+    assert.equal(await page.locator(".form-error").count(), 0);
+
+    // 4. Cold deep links & hard reloads: message permalink, >5-page older permalink & nonexistent permalink (Codex #9), project, task detail, activity, DM.
     await page.goto(messagePermalinkUrl);
     await page.locator('[data-highlighted="true"]').filter({ hasText: "Root permalink message" }).waitFor({ state: "visible" });
     await page.reload();
     await page.locator('[data-highlighted="true"]').filter({ hasText: "Root permalink message" }).waitFor({ state: "visible" });
+
+    await page.goto(ancientPermalinkUrl);
+    await page.locator('[data-highlighted="true"]').filter({ hasText: "Ancient 610th message" }).waitFor({ state: "visible" });
+    assert.equal(await page.getByText("Loading linked message…").count(), 0, "older >5-page permalink resolves cleanly");
+
+    await page.goto(missingPermalinkUrl);
+    await page.getByText("The linked message was not found in this channel.", { exact: true }).waitFor({ state: "visible" });
+    assert.equal(await page.getByText("Loading linked message…").count(), 0, "nonexistent permalink must never stay stuck loading");
 
     await page.goto(projectDeepUrl);
     await page.getByRole("heading", { name: "Alpha Project", exact: true }).waitFor({ state: "visible" });
