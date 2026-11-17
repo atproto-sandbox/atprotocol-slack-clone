@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { LTHASH_STATE_BYTES, RepoCommit, SpaceMacError } from "@flock/protocol/atproto/space-credential-core";
+import { LTHASH_STATE_BYTES, RepoCommit, serializedRecordBytes, SpaceMacError } from "@flock/protocol/atproto/space-credential-core";
 import { extSpaceUriFor } from "@flock/protocol/extensions";
 import { subjectKey, tidNow } from "@flock/protocol/keys";
 import { COLLECTION } from "@flock/protocol/nsids";
 import { FakeNetwork } from "@flock/testing/fake-network";
+import { MAX_HOLD_MS } from "./key-window";
 import { MemoryStore } from "./memory-store";
 import { AUTHORITY, countCalls, createChannel, createWorkspace, key, readChannel, syncFor, transportFor, writeMessage } from "./testing/engine-fixture";
 
@@ -677,7 +678,7 @@ test("D14 purge waits for both listRepos and verifiedRosterMembers, and RepoNotF
   assert.equal(afterWrite.emptyReasons[BOB], undefined);
   assert.equal(afterWrite.records.find((r) => r.repo === BOB)?.value.text, "bob-first-write");
 
-  // RepoNotFound when previously synced (syncedRev !== null) -> FAIL CLOSED permanently even across repeated reads!
+  // RepoNotFound when previously synced (syncedRev !== null) -> FAIL CLOSED transiently (permanent: false) while keeping verified cached records!
   network.setAccountState(BOB, "missing");
   await core.markSpaceStale(channels.tasks!);
   const missingAfterSync = await core.syncVerifiedSpace({
@@ -687,9 +688,9 @@ test("D14 purge waits for both listRepos and verifiedRosterMembers, and RepoNotF
     workspaceSnapshotComplete: true,
   });
   assert.equal(missingAfterSync.complete, false);
-  assert.equal(missingAfterSync.setAside.some((entry) => entry.did === BOB && entry.permanent), true);
-  assert.equal(missingAfterSync.records.some((r) => r.repo === BOB), false);
-  // Repeat read still fails closed (syncedRev remained non-null while records were cleared).
+  assert.deepEqual(missingAfterSync.setAside, [{ did: BOB, reason: "its host has no repo for it", permanent: false }]);
+  assert.equal(missingAfterSync.records.find((r) => r.repo === BOB)?.value.text, "bob-first-write");
+  // Repeat read still fails closed (permanent: false) until writer recovers or is evicted under D14.
   await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMember", { space: channels.tasks!, did: BOB });
   await core.markSpaceStale(channels.tasks!);
   const missingSecondRead = await core.syncVerifiedSpace({
@@ -699,16 +700,17 @@ test("D14 purge waits for both listRepos and verifiedRosterMembers, and RepoNotF
     workspaceSnapshotComplete: true,
   });
   assert.equal(missingSecondRead.complete, false);
-  assert.equal(missingSecondRead.setAside.some((entry) => entry.did === BOB && entry.permanent), true);
+  assert.deepEqual(missingSecondRead.setAside, [{ did: BOB, reason: "its host has no repo for it", permanent: false }]);
+  assert.equal(missingSecondRead.records.find((r) => r.repo === BOB)?.value.text, "bob-first-write");
 
-  // RepoNotFound when listed in listRepos on cold read OR invalid resolvePds -> FAIL CLOSED!
+  // RepoNotFound when listed in listRepos on cold read OR invalid resolvePds -> FAIL CLOSED (permanent: false)!
   const carolListedNetwork = new FakeNetwork();
   const s2 = await createChannel(carolListedNetwork, "g2", [CAROL, READER]);
   await writeMessage(carolListedNetwork, CAROL, s2, 1, "hi");
   carolListedNetwork.setAccountState(CAROL, "missing");
   const carolRes = await syncFor(carolListedNetwork, READER).core.syncVerifiedSpace({ space: s2, collections: [COLLECTION.message] });
   assert.equal(carolRes.complete, false);
-  assert.deepEqual(carolRes.setAside.map((e) => ({ did: e.did, permanent: e.permanent })), [{ did: CAROL, permanent: true }]);
+  assert.deepEqual(carolRes.setAside.map((e) => ({ did: e.did, permanent: e.permanent })), [{ did: CAROL, permanent: false }]);
 
   // resolvePds failure or non-HTTPS endpoint on unwritten roster member -> FAIL CLOSED!
   const badPdsTransport = {
@@ -890,4 +892,228 @@ test("followRepoOps baselines without downloading payloads, preserves same-rev a
   assert.equal(forgedRes.setAside.some((entry) => entry.did === BOB && entry.permanent), true);
   assert.ok(SpaceMacError);
   assert.ok(subjectKey(ALICE));
+});
+
+test("JSON fallback and incremental oplog growth enforce cumulative byte limits permanently and purge warm cache", async () => {
+  // 1. JSON listRecords fallback exceeding maxStarBytes aborts permanently and purges cached records.
+  {
+    const network = new FakeNetwork();
+    const space = await createChannel(network, "fallback-limit", [ALICE, BOB, READER]);
+    await writeMessage(network, ALICE, space, 1, "alice-small");
+    await writeMessage(network, BOB, space, 1, "bob-initial");
+    const oneSize = await serializedRecordBytes(COLLECTION.message, key(1), {
+      text: "bob-initial",
+      createdAt: "2026-11-10T12:00:00.000Z",
+    });
+    const budget = 1024;
+
+    const { core, store } = syncFor(network, READER);
+    const seed = await core.syncVerifiedSpace({
+      space,
+      collections: [COLLECTION.message],
+      maxStarBytes: budget,
+    });
+    assert.equal(seed.complete, true);
+    assert.equal(seed.records.some((r) => r.repo === BOB), true);
+
+    // Bob adds records pushing cumulative live CBOR bytes > 1024 while getRepo returns 501 (forcing JSON listRecords fallback).
+    await writeMessage(network, BOB, space, 2, `bob-2-${"x".repeat(400)}`);
+    await writeMessage(network, BOB, space, 3, `bob-3-${"x".repeat(400)}`);
+    await writeMessage(network, BOB, space, 4, `bob-4-${"x".repeat(400)}`);
+    let getRepoFallbackCalls = 0;
+    network.interceptResponse = ({ method, params, response }) => {
+      if (method === "com.atproto.space.getRepo" && params.repo === BOB) {
+        getRepoFallbackCalls += 1;
+        return new Response(JSON.stringify({ error: "MethodNotImplemented", message: "no star" }), { status: 501 });
+      }
+      // Force fallback even on delta attempts for this check by returning 501 on listRepoOps too.
+      if (method === "com.atproto.space.listRepoOps" && params.repo === BOB) {
+        return new Response(JSON.stringify({ error: "MethodNotImplemented", message: "no ops" }), { status: 501 });
+      }
+      return response;
+    };
+    await core.markSpaceStale(space);
+    const exceeded = await core.syncVerifiedSpace({
+      space,
+      collections: [COLLECTION.message],
+      maxStarBytes: budget,
+    });
+    assert.ok(oneSize > 0 && getRepoFallbackCalls >= 1);
+    assert.equal(exceeded.complete, false);
+    assert.deepEqual(exceeded.setAside, [
+      { did: BOB, reason: "its answer is larger than this app reads", permanent: true },
+    ]);
+    assert.equal(exceeded.records.some((r) => r.repo === BOB), false, "permanent size failure purges cached records");
+    assert.equal((await store.records(space, COLLECTION.message, BOB)).length, 0);
+  }
+
+  // 2. Incremental listRepoOps replay exceeding maxStarBytes aborts permanently via RepoStarLimitError without STAR fallback and purges cache.
+  {
+    const network = new FakeNetwork();
+    const space = await createChannel(network, "oplog-limit", [ALICE, BOB, READER]);
+    await writeMessage(network, ALICE, space, 1, "alice-ok");
+    await writeMessage(network, BOB, space, 1, "bob-1");
+    const budget = 1024;
+
+    const { core, store } = syncFor(network, READER);
+    const initial = await core.syncVerifiedSpace({
+      space,
+      collections: [COLLECTION.message],
+      maxStarBytes: budget,
+    });
+    assert.equal(initial.complete, true);
+
+    await writeMessage(network, BOB, space, 2, `bob-2-${"y".repeat(400)}`);
+    await writeMessage(network, BOB, space, 3, `bob-3-${"y".repeat(400)}`);
+    await writeMessage(network, BOB, space, 4, `bob-4-${"y".repeat(400)}`);
+    const calls = await countCalls(network, async () => {
+      const next = await core.syncVerifiedSpace({
+        space,
+        collections: [COLLECTION.message],
+        maxStarBytes: budget,
+      });
+      assert.equal(next.complete, false);
+      assert.deepEqual(next.setAside, [
+        { did: BOB, reason: "its answer is larger than this app reads", permanent: true },
+      ]);
+      assert.equal(next.records.some((r) => r.repo === BOB), false, "stale oversized cache purged after incremental overflow");
+    });
+    assert.equal(calls["com.atproto.space.getRepo"] ?? 0, 0, "aborts permanently from listRepoOps without extra STAR fetch");
+    assert.equal((await store.records(space, COLLECTION.message, BOB)).length, 0);
+  }
+});
+
+test("followRepoOps keeps initial baseline sticky across baseline failures and expires missing-writer holds after MAX_HOLD_MS", async () => {
+  // Codex #2: deliver:false fails twice with SpaceMacError -> recovers on subsequent deliver:true poll -> historical commands are NOT delivered.
+  {
+    const network = new FakeNetwork();
+    const space = await createChannel(network, "codex2", [ALICE, BOB, READER]);
+    await writeMessage(network, BOB, space, 1, "historical-command-1");
+    await writeMessage(network, BOB, space, 2, "historical-command-2");
+
+    let corruptBobMac = true;
+    network.interceptResponse = ({ method, params, response }) => {
+      if (corruptBobMac && method === "com.atproto.space.getLatestCommit" && params.repo === BOB && response.ok) {
+        const headers = new Headers(response.headers);
+        headers.delete("atproto-space-mac");
+        return new Response(response.body, { status: 200, headers });
+      }
+      return response;
+    };
+
+    const { core } = syncFor(network, READER);
+    const delivered: string[] = [];
+    const poll1 = await core.followRepoOps({
+      space,
+      collections: [COLLECTION.message],
+      deliver: false,
+      onEvent: async (ev) => { delivered.push(String(ev.value.text)); },
+    });
+    assert.equal(poll1.complete, false);
+    assert.equal(poll1.setAside.some((entry) => entry.did === BOB && entry.permanent), true);
+
+    const poll2 = await core.followRepoOps({
+      space,
+      collections: [COLLECTION.message],
+      deliver: false,
+      onEvent: async (ev) => { delivered.push(String(ev.value.text)); },
+    });
+    assert.equal(poll2.complete, false);
+    assert.equal(delivered.length, 0);
+
+    // Recover Bob's MAC and run a deliver:true poll: historical commands MUST NOT execute.
+    corruptBobMac = false;
+    network.interceptResponse = undefined;
+    const poll3 = await core.followRepoOps({
+      space,
+      collections: [COLLECTION.message],
+      deliver: true,
+      onEvent: async (ev) => { delivered.push(String(ev.value.text)); },
+    });
+    assert.equal(poll3.complete, true);
+    assert.equal(delivered.length, 0, "recovered failed-baseline writer must baseline instead of replaying historical records");
+
+    // Genuine new command written after recovery IS delivered.
+    await writeMessage(network, BOB, space, 3, "live-command-after-recovery");
+    const poll4 = await core.followRepoOps({
+      space,
+      collections: [COLLECTION.message],
+      deliver: true,
+      onEvent: async (ev) => { delivered.push(String(ev.value.text)); },
+    });
+    assert.deepEqual(poll4.delivered.map((d) => String(d.value.text)), ["live-command-after-recovery"]);
+  }
+
+  // Codex #10: missing-writer hold expires after MAX_HOLD_MS (10 min), re-baselining on recovery without replaying stale commands.
+  {
+    const network = new FakeNetwork();
+    const space = await createChannel(network, "codex10", [ALICE, BOB, READER]);
+    await writeMessage(network, BOB, space, 1, "initial-seed");
+    let elapsed = 0;
+    const clock = { now: () => network.now(), elapsed: () => elapsed };
+    const advance = (ms: number) => {
+      network.advanceClock(ms);
+      elapsed += ms;
+    };
+
+    const { core } = syncFor(network, READER);
+    const delivered: string[] = [];
+    const resets: string[] = [];
+    const errors: string[] = [];
+    await core.followRepoOps({
+      space,
+      collections: [COLLECTION.message],
+      deliver: false,
+      clock,
+      onEvent: async (ev) => { delivered.push(String(ev.value.text)); },
+    });
+
+    // At minute 1, Bob's host fails with 503 after Bob receives a stale command while unreachable from reader.
+    advance(60_000);
+    await writeMessage(network, BOB, space, 2, "stale-minute-1-cmd");
+    network.setHostReachable(BOB, false);
+    const downPoll = await core.followRepoOps({
+      space,
+      collections: [COLLECTION.message],
+      deliver: true,
+      clock,
+      onEvent: async (ev) => { delivered.push(String(ev.value.text)); },
+      onReset: (n) => resets.push(`${n.repo}:${n.reason}`),
+      onError: (err) => errors.push(err instanceof Error ? err.message : String(err)),
+    });
+    assert.equal(downPoll.complete, false);
+    assert.deepEqual(downPoll.setAside, [{ did: BOB, reason: "its host answered HTTP 503", permanent: false }]);
+    assert.equal(resets.length, 0);
+
+    // At minute 5 (< MAX_HOLD_MS), a briefly recovering writer WOULD deliver cleanly; instead keep Bob down past MAX_HOLD_MS (minute 12).
+    advance(11 * 60_000);
+    assert.ok(elapsed > MAX_HOLD_MS);
+    network.setHostReachable(BOB, true);
+    const recoveredPoll = await core.followRepoOps({
+      space,
+      collections: [COLLECTION.message],
+      deliver: true,
+      clock,
+      onEvent: async (ev) => { delivered.push(String(ev.value.text)); },
+      onReset: (n) => resets.push(`${n.repo}:${n.reason}`),
+      onError: (err) => errors.push(err instanceof Error ? err.message : String(err)),
+    });
+    assert.equal(recoveredPoll.kind, "reset");
+    assert.equal(recoveredPoll.complete, true);
+    assert.equal(resets.length, 1);
+    assert.match(resets[0]!, new RegExp(`^${BOB}:`));
+    assert.equal(delivered.length, 0, "expired missing-writer hold re-baselines without executing stale minute-1 commands");
+
+    // New command at minute 13 IS delivered normally.
+    await writeMessage(network, BOB, space, 3, "fresh-minute-13-cmd");
+    const postRecovery = await core.followRepoOps({
+      space,
+      collections: [COLLECTION.message],
+      deliver: true,
+      clock,
+      onEvent: async (ev) => { delivered.push(String(ev.value.text)); },
+    });
+    assert.deepEqual(postRecovery.delivered.map((d) => String(d.value.text)), ["fresh-minute-13-cmd"]);
+    void errors;
+  }
 });

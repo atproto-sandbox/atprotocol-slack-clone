@@ -4,7 +4,7 @@ import { COMMIT_MAC_TYPE, LTHASH_STATE_BYTES, MAC_HEADER, RECORD_MAC_TYPE, RepoC
 import { UpstreamResponseTooLargeError } from "@flock/protocol/bounded-json";
 import { FakeNetwork } from "./fake-network";
 import { dmInboxUri } from "@flock/protocol/keys";
-import { RepoStarLimitError, credentialLifetimeMs, exchangeSpaceCredential, isAccessLost, isCredentialRefused, isSpaceDeleted, mintSpaceCredentialWith, parseCid, SPACE_CREDENTIAL_LIFETIME_MS, SPACE_CREDENTIAL_RENEW_BEFORE_MS, SpaceCredentialError, verifyRecordCid, type SpaceCredential } from "@flock/protocol/atproto/space-credential-core";
+import { RepoStarLimitError, credentialLifetimeMs, exchangeSpaceCredential, isAccessLost, isCredentialRefused, isSpaceDeleted, listVerifiedBoundedRecords, mintSpaceCredentialWith, parseCid, serializedRecordBytes, SPACE_CREDENTIAL_LIFETIME_MS, SPACE_CREDENTIAL_RENEW_BEFORE_MS, SpaceCredentialError, verifyRecordCid, verifyRecordCidWithSize, type SpaceCredential } from "@flock/protocol/atproto/space-credential-core";
 import { MEMBERSPACE_POLICY } from "@flock/protocol/atproto/space-policy";
 import { XrpcError } from "@flock/protocol/atproto/xrpc";
 
@@ -677,4 +677,60 @@ test("verifyRecordCid checks canonical DRISL CID and returns false cleanly on mi
   assert.equal(await verifyRecordCid(COLLECTION, "", value, cid.toString()), false);
   assert.equal(await verifyRecordCid(COLLECTION, "a", null as never, cid.toString()), false);
   assert.equal(await verifyRecordCid(COLLECTION, "a", [] as never, cid.toString()), false);
+});
+
+test("listVerifiedBoundedRecords enforces aggregate byte and record limits across paginated listRecords responses", async () => {
+  const { network, credential } = await capture();
+  const payloadText = "x".repeat(400);
+  for (let i = 0; i < 6; i += 1) {
+    await writeRequest(network, `r${i}`, `${payloadText}-${i}`);
+  }
+  const oneSize = await serializedRecordBytes(COLLECTION, "r0", { text: `${payloadText}-0` });
+  assert.ok(oneSize > 400);
+
+  // Within both caps succeeds and returns accurate totalBytes.
+  const full = await listVerifiedBoundedRecords(credential.client(PDS1), {
+    space: SPACE,
+    repo: OWNER,
+    maxRecords: 10,
+    maxBytes: oneSize * 10,
+  });
+  assert.equal(full.records.length, 6);
+  assert.equal(full.totalBytes, oneSize * 6);
+
+  // > maxBytes aborts immediately with RepoStarLimitError("bytes", maxBytes).
+  await assert.rejects(
+    listVerifiedBoundedRecords(credential.client(PDS1), {
+      space: SPACE,
+      repo: OWNER,
+      maxRecords: 100,
+      maxBytes: oneSize * 3,
+    }),
+    (error) => error instanceof RepoStarLimitError && error instanceof UpstreamResponseTooLargeError && error.kind === "bytes",
+  );
+
+  // > maxRecords throws RepoStarLimitError("records", maxRecords) (including maxRecords === 0).
+  await assert.rejects(
+    listVerifiedBoundedRecords(credential.client(PDS1), {
+      space: SPACE,
+      repo: OWNER,
+      maxRecords: 4,
+      maxBytes: 1024 * 1024,
+    }),
+    (error) => error instanceof RepoStarLimitError && error.kind === "records",
+  );
+  await assert.rejects(
+    listVerifiedBoundedRecords(credential.client(PDS1), {
+      space: SPACE,
+      repo: OWNER,
+      maxRecords: 0,
+      maxBytes: 1024 * 1024,
+    }),
+    (error) => error instanceof RepoStarLimitError && error.kind === "records",
+  );
+
+  const r0Record = full.records.find((r) => r.rkey === "r0");
+  assert.ok(r0Record);
+  const checkWithSize = await verifyRecordCidWithSize(COLLECTION, "r0", r0Record.value, r0Record.cid);
+  assert.deepEqual(checkWithSize, { ok: true, byteLength: oneSize });
 });

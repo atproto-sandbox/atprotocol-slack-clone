@@ -634,3 +634,39 @@ test("reading or deleting an unwritten member repo does not mutate space.repos o
     spaces: [{ uri: SPACE }],
   });
 });
+
+test("concurrent applyWritesAs and putRecord calls on the same (space, repo) serialize cleanly and match LtHash commit", async () => {
+  const { network, deps } = await setup();
+  const cred = await mintSpaceCredentialWith(deps, SPACE);
+  const pds1 = "https://fake-pds.test/pds1";
+
+  await Promise.all([
+    network.applyWritesAs(OWNER, SPACE, [
+      { action: "create", collection: "new.flock.dm.request", rkey: "b1", value: { text: "one" } },
+      { action: "create", collection: "new.flock.dm.request", rkey: "b2", value: { text: "two" } },
+    ]),
+    network.applyWritesAs(OWNER, SPACE, [
+      { action: "create", collection: "new.flock.dm.request", rkey: "b3", value: { text: "three" } },
+    ]),
+    network.writeAs(OWNER, SPACE, "new.flock.dm.request", "p1", { text: "four" }),
+  ]);
+
+  const star = await cred.fetchVerifiedRepoStar(pds1, {
+    space: SPACE,
+    repo: OWNER,
+    maxBytes: 1024 * 1024,
+    maxRecords: 100,
+  });
+  assert.deepEqual(
+    star.records.map((r) => r.rkey).sort(),
+    ["b1", "b2", "b3", "p1"],
+  );
+  const opsPage = await cred.client(pds1).query<{ ops: Array<{ rev: string; rkey: string; prev: string | null }> }>(
+    "com.atproto.space.listRepoOps",
+    { space: SPACE, repo: OWNER, limit: 100 },
+  );
+  assert.deepEqual(opsPage.ops.map((o) => o.rkey).sort(), ["b1", "b2", "b3", "p1"]);
+  for (const op of opsPage.ops) {
+    assert.equal(op.prev, null);
+  }
+});

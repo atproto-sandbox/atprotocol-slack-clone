@@ -1,4 +1,4 @@
-import { cloneActivityState, cloneWriterState, commitAllowed, emptyWriterState, mergeMonotonicClock, nextWriterState, SyncStoreError, type ActivityState, type ClockPatch, type ClockState, type IdentityEntry, type IdentityKind, type SpaceState, type StoredRecord, type SyncStore, type WriterCommit, type WriterState } from "./store";
+import { cloneActivityState, cloneWriterState, commitAllowed, emptyWriterState, mergeMonotonicClock, mergeOptimisticOverlay, missingOptimisticKeys, nextWriterState, SyncStoreError, type ActivityState, type ClockPatch, type ClockState, type IdentityEntry, type IdentityKind, type SpaceState, type StoredRecord, type SyncStore, type WriterCommit, type WriterState } from "./store";
 
 // The browser's store for workspace, inbox and channel spaces (D10): one IndexedDB database per account, so a sign-out
 // deletes one database and a different account's start deletes databases that are not its own.
@@ -190,7 +190,20 @@ export class IndexedDbStore implements SyncStore {
       if (change.epoch !== undefined && change.epoch !== await epochOf(stores.meta!, change.space)) return false;
       const current = await settle<WriterState | undefined>(stores.writers!.get([change.space, change.repo]));
       if (!commitAllowed(current, change)) return false;
-      const next = nextWriterState(current, change);
+      const missingKeys = missingOptimisticKeys(current, change);
+      const addedOverlay = missingKeys.length > 0
+        ? await Promise.all(
+            missingKeys.map(async ({ collection, rkey }) => ({
+              collection,
+              rkey,
+              prevRecord: (await settle<StoredRecord | undefined>(stores.records!.get([change.space, collection, change.repo, rkey]))) ?? null,
+            })),
+          )
+        : [];
+      const resolvedOverlay = change.markStale
+        ? mergeOptimisticOverlay(current?.optimisticOverlay, addedOverlay)
+        : undefined;
+      const next = nextWriterState(current, change, resolvedOverlay);
       const clockScope = change.clock ? (change.clock.scope ?? "") : "";
       const currentClock = change.clock
         ? await settle<ClockState | undefined>(stores.clock!.get([change.clock.accountDid, clockScope]))

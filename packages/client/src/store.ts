@@ -26,6 +26,17 @@ export type StoredRecord = {
  */
 export type Coverage = { strategy: "window" | "all"; lowest: string | null; complete: boolean; cursor: string | null };
 
+/**
+ * Snapshot of the pre-optimistic verified record state for one `(collection, rkey)` touched by an own write while a
+ * verified baseline (`syncedRev` + `setHash`) is held. Lets the next `listRepoOps` sync invert optimistic mutations,
+ * verify historical delta replay against `syncedRev`, and reconcile any un-reflected optimistic keys.
+ */
+export type OptimisticOverlayEntry = {
+  collection: string;
+  rkey: string;
+  prevRecord: StoredRecord | null;
+};
+
 export type WriterState = {
   space: string;
   repo: string;
@@ -42,6 +53,8 @@ export type WriterState = {
   setHash?: Uint8Array;
   /** 32-byte SHA-256 commit digest of `setHash`. */
   commitDigest?: Uint8Array;
+  /** Pre-optimistic record snapshots per key touched since the last verified commit. */
+  optimisticOverlay?: OptimisticOverlayEntry[];
 };
 
 export type ListedWriter = { did: string; repoRev: string };
@@ -102,6 +115,8 @@ export type WriterCommit = {
   next?: Omit<WriterState, "space" | "repo" | "generation">;
   /** Marks the stored state stale, atomically: a hint, or an own write applied before its host's listing shows it. */
   markStale?: boolean;
+  /** When set alongside `markStale`, captures the earliest pre-write `prevRecord` per key for `listRepoOps` continuity. */
+  recordOptimistic?: boolean;
   /** Collections whose held records are replaced wholesale by these (a refresh). */
   replace?: Record<string, StoredRecord[]>;
   upsert?: StoredRecord[];
@@ -174,6 +189,7 @@ export function validateWriterHashes(fields: Pick<WriterState, "setHash" | "comm
 export function cloneWriterState(state: WriterState): WriterState {
   const coverage: Record<string, Coverage> = {};
   for (const [collection, entry] of Object.entries(state.coverage)) coverage[collection] = { ...entry };
+  const optimisticOverlay = cloneOptimisticOverlay(state.optimisticOverlay);
   return {
     space: state.space,
     repo: state.repo,
@@ -184,14 +200,80 @@ export function cloneWriterState(state: WriterState): WriterState {
     coverage,
     ...(state.setHash !== undefined ? { setHash: new Uint8Array(state.setHash) } : {}),
     ...(state.commitDigest !== undefined ? { commitDigest: new Uint8Array(state.commitDigest) } : {}),
+    ...(optimisticOverlay !== undefined ? { optimisticOverlay } : {}),
   };
 }
 
+function cloneOptimisticOverlay(entries: readonly OptimisticOverlayEntry[] | undefined): OptimisticOverlayEntry[] | undefined {
+  if (!entries || entries.length === 0) return undefined;
+  return entries.map((entry) => ({
+    collection: entry.collection,
+    rkey: entry.rkey,
+    prevRecord: entry.prevRecord ? structuredClone(entry.prevRecord) : null,
+  }));
+}
+
+/** Returns deduplicated `(collection, rkey)` keys modified by `change` that are not yet tracked in `current.optimisticOverlay`. */
+export function missingOptimisticKeys(
+  current: WriterState | undefined,
+  change: WriterCommit,
+): Array<{ collection: string; rkey: string }> {
+  if (!change.markStale || !change.recordOptimistic || !current || current.syncedRev === null || current.setHash === undefined) {
+    return [];
+  }
+  const existingKeys = new Set(
+    (current.optimisticOverlay ?? []).map((entry) => `${entry.collection}\0${entry.rkey}`),
+  );
+  const missing: Array<{ collection: string; rkey: string }> = [];
+  for (const record of change.upsert ?? []) {
+    const key = `${record.collection}\0${record.rkey}`;
+    if (!existingKeys.has(key)) {
+      existingKeys.add(key);
+      missing.push({ collection: record.collection, rkey: record.rkey });
+    }
+  }
+  for (const { collection, rkey } of change.remove ?? []) {
+    const key = `${collection}\0${rkey}`;
+    if (!existingKeys.has(key)) {
+      existingKeys.add(key);
+      missing.push({ collection, rkey });
+    }
+  }
+  return missing;
+}
+
+export function mergeOptimisticOverlay(
+  base: readonly OptimisticOverlayEntry[] | undefined,
+  added: readonly OptimisticOverlayEntry[],
+): OptimisticOverlayEntry[] | undefined {
+  if ((!base || base.length === 0) && added.length === 0) return undefined;
+  const merged = cloneOptimisticOverlay(base) ?? [];
+  const seen = new Set(merged.map((entry) => `${entry.collection}\0${entry.rkey}`));
+  for (const entry of added) {
+    const key = `${entry.collection}\0${entry.rkey}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push({
+      collection: entry.collection,
+      rkey: entry.rkey,
+      prevRecord: entry.prevRecord ? structuredClone(entry.prevRecord) : null,
+    });
+  }
+  return merged.length > 0 ? merged : undefined;
+}
+
 /** The state `change` leaves, with the generation advanced; computed inside the store's atomic section. */
-export function nextWriterState(current: WriterState | undefined, change: WriterCommit): WriterState {
+export function nextWriterState(
+  current: WriterState | undefined,
+  change: WriterCommit,
+  resolvedOverlay?: readonly OptimisticOverlayEntry[],
+): WriterState {
   const base = current ?? emptyWriterState(change.space, change.repo);
   if (!change.markStale && !change.next) throw new SyncStoreError("A writer commit needs its next state.");
   if (!change.markStale && change.next) validateWriterHashes(change.next);
+  const overlay = change.markStale
+    ? cloneOptimisticOverlay(resolvedOverlay ?? base.optimisticOverlay)
+    : cloneOptimisticOverlay(change.next!.optimisticOverlay);
   const fields = change.markStale
     ? {
         syncedRev: base.syncedRev,
@@ -202,7 +284,13 @@ export function nextWriterState(current: WriterState | undefined, change: Writer
         ...(base.commitDigest !== undefined ? { commitDigest: new Uint8Array(base.commitDigest) } : {}),
       }
     : change.next!;
-  return cloneWriterState({ ...fields, space: change.space, repo: change.repo, generation: base.generation + 1 });
+  return cloneWriterState({
+    ...fields,
+    ...(overlay !== undefined ? { optimisticOverlay: overlay } : { optimisticOverlay: undefined }),
+    space: change.space,
+    repo: change.repo,
+    generation: base.generation + 1,
+  });
 }
 
 /** Whether `change` may apply over `current`: the generation it was computed from, and a revision no older than the stored one. */

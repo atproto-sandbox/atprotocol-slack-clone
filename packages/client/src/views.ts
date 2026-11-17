@@ -86,19 +86,25 @@ type Binding = { spaces: readonly string[]; load: () => Promise<unknown> };
  * followed yet, and they are followed once the operator answers. `start` runs the long poll until `stop`; a poll held when
  * a new space is followed is asked again at once, so the new space is in it.
  */
+export type LiveSpacesDeps = Omit<FollowerDeps, "sync"> & {
+  onSpaceChanged?: (space: string) => Promise<void> | void;
+};
+
 export class LiveSpaces {
   private readonly bindings = new Map<string, Binding>();
   /** Spaces the feed stopped following (access lost, or deleted): followed again only when a key is watched anew. */
   private readonly lost = new Set<string>();
   private readonly follower: ChangeFollower;
   private readonly retryDelayMs: number;
+  private readonly onSpaceChanged: ((space: string) => Promise<void> | void) | undefined;
   private controller: AbortController | undefined;
   private poll: AbortController | undefined;
   private wake: (() => void) | undefined;
 
-  constructor(private readonly snapshots: Snapshots, deps: Omit<FollowerDeps, "sync">) {
+  constructor(private readonly snapshots: Snapshots, deps: LiveSpacesDeps) {
     this.follower = new ChangeFollower({ ...deps, sync: (space) => this.reloadSpace(space) });
     this.retryDelayMs = deps.retryDelayMs ?? RETRY_DELAY_MS;
+    this.onSpaceChanged = deps.onSpaceChanged;
   }
 
   /**
@@ -184,6 +190,7 @@ export class LiveSpaces {
   }
 
   private async reloadSpace(space: string): Promise<void> {
+    await this.onSpaceChanged?.(space);
     await Promise.all([...this.bindings].filter(([, binding]) => binding.spaces.includes(space)).map(([key]) => this.reload(key)));
   }
 

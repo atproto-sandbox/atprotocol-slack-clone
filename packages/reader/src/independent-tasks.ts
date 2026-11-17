@@ -1,13 +1,12 @@
-import { fromBase64, parseCidSafe } from "@atproto/lex-data";
+import { fromBase64 } from "@atproto/lex-data";
 import { jsonToLex } from "@atproto/lexicon";
 import { RepoCommit, RepoVerificationError, StarParseError, type Commit } from "@atproto/space";
-import { listBoundedRecords, listBoundedRepos } from "@flock/protocol/atproto/record-pages";
-import { classifyRepoFailure, MAX_LISTED_SET_ASIDE } from "@flock/protocol/atproto/repo-failure";
+import { listBoundedRepos } from "@flock/protocol/atproto/record-pages";
+import { classifyVerifiedRepoFailure, MAX_LISTED_SET_ASIDE } from "@flock/protocol/atproto/repo-failure";
 import {
+  listVerifiedBoundedRecords,
   mintSpaceCredentialWith,
-  RepoStarLimitError,
   SpaceCredentialError,
-  verifyRecordCid,
   type SpaceCredential,
   type SpaceCredentialDeps,
 } from "@flock/protocol/atproto/space-credential-core";
@@ -101,13 +100,6 @@ type ValidatedTasksRecords = {
   taskEdits: StoredEntityRecord<TaskEditRecordValue>[];
   comments: StoredEntityRecord<TaskCommentRecordValue>[];
 };
-
-class ForgedRecordCidError extends Error {
-  constructor(collection: string, rkey: string) {
-    super(`Record ${collection}/${rkey} failed CID verification.`);
-    this.name = "ForgedRecordCidError";
-  }
-}
 
 /**
  * Stateless verified cold reader for a workspace's Tasks extension space (`D11.1`, `D11.3`, `D11.4`, `D11.11`, `D11.13`).
@@ -445,14 +437,12 @@ async function readTasksWriters(
     } catch (error) {
       if (error instanceof SpaceCredentialError) throw error;
       if (error instanceof XrpcError && error.code === "RepoNotFound") {
-        // D11.1 #4 trust boundary: intercept before classifyRepoFailure.
+        // D11.1 #4 trust boundary: intercept before classifying.
         // Trusted empty (0 records, complete stays true) ONLY when the writer was NOT listed by listRepos
         // AND resolvePds succeeded with a valid HTTPS/loopback endpoint.
         if (!input.listedRepos.has(did) && pdsResolved) {
           return [] as VerifiedRecordEntry[];
         }
-        writerSetAside.push({ did, reason: "its host has no repo for it", permanent: true });
-        return [] as VerifiedRecordEntry[];
       }
       const failure = classifyVerifiedRepoFailure(error);
       if (!failure) throw error;
@@ -530,6 +520,11 @@ function collectTasksDegradedReasons(
   if (hasUncertainAncestry) {
     degradedReasons.push("Task causal history limit reached — archive or split into a fresh task.");
   }
+  if ((merged.overloadedHistoryEntities ?? 0) > 0) {
+    degradedReasons.push(
+      `${merged.overloadedHistoryEntities} entity(s) exceed the ${WORKSPACE_ENVELOPE.maxOpsPerEntity}-op causal history envelope.`,
+    );
+  }
 
   const activeProjectsCount = merged.projects.filter((project) => !project.deleted).length;
   const activeTasksCount = merged.tasks.filter((task) => !task.deleted).length;
@@ -588,17 +583,15 @@ async function readVerifiedRepo(
   }
 
   // Fallback path (only when getRepo endpoint is unsupported): bounded full-repo listRecords
-  // + verifyRecordCid on every record + MAC-verified getLatestCommit + RepoCommit.fromRecords match.
+  // with per-page CID verification + aggregate byte/record caps + MAC-verified getLatestCommit + RepoCommit.fromRecords match.
   const repoClient = credential.client(pdsUrl);
   for (let attempt = 0; attempt < input.maxRetries; attempt += 1) {
-    const listed = await listBoundedRecords(repoClient, {
+    const listed = await listVerifiedBoundedRecords(repoClient, {
       space: input.space,
       repo: input.repo,
-      maxRecords: input.maxRecords === 0 ? 1 : input.maxRecords,
+      maxRecords: input.maxRecords,
+      maxBytes: input.maxBytes,
     });
-    if (listed.truncated || listed.records.length > input.maxRecords) {
-      throw new RepoStarLimitError("records", input.maxRecords);
-    }
 
     let rawLatest: { commit?: unknown };
     try {
@@ -614,25 +607,13 @@ async function readVerifiedRepo(
     }
 
     const commit = parseCommit(rawLatest.commit, input.space, input.repo);
-    const repoEntries: Array<{ collection: never; rkey: never; cid: NonNullable<ReturnType<typeof parseCidSafe>> }> = [];
-
-    for (const record of listed.records) {
-      const cidOk = record.cid.length > 0 && await verifyRecordCid(record.collection, record.rkey, record.value, record.cid);
-      if (!cidOk) {
-        throw new ForgedRecordCidError(record.collection, record.rkey);
-      }
-      const parsedCid = parseCidSafe(record.cid);
-      if (!parsedCid) {
-        throw new ForgedRecordCidError(record.collection, record.rkey);
-      }
-      repoEntries.push({
+    const repoCommit = RepoCommit.fromRecords(
+      listed.records.map((record) => ({
         collection: record.collection as never,
         rkey: record.rkey as never,
-        cid: parsedCid,
-      });
-    }
-
-    const repoCommit = RepoCommit.fromRecords(repoEntries);
+        cid: record.parsedCid,
+      })),
+    );
     if (repoCommit.matches(commit)) {
       return listed.records.map((record) => ({
         collection: record.collection,
@@ -732,16 +713,6 @@ async function resolveVerifiedPds(deps: IndependentDeps, did: string): Promise<s
 function isLoopbackHostname(hostname: string): boolean {
   const normalized = hostname.replace(/^\[|\]$/g, "").toLowerCase();
   return normalized === "localhost" || normalized === "::1" || normalized === "0:0:0:0:0:0:0:1" || /^127(?:\.\d{1,3}){3}$/.test(normalized);
-}
-
-function classifyVerifiedRepoFailure(error: unknown) {
-  if (error instanceof ForgedRecordCidError) {
-    return { reason: "its records could not be authenticated", permanent: true };
-  }
-  if (error instanceof RepoVerificationError || error instanceof StarParseError) {
-    return { reason: "its records could not be verified", permanent: false };
-  }
-  return classifyRepoFailure(error);
 }
 
 function clampBound(override: number | undefined, envelopeMax: number, min: number): number {

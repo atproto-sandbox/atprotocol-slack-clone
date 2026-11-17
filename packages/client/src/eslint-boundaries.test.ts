@@ -212,3 +212,42 @@ test("D11.11: existing browser, node, operator, and DM rules are never shadowed 
     "D11.11",
   );
 });
+
+test("D11.11: computed dynamic import() specifiers are blocked while static literal dynamic imports remain allowed", async () => {
+  for (const filePath of [
+    "packages/client/src/channel-client.ts",
+    "packages/client/src/engine.ts",
+    "packages/client/src/ext/tasks/tasks-client.ts",
+    "packages/protocol/src/entity-merge.ts",
+    "packages/reader/src/independent-tasks.ts",
+    "apps/operator/src/operator/operations.ts",
+    "apps/web/src/app/ui/channel-view.tsx",
+    "apps/web/src/app/oauth/client-metadata.json/route.ts",
+  ]) {
+    await assertForbidden(
+      filePath,
+      `export async function loadMod(name: string) { return import(name); }\n`,
+      "non-static dynamic import()",
+    );
+    await assertForbidden(
+      filePath,
+      `const base = "merge";\nexport const p = import(\`./entity-\${base}\`);\n`,
+      "non-static dynamic import()",
+    );
+    await assertForbidden(
+      filePath,
+      `export const p = import("./entity-" + "merge");\n`,
+      "non-static dynamic import()",
+    );
+  }
+
+  // Static literal and expressionless template dynamic imports stay permitted.
+  await assertAllowed(
+    "packages/client/src/channel-client.ts",
+    `export const p = import("./store");\nexport const q = import(\`./store\`);\n`,
+  );
+  await assertAllowed(
+    "apps/web/src/browser/use-browser-session.ts",
+    `export const s = import("./account-gate");\n`,
+  );
+});

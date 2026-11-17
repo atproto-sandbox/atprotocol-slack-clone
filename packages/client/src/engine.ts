@@ -46,7 +46,7 @@ export function createEngine(
     sync,
     lifecycle,
     channels: new ChannelClient({ transport, credentials, sync, lifecycle, applyOwnWrites: input.applyOwnWrites }),
-    workspaces: new WorkspaceClient({ transport, credentials, lifecycle }),
+    workspaces: new WorkspaceClient({ transport, credentials, lifecycle, sync }),
     appInboxes: new AppInboxClient({ transport, sync }),
     tasks: new TasksClient({
       transport,
@@ -57,6 +57,12 @@ export function createEngine(
       applyOwnWrites: input.applyOwnWrites,
     }),
     writeQueue,
-    ...(input.operator ? { operator: new OperatorClient(transport, input.operator) } : {}),
+    ...(input.operator
+      ? {
+          operator: new OperatorClient(transport, input.operator, {
+            onWorkspaceMutated: (workspaceUri) => sync.markSpaceStale(workspaceUri),
+          }),
+        }
+      : {}),
   };
 }

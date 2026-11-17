@@ -11,6 +11,7 @@ import {
   HlcRangeError,
   MAX_ANCESTOR_REFS,
   MAX_HLC_MS,
+  MAX_OPS_PER_ENTITY,
   mergeProject,
   mergeTask,
   mergeTasksSpace,
@@ -606,4 +607,102 @@ test("cycle detection removes back-edges deterministically and supports project 
   assert.equal(forward?.conflictFinal, false);
   assert.equal(forward?.name, "Cycle B");
   assert.deepEqual(forward?.activities, []);
+});
+
+test("multi-delete concurrentDeleteOverwrite reports edits concurrent with an active delete and excludes edits superseded by any active delete", () => {
+  // Codex #7: D1 || D2, D1 > D2, and E was written after D1 (D1 -> E). E is concurrent with D2 and overwritten by D2.
+  const task1 = makeTask(ALICE, tidFor(1), { title: "Root 1" });
+  const r1 = opRef(ALICE, tidFor(1));
+  const d2 = makeTaskEdit(task1.uri, BOB, tidFor(2), { t: hlcAt(10), s: [r1], deleted: true });
+  const d1 = makeTaskEdit(task1.uri, ALICE, tidFor(3), { t: hlcAt(20), s: [r1], deleted: true });
+  const postD1Edit = makeTaskEdit(task1.uri, ALICE, tidFor(4), {
+    t: hlcAt(30),
+    s: [r1, opRef(ALICE, tidFor(3))],
+    title: "After D1",
+  });
+  const merged1 = mergeTask(task1, [d2, d1, postD1Edit]);
+  assert.ok(merged1);
+  assert.equal(merged1.deleted, true);
+  assert.deepEqual(
+    merged1.activities.filter((a) => a.kind === "concurrentDeleteOverwrite").map((a) => `${a.winner.opId}->${a.loser.opId}`),
+    [`${opId(BOB, tidFor(2))}->${opId(ALICE, tidFor(4))}`],
+  );
+
+  // Carbon M2: E1 -> E2 -> D1 while concurrent D2 > D1. Neither E1 nor E2 was concurrent with all active deletes (both preceded D1);
+  // only genuinely concurrent edits (E3) emit concurrentDeleteOverwrite against highest concurrent active delete (D2).
+  const task2 = makeTask(ALICE, tidFor(10), { title: "Root 2" });
+  const r2 = opRef(ALICE, tidFor(10));
+  const e1 = makeTaskEdit(task2.uri, ALICE, tidFor(11), { t: hlcAt(5), s: [r2], title: "E1" });
+  const e2 = makeTaskEdit(task2.uri, ALICE, tidFor(12), { t: hlcAt(6), s: [r2, opRef(ALICE, tidFor(11))], title: "E2" });
+  const seqDelete1 = makeTaskEdit(task2.uri, ALICE, tidFor(13), {
+    t: hlcAt(7),
+    s: [r2, opRef(ALICE, tidFor(11)), opRef(ALICE, tidFor(12))],
+    deleted: true,
+  });
+  const concDelete2 = makeTaskEdit(task2.uri, BOB, tidFor(14), { t: hlcAt(25), s: [r2], deleted: true });
+  const concEdit3 = makeTaskEdit(task2.uri, CAROL, tidFor(15), { t: hlcAt(15), s: [r2], title: "Concurrent E3" });
+  const merged2 = mergeTask(task2, [e1, e2, seqDelete1, concDelete2, concEdit3]);
+  assert.ok(merged2);
+  assert.equal(merged2.deleted, true);
+  assert.deepEqual(
+    merged2.activities.filter((a) => a.kind === "concurrentDeleteOverwrite").map((a) => `${a.winner.opId}->${a.loser.opId}`),
+    [`${opId(BOB, tidFor(14))}->${opId(CAROL, tidFor(15))}`],
+  );
+});
+
+test("entities exceeding MAX_OPS_PER_ENTITY skip quadratic DAG allocation and resolve deterministically in O(N log N)", () => {
+  const root = makeTask(ALICE, tidFor(1), { title: "Initial", labels: ["keep"] });
+  const rootRef = opRef(ALICE, tidFor(1));
+  const totalEdits = 5_000;
+  assert.ok(totalEdits > MAX_OPS_PER_ENTITY);
+
+  const edits: StoredEntityRecord<TaskEditRecordValue>[] = [];
+  for (let i = 1; i <= totalEdits; i += 1) {
+    const rkey = tidFor(i + 1);
+    const repo = i % 2 === 0 ? ALICE : BOB;
+    edits.push(
+      makeTaskEdit(root.uri, repo, rkey, {
+        t: hlcAt(i),
+        s: [rootRef],
+        title: `Edit ${i}`,
+        addAssignees: i === totalEdits ? ["did:plc:winner"] : undefined,
+      }),
+    );
+  }
+
+  const startedAt = performance.now();
+  const mergedForward = mergeTask(root, edits);
+  const elapsedMs = performance.now() - startedAt;
+
+  assert.ok(mergedForward);
+  assert.ok(elapsedMs < 200, `expected 5,000-op merge < 200ms, got ${elapsedMs.toFixed(1)}ms`);
+  assert.equal(mergedForward.uncertainAncestry, true);
+  assert.equal(mergedForward.lifecycleFinal, false);
+  assert.equal(mergedForward.conflictFinal, false);
+  assert.deepEqual(mergedForward.activities, []);
+  assert.equal(mergedForward.title, `Edit ${totalEdits}`);
+  assert.deepEqual(mergedForward.assignees, ["did:plc:winner"]);
+
+  const mergedReverse = mergeTask(root, [...edits].reverse());
+  assert.deepEqual(mergedForward, mergedReverse);
+
+  const closureStarted = performance.now();
+  const closure = buildEditClosure({
+    observedOps: [
+      { isRoot: true, repo: root.repo, rkey: root.rkey, t: root.value.t },
+      ...edits.map((e) => ({ repo: e.repo, rkey: e.rkey, t: e.value.t, s: e.value.s })),
+    ],
+  });
+  assert.ok(performance.now() - closureStarted < 200, "buildEditClosure over 5,000 ops must stay fast");
+  assert.equal(closure.sTruncated, true);
+  assert.equal(closure.s.length, MAX_ANCESTOR_REFS);
+
+  const space = mergeTasksSpace({
+    projects: [],
+    projectEdits: [],
+    tasks: [root],
+    taskEdits: edits,
+    comments: [],
+  });
+  assert.equal(space.overloadedHistoryEntities, 1);
 });

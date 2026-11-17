@@ -1,6 +1,6 @@
 import { KemKeyError } from "@flock/protocol/atproto/kem-key";
 import { assertBoundedRecordPage, listBoundedRecords, listBoundedRepos, listReposSince } from "@flock/protocol/atproto/record-pages";
-import { classifyRepoFailure, type RepoFailure } from "@flock/protocol/atproto/repo-failure";
+import { classifyRepoFailure, classifyVerifiedRepoFailure } from "@flock/protocol/atproto/repo-failure";
 import {
   LTHASH_STATE_BYTES,
   RepoCommit,
@@ -10,8 +10,11 @@ import {
   SpaceMacError,
   StarParseError,
   isCredentialRefused,
+  listVerifiedBoundedRecords,
   parseCidSafe,
+  serializedRecordBytes,
   verifyRecordCid,
+  verifyRecordCidWithSize,
   type Cid,
   type Commit,
   type SpaceCredential,
@@ -128,6 +131,7 @@ export type VerifiedSpaceSyncInput = {
   includeAuthority?: boolean;
   workspace?: string | null;
   truthIntervalMs?: number;
+  fullWriterScan?: boolean;
   maxStarBytes?: number;
   maxStarRecords?: number;
   signal?: AbortSignal;
@@ -137,6 +141,7 @@ export type VerifiedSpaceSyncResult = {
   records: StoredRecord[];
   byCollection: Record<string, StoredRecord[]>;
   writers: string[];
+  listedWriters: string[];
   complete: boolean;
   setAside: SetAside[];
   changing: string[];
@@ -214,10 +219,13 @@ type RepoFollowState = {
   attempts: Map<string, RepoFollowAttempt>;
   unbaselined: boolean;
   stale: boolean;
+  /** Elapsed clock timestamp when transient fetch failures began for this baselined writer (`MAX_HOLD_MS`). */
+  holdStartedAt: number | null;
 };
 
 type SpaceFollowState = {
   baselined: boolean;
+  listedOnce: boolean;
   lastCheckedAt: number | null;
   repos: Map<string, RepoFollowState>;
   seen: Set<string>;
@@ -286,7 +294,7 @@ export class SyncCore {
 
   private async resolveSpaceWriters(
     space: string,
-    input: { workspace?: string | null; truthIntervalMs?: number; keepWriters?: ReadonlySet<string> } = {},
+    input: { workspace?: string | null; truthIntervalMs?: number; keepWriters?: ReadonlySet<string>; fullScan?: boolean } = {},
   ): Promise<{ writers: ListedWriter[]; listed: Set<string>; reported: Array<{ did: string; repoRev: string }>; fullScan: boolean }> {
     const authorityDid = authorityOf(space);
     const now = this.now();
@@ -301,7 +309,7 @@ export class SyncCore {
     const sinceListing = state.writersListedAt === null ? Number.POSITIVE_INFINITY : now - state.writersListedAt;
     let reported: Array<{ did: string; repoRev: string }>;
     let fullScan = false;
-    if (!this.opened.has(space) || sinceListing < 0 || sinceListing >= intervalMs) {
+    if (input.fullScan || !this.opened.has(space) || sinceListing < 0 || sinceListing >= intervalMs) {
       fullScan = true;
       const scan = await listBoundedRepos(client, { space, maxRepos: this.options.maxWriters });
       if (scan.truncated) throw new Error(`The space has more than ${this.options.maxWriters} writers, more than this client reads.`);
@@ -353,6 +361,11 @@ export class SyncCore {
 
   /** Marks every tracked writer (including unwritten probes) in `space` stale so the next sync re-probes them. */
   async markSpaceStale(space: string): Promise<void> {
+    const spaceState = await this.deps.store.getSpace(space);
+    if (spaceState && spaceState.writersListedAt !== null) {
+      await this.deps.store.putSpace({ ...spaceState, writersListedAt: null });
+    }
+    this.opened.delete(space);
     const writers = await this.deps.store.listWriters(space);
     for (const writer of writers) {
       await this.deps.store.commit({ space, repo: writer.repo, expectedGeneration: null, markStale: true });
@@ -376,7 +389,15 @@ export class SyncCore {
     const space = (await this.deps.store.getSpace(source.space))
       ?? { space: source.space, spaceRev: null, writers: [], writersListedAt: null, workspace: input.workspace ?? null, lastOpenedAt: this.now() };
     await this.deps.store.putSpace({ ...space, ownWriteAt: this.now() });
-    await this.deps.store.commit({ space: source.space, repo: source.repo, expectedGeneration: null, markStale: true, upsert: change.upsert, remove: change.remove });
+    await this.deps.store.commit({
+      space: source.space,
+      repo: source.repo,
+      expectedGeneration: null,
+      markStale: true,
+      recordOptimistic: true,
+      upsert: change.upsert,
+      remove: change.remove,
+    });
   }
 
   /** Reads one page of `window` across `sources`, refreshing and backfilling writers until the page is the true one. */
@@ -500,6 +521,7 @@ export class SyncCore {
       workspace: input.workspace,
       truthIntervalMs: input.truthIntervalMs,
       keepWriters: keepWriters.size > 0 ? keepWriters : undefined,
+      fullScan: input.fullWriterScan,
     });
     const universeSet = new Set<string>([...listed, ...rosterSet]);
     if (input.includeAuthority) universeSet.add(authorityDid);
@@ -556,7 +578,7 @@ export class SyncCore {
     for (const collection of input.collections) records.push(...(byCollection[collection] ?? []));
 
     const complete = input.workspaceSnapshotComplete !== false && setAside.length === 0 && changing.length === 0;
-    return { records, byCollection, writers, complete, setAside, changing, emptyUnwrittenWriters, emptyReasons };
+    return { records, byCollection, writers, listedWriters: [...listed].sort(), complete, setAside, changing, emptyUnwrittenWriters, emptyReasons };
   }
 
   /**
@@ -577,7 +599,14 @@ export class SyncCore {
 
     let spaceFollow = this.opsFollowers.get(input.space);
     if (!spaceFollow) {
-      spaceFollow = { baselined: false, lastCheckedAt: null, repos: new Map(), seen: new Set(), reportedAside: new Set() };
+      spaceFollow = {
+        baselined: input.deliver,
+        listedOnce: false,
+        lastCheckedAt: null,
+        repos: new Map(),
+        seen: new Set(),
+        reportedAside: new Set(),
+      };
       this.opsFollowers.set(input.space, spaceFollow);
     }
 
@@ -609,6 +638,7 @@ export class SyncCore {
         }
       }
     }
+    spaceFollow.listedOnce = true;
 
     const listedRepoRevs = new Map<string, string>();
     if (input.writers === undefined) {
@@ -634,7 +664,7 @@ export class SyncCore {
 
     const writersToCheck = writersList.filter((repo) => {
       const existing = spaceFollow.repos.get(repo);
-      if (!existing || existing.unbaselined || existing.stale || existing.attempts.size > 0) return true;
+      if (!existing || existing.unbaselined || existing.stale || existing.attempts.size > 0 || existing.holdStartedAt !== null) return true;
       if (!input.deliver || intervalElapsed) return true;
       if (reportedSet.has(repo)) return true;
       const listedRev = listedRepoRevs.get(repo);
@@ -649,16 +679,18 @@ export class SyncCore {
           setHash: new Uint8Array(LTHASH_STATE_BYTES),
           cids: new Map(),
           attempts: new Map(),
-          unbaselined: !input.deliver,
+          unbaselined: !input.deliver || !spaceFollow.baselined,
           stale: false,
+          holdStartedAt: null,
         };
         spaceFollow.repos.set(repo, repoState);
       }
 
       const shouldBaselineOnly = !input.deliver || repoState.unbaselined;
+      const holdExpired = !shouldBaselineOnly && repoState.holdStartedAt !== null && elapsed - repoState.holdStartedAt >= MAX_HOLD_MS;
       try {
         await this.resolveValidPds(repo);
-        if (shouldBaselineOnly) {
+        if (shouldBaselineOnly || holdExpired) {
           const baseline = await this.fetchOpsBaseline(input.space, repo, {
             allowTrustedEmpty: !listedSet.has(repo) && repoState.rev === null,
             signal: input.signal,
@@ -666,10 +698,21 @@ export class SyncCore {
           repoState.rev = baseline.rev;
           repoState.setHash = baseline.setHash;
           repoState.cids = baseline.cids;
+          repoState.attempts.clear();
           repoState.unbaselined = false;
           repoState.stale = false;
+          repoState.holdStartedAt = null;
           for (const key of baseline.seenKeys) recordSeenKey(spaceFollow.seen, key);
-          return { repo, repoState, events: [], silentSeenKeys: [] };
+          const reset: RepoOpsResetNotice | undefined = holdExpired
+            ? {
+                kind: "reset",
+                space: input.space,
+                repo,
+                reason: `held missing writer expired after ${MAX_HOLD_MS / 60_000} minutes`,
+                rev: baseline.rev,
+              }
+            : undefined;
+          return { repo, repoState, events: [], silentSeenKeys: [], ...(reset ? { reset } : {}) };
         }
 
         const replay = await this.fetchAndReplayOpsForFollow({
@@ -691,11 +734,13 @@ export class SyncCore {
           repoState.cids = baseline.cids;
           repoState.attempts.clear();
           repoState.stale = false;
+          repoState.holdStartedAt = null;
           for (const key of baseline.seenKeys) recordSeenKey(spaceFollow.seen, key);
           const reset: RepoOpsResetNotice = { kind: "reset", space: input.space, repo, reason: replay.reason, rev: baseline.rev };
           return { repo, repoState, events: [], silentSeenKeys: [], reset };
         }
         repoState.stale = false;
+        repoState.holdStartedAt = null;
         return {
           repo,
           repoState,
@@ -719,11 +764,40 @@ export class SyncCore {
           repoState.cids = new Map();
           repoState.unbaselined = false;
           repoState.stale = false;
+          repoState.holdStartedAt = null;
           return { repo, repoState, events: [], silentSeenKeys: [] };
         }
         if (failure.permanent) {
+          repoState.rev = null;
+          repoState.setHash = new Uint8Array(LTHASH_STATE_BYTES);
+          repoState.cids = new Map();
           repoState.attempts.clear();
-          spaceFollow.repos.delete(repo);
+          repoState.holdStartedAt = null;
+          repoState.unbaselined ||= !input.deliver || !spaceFollow.baselined;
+        } else if (!repoState.unbaselined) {
+          repoState.holdStartedAt ??= elapsed;
+          if (elapsed - repoState.holdStartedAt >= MAX_HOLD_MS) {
+            repoState.rev = null;
+            repoState.setHash = new Uint8Array(LTHASH_STATE_BYTES);
+            repoState.cids = new Map();
+            repoState.attempts.clear();
+            repoState.holdStartedAt = null;
+            repoState.unbaselined = true;
+            return {
+              repo,
+              repoState,
+              events: [],
+              silentSeenKeys: [],
+              reset: {
+                kind: "reset",
+                space: input.space,
+                repo,
+                reason: `held missing writer expired after ${MAX_HOLD_MS / 60_000} minutes`,
+                rev: null,
+              },
+              aside: { did: repo, reason: failure.reason, permanent: failure.permanent },
+            };
+          }
         }
         return {
           repo,
@@ -735,12 +809,21 @@ export class SyncCore {
       }
     });
 
-    spaceFollow.baselined ||= !input.deliver || writersToCheck.length === writersList.length;
-    if (intervalElapsed) spaceFollow.lastCheckedAt = now;
-
     const resets = prepared.flatMap((batch) => (batch.reset ? [batch.reset] : []));
     const setAside = prepared.flatMap((batch) => (batch.aside ? [batch.aside] : []));
-    for (const reset of resets) input.onReset?.(reset);
+
+    spaceFollow.baselined ||=
+      spaceFollow.listedOnce &&
+      setAside.length === 0 &&
+      writersToCheck.length === writersList.length &&
+      writersList.every((did) => spaceFollow.repos.get(did)?.unbaselined === false);
+    if (intervalElapsed) spaceFollow.lastCheckedAt = now;
+    for (const reset of resets) {
+      input.onReset?.(reset);
+      if (!input.onReset) {
+        input.onError?.(new Error(`Repo oplog reset on ${reset.space} (${reset.repo}): ${reset.reason}.`));
+      }
+    }
 
     if (!input.deliver) {
       return {
@@ -855,6 +938,7 @@ export class SyncCore {
             repo: input.repo,
             state,
             collections: input.collections,
+            maxBytes: input.maxStarBytes,
             maxRecords: input.maxStarRecords,
             signal: input.signal,
           });
@@ -938,11 +1022,11 @@ export class SyncCore {
             });
             return { repo: input.repo, emptyReason: "unwrittenOrAbsent" };
           }
-          await this.dropRecordsOnPermanentFailure(input.space, input.repo, state, input.collections, input.epoch);
-          return { repo: input.repo, setAside: { did: input.repo, reason: "its host has no repo for it", permanent: true } };
+          // Fail closed without dropping verified cached records on unauthenticated 400 RepoNotFound.
+          return { repo: input.repo, setAside: { did: input.repo, reason: "its host has no repo for it", permanent: false } };
         }
         if (error instanceof ChangingWriterError) return { repo: input.repo, changing: true };
-        const failure = classifyVerifiedFailure(error);
+        const failure = classifyVerifiedRepoFailure(error);
         if (!failure) throw error;
         if (failure.permanent) await this.dropRecordsOnPermanentFailure(input.space, input.repo, state, input.collections, input.epoch);
         return { repo: input.repo, setAside: { did: input.repo, reason: failure.reason, permanent: failure.permanent } };
@@ -1024,6 +1108,7 @@ export class SyncCore {
     repo: string;
     state: WriterState;
     collections: readonly string[];
+    maxBytes: number;
     maxRecords: number;
     signal?: AbortSignal;
   }): Promise<
@@ -1041,14 +1126,25 @@ export class SyncCore {
     const syncedRev = state.syncedRev!;
     const persistedCols = Object.keys(state.coverage);
     const persisted = (await Promise.all(persistedCols.map((c) => this.deps.store.records(space, c, repo)))).flat();
-    const stagedCids = new Map<string, Cid>();
-    const liveRecords = new Map<string, { collection: string; rkey: string; cid: string; value: Record<string, unknown> }>();
+    const liveRecords = new Map<string, StoredRecord>();
     for (const record of persisted) {
+      liveRecords.set(pathKey(record.collection, record.rkey), record);
+    }
+    const overlayKeys = new Map<string, StoredRecord | null>();
+    for (const entry of state.optimisticOverlay ?? []) {
+      const path = pathKey(entry.collection, entry.rkey);
+      overlayKeys.set(path, entry.prevRecord);
+      if (entry.prevRecord === null) {
+        liveRecords.delete(path);
+      } else {
+        liveRecords.set(path, entry.prevRecord);
+      }
+    }
+    const stagedCids = new Map<string, Cid>();
+    for (const [path, record] of liveRecords) {
       const cid = parseCidSafe(record.cid);
       if (!cid) return { applied: false };
-      const path = pathKey(record.collection, record.rkey);
       stagedCids.set(path, cid);
-      liveRecords.set(path, { collection: record.collection, rkey: record.rkey, cid: record.cid, value: record.value });
     }
     const persistedSetHash = RepoCommit.fromRecords(
       [...stagedCids.entries()].map(([path, cid]) => {
@@ -1078,15 +1174,24 @@ export class SyncCore {
       baseCids: stagedCids,
       maxRecords: input.maxRecords,
     });
-    if (!replayed.ok) return { applied: false };
+    if (!replayed.ok) {
+      if (replayed.exceededLimit === "records") {
+        throw new RepoStarLimitError("records", input.maxRecords);
+      }
+      return { applied: false };
+    }
 
+    const touchedPaths = new Set<string>();
+    const touchedBytes = new Map<string, number>();
     const upsert: StoredRecord[] = [];
     const remove: Array<{ collection: string; rkey: string }> = [];
     for (const item of replayed.touched) {
+      touchedPaths.add(item.path);
       if (item.finalCid === null) {
         liveRecords.delete(item.path);
         remove.push({ collection: item.collection, rkey: item.rkey });
       } else {
+        if (item.finalByteLength !== undefined) touchedBytes.set(item.path, item.finalByteLength);
         const stored: StoredRecord = {
           space,
           repo,
@@ -1096,27 +1201,39 @@ export class SyncCore {
           cid: item.finalCid.toString(),
           value: item.finalValue!,
         };
-        liveRecords.set(item.path, { collection: item.collection, rkey: item.rkey, cid: stored.cid, value: stored.value });
+        liveRecords.set(item.path, stored);
         upsert.push(stored);
       }
     }
 
+    // Reconcile any optimistic keys not touched by verified oplog replay back to their verified pre-optimistic baseline.
+    for (const [path, prevRecord] of overlayKeys) {
+      if (touchedPaths.has(path)) continue;
+      if (prevRecord === null) {
+        const [collection, rkey] = splitPathKey(path);
+        remove.push({ collection, rkey });
+      } else {
+        upsert.push(prevRecord);
+      }
+    }
+
+    // Enforce aggregate 20,000-record and 16 MiB CBOR byte caps over all surviving live records (matching cold STAR).
+    if (replayed.stagedCids.size > input.maxRecords) {
+      throw new RepoStarLimitError("records", input.maxRecords);
+    }
+    let liveBytes = 0;
     const byCol = new Map<string, StoredRecord[]>();
     for (const [path] of replayed.stagedCids) {
-      const [collection, rkey] = splitPathKey(path);
       const live = liveRecords.get(path);
       if (!live) continue;
-      const list = byCol.get(collection) ?? [];
-      list.push({
-        space,
-        repo,
-        collection,
-        rkey,
-        uri: spaceRecordUri(space, repo, collection, rkey),
-        cid: live.cid,
-        value: live.value,
-      });
-      byCol.set(collection, list);
+      const bytes = touchedBytes.get(path) ?? await serializedRecordBytes(live.collection, live.rkey, live.value);
+      liveBytes += bytes;
+      if (liveBytes > input.maxBytes) {
+        throw new RepoStarLimitError("bytes", input.maxBytes, liveBytes);
+      }
+      const list = byCol.get(live.collection) ?? [];
+      list.push(live);
+      byCol.set(live.collection, list);
     }
     return {
       applied: true,
@@ -1218,42 +1335,34 @@ export class SyncCore {
         }
         if (error instanceof RepoVerificationError || error instanceof StarParseError) {
           if (attempt + 1 < WORKSPACE_ENVELOPE.maxListRecordsRetry) continue;
-          throw new SpaceMacError(`STAR verification failed for ${input.repo}: ${error.message}`);
+          throw error;
         }
         throw error;
       }
     }
 
-    if (!starUnsupported) throw new Error("STAR recovery failed.");
+    if (!starUnsupported) throw new RepoVerificationError(`STAR verification failed for ${input.repo}.`);
 
     for (let attempt = 0; attempt < WORKSPACE_ENVELOPE.maxListRecordsRetry; attempt += 1) {
       const result = await this.withCredentialRetry(input.space, input.repo, async (_credential, client) => {
         const beforeCommit = await latestCommit(client, input.space, input.repo);
-        const listed = await listBoundedRecords(client, {
+        const listed = await listVerifiedBoundedRecords(client, {
           space: input.space,
           repo: input.repo,
           maxRecords: input.maxRecords,
-          excludeValues: false,
+          maxBytes: input.maxBytes,
         });
-        if (listed.truncated) throw new RepoStarLimitError("records", input.maxRecords);
         const afterCommit = await latestCommit(client, input.space, input.repo);
         return { beforeCommit, listed, afterCommit };
       });
       if (result.beforeCommit.rev !== result.afterCommit.rev) continue;
-      const records: Array<{ collection: string; rkey: string; cid: string; value: Record<string, unknown> }> = [];
-      const commitEntries: Array<{ collection: never; rkey: never; cid: Cid }> = [];
-      for (const entry of result.listed.records) {
-        if (typeof entry.cid !== "string" || entry.cid.length === 0) {
-          throw new SpaceMacError(`Missing CID for ${entry.collection}/${entry.rkey} from ${input.repo}.`);
-        }
-        const parsedCid = parseCidSafe(entry.cid);
-        if (!parsedCid || !(await verifyRecordCid(entry.collection, entry.rkey, entry.value, entry.cid))) {
-          throw new SpaceMacError(`Record ${entry.collection}/${entry.rkey} for ${input.repo} failed CID verification.`);
-        }
-        records.push({ collection: entry.collection, rkey: entry.rkey, cid: entry.cid, value: entry.value });
-        commitEntries.push({ collection: entry.collection as never, rkey: entry.rkey as never, cid: parsedCid });
-      }
-      const repoCommit = RepoCommit.fromRecords(commitEntries);
+      const repoCommit = RepoCommit.fromRecords(
+        result.listed.records.map((entry) => ({
+          collection: entry.collection as never,
+          rkey: entry.rkey as never,
+          cid: entry.parsedCid,
+        })),
+      );
       if (!repoCommit.matches(result.afterCommit)) {
         throw new SpaceMacError(`Commit digest mismatch for ${input.repo} across stable listRecords bracket.`);
       }
@@ -1261,7 +1370,12 @@ export class SyncCore {
         commit: result.afterCommit,
         setHash: repoCommit.setHash.state(),
         commitDigest: new Uint8Array(result.afterCommit.data),
-        records,
+        records: result.listed.records.map((entry) => ({
+          collection: entry.collection,
+          rkey: entry.rkey,
+          cid: entry.cid,
+          value: entry.value,
+        })),
       };
     }
     throw new ChangingWriterError(input.repo);
@@ -1417,9 +1531,9 @@ export class SyncCore {
   ): ({ kind: "empty" } | { kind: "failure"; reason: string; permanent: boolean }) | null {
     if (error instanceof XrpcError && error.code === "RepoNotFound") {
       if (!ctx.listed && !ctx.hadSyncedRev) return { kind: "empty" };
-      return { kind: "failure", reason: "its host has no repo for it", permanent: true };
+      return { kind: "failure", reason: "its host has no repo for it", permanent: false };
     }
-    const failure = classifyVerifiedFailure(error);
+    const failure = classifyVerifiedRepoFailure(error);
     return failure ? { kind: "failure", ...failure } : null;
   }
 }
@@ -1953,6 +2067,7 @@ type TouchedRepoPath = {
   rkey: string;
   finalCid: Cid | null;
   finalValue?: Record<string, unknown>;
+  finalByteLength?: number;
   finalRev: string;
   hadBefore: boolean;
   sawCreateOrDelete: boolean;
@@ -1979,7 +2094,7 @@ async function replayValidatedRepoOps(input: {
   baseCids: ReadonlyMap<string, Cid>;
   maxRecords?: number;
 }): Promise<
-  | { ok: false; reason: string }
+  | { ok: false; reason: string; exceededLimit?: "records" }
   | { ok: true; setHash: Uint8Array; stagedCids: Map<string, Cid>; touched: TouchedRepoPath[] }
 > {
   if (input.ops.length === 0) {
@@ -1995,7 +2110,7 @@ async function replayValidatedRepoOps(input: {
       };
     }
     if (input.maxRecords !== undefined && input.baseCids.size > input.maxRecords) {
-      return { ok: false, reason: "Repository exceeds maxRecords limit." };
+      return { ok: false, exceededLimit: "records", reason: "Repository exceeds maxRecords limit." };
     }
     return { ok: true, setHash: new Uint8Array(input.baseSetHash), stagedCids: new Map(input.baseCids), touched: [] };
   }
@@ -2062,9 +2177,6 @@ async function replayValidatedRepoOps(input: {
     pathMeta.set(path, existing);
   }
 
-  if (input.maxRecords !== undefined && stagedCids.size > input.maxRecords) {
-    return { ok: false, reason: "Repository exceeds maxRecords limit." };
-  }
   if (!replayed.matches(input.commit)) {
     return { ok: false, reason: "Oplog replay commit digest mismatch." };
   }
@@ -2077,6 +2189,9 @@ async function replayValidatedRepoOps(input: {
   const replayedState = replayed.setHash.state();
   if (!bytesEqual(rebuiltState, replayedState)) {
     return { ok: false, reason: "Materialized LtHash mismatch after oplog replay." };
+  }
+  if (input.maxRecords !== undefined && stagedCids.size > input.maxRecords) {
+    return { ok: false, exceededLimit: "records", reason: "Repository exceeds maxRecords limit." };
   }
 
   const touched: TouchedRepoPath[] = [];
@@ -2098,7 +2213,8 @@ async function replayValidatedRepoOps(input: {
     if (!isPlainRecord(finalOp.value)) {
       return { ok: false, reason: "Surviving op missing inlined value." };
     }
-    if (!(await verifyRecordCid(meta.collection, meta.rkey, finalOp.value, meta.finalCid.toString()))) {
+    const verifiedCid = await verifyRecordCidWithSize(meta.collection, meta.rkey, finalOp.value, meta.finalCid.toString());
+    if (!verifiedCid.ok) {
       throw new SpaceMacError(`Record ${meta.collection}/${meta.rkey} for ${input.repo} failed CID verification.`);
     }
     touched.push({
@@ -2107,6 +2223,7 @@ async function replayValidatedRepoOps(input: {
       rkey: meta.rkey,
       finalCid: meta.finalCid,
       finalValue: finalOp.value,
+      finalByteLength: verifiedCid.byteLength,
       finalRev: finalOp.rev,
       hadBefore: meta.hadBefore,
       sawCreateOrDelete: meta.sawCreateOrDelete,
@@ -2164,13 +2281,6 @@ function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
 function isUnsupportedEndpointError(error: unknown): boolean {
   if (!(error instanceof XrpcError)) return false;
   return error.status === 404 || error.status === 501 || error.code === "MethodNotImplemented" || error.code === "MethodNotFound";
-}
-
-function classifyVerifiedFailure(error: unknown): RepoFailure | null {
-  if (error instanceof RepoStarLimitError) {
-    return { reason: error.message, permanent: false };
-  }
-  return classifyRepoFailure(error);
 }
 
 function buildFullReplaceMap(

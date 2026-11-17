@@ -150,6 +150,8 @@ export class FakeNetwork {
   private readonly unreachable = new Set<string>();
   private readonly notifyRegistrations = new Map<string, string>();
   private readonly withheldNotices = new Set<string>();
+  /** Per-`(space, repo)` serialization queue so concurrent async mutations never interleave or clobber staged snapshots. */
+  private readonly repoLocks = new Map<string, Promise<unknown>>();
 
   /** Requests served, by XRPC method. */
   readonly calls = new Map<string, number>();
@@ -206,7 +208,7 @@ export class FakeNetwork {
   }
 
   async deleteAs(did: string, space: string, collection: string, rkey: string): Promise<void> {
-    this.deleteRecord({ space, repo: did, collection, rkey }, { kind: "self", did });
+    await this.deleteRecord({ space, repo: did, collection, rkey }, { kind: "self", did });
   }
 
   /** Applies an atomic multi-op batch into `did`'s repo sharing a single `rev`. */
@@ -608,10 +610,33 @@ export class FakeNetwork {
     return { uri: `at://${String(params.repo)}/${String(params.collection)}/${String(params.rkey)}`, cid: record.cid, value: record.value };
   }
 
-  private async putRecord(params: Record<string, unknown>, auth: FakeAuth) {
-    const did = this.requireSelf(auth);
+  /**
+   * Runs a mutation strictly serialized per `(spaceUri, repoDid)`.
+   * Executes synchronously when no mutation is queued so sync test helpers (`clearRecordsAs`) keep working without `await`.
+   */
+  private withRepoLock<T>(spaceUri: string, repoDid: string, fn: () => T | Promise<T>): T | Promise<T> {
+    const key = `${spaceUri}\u0000${repoDid}`;
+    const prev = this.repoLocks.get(key);
+    if (!prev) {
+      const result = fn();
+      if (result instanceof Promise) {
+        const tracked = result.then(() => undefined, () => undefined).finally(() => {
+          if (this.repoLocks.get(key) === tracked) this.repoLocks.delete(key);
+        });
+        this.repoLocks.set(key, tracked);
+      }
+      return result;
+    }
+    const next = prev.then(() => fn());
+    const tracked = next.then(() => undefined, () => undefined).finally(() => {
+      if (this.repoLocks.get(key) === tracked) this.repoLocks.delete(key);
+    });
+    this.repoLocks.set(key, tracked);
+    return next;
+  }
+
+  private async putRecordUnlocked(params: Record<string, unknown>, did: string) {
     const repo = String(params.repo);
-    if (repo !== did) throw new FakeXrpcError(400, "UserNotAuthorized", "Can only write to your own repo");
     const collection = String(params.collection);
     const rkey = String(params.rkey);
     const record = params.record as Record<string, unknown>;
@@ -638,97 +663,113 @@ export class FakeNetwork {
     return { uri: `${spaceUri(space)}/${repo}/${collection}/${rkey}`, cid: cid.toString() };
   }
 
+  private async putRecord(params: Record<string, unknown>, auth: FakeAuth) {
+    const did = this.requireSelf(auth);
+    const repo = String(params.repo);
+    if (repo !== did) throw new FakeXrpcError(400, "UserNotAuthorized", "Can only write to your own repo");
+    return this.withRepoLock(String(params.space ?? ""), repo, () => this.putRecordUnlocked(params, did));
+  }
+
   /** Like `putRecord`, but a record already at that key is refused, as the pinned PDS's `createRecord` does. */
   private async createRecord(params: Record<string, unknown>, auth: FakeAuth) {
-    const space = typeof params.space === "string" ? this.spaces.get(params.space) : undefined;
-    const rkey = typeof params.rkey === "string" ? params.rkey : fakeTid(++this.revCounter);
-    if (space && !space.deleted && space.repos.get(String(params.repo))?.get(String(params.collection))?.has(rkey)) {
-      throw new FakeXrpcError(400, "RecordAlreadyExists", "Record already exists");
-    }
-    return this.putRecord({ ...params, rkey }, auth);
+    const did = this.requireSelf(auth);
+    const repo = String(params.repo);
+    if (repo !== did) throw new FakeXrpcError(400, "UserNotAuthorized", "Can only write to your own repo");
+    return this.withRepoLock(String(params.space ?? ""), repo, () => {
+      const space = typeof params.space === "string" ? this.spaces.get(params.space) : undefined;
+      const rkey = typeof params.rkey === "string" ? params.rkey : fakeTid(++this.revCounter);
+      if (space && !space.deleted && space.repos.get(repo)?.get(String(params.collection))?.has(rkey)) {
+        throw new FakeXrpcError(400, "RecordAlreadyExists", "Record already exists");
+      }
+      return this.putRecordUnlocked({ ...params, rkey }, did);
+    });
   }
 
   private async applyWrites(params: Record<string, unknown>, auth: FakeAuth) {
     const did = this.requireSelf(auth);
     const repo = String(params.repo);
     if (repo !== did) throw new FakeXrpcError(403, "Forbidden", "repo must match authenticated user");
-    const space = this.requireSpace(params.space);
-    if (space.deleted) throw new FakeXrpcError(400, "SpaceNotFound", "Space not found");
-    const writes = Array.isArray(params.writes) ? (params.writes as Array<Record<string, unknown>>) : [];
-    if (writes.length > 200) throw new FakeXrpcError(400, "InvalidRequest", "Too many writes. Max: 200");
-    if (writes.length === 0) return { results: [] };
+    return this.withRepoLock(String(params.space ?? ""), repo, async () => {
+      const space = this.requireSpace(params.space);
+      if (space.deleted) throw new FakeXrpcError(400, "SpaceNotFound", "Space not found");
+      const writes = Array.isArray(params.writes) ? (params.writes as Array<Record<string, unknown>>) : [];
+      if (writes.length > 200) throw new FakeXrpcError(400, "InvalidRequest", "Too many writes. Max: 200");
+      if (writes.length === 0) return { results: [] };
 
-    const existingCollections = space.repos.get(repo);
-    const staged = new Map<string, Map<string, RecordEntry>>();
-    for (const [col, entries] of existingCollections ?? []) staged.set(col, new Map(entries));
+      const existingCollections = space.repos.get(repo);
+      const staged = new Map<string, Map<string, RecordEntry>>();
+      for (const [col, entries] of existingCollections ?? []) staged.set(col, new Map(entries));
 
-    const rev = this.nextRev();
-    const ops: FakeRepoOp[] = [];
-    const results: Array<Record<string, unknown>> = [];
+      const rev = this.nextRev();
+      const ops: FakeRepoOp[] = [];
+      const results: Array<Record<string, unknown>> = [];
 
-    for (const write of writes) {
-      const type = String(write.$type ?? "");
-      const collection = String(write.collection ?? "");
-      if (type === "com.atproto.space.applyWrites#delete") {
-        const rkey = String(write.rkey ?? "");
-        const col = staged.get(collection);
-        const prevEntry = col?.get(rkey);
-        if (!prevEntry) throw new FakeXrpcError(400, "RecordNotFound", `Record not found: ${collection}/${rkey}`);
-        col!.delete(rkey);
-        ops.push({ rev, idx: ops.length, collection, rkey, cid: null, prev: prevEntry.cid.toString() });
-        results.push({ $type: "com.atproto.space.applyWrites#deleteResult" });
-        continue;
+      for (const write of writes) {
+        const type = String(write.$type ?? "");
+        const collection = String(write.collection ?? "");
+        if (type === "com.atproto.space.applyWrites#delete") {
+          const rkey = String(write.rkey ?? "");
+          const col = staged.get(collection);
+          const prevEntry = col?.get(rkey);
+          if (!prevEntry) throw new FakeXrpcError(400, "RecordNotFound", `Record not found: ${collection}/${rkey}`);
+          col!.delete(rkey);
+          ops.push({ rev, idx: ops.length, collection, rkey, cid: null, prev: prevEntry.cid.toString() });
+          results.push({ $type: "com.atproto.space.applyWrites#deleteResult" });
+          continue;
+        }
+
+        const isCreate = type === "com.atproto.space.applyWrites#create";
+        const isUpdate = type === "com.atproto.space.applyWrites#update";
+        if (!isCreate && !isUpdate) throw new FakeXrpcError(400, "InvalidRequest", `Action not supported: ${type}`);
+
+        const rkey = typeof write.rkey === "string" ? write.rkey : fakeTid(++this.revCounter);
+        let col = staged.get(collection);
+        if (!col) staged.set(collection, col = new Map());
+        const prevEntry = col.get(rkey);
+        if (isCreate && prevEntry) throw new FakeXrpcError(400, "RecordAlreadyExists", `Record already exists: ${collection}/${rkey}`);
+        if (isUpdate && !prevEntry) throw new FakeXrpcError(400, "RecordNotFound", `Record not found: ${collection}/${rkey}`);
+
+        const value = write.value as Record<string, unknown>;
+        const { cid } = await serializeRecord(collection as never, rkey as never, jsonToLex(value as Parameters<typeof jsonToLex>[0]) as never);
+        col.set(rkey, { value, cid });
+        ops.push({
+          rev,
+          idx: ops.length,
+          collection,
+          rkey,
+          cid: cid.toString(),
+          prev: prevEntry?.cid.toString() ?? null,
+        });
+        results.push({
+          $type: isCreate ? "com.atproto.space.applyWrites#createResult" : "com.atproto.space.applyWrites#updateResult",
+          uri: `${spaceUri(space)}/${repo}/${collection}/${rkey}`,
+          cid: cid.toString(),
+        });
       }
 
-      const isCreate = type === "com.atproto.space.applyWrites#create";
-      const isUpdate = type === "com.atproto.space.applyWrites#update";
-      if (!isCreate && !isUpdate) throw new FakeXrpcError(400, "InvalidRequest", `Action not supported: ${type}`);
-
-      const rkey = typeof write.rkey === "string" ? write.rkey : fakeTid(++this.revCounter);
-      let col = staged.get(collection);
-      if (!col) staged.set(collection, col = new Map());
-      const prevEntry = col.get(rkey);
-      if (isCreate && prevEntry) throw new FakeXrpcError(400, "RecordAlreadyExists", `Record already exists: ${collection}/${rkey}`);
-      if (isUpdate && !prevEntry) throw new FakeXrpcError(400, "RecordNotFound", `Record not found: ${collection}/${rkey}`);
-
-      const value = write.value as Record<string, unknown>;
-      const { cid } = await serializeRecord(collection as never, rkey as never, jsonToLex(value as Parameters<typeof jsonToLex>[0]) as never);
-      col.set(rkey, { value, cid });
-      ops.push({
-        rev,
-        idx: ops.length,
-        collection,
-        rkey,
-        cid: cid.toString(),
-        prev: prevEntry?.cid.toString() ?? null,
-      });
-      results.push({
-        $type: isCreate ? "com.atproto.space.applyWrites#createResult" : "com.atproto.space.applyWrites#updateResult",
-        uri: `${spaceUri(space)}/${repo}/${collection}/${rkey}`,
-        cid: cid.toString(),
-      });
-    }
-
-    space.repos.set(repo, staged);
-    space.repoRevs.set(repo, rev);
-    this.repoOplog(space, repo).push(...ops);
-    this.recordWrite(space, repo);
-    return { results };
+      space.repos.set(repo, staged);
+      space.repoRevs.set(repo, rev);
+      this.repoOplog(space, repo).push(...ops);
+      this.recordWrite(space, repo);
+      return { results };
+    });
   }
 
-  private clearRecords(params: Record<string, unknown>, auth: FakeAuth): Record<string, never> {
+  private clearRecords(params: Record<string, unknown>, auth: FakeAuth): Record<string, never> | Promise<Record<string, never>> {
     const did = this.requireSelf(auth);
     const repo = String(params.repo);
     if (repo !== did) throw new FakeXrpcError(403, "Forbidden", "repo must match authenticated user");
-    const space = this.requireSpace(params.space);
-    if (space.deleted) throw new FakeXrpcError(400, "SpaceNotFound", "Space not found");
-    if (space.repoRevs.has(repo)) {
-      space.repos.get(repo)?.clear();
-      space.oplogs.set(repo, []);
-      space.repoRevs.set(repo, this.nextRev());
-      this.recordWrite(space, repo);
-    }
-    return {};
+    return this.withRepoLock(String(params.space ?? ""), repo, () => {
+      const space = this.requireSpace(params.space);
+      if (space.deleted) throw new FakeXrpcError(400, "SpaceNotFound", "Space not found");
+      if (space.repoRevs.has(repo)) {
+        space.repos.get(repo)?.clear();
+        space.oplogs.set(repo, []);
+        space.repoRevs.set(repo, this.nextRev());
+        this.recordWrite(space, repo);
+      }
+      return {};
+    });
   }
 
   private async importRepo(_params: Record<string, unknown>, auth: FakeAuth, rawBody?: Uint8Array): Promise<Record<string, never>> {
@@ -740,20 +781,22 @@ export class FakeNetwork {
     } catch (error) {
       throw new FakeXrpcError(400, "InvalidRequest", error instanceof Error ? error.message : "Invalid STAR archive");
     }
-    const imported = new Map<string, Map<string, RecordEntry>>();
     try {
       if (parsed.commit.repo !== did) throw new FakeXrpcError(400, "InvalidRequest", "Repo does not match the authenticated account");
-      const space = this.requireSpace(parsed.commit.space);
-      if (space.deleted) throw new FakeXrpcError(400, "SpaceNotFound", "Space not found");
-      for await (const entry of parsed.records) {
-        let col = imported.get(entry.collection);
-        if (!col) imported.set(entry.collection, col = new Map());
-        col.set(entry.rkey, { value: lexToJson(entry.record) as Record<string, unknown>, cid: entry.cid });
-      }
-      space.repos.set(did, imported);
-      space.oplogs.set(did, []);
-      space.repoRevs.set(did, this.nextRev());
-      return {};
+      return await this.withRepoLock(parsed.commit.space, did, async () => {
+        const space = this.requireSpace(parsed.commit.space);
+        if (space.deleted) throw new FakeXrpcError(400, "SpaceNotFound", "Space not found");
+        const imported = new Map<string, Map<string, RecordEntry>>();
+        for await (const entry of parsed.records) {
+          let col = imported.get(entry.collection);
+          if (!col) imported.set(entry.collection, col = new Map());
+          col.set(entry.rkey, { value: lexToJson(entry.record) as Record<string, unknown>, cid: entry.cid });
+        }
+        space.repos.set(did, imported);
+        space.oplogs.set(did, []);
+        space.repoRevs.set(did, this.nextRev());
+        return {};
+      });
     } catch (error) {
       if (error instanceof FakeXrpcError) throw error;
       throw new FakeXrpcError(400, "InvalidRequest", error instanceof Error ? error.message : "Invalid STAR archive");
@@ -783,26 +826,28 @@ export class FakeNetwork {
     }
   }
 
-  private deleteRecord(params: Record<string, unknown>, auth: FakeAuth): Record<string, never> {
+  private deleteRecord(params: Record<string, unknown>, auth: FakeAuth): Record<string, never> | Promise<Record<string, never>> {
     const did = this.requireSelf(auth);
     const repo = String(params.repo);
     if (repo !== did) throw new FakeXrpcError(400, "UserNotAuthorized", "Can only delete from your own repo");
-    const space = this.requireSpace(params.space);
-    const collection = String(params.collection);
-    const rkey = String(params.rkey);
-    const entries = space.repos.get(repo)?.get(collection);
-    const existing = entries?.get(rkey);
-    entries?.delete(rkey);
-    const rev = this.nextRev();
-    if (existing) {
-      this.repoOplog(space, repo).push({ rev, idx: 0, collection, rkey, cid: null, prev: existing.cid.toString() });
-      space.repoRevs.set(repo, rev);
-      this.recordWrite(space, repo);
-    } else if (space.repoRevs.has(repo)) {
-      space.repoRevs.set(repo, rev);
-      this.recordWrite(space, repo);
-    }
-    return {};
+    return this.withRepoLock(String(params.space ?? ""), repo, () => {
+      const space = this.requireSpace(params.space);
+      const collection = String(params.collection);
+      const rkey = String(params.rkey);
+      const entries = space.repos.get(repo)?.get(collection);
+      const existing = entries?.get(rkey);
+      entries?.delete(rkey);
+      const rev = this.nextRev();
+      if (existing) {
+        this.repoOplog(space, repo).push({ rev, idx: 0, collection, rkey, cid: null, prev: existing.cid.toString() });
+        space.repoRevs.set(repo, rev);
+        this.recordWrite(space, repo);
+      } else if (space.repoRevs.has(repo)) {
+        space.repoRevs.set(repo, rev);
+        this.recordWrite(space, repo);
+      }
+      return {};
+    });
   }
 
   /** What the authority learns of a write: the writer set moves (now, or on `flushListing`) and registered services are told. */

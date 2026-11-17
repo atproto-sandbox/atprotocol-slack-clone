@@ -79,7 +79,11 @@ export type OperatorExecuteRequest =
 export class OperatorClient {
   private changesToken: { token: string; expiresAt: number } | undefined;
 
-  constructor(private readonly transport: ClientTransport, private readonly service: OperatorService) {}
+  constructor(
+    private readonly transport: ClientTransport,
+    private readonly service: OperatorService,
+    private readonly options: { onWorkspaceMutated?: (workspaceUri: string) => Promise<void> | void } = {},
+  ) {}
 
   /** Which followed spaces changed since their cursors, waiting up to about 25 seconds; `signal` ends the wait. */
   getChanges(follow: ReadonlyArray<{ space: string; after: string }>, signal?: AbortSignal): Promise<ChangesAnswer> {
@@ -103,8 +107,10 @@ export class OperatorClient {
     return this.call(OPERATOR_METHOD.listStalledOperations, { params: { workspace } });
   }
 
-  execute(input: { workspace: string; operationId: string; request: OperatorExecuteRequest | Record<string, unknown> }): Promise<{ operation: OperationView }> {
-    return this.call(OPERATOR_METHOD.execute, { input });
+  async execute(input: { workspace: string; operationId: string; request: OperatorExecuteRequest | Record<string, unknown> }): Promise<{ operation: OperationView }> {
+    const result = await this.call<{ operation: OperationView }>(OPERATOR_METHOD.execute, { input });
+    await this.options.onWorkspaceMutated?.(input.workspace);
+    return result;
   }
 
   enableExtension(workspace: string, extId: ExtensionId, operationId = tidNow()): Promise<{ operation: OperationView }> {

@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { SpaceMacError } from "@atproto/space";
+import { RepoVerificationError, SpaceMacError, StarParseError } from "@atproto/space";
 import { UpstreamResponseTooLargeError } from "../bounded-json";
 import { KemKeyError, kemKeyFromDidDocument } from "./kem-key";
-import { classifyRepoFailure, describeRepoFailure } from "./repo-failure";
+import { classifyRepoFailure, classifyVerifiedRepoFailure, describeRepoFailure } from "./repo-failure";
+import { RepoStarLimitError } from "./space-credential-core";
 import { XrpcError } from "./xrpc";
 
 test("a repo whose account is deactivated, taken down, suspended or gone is a permanent failure with a fixed reason", () => {
@@ -59,4 +60,28 @@ test("a host-chosen error code cannot forge or flood a log line", () => {
   assert.equal(describeRepoFailure(new XrpcError(500, "boom", "x\nWARN fake line")), "XrpcError 500 (unrecognized)");
   assert.equal(describeRepoFailure(new XrpcError(500, "boom", "A".repeat(10_000))), "XrpcError 500 (unrecognized)");
   assert.equal(describeRepoFailure(new XrpcError(500, "boom", "UpstreamFailure")), "XrpcError 500 UpstreamFailure");
+});
+
+test("classifyVerifiedRepoFailure treats unauthenticated RepoNotFound as transient while keeping STAR limit and verification failures permanent", () => {
+  assert.deepEqual(classifyVerifiedRepoFailure(new XrpcError(400, "RepoNotFound", "RepoNotFound")), {
+    reason: "its host has no repo for it",
+    permanent: false,
+  });
+  assert.deepEqual(classifyVerifiedRepoFailure(new RepoStarLimitError("bytes", 16 * 1024 * 1024)), {
+    reason: "its answer is larger than this app reads",
+    permanent: true,
+  });
+  assert.deepEqual(classifyVerifiedRepoFailure(new RepoVerificationError("bad root")), {
+    reason: "its records could not be authenticated",
+    permanent: true,
+  });
+  assert.deepEqual(classifyVerifiedRepoFailure(new StarParseError("truncated star")), {
+    reason: "its records could not be authenticated",
+    permanent: true,
+  });
+  assert.deepEqual(classifyVerifiedRepoFailure(new XrpcError(400, "RepoDeactivated", "RepoDeactivated")), {
+    reason: "its account is deactivated",
+    permanent: true,
+  });
+  assert.equal(classifyVerifiedRepoFailure(Object.assign(new Error("locked"), { code: "SQLITE_BUSY" })), null);
 });

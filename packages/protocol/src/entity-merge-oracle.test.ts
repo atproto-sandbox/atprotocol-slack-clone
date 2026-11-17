@@ -79,11 +79,13 @@ function evaluateGroundTruthOracle(
 
   const activityIds: string[] = [];
   if (deleted) {
-    const winningDelete = activeDeletes.reduce((best, cur) => (compareOpOrder(cur, best) > 0 ? cur : best));
     for (const op of allOps) {
       if (op.isRoot || op.deleted === true) continue;
-      if (happensBefore(op, winningDelete) || happensBefore(winningDelete, op)) continue;
-      activityIds.push(`delete:${root.uri}:${winningDelete.id}:${op.id}`);
+      if (activeDeletes.some((d) => happensBefore(op, d))) continue;
+      const concurrentActiveDeletes = activeDeletes.filter((d) => !happensBefore(op, d) && !happensBefore(d, op));
+      if (concurrentActiveDeletes.length === 0) continue;
+      const overwritingDelete = concurrentActiveDeletes.reduce((best, cur) => (compareOpOrder(cur, best) > 0 ? cur : best));
+      activityIds.push(`delete:${root.uri}:${overwritingDelete.id}:${op.id}`);
     }
   }
 

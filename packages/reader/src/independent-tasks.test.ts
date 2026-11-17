@@ -405,7 +405,8 @@ test("D11.1 #4 RepoNotFound trust boundary: unwritten non-listed roster member s
     assert.equal(result.degraded, true);
     assert.equal(result.setAside.length, 1);
     assert.equal(result.setAside[0]!.did, BOB);
-    assert.equal(result.setAside[0]!.permanent, true);
+    assert.equal(result.setAside[0]!.permanent, false);
+    assert.equal(result.setAside[0]!.reason, "its host has no repo for it");
     assert.deepEqual(result.activities, [], "Activity suppressed when complete is false");
   }
 
@@ -1106,5 +1107,79 @@ test("workspace snapshot forged MAC, oversized roster (>200), and deactivated Ta
     assert.deepEqual(res.setAside.map((s) => [s.did, s.permanent]), [[BOB, true]]);
     assert.equal(res.tasks.length, 1);
     assert.equal(res.tasks[0]!.repo, ALICE);
+  }
+});
+
+test("JSON listRecords fallback enforces aggregate CBOR byte cap and classifies persistent STAR verification failures permanently", async () => {
+  // 1. JSON listRecords fallback exceeding maxStarArchiveBytes -> permanent: true ("its answer is larger than this app reads").
+  {
+    const network = new FakeNetwork();
+    const { workspace, tasksSpace } = await createTasksWorkspaceFixture(network, { members: [ALICE, BOB] });
+    await network.writeAs(ALICE, tasksSpace, COLLECTION.task, tidFor(1), {
+      title: "Alice",
+      status: "todo",
+      priority: "none",
+      t: hlcAt(0),
+      createdAt: TIMESTAMP,
+    });
+    for (let i = 0; i < 4; i += 1) {
+      await network.writeAs(BOB, tasksSpace, COLLECTION.task, tidFor(10 + i), {
+        title: `Bob large ${i} ${"x".repeat(180)}`,
+        status: "todo",
+        priority: "none",
+        t: hlcAt(10 + i),
+        createdAt: TIMESTAMP,
+      });
+    }
+    let bobListCalls = 0;
+    network.interceptResponse = ({ method, params, response }) => {
+      if (method === "com.atproto.space.getRepo" && params.repo === BOB) {
+        return new Response(JSON.stringify({ error: "MethodNotImplemented", message: "no star" }), { status: 501 });
+      }
+      if (method === "com.atproto.space.listRecords" && params.repo === BOB) {
+        bobListCalls += 1;
+      }
+      return response;
+    };
+
+    const res = await readIndependentTasksSpace(depsFor(network, ALICE), workspace, { maxStarArchiveBytes: 512 });
+    assert.equal(bobListCalls, 1);
+    assert.equal(res.complete, false);
+    assert.deepEqual(res.setAside, [
+      { did: BOB, reason: "its answer is larger than this app reads", permanent: true },
+    ]);
+  }
+
+  // 2. Persistent tampered STAR stream after maxListRecordsRetry -> permanent: true ("its records could not be authenticated").
+  {
+    const network = new FakeNetwork();
+    const { workspace, tasksSpace } = await createTasksWorkspaceFixture(network, { members: [ALICE, BOB] });
+    await network.writeAs(ALICE, tasksSpace, COLLECTION.task, tidFor(1), {
+      title: "Alice",
+      status: "todo",
+      priority: "none",
+      t: hlcAt(0),
+      createdAt: TIMESTAMP,
+    });
+    await network.writeAs(BOB, tasksSpace, COLLECTION.task, tidFor(2), {
+      title: "Bob",
+      status: "todo",
+      priority: "none",
+      t: hlcAt(10),
+      createdAt: TIMESTAMP,
+    });
+    network.interceptResponse = ({ method, params, response }) => {
+      if (method === "com.atproto.space.getRepo" && params.repo === BOB && response.ok) {
+        const tampered = new Uint8Array(64).fill(0xff);
+        return new Response(tampered, { status: 200, headers: response.headers });
+      }
+      return response;
+    };
+
+    const res = await readIndependentTasksSpace(depsFor(network, ALICE), workspace);
+    assert.equal(res.complete, false);
+    assert.deepEqual(res.setAside, [
+      { did: BOB, reason: "its records could not be authenticated", permanent: true },
+    ]);
   }
 });

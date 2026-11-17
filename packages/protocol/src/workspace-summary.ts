@@ -16,6 +16,7 @@ export const WORKSPACE_ENVELOPE = {
   taskProjects: 100,
   tasks: 2_000,
   maxAncestorRefs: 256,
+  maxOpsPerEntity: 1_000,
   maxCommentsPerTask: 200,
   maxStarArchiveBytes: 16 * 1024 * 1024,
   maxStarRecords: 20_000,

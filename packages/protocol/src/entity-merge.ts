@@ -1,11 +1,13 @@
 import { sha256 } from "@noble/hashes/sha2";
 import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils";
 import { canonicalJson } from "./keys";
+import { WORKSPACE_ENVELOPE } from "./workspace-summary";
 
 export const MIN_HLC_MS = 1_000_000_000_000;
 export const MAX_HLC_MS = 999_999_999_999_999;
 export const DEFAULT_MAX_HLC_DRIFT_MS = 24 * 60 * 60 * 1000;
 export const MAX_ANCESTOR_REFS = 256;
+export const MAX_OPS_PER_ENTITY = WORKSPACE_ENVELOPE.maxOpsPerEntity;
 
 export const TASK_STATUSES = ["backlog", "todo", "in_progress", "done", "canceled"] as const;
 export type TaskStatus = (typeof TASK_STATUSES)[number];
@@ -285,6 +287,24 @@ export function buildEditClosure(input: BuildEditClosureInput): EditClosureResul
     const d = liveOps[dag.nodes[i]!.sourceIndex]!.deleted;
     if (d === true || d === false) lifecycleIndices.push(i);
   }
+  if (dag.exceededMaxOps) {
+    // Nodes are already sorted asc by (t, repo, rkey); avoid O(N^2) happensBefore filtering when over cap.
+    const recentLifecycle = lifecycleIndices.slice(-maxRefs).reverse();
+    for (const idx of recentLifecycle) pushRef(dag.nodes[idx]!.opRef);
+    for (const idx of dag.headIndices) pushRef(dag.nodes[idx]!.opRef);
+    for (let i = dag.nodes.length - 1; i >= 0 && picked.length < maxRefs; i -= 1) {
+      pushRef(dag.nodes[i]!.opRef);
+    }
+    for (const ref of unresolvedRefs) {
+      if (picked.length >= maxRefs) break;
+      pushRef(ref);
+    }
+    return {
+      s: picked,
+      sTruncated: true,
+      totalClosureSize,
+    };
+  }
   const unsupersededLifecycle = lifecycleIndices
     .filter((idx) => !lifecycleIndices.some((other) => other !== idx && dag.happensBefore(idx, other)))
     .sort((a, b) => compareOpOrder(dag.nodes[b]!, dag.nodes[a]!));
@@ -431,6 +451,7 @@ export type MergedTasksSpace = {
   orphanedProjectEdits: number;
   orphanedTaskEdits: number;
   orphanedComments: number;
+  overloadedHistoryEntities?: number;
 };
 
 export function mergeProject(
@@ -548,7 +569,7 @@ export function mergeProject(
     conflictFinal,
     otherVersions,
     activities: sortActivities(activities),
-    closureRefs: collectClosureRefs(dag.nodes),
+    closureRefs: collectClosureRefs(dag),
     maxHlc: maxOpHlc(dag.nodes),
     headRefs: dag.headIndices.map((idx) => dag.nodes[idx]!.opRef).sort(),
   };
@@ -733,7 +754,7 @@ export function mergeTask(
     conflictFinal,
     otherVersions,
     activities: sortActivities(activities),
-    closureRefs: collectClosureRefs(dag.nodes),
+    closureRefs: collectClosureRefs(dag),
     maxHlc: maxOpHlc(dag.nodes),
     headRefs: dag.headIndices.map((idx) => dag.nodes[idx]!.opRef).sort(),
   };
@@ -813,6 +834,10 @@ export function mergeTasksSpace(input: TasksSpaceSnapshotInput): MergedTasksSpac
     .map((task) => mergeTask(task, taskEditsBySubject.get(task.uri) ?? [], { complete })!)
     .sort(compareEntityOrder);
 
+  const overloadedHistoryEntities =
+    projects.filter((project) => project.uncertainAncestry && (1 + (projectEditsBySubject.get(project.uri)?.length ?? 0)) > MAX_OPS_PER_ENTITY).length +
+    tasks.filter((task) => task.uncertainAncestry && (1 + (taskEditsBySubject.get(task.uri)?.length ?? 0)) > MAX_OPS_PER_ENTITY).length;
+
   const tasksByUri = new Map(tasks.map((task) => [task.uri, task]));
   const { commentsByTask, orphanedComments } = filterTaskComments(input.comments, tasksByUri);
   const activities = sortActivities([
@@ -829,6 +854,7 @@ export function mergeTasksSpace(input: TasksSpaceSnapshotInput): MergedTasksSpac
     orphanedProjectEdits,
     orphanedTaskEdits,
     orphanedComments,
+    ...(overloadedHistoryEntities > 0 ? { overloadedHistoryEntities } : {}),
   };
 }
 
@@ -847,12 +873,16 @@ type NormalizedDagOp = {
 type CausalDag = {
   nodes: NormalizedDagOp[];
   hasTruncated: boolean;
+  exceededMaxOps: boolean;
   cycleDetected: boolean;
   headIndices: number[];
   happensBefore: (uIdx: number, vIdx: number) => boolean;
 };
 
-function buildCausalDag(rawOps: readonly Omit<NormalizedDagOp, "sourceIndex">[]): CausalDag {
+function buildCausalDag(
+  rawOps: readonly Omit<NormalizedDagOp, "sourceIndex">[],
+  maxOps: number = MAX_OPS_PER_ENTITY,
+): CausalDag {
   const deduped = new Map<string, NormalizedDagOp>();
   for (let index = 0; index < rawOps.length; index += 1) {
     const op = rawOps[index]!;
@@ -862,6 +892,17 @@ function buildCausalDag(rawOps: readonly Omit<NormalizedDagOp, "sourceIndex">[])
   }
   const nodes = [...deduped.values()].sort(compareOpOrder);
   const n = nodes.length;
+  if (n > maxOps) {
+    // Bound before allocating quadratic adj/Uint32Array structures; fall back deterministically in O(N log N).
+    return {
+      nodes,
+      hasTruncated: true,
+      exceededMaxOps: true,
+      cycleDetected: false,
+      headIndices: n > 0 ? [n - 1] : [],
+      happensBefore: () => false,
+    };
+  }
   const refToIdx = new Map<string, number>();
   let rootIdx = -1;
   let hasTruncated = false;
@@ -936,7 +977,7 @@ function buildCausalDag(rawOps: readonly Omit<NormalizedDagOp, "sourceIndex">[])
     if (adj[i]!.length === 0) headIndices.push(i);
   }
 
-  return { nodes, hasTruncated, cycleDetected, headIndices, happensBefore };
+  return { nodes, hasTruncated, exceededMaxOps: false, cycleDetected, headIndices, happensBefore };
 }
 
 function topologicalOrder(adj: readonly (readonly number[])[], n: number): number[] | null {
@@ -1018,6 +1059,14 @@ function resolveLifecycle(
   entityUri: string,
   emitActivity: boolean,
 ): { deleted: boolean; activities: DeleteOverwriteActivity[] } {
+  if (dag.exceededMaxOps) {
+    for (let i = dag.nodes.length - 1; i >= 0; i -= 1) {
+      if (deletedFlags[i] === true) return { deleted: true, activities: [] };
+      if (deletedFlags[i] === false) return { deleted: false, activities: [] };
+    }
+    return { deleted: false, activities: [] };
+  }
+
   const deleteIndices: number[] = [];
   const restoreIndices: number[] = [];
   for (let i = 0; i < dag.nodes.length; i += 1) {
@@ -1031,14 +1080,19 @@ function resolveLifecycle(
 
   const activities: DeleteOverwriteActivity[] = [];
   if (emitActivity) {
-    const winningDeleteIdx = activeDeletes.reduce((best, cur) =>
-      compareOpOrder(dag.nodes[cur]!, dag.nodes[best]!) > 0 ? cur : best,
-    );
-    const winner = toOpStamp(dag.nodes[winningDeleteIdx]!);
     for (let i = 0; i < dag.nodes.length; i += 1) {
       const node = dag.nodes[i]!;
       if (node.isRoot || deletedFlags[i] === true) continue;
-      if (dag.happensBefore(i, winningDeleteIdx) || dag.happensBefore(winningDeleteIdx, i)) continue;
+      // If op i already preceded an active un-restored delete, that delete intentionally observed and superseded it.
+      if (activeDeletes.some((dIdx) => dag.happensBefore(i, dIdx))) continue;
+      const concurrentActiveDeletes = activeDeletes.filter(
+        (dIdx) => !dag.happensBefore(i, dIdx) && !dag.happensBefore(dIdx, i),
+      );
+      if (concurrentActiveDeletes.length === 0) continue;
+      const overwritingDeleteIdx = concurrentActiveDeletes.reduce((best, cur) =>
+        compareOpOrder(dag.nodes[cur]!, dag.nodes[best]!) > 0 ? cur : best,
+      );
+      const winner = toOpStamp(dag.nodes[overwritingDeleteIdx]!);
       const loser = toOpStamp(node);
       activities.push({
         kind: "concurrentDeleteOverwrite",
@@ -1067,6 +1121,16 @@ function resolveScalarField<Op extends { isRoot: boolean }>(
   otherVersions: FieldVersion<string | undefined>[];
   activities: FieldOverwriteActivity[];
 } {
+  if (dag.exceededMaxOps) {
+    for (let i = ops.length - 1; i >= 0; i -= 1) {
+      const extracted = extract(ops[i]!);
+      if (extracted.touched) {
+        return { value: extracted.value, otherVersions: [], activities: [] };
+      }
+    }
+    return { value: undefined, otherVersions: [], activities: [] };
+  }
+
   const touching: Array<{ idx: number; value: string | undefined }> = [];
   for (let i = 0; i < ops.length; i += 1) {
     const extracted = extract(ops[i]!);
@@ -1136,6 +1200,12 @@ function resolveOrSet<Op>(
   const activities: SetConflictActivity[] = [];
   for (const [item, addIndices] of addsByItem.entries()) {
     const removeIndices = removesByItem.get(item) ?? [];
+    if (dag.exceededMaxOps) {
+      const maxAddIdx = addIndices[addIndices.length - 1]!;
+      const maxRemoveIdx = removeIndices.length > 0 ? removeIndices[removeIndices.length - 1]! : -1;
+      if (maxAddIdx >= maxRemoveIdx) activeItems.push(item);
+      continue;
+    }
     const activeAdds = addIndices.filter(
       (aIdx) => !removeIndices.some((rIdx) => dag.happensBefore(aIdx, rIdx)),
     );
@@ -1182,10 +1252,11 @@ function toOpStamp(node: NormalizedDagOp): OpStamp {
   };
 }
 
-function collectClosureRefs(ops: readonly NormalizedDagOp[]): string[] {
+function collectClosureRefs(dag: CausalDag): string[] {
   const refs = new Set<string>();
-  for (const op of ops) {
-    refs.add(op.opRef);
+  for (const op of dag.nodes) refs.add(op.opRef);
+  const opsToScan = dag.exceededMaxOps ? dag.nodes.slice(-MAX_ANCESTOR_REFS) : dag.nodes;
+  for (const op of opsToScan) {
     for (const ref of op.s) {
       if (OP_REF_PATTERN.test(ref)) refs.add(ref);
     }

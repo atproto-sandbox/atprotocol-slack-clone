@@ -1,3 +1,4 @@
+import { RepoVerificationError, StarParseError } from "@atproto/space";
 import { UpstreamResponseTooLargeError } from "../bounded-json";
 import { KemKeyError, isUnverifiableRepo } from "./kem-key";
 import { XrpcError } from "./xrpc";
@@ -47,6 +48,27 @@ export function classifyRepoFailure(error: unknown): RepoFailure | null {
     return { reason: `its host answered HTTP ${error.status}`, permanent: false };
   }
   return { reason: "its host could not be read", permanent: false };
+}
+
+/**
+ * Classifies a failure while reading a space repo in verified-sync mode (used identically by
+ * cold `@flock/reader` and warm `@flock/client`):
+ * - `RepoNotFound` failing closed without signed proof is transient (`permanent: false`) so verified
+ *   cached records stay intact until signed/authenticated account state arrives.
+ * - Persistent `RepoVerificationError` / `StarParseError` after bounded retries cannot be authenticated
+ *   (`permanent: true`).
+ * - Size limits (`RepoStarLimitError` extends `UpstreamResponseTooLargeError`), `#atproto_kem`/MAC errors,
+ *   and authenticated account states delegate to `classifyRepoFailure`.
+ */
+export function classifyVerifiedRepoFailure(error: unknown): RepoFailure | null {
+  if (isStoreFailure(error)) return null;
+  if (error instanceof XrpcError && error.code === "RepoNotFound") {
+    return { reason: ACCOUNT_STATE.RepoNotFound!, permanent: false };
+  }
+  if (error instanceof RepoVerificationError || error instanceof StarParseError) {
+    return { reason: "its records could not be authenticated", permanent: true };
+  }
+  return classifyRepoFailure(error);
 }
 
 /**

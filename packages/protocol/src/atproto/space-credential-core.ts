@@ -24,8 +24,10 @@ import {
 import { fromBase64, parseCid, parseCidSafe, validateCidString, type Cid } from "@atproto/lex-data";
 import { jsonToLex, lexToJson } from "@atproto/lexicon";
 import type * as GetDelegationToken from "../lexicons/api/types/com/atproto/space/getDelegationToken";
+import type * as ListRecords from "../lexicons/api/types/com/atproto/space/listRecords";
 import { UpstreamResponseTooLargeError, readUpstreamJson, readUpstreamText } from "../bounded-json";
 import { isDid, parseSpaceUri, spaceRecordUri, type Did } from "../keys";
+import { assertBoundedRecordPage } from "./record-pages";
 import type { SpaceKey } from "./space-key";
 import { AtprotoClient, isScopeMissingError, MAX_XRPC_RESPONSE_BYTES, XrpcError } from "./xrpc";
 
@@ -363,6 +365,67 @@ async function* boundedByteStream(
   }
 }
 
+export type VerifiedRecordCidResult = { ok: true; byteLength: number } | { ok: false };
+
+export type VerifiedBoundedRecord = {
+  collection: string;
+  rkey: string;
+  cid: string;
+  parsedCid: Cid;
+  value: Record<string, unknown>;
+  byteLength: number;
+};
+
+/**
+ * Returns the canonical DRISL CBOR byte length of a JSON record value.
+ */
+export async function serializedRecordBytes(
+  collection: string,
+  rkey: string,
+  recordValue: Record<string, unknown>,
+): Promise<number> {
+  const lexValue = jsonToLex(recordValue as Parameters<typeof jsonToLex>[0]) as Parameters<typeof serializeRecord>[2];
+  const { bytes } = await serializeRecord(
+    collection as Parameters<typeof serializeRecord>[0],
+    rkey as Parameters<typeof serializeRecord>[1],
+    lexValue,
+  );
+  return bytes.byteLength;
+}
+
+/**
+ * Verifies a JSON record value against an expected CID string by converting XRPC JSON -> Lex (`jsonToLex`),
+ * computing canonical DRISL `serializeRecord`, comparing against `parseCid(expectedCid)`, and returning its
+ * serialized byte length on success.
+ */
+export async function verifyRecordCidWithSize(
+  collection: string,
+  rkey: string,
+  recordValue: Record<string, unknown>,
+  expectedCid: string,
+): Promise<VerifiedRecordCidResult> {
+  if (typeof collection !== "string" || collection.length === 0 || typeof rkey !== "string" || rkey.length === 0) {
+    return { ok: false };
+  }
+  if (typeof recordValue !== "object" || recordValue === null || Array.isArray(recordValue)) {
+    return { ok: false };
+  }
+  if (!validateCidString(expectedCid)) return { ok: false };
+  const expected = parseCidSafe(expectedCid);
+  if (!expected) return { ok: false };
+  try {
+    const lexValue = jsonToLex(recordValue as Parameters<typeof jsonToLex>[0]) as Parameters<typeof serializeRecord>[2];
+    const { cid, bytes } = await serializeRecord(
+      collection as Parameters<typeof serializeRecord>[0],
+      rkey as Parameters<typeof serializeRecord>[1],
+      lexValue,
+    );
+    return cid.equals(expected) ? { ok: true, byteLength: bytes.byteLength } : { ok: false };
+  } catch {
+    return { ok: false };
+  }
+}
+
 /**
  * Verifies a JSON record value against an expected CID string by converting XRPC JSON -> Lex (`jsonToLex`),
  * computing canonical DRISL `serializeRecord`, and comparing against `parseCid(expectedCid)`.
@@ -373,22 +436,123 @@ export async function verifyRecordCid(
   recordValue: Record<string, unknown>,
   expectedCid: string,
 ): Promise<boolean> {
-  if (typeof collection !== "string" || collection.length === 0 || typeof rkey !== "string" || rkey.length === 0) {
-    return false;
+  return (await verifyRecordCidWithSize(collection, rkey, recordValue, expectedCid)).ok;
+}
+
+const MAX_VERIFIED_RECORD_PAGES = 128;
+
+/**
+ * Pages `com.atproto.space.listRecords` for one repo while verifying every record's CID and enforcing
+ * aggregate `maxRecords` and serialized DRISL CBOR `maxBytes` caps page-by-page so oversized repos abort
+ * immediately with `RepoStarLimitError` before fetching additional pages.
+ */
+export async function listVerifiedBoundedRecords(
+  client: AtprotoClient,
+  input: { space: string; repo: string; collection?: string; maxRecords: number; maxBytes: number },
+): Promise<{ records: VerifiedBoundedRecord[]; totalBytes: number }> {
+  if (!Number.isSafeInteger(input.maxRecords) || input.maxRecords < 0) {
+    throw new RangeError("Verified record limit must be a non-negative safe integer.");
   }
-  if (typeof recordValue !== "object" || recordValue === null || Array.isArray(recordValue)) {
-    return false;
+  if (!Number.isSafeInteger(input.maxBytes) || input.maxBytes < 0) {
+    throw new RangeError("Verified byte limit must be a non-negative safe integer.");
   }
-  if (!validateCidString(expectedCid)) return false;
-  const expected = parseCidSafe(expectedCid);
-  if (!expected) return false;
-  try {
-    const lexValue = jsonToLex(recordValue as Parameters<typeof jsonToLex>[0]) as Parameters<typeof serializeRecord>[2];
-    const { cid } = await serializeRecord(collection as Parameters<typeof serializeRecord>[0], rkey as Parameters<typeof serializeRecord>[1], lexValue);
-    return cid.equals(expected);
-  } catch {
-    return false;
+
+  const records: VerifiedBoundedRecord[] = [];
+  const seenCursors = new Set<string>();
+  const seenKeys = new Set<string>();
+  let totalBytes = 0;
+  let pages = 0;
+  let cursor: string | undefined;
+
+  do {
+    const remaining = input.maxRecords - records.length;
+    const limit = input.maxRecords === 0 ? 1 : Math.min(500, remaining);
+    if (++pages > MAX_VERIFIED_RECORD_PAGES) {
+      throw new Error("PDS record pagination exceeded the bounded page limit.");
+    }
+    const page = await client.query<ListRecords.OutputSchema>("com.atproto.space.listRecords", {
+      space: input.space,
+      repo: input.repo,
+      ...(input.collection !== undefined ? { collection: input.collection } : {}),
+      excludeValues: false,
+      limit,
+      cursor,
+    });
+    if (cursor) seenCursors.add(cursor);
+    assertBoundedRecordPage(page, {
+      collection: input.collection,
+      excludeValues: false,
+      limit,
+      cursor,
+      seenCursors,
+      space: input.space,
+      repo: input.repo,
+    });
+    for (const entry of page.records) {
+      const key = `${entry.collection}/${entry.rkey}`;
+      if (seenKeys.has(key)) throw new Error("PDS record pagination returned a duplicate record key.");
+      seenKeys.add(key);
+      if (records.length >= input.maxRecords) {
+        throw new RepoStarLimitError("records", input.maxRecords);
+      }
+      if (typeof entry.cid !== "string" || entry.cid.length === 0) {
+        throw new SpaceMacError(`Missing CID for ${entry.collection}/${entry.rkey} from ${input.repo}.`);
+      }
+      const parsedCid = parseCidSafe(entry.cid);
+      const value = entry.value as Record<string, unknown>;
+      const verified = parsedCid
+        ? await verifyRecordCidWithSize(entry.collection, entry.rkey, value, entry.cid)
+        : { ok: false as const };
+      if (!parsedCid || !verified.ok) {
+        throw new SpaceMacError(`Record ${entry.collection}/${entry.rkey} for ${input.repo} failed CID verification.`);
+      }
+      totalBytes += verified.byteLength;
+      if (totalBytes > input.maxBytes) {
+        throw new RepoStarLimitError("bytes", input.maxBytes, totalBytes);
+      }
+      records.push({
+        collection: entry.collection,
+        rkey: entry.rkey,
+        cid: entry.cid,
+        parsedCid,
+        value,
+        byteLength: verified.byteLength,
+      });
+    }
+    cursor = page.cursor;
+    if (cursor) seenCursors.add(cursor);
+  } while (cursor && records.length < input.maxRecords);
+
+  if (cursor && input.maxRecords > 0) {
+    if (++pages > MAX_VERIFIED_RECORD_PAGES) {
+      throw new Error("PDS record pagination exceeded the bounded page limit.");
+    }
+    const page = await client.query<ListRecords.OutputSchema>("com.atproto.space.listRecords", {
+      space: input.space,
+      repo: input.repo,
+      ...(input.collection !== undefined ? { collection: input.collection } : {}),
+      excludeValues: false,
+      limit: 1,
+      cursor,
+    });
+    assertBoundedRecordPage(page, {
+      collection: input.collection,
+      excludeValues: false,
+      limit: 1,
+      cursor,
+      seenCursors,
+      space: input.space,
+      repo: input.repo,
+    });
+    if (page.records.some((entry) => seenKeys.has(`${entry.collection}/${entry.rkey}`))) {
+      throw new Error("PDS record pagination returned a duplicate record key.");
+    }
+    if (page.records.length > 0) {
+      throw new RepoStarLimitError("records", input.maxRecords);
+    }
   }
+
+  return { records, totalBytes };
 }
 
 /** The response a caller sees once its body has been read and verified. The length and encoding headers described the wire bytes. */

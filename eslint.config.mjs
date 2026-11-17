@@ -91,6 +91,10 @@ const NO_EXTENSION_DYNAMIC_IMPORT = {
     "ImportExpression[source.value=/^(?!.*\\/lexicons\\/)(?:.*(?:^|\\/)ext(?:\\/|$)|@flock\\/client\\/ext(?:\\/|$))/], ImportExpression:has(TemplateElement[value.raw=/^(?!.*\\/lexicons\\/)(?:.*(?:^|\\/)ext(?:\\/|$)|@flock\\/client\\/ext(?:\\/|$))/])",
   message: "D11.11: dynamic import of client/UI extensions is forbidden outside extension boundaries.",
 };
+const NO_COMPUTED_DYNAMIC_IMPORT = {
+  selector: 'ImportExpression:not([source.type="Literal"]):not([source.type="TemplateLiteral"][source.expressions.length=0])',
+  message: "D11.11: non-static dynamic import() specifiers are forbidden in boundary-restricted modules.",
+};
 
 function restrictedBoundaryRules(patterns, syntax = []) {
   return {
@@ -129,16 +133,16 @@ export default defineConfig([
     // D11.11 baseline: block entity-merge and ext/* everywhere outside their explicit allowlists.
     // Every more-specific block below spreads all applicable patterns rather than shadowing this baseline.
     files: ALL_BOUNDARY_SOURCE,
-    ignores: [...ENTITY_MERGE_ALLOWED, ...EXTENSION_IMPORT_ALLOWED],
+    ignores: [...ENTITY_MERGE_ALLOWED, ...EXTENSION_IMPORT_ALLOWED, "apps/operator/src/**/*.test.{ts,tsx}"],
     rules: restrictedBoundaryRules(
       [NO_ENTITY_MERGE_IMPORT, NO_EXTENSION_IMPORT],
-      [NO_ENTITY_MERGE_DYNAMIC_IMPORT, NO_EXTENSION_DYNAMIC_IMPORT],
+      [NO_ENTITY_MERGE_DYNAMIC_IMPORT, NO_EXTENSION_DYNAMIC_IMPORT, NO_COMPUTED_DYNAMIC_IMPORT],
     ),
   },
   {
     // Independent Tasks reader may import entity-merge, never client/UI extensions.
     files: ["packages/reader/src/independent-tasks*.ts"],
-    rules: restrictedBoundaryRules([NO_EXTENSION_IMPORT], [NO_EXTENSION_DYNAMIC_IMPORT]),
+    rules: restrictedBoundaryRules([NO_EXTENSION_IMPORT], [NO_EXTENSION_DYNAMIC_IMPORT, NO_COMPUTED_DYNAMIC_IMPORT]),
   },
   {
     // Browser tests/fixtures (except entity-merge tests, ext/tasks tests, and tasks-reader-parity.test.ts).
@@ -146,19 +150,19 @@ export default defineConfig([
     ignores: [...ENTITY_MERGE_ALLOWED, ...EXTENSION_IMPORT_ALLOWED],
     rules: restrictedBoundaryRules(
       [NO_SERVER_CONFIG, NO_APP_LAYER, NO_ENTITY_MERGE_IMPORT, NO_EXTENSION_IMPORT],
-      [NO_ENTITY_MERGE_DYNAMIC_IMPORT, NO_EXTENSION_DYNAMIC_IMPORT],
+      [NO_ENTITY_MERGE_DYNAMIC_IMPORT, NO_EXTENSION_DYNAMIC_IMPORT, NO_COMPUTED_DYNAMIC_IMPORT],
     ),
   },
   {
     files: ["packages/protocol/src/entity-merge*.test.ts"],
     rules: restrictedBoundaryRules(
       [NO_SERVER_CONFIG, NO_APP_LAYER, NO_EXTENSION_IMPORT],
-      [NO_EXTENSION_DYNAMIC_IMPORT],
+      [NO_EXTENSION_DYNAMIC_IMPORT, NO_COMPUTED_DYNAMIC_IMPORT],
     ),
   },
   {
     files: ["packages/client/src/ext/tasks/**/*.test.ts", "packages/client/src/tasks-reader-parity.test.ts"],
-    rules: restrictedBoundaryRules([NO_SERVER_CONFIG, NO_APP_LAYER]),
+    rules: restrictedBoundaryRules([NO_SERVER_CONFIG, NO_APP_LAYER], [NO_COMPUTED_DYNAMIC_IMPORT]),
   },
   {
     // The client's Node entry (non-test): may import node:* and @flock/net, never server config, app layer, entity-merge, or ext/*.
@@ -166,7 +170,7 @@ export default defineConfig([
     ignores: NODE_TESTS,
     rules: restrictedBoundaryRules(
       [NO_SERVER_CONFIG, NO_APP_LAYER, NO_ENTITY_MERGE_IMPORT, NO_EXTENSION_IMPORT],
-      [NO_ENTITY_MERGE_DYNAMIC_IMPORT, NO_EXTENSION_DYNAMIC_IMPORT],
+      [NO_ENTITY_MERGE_DYNAMIC_IMPORT, NO_EXTENSION_DYNAMIC_IMPORT, NO_COMPUTED_DYNAMIC_IMPORT],
     ),
   },
   {
@@ -175,7 +179,7 @@ export default defineConfig([
     ignores: [...NODE_TESTS, ...CLIENT_NODE_ENTRY, ...ENTITY_MERGE_ALLOWED, ...EXTENSION_IMPORT_ALLOWED],
     rules: restrictedBoundaryRules(
       [NO_NODE_BUILTINS, NO_SERVER_CONFIG, NO_APP_LAYER, NO_CLIENT_NODE_ENTRY, NO_ENTITY_MERGE_IMPORT, NO_EXTENSION_IMPORT],
-      [NO_ENTITY_MERGE_DYNAMIC_IMPORT, NO_EXTENSION_DYNAMIC_IMPORT],
+      [NO_ENTITY_MERGE_DYNAMIC_IMPORT, NO_EXTENSION_DYNAMIC_IMPORT, NO_COMPUTED_DYNAMIC_IMPORT],
     ),
   },
   {
@@ -183,24 +187,34 @@ export default defineConfig([
     ignores: NODE_TESTS,
     rules: restrictedBoundaryRules(
       [NO_NODE_BUILTINS, NO_SERVER_CONFIG, NO_APP_LAYER, NO_CLIENT_NODE_ENTRY, NO_EXTENSION_IMPORT],
-      [NO_EXTENSION_DYNAMIC_IMPORT],
+      [NO_EXTENSION_DYNAMIC_IMPORT, NO_COMPUTED_DYNAMIC_IMPORT],
     ),
   },
   {
     files: ["packages/client/src/engine.ts"],
     rules: restrictedBoundaryRules(
       [NO_NODE_BUILTINS, NO_SERVER_CONFIG, NO_APP_LAYER, NO_CLIENT_NODE_ENTRY, NO_ENTITY_MERGE_IMPORT],
-      [NO_ENTITY_MERGE_DYNAMIC_IMPORT],
+      [NO_ENTITY_MERGE_DYNAMIC_IMPORT, NO_COMPUTED_DYNAMIC_IMPORT],
     ),
   },
   {
     files: ["packages/client/src/ext/tasks/**/*.{ts,tsx}"],
     ignores: NODE_TESTS,
-    rules: restrictedBoundaryRules([NO_NODE_BUILTINS, NO_SERVER_CONFIG, NO_APP_LAYER, NO_CLIENT_NODE_ENTRY]),
+    rules: restrictedBoundaryRules(
+      [NO_NODE_BUILTINS, NO_SERVER_CONFIG, NO_APP_LAYER, NO_CLIENT_NODE_ENTRY],
+      [NO_COMPUTED_DYNAMIC_IMPORT],
+    ),
   },
   {
     files: ["apps/operator/src/**/*.{ts,tsx}"],
-    ignores: ["apps/operator/src/operator/members.ts"],
+    ignores: ["apps/operator/src/operator/members.ts", ...NODE_TESTS],
+    rules: restrictedBoundaryRules(
+      [MEMBER_LIST_WRITES, NO_ENTITY_MERGE_IMPORT, NO_EXTENSION_IMPORT],
+      [NO_ENTITY_MERGE_DYNAMIC_IMPORT, NO_EXTENSION_DYNAMIC_IMPORT, NO_COMPUTED_DYNAMIC_IMPORT],
+    ),
+  },
+  {
+    files: ["apps/operator/src/**/*.test.{ts,tsx}"],
     rules: restrictedBoundaryRules(
       [MEMBER_LIST_WRITES, NO_ENTITY_MERGE_IMPORT, NO_EXTENSION_IMPORT],
       [NO_ENTITY_MERGE_DYNAMIC_IMPORT, NO_EXTENSION_DYNAMIC_IMPORT],
@@ -208,7 +222,7 @@ export default defineConfig([
   },
   {
     files: ["apps/web/src/app/ui/ext/tasks/**/*.test.{ts,tsx}", "apps/web/src/app/(shell)/**/ext/tasks/**/*.test.{ts,tsx}"],
-    rules: restrictedBoundaryRules([NO_ENTITY_MERGE_IMPORT], [NO_ENTITY_MERGE_DYNAMIC_IMPORT]),
+    rules: restrictedBoundaryRules([NO_ENTITY_MERGE_IMPORT], [NO_ENTITY_MERGE_DYNAMIC_IMPORT, NO_COMPUTED_DYNAMIC_IMPORT]),
   },
   {
     // The web app, above its browser code, is no Node process and stays isolated from ext/* and entity-merge outside extension UI boundaries.
@@ -216,7 +230,7 @@ export default defineConfig([
     ignores: ["apps/web/src/browser/**", ...NODE_TESTS, ...EXTENSION_IMPORT_ALLOWED, "apps/web/src/app/**/route.{ts,tsx}"],
     rules: restrictedBoundaryRules(
       [NO_CLIENT_NODE_ENTRY, NO_ENTITY_MERGE_IMPORT, NO_EXTENSION_IMPORT],
-      [NO_ENTITY_MERGE_DYNAMIC_IMPORT, NO_EXTENSION_DYNAMIC_IMPORT],
+      [NO_ENTITY_MERGE_DYNAMIC_IMPORT, NO_EXTENSION_DYNAMIC_IMPORT, NO_COMPUTED_DYNAMIC_IMPORT],
     ),
   },
   {
@@ -229,7 +243,7 @@ export default defineConfig([
     ignores: NODE_TESTS,
     rules: restrictedBoundaryRules(
       [NO_CLIENT_NODE_ENTRY, NO_ENTITY_MERGE_IMPORT],
-      [NO_ENTITY_MERGE_DYNAMIC_IMPORT],
+      [NO_ENTITY_MERGE_DYNAMIC_IMPORT, NO_COMPUTED_DYNAMIC_IMPORT],
     ),
   },
   {
@@ -237,7 +251,7 @@ export default defineConfig([
     files: ["apps/web/src/app/**/route.{ts,tsx}"],
     rules: restrictedBoundaryRules(
       [NO_DM_IMPORT, NO_CLIENT_NODE_ENTRY, NO_ENTITY_MERGE_IMPORT, NO_EXTENSION_IMPORT],
-      [NO_ENTITY_MERGE_DYNAMIC_IMPORT, NO_EXTENSION_DYNAMIC_IMPORT],
+      [NO_ENTITY_MERGE_DYNAMIC_IMPORT, NO_EXTENSION_DYNAMIC_IMPORT, NO_COMPUTED_DYNAMIC_IMPORT],
     ),
   },
 ]);

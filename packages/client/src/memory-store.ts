@@ -5,6 +5,8 @@ import {
   dedupeIds,
   emptyWriterState,
   mergeMonotonicClock,
+  mergeOptimisticOverlay,
+  missingOptimisticKeys,
   nextWriterState,
   SyncStoreError,
   type ActivityState,
@@ -84,7 +86,15 @@ export class MemoryStore implements SyncStore {
     let clonedReplace: Array<[string, StoredRecord[]]>;
     let clonedUpsert: StoredRecord[];
     try {
-      next = nextWriterState(current, change);
+      const addedOverlay = missingOptimisticKeys(current, change).map(({ collection, rkey: rk }) => ({
+        collection,
+        rkey: rk,
+        prevRecord: clone(this.held.get(collectionKey(change.space, collection))?.get(recordKey(change.repo, rk)) ?? null),
+      }));
+      const resolvedOverlay = change.markStale
+        ? mergeOptimisticOverlay(current?.optimisticOverlay, addedOverlay)
+        : undefined;
+      next = nextWriterState(current, change, resolvedOverlay);
       nextClock = change.clock
         ? (() => {
             const scope = change.clock.scope ?? "";

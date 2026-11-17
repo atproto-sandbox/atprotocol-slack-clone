@@ -39,7 +39,12 @@ export type DiscoveredWorkspace = WorkspaceSummary & WorkspaceCompleteness;
 export type WorkspaceCandidate = { uri: string; authorityDid: string; skey: string };
 export type WorkspaceDiscovery = { workspaces: DiscoveredWorkspace[]; candidates: WorkspaceCandidate[] };
 
-export type WorkspaceClientDeps = { transport: ClientTransport; credentials: CredentialCache; lifecycle: Lifecycle };
+export type WorkspaceClientDeps = {
+  transport: ClientTransport;
+  credentials: CredentialCache;
+  lifecycle: Lifecycle;
+  sync?: { markSpaceStale(space: string): Promise<void> };
+};
 
 /** The member's workspaces: finding them, accepting an invitation, and an admin's view of the inbox. */
 export class WorkspaceClient {
@@ -122,7 +127,10 @@ export class WorkspaceClient {
     const workspace = parseWorkspaceUri(uri);
     if (!workspace) return null;
     const { authorityDid } = workspace;
-    if (options.fresh) await this.deps.credentials.fresh(uri);
+    if (options.fresh) {
+      await this.deps.credentials.fresh(uri);
+      await this.deps.sync?.markSpaceStale(uri);
+    }
     const client = await this.deps.credentials.clientFor(uri, authorityDid);
     const scan = (collection: string, maxRecords: number) => listBoundedRecords(client, { space: uri, repo: authorityDid, collection, maxRecords });
     const [profiles, directory, roster, admins, installs, extInstalls] = await Promise.all([

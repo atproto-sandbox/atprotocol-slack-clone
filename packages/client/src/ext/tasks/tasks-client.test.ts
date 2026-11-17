@@ -4,12 +4,13 @@ import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 import { memberspacePolicy } from "@flock/protocol/atproto/space-policy";
 import { advanceHlc, buildEditClosure, formatHlc, MAX_ANCESTOR_REFS, opRef } from "@flock/protocol/entity-merge";
 import { spaceRecordUri, subjectKey, tasksSpaceUri } from "@flock/protocol/keys";
-import { COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
+import { COLLECTION, OPERATOR_METHOD, SPACE_TYPE } from "@flock/protocol/nsids";
 import { WORKSPACE_ENVELOPE } from "@flock/protocol/workspace-summary";
 import { FakeNetwork } from "@flock/testing/fake-network";
 import { createEngine } from "../../engine";
 import { IndexedDbStore } from "../../indexeddb-store";
-import { transportFor } from "../../testing/engine-fixture";
+import type { OperatorService } from "../../operator-client";
+import { countCalls, transportFor } from "../../testing/engine-fixture";
 import {
   EntityNotFoundError,
   StaleEntityContextError,
@@ -662,4 +663,81 @@ test("TasksClient handles 256/257 saturation, D14 purged inherited refs, disable
   assert.equal(envView.projects.length, WORKSPACE_ENVELOPE.taskProjects + 1);
   assert.equal(envView.degraded, true);
   assert.ok(envView.degradedReasons.some((r) => r.includes("task projects")));
+});
+
+test("own optimistic writes preserve listRepoOps LtHash delta continuity and disableExtension invalidates workspace immediately", async () => {
+  const network = new FakeNetwork();
+  const { workspace, tasksSpace } = await setupTasksWorkspace(network, { members: [AUTHORITY, ALICE] });
+
+  const operatorService: OperatorService = {
+    serviceRef: "did:web:operator.test#atproto_flock_operator",
+    endpoint: "https://operator.test",
+  };
+  const ownerTransport = transportFor(network, AUTHORITY);
+  const ownerWithOperator = {
+    ...ownerTransport,
+    fetchEndpoint: async (request: Request) => {
+      const url = new URL(request.url);
+      if (url.origin !== operatorService.endpoint) return network.fetchEndpoint(request);
+      if (url.pathname === `/xrpc/${OPERATOR_METHOD.execute}`) {
+        const body = await request.json() as { workspace: string; request: { kind: string; extId?: string } };
+        if (body.request.kind === "disableExtension" && body.request.extId === "tasks") {
+          await network.writeAs(AUTHORITY, body.workspace, COLLECTION.extInstall, "tasks", {
+            extId: "tasks",
+            space: tasksSpace,
+            active: false,
+            updatedAt: TIMESTAMP,
+            disabledAt: TIMESTAMP,
+          });
+          return Response.json({
+            operation: {
+              operationId: "op-disable",
+              workspace: body.workspace,
+              kind: "disableExtension",
+              state: "completed",
+              createdAt: TIMESTAMP,
+              updatedAt: TIMESTAMP,
+              steps: [],
+            },
+          });
+        }
+      }
+      return Response.json({ error: "NotFound", message: "unknown operator method" }, { status: 404 });
+    },
+  };
+
+  const alice = createEngine(transportFor(network, ALICE));
+  await alice.tasks.createTask(workspace, { title: "Initial seed task" });
+  const initialRead = await alice.tasks.readSpace(workspace);
+  assert.equal(initialRead.complete, true);
+  assert.equal(initialRead.tasks.length, 1);
+
+  // Carbon L1: own optimistic writes (create + double update) capture optimisticOverlay and next readSpace
+  // reconciles via listRepoOps delta with ZERO full STAR getRepo downloads!
+  const created = await alice.tasks.createTask(workspace, { title: "Optimistic Task" });
+  const u1 = await alice.tasks.updateTask(workspace, { context: created.observedContext, title: "Optimistic v2" });
+  await alice.tasks.updateTask(workspace, { context: u1.observedContext, title: "Optimistic v3" });
+
+  let syncedView!: Awaited<ReturnType<typeof alice.tasks.readSpace>>;
+  const calls = await countCalls(network, async () => {
+    syncedView = await alice.tasks.readSpace(workspace);
+  });
+  assert.equal(syncedView.complete, true);
+  assert.equal(syncedView.tasks.find((t) => t.uri === created.uri)?.title, "Optimistic v3");
+  assert.equal(calls["com.atproto.space.getRepo"] ?? 0, 0, "optimistic overlay allows listRepoOps without getRepo STAR fallback");
+  assert.ok((calls["com.atproto.space.listRepoOps"] ?? 0) >= 1, "verified via incremental listRepoOps");
+
+  // Carbon H1: Owner disables Tasks via OperatorClient -> same engine immediately sees enabled: false and rejects createTask without clock advance.
+  const owner = createEngine(ownerWithOperator, { operator: operatorService });
+  await owner.tasks.createTask(workspace, { title: "Before disable" });
+  const ownerEnabled = await owner.tasks.readSpace(workspace);
+  assert.equal(ownerEnabled.enabled, true);
+
+  await owner.operator!.disableExtension(workspace, "tasks");
+  const ownerAfterDisable = await owner.tasks.readSpace(workspace);
+  assert.equal(ownerAfterDisable.enabled, false);
+  await assert.rejects(
+    () => owner.tasks.createTask(workspace, { title: "Must reject after disable" }),
+    TasksExtensionDisabledError,
+  );
 });

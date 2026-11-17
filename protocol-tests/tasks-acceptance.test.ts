@@ -198,7 +198,7 @@ test("Tasks real-PDS acceptance & cold reader parity across two PDS hosts (R11f)
     const workspaceRef = parseWorkspaceRef(workspace);
     const tasksSpace = extSpaceUriFor(owner.did, workspaceRef.skey, "tasks");
 
-    let aliceClockOffset = 0;
+    const aliceClockOffset = 0;
     const aliceHarness = trackedTransport(pds, alice, { now: () => Date.now() + aliceClockOffset });
     const ownerEngine = createEngine(actorTransport(pds, owner), { operator: operatorService });
     const aliceEngine = createEngine(aliceHarness.transport, { operator: operatorService });
@@ -567,8 +567,7 @@ test("Tasks real-PDS acceptance & cold reader parity across two PDS hosts (R11f)
       assert.equal(removed.operation.state, "completed");
       activeWriters.splice(activeWriters.indexOf(carol), 1);
 
-      // Advance Alice's clock past truthIntervalMs so SyncCore refreshes workspace snapshot & writer universe.
-      aliceClockOffset += aliceEngine.sync.options.truthIntervalMs;
+      // Cross-engine D14 Carol removal takes effect immediately without fast-forwarding Alice's clock:
       const postRemovalView = await compare("step 5 after D14 Carol removal");
 
       assert.equal(postRemovalView.rosterMembers.includes(carol.did), false);
@@ -784,6 +783,16 @@ test("Tasks real-PDS acceptance & cold reader parity across two PDS hosts (R11f)
           context: { ...legacyTask.observedContext, entityUri: `${legacyTasksSpace}/${alice.did}/${COLLECTION.task}/3k22222222222` },
         }),
         EntityNotFoundError,
+      );
+
+      // Carbon H1: ownerEngine.operator.disableExtension immediately invalidates workspace cache -> readSpace sees enabled:false & createTask rejects.
+      assert.equal((await legacyOwnerEngine.tasks.readSpace(legacyWs)).enabled, true);
+      const disabled = await legacyOwnerEngine.operator!.disableExtension(legacyWs, "tasks");
+      assert.equal(disabled.operation.state, "completed");
+      assert.equal((await legacyOwnerEngine.tasks.readSpace(legacyWs)).enabled, false);
+      await assert.rejects(
+        () => legacyOwnerEngine.tasks.createTask(legacyWs, { title: "Rejected after disableExtension" }),
+        /disabled/i,
       );
     });
   } finally {

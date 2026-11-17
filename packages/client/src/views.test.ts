@@ -333,3 +333,25 @@ test("a watch replaced while its follow is under way has the key loaded again af
   assert.deepEqual(loads, ["second", "second"]);
   stop();
 });
+
+test("LiveSpaces awaits onSpaceChanged before reloading bound keys", async () => {
+  const snapshots = new Snapshots();
+  const order: string[] = [];
+  const live = new LiveSpaces(snapshots, {
+    operator: scriptedOperator([answer("1"), answer("2", { changed: [{ space: GENERAL, cursor: "2" }] })]),
+    credentials: { fresh: async () => ({}) as never },
+    onSpaceChanged: async (space) => {
+      await Promise.resolve();
+      order.push(`stale:${space}`);
+    },
+  });
+  const stop = await live.watch("tasks", [GENERAL], async () => {
+    order.push("load");
+  });
+  live.start();
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  live.stop();
+  stop();
+
+  assert.deepEqual(order, ["load", `stale:${GENERAL}`, "load"]);
+});

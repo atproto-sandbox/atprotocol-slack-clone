@@ -302,4 +302,67 @@ export function storeContract(name: string, open: () => Promise<SyncStore>): voi
     await store.clear();
     assert.equal(await store.getActivityState(account, OTHER), undefined);
   });
+
+  test(`${name}: recordOptimistic captures earliest pre-sync prevRecord atomically, survives markStale, and clears on verified commit`, async () => {
+    const store = await open();
+    const alice = "did:plc:alice";
+    const existing = record(SPACE, alice, MESSAGE, "r1");
+    assert.equal(await store.commit({
+      space: SPACE,
+      repo: alice,
+      expectedGeneration: 0,
+      rev: "rev1",
+      next: {
+        syncedRev: "rev1",
+        checkedAt: 100,
+        stale: false,
+        coverage: { [MESSAGE]: { strategy: "all", lowest: null, complete: true, cursor: null } },
+        setHash: new Uint8Array(2048),
+        commitDigest: new Uint8Array(32),
+      },
+      replace: { [MESSAGE]: [existing] },
+    }), true);
+
+    // First optimistic update on existing r1 captures existing; second optimistic update on r1 preserves existing;
+    // optimistic create on r2 captures prevRecord: null; follow-up update on r2 preserves prevRecord: null.
+    const v1 = { ...existing, cid: "cid-v1", value: { text: "v1" } };
+    const v2 = { ...existing, cid: "cid-v2", value: { text: "v2" } };
+    const r2a = { ...record(SPACE, alice, MESSAGE, "r2"), cid: "cid-r2a", value: { text: "r2a" } };
+    const r2b = { ...r2a, cid: "cid-r2b", value: { text: "r2b" } };
+
+    assert.equal(await store.commit({
+      space: SPACE, repo: alice, expectedGeneration: null, markStale: true, recordOptimistic: true, upsert: [v1, r2a],
+    }), true);
+    assert.equal(await store.commit({
+      space: SPACE, repo: alice, expectedGeneration: null, markStale: true, recordOptimistic: true, upsert: [v2, r2b],
+    }), true);
+    // Plain markStale preserves optimisticOverlay.
+    assert.equal(await store.commit({
+      space: SPACE, repo: alice, expectedGeneration: null, markStale: true,
+    }), true);
+
+    const state = await store.getWriter(SPACE, alice);
+    assert.ok(state?.optimisticOverlay);
+    assert.deepEqual(state.optimisticOverlay, [
+      { collection: MESSAGE, rkey: "r1", prevRecord: existing },
+      { collection: MESSAGE, rkey: "r2", prevRecord: null },
+    ]);
+
+    // Next verified commit clears optimisticOverlay.
+    assert.equal(await store.commit({
+      space: SPACE,
+      repo: alice,
+      expectedGeneration: state.generation,
+      rev: "rev2",
+      next: {
+        syncedRev: "rev2",
+        checkedAt: 200,
+        stale: false,
+        coverage: { [MESSAGE]: { strategy: "all", lowest: null, complete: true, cursor: null } },
+        setHash: new Uint8Array(2048),
+        commitDigest: new Uint8Array(32),
+      },
+    }), true);
+    assert.equal((await store.getWriter(SPACE, alice))?.optimisticOverlay, undefined);
+  });
 }

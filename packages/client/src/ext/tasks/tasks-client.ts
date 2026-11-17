@@ -1161,25 +1161,22 @@ export class TasksClient {
             ? defaultTruthInterval
             : 0;
 
-    const snapshot = await this.deps.sync.syncVerifiedWorkspaceSnapshot(workspaceUri, {
+    let snapshot = await this.deps.sync.syncVerifiedWorkspaceSnapshot(workspaceUri, {
       truthIntervalMs: snapshotTruthInterval,
       fresh: options.fresh,
       signal: options.signal,
     });
 
-    const extInstall = snapshot.extensions.find((ext) => ext.extId === "tasks") ?? null;
-    const enabled =
-      extInstall !== null && extInstall.active === true && extInstall.space === tasksSpace;
-
-    if (!enabled) {
-      if (snapshot.workspaceSnapshotComplete) {
-        const activeExtensions = snapshot.extensions.filter((ext) => ext.active).map((ext) => ext.space);
+    const buildDisabled = async (currentSnapshot: VerifiedWorkspaceSnapshot) => {
+      const currentExtInstall = currentSnapshot.extensions.find((ext) => ext.extId === "tasks") ?? null;
+      if (currentSnapshot.workspaceSnapshotComplete) {
+        const activeExtensions = currentSnapshot.extensions.filter((ext) => ext.active).map((ext) => ext.space);
         await this.deps.lifecycle.keepWorkspaceSpaces(workspaceUri, { extensions: activeExtensions });
       }
-      const complete = snapshot.workspaceSnapshotComplete && snapshot.setAside.length === 0;
-      const degradedReasons = [...(snapshot.reason && !snapshot.workspaceSnapshotComplete ? [snapshot.reason] : [])];
-      if (snapshot.summary) {
-        for (const reason of snapshot.summary.degradedReasons) {
+      const complete = currentSnapshot.workspaceSnapshotComplete && currentSnapshot.setAside.length === 0;
+      const degradedReasons = [...(currentSnapshot.reason && !currentSnapshot.workspaceSnapshotComplete ? [currentSnapshot.reason] : [])];
+      if (currentSnapshot.summary) {
+        for (const reason of currentSnapshot.summary.degradedReasons) {
           if (!degradedReasons.includes(reason)) degradedReasons.push(reason);
         }
       }
@@ -1187,16 +1184,16 @@ export class TasksClient {
         disabled: {
           workspaceUri,
           tasksSpaceUri: tasksSpace,
-          enabled: false,
-          extInstall,
-          workspaceSnapshotComplete: snapshot.workspaceSnapshotComplete,
+          enabled: false as const,
+          extInstall: currentExtInstall,
+          workspaceSnapshotComplete: currentSnapshot.workspaceSnapshotComplete,
           complete,
           degraded: !complete || degradedReasons.length > 0,
           degradedReasons,
           hasUncertainAncestry: false,
-          setAside: snapshot.setAside,
+          setAside: currentSnapshot.setAside,
           changing: [],
-          rosterMembers: [...snapshot.rosterMembers].sort(),
+          rosterMembers: [...currentSnapshot.rosterMembers].sort(),
           writerUniverse: [],
           projects: [],
           tasks: [],
@@ -1208,20 +1205,61 @@ export class TasksClient {
           orphanedComments: 0,
         },
       };
+    };
+
+    let extInstall = snapshot.extensions.find((ext) => ext.extId === "tasks") ?? null;
+    if (!(extInstall !== null && extInstall.active === true && extInstall.space === tasksSpace)) {
+      return buildDisabled(snapshot);
     }
 
-    const spaceSync = await this.deps.sync.syncVerifiedSpace({
+    const prevSpaceState = await this.deps.sync.store.getSpace(tasksSpace);
+    const prevListedSet = new Set(prevSpaceState?.writers.map((writer) => writer.did) ?? []);
+    const spaceSyncTruthInterval = options.fresh ? 0 : (options.truthIntervalMs ?? defaultTruthInterval);
+    let spaceSync = await this.deps.sync.syncVerifiedSpace({
       space: tasksSpace,
       collections: TASKS_COLLECTIONS,
       verifiedRosterMembers: snapshot.rosterMembers,
       workspaceSnapshotComplete: snapshot.workspaceSnapshotComplete,
       includeAuthority: false,
       workspace: workspaceUri,
-      truthIntervalMs: options.fresh ? 0 : (options.truthIntervalMs ?? defaultTruthInterval),
+      truthIntervalMs: spaceSyncTruthInterval,
+      fullWriterScan: true,
       maxStarBytes: options.maxStarArchiveBytes,
       maxStarRecords: options.maxStarRecords,
       signal: options.signal,
     });
+
+    if (snapshotTruthInterval !== 0) {
+      const listedSet = new Set(spaceSync.listedWriters);
+      const rosterSet = new Set(snapshot.rosterMembers);
+      const writerDisappeared = [...prevListedSet].some((did) => !listedSet.has(did));
+      const unexpectedWriter = spaceSync.listedWriters.some(
+        (did) => !rosterSet.has(did) && (did !== authorityDid || !prevListedSet.has(did)),
+      );
+      if (writerDisappeared || unexpectedWriter) {
+        snapshot = await this.deps.sync.syncVerifiedWorkspaceSnapshot(workspaceUri, {
+          truthIntervalMs: 0,
+          signal: options.signal,
+        });
+        extInstall = snapshot.extensions.find((ext) => ext.extId === "tasks") ?? null;
+        if (!(extInstall !== null && extInstall.active === true && extInstall.space === tasksSpace)) {
+          return buildDisabled(snapshot);
+        }
+        spaceSync = await this.deps.sync.syncVerifiedSpace({
+          space: tasksSpace,
+          collections: TASKS_COLLECTIONS,
+          verifiedRosterMembers: snapshot.rosterMembers,
+          workspaceSnapshotComplete: snapshot.workspaceSnapshotComplete,
+          includeAuthority: false,
+          workspace: workspaceUri,
+          truthIntervalMs: spaceSyncTruthInterval,
+          fullWriterScan: true,
+          maxStarBytes: options.maxStarArchiveBytes,
+          maxStarRecords: options.maxStarRecords,
+          signal: options.signal,
+        });
+      }
+    }
 
     await this.reconcileOwnClockFromSync(spaceSync);
 
@@ -1521,6 +1559,11 @@ function collectTasksDegradedReasons(
   }
   if (hasUncertainAncestry) {
     reasons.push("Task causal history limit reached — archive or split into a fresh task.");
+  }
+  if ((merged.overloadedHistoryEntities ?? 0) > 0) {
+    reasons.push(
+      `${merged.overloadedHistoryEntities} entity(s) exceed the ${WORKSPACE_ENVELOPE.maxOpsPerEntity}-op causal history envelope.`,
+    );
   }
 
   const activeProjectsCount = merged.projects.filter((project) => !project.deleted).length;

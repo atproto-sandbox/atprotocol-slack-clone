@@ -994,9 +994,14 @@ test("D11.13 frozen 50-writer / 1,000-task / 5,020-record Tasks performance enve
       assert.equal(gate5Measured.result.degraded, true);
       assert.equal(gate5Measured.result.projects.length, 1, "Healthy writer data remains available alongside SetAside");
       assert.equal(
-        gate5Measured.result.setAside.some((entry) => entry.did === oversizedWriter.did),
+        gate5Measured.result.setAside.some(
+          (entry) =>
+            entry.did === oversizedWriter.did &&
+            entry.permanent === true &&
+            entry.reason === "its answer is larger than this app reads",
+        ),
         true,
-        "Oversized STAR writer is reported in SetAside",
+        "Oversized STAR writer is reported in SetAside as permanent",
       );
       assert.equal(streamCanceled, true, "Oversized STAR stream is canceled mid-transfer");
       assert.ok(
@@ -1064,7 +1069,15 @@ test("D11.13 frozen 50-writer / 1,000-task / 5,020-record Tasks performance enve
     const coldCheck = await readIndependentTasksSpace(gate5Harness.transport, gate5Workspace);
     assert.equal(coldCheck.complete, false);
     assert.equal(coldCheck.projects.length, 1);
-    assert.equal(coldCheck.setAside.some((entry) => entry.did === oversizedWriter.did), true);
+    assert.equal(
+      coldCheck.setAside.some(
+        (entry) =>
+          entry.did === oversizedWriter.did &&
+          entry.permanent === true &&
+          entry.reason === "its answer is larger than this app reads",
+      ),
+      true,
+    );
   } finally {
     await network?.close();
     rmSync(dbDir, { recursive: true, force: true });

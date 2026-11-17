@@ -38,8 +38,8 @@ function assertTasksParity(engine: TasksSpaceView, reader: IndependentTasksReadR
   assert.equal(engine.degraded, reader.degraded, `${label}: degraded`);
   assert.equal(engine.hasUncertainAncestry, reader.hasUncertainAncestry, `${label}: hasUncertainAncestry`);
   assert.deepEqual(
-    engine.setAside.map((s) => [s.did, s.permanent]),
-    reader.setAside.map((s) => [s.did, s.permanent]),
+    engine.setAside.map((s) => [s.did, s.permanent, s.reason]),
+    reader.setAside.map((s) => [s.did, s.permanent, s.reason]),
     `${label}: setAside`,
   );
   assert.deepEqual(engine.rosterMembers, reader.rosterMembers, `${label}: rosterMembers`);
@@ -253,7 +253,6 @@ test("engine.tasks matches readIndependentTasksSpace across cold STAR, listRepoO
       updatedAt: TIMESTAMP,
     });
     await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMember", { space: tasksSpace, did: BOB });
-    network.advanceClock(aliceEngine.sync.options.truthIntervalMs);
     await compare("after D14 intermediate writer removal");
 
     // 6. Set-aside deactivated writer parity.
@@ -328,7 +327,6 @@ test("engine.tasks matches readIndependentTasksSpace across 255/256/257 saturati
     updatedAt: TIMESTAMP,
   });
   await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMember", { space: tasksSpace, did: BOB });
-  network.advanceClock(alice.sync.options.truthIntervalMs);
   assertTasksParity(
     await alice.tasks.readSpace(workspace),
     await readIndependentTasksSpace(reader, workspace),
@@ -366,4 +364,80 @@ test("engine.tasks matches readIndependentTasksSpace when Tasks is disabled or w
   assert.equal(engMalformed.workspaceSnapshotComplete, false);
   assert.deepEqual(engMalformed.activities, []);
   assertTasksParity(engMalformed, indMalformed, "malformed workspace.roster");
+});
+
+test("engine.tasks and readIndependentTasksSpace match on RepoStarLimitError and persistent STAR verification failures (cold & warm)", async () => {
+  // 1. Cold + warm RepoStarLimitError parity: both classify permanent: true with "its answer is larger than this app reads", and warm purges cached records.
+  {
+    const network = new FakeNetwork();
+    const { workspace } = await createTasksFixture(network, { members: [ALICE, BOB], skey: "star-limit" });
+    const alice = createEngine(transportFor(network, ALICE));
+    const bob = createEngine(transportFor(network, BOB));
+    const reader = transportFor(network, ALICE);
+
+    await alice.tasks.createTask(workspace, { title: "Alice task" });
+    await bob.tasks.createTask(workspace, { title: "Bob small task" });
+
+    // Seed warm cache under normal envelope.
+    assert.equal((await alice.tasks.readSpace(workspace)).tasks.length, 2);
+
+    // Bob adds a big description exceeding maxStarArchiveBytes: 900 on read -> both cold reader & warm engine agree on permanent: true & drop Bob's tasks.
+    await bob.tasks.createTask(workspace, { title: "Bob oversized", description: "x".repeat(1200) });
+    const engLimit = await alice.tasks.readSpace(workspace, { fresh: true, maxStarArchiveBytes: 900 });
+    const indLimit = await readIndependentTasksSpace(reader, workspace, { maxStarArchiveBytes: 900 });
+    assertTasksParity(engLimit, indLimit, "warm RepoStarLimitError parity");
+    assert.deepEqual(engLimit.setAside, [
+      { did: BOB, reason: "its answer is larger than this app reads", permanent: true },
+    ]);
+    assert.equal(engLimit.tasks.some((t) => t.repo === BOB), false, "warm engine purges cached records on permanent RepoStarLimitError");
+
+    const coldAlice = createEngine(transportFor(network, ALICE));
+    assertTasksParity(
+      await coldAlice.tasks.readSpace(workspace, { maxStarArchiveBytes: 900 }),
+      indLimit,
+      "cold RepoStarLimitError parity",
+    );
+  }
+
+  // 2. Cold + warm persistent RepoVerificationError/StarParseError parity: both classify permanent: true with "its records could not be authenticated".
+  {
+    const network = new FakeNetwork();
+    const { workspace } = await createTasksFixture(network, { members: [ALICE, BOB], skey: "star-verify" });
+    const alice = createEngine(transportFor(network, ALICE));
+    const bob = createEngine(transportFor(network, BOB));
+    const reader = transportFor(network, ALICE);
+
+    await alice.tasks.createTask(workspace, { title: "Alice task" });
+    await bob.tasks.createTask(workspace, { title: "Bob task" });
+    // Warm cache includes Bob initially.
+    assert.equal((await alice.tasks.readSpace(workspace)).tasks.length, 2);
+
+    // Bob updates while host returns corrupted STAR archive on every retry.
+    const bobView = (await bob.tasks.readSpace(workspace)).tasks.find((t) => t.repo === BOB)!;
+    await bob.tasks.updateTask(workspace, { context: bobView.observedContext, title: "Bob v2" });
+    network.interceptResponse = ({ method, params, response }) => {
+      if (method === "com.atproto.space.getRepo" && params.repo === BOB && response.ok) {
+        return new Response(new Uint8Array(64).fill(0xfe), { status: 200, headers: response.headers });
+      }
+      if (method === "com.atproto.space.listRepoOps" && params.repo === BOB && response.ok) {
+        return new Response(JSON.stringify({ error: "MethodNotImplemented", message: "force star" }), { status: 501 });
+      }
+      return response;
+    };
+
+    const engVerify = await alice.tasks.readSpace(workspace, { fresh: true });
+    const indVerify = await readIndependentTasksSpace(reader, workspace);
+    assertTasksParity(engVerify, indVerify, "warm STAR verification failure parity");
+    assert.deepEqual(engVerify.setAside, [
+      { did: BOB, reason: "its records could not be authenticated", permanent: true },
+    ]);
+    assert.equal(engVerify.tasks.some((t) => t.repo === BOB), false, "warm engine drops cached records on persistent verification failure");
+
+    const coldAlice = createEngine(transportFor(network, ALICE));
+    assertTasksParity(
+      await coldAlice.tasks.readSpace(workspace),
+      indVerify,
+      "cold STAR verification failure parity",
+    );
+  }
 });
