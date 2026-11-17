@@ -1,6 +1,6 @@
 import { P256Keypair } from "@atproto/crypto";
 import { toBase64 } from "@atproto/lex-data";
-import { jsonToLex } from "@atproto/lexicon";
+import { jsonToLex, lexToJson } from "@atproto/lexicon";
 import {
   COMMIT_MAC_TYPE,
   MAC_HEADER,
@@ -14,9 +14,12 @@ import {
   formatMacHeader,
   isP256DidKey,
   parseWantMacHeader,
+  readRepoStar,
   serializeRecord,
+  serializeRepo,
   verifyCredentialSig,
   type MacType,
+  type SerializedRecord,
 } from "@atproto/space";
 import { SPACE_CREDENTIAL_LIFETIME_MS } from "@flock/protocol/atproto/space-credential-core";
 import { generateSpaceKey } from "@flock/protocol/atproto/space-key";
@@ -57,17 +60,32 @@ const PERSONALSPACE_POLICY = "com.atproto.personalspace.policy";
 
 type RecordEntry = { value: Record<string, unknown>; cid: Awaited<ReturnType<typeof serializeRecord>>["cid"] };
 
+type FakeRepoOp = {
+  rev: string;
+  idx: number;
+  collection: string;
+  rkey: string;
+  cid: string | null;
+  prev: string | null;
+};
+
 type FakeSpace = {
   type: string;
   skey: string;
   ownerDid: string;
   policy: { $type: string; publicRead: boolean; publicWrite: boolean; allowedApps?: string[]; publishPolicy?: boolean; publishMembers?: boolean };
   members: Map<string, { read: boolean; write: boolean }>;
-  trackedWriters: Map<string, { repoRev: string; spaceRev: string }>;
+  trackedWriters: Map<string, { repoRev: string; spaceRev: string; data: Uint8Array }>;
   repoRevs: Map<string, string>;
   deleted: boolean;
   repos: Map<string, Map<string, Map<string, RecordEntry>>>;
+  oplogs: Map<string, FakeRepoOp[]>;
 };
+
+export type ApplyWriteOp =
+  | { action: "create"; collection: string; rkey?: string; value: Record<string, unknown> }
+  | { action: "update"; collection: string; rkey: string; value: Record<string, unknown> }
+  | { action: "delete"; collection: string; rkey: string };
 
 type FakeAuth =
   | { kind: "self"; did: string }
@@ -80,6 +98,8 @@ const NOTIFY_REGISTRATION_TTL_MS = 24 * 60 * 60 * 1000;
 const MAC_METHODS: Readonly<Record<string, MacType>> = {
   "com.atproto.space.getRecord": RECORD_MAC_TYPE,
   "com.atproto.space.getLatestCommit": COMMIT_MAC_TYPE,
+  "com.atproto.space.listRepoOps": COMMIT_MAC_TYPE,
+  "com.atproto.space.getRepo": COMMIT_MAC_TYPE,
 };
 
 export class FakeXrpcError extends Error {
@@ -99,12 +119,20 @@ class WithHeaders {
   constructor(readonly body: unknown, readonly headers: Record<string, string>) {}
 }
 
+class BinaryResponse {
+  constructor(
+    readonly body: ReadableStream<Uint8Array> | Uint8Array,
+    readonly headers: Record<string, string>,
+    readonly contentType = "application/octet-stream",
+  ) {}
+}
+
 export class FakeNetwork {
   private virtualNow = Date.now();
 
   private readonly accounts = new Map<string, string>();
-  /** Accounts whose repo the host refuses to serve to anyone but the account itself, like the pinned PDS's `assertRepoAvailability`. */
-  private readonly unavailable = new Map<string, "RepoDeactivated" | "RepoTakendown">();
+  /** Accounts whose repo the host refuses to serve (deactivated, taken down, or missing on PDS), like the pinned PDS's `assertRepoAvailability`. */
+  private readonly unavailable = new Map<string, "RepoDeactivated" | "RepoTakendown" | "RepoNotFound">();
   private readonly kemKeys = new Map<string, Promise<P256Keypair>>();
   /** What a DID-document cache holds for each account: stale after `rotateKemKey` until a forced refresh. */
   private readonly publishedKemKeys = new Map<string, string>();
@@ -128,7 +156,15 @@ export class FakeNetwork {
   /** Called for every write notice the authority would send a registered service, unless the space's notices are withheld. */
   onNotifyWrite: ((notice: { space: string; repo: string; service: string }) => void) | undefined;
   /** Runs before each `listRecords` page is served, so a test can write between two pages of one listing. */
-  beforeListRecords: ((params: { space: string; repo: string; collection: string; cursor?: string }) => Promise<void> | void) | undefined;
+  beforeListRecords: ((params: { space: string; repo: string; collection?: string; excludeValues?: boolean; cursor?: string }) => Promise<void> | void) | undefined;
+  /** Runs before each `listRepoOps` page is served, so a test can inject concurrent mutations or resets. */
+  beforeListRepoOps: ((params: { space: string; repo: string; since?: string; cursor?: string; limit: number; excludeValues: boolean }) => Promise<void> | void) | undefined;
+  /** Runs before `getLatestCommit` is served, so a test can race a write between `listRecords` and `getLatestCommit`. */
+  beforeGetLatestCommit: ((params: { space: string; repo: string }) => Promise<void> | void) | undefined;
+  /** Runs before `getRepo` is served, so a test can inject concurrent mutations or resets before STAR export. */
+  beforeGetRepo: ((params: { space: string; repo: string }) => Promise<void> | void) | undefined;
+  /** Optional response fault-injection hook for tests (tampered MACs, reordered/broken ops, forged CIDs, oversized streams). */
+  interceptResponse: ((ctx: { method: string; params: Record<string, unknown>; response: Response }) => Promise<Response> | Response) | undefined;
 
   now = (): number => this.virtualNow;
 
@@ -144,7 +180,10 @@ export class FakeNetwork {
   flushListing(space: string): void {
     const target = this.spaces.get(space);
     for (const { did, repoRev } of this.pendingListing.get(space) ?? []) {
-      if (target && this.currentlyAuthorizedWriter(target, did)) target.trackedWriters.set(did, { repoRev, spaceRev: this.nextRev() });
+      if (target && this.currentlyAuthorizedWriter(target, did)) {
+        const data = target.repoRevs.has(did) && !target.deleted ? this.commitFor(target, did).data : new Uint8Array(32);
+        target.trackedWriters.set(did, { repoRev, spaceRev: this.nextRev(), data });
+      }
     }
     this.pendingListing.delete(space);
   }
@@ -170,6 +209,80 @@ export class FakeNetwork {
     this.deleteRecord({ space, repo: did, collection, rkey }, { kind: "self", did });
   }
 
+  /** Applies an atomic multi-op batch into `did`'s repo sharing a single `rev`. */
+  async applyWritesAs(did: string, space: string, writes: readonly ApplyWriteOp[]) {
+    return this.applyWrites({
+      space,
+      repo: did,
+      writes: writes.map((write) => {
+        if (write.action === "delete") {
+          return { $type: "com.atproto.space.applyWrites#delete", collection: write.collection, rkey: write.rkey };
+        }
+        if (write.action === "update") {
+          return {
+            $type: "com.atproto.space.applyWrites#update",
+            collection: write.collection,
+            rkey: write.rkey,
+            value: { $type: write.collection, ...write.value },
+          };
+        }
+        return {
+          $type: "com.atproto.space.applyWrites#create",
+          collection: write.collection,
+          ...(write.rkey !== undefined ? { rkey: write.rkey } : {}),
+          value: { $type: write.collection, ...write.value },
+        };
+      }),
+    }, { kind: "self", did });
+  }
+
+  /** Clears all records and oplog history for `did` in `space`, preserving `space_repo` with a new signed commit. */
+  clearRecordsAs(did: string, space: string): void {
+    this.clearRecords({ space, repo: did }, { kind: "self", did });
+  }
+
+  /** Imports a STAR archive or record set for `did` in `space`, replacing records and resetting oplog history. */
+  async importRepoAs(
+    did: string,
+    space: string,
+    input: Uint8Array | ReadonlyArray<{ collection: string; rkey: string; value: Record<string, unknown> }>,
+  ): Promise<void> {
+    let starBytes: Uint8Array;
+    if (input instanceof Uint8Array) {
+      starBytes = input;
+    } else {
+      const encoder = new TextEncoder();
+      const sorted = [...input].sort((a, b) =>
+        compareBytes(encoder.encode(`${a.collection}/${a.rkey}`), encoder.encode(`${b.collection}/${b.rkey}`)));
+      const serialized: Array<SerializedRecord & { cid: Awaited<ReturnType<typeof serializeRecord>>["cid"] }> = [];
+      for (const item of sorted) {
+        const lex = jsonToLex({ $type: item.collection, ...item.value } as Parameters<typeof jsonToLex>[0]) as Parameters<typeof serializeRecord>[2];
+        serialized.push(await serializeRecord(item.collection as never, item.rkey as never, lex));
+      }
+      const commit = RepoCommit.fromRecords(serialized).toCommit({
+        space: space as never,
+        repo: did as never,
+        rev: this.nextRev(),
+      });
+      const chunks: Uint8Array[] = [];
+      for await (const chunk of serializeRepo(commit, serialized)) chunks.push(chunk);
+      starBytes = concatBytes(chunks);
+    }
+    await this.importRepo({}, { kind: "self", did }, starBytes);
+  }
+
+  /** Simulates PDS oplog pruning/compaction for `(space, repo)`: drops all ops, or ops strictly before `keepFromRev`. */
+  pruneOplog(space: string, repo: string, keepFromRev?: string): void {
+    const target = this.spaces.get(space);
+    if (!target) return;
+    if (keepFromRev === undefined) {
+      target.oplogs.set(repo, []);
+      return;
+    }
+    const existing = target.oplogs.get(repo) ?? [];
+    target.oplogs.set(repo, existing.filter((op) => op.rev >= keepFromRev));
+  }
+
   /** Advances the fake network's clock, used by tests exercising credential expiry and re-notify backoff. */
   advanceClock(ms: number): void {
     this.virtualNow += ms;
@@ -179,9 +292,10 @@ export class FakeNetwork {
     this.accounts.set(did, host);
   }
 
-  /** Deactivates or takes down an account: the authority still issues credentials for it, but its host refuses every other account's read of its repos. */
-  setAccountState(did: string, state: "active" | "deactivated" | "takendown"): void {
+  /** Deactivates, takes down, or marks missing an account on its PDS: the authority may still issue credentials, while the PDS rejects reads appropriately. */
+  setAccountState(did: string, state: "active" | "deactivated" | "takendown" | "missing"): void {
     if (state === "active") this.unavailable.delete(did);
+    else if (state === "missing") this.unavailable.set(did, "RepoNotFound");
     else this.unavailable.set(did, state === "deactivated" ? "RepoDeactivated" : "RepoTakendown");
   }
 
@@ -233,7 +347,12 @@ export class FakeNetwork {
   fetchEndpoint = async (request: Request): Promise<Response> => {
     const url = new URL(request.url);
     const path = `${url.pathname}${url.search}`;
-    const body = request.method === "GET" || request.method === "HEAD" ? undefined : await request.text();
+    const contentType = request.headers.get("content-type") ?? "";
+    const body = request.method === "GET" || request.method === "HEAD"
+      ? undefined
+      : contentType.includes("application/octet-stream")
+        ? new Uint8Array(await request.arrayBuffer())
+        : await request.text();
     return this.respond(path, { method: request.method, body }, await this.authFromRequest(request.headers), request.headers);
   };
 
@@ -269,22 +388,41 @@ export class FakeNetwork {
     const params: Record<string, unknown> = {};
     for (const [key, value] of url.searchParams.entries()) params[key] = value;
     if (typeof init.body === "string" && init.body.length > 0) Object.assign(params, JSON.parse(init.body));
+    const rawBody = init.body instanceof Uint8Array ? init.body : undefined;
     this.calls.set(method, (this.calls.get(method) ?? 0) + 1);
-    if (auth.kind === "rejected") return errorResponse(auth.error);
-    if (typeof params.repo === "string" && this.unreachable.has(params.repo) && !(auth.kind === "self" && auth.did === params.repo)) {
-      return errorResponse(new FakeXrpcError(503, "ServiceUnavailable", "The repo host is down."));
+    let response: Response;
+    if (auth.kind === "rejected") {
+      response = errorResponse(auth.error);
+    } else if (typeof params.repo === "string" && this.unreachable.has(params.repo) && !(auth.kind === "self" && auth.did === params.repo)) {
+      response = errorResponse(new FakeXrpcError(503, "ServiceUnavailable", "The repo host is down."));
+    } else {
+      try {
+        const handled = await this.handle(method, params, auth, requestHeaders, rawBody);
+        if (handled instanceof BinaryResponse) {
+          const responseBody: BodyInit = handled.body instanceof Uint8Array ? new Uint8Array(handled.body) : handled.body;
+          response = new Response(responseBody, {
+            status: 200,
+            headers: { "content-type": handled.contentType, ...handled.headers },
+          });
+        } else {
+          const [body, headers] = handled instanceof WithHeaders ? [handled.body, handled.headers] : [handled, {}];
+          response = new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json", ...headers } });
+        }
+      } catch (error) {
+        if (error instanceof FakeXrpcError) response = errorResponse(error);
+        else throw error;
+      }
     }
-    try {
-      const handled = await this.handle(method, params, auth, requestHeaders);
-      const [body, headers] = handled instanceof WithHeaders ? [handled.body, handled.headers] : [handled, {}];
-      return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json", ...headers } });
-    } catch (error) {
-      if (error instanceof FakeXrpcError) return errorResponse(error);
-      throw error;
-    }
+    return this.interceptResponse ? this.interceptResponse({ method, params, response }) : response;
   }
 
-  private async handle(method: string, params: Record<string, unknown>, auth: FakeAuth, requestHeaders: Headers | undefined): Promise<unknown> {
+  private async handle(
+    method: string,
+    params: Record<string, unknown>,
+    auth: FakeAuth,
+    requestHeaders: Headers | undefined,
+    rawBody?: Uint8Array,
+  ): Promise<unknown> {
     switch (method) {
       case "com.atproto.repo.putRecord": return this.putPublicRecord(params, auth);
       case "com.atproto.repo.getRecord": return this.getPublicRecord(params);
@@ -300,11 +438,16 @@ export class FakeNetwork {
       case "com.atproto.space.listSpaces": return this.listSpaces(params, auth);
       case "com.atproto.space.putRecord": return this.putRecord(params, auth);
       case "com.atproto.space.createRecord": return this.createRecord(params, auth);
+      case "com.atproto.space.applyWrites": return this.applyWrites(params, auth);
+      case "com.atproto.space.clearRecords": return this.clearRecords(params, auth);
+      case "com.atproto.space.importRepo": return this.importRepo(params, auth, rawBody);
       case "com.atproto.server.getServiceAuth": return this.getServiceAuth(params, auth);
       case "com.atproto.space.deleteRecord": return this.deleteRecord(params, auth);
       case "com.atproto.space.getRecord": return this.getRecord(params, auth, requestHeaders);
       case "com.atproto.space.getLatestCommit": return this.getLatestCommit(params, auth, requestHeaders);
+      case "com.atproto.space.getRepo": return this.getRepo(params, auth, requestHeaders);
       case "com.atproto.space.listRecords": return this.listRecords(params, auth);
+      case "com.atproto.space.listRepoOps": return this.listRepoOps(params, auth, requestHeaders);
       case "com.atproto.space.listRepos": return this.listRepos(params, auth);
       case "com.atproto.space.registerNotify": return this.registerNotify(params, auth);
       default: throw new FakeXrpcError(501, "MethodNotImplemented", `fake-pds does not implement ${method}`);
@@ -374,7 +517,7 @@ export class FakeNetwork {
     this.spaces.set(uri, {
       type, skey, ownerDid,
       policy: toStoredPolicy(params.policy),
-      members: new Map(), trackedWriters: new Map(), repoRevs: new Map(), deleted: false, repos: new Map(),
+      members: new Map(), trackedWriters: new Map(), repoRevs: new Map(), deleted: false, repos: new Map(), oplogs: new Map(),
     });
     return { uri };
   }
@@ -486,8 +629,11 @@ export class FakeNetwork {
     const repoCollections = this.repoCollections(space, repo);
     const records = repoCollections.get(collection) ?? new Map<string, RecordEntry>();
     repoCollections.set(collection, records);
+    const prev = records.get(rkey)?.cid.toString() ?? null;
     records.set(rkey, { value: record, cid });
-    space.repoRevs.set(repo, this.nextRev());
+    const rev = this.nextRev();
+    space.repoRevs.set(repo, rev);
+    this.repoOplog(space, repo).push({ rev, idx: 0, collection, rkey, cid: cid.toString(), prev });
     this.recordWrite(space, repo);
     return { uri: `${spaceUri(space)}/${repo}/${collection}/${rkey}`, cid: cid.toString() };
   }
@@ -500,6 +646,120 @@ export class FakeNetwork {
       throw new FakeXrpcError(400, "RecordAlreadyExists", "Record already exists");
     }
     return this.putRecord({ ...params, rkey }, auth);
+  }
+
+  private async applyWrites(params: Record<string, unknown>, auth: FakeAuth) {
+    const did = this.requireSelf(auth);
+    const repo = String(params.repo);
+    if (repo !== did) throw new FakeXrpcError(403, "Forbidden", "repo must match authenticated user");
+    const space = this.requireSpace(params.space);
+    if (space.deleted) throw new FakeXrpcError(400, "SpaceNotFound", "Space not found");
+    const writes = Array.isArray(params.writes) ? (params.writes as Array<Record<string, unknown>>) : [];
+    if (writes.length > 200) throw new FakeXrpcError(400, "InvalidRequest", "Too many writes. Max: 200");
+    if (writes.length === 0) return { results: [] };
+
+    const existingCollections = this.repoCollections(space, repo);
+    const staged = new Map<string, Map<string, RecordEntry>>();
+    for (const [col, entries] of existingCollections) staged.set(col, new Map(entries));
+
+    const rev = this.nextRev();
+    const ops: FakeRepoOp[] = [];
+    const results: Array<Record<string, unknown>> = [];
+
+    for (const write of writes) {
+      const type = String(write.$type ?? "");
+      const collection = String(write.collection ?? "");
+      if (type === "com.atproto.space.applyWrites#delete") {
+        const rkey = String(write.rkey ?? "");
+        const col = staged.get(collection);
+        const prevEntry = col?.get(rkey);
+        if (!prevEntry) throw new FakeXrpcError(400, "RecordNotFound", `Record not found: ${collection}/${rkey}`);
+        col!.delete(rkey);
+        ops.push({ rev, idx: ops.length, collection, rkey, cid: null, prev: prevEntry.cid.toString() });
+        results.push({ $type: "com.atproto.space.applyWrites#deleteResult" });
+        continue;
+      }
+
+      const isCreate = type === "com.atproto.space.applyWrites#create";
+      const isUpdate = type === "com.atproto.space.applyWrites#update";
+      if (!isCreate && !isUpdate) throw new FakeXrpcError(400, "InvalidRequest", `Action not supported: ${type}`);
+
+      const rkey = typeof write.rkey === "string" ? write.rkey : fakeTid(++this.revCounter);
+      let col = staged.get(collection);
+      if (!col) staged.set(collection, col = new Map());
+      const prevEntry = col.get(rkey);
+      if (isCreate && prevEntry) throw new FakeXrpcError(400, "RecordAlreadyExists", `Record already exists: ${collection}/${rkey}`);
+      if (isUpdate && !prevEntry) throw new FakeXrpcError(400, "RecordNotFound", `Record not found: ${collection}/${rkey}`);
+
+      const value = write.value as Record<string, unknown>;
+      const { cid } = await serializeRecord(collection as never, rkey as never, jsonToLex(value as Parameters<typeof jsonToLex>[0]) as never);
+      col.set(rkey, { value, cid });
+      ops.push({
+        rev,
+        idx: ops.length,
+        collection,
+        rkey,
+        cid: cid.toString(),
+        prev: prevEntry?.cid.toString() ?? null,
+      });
+      results.push({
+        $type: isCreate ? "com.atproto.space.applyWrites#createResult" : "com.atproto.space.applyWrites#updateResult",
+        uri: `${spaceUri(space)}/${repo}/${collection}/${rkey}`,
+        cid: cid.toString(),
+      });
+    }
+
+    space.repos.set(repo, staged);
+    space.repoRevs.set(repo, rev);
+    this.repoOplog(space, repo).push(...ops);
+    this.recordWrite(space, repo);
+    return { results };
+  }
+
+  private clearRecords(params: Record<string, unknown>, auth: FakeAuth): Record<string, never> {
+    const did = this.requireSelf(auth);
+    const repo = String(params.repo);
+    if (repo !== did) throw new FakeXrpcError(403, "Forbidden", "repo must match authenticated user");
+    const space = this.requireSpace(params.space);
+    if (space.deleted) throw new FakeXrpcError(400, "SpaceNotFound", "Space not found");
+    if (space.repoRevs.has(repo)) {
+      this.repoCollections(space, repo).clear();
+      space.oplogs.set(repo, []);
+      space.repoRevs.set(repo, this.nextRev());
+      this.recordWrite(space, repo);
+    }
+    return {};
+  }
+
+  private async importRepo(_params: Record<string, unknown>, auth: FakeAuth, rawBody?: Uint8Array): Promise<Record<string, never>> {
+    const did = this.requireSelf(auth);
+    if (!rawBody) throw new FakeXrpcError(400, "InvalidRequest", "STAR archive body is required");
+    let parsed: Awaited<ReturnType<typeof readRepoStar>>;
+    try {
+      parsed = await readRepoStar([rawBody]);
+    } catch (error) {
+      throw new FakeXrpcError(400, "InvalidRequest", error instanceof Error ? error.message : "Invalid STAR archive");
+    }
+    const imported = new Map<string, Map<string, RecordEntry>>();
+    try {
+      if (parsed.commit.repo !== did) throw new FakeXrpcError(400, "InvalidRequest", "Repo does not match the authenticated account");
+      const space = this.requireSpace(parsed.commit.space);
+      if (space.deleted) throw new FakeXrpcError(400, "SpaceNotFound", "Space not found");
+      for await (const entry of parsed.records) {
+        let col = imported.get(entry.collection);
+        if (!col) imported.set(entry.collection, col = new Map());
+        col.set(entry.rkey, { value: lexToJson(entry.record) as Record<string, unknown>, cid: entry.cid });
+      }
+      space.repos.set(did, imported);
+      space.oplogs.set(did, []);
+      space.repoRevs.set(did, this.nextRev());
+      return {};
+    } catch (error) {
+      if (error instanceof FakeXrpcError) throw error;
+      throw new FakeXrpcError(400, "InvalidRequest", error instanceof Error ? error.message : "Invalid STAR archive");
+    } finally {
+      await parsed.records.return?.(undefined).catch(() => undefined);
+    }
   }
 
   /**
@@ -528,9 +788,20 @@ export class FakeNetwork {
     const repo = String(params.repo);
     if (repo !== did) throw new FakeXrpcError(400, "UserNotAuthorized", "Can only delete from your own repo");
     const space = this.requireSpace(params.space);
-    this.repoCollections(space, repo).get(String(params.collection))?.delete(String(params.rkey));
-    space.repoRevs.set(repo, this.nextRev());
-    this.recordWrite(space, repo);
+    const collection = String(params.collection);
+    const rkey = String(params.rkey);
+    const entries = this.repoCollections(space, repo).get(collection);
+    const existing = entries?.get(rkey);
+    entries?.delete(rkey);
+    const rev = this.nextRev();
+    if (existing) {
+      this.repoOplog(space, repo).push({ rev, idx: 0, collection, rkey, cid: null, prev: existing.cid.toString() });
+      space.repoRevs.set(repo, rev);
+      this.recordWrite(space, repo);
+    } else if (space.repoRevs.has(repo)) {
+      space.repoRevs.set(repo, rev);
+      this.recordWrite(space, repo);
+    }
     return {};
   }
 
@@ -538,12 +809,14 @@ export class FakeNetwork {
   private recordWrite(space: FakeSpace, repo: string): void {
     const uri = spaceUri(space);
     if (!this.currentlyAuthorizedWriter(space, repo)) return;
+    const repoRev = space.repoRevs.get(repo)!;
+    const data = this.commitFor(space, repo).data;
     if (this.lagging.has(uri)) {
       const pending = this.pendingListing.get(uri) ?? [];
-      pending.push({ did: repo, repoRev: space.repoRevs.get(repo)! });
+      pending.push({ did: repo, repoRev });
       this.pendingListing.set(uri, pending);
     } else {
-      space.trackedWriters.set(repo, { repoRev: space.repoRevs.get(repo)!, spaceRev: this.nextRev() });
+      space.trackedWriters.set(repo, { repoRev, spaceRev: this.nextRev(), data });
     }
     const service = this.notifyRegistrations.get(uri);
     if (service && !this.withheldNotices.has(uri)) this.onNotifyWrite?.({ space: uri, repo, service });
@@ -582,7 +855,9 @@ export class FakeNetwork {
   }
 
   private assertRepoAvailability(repo: string, own: boolean): void {
+    if (!this.accounts.has(repo)) throw new FakeXrpcError(400, "RepoNotFound", `Could not find repo for DID: ${repo}`);
     const state = this.unavailable.get(repo);
+    if (state === "RepoNotFound") throw new FakeXrpcError(400, "RepoNotFound", `Could not find repo for DID: ${repo}`);
     if (state && !own) throw new FakeXrpcError(400, state, `Repo is not available: ${repo}`);
   }
 
@@ -605,6 +880,7 @@ export class FakeNetwork {
   }
 
   private async getLatestCommit(params: Record<string, unknown>, auth: FakeAuth, requestHeaders: Headers | undefined): Promise<WithHeaders> {
+    await this.beforeGetLatestCommit?.({ space: String(params.space), repo: String(params.repo) });
     const own = this.isOwnRead(params, auth);
     if (!own) this.requireCredential(params, auth);
     this.assertRepoAvailability(String(params.repo), own);
@@ -618,6 +894,46 @@ export class FakeNetwork {
     );
   }
 
+  private async getRepo(params: Record<string, unknown>, auth: FakeAuth, requestHeaders: Headers | undefined): Promise<BinaryResponse> {
+    await this.beforeGetRepo?.({ space: String(params.space), repo: String(params.repo) });
+    const own = this.isOwnRead(params, auth);
+    if (!own) this.requireCredential(params, auth);
+    this.assertRepoAvailability(String(params.repo), own);
+    const space = this.requireSpace(params.space);
+    const repo = String(params.repo);
+    const sharedSecret = own && !requestHeaders?.has(WANT_MAC_HEADER) ? undefined : await this.macSecret("com.atproto.space.getRepo", repo, requestHeaders);
+    const commit = this.commitFor(space, repo);
+
+    const encoder = new TextEncoder();
+    const entries: Array<{ keyBytes: Uint8Array; collection: string; rkey: string; value: Record<string, unknown> }> = [];
+    for (const [collection, records] of this.repoCollections(space, repo)) {
+      for (const [rkey, entry] of records) {
+        entries.push({ keyBytes: encoder.encode(`${collection}/${rkey}`), collection, rkey, value: entry.value });
+      }
+    }
+    entries.sort((left, right) => compareBytes(left.keyBytes, right.keyBytes));
+    const serialized: SerializedRecord[] = [];
+    for (const entry of entries) {
+      const lex = jsonToLex(entry.value as Parameters<typeof jsonToLex>[0]) as Parameters<typeof serializeRecord>[2];
+      serialized.push(await serializeRecord(entry.collection as never, entry.rkey as never, lex));
+    }
+    const generator = serializeRepo(commit, serialized);
+    const stream = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        const next = await generator.next();
+        if (next.done) controller.close();
+        else controller.enqueue(next.value);
+      },
+      async cancel() {
+        await generator.return?.(undefined);
+      },
+    });
+    return new BinaryResponse(
+      stream,
+      sharedSecret ? macHeaders(formatMacHeader(COMMIT_MAC_TYPE, computeCommitMac(sharedSecret, commit))) : { vary: WANT_MAC_HEADER },
+    );
+  }
+
   private commitFor(space: FakeSpace, repo: string) {
     const rev = space.repoRevs.get(repo);
     if (space.deleted || !rev) throw new FakeXrpcError(400, "RepoNotFound", "Repo not found");
@@ -627,8 +943,14 @@ export class FakeNetwork {
   }
 
   private async listRecords(params: Record<string, unknown>, auth: FakeAuth) {
+    const collection = typeof params.collection === "string" ? params.collection : undefined;
+    const excludeValues = params.excludeValues === true || params.excludeValues === "true";
+    const reverse = params.reverse === true || params.reverse === "true";
     await this.beforeListRecords?.({
-      space: String(params.space), repo: String(params.repo), collection: String(params.collection),
+      space: String(params.space),
+      repo: String(params.repo),
+      ...(collection !== undefined ? { collection } : {}),
+      excludeValues,
       ...(typeof params.cursor === "string" ? { cursor: params.cursor } : {}),
     });
     // An account listing its own repo with its own OAuth session needs no credential, as on the pinned PDS.
@@ -637,12 +959,99 @@ export class FakeNetwork {
     this.assertRepoAvailability(String(params.repo), own);
     const space = this.requireSpace(params.space);
     const repo = String(params.repo);
-    const collection = String(params.collection);
-    const records = [...(space.deleted ? [] : this.repoCollections(space, repo).get(collection)?.entries() ?? [])]
-      .sort(([left], [right]) => right.localeCompare(left))
-      .map(([rkey, entry]) => ({ collection, rkey, cid: entry.cid.toString(), value: entry.value }));
+    const prefix = `${spaceUri(space)}/${repo}`;
+    const all: Array<{ uri: string; collection: string; rkey: string; entry: RecordEntry }> = [];
+    if (!space.deleted) {
+      const collections = this.repoCollections(space, repo);
+      if (collection !== undefined) {
+        for (const [rkey, entry] of collections.get(collection)?.entries() ?? []) {
+          all.push({ uri: `${prefix}/${collection}/${rkey}`, collection, rkey, entry });
+        }
+      } else {
+        for (const [col, entries] of collections) {
+          for (const [rkey, entry] of entries) {
+            all.push({ uri: `${prefix}/${col}/${rkey}`, collection: col, rkey, entry });
+          }
+        }
+      }
+    }
+    all.sort((left, right) => (reverse ? compareLex(left.uri, right.uri) : compareLex(right.uri, left.uri)));
+    const cursor = typeof params.cursor === "string" ? params.cursor : undefined;
+    const filtered = cursor ? all.filter((item) => (reverse ? item.uri > cursor : item.uri < cursor)) : all;
+    const limit = clampLimit(params.limit, 100, 1000);
+    const page = filtered.slice(0, limit);
     // Like the pinned PDS's listRecords, a full page carries a cursor even when nothing follows it.
-    return paginate(records, params, (record) => record.rkey, "records", { cursorOnFullPage: true });
+    const nextCursor = page.length < limit ? undefined : page.at(-1)?.uri;
+    return {
+      records: page.map((item) => ({
+        collection: item.collection,
+        rkey: item.rkey,
+        cid: item.entry.cid.toString(),
+        ...(excludeValues ? {} : { value: item.entry.value }),
+      })),
+      ...(nextCursor !== undefined ? { cursor: nextCursor } : {}),
+    };
+  }
+
+  private async listRepoOps(params: Record<string, unknown>, auth: FakeAuth, requestHeaders: Headers | undefined): Promise<WithHeaders> {
+    const limit = clampLimit(params.limit, 100, 1000);
+    const excludeValues = params.excludeValues === true || params.excludeValues === "true";
+    const since = typeof params.since === "string" ? params.since : undefined;
+    const cursorStr = typeof params.cursor === "string" ? params.cursor : undefined;
+    await this.beforeListRepoOps?.({
+      space: String(params.space),
+      repo: String(params.repo),
+      ...(since !== undefined ? { since } : {}),
+      ...(cursorStr !== undefined ? { cursor: cursorStr } : {}),
+      limit,
+      excludeValues,
+    });
+    const own = this.isOwnRead(params, auth);
+    if (!own) this.requireCredential(params, auth);
+    this.assertRepoAvailability(String(params.repo), own);
+    const space = this.requireSpace(params.space);
+    const repo = String(params.repo);
+    const sharedSecret = own && !requestHeaders?.has(WANT_MAC_HEADER) ? undefined : await this.macSecret("com.atproto.space.listRepoOps", repo, requestHeaders);
+    const cursor = cursorStr !== undefined ? parseRepoOpsCursor(cursorStr) : undefined;
+
+    const allOps = space.deleted ? [] : (space.oplogs.get(repo) ?? []);
+    const filtered = allOps.filter((op) => {
+      if (since !== undefined && op.rev <= since) return false;
+      if (cursor !== undefined && !(op.rev > cursor.rev || (op.rev === cursor.rev && op.idx > cursor.idx))) return false;
+      return true;
+    });
+    const page = filtered.slice(0, limit);
+    const collections = this.repoCollections(space, repo);
+    const ops = page.map((op) => {
+      const live = space.deleted ? undefined : collections.get(op.collection)?.get(op.rkey);
+      const value = !excludeValues && op.cid !== null && live && live.cid.toString() === op.cid ? live.value : undefined;
+      return {
+        rev: op.rev,
+        collection: op.collection,
+        rkey: op.rkey,
+        cid: op.cid,
+        prev: op.prev,
+        ...(value !== undefined ? { value } : {}),
+      };
+    });
+
+    if (ops.length === limit) {
+      const last = page[page.length - 1]!;
+      return new WithHeaders(
+        { ops, cursor: `${last.rev}/${last.idx}` },
+        { vary: WANT_MAC_HEADER },
+      );
+    }
+
+    const rev = space.repoRevs.get(repo);
+    if (space.deleted || !rev) {
+      return new WithHeaders({ ops: [] }, { vary: WANT_MAC_HEADER });
+    }
+    const commit = this.commitFor(space, repo);
+    return new WithHeaders(
+      { ops, commit: commitJson(commit) },
+      sharedSecret ? macHeaders(formatMacHeader(COMMIT_MAC_TYPE, computeCommitMac(sharedSecret, commit))) : { vary: WANT_MAC_HEADER },
+    );
   }
 
   private listRepos(params: Record<string, unknown>, auth: FakeAuth) {
@@ -651,9 +1060,9 @@ export class FakeNetwork {
     const limit = typeof params.limit === "number" ? params.limit : Number(params.limit ?? 100) || 100;
     const after = typeof params.cursor === "string" ? params.cursor : "";
     const updated = [...space.trackedWriters]
-      .map(([did, revs]) => ({ did, ...revs, data: { $bytes: toBase64(new Uint8Array(32)) } }))
+      .map(([did, entry]) => ({ did, repoRev: entry.repoRev, spaceRev: entry.spaceRev, data: { $bytes: toBase64(entry.data) } }))
       .filter((repo) => repo.spaceRev > after)
-      .sort((left, right) => left.spaceRev.localeCompare(right.spaceRev));
+      .sort((left, right) => compareLex(left.spaceRev, right.spaceRev));
     const repos = updated.slice(0, limit);
     return { repos, ...(repos.length > 0 ? { cursor: repos[repos.length - 1]!.spaceRev } : {}) };
   }
@@ -678,9 +1087,56 @@ export class FakeNetwork {
     return collections;
   }
 
+  private repoOplog(space: FakeSpace, repo: string): FakeRepoOp[] {
+    let oplog = space.oplogs.get(repo);
+    if (!oplog) {
+      oplog = [];
+      space.oplogs.set(repo, oplog);
+    }
+    return oplog;
+  }
+
   private currentlyAuthorizedWriter(space: FakeSpace, did: string): boolean {
     return did === space.ownerDid || space.policy.publicWrite || space.members.get(did)?.write === true;
   }
+}
+
+function compareLex(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function compareBytes(left: Uint8Array, right: Uint8Array): number {
+  const len = Math.min(left.length, right.length);
+  for (let i = 0; i < len; i += 1) {
+    if (left[i] !== right[i]) return left[i]! - right[i]!;
+  }
+  return left.length - right.length;
+}
+
+function concatBytes(chunks: readonly Uint8Array[]): Uint8Array {
+  const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
+
+function clampLimit(raw: unknown, fallback: number, max: number): number {
+  const value = typeof raw === "number" ? raw : raw !== undefined ? Number(raw) : fallback;
+  if (!Number.isFinite(value) || value < 1) return fallback;
+  return Math.min(max, Math.floor(value));
+}
+
+function parseRepoOpsCursor(cursor: string): { rev: string; idx: number } {
+  const slash = cursor.indexOf("/");
+  if (slash <= 0) throw new FakeXrpcError(400, "MalformedCursor", "Malformed cursor");
+  const rev = cursor.slice(0, slash);
+  const idxStr = cursor.slice(slash + 1);
+  if (!/^\d+$/.test(idxStr)) throw new FakeXrpcError(400, "MalformedCursor", "Malformed cursor");
+  return { rev, idx: Number(idxStr) };
 }
 
 function spaceUri(space: FakeSpace): string {

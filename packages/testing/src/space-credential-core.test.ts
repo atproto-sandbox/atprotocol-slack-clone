@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { COMMIT_MAC_TYPE, MAC_HEADER, RECORD_MAC_TYPE, SpaceMacError, WANT_MAC_HEADER, parseMacHeader, serializeRecord } from "@atproto/space";
+import { COMMIT_MAC_TYPE, LTHASH_STATE_BYTES, MAC_HEADER, RECORD_MAC_TYPE, RepoCommit, RepoVerificationError, SpaceMacError, StarParseError, WANT_MAC_HEADER, parseMacHeader, serializeRecord } from "@atproto/space";
 import { UpstreamResponseTooLargeError } from "@flock/protocol/bounded-json";
 import { FakeNetwork } from "./fake-network";
 import { dmInboxUri } from "@flock/protocol/keys";
-import { credentialLifetimeMs, exchangeSpaceCredential, isAccessLost, isCredentialRefused, isSpaceDeleted, mintSpaceCredentialWith, SPACE_CREDENTIAL_LIFETIME_MS, SPACE_CREDENTIAL_RENEW_BEFORE_MS, SpaceCredentialError, type SpaceCredential } from "@flock/protocol/atproto/space-credential-core";
+import { RepoStarLimitError, credentialLifetimeMs, exchangeSpaceCredential, isAccessLost, isCredentialRefused, isSpaceDeleted, mintSpaceCredentialWith, parseCid, SPACE_CREDENTIAL_LIFETIME_MS, SPACE_CREDENTIAL_RENEW_BEFORE_MS, SpaceCredentialError, verifyRecordCid, type SpaceCredential } from "@flock/protocol/atproto/space-credential-core";
 import { MEMBERSPACE_POLICY } from "@flock/protocol/atproto/space-policy";
 import { XrpcError } from "@flock/protocol/atproto/xrpc";
 
@@ -363,4 +363,318 @@ test("only a host refusing the credential itself counts as a refused credential,
   assert.equal(isCredentialRefused(new XrpcError(403, "denied", "Forbidden")), false);
   assert.equal(isCredentialRefused(new XrpcError(502, "bad gateway", "UpstreamFailure")), false);
   assert.equal(isCredentialRefused(new TypeError("fetch failed")), false);
+});
+
+// --- listRepoOps MAC gating --------------------------------------------------------------------------------
+
+test("listRepoOps requests COMMIT_MAC_TYPE, accepts intermediate full pages and unwritten empty repos without MAC, and verifies final commit MAC", async () => {
+  const { network, credential, requests } = await capture();
+  // Unwritten empty repo: { ops: [] } with commit: undefined and no MAC is accepted on the first attempt.
+  const beforeCalls = requests.length;
+  const unwritten = await credential.client(PDS1).query<{ ops: unknown[]; commit?: unknown; cursor?: string }>("com.atproto.space.listRepoOps", {
+    space: SPACE, repo: OWNER, limit: 10,
+  });
+  assert.deepEqual(unwritten, { ops: [] });
+  assert.equal(requests.length - beforeCalls, 1);
+  assert.match(requests.at(-1)!.headers.get(WANT_MAC_HEADER) ?? "", /^type="atproto-space-repo", ver=1, key_share=/);
+
+  // Two writes paginated with limit: 1 -> pages 1 & 2 are full (ops.length === 1), page 3 is short (ops: [], commit + MAC).
+  await writeRequest(network, "a", "one");
+  await writeRequest(network, "b", "two");
+  const page1 = await credential.client(PDS1).query<{ ops: unknown[]; cursor?: string; commit?: unknown }>("com.atproto.space.listRepoOps", {
+    space: SPACE, repo: OWNER, limit: 1,
+  });
+  assert.equal(page1.ops.length, 1);
+  assert.ok(page1.cursor);
+  assert.equal(page1.commit, undefined);
+
+  const page2 = await credential.client(PDS1).query<{ ops: unknown[]; cursor?: string; commit?: unknown }>("com.atproto.space.listRepoOps", {
+    space: SPACE, repo: OWNER, limit: 1, cursor: page1.cursor,
+  });
+  assert.equal(page2.ops.length, 1);
+  assert.ok(page2.cursor);
+  assert.equal(page2.commit, undefined);
+
+  const page3 = await credential.client(PDS1).query<{ ops: unknown[]; cursor?: string; commit?: { rev: string } }>("com.atproto.space.listRepoOps", {
+    space: SPACE, repo: OWNER, limit: 1, cursor: page2.cursor,
+  });
+  assert.equal(page3.ops.length, 0);
+  assert.equal(page3.cursor, undefined);
+  assert.ok(page3.commit?.rev);
+
+  const sinceHead = await credential.client(PDS1).query<{ ops: unknown[]; cursor?: string; commit?: { rev: string } }>("com.atproto.space.listRepoOps", {
+    space: SPACE, repo: OWNER, limit: 10, since: page3.commit!.rev,
+  });
+  assert.equal(sinceHead.ops.length, 0);
+  assert.equal(sinceHead.commit?.rev, page3.commit!.rev);
+});
+
+test("listRepoOps rejects unsigned empty-with-cursor, unsigned non-empty final page, and missing/forged commit MAC; getLatestCommit never passes HTTP 200 without MAC", async () => {
+  for (const [label, body] of [
+    ["empty ops with cursor", { ops: [], cursor: "r1/0" }],
+    ["empty ops with empty cursor", { ops: [], cursor: "" }],
+    ["non-empty ops without cursor or commit", { ops: [{ rev: "r1", collection: COLLECTION, rkey: "a", cid: "bafy", prev: null }] }],
+    ["ops with empty cursor and no commit", { ops: [{ rev: "r1", collection: COLLECTION, rkey: "a", cid: "bafy", prev: null }], cursor: "" }],
+    ["non-array ops with commit", { ops: null, commit: { ver: 1, repo: OWNER, space: SPACE, rev: "r1", data: { $bytes: "AAAA" } } }],
+  ] as const) {
+    const { credential } = await capture((response, request) => {
+      if (!request.url.includes("listRepoOps") || !response.ok) return response;
+      const headers = new Headers(response.headers);
+      headers.delete(MAC_HEADER);
+      return new Response(JSON.stringify(body), { status: 200, headers });
+    });
+    await assert.rejects(
+      credential.client(PDS1).query("com.atproto.space.listRepoOps", { space: SPACE, repo: OWNER, limit: 10 }),
+      SpaceMacError,
+      label,
+    );
+  }
+
+  // Final listRepoOps page with commit but missing MAC header must fail SpaceMacError.
+  {
+    const { network, credential } = await capture((response, request) => {
+      if (!request.url.includes("listRepoOps") || !response.ok) return response;
+      const headers = new Headers(response.headers);
+      headers.delete(MAC_HEADER);
+      return new Response(response.body, { status: 200, headers });
+    });
+    await writeRequest(network, "a");
+    await assert.rejects(
+      credential.client(PDS1).query("com.atproto.space.listRepoOps", { space: SPACE, repo: OWNER, limit: 10 }),
+      SpaceMacError,
+    );
+  }
+
+  // Rotated KEM key on listRepoOps final page triggers one forced refresh and succeeds.
+  {
+    const { network, credential, requests } = await capture();
+    await writeRequest(network, "a");
+    await getCommit(credential); // Prime KEM cache
+    await network.rotateKemKey(OWNER);
+    const before = requests.length;
+    const result = await credential.client(PDS1).query<{ ops: unknown[]; commit?: { rev: string } }>("com.atproto.space.listRepoOps", {
+      space: SPACE, repo: OWNER, limit: 10,
+    });
+    assert.equal(result.ops.length, 1);
+    assert.ok(result.commit?.rev);
+    assert.equal(requests.length - before, 2);
+  }
+
+  // getLatestCommit HTTP 200 without commit or without MAC must NEVER succeed.
+  for (const mode of ["missing-commit", "missing-mac"] as const) {
+    const { network, credential } = await capture((response, request) => {
+      if (!request.url.includes("getLatestCommit") || !response.ok) return response;
+      const headers = new Headers(response.headers);
+      if (mode === "missing-mac") headers.delete(MAC_HEADER);
+      const body = mode === "missing-commit" ? JSON.stringify({ ops: [] }) : response.body;
+      return new Response(body, { status: 200, headers });
+    });
+    await writeRequest(network, "a");
+    await assert.rejects(getCommit(credential), SpaceMacError, mode);
+  }
+});
+
+// --- fetchVerifiedRepoStar & verifyRecordCid --------------------------------------------------------------
+
+test("fetchVerifiedRepoStar verifies STAR archive, computes 2048B LtHash state and 32B digest, handles $link/$bytes and empty repos", async () => {
+  const { network, credential } = await capture();
+  const { cid: seedCid } = await serializeRecord(COLLECTION, "seed" as never, { text: "seed" });
+  const refValue = { text: "with refs", ref: { $link: seedCid.toString() }, blob: { $bytes: "AAECAw" } };
+  await network.clientFor(OWNER).procedure("com.atproto.space.putRecord", {
+    space: SPACE, repo: OWNER, collection: COLLECTION, rkey: "b", record: refValue,
+  });
+  await writeRequest(network, "a", "alpha");
+
+  const star = await credential.fetchVerifiedRepoStar(PDS1, {
+    space: SPACE, repo: OWNER, maxBytes: 1024 * 1024, maxRecords: 100,
+  });
+  assert.equal(star.setHash.byteLength, LTHASH_STATE_BYTES);
+  assert.equal(star.commitDigest.byteLength, 32);
+  assert.deepEqual(star.commit.data, star.commitDigest);
+  assert.deepEqual(star.records.map((r) => [r.collection, r.rkey]), [[COLLECTION, "a"], [COLLECTION, "b"]]);
+  assert.deepEqual(star.records[1]!.record, refValue);
+
+  const expectedSetHash = RepoCommit.fromRecords(
+    star.records.map((r) => ({ collection: r.collection as never, rkey: r.rkey as never, cid: parseCid(r.cid) })),
+  ).setHash.state();
+  assert.deepEqual(star.setHash, expectedSetHash);
+
+  // Every returned record passes verifyRecordCid.
+  for (const r of star.records) {
+    assert.equal(await verifyRecordCid(r.collection, r.rkey, r.record, r.cid), true);
+  }
+
+  // Empty written repo (after deleting all records) verifies cleanly with 2048 zero bytes.
+  await network.deleteAs(OWNER, SPACE, COLLECTION, "a");
+  await network.deleteAs(OWNER, SPACE, COLLECTION, "b");
+  const emptyStar = await credential.fetchVerifiedRepoStar(PDS1, {
+    space: SPACE, repo: OWNER, maxBytes: 1024 * 1024, maxRecords: 100,
+  });
+  assert.deepEqual(emptyStar.records, []);
+  assert.deepEqual(emptyStar.setHash, new Uint8Array(LTHASH_STATE_BYTES));
+});
+
+test("fetchVerifiedRepoStar retries once on rotated #atproto_kem key and rejects forged/missing MAC or tampered STAR body", async () => {
+  // Rotated KEM key triggers 1 forced refresh and succeeds.
+  {
+    const { network, credential, requests } = await capture();
+    await writeRequest(network, "a", "hello");
+    await getCommit(credential); // Prime KEM cache
+    await network.rotateKemKey(OWNER);
+    const before = requests.length;
+    const star = await credential.fetchVerifiedRepoStar(PDS1, {
+      space: SPACE, repo: OWNER, maxBytes: 1024 * 1024, maxRecords: 100,
+    });
+    assert.equal(star.records.length, 1);
+    assert.equal(requests.length - before, 2);
+  }
+
+  // Missing MAC header fails SpaceMacError.
+  {
+    const { network, credential } = await capture((response, request) => {
+      if (!request.url.includes("getRepo") || !response.ok) return response;
+      const headers = new Headers(response.headers);
+      headers.delete(MAC_HEADER);
+      return new Response(response.body, { status: 200, headers });
+    });
+    await writeRequest(network, "a");
+    await assert.rejects(
+      credential.fetchVerifiedRepoStar(PDS1, { space: SPACE, repo: OWNER, maxBytes: 1024 * 1024, maxRecords: 100 }),
+      SpaceMacError,
+    );
+  }
+
+  // Forged MAC header fails SpaceMacError.
+  {
+    const { network, credential } = await capture((response, request) => {
+      if (!request.url.includes("getRepo") || !response.ok) return response;
+      const headers = new Headers(response.headers);
+      headers.set(MAC_HEADER, headers.get(MAC_HEADER)!.replace(COMMIT_MAC_TYPE, RECORD_MAC_TYPE));
+      return new Response(response.body, { status: 200, headers });
+    });
+    await writeRequest(network, "a");
+    await assert.rejects(
+      credential.fetchVerifiedRepoStar(PDS1, { space: SPACE, repo: OWNER, maxBytes: 1024 * 1024, maxRecords: 100 }),
+      SpaceMacError,
+    );
+  }
+
+  // Truncated STAR stream (header verified, EOF before all records matching commit) fails RepoVerificationError.
+  {
+    const { network, credential } = await capture(async (response, request) => {
+      if (!request.url.includes("getRepo") || !response.ok) return response;
+      const full = new Uint8Array(await response.arrayBuffer());
+      // Keep magic + metadata header only, drop the record pair bytes.
+      const truncated = full.subarray(0, full.length - 10);
+      return new Response(truncated, { status: 200, headers: response.headers });
+    });
+    await writeRequest(network, "a", "hello");
+    await assert.rejects(
+      credential.fetchVerifiedRepoStar(PDS1, { space: SPACE, repo: OWNER, maxBytes: 1024 * 1024, maxRecords: 100 }),
+      (error) => error instanceof RepoVerificationError || error instanceof StarParseError,
+    );
+  }
+
+  // Unwritten repo returns XrpcError RepoNotFound.
+  {
+    const { credential } = await capture();
+    await assert.rejects(
+      credential.fetchVerifiedRepoStar(PDS1, { space: SPACE, repo: OWNER, maxBytes: 1024 * 1024, maxRecords: 100 }),
+      (error) => error instanceof XrpcError && error.code === "RepoNotFound",
+    );
+  }
+});
+
+test("fetchVerifiedRepoStar enforces maxBytes and maxRecords mid-stream before buffering unbounded bytes", async () => {
+  // Authentic chunked STAR stream without content-length must abort mid-stream once maxBytes is exceeded.
+  {
+    let pulls = 0;
+    let canceled = false;
+    const { network, credential } = await capture(async (response, request) => {
+      if (!request.url.includes("getRepo") || !response.ok) return response;
+      const full = new Uint8Array(await response.arrayBuffer());
+      const headers = new Headers(response.headers);
+      headers.delete("content-length");
+      let offset = 0;
+      const stream = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          pulls += 1;
+          if (offset >= full.byteLength) {
+            controller.close();
+            return;
+          }
+          const end = Math.min(offset + 512, full.byteLength);
+          controller.enqueue(full.subarray(offset, end));
+          offset = end;
+        },
+        cancel() {
+          canceled = true;
+        },
+      });
+      return new Response(stream, { status: 200, headers });
+    });
+    for (let i = 0; i < 8; i += 1) await writeRequest(network, `big${i}`, "x".repeat(1_000));
+    await assert.rejects(
+      credential.fetchVerifiedRepoStar(PDS1, { space: SPACE, repo: OWNER, maxBytes: 2048, maxRecords: 100 }),
+      (error) => error instanceof RepoStarLimitError && error instanceof UpstreamResponseTooLargeError && error.kind === "bytes",
+    );
+    assert.equal(canceled, true, "oversized STAR stream is canceled");
+    assert.ok(pulls <= 6, `expected early abort, got ${pulls} pulls`);
+  }
+
+  // Content-length exceeding maxBytes aborts without reading body.
+  {
+    const { network, credential } = await capture((response, request) => {
+      if (!request.url.includes("getRepo") || !response.ok) return response;
+      const headers = new Headers(response.headers);
+      headers.set("content-length", String(100_000));
+      return new Response(new ReadableStream({ pull(controller) { controller.enqueue(new Uint8Array(128)); } }), { status: 200, headers });
+    });
+    await writeRequest(network, "a");
+    await assert.rejects(
+      credential.fetchVerifiedRepoStar(PDS1, { space: SPACE, repo: OWNER, maxBytes: 1024, maxRecords: 100 }),
+      (error) => error instanceof RepoStarLimitError && error.kind === "bytes",
+    );
+  }
+
+  // maxRecords exceeded mid-stream aborts before consuming remaining records.
+  {
+    const { network, credential } = await capture();
+    for (let i = 0; i < 5; i += 1) await writeRequest(network, `r${i}`, `msg ${i}`);
+    await assert.rejects(
+      credential.fetchVerifiedRepoStar(PDS1, { space: SPACE, repo: OWNER, maxBytes: 1024 * 1024, maxRecords: 3 }),
+      (error) => error instanceof RepoStarLimitError && error instanceof UpstreamResponseTooLargeError && error.kind === "records",
+    );
+  }
+
+  // Pre-aborted signal aborts cleanly without fetching.
+  {
+    const { network, credential, requests } = await capture();
+    await writeRequest(network, "a");
+    const controller = new AbortController();
+    controller.abort(new Error("cancelled"));
+    const before = requests.length;
+    await assert.rejects(
+      credential.fetchVerifiedRepoStar(PDS1, { space: SPACE, repo: OWNER, maxBytes: 1024 * 1024, maxRecords: 10, signal: controller.signal }),
+      /cancelled/,
+    );
+    assert.equal(requests.length, before);
+  }
+});
+
+test("verifyRecordCid checks canonical DRISL CID and returns false cleanly on mismatches or malformed inputs", async () => {
+  const { cid: seedCid } = await serializeRecord(COLLECTION, "seed" as never, { text: "seed" });
+  const value = { text: "hello", ref: { $link: seedCid.toString() }, blob: { $bytes: "AAECAw" } };
+  const { cid } = await serializeRecord(COLLECTION, "a" as never, { text: "hello", ref: seedCid, blob: new Uint8Array([0, 1, 2, 3]) });
+
+  assert.equal(await verifyRecordCid(COLLECTION, "a", value, cid.toString()), true);
+  assert.equal(await verifyRecordCid(COLLECTION, "a", { ...value, text: "tampered" }, cid.toString()), false);
+  assert.equal(await verifyRecordCid(COLLECTION, "a", value, "not-a-cid"), false);
+  assert.equal(await verifyRecordCid(COLLECTION, "a", value, seedCid.toString()), false);
+  assert.equal(await verifyRecordCid(COLLECTION, "a", { badLink: { $link: "invalid" } }, cid.toString()), false);
+  assert.equal(await verifyRecordCid(COLLECTION, "a", { badFloat: 1.5 }, cid.toString()), false);
+  assert.equal(await verifyRecordCid("", "a", value, cid.toString()), false);
+  assert.equal(await verifyRecordCid(COLLECTION, "", value, cid.toString()), false);
+  assert.equal(await verifyRecordCid(COLLECTION, "a", null as never, cid.toString()), false);
+  assert.equal(await verifyRecordCid(COLLECTION, "a", [] as never, cid.toString()), false);
 });
