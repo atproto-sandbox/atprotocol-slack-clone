@@ -1054,3 +1054,80 @@ test("per-author inbox throttle caps each author per minute, reports excess once
   await env.runtime.poll();
   assert.deepEqual(env.commands.map((entry) => entry.text), ["a0", "a1", "a2", "b0", "after-minute"]);
 });
+
+test("AppRuntime with followRepoOps delivers same-rev applyWrites in host order, handles oplog reset without redelivery, and retries without duplicating", async () => {
+  const resets: Array<{ space: string; repo: string }> = [];
+  const env = await inboxFixture({ onMessage: true, onCommand: false, onAction: false });
+  const channel = env.fixture.channels.general!;
+  // Baseline existing message before polling so it is never delivered as new.
+  await writeMessage(env.network, env.alice, channel, 1, "before-follow");
+  await env.runtime.poll();
+  assert.equal(env.messages.length, 0);
+
+  // Single applyWrites commit writes reverse-TID keys ("zzz" then "aaa"): AppRuntime delivers in host (rev, idx) order!
+  await env.network.applyWritesAs(env.alice, channel, [
+    { action: "create", collection: COLLECTION.message, rkey: "zzzzzzzzzzzzz", value: { text: "host-first", createdAt: "2026-11-10T12:00:00.000Z" } },
+    { action: "create", collection: COLLECTION.message, rkey: "aaaaaaaaaaaaa", value: { text: "host-second", createdAt: "2026-11-10T12:00:00.000Z" } },
+  ]);
+  env.change(channel);
+  await env.runtime.poll();
+  assert.deepEqual(
+    env.messages.map((entry) => entry.message.value.text),
+    ["host-first", "host-second"],
+    "AppRuntime delivers same-rev applyWrites in PDS host order",
+  );
+
+  // Pruned oplog hole: write msg A (unsynced), prune oplog so msg A's op disappears, write msg B -> AppRuntime detects reset without delivering A/B or historical records!
+  await writeMessage(env.network, env.alice, channel, 98, "lost-during-prune");
+  env.network.pruneOplog(channel, env.alice);
+  await writeMessage(env.network, env.alice, channel, 99, "after-prune");
+  env.change(channel);
+  await env.runtime.poll();
+  assert.equal(env.messages.length, 2, "no duplicate deliveries or pre-reset historical replay");
+  assert.equal(env.errors.some((error) => /Repo oplog reset/.test(String(error))), true, "reset diagnostic emitted via onError");
+
+  // New write after reset is delivered cleanly, and handler failure retries without duplicating sibling messages!
+  let failMessage = true;
+  const deliveredRetry: string[] = [];
+  const retryRuntime = new AppRuntime({
+    did: env.appDid,
+    workspaces: [env.fixture.workspace],
+    clock: env.clock,
+    refollowDelayMs: 20,
+    retryDelayMs: 10,
+    engine: {
+      ...createEngine(transportFor(env.network, env.appDid)),
+      operator: {
+        getChanges: async (follow) => {
+          if (follow.length === 0) return { head: "1", changed: [], denied: [], reset: [] };
+          return { head: "2", changed: follow.map((f) => ({ space: f.space, cursor: "2" })), denied: [], reset: [] };
+        },
+      },
+    },
+    onMessage: async (entry) => {
+      const text = String(entry.message.value.text);
+      if (failMessage && text === "m1") {
+        failMessage = false;
+        throw new Error("handler transient failure");
+      }
+      deliveredRetry.push(text);
+    },
+    onReset: (notice) => resets.push({ space: notice.space, repo: notice.repo }),
+    onError: () => undefined,
+  });
+  await retryRuntime.poll();
+  await retryRuntime.poll();
+  await env.network.applyWritesAs(env.bob, channel, [
+    { action: "create", collection: COLLECTION.message, rkey: "jzzzzzzzzzzzz", value: { text: "m1", createdAt: "2026-11-10T12:00:00.000Z" } },
+    { action: "create", collection: COLLECTION.message, rkey: "3aaaaaaaaaaaa", value: { text: "m2", createdAt: "2026-11-10T12:00:00.000Z" } },
+  ]);
+  await retryRuntime.poll();
+  assert.deepEqual(deliveredRetry, ["m2"], "sibling m2 delivered while m1 deferred");
+  await retryRuntime.poll();
+  assert.deepEqual(deliveredRetry, ["m2", "m1"], "m1 retried on next poll without duplicating m2");
+
+  // Verify onReset callback works independently on reset:
+  env.network.clearRecordsAs(env.bob, channel);
+  await retryRuntime.poll();
+  assert.deepEqual(resets, [{ space: channel, repo: env.bob }]);
+});

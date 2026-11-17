@@ -160,3 +160,58 @@ test("a writer the authority never listed stays unread, and the page claims comp
   assert.equal(page.items.some((item) => item.repo === stranger), false);
   assert.equal(page.complete, true);
 });
+
+test("two tabs racing syncVerifiedSpace and listRepoOps delta commits preserve newer state and non-stale setHash", async () => {
+  const { network, space } = await channel();
+  const store = new MemoryStore();
+  const tabA = syncFor(network, READER, { store }).core;
+  const tabB = syncFor(network, READER, { store }).core;
+
+  // Both tabs warm-sync via STAR first so Bob holds a valid 2048B setHash and syncedRev.
+  await tabA.syncVerifiedSpace({ space, collections: [COLLECTION.message, COLLECTION.reaction] });
+
+  // Bob writes msg 11; tab A enters listRepoOps, pauses, then Bob writes msg 12 and tab B commits rev(12) first.
+  await writeMessage(network, BOB, space, 11);
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let paused = false;
+  network.beforeListRepoOps = async ({ repo }) => {
+    if (repo !== BOB || paused) return;
+    paused = true;
+    await held;
+  };
+  const slowTabA = tabA.syncVerifiedSpace({ space, collections: [COLLECTION.message, COLLECTION.reaction] });
+  while (!paused) await new Promise((resolve) => setTimeout(resolve, 1));
+  network.beforeListRepoOps = undefined;
+
+  await writeMessage(network, BOB, space, 12);
+  await tabB.markStale(space, BOB);
+  await tabB.syncVerifiedSpace({ space, collections: [COLLECTION.message, COLLECTION.reaction] });
+  release();
+  await slowTabA;
+
+  const heldAfter = await heldKeys(store, space, BOB);
+  assert.ok(heldAfter.includes(key(12)), "tab B's newer verified delta state survives CAS race");
+  const bobState = await store.getWriter(space, BOB);
+  assert.equal(bobState?.setHash?.length, 2048);
+  assert.equal(bobState?.commitDigest?.length, 32);
+});
+
+test("a space purge during an in-flight syncVerifiedSpace STAR or listRepoOps delta refuses to resurrect records", async () => {
+  const { network, space } = await channel();
+  const store = new MemoryStore();
+  const { core } = syncFor(network, READER, { store });
+
+  let raced = false;
+  network.beforeGetRepo = async ({ repo }) => {
+    if (repo !== BOB || raced) return;
+    raced = true;
+    await store.purgeSpace(space);
+  };
+  await core.syncVerifiedSpace({ space, collections: [COLLECTION.message, COLLECTION.reaction] });
+  network.beforeGetRepo = undefined;
+  assert.equal(raced, true);
+  assert.deepEqual(await heldKeys(store, space, BOB), [], "STAR result from pre-purge epoch must not commit");
+});
