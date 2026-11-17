@@ -675,6 +675,7 @@ export class SyncCore {
     type PreparedRepoBatch = {
       repo: string;
       repoState: RepoFollowState;
+      seenStaleSeq: number;
       events: RepoOpsEvent[];
       commitRev?: string;
       nextSetHash?: Uint8Array;
@@ -757,7 +758,7 @@ export class SyncCore {
                 rev: baseline.rev,
               }
             : undefined;
-          return { repo, repoState, events: [], silentSeenKeys: [], ...(reset ? { reset } : {}) };
+          return { repo, repoState, seenStaleSeq, events: [], silentSeenKeys: [], ...(reset ? { reset } : {}) };
         }
 
         if (repoState.expiredFloorRkey !== null) {
@@ -796,7 +797,7 @@ export class SyncCore {
             });
           }
           events.sort((left, right) => (left.rkey < right.rkey ? -1 : left.rkey > right.rkey ? 1 : left.uri < right.uri ? -1 : left.uri > right.uri ? 1 : 0));
-          repoState.ackedStaleSeq = Math.max(repoState.ackedStaleSeq, seenStaleSeq);
+          if (events.length === 0) repoState.ackedStaleSeq = Math.max(repoState.ackedStaleSeq, seenStaleSeq);
           repoState.holdStartedAt = null;
           repoState.permanentFailure = false;
           repoState.permanentFailedListedRev = null;
@@ -805,6 +806,7 @@ export class SyncCore {
           return {
             repo,
             repoState,
+            seenStaleSeq,
             events,
             commitRev: recovered.commit.rev,
             nextSetHash: recovered.setHash,
@@ -841,9 +843,9 @@ export class SyncCore {
           repoState.expiredFloorRkey = null;
           for (const key of baseline.seenKeys) recordSeenKey(spaceFollow.seen, key);
           const reset: RepoOpsResetNotice = { kind: "reset", space: input.space, repo, reason: replay.reason, rev: baseline.rev };
-          return { repo, repoState, events: [], silentSeenKeys: [], reset };
+          return { repo, repoState, seenStaleSeq, events: [], silentSeenKeys: [], reset };
         }
-        repoState.ackedStaleSeq = Math.max(repoState.ackedStaleSeq, seenStaleSeq);
+        if (replay.events.length === 0) repoState.ackedStaleSeq = Math.max(repoState.ackedStaleSeq, seenStaleSeq);
         repoState.holdStartedAt = null;
         repoState.permanentFailure = false;
         repoState.permanentFailedListedRev = null;
@@ -852,6 +854,7 @@ export class SyncCore {
         return {
           repo,
           repoState,
+          seenStaleSeq,
           events: replay.events,
           commitRev: replay.commitRev,
           nextSetHash: replay.nextSetHash,
@@ -878,7 +881,7 @@ export class SyncCore {
           repoState.resetOnBaseline = false;
           repoState.holdStartedAt = null;
           repoState.expiredFloorRkey = null;
-          return { repo, repoState, events: [], silentSeenKeys: [] };
+          return { repo, repoState, seenStaleSeq, events: [], silentSeenKeys: [] };
         }
         if (failure.permanent) {
           const wasPreviouslyBaselined = !repoState.unbaselined || repoState.expiredFloorRkey !== null;
@@ -899,6 +902,7 @@ export class SyncCore {
           return {
             repo,
             repoState,
+            seenStaleSeq,
             events: [],
             silentSeenKeys: [],
             aside,
@@ -919,6 +923,7 @@ export class SyncCore {
             return {
               repo,
               repoState,
+              seenStaleSeq,
               events: [],
               silentSeenKeys: [],
               reset: {
@@ -935,6 +940,7 @@ export class SyncCore {
         return {
           repo,
           repoState,
+          seenStaleSeq,
           events: [],
           silentSeenKeys: [],
           aside: { did: repo, reason: failure.reason, permanent: false },
@@ -980,6 +986,9 @@ export class SyncCore {
     }
 
     for (const batch of prepared) {
+      if (batch.events.length > 0) {
+        batch.repoState.ackedStaleSeq = Math.max(batch.repoState.ackedStaleSeq, batch.seenStaleSeq);
+      }
       if (!batch.aside) spaceFollow.reportedAside.delete(batch.repo);
     }
     reportFollowSetAside(input.space, labels, setAside, spaceFollow.reportedAside, input.onError);

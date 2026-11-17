@@ -1110,6 +1110,9 @@ export class TasksClient {
   private async ensureSyncedForWrite(workspaceUri: string): Promise<SyncedTasksContext> {
     const synced = await this.syncSpaceInternal(workspaceUri, {}, true);
     if ("disabled" in synced) {
+      if (!synced.disabled.workspaceSnapshotComplete) {
+        throw new TasksWorkspaceUnavailableError(workspaceUri, synced.disabled.degradedReasons[0]);
+      }
       throw new TasksExtensionDisabledError(workspaceUri, synced.disabled.degradedReasons[0]);
     }
     if (!synced.snapshot.workspaceSnapshotComplete) {
@@ -1219,10 +1222,6 @@ export class TasksClient {
         },
       };
     };
-
-    if (forWrite && !snapshot.workspaceSnapshotComplete) {
-      throw new TasksWorkspaceUnavailableError(workspaceUri, snapshot.reason);
-    }
 
     let extInstall = snapshot.extensions.find((ext) => ext.extId === "tasks") ?? null;
     if (!(extInstall !== null && extInstall.active === true && extInstall.space === tasksSpace)) {

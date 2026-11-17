@@ -1772,4 +1772,100 @@ test("followRepoOps consumes stale hints on permanent failures without defeating
     network.interceptResponse = undefined;
     assert.equal(bobPoll3Calls, 0, "consumed mid-poll hint must not loop on poll3");
   }
+
+  // (c) prepare returning false must leave seenStaleSeq unacknowledged so the stale writer is re-polled on the next tick.
+  {
+    const network = new FakeNetwork();
+    const space = await createChannel(network, "r4-prepare-defer-ack", [BOB, READER]);
+    await writeMessage(network, BOB, space, 1, "bob-1");
+    const { core } = syncFor(network, READER);
+
+    const savedListRepos = new Map<string, { body: string; status: number; headers: Headers }>();
+    let freezeListRepos = false;
+    network.interceptResponse = async ({ method, params, response }) => {
+      if (method === "com.atproto.space.listRepos" && params.space === space && response.ok) {
+        const cursorKey = typeof params.cursor === "string" ? params.cursor : "";
+        if (!freezeListRepos) {
+          const body = await response.text();
+          savedListRepos.set(cursorKey, { body, status: response.status, headers: response.headers });
+          return new Response(body, { status: response.status, headers: response.headers });
+        }
+        const saved = savedListRepos.get(cursorKey);
+        if (saved) return new Response(saved.body, { status: saved.status, headers: saved.headers });
+      }
+      return response;
+    };
+
+    const clockNow = 1_700_000_000_000;
+    const clock = { now: () => clockNow, elapsed: () => clockNow };
+
+    // Baseline Bob at bob-1.
+    await core.followRepoOps({
+      space,
+      collections: [COLLECTION.message],
+      deliver: false,
+      truthIntervalMs: 60_000,
+      clock,
+      onEvent: async () => undefined,
+    });
+    assert.ok(savedListRepos.size > 0, "captured initial listRepos snapshot");
+    freezeListRepos = true;
+
+    // Bob writes bob-2 while listRepos lags at bob-1; markSpaceStale sets staleSeq > ackedStaleSeq.
+    await writeMessage(network, BOB, space, 2, "bob-2");
+    await core.markSpaceStale(space);
+
+    const preparedEvents: string[] = [];
+    const delivered: string[] = [];
+    const poll1 = await core.followRepoOps({
+      space,
+      collections: [COLLECTION.message],
+      deliver: true,
+      truthIntervalMs: 60_000,
+      clock,
+      prepare: async (events) => {
+        preparedEvents.push(...events.map((event) => String((event.value as { text?: string } | undefined)?.text ?? "")));
+        return false;
+      },
+      onEvent: async (event) => {
+        delivered.push(String((event.value as { text?: string } | undefined)?.text ?? ""));
+      },
+    });
+    assert.deepEqual(preparedEvents, ["bob-2"]);
+    assert.equal(poll1.delivered.length, 0);
+    assert.equal(delivered.length, 0);
+
+    // Next tick within truthIntervalMs with listRepos STILL lagging must re-poll Bob because prepare returned false.
+    const poll2 = await core.followRepoOps({
+      space,
+      collections: [COLLECTION.message],
+      deliver: true,
+      truthIntervalMs: 60_000,
+      clock,
+      prepare: async () => true,
+      onEvent: async (event) => {
+        delivered.push(String((event.value as { text?: string } | undefined)?.text ?? ""));
+      },
+    });
+    assert.equal(poll2.delivered.length, 1);
+    assert.deepEqual(delivered, ["bob-2"]);
+
+    // Third tick within truthIntervalMs now skips Bob cleanly because ackedStaleSeq was committed after prepare=true.
+    let bobPoll3OpsCalls = 0;
+    const prevInterceptor = network.interceptResponse;
+    network.interceptResponse = async (args) => {
+      if (args.method === "com.atproto.space.listRepoOps" && args.params.repo === BOB) bobPoll3OpsCalls += 1;
+      return prevInterceptor ? prevInterceptor(args) : args.response;
+    };
+    await core.followRepoOps({
+      space,
+      collections: [COLLECTION.message],
+      deliver: true,
+      truthIntervalMs: 60_000,
+      clock,
+      onEvent: async () => undefined,
+    });
+    network.interceptResponse = undefined;
+    assert.equal(bobPoll3OpsCalls, 0);
+  }
 });

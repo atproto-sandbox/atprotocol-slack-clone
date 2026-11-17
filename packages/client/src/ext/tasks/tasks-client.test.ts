@@ -901,3 +901,84 @@ test("ensureSyncedForWrite refuses writes when live workspace snapshot verificat
   network.interceptResponse = undefined;
   assert.equal(aliceCreated.task.title, "Alice write succeeds with Bob setAside");
 });
+
+test("concurrent readSpace coalescing onto forWrite resolves degraded TasksSpaceView during workspace 503 while createTask rejects with TasksWorkspaceUnavailableError (Carbon R4-M1)", async () => {
+  const network = new FakeNetwork();
+  const { workspace } = await setupTasksWorkspace(network, { members: [ALICE] });
+  const warmAlice = createEngine(transportFor(network, ALICE));
+  const coldAlice = createEngine(transportFor(network, ALICE));
+
+  await warmAlice.tasks.createTask(workspace, { title: "Seed task" });
+
+  // 1. Warm workspace + 503: concurrent readSpace coalescing onto forWrite resolves degraded view while createTask rejects.
+  let markWarmInFlight!: () => void;
+  const warmInFlight = new Promise<void>((resolve) => {
+    markWarmInFlight = resolve;
+  });
+  let releaseWarm!: () => void;
+  const warmGate = new Promise<void>((resolve) => {
+    releaseWarm = resolve;
+  });
+  let pausedWarm = false;
+  network.interceptResponse = async ({ params, response }) => {
+    if (params.space === workspace) {
+      if (!pausedWarm) {
+        pausedWarm = true;
+        markWarmInFlight();
+        await warmGate;
+      }
+      return new Response("upstream unavailable", { status: 503 });
+    }
+    return response;
+  };
+
+  const warmWrite = warmAlice.tasks.createTask(workspace, { title: "Blocked warm write" });
+  const warmWriteCheck = assert.rejects(warmWrite, TasksWorkspaceUnavailableError);
+  await warmInFlight;
+  const warmRead = warmAlice.tasks.readSpace(workspace);
+  releaseWarm();
+
+  const warmView = await warmRead;
+  assert.equal(warmView.enabled, true);
+  assert.equal(warmView.workspaceSnapshotComplete, false);
+  assert.equal(warmView.complete, false);
+  assert.equal(warmView.degraded, true);
+  assert.equal(warmView.tasks.some((task) => task.title === "Seed task"), true);
+  await warmWriteCheck;
+
+  // 2. Cold workspace + 503: concurrent readSpace resolves degraded disabled view while createTask rejects with TasksWorkspaceUnavailableError (not TasksExtensionDisabledError).
+  let markColdInFlight!: () => void;
+  const coldInFlight = new Promise<void>((resolve) => {
+    markColdInFlight = resolve;
+  });
+  let releaseCold!: () => void;
+  const coldGate = new Promise<void>((resolve) => {
+    releaseCold = resolve;
+  });
+  let pausedCold = false;
+  network.interceptResponse = async ({ params, response }) => {
+    if (params.space === workspace) {
+      if (!pausedCold) {
+        pausedCold = true;
+        markColdInFlight();
+        await coldGate;
+      }
+      return new Response("upstream unavailable", { status: 503 });
+    }
+    return response;
+  };
+
+  const coldWrite = coldAlice.tasks.createTask(workspace, { title: "Blocked cold write" });
+  const coldWriteCheck = assert.rejects(coldWrite, TasksWorkspaceUnavailableError);
+  await coldInFlight;
+  const coldRead = coldAlice.tasks.readSpace(workspace);
+  releaseCold();
+
+  const coldView = await coldRead;
+  network.interceptResponse = undefined;
+  assert.equal(coldView.enabled, false);
+  assert.equal(coldView.workspaceSnapshotComplete, false);
+  assert.equal(coldView.complete, false);
+  assert.equal(coldView.degraded, true);
+  await coldWriteCheck;
+});
