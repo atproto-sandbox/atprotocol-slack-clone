@@ -1,6 +1,6 @@
 # R11 Plan — Verified Sync, First-Party Extensions, Tasks & URL Routing
 
-- **Status:** DONE — Implemented and verified sequentially across all 6 final acceptance gates on `feat/r11-tasks` (`75a78d4`, Node `v22.17.0`, `ATPROTO_PINNED_CHECKOUT=../atproto-spaces-phase3`)
+- **Status:** DONE — Implemented, hardened across 5 adversarial implementation review rounds (dual `VERDICT: READY` on `308d1db`), and verified sequentially (`Node v22.17.0`, `ATPROTO_PINNED_CHECKOUT=../atproto-spaces-phase3`)
 - **Date:** 2026-11-16 (completed 2026-11-17)
 - **Baseline:** `feat/r10-interactions` (`84cfff4`, stacked cleanly on `fix/script-policy-and-cors` -> `feat/platform-refactor` -> `main`)
 - **Pinned Protocol:** `atproto-spaces` @ `5d88b414a98de1ada22c94c78fa0667a7028163c` + `strict-credential-expiry.patch` (`docs/protocol/atproto-spaces-pin.md`)
@@ -256,6 +256,8 @@ Use explicit `clearDescription?: boolean`, `clearProject?: boolean`, `clearDueDa
 ---
 
 ## 4. Review Tracking
+
+### 4.1 Plan Review Rounds (`84cfff4`)
 - **Round 1 — Codex (`gpt-6.1-sol`, xhigh, read-only):** `VERDICT: REVISE` ([codex-r11-plan-round-1.md](../reviews/codex-r11-plan-round-1.md))
 - **Round 1 — Claude Opus (`claude-opus-5-5-high`, read-only):** `VERDICT: REVISE` ([opus-r11-plan-round-1.md](../reviews/opus-r11-plan-round-1.md))
 - **Round 2 — Claude Opus (`claude-opus-5-5-high`, read-only):** `VERDICT: READY` ([opus-r11-plan-round-2.md](../reviews/opus-r11-plan-round-2.md))
@@ -264,6 +266,20 @@ Use explicit `clearDescription?: boolean`, `clearProject?: boolean`, `clearDueDa
 - **Round 3 — Codex (`gpt-6.1-sol`, xhigh, read-only):** `VERDICT: REVISE` ([codex-r11-plan-round-3.md](../reviews/codex-r11-plan-round-3.md))
 - **Round 4 — Codex (`gpt-6.1-sol`, xhigh, read-only):** `VERDICT: READY` ([codex-r11-plan-round-4.md](../reviews/codex-r11-plan-round-4.md))
 - **Round 4 — Claude Opus (`claude-opus-5-5-high`, read-only):** `VERDICT: READY` ([opus-r11-plan-round-4.md](../reviews/opus-r11-plan-round-4.md))
+
+### 4.2 Implementation Review Rounds (`e19cbd9` -> `308d1db`)
+> **Reviewer note:** Gemini 4 Carbon (`gemini-4-carbon-high`, strictly read-only) served as the second adversarial reviewer alongside Codex (`gpt-6.1-sol`, `xhigh`, strictly read-only) after Claude Opus hit `0%` quota / expired CLI OAuth.
+
+- **Round 1 (`e19cbd9` / `75a78d4`) — Codex:** `VERDICT: REVISE` ([codex-r11-impl-round-1.md](../reviews/codex-r11-impl-round-1.md))
+- **Round 1 (`e19cbd9` / `75a78d4`) — Carbon:** `VERDICT: REVISE` ([carbon-r11-impl-round-1.md](../reviews/carbon-r11-impl-round-1.md))
+- **Round 2 (`17e8fe5`) — Codex:** `VERDICT: REVISE` ([codex-r11-impl-round-2.md](../reviews/codex-r11-impl-round-2.md))
+- **Round 2 (`17e8fe5`) — Carbon:** `VERDICT: REVISE` ([carbon-r11-impl-round-2.md](../reviews/carbon-r11-impl-round-2.md))
+- **Round 3 (`4b4c7aa`) — Codex:** `VERDICT: REVISE` ([codex-r11-impl-round-3.md](../reviews/codex-r11-impl-round-3.md))
+- **Round 3 (`4b4c7aa`) — Carbon:** `VERDICT: REVISE` ([carbon-r11-impl-round-3.md](../reviews/carbon-r11-impl-round-3.md))
+- **Round 4 (`00fc1fe`) — Codex:** `VERDICT: READY` ([codex-r11-impl-round-4.md](../reviews/codex-r11-impl-round-4.md))
+- **Round 4 (`00fc1fe`) — Carbon:** `VERDICT: REVISE` (`M1`, `L1`) ([carbon-r11-impl-round-4.md](../reviews/carbon-r11-impl-round-4.md))
+- **Round 5 (`308d1db`) — Codex:** `VERDICT: READY` (`0` findings) ([codex-r11-impl-round-5.md](../reviews/codex-r11-impl-round-5.md))
+- **Round 5 (`308d1db`) — Carbon:** `VERDICT: READY` (`0` findings) ([carbon-r11-impl-round-5.md](../reviews/carbon-r11-impl-round-5.md))
 
 ---
 
@@ -280,27 +296,35 @@ Use explicit `clearDescription?: boolean`, `clearProject?: boolean`, `clearDueDa
 - `4f6b264`: Phase R11d — `WriteQueue`, `TasksClient` (`engine.tasks`), `eslint.config.mjs` boundaries + `eslint-boundaries.test.ts`, IDB Activity sign-out wipe (`sign-out.test.ts`), and `tasks-reader-parity.test.ts`
 - `58dc3b0`, `2a4b1e0`: Phase R11f Acceptance & Perf — `tasks-acceptance.test.ts` and `tasks-performance.test.ts`
 - `c37adbd`, `628223b`: Phase R11e — Next.js App Router `(shell)` routes, `proxy.ts` loopback redirect & CSP nonces, `returnTo` OAuth lifecycle, `ExtensionsPanel`, Orbit-aligned Tasks UI, and `protocol-tests/browser/{url-routing,tasks}.spec.ts`
-- `7becb52`, `acd4816`, `75a78d4`: Executable Cucumber suites (`features/{url-routing,tasks}.feature`, `bdd/steps/{url-routing,tasks}.steps.ts`, `bdd/support/tasks-ui.ts`), `CODE-MAP.md` & `.ai/plans/platform-refactor.md` updates, and `app-acceptance.test.ts` `new.flock.ext.install` lexicon assertion update
+- `7becb52`, `acd4816`, `75a78d4`, `e19cbd9`: Executable Cucumber suites (`features/{url-routing,tasks}.feature`, `bdd/steps/{url-routing,tasks}.steps.ts`, `bdd/support/tasks-ui.ts`), `CODE-MAP.md` & `.ai/plans/platform-refactor.md` updates, `app-acceptance.test.ts` `new.flock.ext.install` lexicon assertion update, and 6-gate summary doc
+- `e80eecd`, `2b84af4`, `b12123c`, `17e8fe5`: Round 1 review docs & fixes (sync, merge, FakeNetwork batching, lint dynamic import guards, Tasks UI/routing/permalinks/LiveSpaces wiring)
+- `bd6086c`, `4b4c7aa`: Round 2 review docs & fixes (channel permalinks, staging payload bounds, generation-0 CAS, `followRepoOps` isolation/backoff/expiry recovery)
+- `667bb4c`, `00fc1fe`: Round 3 review docs & fixes (bounded oplog metadata/cursors & byte accounting, CAS permanent-failure cleanup, `staleSeq` follower ack, live workspace verification on writes)
+- `802588e`, `308d1db`: Round 4 review docs & fixes (`ensureSyncedForWrite` completeness outside `inFlightSync`, deferred `ackedStaleSeq` until `input.prepare`) & Round 5 dual-READY docs/plan finalization
 
-### 5.2 Sequential 6-Gate Results (`75a78d4`, Node `v22.17.0`)
-1. `pnpm typecheck`: PASS (`0` errors; zero `@types/node` in `@flock/protocol` and `@flock/client`)
-2. `pnpm lint`: PASS (`0` errors, including `NO_ENTITY_MERGE_IMPORT`, `NO_EXTENSION_IMPORT`, dynamic `ImportExpression`, and `eslint-boundaries.test.ts`)
-3. `pnpm test`: PASS (`876/876` passed, `0` failed, `0` skipped, `32609.8 ms`)
-4. `pnpm test:acceptance`: PASS (`44/44` passed across 13 suites, `0` failed, `0` skipped, `141346.3 ms`)
-5. `pnpm test:browser`: PASS (`10/10` passed across 8 Playwright specs, `0` failed, `0` skipped, `158479.8 ms`)
-6. Gate 6 (`test:bdd`, `test:performance`, `test:sync-budget`, `test:sync-budget:browser`):
-   - `pnpm test:bdd`: PASS (`74/74` scenarios passed, `537/537` steps passed, `0` failed, `18m 12.949s`)
-   - `pnpm test:performance`: PASS (`3/3` suites passed, `1706026.9 ms`):
-     - `dm-performance.test.ts`: PASS (`106356.6 ms`; latest-100 median `5614 ms`, p95 `7547 ms`)
-     - `tasks-performance.test.ts` (`50` writers, `20` projects, `1,000` tasks, `3,000` edits, `1,000` comments = `5,020` records, `2,828,971` aggregate STAR bytes, `24093.8 ms`):
-       - Gate 1 (Cold STAR load): median `1749 ms`, max `1755 ms` (`<= 15000 / 30000 ms`), `2 listRepos + 50 getRepo + 0 getRecord`
-       - Gate 2 (Warm reopen): median `110 ms`, max `111 ms` (`<= 250 ms`), `2 listRepos + 0 writer/ws`
-       - Gate 3 (Incremental `listRepoOps`): median `218 ms`, max `229 ms` (`<= 1500 ms`), `2 listRepos + 5 listRepoOps + 0 getRepo`
-       - Gate 4 (Reset / mid-STAR race recovery): median `168 ms`, max `171 ms` (`<= 5000 ms`), `2` attempts per run (`<= 3`)
-       - Gate 5 (Oversized STAR abort `> 16 MiB`): median `186 ms`, max `188 ms`, `bytesSeenBeforeAbort = 16794329`, RSS delta median `13.52 MiB` / max `17 MiB` (`< 32 MiB`)
-     - `performance-envelope.test.ts`: PASS (`1705839.3 ms`) — see channel regression comparison below.
-   - `pnpm test:sync-budget`: PASS (`reopen` calls gate = `1` across all writer counts).
-   - `pnpm test:sync-budget:browser`: PASS (`20`: `105+85` / `2+2` / `6+6` reqs+preflights, `669/32/69 ms` med; `100`: `505+405` / `2+2` / `6+6`, `2904/31/66 ms`; `200`: `1005+805` / `2+2` / `6+6`, `5698/37/75 ms`).
+### 5.2 Sequential 6-Gate Results & Post-Review Hardening Verification (`Node v22.17.0`)
+- **Full 6-Gate Run (`75a78d4`):**
+  1. `pnpm typecheck`: PASS (`0` errors; zero `@types/node` in `@flock/protocol` and `@flock/client`)
+  2. `pnpm lint`: PASS (`0` errors, including `NO_ENTITY_MERGE_IMPORT`, `NO_EXTENSION_IMPORT`, dynamic `ImportExpression`, and `eslint-boundaries.test.ts`)
+  3. `pnpm test`: PASS (`876/876` passed, `0` failed, `0` skipped, `32609.8 ms`)
+  4. `pnpm test:acceptance`: PASS (`44/44` passed across 13 suites, `0` failed, `0` skipped, `141346.3 ms`)
+  5. `pnpm test:browser`: PASS (`10/10` passed across 8 Playwright specs, `0` failed, `0` skipped, `158479.8 ms`)
+  6. Gate 6 (`test:bdd`, `test:performance`, `test:sync-budget`, `test:sync-budget:browser`):
+     - `pnpm test:bdd`: PASS (`74/74` scenarios passed, `537/537` steps passed, `0` failed, `18m 12.949s`)
+     - `pnpm test:performance`: PASS (`3/3` suites passed, `1706026.9 ms`):
+       - `dm-performance.test.ts`: PASS (`106356.6 ms`; latest-100 median `5614 ms`, p95 `7547 ms`)
+       - `tasks-performance.test.ts` (`50` writers, `20` projects, `1,000` tasks, `3,000` edits, `1,000` comments = `5,020` records, `2,828,971` aggregate STAR bytes, `24093.8 ms`):
+         - Gate 1 (Cold STAR load): median `1749 ms`, max `1755 ms` (`<= 15000 / 30000 ms`), `2 listRepos + 50 getRepo + 0 getRecord`
+         - Gate 2 (Warm reopen): median `110 ms`, max `111 ms` (`<= 250 ms`), `2 listRepos + 0 writer/ws`
+         - Gate 3 (Incremental `listRepoOps`): median `218 ms`, max `229 ms` (`<= 1500 ms`), `2 listRepos + 5 listRepoOps + 0 getRepo`
+         - Gate 4 (Reset / mid-STAR race recovery): median `168 ms`, max `171 ms` (`<= 5000 ms`), `2` attempts per run (`<= 3`)
+         - Gate 5 (Oversized STAR abort `> 16 MiB`): median `186 ms`, max `188 ms`, `bytesSeenBeforeAbort = 16794329`, RSS delta median `13.52 MiB` / max `17 MiB` (`< 32 MiB`)
+       - `performance-envelope.test.ts`: PASS (`1705839.3 ms`) — see channel regression comparison below.
+     - `pnpm test:sync-budget`: PASS (`reopen` calls gate = `1` across all writer counts).
+     - `pnpm test:sync-budget:browser`: PASS (`20`: `105+85` / `2+2` / `6+6` reqs+preflights, `669/32/69 ms` med; `100`: `505+405` / `2+2` / `6+6`, `2904/31/66 ms`; `200`: `1005+805` / `2+2` / `6+6`, `5698/37/75 ms`).
+- **Post-Review Hardening Verification (`00fc1fe` / `308d1db`):**
+  - `00fc1fe`: `pnpm typecheck` (`0` errors), `pnpm lint` (`0` errors), `pnpm test` (`907/907` passed, `30756.5 ms`), `node --import tsx --test --test-concurrency=1 protocol-tests/verified-sync.test.ts protocol-tests/tasks-acceptance.test.ts protocol-tests/tasks-performance.test.ts` (`10/10` passed, `43145.1 ms`), `pnpm test:sync-budget` (`GATE reopen calls = 1` across `20/100/200` writers; `105/505/1005` first open, `1` reopen, `5` one new message).
+  - `308d1db` (final code commit, dual `VERDICT: READY`): `pnpm typecheck` (`0` errors), `pnpm lint` (`0` errors), `pnpm test` (`908/908` passed, `0` failed, `0` skipped, `30678.2 ms`).
 
 ### 5.3 Channel Regression Comparison vs `84cfff4` Baseline
 Baseline source: [r11-channel-baseline-84cfff4.md](../reviews/r11-channel-baseline-84cfff4.md)

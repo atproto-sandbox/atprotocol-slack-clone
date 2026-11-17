@@ -1,0 +1,11 @@
+- **Carbon R4 M1 — RESOLVED.** Completeness checks now reject writes in both active and disabled branches outside the shared sync promise. Coalesced `readSpace`/`useTasksSpace` readers receive degraded views. Writes retain forced live verification and the common guard before mutations, preserving R3-#4. See [tasks-client.ts:1110](packages/client/src/ext/tasks/tasks-client.ts:1110), [tasks-client.ts:1129](packages/client/src/ext/tasks/tasks-client.ts:1129), [tasks-client.ts:1171](packages/client/src/ext/tasks/tasks-client.ts:1171), and [tasks-client.ts:769](packages/client/src/ext/tasks/tasks-client.ts:769).
+
+- **Carbon R4 L1 — RESOLVED.** Event-bearing batches acknowledge their captured sequence only after `prepare` approves; false/null returns and exceptions leave pending hints intact. Per-batch captured sequences preserve concurrent `markSpaceStale` hints across multiple batches. See [sync.ts:724](packages/client/src/sync.ts:724), [sync.ts:980](packages/client/src/sync.ts:980), and [sync.ts:988](packages/client/src/sync.ts:988). Immediate acknowledgment remains for baseline/reset, empty recovery/replay, and classified failures—including permanent failures—preserving R3-#3 backoff: [sync.ts:744](packages/client/src/sync.ts:744), [800](packages/client/src/sync.ts:800), [837](packages/client/src/sync.ts:837), [848](packages/client/src/sync.ts:848), [872](packages/client/src/sync.ts:872).
+
+The added tests meaningfully reproduce warm/cold reader–writer overlap and isolate stale-hint retries using frozen listings and time. See [tasks-client.test.ts:905](packages/client/src/ext/tasks/tasks-client.test.ts:905) and [sync.test.ts:1776](packages/client/src/sync.test.ts:1776). Null/throwing preparation, mixed batches, post-expiry recovery, and hints during preparation lack dedicated new tests; those paths were traced statically.
+
+**Zero remaining or newly introduced findings:** Blocker **0**, High **0**, Medium **0**, Low **0**. No Round 4 regressions found within the audited delta. Independent reviewer and critic agreed.
+
+Branch and HEAD match the requested target; tracked and untracked status remain clean. No files changed or execution-based checks ran.
+
+VERDICT: READY
