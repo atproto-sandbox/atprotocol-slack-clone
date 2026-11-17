@@ -1,11 +1,13 @@
 "use client";
 
 import { useState } from "react";
+import type { ExtensionId } from "@flock/protocol/extensions";
+import type { WorkspaceSummary } from "@flock/protocol/workspace-summary";
 import { inviteLinkFor, makeShortId, splitDids, toSlug, type InboxRequest, type RunOperation } from "./client-api";
 import { useBrowserSessionContext } from "./session-context";
 import { AppsPanel, type AppDirectory } from "./apps-panel";
+import { ExtensionsPanel, type ExtensionToggleOutcome } from "./extensions-panel";
 import type { WorkspaceDeclarations } from "./interactions";
-import type { WorkspaceSummary } from "@flock/protocol/workspace-summary";
 
 type WorkspaceHomeProps = {
   did: string;
@@ -17,6 +19,9 @@ type WorkspaceHomeProps = {
   inboxLoaded: boolean;
   inboxPermissionMissing: boolean;
   runOperation: RunOperation;
+  onToggleExtension: (extId: ExtensionId, enable: boolean) => Promise<ExtensionToggleOutcome>;
+  onReauthorizeAuthority: (authorityDid: string) => Promise<void>;
+  onOpenExtension?: (extId: ExtensionId) => void;
   leaveWorkspace: () => Promise<void>;
   syncInbox: () => void;
   setStatus: (message: string) => void;
@@ -24,7 +29,25 @@ type WorkspaceHomeProps = {
   apps: AppDirectory | null;
 };
 
-export function WorkspaceHome({ did, activeWorkspace, declarations, busy, workspaceDegraded, inbox, inboxLoaded, inboxPermissionMissing, runOperation, leaveWorkspace, syncInbox, setStatus, setError, apps }: WorkspaceHomeProps) {
+export function WorkspaceHome({
+  did,
+  activeWorkspace,
+  declarations,
+  busy,
+  workspaceDegraded,
+  inbox,
+  inboxLoaded,
+  inboxPermissionMissing,
+  runOperation,
+  onToggleExtension,
+  onReauthorizeAuthority,
+  onOpenExtension,
+  leaveWorkspace,
+  syncInbox,
+  setStatus,
+  setError,
+  apps,
+}: WorkspaceHomeProps) {
   // The inbox is read with the browser session's grant, so a refusal is answered by connecting it again.
   const { connect: connectBrowser } = useBrowserSessionContext();
   const [inviteDid, setInviteDid] = useState("");
@@ -44,6 +67,7 @@ export function WorkspaceHome({ did, activeWorkspace, declarations, busy, worksp
       <div className="starter-card roster-list">{activeWorkspace.members.map((member) => <div className="roster-row" key={member.did}><span>{member.did}</span>{member.did !== activeWorkspace.authorityDid && <div><button className="text-button" disabled={workspaceDegraded} onClick={() => void runOperation({ kind: "setAdmin", subject: member.did, active: !activeWorkspace.admins.includes(member.did) })}>{activeWorkspace.admins.includes(member.did) ? "Demote admin" : "Make admin"}</button><button className="text-button danger" disabled={workspaceDegraded} onClick={() => void runOperation({ kind: "removeMember", subject: member.did })}>Remove</button></div>}</div>)}</div>
       <div className="section-heading"><div><span className="eyebrow">PRIVATE CHANNEL INBOX</span><h2>Join requests</h2></div><button className="text-button" disabled={workspaceDegraded} onClick={syncInbox}>Sync inbox ↻</button></div>
       <div className="starter-card roster-list">{inbox.length === 0 ? <p>{inboxPermissionMissing ? <>This browser’s permission does not cover the workspace inbox. <button className="text-button" onClick={connectBrowser}>Connect this browser again →</button></> : inboxLoaded ? "No pending join requests." : "Inbox has not been synced yet."}</p> : inbox.map((joinRequest) => <div className="roster-row" key={joinRequest.uri}><span>{joinRequest.repoDid} requested #{joinRequest.channelName}</span><div><button className="text-button" onClick={() => void runOperation({ kind: "decideJoinRequest", request: joinRequest.uri, requestId: joinRequest.requestId, decision: "approve" })}>Approve</button><button className="text-button danger" onClick={() => void runOperation({ kind: "decideJoinRequest", request: joinRequest.uri, requestId: joinRequest.requestId, decision: "deny" })}>Deny</button></div></div>)}</div>
+      <ExtensionsPanel key={`ext:${activeWorkspace.uri}`} activeWorkspace={activeWorkspace} busy={busy} workspaceDegraded={workspaceDegraded} onToggleExtension={onToggleExtension} onReauthorizeAuthority={onReauthorizeAuthority} onOpenExtension={onOpenExtension} />
       <AppsPanel key={activeWorkspace.uri} activeWorkspace={activeWorkspace} declarations={declarations} busy={busy} workspaceDegraded={workspaceDegraded} runOperation={runOperation} apps={apps} setError={setError} />
     </>}
   </>;

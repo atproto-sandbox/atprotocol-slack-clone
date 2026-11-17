@@ -1,12 +1,16 @@
 "use client";
 
 import dynamic from "next/dynamic";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChannelView } from "./channel-view";
 import { acceptFailure } from "@flock/client/accept-errors";
 import { captureInviteLink, INVITE_LINK_KEY, isAccessFailure, makeTid, needsAuthorityApproval, WORKSPACE_OPERATION_KEY, workspaceCreationFrom, workspaceOperationIdFor, messageOf, parsePastedWorkspaceUri, type Message, type PendingOperation, type WorkspaceCreationInput } from "./client-api";
 import { DmProvider, type DmView } from "./dm-context";
+import type { ExtensionToggleOutcome } from "./extensions-panel";
+import { TasksWorkspaceView } from "./ext/tasks/tasks-workspace-view";
 import { InviteBanner } from "./invite-banner";
+import { channelRoute, dmConversationRoute, dmHomeRoute, homeRoute, messageRoute, parseRoute, sanitizeReturnTo, sentThreadCleanupRoute, tasksRoute, workspaceRoute } from "./routes";
 import { SessionProvider, useBrowserSessionContext } from "./session-context";
 import { Sidebar } from "./sidebar";
 import { WorkspaceHome } from "./workspace-home";
@@ -16,8 +20,9 @@ import { WorkspaceOnboarding } from "./workspace-onboarding";
 import { channelKey, useChannelContent } from "./use-channel-content";
 import { useAdminViews } from "./use-admin-views";
 import { useDiscovery } from "./use-discovery";
-import { shownChannel, type ChosenChannel } from "./selection";
+import { NO_WORKSPACE, shownChannel } from "./selection";
 import type { BrowserSessionConfig } from "../../browser/session";
+import type { ExtensionId } from "@flock/protocol/extensions";
 import { isDid } from "@flock/protocol/keys";
 import { SPACE_TYPE } from "@flock/protocol/nsids";
 import type { AuthorityFlowRequest } from "@flock/client/operator-client";
@@ -26,6 +31,8 @@ import type { WorkspaceSummary } from "@flock/protocol/workspace-summary";
 
 // The DM stage renders only client-side; see the note in sidebar.tsx.
 const DmStage = dynamic(() => import("./dm-stage").then((mod) => mod.DmStage), { ssr: false });
+
+const MAX_PERMALINK_PAGES = 5;
 
 /** The signed-in account's app: its browser session restored once, and the workspace, channel and DM views on top of it. */
 export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: BrowserSessionConfig }) {
@@ -40,11 +47,22 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
   // Sign-in, reads, writes and operator calls all go through the browser session and its engine; the server holds no member
   // session.
   const session = useBrowserSessionContext();
-  const { engine, live, status: sessionStatus, error: sessionError, connect: connectSession } = session;
-  /** The workspace and channel a person chose; what is shown follows the workspaces as last discovered. */
+  const { engine, live, snapshots, status: sessionStatus, error: sessionError, connect: connectSession } = session;
+  const pathname = usePathname() ?? "/";
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const searchString = useMemo(() => {
+    const encoded = searchParams.toString();
+    return encoded ? `?${encoded}` : "";
+  }, [searchParams]);
+  const parsedRoute = useMemo(() => parseRoute(pathname, searchString), [pathname, searchString]);
+  const routeWorkspaceUri =
+    parsedRoute && (parsedRoute.kind === "workspace" || parsedRoute.kind === "channel" || parsedRoute.kind === "message" || parsedRoute.kind === "tasks")
+      ? parsedRoute.workspaceUri
+      : null;
+
+  /** The workspace a person chose on `/` (or kept for sidebar context on `/dm`); deep workspace routes override it. */
   const [chosenWorkspace, setChosenWorkspace] = useState<string | null>(null);
-  const [chosenChannel, setChosenChannel] = useState<ChosenChannel | null>(null);
-  const [dmView, setDmView] = useState<DmView | null>(null);
   const [workspaceName, setWorkspaceName] = useState("");
   const [workspaceAccount, setWorkspaceAccount] = useState("");
   const [inviteUri, setInviteUri] = useState("");
@@ -66,6 +84,23 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const resumedRef = useRef(false);
+  const permalinkPagesRef = useRef<{ uri: string; count: number }>({ uri: "", count: 0 });
+  const navEpochRef = useRef(0);
+  const navigateTo = useCallback((url: string, replace = false) => {
+    navEpochRef.current += 1;
+    if (replace) router.replace(url);
+    else router.push(url);
+  }, [router]);
+
+  useEffect(() => {
+    navEpochRef.current += 1;
+  }, [pathname]);
+
+  useEffect(() => {
+    const bumpEpoch = () => { navEpochRef.current += 1; };
+    window.addEventListener("popstate", bumpEpoch);
+    return () => window.removeEventListener("popstate", bumpEpoch);
+  }, []);
   /** The engine's reads of an app account, for the Apps panel: its declaration, and the DID of an account an admin typed. */
   const appDirectory = useMemo<AppDirectory | null>(() => engine ? {
     declaration: (appDid) => engine.workspaces.appDeclaration(appDid),
@@ -79,19 +114,44 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
     sessionStorage.removeItem(INVITE_LINK_KEY);
     setInvitedTo((current) => current === waiting ? null : current);
   }, []);
-  const { discovery: discovered, workspace: activeWorkspace, reload: refreshWorkspaces } = useDiscovery(session, chosenWorkspace, listed);
+  const discoveryChoice = routeWorkspaceUri ?? chosenWorkspace;
+  const { discovery: discovered, workspace: discoveredWorkspace, reload: refreshWorkspaces } = useDiscovery(session, discoveryChoice, listed);
   const workspaces = useMemo(() => discovered.value?.workspaces ?? [], [discovered.value]);
   const workspaceCandidates = discovered.value?.candidates ?? [];
   const workspacesLoaded = discovered.value !== undefined;
+  const missingRouteWorkspace = Boolean(routeWorkspaceUri && workspacesLoaded && !workspaces.some((workspace) => workspace.uri === routeWorkspaceUri));
+  const activeWorkspace = missingRouteWorkspace ? null : discoveredWorkspace;
   const activeUri = activeWorkspace?.uri ?? "";
-  const activeChannel = useMemo(() => shownChannel(activeWorkspace, chosenChannel), [activeWorkspace, chosenChannel]);
   const activeDeclarations = useMemo<WorkspaceDeclarations>(
     () => (activeUri ? declarationsByWorkspace[activeUri] ?? {} : {}),
     [activeUri, declarationsByWorkspace],
   );
   const workspaceDegraded = Boolean(activeWorkspace?.degradedReasons.length);
   // The workspace shown stays shown: one discovery fell back to becomes the choice, so a later discovery never moves the view.
-  if (activeWorkspace && activeWorkspace.uri !== chosenWorkspace) setChosenWorkspace(activeWorkspace.uri);
+  if (activeWorkspace && activeWorkspace.uri !== chosenWorkspace && (!routeWorkspaceUri || activeWorkspace.uri === routeWorkspaceUri)) {
+    setChosenWorkspace(activeWorkspace.uri);
+  }
+
+  const routeChannelSkey =
+    parsedRoute && (parsedRoute.kind === "channel" || parsedRoute.kind === "message")
+      ? parsedRoute.channelSkey
+      : null;
+  const activeChannel = useMemo(
+    () => (activeWorkspace && routeChannelSkey ? shownChannel(activeWorkspace, { workspace: activeWorkspace.uri, skey: routeChannelSkey }) : null),
+    [activeWorkspace, routeChannelSkey],
+  );
+  const missingRouteChannel = Boolean(workspacesLoaded && activeWorkspace && routeChannelSkey && !activeChannel);
+
+  const dmView = useMemo<DmView | null>(() => {
+    if (parsedRoute?.kind !== "dm") return null;
+    if (parsedRoute.view === "conversation") {
+      return { kind: "conversation", convKey: parsedRoute.convKey, participants: [] };
+    }
+    return { kind: parsedRoute.view };
+  }, [parsedRoute]);
+
+  const tasksEnabledOnActive = Boolean(activeWorkspace?.extensions?.some((ext) => ext.extId === "tasks" && ext.active));
+  const tasksRouteActive = parsedRoute?.kind === "tasks";
 
   useEffect(() => {
     if (!engine || !activeWorkspace) return;
@@ -115,25 +175,50 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
     setReplyTo(""); setMessageText(""); setChosenCommandApp(null); setComposerStatus(""); setRequestSubmitted(false);
   }, []);
 
-  const clearChannelView = useCallback(() => {
-    setChosenChannel(null);
-    resetChannelInput();
-  }, [resetChannelInput]);
-
-  // A channel gone from the directory, or from a workspace no longer shown, closes with what was typed in it.
-  if (chosenChannel && workspacesLoaded && !activeChannel) clearChannelView();
-
   const openDmView = useCallback((view: DmView | null) => {
-    setDmView(view);
-    if (view) clearChannelView();
-  }, [clearChannelView]);
+    resetChannelInput();
+    setError("");
+    if (!view) {
+      navigateTo(activeWorkspace ? workspaceRoute(activeWorkspace.authorityDid, activeWorkspace.skey) : homeRoute());
+      return;
+    }
+    if (view.kind === "conversation") {
+      navigateTo(dmConversationRoute(view.convKey));
+      return;
+    }
+    navigateTo(dmHomeRoute(view.kind));
+  }, [navigateTo, activeWorkspace, resetChannelInput]);
 
   const openContent = useChannelContent(session, did, activeChannel);
   const contentRefused = openContent.content.value?.refused !== undefined;
 
+  const routeThread = parsedRoute?.kind === "channel" ? (parsedRoute.thread ?? "") : "";
+  const effectiveReplyTo = replyTo || routeThread;
+  const highlightedMessageUri =
+    parsedRoute?.kind === "message"
+      ? parsedRoute.messageUri
+      : parsedRoute?.kind === "channel"
+        ? (parsedRoute.thread ?? null)
+        : null;
+
+  useEffect(() => {
+    if (parsedRoute?.kind !== "message") return;
+    const targetUri = parsedRoute.messageUri;
+    const value = openContent.content.value;
+    if (!value || openContent.content.loading || value.refused) return;
+    if (value.messages.some((entry) => entry.uri === targetUri)) return;
+    if (value.next === undefined) return;
+    if (permalinkPagesRef.current.uri !== targetUri) {
+      permalinkPagesRef.current = { uri: targetUri, count: 0 };
+    }
+    if (permalinkPagesRef.current.count >= MAX_PERMALINK_PAGES) return;
+    permalinkPagesRef.current.count += 1;
+    void openContent.loadOlder();
+  }, [parsedRoute, openContent]);
+
   /** A write the account was refused (removed, the channel archived or paused) has the selection follow the workspace now. */
   const rediscoverAfterAccessFailure = useCallback((caught: unknown) => {
-    if (isAccessFailure(caught)) void refreshWorkspaces().catch((error) => setError(messageOf(error)));
+    if (isAccessFailure(caught)) void refreshWorkspaces().catch((err) => setError(messageOf(err)));
   }, [refreshWorkspaces]);
 
   /** Joins a workspace the account was added to: the browser writes the acceptance record to its own repo. */
@@ -150,16 +235,16 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
         setError("You accepted the invitation, but the workspace isn't available to you yet. Use Refresh in a moment, and ask an admin to check that your account was added.");
         return;
       }
-      setChosenWorkspace(workspace); clearChannelView();
+      setChosenWorkspace(workspace); resetChannelInput();
       setInviteUri("");
-      setInvitedTo((current) => current === workspace ? null : current);
+      setInvitedTo((cur) => cur === workspace ? null : cur);
       if (sessionStorage.getItem(INVITE_LINK_KEY) === workspace) sessionStorage.removeItem(INVITE_LINK_KEY);
     } catch (caught) {
       setError(acceptFailure(caught)?.error ?? messageOf(caught));
     } finally {
       setBusy(false);
     }
-  }, [engine, clearChannelView, refreshWorkspaces]);
+  }, [engine, resetChannelInput, refreshWorkspaces]);
 
   /**
    * Sends the browser to approve the operator's grant for a workspace account (this person's own, or a dedicated one, which
@@ -190,7 +275,7 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
       if (account && result.state === "completed") await engine.workspaces.accept(result.workspace);
       const current = await refreshWorkspaces();
       if (current?.workspaces.some((entry) => entry.uri === result.workspace)) {
-        setChosenWorkspace(result.workspace); clearChannelView();
+        setChosenWorkspace(result.workspace); resetChannelInput();
       }
       if (result.state === "completed") {
         sessionStorage.removeItem(WORKSPACE_OPERATION_KEY);
@@ -220,7 +305,7 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
         setError(messageOf(grantFailure));
       }
     } finally { if (!redirecting) setBusy(false); }
-  }, [engine, approveAuthority, clearChannelView, refreshWorkspaces]);
+  }, [engine, approveAuthority, resetChannelInput, refreshWorkspaces]);
 
   useEffect(() => {
     // Back from the permission screen restores this page as it was left. The resume flags must not
@@ -243,7 +328,10 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
       const search = window.location.search;
       const invitedWorkspace = captureInviteLink(search, sessionStorage) ?? sessionStorage.getItem(INVITE_LINK_KEY);
       const authorityFailed = new URLSearchParams(search).get("authority") === "failed";
-      if (search.includes("invite=") || search.includes("authority=")) window.history.replaceState(null, "", window.location.pathname);
+      if (search.includes("invite=") || search.includes("authority=")) {
+        const cleaned = sanitizeReturnTo(window.location.pathname, search);
+        window.history.replaceState(null, "", cleaned ?? window.location.pathname);
+      }
       if (invitedWorkspace) { setInvitedTo(invitedWorkspace); setInviteUri(invitedWorkspace); }
       // A workspace creation that was waiting on the approval reports the outcome itself when it retries.
       if (authorityFailed && !sessionStorage.getItem("spaces.autoCreateWorkspace")) {
@@ -347,8 +435,21 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
       }
       await refreshWorkspaces();
       if (request.kind === "leaveChannel" && operation.state === "completed") {
-        clearChannelView();
+        resetChannelInput();
         await engine?.channels.left({ workspace, skey: String(request.skey) }).catch((caught) => setError(messageOf(caught)));
+        const liveRoute = typeof window === "undefined" ? parsedRoute : parseRoute(window.location.pathname, window.location.search);
+        const onLeftChannel =
+          (liveRoute?.kind === "channel" || liveRoute?.kind === "message") &&
+          liveRoute.workspaceUri === workspace &&
+          liveRoute.channelSkey === String(request.skey);
+        if (activeWorkspace && activeWorkspace.uri === workspace && onLeftChannel) {
+          navigateTo(workspaceRoute(activeWorkspace.authorityDid, activeWorkspace.skey));
+        }
+      } else if (request.kind === "leaveWorkspace" && operation.state === "completed") {
+        const liveRoute = typeof window === "undefined" ? parsedRoute : parseRoute(window.location.pathname, window.location.search);
+        if (liveRoute && liveRoute.kind !== "home" && "workspaceUri" in liveRoute && liveRoute.workspaceUri === workspace) {
+          navigateTo(homeRoute());
+        }
       } else if (activeChannel?.workspace === workspace) await live?.reload(channelKey(activeChannel));
       // What an operation changes for an admin: the inbox's requests and the stalled operations.
       admin.reload();
@@ -371,28 +472,169 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
     } finally { setBusy(false); }
   }
 
+  async function toggleExtension(extId: ExtensionId, enable: boolean): Promise<ExtensionToggleOutcome> {
+    if (!activeWorkspace) return { kind: "failed" };
+    if (activeWorkspace.degradedReasons.length) {
+      setError(`Workspace mutations are paused in degraded mode. ${activeWorkspace.degradedReasons.join(" ")}`);
+      return { kind: "failed" };
+    }
+    const workspace = activeWorkspace.uri;
+    const operationId = makeTid();
+    const request = { kind: enable ? "enableExtension" : "disableExtension", extId } as const;
+    const pending = { workspace, operationId, request };
+    setPendingOperation(pending);
+    sessionStorage.setItem("spaces.pendingOperatorOperation", JSON.stringify(pending));
+    setBusy(true);
+    setError("");
+    setStatus(enable ? `Enabling ${extId} extension…` : `Disabling ${extId} extension…`);
+    try {
+      if (!engine?.operator) throw new Error("Connect this browser first.");
+      const { operation } = enable
+        ? await engine.operator.enableExtension(workspace, extId, operationId)
+        : await engine.operator.disableExtension(workspace, extId, operationId);
+      setOperatorReady(true);
+      setStatus(`Operation ${operation.state}; ${operation.completedSteps.length} steps recorded.${operation.error ? ` ${operation.error}` : ""}`);
+      if (operation.state === "completed" || operation.state === "failed") {
+        setPendingOperation(null);
+        sessionStorage.removeItem("spaces.pendingOperatorOperation");
+      }
+      await refreshWorkspaces();
+      admin.reload();
+      return operation.state === "completed" ? { kind: "completed" } : { kind: "failed" };
+    } catch (caught) {
+      setStatus("");
+      if (needsAuthorityApproval(caught)) {
+        return {
+          kind: "reauthorizationRequired",
+          message: messageOf(caught),
+          authorityDid: activeWorkspace.authorityDid,
+        };
+      }
+      setError(messageOf(caught));
+      return { kind: "failed" };
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function reauthorizeAuthority(authorityDid: string): Promise<void> {
+    setBusy(true);
+    setError("");
+    setStatus(
+      authorityDid === did
+        ? "Opening the permission screen. Approve it, then retry the pending operation."
+        : "Opening the permission screen. Sign in there as the workspace account and approve it, then retry the pending operation.",
+    );
+    try {
+      await approveAuthority({ purpose: "reauthorize", authority: authorityDid });
+    } catch (caught) {
+      setStatus("");
+      setError(messageOf(caught));
+      setBusy(false);
+    }
+  }
+
   async function openChannel(channel: WorkspaceSummary["channels"][number]) {
     if (!activeWorkspace) return;
     const selected = { workspace: activeWorkspace.uri, skey: channel.skey, name: channel.name, visibility: channel.visibility };
     const reopened = activeChannel !== null && channelKey(activeChannel) === channelKey(selected);
-    setDmView(null);
-    setChosenChannel({ workspace: selected.workspace, skey: selected.skey }); resetChannelInput(); setError("");
-    // The channel's live view loads it (none while it is in transition); the same channel opened again keeps its view, which
-    // is asked to load it now.
-    if (reopened) await live?.reload(channelKey(selected));
+    const targetUrl = channelRoute({
+      authority: activeWorkspace.authorityDid,
+      workspaceSkey: activeWorkspace.skey,
+      channelSkey: channel.skey,
+    });
+    resetChannelInput(); setError("");
+    if (reopened && parsedRoute?.kind === "channel" && !parsedRoute.thread) {
+      await live?.reload(channelKey(selected));
+      return;
+    }
+    navigateTo(targetUrl);
+  }
+
+  function openTasks() {
+    if (!activeWorkspace) return;
+    resetChannelInput();
+    setError("");
+    navigateTo(tasksRoute(activeWorkspace.authorityDid, activeWorkspace.skey));
+  }
+
+  function handleReplyToChange(nextUri: string) {
+    setReplyTo(nextUri);
+    if (!activeWorkspace || !activeChannel) return;
+    if (parsedRoute?.kind === "channel") {
+      // Only touch the URL when entering a thread or removing an existing ?thread= query param.
+      if (!nextUri && !parsedRoute.thread) return;
+      router.replace(
+        channelRoute({
+          authority: activeWorkspace.authorityDid,
+          workspaceSkey: activeWorkspace.skey,
+          channelSkey: activeChannel.skey,
+          ...(nextUri ? { thread: nextUri } : {}),
+        }),
+      );
+    } else if (parsedRoute?.kind === "message" && nextUri) {
+      navigateTo(
+        channelRoute({
+          authority: activeWorkspace.authorityDid,
+          workspaceSkey: activeWorkspace.skey,
+          channelSkey: activeChannel.skey,
+          thread: nextUri,
+        }),
+      );
+    }
+  }
+
+  function openMessagePermalink(message: Message) {
+    if (!activeWorkspace || !activeChannel) return;
+    navigateTo(
+      messageRoute({
+        authority: activeWorkspace.authorityDid,
+        workspaceSkey: activeWorkspace.skey,
+        channelSkey: activeChannel.skey,
+        repo: message.repo,
+        rkey: message.rkey,
+      }),
+    );
   }
 
   // Messages and reactions are written by the engine to the account's own repo, with the browser session's grant; the
   // engine keeps an own write in view until the authority lists it. Slash commands write only into the app's inbox.
   async function sendMessage(event: FormEvent) {
     event.preventDefault();
-    if (!engine || !activeChannel || activeChannel.visibility === "transitioning") return;
+    if (!engine || !activeWorkspace || !activeChannel || activeChannel.visibility === "transitioning") return;
+    const sentWorkspace = activeWorkspace;
+    const sentChannel = activeChannel;
+    const sendEpoch = navEpochRef.current;
+    const finishSentMessage = () => {
+      // If the person navigated elsewhere while the PDS write finished, do not clobber the new route or URL.
+      if (navEpochRef.current !== sendEpoch) return;
+      const liveRoute = typeof window === "undefined"
+        ? parsedRoute
+        : parseRoute(window.location.pathname, window.location.search);
+      if (
+        liveRoute?.kind !== "channel" ||
+        liveRoute.workspaceUri !== sentWorkspace.uri ||
+        liveRoute.channelSkey !== sentChannel.skey
+      ) {
+        return;
+      }
+      setMessageText("");
+      setChosenCommandApp(null);
+      setReplyTo("");
+      const cleanupUrl = sentThreadCleanupRoute(liveRoute, {
+        authority: sentWorkspace.authorityDid,
+        workspaceSkey: sentWorkspace.skey,
+        workspaceUri: sentWorkspace.uri,
+        channelSkey: sentChannel.skey,
+      });
+      if (cleanupUrl) router.replace(cleanupUrl);
+    };
     const context = channelCommandContext({
       workspace: activeWorkspace,
       channel: activeChannel,
       viewerDid: did,
       content: openContent.content.value,
-      replyTo,
+      replyTo: effectiveReplyTo,
       declarations: activeDeclarations,
     });
     const resolution = resolveComposerSubmission(messageText, { ...context, chosenAppDid: chosenCommandApp });
@@ -409,14 +651,14 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
     setBusy(true); setError(""); setComposerStatus("");
     try {
       if (resolution.kind === "command") {
-        await engine.appInboxes.sendCommand(activeChannel, resolution.appDid, resolution.command, resolution.text, replyTo || undefined);
-        setMessageText(""); setReplyTo(""); setChosenCommandApp(null);
-        setComposerStatus(`Sent /${resolution.command} to ${resolution.appName}.`);
+        await engine.appInboxes.sendCommand(sentChannel, resolution.appDid, resolution.command, resolution.text, effectiveReplyTo || undefined);
+        finishSentMessage();
+        if (navEpochRef.current === sendEpoch) setComposerStatus(`Sent /${resolution.command} to ${resolution.appName}.`);
         return;
       }
-      await engine.channels.send(activeChannel, resolution.text, replyTo || undefined);
-      setMessageText(""); setReplyTo(""); setChosenCommandApp(null);
-      await live?.reload(channelKey(activeChannel));
+      await engine.channels.send(sentChannel, resolution.text, effectiveReplyTo || undefined);
+      finishSentMessage();
+      await live?.reload(channelKey(sentChannel));
     } catch (caught) {
       setError(messageOf(caught));
       rediscoverAfterAccessFailure(caught);
@@ -466,22 +708,54 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
   }
 
   function switchWorkspace(uri: string) {
-    setDmView(null);
-    clearChannelView();
-    // The shown workspace chosen again only returns to its home; its inbox and operator state stay.
+    resetChannelInput();
+    setError("");
+    if (uri === NO_WORKSPACE) {
+      setChosenWorkspace(NO_WORKSPACE);
+      if (pathname !== "/") navigateTo(homeRoute());
+      return;
+    }
     setChosenWorkspace(uri);
+    const target = workspaces.find((entry) => entry.uri === uri);
+    if (target) {
+      navigateTo(workspaceRoute(target.authorityDid, target.skey));
+    } else if (pathname !== "/") {
+      navigateTo(homeRoute());
+    }
   }
 
   function syncInbox() {
     admin.reload();
   }
 
+  const sidebarWorkspace = discoveredWorkspace;
+  const breadcrumbLabel =
+    activeChannel?.name ??
+    (dmView
+      ? "Direct messages"
+      : tasksRouteActive
+        ? `${activeWorkspace?.name ?? "Workspace"} / Tasks`
+        : activeWorkspace?.name ?? "Overview");
+
   return (
-    <DmProvider did={did} dmConfig={dmConfig} workspaces={workspaces} activeWorkspace={activeWorkspace} view={dmView} openView={openDmView}>
+    <DmProvider did={did} dmConfig={dmConfig} workspaces={workspaces} activeWorkspace={sidebarWorkspace} view={dmView} openView={openDmView}>
     <main className="app-frame">
-      <Sidebar did={did} workspaces={workspaces} workspaceCandidates={workspaceCandidates} activeUri={activeUri} activeWorkspace={activeWorkspace} activeChannel={activeChannel} switchWorkspace={switchWorkspace} openChannel={openChannel} refresh={() => void refreshWorkspaces().catch((caught) => setError(messageOf(caught)))} />
+      <Sidebar
+        did={did}
+        workspaces={workspaces}
+        workspaceCandidates={workspaceCandidates}
+        activeUri={activeWorkspace?.uri ?? sidebarWorkspace?.uri ?? ""}
+        activeWorkspace={sidebarWorkspace}
+        activeChannel={activeChannel}
+        tasksEnabled={tasksEnabledOnActive}
+        tasksActive={tasksRouteActive}
+        openTasks={openTasks}
+        switchWorkspace={switchWorkspace}
+        openChannel={openChannel}
+        refresh={() => void refreshWorkspaces().catch((caught) => setError(messageOf(caught)))}
+      />
       <section className="main-stage">
-        <header className="topbar"><div className="breadcrumb">Your spaces <span>/</span> <strong>{activeChannel?.name ?? (dmView ? "Direct messages" : activeWorkspace?.name ?? "Overview")}</strong></div><div className="topbar-tools"><button className="help-button" onClick={() => void refreshWorkspaces().catch((caught) => setError(messageOf(caught)))}>↻ <span>Refresh</span></button><button className="top-avatar">{did.slice(-1).toUpperCase()}</button></div></header>
+        <header className="topbar"><div className="breadcrumb">Your spaces <span>/</span> <strong>{breadcrumbLabel}</strong></div><div className="topbar-tools"><button className="help-button" onClick={() => void refreshWorkspaces().catch((caught) => setError(messageOf(caught)))}>↻ <span>Refresh</span></button><button className="top-avatar">{did.slice(-1).toUpperCase()}</button></div></header>
         <div className="overview-content">
           {shownError && <p className="form-error" role="alert">{shownError}</p>}
           {status && <p className="status-note" role="status">{status}</p>}
@@ -491,11 +765,102 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
           {stalledWork && stalledWork.operations.length > 0 && <div className="operation-alert" role="alert"><strong>{stalledWork.operations.length} operation(s) have had no progress for at least five minutes.{stalledWork.truncated ? " Showing the oldest 100; more stalled operations exist." : ""}</strong>{stalledWork.operations.map((operation) => <p key={`${operation.actor}:${operation.operationId}`}>{operation.operationId} · {operation.actor} · {operation.error ?? operation.state}</p>)}</div>}
           {inboxView && inboxView.skipped.length > 0 && <p className="status-note" role="status">Join requests from {inboxView.skipped.map(({ did: writer, reason }) => `${writer} (${reason})`).join("; ")} could not be read.</p>}
           {sessionStatus === "ready" && <>
-          {!dmView && workspacesLoaded && invitedTo && !workspaces.some((workspace) => workspace.uri === invitedTo) && <InviteBanner workspace={invitedTo} busy={busy} join={() => void connectInvitation(invitedTo)} dismiss={dismissInvitation} />}
-          {!dmView && !activeWorkspace && <WorkspaceOnboarding busy={busy} workspaceName={workspaceName} setWorkspaceName={setWorkspaceName} workspaceAccount={workspaceAccount} setWorkspaceAccount={setWorkspaceAccount} inviteUri={inviteUri} setInviteUri={setInviteUri} createWorkspace={createWorkspace} beginAccept={beginAccept} />}
-          {!dmView && activeWorkspace && (!activeChannel || activeChannel.workspace !== activeUri) && <WorkspaceHome did={did} apps={appDirectory} activeWorkspace={activeWorkspace} declarations={activeDeclarations} busy={busy} workspaceDegraded={workspaceDegraded} inbox={inboxView?.requests ?? []} inboxLoaded={inboxView !== undefined && !inboxView.refused} inboxPermissionMissing={inboxView?.refused === true} runOperation={runOperation} leaveWorkspace={leaveWorkspace} syncInbox={syncInbox} setStatus={setStatus} setError={setError} />}
-          {!dmView && activeChannel?.workspace === activeUri && <ChannelView did={did} activeChannel={activeChannel} activeWorkspace={activeWorkspace} declarations={activeDeclarations} busy={busy} workspaceDegraded={workspaceDegraded} requestSubmitted={requestSubmitted} content={openContent.content} loadOlder={openContent.loadOlder} reload={openContent.reload} messageText={messageText} setMessageText={setMessageText} chosenCommandApp={chosenCommandApp} setChosenCommandApp={setChosenCommandApp} composerStatus={composerStatus} pendingActions={pendingActions} replyTo={replyTo} setReplyTo={setReplyTo} runOperation={runOperation} leaveChannel={leaveChannel} requestPrivateAccess={requestPrivateAccess} sendMessage={sendMessage} sendAction={sendAction} toggleReaction={toggleReaction} editMessage={editMessage} deleteMessage={deleteMessage} setError={setError} />}
-          {dmView && <DmStage />}
+          {parsedRoute === null ? (
+            <div className="starter-card">
+              <p className="form-error" role="alert">Page not found.</p>
+              <button type="button" className="text-button" onClick={() => navigateTo(homeRoute())}>Back to your spaces →</button>
+            </div>
+          ) : dmView ? (
+            <DmStage />
+          ) : (
+            <>
+              {workspacesLoaded && invitedTo && !workspaces.some((workspace) => workspace.uri === invitedTo) && <InviteBanner workspace={invitedTo} busy={busy} join={() => void connectInvitation(invitedTo)} dismiss={dismissInvitation} />}
+              {missingRouteWorkspace ? (
+                <div className="starter-card">
+                  <p className="form-error" role="alert">Workspace not found or you do not have access to it.</p>
+                  <button type="button" className="text-button" onClick={() => navigateTo(homeRoute())}>Back to your spaces →</button>
+                </div>
+              ) : !activeWorkspace ? (
+                workspacesLoaded || parsedRoute.kind === "home" ? (
+                  <WorkspaceOnboarding busy={busy} workspaceName={workspaceName} setWorkspaceName={setWorkspaceName} workspaceAccount={workspaceAccount} setWorkspaceAccount={setWorkspaceAccount} inviteUri={inviteUri} setInviteUri={setInviteUri} createWorkspace={createWorkspace} beginAccept={beginAccept} />
+                ) : (
+                  <p className="status-note" role="status">Loading workspace…</p>
+                )
+              ) : missingRouteChannel ? (
+                <div className="starter-card">
+                  <p className="form-error" role="alert">Channel not found or you no longer have access to it.</p>
+                  <button type="button" className="text-button" onClick={() => navigateTo(workspaceRoute(activeWorkspace.authorityDid, activeWorkspace.skey))}>Back to workspace →</button>
+                </div>
+              ) : parsedRoute.kind === "tasks" && engine ? (
+                <TasksWorkspaceView
+                  did={did}
+                  engine={engine}
+                  live={live}
+                  snapshots={snapshots}
+                  workspace={activeWorkspace}
+                  route={parsedRoute}
+                  navigate={(url) => navigateTo(url)}
+                  onEnableTasks={() => navigateTo(workspaceRoute(activeWorkspace.authorityDid, activeWorkspace.skey))}
+                  setStatus={setStatus}
+                  setError={setError}
+                />
+              ) : activeChannel?.workspace === activeUri ? (
+                <ChannelView
+                  did={did}
+                  activeChannel={activeChannel}
+                  activeWorkspace={activeWorkspace}
+                  declarations={activeDeclarations}
+                  busy={busy}
+                  workspaceDegraded={workspaceDegraded}
+                  requestSubmitted={requestSubmitted}
+                  content={openContent.content}
+                  loadOlder={openContent.loadOlder}
+                  reload={openContent.reload}
+                  messageText={messageText}
+                  setMessageText={setMessageText}
+                  chosenCommandApp={chosenCommandApp}
+                  setChosenCommandApp={setChosenCommandApp}
+                  composerStatus={composerStatus}
+                  pendingActions={pendingActions}
+                  replyTo={effectiveReplyTo}
+                  setReplyTo={handleReplyToChange}
+                  highlightedMessageUri={highlightedMessageUri}
+                  onOpenPermalink={openMessagePermalink}
+                  runOperation={runOperation}
+                  leaveChannel={leaveChannel}
+                  requestPrivateAccess={requestPrivateAccess}
+                  sendMessage={sendMessage}
+                  sendAction={sendAction}
+                  toggleReaction={toggleReaction}
+                  editMessage={editMessage}
+                  deleteMessage={deleteMessage}
+                  setError={setError}
+                />
+              ) : (
+                <WorkspaceHome
+                  did={did}
+                  apps={appDirectory}
+                  activeWorkspace={activeWorkspace}
+                  declarations={activeDeclarations}
+                  busy={busy}
+                  workspaceDegraded={workspaceDegraded}
+                  inbox={inboxView?.requests ?? []}
+                  inboxLoaded={inboxView !== undefined && !inboxView.refused}
+                  inboxPermissionMissing={inboxView?.refused === true}
+                  runOperation={runOperation}
+                  onToggleExtension={toggleExtension}
+                  onReauthorizeAuthority={reauthorizeAuthority}
+                  onOpenExtension={(extId) => {
+                    if (extId === "tasks") openTasks();
+                  }}
+                  leaveWorkspace={leaveWorkspace}
+                  syncInbox={syncInbox}
+                  setStatus={setStatus}
+                  setError={setError}
+                />
+              )}
+            </>
+          )}
           </>}
           <div className="data-note"><span className="note-icon">◈</span><span><strong>Your conversations belong to you.</strong><small>Records remain in their authors’ AT Protocol accounts. Workspace access is enforced by PDS member lists.</small></span><a href="https://atproto.com" target="_blank" rel="noreferrer">How it works ↗</a></div>
         </div>
@@ -534,4 +899,3 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
   }
 
 }
-

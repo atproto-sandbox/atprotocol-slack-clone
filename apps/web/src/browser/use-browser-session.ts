@@ -5,6 +5,7 @@ import { IndexedDbStore } from "@flock/client/indexeddb-store";
 import { LiveSpaces, Snapshots } from "@flock/client/views";
 import { DmClient } from "@flock/client/dm/dm-client";
 import { createBrowserDmStore, type BrowserDmStore } from "@flock/client/dm/browser-store";
+import { captureReturnTo, RETURN_TO_KEY } from "../lib/return-to";
 import { within } from "../lib/within";
 import { ERASE_WITHIN_MS, signOutAccount, type SignOutResult } from "./sign-out";
 import type { BrowserSessionConfig } from "./session";
@@ -105,6 +106,7 @@ export function useBrowserSession(did: string, config: BrowserSessionConfig): Br
   const connect = useCallback(() => {
     setStatus("connecting");
     setError("");
+    captureReturnTo(window.location.pathname, window.location.search, sessionStorage);
     void (async () => {
       try {
         const { signIn, signOut: revoke } = await import("./session");
@@ -114,6 +116,7 @@ export function useBrowserSession(did: string, config: BrowserSessionConfig): Br
         await revoke({ appUrl, plcUrl, scope, serviceRef, operatorUrl, loopback }).catch(() => undefined);
         await signIn(did, { appUrl, plcUrl, scope, serviceRef, operatorUrl, loopback });
       } catch (caught) {
+        sessionStorage.removeItem(RETURN_TO_KEY);
         setError(caught instanceof Error ? caught.message : "Could not connect.");
         setStatus("error");
       }

@@ -92,6 +92,7 @@ export function clearAccountScopedState(storage: Pick<Storage, "length" | "key" 
 }
 
 export const INVITE_LINK_KEY = "spaces.inviteLink";
+export { RETURN_TO_KEY } from "../../lib/return-to";
 
 /** Set on the sign-in page after a sign-out that did not fully hold: `?signout=` the parts that did not, comma-separated. */
 export const SIGN_OUT_PARAM = "signout";

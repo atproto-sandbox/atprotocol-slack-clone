@@ -3,7 +3,8 @@
 import { FormEvent, useEffect, useState } from "react";
 import Link from "next/link";
 import { signIn, type BrowserSessionConfig } from "../../browser/session";
-import { captureInviteLink, clearAccountScopedState, INVITE_LINK_KEY, messageOf, SIGN_OUT_KEPT, SIGN_OUT_PARAM, SIGN_OUT_UNREVOKED } from "./client-api";
+import { captureInviteLink, clearAccountScopedState, INVITE_LINK_KEY, messageOf, RETURN_TO_KEY, SIGN_OUT_KEPT, SIGN_OUT_PARAM, SIGN_OUT_UNREVOKED } from "./client-api";
+import { captureReturnTo, sanitizeReturnTo } from "./routes";
 
 /** Signs in with the browser's one OAuth client: the account's host asks for consent and sends the browser back. */
 export function LoginForm({ config, ended = "" }: { config: BrowserSessionConfig; ended?: string }) {
@@ -15,11 +16,18 @@ export function LoginForm({ config, ended = "" }: { config: BrowserSessionConfig
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      clearAccountScopedState(sessionStorage, [INVITE_LINK_KEY]);
+      const pathname = window.location.pathname;
       const search = window.location.search;
+      captureReturnTo(pathname, search, sessionStorage);
+      clearAccountScopedState(sessionStorage, [INVITE_LINK_KEY, RETURN_TO_KEY]);
       if (captureInviteLink(search, sessionStorage)) setInvited(true);
       setSignOutUnheld((new URLSearchParams(search).get(SIGN_OUT_PARAM) ?? "").split(",").filter(Boolean));
-      if (search) window.history.replaceState(null, "", window.location.pathname);
+      if (search) {
+        const cleaned = sanitizeReturnTo(pathname, search);
+        if (cleaned && cleaned !== `${pathname}${search}`) {
+          window.history.replaceState(null, "", cleaned);
+        }
+      }
     }, 0);
     return () => window.clearTimeout(timer);
   }, []);
@@ -28,9 +36,11 @@ export function LoginForm({ config, ended = "" }: { config: BrowserSessionConfig
     event.preventDefault();
     setError("");
     setBusy(true);
+    captureReturnTo(window.location.pathname, window.location.search, sessionStorage);
     try {
       await signIn(handle.trim().replace(/^@/, ""), config);
     } catch (caught) {
+      sessionStorage.removeItem(RETURN_TO_KEY);
       setError(messageOf(caught));
       setBusy(false);
     }

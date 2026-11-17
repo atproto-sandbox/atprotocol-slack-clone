@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { BLOCK_TYPE } from "@flock/client/blocks";
 import { messageOf, splitDids, threadMessages, TRANSITIONING_STATUS, type ChannelSelection, type Message, type RunOperation } from "./client-api";
 import { channelCommandContext, matchingCommands, renderableBlocks, type WorkspaceDeclarations } from "./interactions";
@@ -29,6 +29,8 @@ type ChannelViewProps = {
   pendingActions: ReadonlySet<string>;
   replyTo: string;
   setReplyTo: (value: string) => void;
+  highlightedMessageUri?: string | null;
+  onOpenPermalink?: (message: Message) => void;
   runOperation: RunOperation;
   leaveChannel: () => Promise<void>;
   requestPrivateAccess: (withdraw?: boolean) => Promise<void>;
@@ -42,11 +44,19 @@ type ChannelViewProps = {
 
 export function ChannelView(props: ChannelViewProps) {
   const { did, activeChannel, activeWorkspace, declarations, busy, workspaceDegraded, requestSubmitted, content, loadOlder, reload } = props;
-  const { messageText, setMessageText, chosenCommandApp, setChosenCommandApp, composerStatus, pendingActions, replyTo, setReplyTo } = props;
+  const { messageText, setMessageText, chosenCommandApp, setChosenCommandApp, composerStatus, pendingActions, replyTo, setReplyTo, highlightedMessageUri = null, onOpenPermalink } = props;
   const { runOperation, leaveChannel, requestPrivateAccess, sendMessage, sendAction, toggleReaction, editMessage, deleteMessage, setError } = props;
   const [transitionMembers, setTransitionMembers] = useState("");
-  const messages = content.value?.messages ?? [];
+  const messages = useMemo(() => content.value?.messages ?? [], [content.value?.messages]);
   const privateRoster = content.value?.roster ?? [];
+
+  useEffect(() => {
+    if (!highlightedMessageUri) return;
+    const match = [...document.querySelectorAll<HTMLElement>("[data-message-uri]")].find(
+      (element) => element.dataset.messageUri === highlightedMessageUri,
+    );
+    match?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, [highlightedMessageUri, messages]);
   // An installed app's messages are marked and may render blocks; a person's message shows its fallback text only.
   const appDids = new Set(activeWorkspace?.installs.map((install) => install.did) ?? []);
   // Busy while a read runs, and before the first one has answered; a channel in transition is not read.
@@ -88,10 +98,21 @@ export function ChannelView(props: ChannelViewProps) {
     {content.value?.degradedReasons.length ? <p className="status-note" role="status">{content.value.degradedReasons.join(" ")} Older records need operator review.</p> : null}
     {content.error !== undefined && <p className="form-error" role="alert">{messageOf(content.error)}</p>}
     {refused && activeChannel.visibility !== "private" && <p className="form-error" role="alert">{refused.message}</p>}
+    {highlightedMessageUri && !reading && !content.error && !refused && !messages.some((entry) => entry.uri === highlightedMessageUri) && (
+      <p className="status-note" role="status">
+        {content.value?.next !== undefined ? "Loading linked message…" : "The linked message was not found in this channel."}
+      </p>
+    )}
     <div className="message-list" aria-busy={reading}>{threadMessages(messages).map(({ message, isReply }) => {
       const blocks = renderableBlocks(message, appDids);
+      const isHighlighted = highlightedMessageUri === message.uri;
       return (
-        <article className={isReply ? "message-card reply-card" : "message-card"} key={message.uri}>
+        <article
+          className={`${isReply ? "message-card reply-card" : "message-card"}${isHighlighted ? " highlighted-message" : ""}`}
+          key={message.uri}
+          data-message-uri={message.uri}
+          data-highlighted={isHighlighted ? "true" : undefined}
+        >
           <div className="message-meta"><strong>{message.repo.slice(0, 20)}…</strong>{appDids.has(message.repo) && <span className="eyebrow app-marker">APP</span>}<time>{message.value.createdAt}</time></div>
           {blocks ? (
             <div className="message-blocks">
@@ -124,7 +145,7 @@ export function ChannelView(props: ChannelViewProps) {
             <p>{message.value.text}</p>
           )}
           {message.value.parent && <small>Reply to {message.value.parent}</small>}
-          <div className="message-actions"><button onClick={() => setReplyTo(message.uri)}>Reply</button>{(message.reactions ?? []).map((reaction) => <button className={reaction.active ? "reaction-active" : ""} key={reaction.emoji} onClick={() => void toggleReaction(message.uri, reaction.emoji, reaction.active)}>{reaction.emoji} {reaction.count}</button>)}{!(message.reactions ?? []).some((reaction) => reaction.emoji === "💜") && <button onClick={() => void toggleReaction(message.uri, "💜", false)}>💜 0</button>}{message.repo === did && <><button onClick={() => void editMessage(message)}>Edit</button><button onClick={() => void deleteMessage(message.uri)}>Delete</button></>}</div>
+          <div className="message-actions"><button onClick={() => setReplyTo(message.uri)}>Reply</button>{onOpenPermalink && <button type="button" onClick={() => onOpenPermalink(message)}>Link</button>}{(message.reactions ?? []).map((reaction) => <button className={reaction.active ? "reaction-active" : ""} key={reaction.emoji} onClick={() => void toggleReaction(message.uri, reaction.emoji, reaction.active)}>{reaction.emoji} {reaction.count}</button>)}{!(message.reactions ?? []).some((reaction) => reaction.emoji === "💜") && <button onClick={() => void toggleReaction(message.uri, "💜", false)}>💜 0</button>}{message.repo === did && <><button onClick={() => void editMessage(message)}>Edit</button><button onClick={() => void deleteMessage(message.uri)}>Delete</button></>}</div>
         </article>
       );
     })}</div>
