@@ -12,7 +12,7 @@ test("the operator scope lists exactly the published operator methods", () => {
 });
 
 test("legacyMemberGrantScopes matches memberGrantScopes except omitting optional getDmNotifyTarget", () => {
-  assert.equal(LEGACY_OPERATOR_METHODS.includes(OPERATOR_METHOD.getDmNotifyTarget), false);
+  assert.equal((LEGACY_OPERATOR_METHODS as readonly string[]).includes(OPERATOR_METHOD.getDmNotifyTarget), false);
   assert.deepEqual([...LEGACY_OPERATOR_METHODS, OPERATOR_METHOD.getDmNotifyTarget], OPERATOR_METHODS);
   const current = memberGrantScopes(serviceRef);
   const legacy = legacyMemberGrantScopes(serviceRef);
