@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { channelUri, inboxUri, workspaceUri } from "@flock/protocol/keys";
+import { channelUri, inboxUri, tasksSpaceUri, workspaceUri } from "@flock/protocol/keys";
 import { Lifecycle } from "./lifecycle";
 import { MemoryStore } from "./memory-store";
 
@@ -13,10 +13,13 @@ const GENERAL = channelUri(AUTHORITY, "acme-general");
 const RANDOM = channelUri(AUTHORITY, "acme-random");
 const ELSEWHERE = channelUri(AUTHORITY, "other-general");
 const INBOX = inboxUri(AUTHORITY, "acme");
+const TASKS = tasksSpaceUri(AUTHORITY, "acme");
 
 async function storeWithSpaces(lastOpenedAt: Record<string, number> = {}) {
   const store = new MemoryStore();
-  const spaces: Array<[string, string | null]> = [[WORKSPACE, null], [GENERAL, WORKSPACE], [RANDOM, WORKSPACE], [INBOX, WORKSPACE], [OTHER_WORKSPACE, null], [ELSEWHERE, OTHER_WORKSPACE]];
+  const spaces: Array<[string, string | null]> = [
+    [WORKSPACE, null], [GENERAL, WORKSPACE], [RANDOM, WORKSPACE], [INBOX, WORKSPACE], [TASKS, WORKSPACE], [OTHER_WORKSPACE, null], [ELSEWHERE, OTHER_WORKSPACE],
+  ];
   for (const [space, workspace] of spaces) {
     await store.putSpace({ space, spaceRev: null, writers: [], writersListedAt: null, workspace, lastOpenedAt: lastOpenedAt[space] ?? 1_000 });
   }
@@ -34,24 +37,34 @@ test("dropping a workspace drops every space that belongs to it, and nothing els
 test("dropping a channel drops that channel alone", async () => {
   const store = await storeWithSpaces();
   await new Lifecycle(store, () => 2_000).dropSpace(GENERAL);
-  assert.deepEqual(await held(store), [WORKSPACE, RANDOM, INBOX, OTHER_WORKSPACE, ELSEWHERE].sort());
+  assert.deepEqual(await held(store), [WORKSPACE, RANDOM, INBOX, TASKS, OTHER_WORKSPACE, ELSEWHERE].sort());
 });
 
-test("a workspace no longer listed after discovery goes with its channels and inbox", async () => {
+test("a workspace no longer listed after discovery goes with its channels, inbox, and extension spaces", async () => {
   const store = await storeWithSpaces();
   await new Lifecycle(store, () => 2_000).keepWorkspaces([OTHER_WORKSPACE]);
   assert.deepEqual(await held(store), [OTHER_WORKSPACE, ELSEWHERE].sort());
 });
 
-test("a directory read keeps the workspace's current channels and drops the rest, leaving its inbox and other workspaces", async () => {
+test("a directory read keeps the workspace's current channels and drops the rest, leaving its inbox, extensions, and other workspaces", async () => {
   const store = await storeWithSpaces();
   await new Lifecycle(store, () => 2_000).keepChannels(WORKSPACE, [GENERAL]);
+  assert.deepEqual(await held(store), [WORKSPACE, GENERAL, INBOX, TASKS, OTHER_WORKSPACE, ELSEWHERE].sort());
+});
+
+test("keepWorkspaceSpaces retains active extension spaces alongside channels and inbox, and purges disabled ones", async () => {
+  const store = await storeWithSpaces();
+  const lifecycle = new Lifecycle(store, () => 2_000);
+  await lifecycle.keepWorkspaceSpaces(WORKSPACE, [WORKSPACE, INBOX, GENERAL, TASKS]);
+  assert.deepEqual(await held(store), [WORKSPACE, GENERAL, INBOX, TASKS, OTHER_WORKSPACE, ELSEWHERE].sort());
+
+  await lifecycle.keepWorkspaceSpaces(WORKSPACE, { channels: [GENERAL], extensions: [] });
   assert.deepEqual(await held(store), [WORKSPACE, GENERAL, INBOX, OTHER_WORKSPACE, ELSEWHERE].sort());
 });
 
 test("the sweep drops spaces not opened within the retention period", async () => {
   const store = await storeWithSpaces({ [RANDOM]: 1, [ELSEWHERE]: 1 });
   await new Lifecycle(store, () => 2_000).sweep(1_000);
-  assert.deepEqual(await held(store), [WORKSPACE, GENERAL, INBOX, OTHER_WORKSPACE].sort());
+  assert.deepEqual(await held(store), [WORKSPACE, GENERAL, INBOX, TASKS, OTHER_WORKSPACE].sort());
 });
 

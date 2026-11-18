@@ -1,4 +1,6 @@
 import { readUpstreamJson } from "@flock/protocol/bounded-json";
+import type { ExtensionId } from "@flock/protocol/extensions";
+import { tidNow } from "@flock/protocol/keys";
 import { OPERATOR_METHOD, type OperatorMethod } from "@flock/protocol/nsids";
 import { transportNow, type ClientTransport } from "./transport";
 
@@ -57,10 +59,31 @@ export function operatorResponseFailure(status: number, ok: boolean, body: { err
 /** What an authority flow is for, and for which workspace account (the caller's own when absent). */
 export type AuthorityFlowRequest = ({ purpose: "createWorkspace"; name: string } | { purpose: "reauthorize" }) & { authority?: string };
 
+export type OperatorExecuteRequest =
+  | { kind: "inviteMember"; subject: string }
+  | { kind: "removeMember"; subject: string }
+  | { kind: "setAdmin"; subject: string; active: boolean }
+  | { kind: "createChannel"; skey: string; name: string; visibility: "public" | "private"; members?: string[] }
+  | { kind: "transitionChannel"; skey: string; visibility: "public" | "private"; members?: string[] }
+  | { kind: "archiveChannel"; skey: string }
+  | { kind: "decideJoinRequest"; request: string; requestId: string; decision: "approve" | "deny" }
+  | { kind: "leaveWorkspace" }
+  | { kind: "leaveChannel"; skey: string }
+  | { kind: "reconcileWorkspace" }
+  | { kind: "installApp"; subject: string; channels: Array<{ skey: string; write: boolean }> }
+  | { kind: "updateAppAccess"; subject: string; channels: Array<{ skey: string; write: boolean }> }
+  | { kind: "uninstallApp"; subject: string }
+  | { kind: "enableExtension"; extId: ExtensionId }
+  | { kind: "disableExtension"; extId: ExtensionId };
+
 export class OperatorClient {
   private changesToken: { token: string; expiresAt: number } | undefined;
 
-  constructor(private readonly transport: ClientTransport, private readonly service: OperatorService) {}
+  constructor(
+    private readonly transport: ClientTransport,
+    private readonly service: OperatorService,
+    private readonly options: { onWorkspaceMutated?: (workspaceUri: string) => Promise<void> | void } = {},
+  ) {}
 
   /** Which followed spaces changed since their cursors, waiting up to about 25 seconds; `signal` ends the wait. */
   getChanges(follow: ReadonlyArray<{ space: string; after: string }>, signal?: AbortSignal): Promise<ChangesAnswer> {
@@ -84,8 +107,18 @@ export class OperatorClient {
     return this.call(OPERATOR_METHOD.listStalledOperations, { params: { workspace } });
   }
 
-  execute(input: { workspace: string; operationId: string; request: Record<string, unknown> }): Promise<{ operation: OperationView }> {
-    return this.call(OPERATOR_METHOD.execute, { input });
+  async execute(input: { workspace: string; operationId: string; request: OperatorExecuteRequest | Record<string, unknown> }): Promise<{ operation: OperationView }> {
+    const result = await this.call<{ operation: OperationView }>(OPERATOR_METHOD.execute, { input });
+    await this.options.onWorkspaceMutated?.(input.workspace);
+    return result;
+  }
+
+  enableExtension(workspace: string, extId: ExtensionId, operationId = tidNow()): Promise<{ operation: OperationView }> {
+    return this.execute({ workspace, operationId, request: { kind: "enableExtension", extId } });
+  }
+
+  disableExtension(workspace: string, extId: ExtensionId, operationId = tidNow()): Promise<{ operation: OperationView }> {
+    return this.execute({ workspace, operationId, request: { kind: "disableExtension", extId } });
   }
 
   getOperation(workspace: string, operationId: string): Promise<{ operation: OperationView }> {

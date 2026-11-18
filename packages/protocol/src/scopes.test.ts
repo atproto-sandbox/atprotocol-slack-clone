@@ -22,13 +22,16 @@ test("workspace authority scopes contain no message or reaction writes", () => {
   assert.ok(scopes.every((scope) => !scope.includes("channel.message") && !scope.includes("channel.reaction")));
 });
 
-test("workspace authority combines equivalent read actions into compact scopes and emits no collection scope for app inboxes", () => {
+test("workspace authority combines equivalent read actions into compact scopes and emits no collection scope for app inboxes or tasks spaces", () => {
   const scopes = workspaceAuthorityScopes();
   assert.ok(scopes.includes("space:new.flock.workspace?authority=self&skey=*&action=read_self&action=read&manage=create&manage=update"));
   assert.ok(scopes.includes("space:new.flock.inbox?authority=self&skey=*&action=read_self&action=read&manage=create&manage=update"));
   assert.ok(scopes.includes("space:new.flock.channel?authority=self&skey=*&action=read_self&action=read&manage=create&manage=update"));
   assert.ok(scopes.includes("space:new.flock.app.inbox?authority=self&skey=*&action=read_self&action=read&manage=create&manage=update"));
+  assert.ok(scopes.includes("space:new.flock.ext.tasks?authority=self&skey=*&action=read_self&action=read&manage=create&manage=update"));
+  assert.ok(scopes.some((scope) => scope.startsWith("space:new.flock.workspace?") && scope.includes("collection=new.flock.ext.install")));
   assert.equal(scopes.filter((scope) => scope.startsWith("space:new.flock.app.inbox?")).length, 1, "the authority writes no records in an app inbox");
+  assert.equal(scopes.filter((scope) => scope.startsWith("space:new.flock.ext.tasks?")).length, 1, "the authority writes no records in a tasks space");
 });
 
 test("DM_BROWSER_SCOPES is the exact DM part of the browser grant (M3)", () => {
@@ -64,4 +67,16 @@ test("a member's browser grant creates and deletes commands and actions in app i
   assert.deepEqual(appInboxScopes, [
     "space:new.flock.app.inbox?authority=*&collection=new.flock.app.command&collection=new.flock.app.action&action=create&action=delete",
   ]);
+});
+
+test("a member's browser grant reads and writes Tasks extension collections, while appGrantScopes remains unchanged", () => {
+  const scopes = memberGrantScopes(serviceRef);
+  const tasksScopes = scopes.filter((scope) => scope.startsWith("space:new.flock.ext.tasks?"));
+  assert.deepEqual(tasksScopes, [
+    "space:new.flock.ext.tasks?authority=*&action=read",
+    "space:new.flock.ext.tasks?authority=*&collection=new.flock.ext.tasks.project&collection=new.flock.ext.tasks.projectEdit&collection=new.flock.ext.tasks.task&collection=new.flock.ext.tasks.taskEdit&collection=new.flock.ext.tasks.comment&action=create&action=update&action=delete",
+  ]);
+  for (const scope of appGrantScopes(serviceRef)) {
+    assert.ok(!scope.includes("new.flock.ext.tasks"), scope);
+  }
 });

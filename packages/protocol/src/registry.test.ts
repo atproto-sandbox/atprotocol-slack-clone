@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { appInboxUri, channelUri, dmConversationUri, dmInboxUri, reactionRecordKey, requestRecordKey, spaceRecordUri, subjectKey } from "./keys";
-import { BLOCK_TYPE, SPACE_TYPE } from "./nsids";
+import { appInboxUri, channelUri, dmConversationUri, dmInboxUri, reactionRecordKey, requestRecordKey, spaceRecordUri, subjectKey, tasksSpaceUri } from "./keys";
+import { BLOCK_TYPE, COLLECTION, SPACE_TYPE } from "./nsids";
 import { spaceCollections, validateDmHeaderMatchesRequest, validateSpaceRecord } from "./registry";
 
 const authorityDid = "did:plc:owner";
@@ -274,4 +274,71 @@ test("app commands and actions validate TID keys, token syntax, same-authority c
   assert.equal(validateSpaceRecord("new.flock.app.action", { message: top, actionId: "again_1", channel, createdAt: now }, context).valid, true);
   assert.equal(validateSpaceRecord("new.flock.app.action", { message: top, actionId: "bad id", channel, createdAt: now }, context).valid, false);
   assert.equal(validateSpaceRecord("new.flock.app.action", { message: spaceRecordUri(otherChannel, "did:plc:bot", "new.flock.channel.message", "2222222222222"), actionId: "again_1", channel, createdAt: now }, context).valid, false);
+});
+
+test("ext.install and Tasks collections validate boundaries, sTruncated, clear flags, and HLC ranges", () => {
+  const tasksSpace = tasksSpaceUri(authorityDid, "acme");
+  const workspaceSpace = "at://did:plc:owner/space/new.flock.workspace/acme";
+  assert.equal(
+    validateSpaceRecord(
+      COLLECTION.extInstall,
+      { extId: "tasks", active: true, space: tasksSpace, cleanupComplete: false, enabledBy: authorityDid, enabledAt: now, updatedAt: now },
+      { authorityDid, spaceUri: workspaceSpace, repoDid: authorityDid, rkey: "tasks" },
+    ).valid,
+    true,
+  );
+  assert.equal(
+    validateSpaceRecord(
+      COLLECTION.extInstall,
+      { extId: "tasks", active: false, space: tasksSpace, cleanupComplete: true, enabledBy: authorityDid, enabledAt: now, updatedAt: now, disabledAt: now },
+      { authorityDid, spaceUri: workspaceSpace, repoDid: authorityDid, rkey: "tasks" },
+    ).valid,
+    true,
+  );
+
+  const projectUri = spaceRecordUri(tasksSpace, memberDid, COLLECTION.taskProject, "2222222222222");
+  const taskUri = spaceRecordUri(tasksSpace, memberDid, COLLECTION.task, "2222222222223");
+  const maxS = Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(32, "0"));
+  assert.equal(
+    validateSpaceRecord(
+      COLLECTION.taskEdit,
+      {
+        subject: taskUri,
+        t: "001700000000000.ffff",
+        s: maxS,
+        sTruncated: true,
+        clearDescription: true,
+        clearProject: true,
+        clearDueDate: true,
+        clearParent: true,
+        deleted: false,
+      },
+      { authorityDid, spaceUri: tasksSpace, repoDid: memberDid, rkey: "2222222222224" },
+    ).valid,
+    true,
+  );
+  assert.equal(
+    validateSpaceRecord(
+      COLLECTION.taskEdit,
+      {
+        subject: taskUri,
+        t: "001700000000000.0000",
+        s: [...maxS, "f".repeat(32)],
+        sTruncated: true,
+        deleted: true,
+      },
+      { authorityDid, spaceUri: tasksSpace, repoDid: memberDid, rkey: "2222222222225" },
+    ).valid,
+    false,
+    "s over 256 entries is rejected by shape validation",
+  );
+  assert.equal(
+    validateSpaceRecord(
+      COLLECTION.taskProjectEdit,
+      { subject: projectUri, t: "999999999999999.ffff", s: [], clearDescription: true },
+      { authorityDid, spaceUri: tasksSpace, repoDid: memberDid, rkey: "2222222222226" },
+    ).valid,
+    true,
+    "MAX_HLC_MS is accepted",
+  );
 });

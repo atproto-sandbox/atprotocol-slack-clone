@@ -1,25 +1,50 @@
 import {
   COMMIT_MAC_TYPE,
+  LTHASH_STATE_BYTES,
+  LtHash,
   MAC_HEADER,
   RECORD_MAC_TYPE,
+  RepoCommit,
+  RepoVerificationError,
   SpaceMacError,
+  StarParseError,
   WANT_MAC_HEADER,
   createSpaceSigHeaders,
   encapsulate,
   formatWantMacHeader,
   parseMacHeader,
+  serializeRecord,
+  serializeRepo,
   verifyCommit,
   verifyRecord,
+  verifyRepoStar,
   type Commit,
   type MacType,
+  type RepoOp,
 } from "@atproto/space";
-import { fromBase64 } from "@atproto/lex-data";
-import { jsonToLex } from "@atproto/lexicon";
+import { fromBase64, parseCid, parseCidSafe, validateCidString, type Cid } from "@atproto/lex-data";
+import { jsonToLex, lexToJson } from "@atproto/lexicon";
 import type * as GetDelegationToken from "../lexicons/api/types/com/atproto/space/getDelegationToken";
-import { readUpstreamJson, readUpstreamText } from "../bounded-json";
+import type * as ListRecords from "../lexicons/api/types/com/atproto/space/listRecords";
+import { UpstreamResponseTooLargeError, readUpstreamJson, readUpstreamText } from "../bounded-json";
 import { isDid, parseSpaceUri, spaceRecordUri, type Did } from "../keys";
+import { assertBoundedRecordPage } from "./record-pages";
 import type { SpaceKey } from "./space-key";
 import { AtprotoClient, isScopeMissingError, MAX_XRPC_RESPONSE_BYTES, XrpcError } from "./xrpc";
+
+export {
+  LTHASH_STATE_BYTES,
+  LtHash,
+  RepoCommit,
+  RepoVerificationError,
+  SpaceMacError,
+  StarParseError,
+  parseCid,
+  parseCidSafe,
+  type Cid,
+  type Commit,
+  type RepoOp,
+};
 
 /** The PDS default lifetime of a space credential; the protocol ceiling is one hour. */
 export const SPACE_CREDENTIAL_LIFETIME_MS = 10 * 60 * 1000;
@@ -31,12 +56,42 @@ const GET_SPACE_CREDENTIAL = "/xrpc/com.atproto.space.getSpaceCredential";
 
 /**
  * The reads this app makes that a repo host only serves to a space credential together with a MAC request, and the MAC type
- * each answers with. `listRepoOps` and `getRepo` need one too, but nothing here calls them; a call would be refused by the host
- * rather than accepted half-verified (a `listRepoOps` page without a commit carries no MAC).
+ * each answers with. `getRepo` also requires a `COMMIT_MAC_TYPE` MAC and is handled by `SpaceCredential.fetchVerifiedRepoStar`.
+ * For `listRepoOps`, intermediate full pages and unwritten empty-repo answers omit `commit` and carry no MAC; every response
+ * carrying `commit` MUST verify its `Atproto-Space-Mac`.
  */
 const MAC_METHODS: Readonly<Record<string, MacType>> = {
   "com.atproto.space.getRecord": RECORD_MAC_TYPE,
   "com.atproto.space.getLatestCommit": COMMIT_MAC_TYPE,
+  "com.atproto.space.listRepoOps": COMMIT_MAC_TYPE,
+};
+
+export class RepoStarLimitError extends UpstreamResponseTooLargeError {
+  constructor(
+    readonly kind: "bytes" | "records",
+    readonly limit: number,
+    readonly actual?: number,
+  ) {
+    super(limit);
+    this.name = "RepoStarLimitError";
+    this.message = kind === "bytes"
+      ? `STAR archive exceeds the ${limit}-byte limit.`
+      : `STAR archive exceeds the ${limit}-record limit.`;
+  }
+}
+
+export type VerifiedRepoStarRecord = {
+  collection: string;
+  rkey: string;
+  cid: string;
+  record: Record<string, unknown>;
+};
+
+export type VerifiedRepoStar = {
+  commit: Commit;
+  setHash: Uint8Array;
+  commitDigest: Uint8Array;
+  records: VerifiedRepoStarRecord[];
 };
 
 /** The author's `#atproto_kem` did:key; `forceRefresh` bypasses cached DID documents after a failed MAC (the key may have rotated). */
@@ -140,6 +195,108 @@ export class SpaceCredential {
   }
 
   /**
+   * Downloads and cryptographically verifies a binary STAR-lite archive from `com.atproto.space.getRepo`, enforcing
+   * `maxBytes` and `maxRecords` during streaming and staging entries until `verifyRepoStar`'s EOF `repo.matches(commit)`
+   * succeeds.
+   */
+  async fetchVerifiedRepoStar(
+    service: string | URL,
+    input: { space: string; repo: string; maxBytes: number; maxRecords: number; signal?: AbortSignal },
+  ): Promise<VerifiedRepoStar> {
+    if (!isDid(input.repo)) throw new TypeError("com.atproto.space.getRepo needs a repo DID.");
+    if (!Number.isSafeInteger(input.maxBytes) || input.maxBytes < 1) {
+      throw new RangeError("STAR maxBytes must be a positive safe integer.");
+    }
+    if (!Number.isSafeInteger(input.maxRecords) || input.maxRecords < 0) {
+      throw new RangeError("STAR maxRecords must be a non-negative safe integer.");
+    }
+    if (input.signal?.aborted) throw abortReason(input.signal);
+
+    const base = service instanceof URL ? service : new URL(service);
+    const url = new URL("/xrpc/com.atproto.space.getRepo", base);
+    url.searchParams.set("space", input.space);
+    url.searchParams.set("repo", input.repo);
+    const authorization = `Atproto-Space-Credential ${this.token}`;
+
+    for (const forceRefresh of [false, true]) {
+      const { keyShare, sharedSecret } = await encapsulate(await this.resolveKemKey(input.repo, forceRefresh));
+      const attemptController = new AbortController();
+      const onAbort = () => attemptController.abort(input.signal?.reason);
+      if (input.signal) {
+        if (input.signal.aborted) throw abortReason(input.signal);
+        input.signal.addEventListener("abort", onAbort, { once: true });
+      }
+      try {
+        const headers = new Headers(await createSpaceSigHeaders(this.key, { authorization, audience: input.repo }));
+        headers.set("accept", "application/octet-stream");
+        headers.set(WANT_MAC_HEADER, formatWantMacHeader(COMMIT_MAC_TYPE, keyShare));
+        const request = new Request(url, { method: "GET", redirect: "error", headers, signal: attemptController.signal });
+        const response = await this.fetchEndpoint(request);
+        if (!response.ok) throw await xrpcErrorFromResponse(response);
+
+        const contentLength = response.headers.get("content-length");
+        if (contentLength !== null && /^\d+$/.test(contentLength) && BigInt(contentLength) > BigInt(input.maxBytes)) {
+          await response.body?.cancel().catch(() => undefined);
+          attemptController.abort();
+          throw new RepoStarLimitError("bytes", input.maxBytes);
+        }
+
+        const mac = macFromHeaders(response.headers, COMMIT_MAC_TYPE);
+        if (!mac) {
+          await response.body?.cancel().catch(() => undefined);
+          continue;
+        }
+
+        let verifiedRepo: Awaited<ReturnType<typeof verifyRepoStar>>;
+        try {
+          verifiedRepo = await verifyRepoStar(
+            boundedByteStream(response.body, input.maxBytes, attemptController),
+            { space: input.space, repo: input.repo, sharedSecret, mac },
+          );
+        } catch (error) {
+          if (error instanceof RepoVerificationError && error.message === "commit failed verification") continue;
+          attemptController.abort(error);
+          throw error;
+        }
+
+        const staged: VerifiedRepoStarRecord[] = [];
+        const repoCommit = new RepoCommit();
+        try {
+          for await (const entry of verifiedRepo.records) {
+            if (staged.length >= input.maxRecords) {
+              throw new RepoStarLimitError("records", input.maxRecords);
+            }
+            repoCommit.add(entry.collection, entry.rkey, entry.cid);
+            staged.push({
+              collection: entry.collection,
+              rkey: entry.rkey,
+              cid: entry.cid.toString(),
+              record: lexToJson(entry.record) as Record<string, unknown>,
+            });
+          }
+          if (verifiedRepo.commit.data.byteLength !== 32 || !repoCommit.matches(verifiedRepo.commit)) {
+            throw new RepoVerificationError("records do not match the commit data");
+          }
+          return {
+            commit: verifiedRepo.commit,
+            setHash: repoCommit.setHash.state(),
+            commitDigest: new Uint8Array(verifiedRepo.commit.data),
+            records: staged,
+          };
+        } catch (error) {
+          attemptController.abort(error);
+          throw error;
+        } finally {
+          await disposeVerifiedRepo(verifiedRepo);
+        }
+      } finally {
+        input.signal?.removeEventListener("abort", onAbort);
+      }
+    }
+    throw new SpaceMacError(`com.atproto.space.getRepo for ${input.repo} failed MAC verification; the response is not trusted.`);
+  }
+
+  /**
    * A fresh ephemeral key share per attempt (never reused, retries included). A response that fails verification
    * is retried once against a freshly resolved DID document, since the author may have rotated `#atproto_kem`.
    */
@@ -157,6 +314,309 @@ export class SpaceCredential {
     }
     throw new SpaceMacError(`${xrpcMethod(request)} for ${repo} failed MAC verification; the response is not trusted.`);
   }
+}
+
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException("The operation was aborted.", "AbortError");
+}
+
+async function disposeVerifiedRepo(repo: { records: AsyncGenerator<unknown> }): Promise<void> {
+  await repo.records.return?.(undefined).catch(() => undefined);
+  const symbol = (Symbol as { asyncDispose?: symbol }).asyncDispose ?? Symbol.for("Symbol.asyncDispose");
+  const fn = (repo as unknown as Record<symbol, (() => Promise<void>) | undefined>)[symbol];
+  if (typeof fn === "function") await fn.call(repo).catch(() => undefined);
+}
+
+async function xrpcErrorFromResponse(response: Response): Promise<XrpcError> {
+  const body = await readUpstreamJson(response, MAX_XRPC_RESPONSE_BYTES);
+  const detail = body && typeof body === "object" && "message" in body && typeof body.message === "string"
+    ? body.message
+    : `XRPC request failed (${response.status}).`;
+  const code = body && typeof body === "object" && "error" in body && typeof body.error === "string"
+    ? body.error
+    : "XrpcError";
+  return new XrpcError(response.status, detail, code);
+}
+
+async function* boundedByteStream(
+  body: ReadableStream<Uint8Array> | null,
+  maxBytes: number,
+  abortController: AbortController,
+): AsyncGenerator<Uint8Array> {
+  if (!body) return;
+  const reader = body.getReader();
+  let totalBytes = 0;
+  let canceled = false;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        canceled = true;
+        await reader.cancel().catch(() => undefined);
+        abortController.abort();
+        throw new RepoStarLimitError("bytes", maxBytes, totalBytes);
+      }
+      yield value;
+    }
+  } finally {
+    if (!canceled) await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+}
+
+export type VerifiedRecordCidResult = { ok: true; byteLength: number } | { ok: false };
+
+export type VerifiedBoundedRecord = {
+  collection: string;
+  rkey: string;
+  cid: string;
+  parsedCid: Cid;
+  value: Record<string, unknown>;
+  byteLength: number;
+};
+
+/**
+ * Returns the canonical DRISL CBOR byte length of a JSON record value.
+ */
+export async function serializedRecordBytes(
+  collection: string,
+  rkey: string,
+  recordValue: Record<string, unknown>,
+): Promise<number> {
+  const lexValue = jsonToLex(recordValue as Parameters<typeof jsonToLex>[0]) as Parameters<typeof serializeRecord>[2];
+  const { bytes } = await serializeRecord(
+    collection as Parameters<typeof serializeRecord>[0],
+    rkey as Parameters<typeof serializeRecord>[1],
+    lexValue,
+  );
+  return bytes.byteLength;
+}
+
+/**
+ * Verifies a JSON record value against an expected CID string by converting XRPC JSON -> Lex (`jsonToLex`),
+ * computing canonical DRISL `serializeRecord`, comparing against `parseCid(expectedCid)`, and returning its
+ * serialized byte length on success.
+ */
+export async function verifyRecordCidWithSize(
+  collection: string,
+  rkey: string,
+  recordValue: Record<string, unknown>,
+  expectedCid: string,
+): Promise<VerifiedRecordCidResult> {
+  if (typeof collection !== "string" || collection.length === 0 || typeof rkey !== "string" || rkey.length === 0) {
+    return { ok: false };
+  }
+  if (typeof recordValue !== "object" || recordValue === null || Array.isArray(recordValue)) {
+    return { ok: false };
+  }
+  if (!validateCidString(expectedCid)) return { ok: false };
+  const expected = parseCidSafe(expectedCid);
+  if (!expected) return { ok: false };
+  try {
+    const lexValue = jsonToLex(recordValue as Parameters<typeof jsonToLex>[0]) as Parameters<typeof serializeRecord>[2];
+    const { cid, bytes } = await serializeRecord(
+      collection as Parameters<typeof serializeRecord>[0],
+      rkey as Parameters<typeof serializeRecord>[1],
+      lexValue,
+    );
+    return cid.equals(expected) ? { ok: true, byteLength: bytes.byteLength } : { ok: false };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/**
+ * Verifies a JSON record value against an expected CID string by converting XRPC JSON -> Lex (`jsonToLex`),
+ * computing canonical DRISL `serializeRecord`, and comparing against `parseCid(expectedCid)`.
+ */
+export async function verifyRecordCid(
+  collection: string,
+  rkey: string,
+  recordValue: Record<string, unknown>,
+  expectedCid: string,
+): Promise<boolean> {
+  return (await verifyRecordCidWithSize(collection, rkey, recordValue, expectedCid)).ok;
+}
+
+const MAX_VERIFIED_RECORD_PAGES = 128;
+
+const PLACEHOLDER_TID_REV = "2222222222222";
+const STAR_COMMIT_VERSION = 1;
+const COMMIT_DIGEST_BYTE_LENGTH = 32;
+const starPathEncoder = new TextEncoder();
+
+/** Returns the shortest unsigned LEB128 varint byte length used by `@atproto/car`'s `encodeVarInt` / STAR framing. */
+export function varintByteLength(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new RangeError("Varint value must be a non-negative safe integer.");
+  }
+  let n = value;
+  let bytes = 1;
+  while (n >= 0x80) {
+    n = Math.floor(n / 128);
+    bytes += 1;
+  }
+  return bytes;
+}
+
+/** Exact STAR-lite v1 archive header byte length (`STAR_MAGIC` + varint + CBOR `{ $type: "atproto-space-repo", ...commit }`). */
+export async function starHeaderBytes(commit: Commit): Promise<number> {
+  let total = 0;
+  for await (const chunk of serializeRepo(commit, [])) {
+    total += chunk.byteLength;
+  }
+  return total;
+}
+
+/** Exact STAR-lite v1 per-record entry byte length (`varint(keyLen) + keyBytes + varint(valLen) + valLen`). */
+export function starEntryBytes(collection: string, rkey: string, valueByteLength: number): number {
+  const keyByteLength = starPathEncoder.encode(`${collection}/${rkey}`).byteLength;
+  return varintByteLength(keyByteLength) + keyByteLength + varintByteLength(valueByteLength) + valueByteLength;
+}
+
+/** Exact STAR-lite v1 archive byte length matching `@atproto/space`'s `serializeRepo(commit, records)`. */
+export async function computeStarArchiveBytes(
+  commit: Commit,
+  entries: ReadonlyArray<{ collection: string; rkey: string; byteLength: number }>,
+): Promise<number> {
+  let total = await starHeaderBytes(commit);
+  for (const entry of entries) {
+    total += starEntryBytes(entry.collection, entry.rkey, entry.byteLength);
+  }
+  return total;
+}
+
+function defaultStarHeaderCommit(space: string, repo: string): Commit {
+  return {
+    ver: STAR_COMMIT_VERSION,
+    space: space as Commit["space"],
+    repo: repo as Commit["repo"],
+    rev: PLACEHOLDER_TID_REV,
+    data: new Uint8Array(COMMIT_DIGEST_BYTE_LENGTH),
+  };
+}
+
+/**
+ * Pages `com.atproto.space.listRecords` for one repo while verifying every record's CID and enforcing
+ * aggregate `maxRecords` and exact STAR-lite archive byte `maxBytes` caps page-by-page so oversized repos abort
+ * immediately with `RepoStarLimitError` before fetching additional pages.
+ */
+export async function listVerifiedBoundedRecords(
+  client: AtprotoClient,
+  input: { space: string; repo: string; collection?: string; maxRecords: number; maxBytes: number; commit?: Commit },
+): Promise<{ records: VerifiedBoundedRecord[]; totalBytes: number; recordsBytes: number }> {
+  if (!Number.isSafeInteger(input.maxRecords) || input.maxRecords < 0) {
+    throw new RangeError("Verified record limit must be a non-negative safe integer.");
+  }
+  if (!Number.isSafeInteger(input.maxBytes) || input.maxBytes < 0) {
+    throw new RangeError("Verified byte limit must be a non-negative safe integer.");
+  }
+
+  const records: VerifiedBoundedRecord[] = [];
+  const seenCursors = new Set<string>();
+  const seenKeys = new Set<string>();
+  const headerBytes = await starHeaderBytes(input.commit ?? defaultStarHeaderCommit(input.space, input.repo));
+  let recordsBytes = 0;
+  let totalBytes = headerBytes;
+  let pages = 0;
+  let cursor: string | undefined;
+  if (totalBytes > input.maxBytes) {
+    throw new RepoStarLimitError("bytes", input.maxBytes, totalBytes);
+  }
+
+  do {
+    const remaining = input.maxRecords - records.length;
+    const limit = input.maxRecords === 0 ? 1 : Math.min(500, remaining);
+    if (++pages > MAX_VERIFIED_RECORD_PAGES) {
+      throw new Error("PDS record pagination exceeded the bounded page limit.");
+    }
+    const page = await client.query<ListRecords.OutputSchema>("com.atproto.space.listRecords", {
+      space: input.space,
+      repo: input.repo,
+      ...(input.collection !== undefined ? { collection: input.collection } : {}),
+      excludeValues: false,
+      limit,
+      cursor,
+    });
+    if (cursor) seenCursors.add(cursor);
+    assertBoundedRecordPage(page, {
+      collection: input.collection,
+      excludeValues: false,
+      limit,
+      cursor,
+      seenCursors,
+      space: input.space,
+      repo: input.repo,
+    });
+    for (const entry of page.records) {
+      const key = `${entry.collection}/${entry.rkey}`;
+      if (seenKeys.has(key)) throw new Error("PDS record pagination returned a duplicate record key.");
+      seenKeys.add(key);
+      if (records.length >= input.maxRecords) {
+        throw new RepoStarLimitError("records", input.maxRecords);
+      }
+      if (typeof entry.cid !== "string" || entry.cid.length === 0) {
+        throw new SpaceMacError(`Missing CID for ${entry.collection}/${entry.rkey} from ${input.repo}.`);
+      }
+      const parsedCid = parseCidSafe(entry.cid);
+      const value = entry.value as Record<string, unknown>;
+      const verified = parsedCid
+        ? await verifyRecordCidWithSize(entry.collection, entry.rkey, value, entry.cid)
+        : { ok: false as const };
+      if (!parsedCid || !verified.ok) {
+        throw new SpaceMacError(`Record ${entry.collection}/${entry.rkey} for ${input.repo} failed CID verification.`);
+      }
+      const entryBytes = starEntryBytes(entry.collection, entry.rkey, verified.byteLength);
+      recordsBytes += entryBytes;
+      totalBytes += entryBytes;
+      if (totalBytes > input.maxBytes) {
+        throw new RepoStarLimitError("bytes", input.maxBytes, totalBytes);
+      }
+      records.push({
+        collection: entry.collection,
+        rkey: entry.rkey,
+        cid: entry.cid,
+        parsedCid,
+        value,
+        byteLength: verified.byteLength,
+      });
+    }
+    cursor = page.cursor;
+    if (cursor) seenCursors.add(cursor);
+  } while (cursor && records.length < input.maxRecords);
+
+  if (cursor && input.maxRecords > 0) {
+    if (++pages > MAX_VERIFIED_RECORD_PAGES) {
+      throw new Error("PDS record pagination exceeded the bounded page limit.");
+    }
+    const page = await client.query<ListRecords.OutputSchema>("com.atproto.space.listRecords", {
+      space: input.space,
+      repo: input.repo,
+      ...(input.collection !== undefined ? { collection: input.collection } : {}),
+      excludeValues: false,
+      limit: 1,
+      cursor,
+    });
+    assertBoundedRecordPage(page, {
+      collection: input.collection,
+      excludeValues: false,
+      limit: 1,
+      cursor,
+      seenCursors,
+      space: input.space,
+      repo: input.repo,
+    });
+    if (page.records.some((entry) => seenKeys.has(`${entry.collection}/${entry.rkey}`))) {
+      throw new Error("PDS record pagination returned a duplicate record key.");
+    }
+    if (page.records.length > 0) {
+      throw new RepoStarLimitError("records", input.maxRecords);
+    }
+  }
+
+  return { records, totalBytes, recordsBytes };
 }
 
 /** The response a caller sees once its body has been read and verified. The length and encoding headers described the wire bytes. */
@@ -180,13 +640,28 @@ function xrpcMethod(request: Request): string {
 async function macVerifies(headers: Headers, text: string, request: Request, type: MacType, repo: string, sharedSecret: Uint8Array): Promise<boolean> {
   const params = new URL(request.url).searchParams;
   const space = params.get("space") ?? "";
+  const method = xrpcMethod(request);
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
     return false;
   }
-  if (typeof parsed !== "object" || parsed === null) return false;
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return false;
+
+  if (method === "com.atproto.space.listRepoOps") {
+    const page = parsed as { ops?: unknown; cursor?: unknown; commit?: unknown };
+    if (!Array.isArray(page.ops)) return false;
+    if (page.commit === undefined) {
+      // Only two unsigned listRepoOps responses are allowed:
+      // 1) an intermediate full page with non-empty ops and non-empty string cursor, or
+      // 2) an unwritten empty repo returning ops: [] with no cursor and no commit.
+      const isIntermediatePage = page.ops.length > 0 && typeof page.cursor === "string" && page.cursor.length > 0;
+      const isUnwrittenEmpty = page.ops.length === 0 && page.cursor === undefined;
+      return isIntermediatePage || isUnwrittenEmpty;
+    }
+  }
+
   const mac = macFromHeaders(headers, type);
   if (!mac) return false;
   if (type === RECORD_MAC_TYPE) {

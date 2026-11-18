@@ -2395,6 +2395,8 @@ export const schemaDict = {
               'installApp',
               'updateAppAccess',
               'uninstallApp',
+              'enableExtension',
+              'disableExtension',
             ],
           },
           subject: {
@@ -2408,6 +2410,11 @@ export const schemaDict = {
             type: 'string',
             minLength: 1,
             maxLength: 128,
+          },
+          extId: {
+            type: 'string',
+            minLength: 1,
+            maxLength: 64,
           },
           name: {
             type: 'string',

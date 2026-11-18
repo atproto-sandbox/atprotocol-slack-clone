@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { signedInDid, type BrowserSessionConfig } from "../../browser/session";
+import { consumeReturnTo, RETURN_TO_KEY } from "./routes";
 
 export type OAuthCallbackViewProps = { config: BrowserSessionConfig };
 
@@ -13,12 +14,24 @@ export function OAuthCallbackView({ config }: OAuthCallbackViewProps) {
   const [error, setError] = useState("");
 
   useEffect(() => {
+    let cancelled = false;
     signedInDid(config)
       .then((did) => {
-        if (did) router.replace("/");
-        else setError("You were not signed in: the sign-in did not complete. Try again from the sign-in page.");
+        if (cancelled) return;
+        if (did) {
+          const target = consumeReturnTo(sessionStorage);
+          router.replace(target);
+        } else {
+          sessionStorage.removeItem(RETURN_TO_KEY);
+          setError("You were not signed in: the sign-in did not complete. Try again from the sign-in page.");
+        }
       })
-      .catch((caught: unknown) => setError(caught instanceof Error ? caught.message : "Could not finish signing in."));
+      .catch((caught: unknown) => {
+        if (cancelled) return;
+        sessionStorage.removeItem(RETURN_TO_KEY);
+        setError(caught instanceof Error ? caught.message : "Could not finish signing in.");
+      });
+    return () => { cancelled = true; };
   }, [config, router]);
 
   return (

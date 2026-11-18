@@ -1054,3 +1054,180 @@ test("per-author inbox throttle caps each author per minute, reports excess once
   await env.runtime.poll();
   assert.deepEqual(env.commands.map((entry) => entry.text), ["a0", "a1", "a2", "b0", "after-minute"]);
 });
+
+test("AppRuntime with followRepoOps delivers same-rev applyWrites in host order, handles oplog reset without redelivery, and retries without duplicating", async () => {
+  const resets: Array<{ space: string; repo: string }> = [];
+  const env = await inboxFixture({ onMessage: true, onCommand: false, onAction: false });
+  const channel = env.fixture.channels.general!;
+  // Baseline existing message before polling so it is never delivered as new.
+  await writeMessage(env.network, env.alice, channel, 1, "before-follow");
+  await env.runtime.poll();
+  assert.equal(env.messages.length, 0);
+
+  // Single applyWrites commit writes reverse-TID keys ("zzz" then "aaa"): AppRuntime delivers in host (rev, idx) order!
+  await env.network.applyWritesAs(env.alice, channel, [
+    { action: "create", collection: COLLECTION.message, rkey: "zzzzzzzzzzzzz", value: { text: "host-first", createdAt: "2026-11-10T12:00:00.000Z" } },
+    { action: "create", collection: COLLECTION.message, rkey: "aaaaaaaaaaaaa", value: { text: "host-second", createdAt: "2026-11-10T12:00:00.000Z" } },
+  ]);
+  env.change(channel);
+  await env.runtime.poll();
+  assert.deepEqual(
+    env.messages.map((entry) => entry.message.value.text),
+    ["host-first", "host-second"],
+    "AppRuntime delivers same-rev applyWrites in PDS host order",
+  );
+
+  // Pruned oplog hole: write msg A (unsynced), prune oplog so msg A's op disappears, write msg B -> AppRuntime detects reset without delivering A/B or historical records!
+  await writeMessage(env.network, env.alice, channel, 98, "lost-during-prune");
+  env.network.pruneOplog(channel, env.alice);
+  await writeMessage(env.network, env.alice, channel, 99, "after-prune");
+  env.change(channel);
+  await env.runtime.poll();
+  assert.equal(env.messages.length, 2, "no duplicate deliveries or pre-reset historical replay");
+  assert.equal(env.errors.some((error) => /Repo oplog reset/.test(String(error))), true, "reset diagnostic emitted via onError");
+
+  // New write after reset is delivered cleanly, and handler failure retries without duplicating sibling messages!
+  let failMessage = true;
+  const deliveredRetry: string[] = [];
+  const retryRuntime = new AppRuntime({
+    did: env.appDid,
+    workspaces: [env.fixture.workspace],
+    clock: env.clock,
+    refollowDelayMs: 20,
+    retryDelayMs: 10,
+    engine: {
+      ...createEngine(transportFor(env.network, env.appDid)),
+      operator: {
+        getChanges: async (follow) => {
+          if (follow.length === 0) return { head: "1", changed: [], denied: [], reset: [] };
+          return { head: "2", changed: follow.map((f) => ({ space: f.space, cursor: "2" })), denied: [], reset: [] };
+        },
+      },
+    },
+    onMessage: async (entry) => {
+      const text = String(entry.message.value.text);
+      if (failMessage && text === "m1") {
+        failMessage = false;
+        throw new Error("handler transient failure");
+      }
+      deliveredRetry.push(text);
+    },
+    onReset: (notice) => resets.push({ space: notice.space, repo: notice.repo }),
+    onError: () => undefined,
+  });
+  await retryRuntime.poll();
+  await retryRuntime.poll();
+  await env.network.applyWritesAs(env.bob, channel, [
+    { action: "create", collection: COLLECTION.message, rkey: "jzzzzzzzzzzzz", value: { text: "m1", createdAt: "2026-11-10T12:00:00.000Z" } },
+    { action: "create", collection: COLLECTION.message, rkey: "3aaaaaaaaaaaa", value: { text: "m2", createdAt: "2026-11-10T12:00:00.000Z" } },
+  ]);
+  await retryRuntime.poll();
+  assert.deepEqual(deliveredRetry, ["m2"], "sibling m2 delivered while m1 deferred");
+  await retryRuntime.poll();
+  assert.deepEqual(deliveredRetry, ["m2", "m1"], "m1 retried on next poll without duplicating m2");
+
+  // Verify onReset callback works independently on reset:
+  env.network.clearRecordsAs(env.bob, channel);
+  await retryRuntime.poll();
+  assert.deepEqual(resets, [{ space: channel, repo: env.bob }]);
+});
+
+test("AppRuntime with followRepoOps isolates failed initial writers, preserves floor on hold expiry, and prevents post-baseline genesis replay (Codex R2-#4/#5 + Carbon R2-H2)", async () => {
+  // 1. Alice baselines + Bob fails permanently (RepoDeactivated) -> Carol joins on deliver:true and her first command executes immediately without hammering Bob.
+  {
+    const env = await inboxFixture({ onMessage: false, onCommand: true, onAction: false });
+    const generalRef = { workspace: env.fixture.workspace, skey: "acme-general" };
+    const aliceEngine = createEngine(transportFor(env.network, env.alice));
+    const { subjectKey } = await import("@flock/protocol/keys");
+
+    env.network.setAccountState(env.bob, "deactivated");
+    await env.runtime.poll();
+    assert.equal(env.commands.length, 0);
+
+    const carol = "did:plc:carol";
+    env.network.createAccount(carol, "pds2");
+    await env.network.writeAs(AUTHORITY, env.fixture.workspace, COLLECTION.workspaceRoster, subjectKey(carol), {
+      subject: carol,
+      active: true,
+      updatedAt: "2026-11-10T12:00:00.000Z",
+    });
+    await env.network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.putMember", {
+      space: env.inbox,
+      did: carol,
+      read: false,
+      write: true,
+    });
+    const carolEngine = createEngine(transportFor(env.network, carol));
+    await carolEngine.appInboxes.sendCommand(generalRef, env.appDid, "echo", "carol-immediate-cmd");
+
+    let bobInboxCalls = 0;
+    const origFetch = env.network.fetchEndpoint;
+    env.network.fetchEndpoint = async (request) => {
+      const url = new URL(request.url);
+      if (url.searchParams.get("space") === env.inbox && url.searchParams.get("repo") === env.bob) {
+        bobInboxCalls += 1;
+      }
+      return origFetch(request);
+    };
+    try {
+      env.change(env.inbox);
+      await env.runtime.poll();
+    } finally {
+      env.network.fetchEndpoint = origFetch;
+    }
+    assert.deepEqual(env.commands.map((c) => c.text), ["carol-immediate-cmd"]);
+    assert.equal(bobInboxCalls, 0, "unrelated deliver:true tick must not hammer deactivated writer");
+    void aliceEngine;
+  }
+
+  // 2. Hold expiry at minute 11.1 records floor so recovery at minute 12 drops minute-1 command and delivers minute-11.5 command,
+  //    and post-baseline RepoTakendown at minute 1 -> restored at minute 21 never replays genesis oplog or minute-1 commands.
+  {
+    const env = await inboxFixture({ onMessage: false, onCommand: true, onAction: false });
+    const generalRef = { workspace: env.fixture.workspace, skey: "acme-general" };
+    const aliceEngine = createEngine(transportFor(env.network, env.alice));
+    const bobEngine = createEngine(transportFor(env.network, env.bob));
+
+    await env.runtime.poll();
+    assert.equal(env.commands.length, 0);
+
+    // Minute 1: Alice fails 503 with cmd-m1; Bob enters RepoTakendown with bob-cmd-m1.
+    env.advance(60_000);
+    await aliceEngine.appInboxes.sendCommand(generalRef, env.appDid, "echo", "alice-cmd-m1");
+    await bobEngine.appInboxes.sendCommand(generalRef, env.appDid, "echo", "bob-suspended-m1");
+    env.network.setHostReachable(env.alice, false);
+    env.network.setAccountState(env.bob, "takendown");
+    env.change(env.inbox);
+    await env.runtime.poll();
+    assert.equal(env.commands.length, 0);
+
+    // Minute 11.1: Alice's 10m hold expires while still down.
+    env.advance(10 * 60_000 + 6_000);
+    env.change(env.inbox);
+    await env.runtime.poll();
+    assert.equal(env.commands.length, 0);
+
+    // Minute 11.5: Alice writes post-expiry command.
+    env.advance(24_000);
+    await aliceEngine.appInboxes.sendCommand(generalRef, env.appDid, "echo", "alice-cmd-m11-5");
+
+    // Minute 12: Alice recovers -> delivers alice-cmd-m11-5, drops alice-cmd-m1.
+    env.advance(30_000);
+    env.network.setHostReachable(env.alice, true);
+    env.change(env.inbox);
+    await env.runtime.poll();
+    assert.deepEqual(env.commands.map((c) => c.text), ["alice-cmd-m11-5"]);
+
+    // Minute 21: Bob is unsuspended -> must NOT replay genesis oplog or deliver bob-suspended-m1.
+    env.advance(9 * 60_000 + 60 * 60_000);
+    let genesisOps = false;
+    env.network.beforeListRepoOps = ({ since }) => {
+      if (since === undefined) genesisOps = true;
+    };
+    env.network.setAccountState(env.bob, "active");
+    env.change(env.inbox);
+    await env.runtime.poll();
+    assert.equal(genesisOps, false, "must not replay genesis oplog on post-baseline permanent recovery");
+    assert.deepEqual(env.commands.map((c) => c.text), ["alice-cmd-m11-5"]);
+  }
+});

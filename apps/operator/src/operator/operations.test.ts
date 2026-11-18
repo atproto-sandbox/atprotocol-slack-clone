@@ -111,3 +111,12 @@ test("an app's channels are each granted once, by key and write flag only", () =
   ]) assert.throws(() => install(channels), /channels/i, JSON.stringify(channels).slice(0, 80));
   assert.throws(() => validateOperatorRequest({ kind: "uninstallApp", subject: "did:plc:bot", channels: [] }, actor, "execute"), "uninstall takes no channels");
 });
+
+test("extension lifecycle operations validate extId against the extension catalog", () => {
+  assert.deepEqual(validateOperatorRequest({ kind: "enableExtension", extId: "tasks" }, actor, "execute").request, { kind: "enableExtension", extId: "tasks" });
+  assert.deepEqual(validateOperatorRequest({ kind: "disableExtension", extId: "tasks" }, actor, "execute").request, { kind: "disableExtension", extId: "tasks" });
+  assert.throws(() => validateOperatorRequest({ kind: "enableExtension", extId: "unknown" }, actor, "execute"), /unknown extension/i);
+  assert.throws(() => validateOperatorRequest({ kind: "disableExtension", extId: 42 }, actor, "execute"), /unknown extension/i);
+  assert.throws(() => validateOperatorRequest({ kind: "enableExtension" }, actor, "execute"), /missing or unexpected fields/i);
+  assert.throws(() => validateOperatorRequest({ kind: "disableExtension", extId: "tasks", extra: true }, actor, "execute"), /missing or unexpected fields/i);
+});

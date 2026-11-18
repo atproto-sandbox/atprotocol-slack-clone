@@ -4,6 +4,7 @@ import { bootstrapWorkspaceKind } from "./bootstrap-workspace";
 import { createChannelKind } from "./create-channel";
 import { createWorkspaceKind } from "./create-workspace";
 import { decideJoinRequestKind } from "./decide-join-request";
+import { disableExtensionKind, enableExtensionKind } from "./extension-access";
 import { inviteMemberKind } from "./invite-member";
 import type { OperationKind } from "./kind";
 import { leaveChannelKind } from "./leave-channel";
@@ -16,7 +17,7 @@ import { transitionChannelKind } from "./transition-channel";
 export const OPERATION_KINDS: Readonly<Record<string, OperationKind>> = Object.fromEntries([
   bootstrapWorkspaceKind, createWorkspaceKind, inviteMemberKind, removeMemberKind, setAdminKind, createChannelKind, transitionChannelKind,
   archiveChannelKind, decideJoinRequestKind, leaveWorkspaceKind, leaveChannelKind, reconcileWorkspaceKind, installAppKind, updateAppAccessKind,
-  uninstallAppKind,
+  uninstallAppKind, enableExtensionKind, disableExtensionKind,
 ].map((kind) => [kind.kind, kind]));
 
 export function operationKind(name: unknown): OperationKind | undefined {

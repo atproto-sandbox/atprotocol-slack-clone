@@ -5,14 +5,14 @@ import type { OperatorActor } from "../actor";
 import { activeRoster, assertMembership, directoryRecords, writeRoster } from "../workspace-state";
 import type { OperationKind } from "./kind";
 import { putListMember } from "../members";
-import { activeInstalls, readInstall } from "../membership";
+import { activeExtInstalls, activeInstalls, readInstall } from "../membership";
 
 export const inviteMemberKind: OperationKind = {
   kind: "inviteMember",
   required: ["subject"],
   actor: "admin",
   submittedThrough: "execute",
-  steps: ["member-workspace", "member-inbox-writer", "member-app-inbox-{app}", "member-public-channel-{skey}", "member-workspace-roster", "member-state-verified"],
+  steps: ["member-workspace", "member-inbox-writer", "member-app-inbox-{app}", "member-public-channel-{skey}", "member-ext-{extId}", "member-workspace-roster", "member-state-verified"],
   run: (actor, context, request) => inviteMember(actor, context, request.subject as string),
 };
 
@@ -31,7 +31,11 @@ async function inviteMember(actor: OperatorActor, context: OperationContext, sub
     const space = appInboxUri(actor.workspace.authorityDid, actor.workspace.skey, install.subject);
     if (await appInboxState(actor.session, space) === "present") appInboxes.push({ app: install.subject, space });
   }
+  const activeExts = [...(await activeExtInstalls(actor)).values()].sort((left, right) => left.extId.localeCompare(right.extId));
 
+  for (const ext of activeExts) {
+    await context.step(`member-ext-${ext.extId}`, () => putListMember(actor.session, ext.space, subject, true, true));
+  }
   await context.step("member-workspace", () => putListMember(actor.session, workspace, subject, true, true));
   await context.step("member-inbox-writer", () => putListMember(actor.session, inbox, subject, false, true));
   for (const appInbox of appInboxes) {
@@ -45,6 +49,7 @@ async function inviteMember(actor: OperatorActor, context: OperationContext, sub
     await writeRoster(actor, workspace, subject, true);
   });
   await context.step("member-state-verified", async () => {
+    for (const ext of activeExts) await assertMembership(actor, ext.space, subject, true, true);
     await assertMembership(actor, workspace, subject, true, true);
     await assertMembership(actor, inbox, subject, false, true);
     for (const appInbox of appInboxes) await assertMembership(actor, appInbox.space, subject, false, true);

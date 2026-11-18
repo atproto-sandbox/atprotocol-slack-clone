@@ -1,16 +1,22 @@
-import { commitAllowed, emptyWriterState, nextWriterState, SyncStoreError, type IdentityEntry, type IdentityKind, type SpaceState, type StoredRecord, type SyncStore, type WriterCommit, type WriterState } from "./store";
+import { cloneActivityState, cloneWriterState, commitAllowed, emptyWriterState, mergeMonotonicClock, mergeOptimisticOverlay, missingOptimisticKeys, nextWriterState, SyncStoreError, type ActivityState, type ClockPatch, type ClockState, type IdentityEntry, type IdentityKind, type SpaceState, type StoredRecord, type SyncStore, type WriterCommit, type WriterState } from "./store";
 
 // The browser's store for workspace, inbox and channel spaces (D10): one IndexedDB database per account, so a sign-out
 // deletes one database and a different account's start deletes databases that are not its own.
 
 const DATABASE_PREFIX = "flock-sync-";
-const VERSION = 1;
+const VERSION = 2;
 const LAST = "￿";
 
 type Factory = Pick<IDBFactory, "open" | "deleteDatabase" | "databases">;
 
 export class IndexedDbStore implements SyncStore {
-  private constructor(private readonly db: IDBDatabase) {}
+  private db: IDBDatabase | null;
+  private dbPromise: Promise<IDBDatabase> | null;
+
+  private constructor(db: IDBDatabase) {
+    this.db = db;
+    this.dbPromise = Promise.resolve(db);
+  }
 
   /**
    * Opens (creating if needed) the account's database. Another tab deleting it (another account starting there) is not kept
@@ -20,18 +26,38 @@ export class IndexedDbStore implements SyncStore {
     const opening = factory.open(databaseName(did), VERSION);
     opening.onupgradeneeded = () => {
       const db = opening.result;
-      db.createObjectStore("spaces", { keyPath: "space" });
-      db.createObjectStore("writers", { keyPath: ["space", "repo"] }).createIndex("space", "space");
-      db.createObjectStore("records", { keyPath: ["space", "collection", "repo", "rkey"] }).createIndex("writer", ["space", "repo"]);
-      db.createObjectStore("meta", { keyPath: "key" });
-      db.createObjectStore("identities", { keyPath: ["kind", "did"] });
+      const upgradeTx = opening.transaction;
+      if (!db.objectStoreNames.contains("spaces")) db.createObjectStore("spaces", { keyPath: "space" });
+      const writers = db.objectStoreNames.contains("writers")
+        ? upgradeTx?.objectStore("writers")
+        : db.createObjectStore("writers", { keyPath: ["space", "repo"] });
+      if (writers && !writers.indexNames.contains("space")) writers.createIndex("space", "space");
+      const records = db.objectStoreNames.contains("records")
+        ? upgradeTx?.objectStore("records")
+        : db.createObjectStore("records", { keyPath: ["space", "collection", "repo", "rkey"] });
+      if (records && !records.indexNames.contains("writer")) records.createIndex("writer", ["space", "repo"]);
+      if (!db.objectStoreNames.contains("meta")) db.createObjectStore("meta", { keyPath: "key" });
+      if (!db.objectStoreNames.contains("identities")) db.createObjectStore("identities", { keyPath: ["kind", "did"] });
+      const activity = db.objectStoreNames.contains("activity")
+        ? upgradeTx?.objectStore("activity")
+        : db.createObjectStore("activity", { keyPath: ["accountDid", "space"] });
+      if (activity && !activity.indexNames.contains("space")) activity.createIndex("space", "space");
+      const clock = db.objectStoreNames.contains("clock")
+        ? upgradeTx?.objectStore("clock")
+        : db.createObjectStore("clock", { keyPath: ["accountDid", "scope"] });
+      if (clock && !clock.indexNames.contains("scope")) clock.createIndex("scope", "scope");
     };
     const db = await settle(opening);
+    const store = new IndexedDbStore(db);
     db.onversionchange = () => {
-      db.close();
+      store.close();
       onClosedElsewhere?.();
     };
-    return new IndexedDbStore(db);
+    db.onclose = () => {
+      store.db = null;
+      store.dbPromise = null;
+    };
+    return store;
   }
 
   /** Sign-out: deletes the account's store, records and all. Close an open store on it first, or this waits for it. */
@@ -48,7 +74,10 @@ export class IndexedDbStore implements SyncStore {
   }
 
   close(): void {
-    this.db.close();
+    const db = this.db;
+    this.db = null;
+    this.dbPromise = null;
+    db?.close();
   }
 
   async getSpace(space: string): Promise<SpaceState | undefined> {
@@ -56,7 +85,12 @@ export class IndexedDbStore implements SyncStore {
   }
 
   async putSpace(state: SpaceState): Promise<void> {
-    await this.write(["spaces"], async (stores) => { await settle(stores.spaces!.put(state)); });
+    await this.write(["spaces"], async (stores) => {
+      const existing = await settle<SpaceState | undefined>(stores.spaces!.get(state.space));
+      const nextSeq = Math.max(existing?.invalidationSeq ?? 0, state.invalidationSeq ?? 0);
+      const next = nextSeq > 0 ? { ...state, invalidationSeq: nextSeq } : state;
+      await settle(stores.spaces!.put(next));
+    });
   }
 
   async listSpaces(): Promise<SpaceState[]> {
@@ -64,11 +98,70 @@ export class IndexedDbStore implements SyncStore {
   }
 
   async getWriter(space: string, repo: string): Promise<WriterState | undefined> {
-    return this.read("writers", (stores) => settle<WriterState | undefined>(stores.writers!.get([space, repo])));
+    const state = await this.read("writers", (stores) => settle<WriterState | undefined>(stores.writers!.get([space, repo])));
+    return state ? cloneWriterState(state) : undefined;
   }
 
   async listWriters(space: string): Promise<WriterState[]> {
-    return this.read("writers", (stores) => settle<WriterState[]>(stores.writers!.index("space").getAll(space)));
+    const states = await this.read("writers", (stores) => settle<WriterState[]>(stores.writers!.index("space").getAll(space)));
+    return states.map(cloneWriterState);
+  }
+
+  async getClock(accountDid: string, scope = ""): Promise<ClockState | undefined> {
+    const clock = await this.read("clock", (stores) => settle<ClockState | undefined>(stores.clock!.get([accountDid, scope])));
+    return clock ? { ...clock } : undefined;
+  }
+
+  async updateClock(
+    accountDid: string,
+    updater: ClockPatch | ((current: ClockState | undefined) => ClockPatch),
+    scope = "",
+  ): Promise<ClockState> {
+    return this.write(["clock"], async (stores) => {
+      const current = await settle<ClockState | undefined>(stores.clock!.get([accountDid, scope]));
+      const patch = typeof updater === "function" ? updater(current ? { ...current } : undefined) : updater;
+      const next = mergeMonotonicClock(accountDid, scope, current, patch);
+      await settle(stores.clock!.put(next));
+      return { ...next };
+    });
+  }
+
+  async getActivityState(accountDid: string, space: string): Promise<ActivityState | undefined> {
+    const state = await this.read("activity", (stores) => settle<ActivityState | undefined>(stores.activity!.get([accountDid, space])));
+    return state ? cloneActivityState(state) : undefined;
+  }
+
+  async putActivityState(state: ActivityState): Promise<void> {
+    await this.write(["activity"], (stores) => settle(stores.activity!.put(cloneActivityState(state))));
+  }
+
+  markActivitySeen(accountDid: string, space: string, eventIds: readonly string[], updatedAt = Date.now()): Promise<ActivityState> {
+    return this.updateActivityIds(accountDid, space, "seenIds", eventIds, updatedAt);
+  }
+
+  dismissActivity(accountDid: string, space: string, eventIds: readonly string[], updatedAt = Date.now()): Promise<ActivityState> {
+    return this.updateActivityIds(accountDid, space, "dismissedIds", eventIds, updatedAt);
+  }
+
+  private async updateActivityIds(
+    accountDid: string,
+    space: string,
+    field: "seenIds" | "dismissedIds",
+    eventIds: readonly string[],
+    updatedAt: number,
+  ): Promise<ActivityState> {
+    return this.write(["activity"], async (stores) => {
+      const current = await settle<ActivityState | undefined>(stores.activity!.get([accountDid, space]));
+      const next = cloneActivityState({
+        accountDid,
+        space,
+        seenIds: field === "seenIds" ? [...(current?.seenIds ?? []), ...eventIds] : (current?.seenIds ?? []),
+        dismissedIds: field === "dismissedIds" ? [...(current?.dismissedIds ?? []), ...eventIds] : (current?.dismissedIds ?? []),
+        updatedAt: Math.max(current?.updatedAt ?? 0, updatedAt),
+      });
+      await settle(stores.activity!.put(next));
+      return cloneActivityState(next);
+    });
   }
 
   async records(space: string, collection: string, repo?: string): Promise<StoredRecord[]> {
@@ -97,11 +190,38 @@ export class IndexedDbStore implements SyncStore {
   }
 
   async commit(change: WriterCommit): Promise<boolean> {
-    return this.write(["writers", "records", "meta"], async (stores) => {
+    const storeNames: StoreName[] = ["writers", "records", "meta"];
+    if (change.clock) storeNames.push("clock");
+    if (change.expectedInvalidationSeq !== undefined) storeNames.push("spaces");
+    return this.write(storeNames, async (stores) => {
       if (change.epoch !== undefined && change.epoch !== await epochOf(stores.meta!, change.space)) return false;
+      if (change.expectedInvalidationSeq !== undefined) {
+        const spaceState = await settle<SpaceState | undefined>(stores.spaces!.get(change.space));
+        if ((spaceState?.invalidationSeq ?? 0) !== change.expectedInvalidationSeq) return false;
+      }
       const current = await settle<WriterState | undefined>(stores.writers!.get([change.space, change.repo]));
       if (!commitAllowed(current, change)) return false;
-      const next = nextWriterState(current, change);
+      const missingKeys = missingOptimisticKeys(current, change);
+      const addedOverlay = missingKeys.length > 0
+        ? await Promise.all(
+            missingKeys.map(async ({ collection, rkey }) => ({
+              collection,
+              rkey,
+              prevRecord: (await settle<StoredRecord | undefined>(stores.records!.get([change.space, collection, change.repo, rkey]))) ?? null,
+            })),
+          )
+        : [];
+      const resolvedOverlay = change.markStale
+        ? mergeOptimisticOverlay(current?.optimisticOverlay, addedOverlay)
+        : undefined;
+      const next = nextWriterState(current, change, resolvedOverlay);
+      const clockScope = change.clock ? (change.clock.scope ?? "") : "";
+      const currentClock = change.clock
+        ? await settle<ClockState | undefined>(stores.clock!.get([change.clock.accountDid, clockScope]))
+        : undefined;
+      const nextClock = change.clock
+        ? mergeMonotonicClock(change.clock.accountDid, clockScope, currentClock, change.clock)
+        : undefined;
       // Requests in one transaction run in the order issued, so they are issued together and awaited once.
       const pending: Array<Promise<unknown>> = [];
       for (const [collection, records] of Object.entries(change.replace ?? {})) {
@@ -111,8 +231,31 @@ export class IndexedDbStore implements SyncStore {
       for (const record of change.upsert ?? []) pending.push(settle(stores.records!.put(record)));
       for (const { collection, rkey } of change.remove ?? []) pending.push(settle(stores.records!.delete([change.space, collection, change.repo, rkey])));
       pending.push(settle(stores.writers!.put(next)));
+      if (nextClock) pending.push(settle(stores.clock!.put(nextClock)));
       await Promise.all(pending);
       return true;
+    });
+  }
+
+  async invalidateSpace(space: string, extraRepos: readonly string[] = []): Promise<void> {
+    await this.write(["spaces", "writers"], async (stores) => {
+      const [currentSpace, existingWriters] = await Promise.all([
+        settle<SpaceState | undefined>(stores.spaces!.get(space)),
+        settle<WriterState[]>(stores.writers!.index("space").getAll(space)),
+      ]);
+      const nextSpace: SpaceState = currentSpace
+        ? { ...currentSpace, writersListedAt: null, invalidationSeq: (currentSpace.invalidationSeq ?? 0) + 1 }
+        : { space, spaceRev: null, writers: [], writersListedAt: null, workspace: null, lastOpenedAt: 0, invalidationSeq: 1 };
+      const byRepo = new Map(existingWriters.map((writer) => [writer.repo, writer]));
+      const repos = new Set<string>([...byRepo.keys(), ...extraRepos]);
+      const pending: Array<Promise<unknown>> = [settle(stores.spaces!.put(nextSpace))];
+      for (const repo of repos) {
+        const currentWriter = byRepo.get(repo);
+        const staleChange: WriterCommit = { space, repo, expectedGeneration: null, markStale: true };
+        const nextWriter = nextWriterState(currentWriter, staleChange, currentWriter?.optimisticOverlay);
+        pending.push(settle(stores.writers!.put(nextWriter)));
+      }
+      await Promise.all(pending);
     });
   }
 
@@ -125,12 +268,20 @@ export class IndexedDbStore implements SyncStore {
   }
 
   async purgeSpace(space: string): Promise<void> {
-    await this.write(["spaces", "writers", "records", "meta"], async (stores) => {
+    await this.write(["spaces", "writers", "records", "meta", "activity", "clock"], async (stores) => {
       await settle(stores.records!.delete(IDBKeyRange.bound([space], [space, LAST])));
       for (const state of await settle<WriterState[]>(stores.writers!.index("space").getAll(space))) {
         await settle(stores.writers!.put(emptyWriterState(space, state.repo, state.generation + 1)));
       }
       await settle(stores.spaces!.delete(space));
+      for (const key of await settle<IDBValidKey[]>(stores.activity!.index("space").getAllKeys(space))) {
+        await settle(stores.activity!.delete(key));
+      }
+      if (space !== "") {
+        for (const key of await settle<IDBValidKey[]>(stores.clock!.index("scope").getAllKeys(space))) {
+          await settle(stores.clock!.delete(key));
+        }
+      }
       const purges = await settle<{ key: string; value: number } | undefined>(stores.meta!.get(`purges ${space}`));
       await settle(stores.meta!.put({ key: `purges ${space}`, value: (purges?.value ?? 0) + 1 }));
     });
@@ -145,8 +296,8 @@ export class IndexedDbStore implements SyncStore {
   }
 
   async clear(): Promise<void> {
-    await this.write(["spaces", "writers", "records", "meta", "identities"], async (stores) => {
-      for (const name of ["spaces", "writers", "records", "identities"] as const) await settle(stores[name]!.clear());
+    await this.write(["spaces", "writers", "records", "meta", "identities", "activity", "clock"], async (stores) => {
+      for (const name of ["spaces", "writers", "records", "identities", "activity", "clock"] as const) await settle(stores[name]!.clear());
       const clears = await settle<{ key: string; value: number } | undefined>(stores.meta!.get("clears"));
       await settle(stores.meta!.put({ key: "clears", value: (clears?.value ?? 0) + 1 }));
     });
@@ -162,26 +313,36 @@ export class IndexedDbStore implements SyncStore {
 
   /** Runs `run` in one transaction and resolves once the transaction completed, so a resolved write is durable. */
   private async transact<T>(names: StoreName[], mode: IDBTransactionMode, run: (stores: Stores) => Promise<T>): Promise<T> {
+    let transaction: IDBTransaction | undefined;
     try {
-      const transaction = this.db.transaction(names, mode);
+      const db = this.db ?? (this.dbPromise ? await this.dbPromise : null);
+      if (!db) throw new Error("The store connection is closed.");
+      transaction = db.transaction(names, mode);
       const finished = new Promise<void>((resolve, reject) => {
-        transaction.oncomplete = () => resolve();
-        transaction.onerror = () => reject(transaction.error);
-        transaction.onabort = () => reject(transaction.error ?? new Error("The store transaction was aborted."));
+        transaction!.oncomplete = () => resolve();
+        transaction!.onerror = () => reject(transaction!.error);
+        transaction!.onabort = () => reject(transaction!.error ?? new Error("The store transaction was aborted."));
       });
       // `run` may fail first, and then this rejection is reported through `run`'s error instead of going unhandled.
       finished.catch(() => undefined);
-      const stores: Stores = Object.fromEntries(names.map((name) => [name, transaction.objectStore(name)]));
+      const stores: Stores = Object.fromEntries(names.map((name) => [name, transaction!.objectStore(name)]));
       const result = await run(stores);
       await finished;
       return result;
     } catch (error) {
+      if (transaction) {
+        try {
+          transaction.abort();
+        } catch {
+          // Ignore if the transaction already settled.
+        }
+      }
       throw new SyncStoreError("The local store failed.", { cause: error });
     }
   }
 }
 
-type StoreName = "spaces" | "writers" | "records" | "meta" | "identities";
+type StoreName = "spaces" | "writers" | "records" | "meta" | "identities" | "activity" | "clock";
 type Stores = Partial<Record<StoreName, IDBObjectStore>>;
 
 /** The account's database name on this device. */

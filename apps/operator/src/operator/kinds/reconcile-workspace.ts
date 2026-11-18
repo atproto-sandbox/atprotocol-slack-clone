@@ -1,22 +1,31 @@
-import { appInboxState, ensureMemberListSpace, listSpaceMembers } from "../../atproto/space-ops";
+import { appInboxState, ensureMemberListSpace, listSpaceMembers, spaceExists } from "../../atproto/space-ops";
 import { appInboxSkey, appInboxUri, channelUri, inboxUri } from "@flock/protocol/keys";
 import { COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
 import type { OperationContext } from "../journal";
 import type { OperatorActor } from "../actor";
-import { activeAdmins, activePrivateRoster, activeRoster, directoryRecords, writeRoster } from "../workspace-state";
+import { activeAdmins, activePrivateRoster, activeRoster, directoryRecords, isSpaceNotFound, writeRoster } from "../workspace-state";
 import {
   activeInstalls,
+  allExtInstalls,
   allInstalls,
+  diffMemberList,
   expectedAppInboxList,
   expectedChannelList,
+  expectedExtList,
   expectedInboxList,
   expectedWorkspaceList,
   listMatches,
+  putMissingMembers,
+  readExtInstall,
+  removeExtraMembers,
+  writeExtInstall,
   type Access,
   type AppInstall,
+  type ExtInstall,
 } from "../membership";
 import type { OperationKind } from "./kind";
 import { putListMember, putListMembers, removeListMember, removeListMembers } from "../members";
+import { ensureExtensionSpace } from "../workspace-spaces";
 
 export const reconcileWorkspaceKind: OperationKind = {
   kind: "reconcileWorkspace",
@@ -29,6 +38,7 @@ export const reconcileWorkspaceKind: OperationKind = {
     "channel-{skey}-set-{did}", "channel-{skey}-remove-{did}", "channel-{skey}-verified", "channel-{skey}-deactivate-stale-roster-{did}",
     "archived-{skey}-set-{did}", "archived-{skey}-remove-{did}", "archived-{skey}-verified", "archived-{skey}-deactivate-roster-{did}",
     "app-inbox-{did}-space", "app-inbox-{did}-set", "app-inbox-{did}-remove", "app-inbox-{did}-verified",
+    "ext-{extId}-space", "ext-{extId}-set", "ext-{extId}-remove", "ext-{extId}-verified", "ext-{extId}-cleanup-complete",
   ],
   run: (actor, context) => reconcileWorkspace(actor, context),
 };
@@ -48,6 +58,10 @@ async function reconcileWorkspace(actor: OperatorActor, context: OperationContex
   const admins = await activeAdmins(actor);
   const all = await allInstalls(actor);
   const installs = new Map([...all].filter(([, install]) => install.active));
+  const extInstalls = await allExtInstalls(actor);
+  for (const install of [...extInstalls.values()].sort((left, right) => left.extId.localeCompare(right.extId))) {
+    await reconcileExtension(actor, context, members, install);
+  }
   await reconcileSpace(actor, context, "workspace", workspace, expectedWorkspaceList(members, installs));
   await reconcileSpace(actor, context, "inbox", inbox, expectedInboxList(members, admins));
   const channels = (await directoryRecords(actor)).sort((left, right) => left.value.skey.localeCompare(right.value.skey));
@@ -70,6 +84,80 @@ async function reconcileWorkspace(actor: OperatorActor, context: OperationContex
   for (const install of [...all.values()].sort((left, right) => left.subject.localeCompare(right.subject))) {
     await reconcileAppInbox(actor, context, members, install);
   }
+}
+
+async function reconcileExtension(
+  actor: OperatorActor,
+  context: OperationContext,
+  members: ReadonlySet<string>,
+  install: ExtInstall,
+): Promise<void> {
+  if (!install.active && install.cleanupComplete) return;
+  const authorityDid = actor.workspace.authorityDid;
+  if (install.active) {
+    if (!await spaceExists(actor.session, install.space)) {
+      await context.step(`ext-${install.extId}-space`, async () => {
+        await ensureExtensionSpace(actor.session, actor.workspace.skey, install.extId);
+      });
+    }
+    const desired = expectedExtList(members);
+    const current = await listSpaceMembers(actor.session, install.space);
+    const { toPut, toRemove } = diffMemberList(desired, current, authorityDid);
+    if (toPut.length > 0) {
+      await context.step(`ext-${install.extId}-set`, () => putMissingMembers(actor.session, install.space, desired, authorityDid));
+    }
+    if (toRemove.length > 0) {
+      await context.step(`ext-${install.extId}-remove`, () => removeExtraMembers(actor.session, install.space, desired, authorityDid));
+    }
+    await context.step(`ext-${install.extId}-verified`, async () => {
+      const finalList = toPut.length > 0 || toRemove.length > 0 ? await listSpaceMembers(actor.session, install.space) : current;
+      if (!listMatches(desired, finalList, authorityDid)) {
+        throw new Error(`Membership reconciliation has not converged for ext-${install.extId}.`);
+      }
+    });
+    return;
+  }
+
+  let spaceMissing = false;
+  let current: Array<{ did: string; read: boolean; write: boolean }> = [];
+  try {
+    current = await listSpaceMembers(actor.session, install.space);
+  } catch (error) {
+    if (isSpaceNotFound(error)) spaceMissing = true;
+    else throw error;
+  }
+  const needsRemove = !spaceMissing && current.some((member) => member.did !== authorityDid);
+  if (needsRemove) {
+    await context.step(`ext-${install.extId}-remove`, async () => {
+      try {
+        await removeExtraMembers(actor.session, install.space, new Map(), authorityDid);
+      } catch (error) {
+        if (!isSpaceNotFound(error)) throw error;
+      }
+    });
+  }
+  if (!spaceMissing) {
+    await context.step(`ext-${install.extId}-verified`, async () => {
+      try {
+        const finalList = needsRemove ? await listSpaceMembers(actor.session, install.space) : current;
+        if (!listMatches(new Map(), finalList, authorityDid)) {
+          throw new Error(`Membership reconciliation has not converged for ext-${install.extId}.`);
+        }
+      } catch (error) {
+        if (!isSpaceNotFound(error)) throw error;
+      }
+    });
+  }
+  await context.step(`ext-${install.extId}-cleanup-complete`, async () => {
+    const latest = await readExtInstall(actor, install.extId);
+    if (!latest || latest.active) return;
+    await writeExtInstall(actor, {
+      ...latest,
+      active: false,
+      cleanupComplete: true,
+      disabledAt: latest.disabledAt ?? new Date().toISOString(),
+    });
+  });
 }
 
 async function reconcileAppInbox(

@@ -3,8 +3,9 @@ import type { OAuthSession } from "@atproto/oauth-client-node";
 import type * as RegisterNotify from "@flock/protocol/lexicons/api/types/com/atproto/space/registerNotify";
 import { claimLease } from "../auth/oauth-request-lock";
 import { resolvePds } from "../atproto/identity";
-import { appInboxState } from "../atproto/space-ops";
+import { appInboxState, spaceExists } from "../atproto/space-ops";
 import { describeRepoFailure } from "@flock/protocol/atproto/repo-failure";
+import { isScopeMissingError } from "@flock/protocol/atproto/xrpc";
 import { mintSpaceCredential } from "../atproto/space-credential";
 import { getConfig } from "@flock/deployment/config";
 import { getRawDb } from "../lib/db";
@@ -12,7 +13,7 @@ import { appInboxUri, channelUri, inboxUri, parseAppInboxUri, requireSpaceAuthor
 import { parseWorkspaceRef, type OperatorActor } from "./actor";
 import { restoreAuthorityGrant } from "./authority-grant";
 import { isRegisteredSpace } from "./member-access";
-import { activeInstalls, allInstalls } from "./membership";
+import { activeExtInstalls, activeInstalls, allExtInstalls, allInstalls } from "./membership";
 import { adminMutationsPaused } from "./mutations-paused";
 import type { OperationView } from "./journal";
 import { listJournaledWorkspaces } from "./journal";
@@ -73,7 +74,10 @@ export async function afterOperation(
     await registerSpace(actor.session, actor.workspace.uri, space, deps);
   }
   for (const space of kind.archivesSpaces?.(actor, request) ?? []) await unregisterSpace(actor.session, space, deps);
-  if (request.kind === "reconcileWorkspace") await syncReconciledInboxRegistrations(actor, deps);
+  if (request.kind === "reconcileWorkspace") {
+    await syncReconciledInboxRegistrations(actor, deps);
+    await syncReconciledExtensionRegistrations(actor, deps);
+  }
 }
 
 /** Registers one space of `workspace`; whether it is registered now. */
@@ -217,20 +221,45 @@ async function syncReconciledInboxRegistrations(actor: OperatorActor, deps: Regi
   }
 }
 
+async function syncReconciledExtensionRegistrations(actor: OperatorActor, deps: RegistrationDeps): Promise<void> {
+  const extInstalls = await allExtInstalls(actor);
+  for (const install of [...extInstalls.values()].sort((left, right) => left.extId.localeCompare(right.extId))) {
+    if (install.active) {
+      if (hasRegistration(install.space)) continue;
+      if (await spaceExists(actor.session, install.space)) await registerSpace(actor.session, actor.workspace.uri, install.space, deps);
+    } else if (isRegisteredSpace(install.space)) {
+      await unregisterSpace(actor.session, install.space, deps);
+    }
+  }
+}
+
 async function activeWorkspaceSpaces(session: OAuthSession, workspace: string): Promise<string[]> {
   const ref = parseWorkspaceRef(workspace);
   const actor: OperatorActor = { did: session.did, session, workspace: ref, canRecoverOperations: false };
-  const [channels, installs] = await Promise.all([directoryRecords(actor), activeInstalls(actor)]);
+  const [channels, installs, extInstalls] = await Promise.all([
+    directoryRecords(actor),
+    activeInstalls(actor),
+    activeExtInstalls(actor),
+  ]);
   const openChannels = channels.filter(({ value }) => value.visibility !== "archived");
   const inboxes: string[] = [];
   for (const install of [...installs.values()].sort((left, right) => left.subject.localeCompare(right.subject))) {
     const inbox = appInboxUri(ref.authorityDid, ref.skey, install.subject);
     if (await appInboxState(session, inbox) === "present") inboxes.push(inbox);
   }
+  const extSpaces: string[] = [];
+  for (const install of [...extInstalls.values()].sort((left, right) => left.extId.localeCompare(right.extId))) {
+    try {
+      if (await spaceExists(session, install.space)) extSpaces.push(install.space);
+    } catch (error) {
+      if (!isScopeMissingError(error)) throw error;
+    }
+  }
   return [
     workspace,
     inboxUri(ref.authorityDid, ref.skey),
     ...openChannels.map(({ value }) => channelUri(ref.authorityDid, value.skey)),
     ...inboxes,
+    ...extSpaces,
   ];
 }

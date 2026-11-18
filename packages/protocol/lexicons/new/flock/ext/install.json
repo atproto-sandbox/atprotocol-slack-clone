@@ -1,0 +1,25 @@
+{
+  "lexicon": 1,
+  "id": "new.flock.ext.install",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "An extension installed in a workspace: written by the workspace authority in the workspace space, keyed by extId.",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": ["extId", "active", "space", "enabledBy", "enabledAt", "updatedAt"],
+        "properties": {
+          "extId": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "active": { "type": "boolean" },
+          "space": { "type": "string", "format": "space-ref" },
+          "cleanupComplete": { "type": "boolean" },
+          "enabledBy": { "type": "string", "format": "did" },
+          "enabledAt": { "type": "string", "format": "datetime" },
+          "updatedAt": { "type": "string", "format": "datetime" },
+          "disabledAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

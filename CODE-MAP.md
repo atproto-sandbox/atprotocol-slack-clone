@@ -7,12 +7,12 @@ A Slack-style team workspace built directly on atproto (AT Protocol) permissione
 ```
              BROWSER  (apps/web)                       WEB SERVER (apps/web, Next)           EACH ACCOUNT'S PDS
   ┌─────────────────────────────────────┐      ┌──────────────────────────────────┐   ┌──────────────────────────────┐
-  │ React UI: apps/web/src/app/ui       │◀────▶│ page.tsx, layout.tsx, the        │   │ new.flock.workspace/.channel/│
-  │  workspace-manager, sidebar,        │      │ oauth callback page and the      │   │  .inbox/.app.inbox spaces;   │
-  │  channel-view, dm-*.tsx             │      │ browser client's metadata.       │   │  directory, roster, admin,   │
-  │                                     │      │ No database, no secret.          │   │  commands, actions, channel  │
-  │ Browser session: apps/web/src/      │      └──────────────────────────────────┘   │  messages and reactions      │
-  │  browser (one OAuth grant: member   │                                             │  gate)                       │
+  │ React UI: apps/web/src/app/ui       │◀────▶│ (shell)/**/page.tsx, layout.tsx, │   │ new.flock.workspace/.channel/│
+  │  workspace-manager, sidebar,        │      │ proxy.ts, oauth/callback, and the  │   │  .inbox/.app.inbox/.ext.tasks│
+  │  channel-view, dm-*.tsx,            │      │ browser client's metadata.         │   │  spaces; directory, roster,  │
+  │  extensions-panel, ui/ext/tasks/*   │      │ No database, no secret.            │   │  admin, ext.install, tasks,  │
+  │ Browser session: apps/web/src/      │      └──────────────────────────────────┘   │  commands, channel messages, │
+  │  browser (one OAuth grant: member   │                                             │  actions, reactions (gate)   │
   │  set, operator rpc, DM set),        │      OPERATOR (apps/operator, own process,  ├──────────────────────────────┤
   │  IndexedDB, non-extractable keys    │      own origin)                            │ new.flock.dm.inbox (self);   │
   │                                     │      ┌──────────────────────────────────┐   │ new.flock.dm.conversation/   │
@@ -28,7 +28,7 @@ A Slack-style team workspace built directly on atproto (AT Protocol) permissione
   └─────────────────────────────────────┘      └──────────────────────────────────┘
 ```
 
-Two independent-app proofs exist side by side: `packages/reader/src/independent.ts` (channels/workspaces) and `packages/reader/src/independent-dm.ts` (DMs). Both talk only to PDSes through the published lexicons and space-credential protocol — never to this app's database — and the reader package depends on `@flock/protocol` only, so the DM proof cannot quietly depend on the DM engine it is supposed to be independent of.
+Three independent-app proofs exist side by side: `packages/reader/src/independent.ts` (channels/workspaces), `packages/reader/src/independent-dm.ts` (DMs), and `packages/reader/src/independent-tasks.ts` (Tasks extension via STAR/oplog verification + pure `entity-merge`). All three talk only to PDSes through the published lexicons and space-credential protocol — never to this app's database — and the reader package depends only on `@flock/protocol` and `@atproto/{space,lex-data,lexicon}`, so it cannot quietly depend on `@flock/client`.
 
 ## DM data flow (read)
 
@@ -73,20 +73,29 @@ packages/                 Libraries. protocol and client run in a browser: they 
     lexicons/                Source lexicon JSON (new.flock.*, new.flock.dm.*), the published set; imported as
                               `@flock/protocol/lexicons/<path>.json`.
     src/keys.ts              The one owner of URI and key syntax: parseSpaceUri / parseWorkspaceUri / parseChannelUri /
+                              extSpaceSkey / extSpaceUri / tasksSpaceUri / parseExtSpaceUri / parseTasksSpaceUri /
                               requireSpaceAuthority, isDid / isSkey / isTid, canonical record keys, TID generation,
                               canonicalParticipants. No other module hand-writes an at:// regex.
     src/nsids.ts             The one owner of NSIDs: NAMESPACE, SPACE_TYPE, COLLECTION, REPO_COLLECTION, OPERATOR_METHOD.
                               No other source module spells an NSID (registry.test.ts enforces it).
+    src/extensions.ts        Typed declarative first-party extension catalog (`EXTENSIONS`, `getExtension`, `isExtensionId`,
+                              `extSpaceUriFor`), starting with `"tasks"` (`SPACE_TYPE.tasks`).
+    src/entity-merge.ts      Pure causal DAG + HLC + LWW + add-wins OR-Set + deletion-overwrite merge model (`advanceHlc`,
+                              `opRef`, `mergeProject`, `mergeTask`, `mergeTasksSpace`), saturated overflow (`> 256` refs ->
+                              `sTruncated: true`), `otherVersions`, and conflict Activity generation; tested by
+                              `entity-merge-oracle.test.ts` (brute-force full-DAG oracle). ESLint blocks importing or
+                              re-exporting this module outside `ext/tasks`, `independent-tasks`, and parity/protocol tests.
     src/registry.ts          The one table of space records (REGISTRY): space type, author, key rule, sync strategy and
                               semantic rule per collection. validateSpaceRecord = shape from the published lexicons
                               (@atproto/lexicon) + the entry's meaning rule; records are open (unknown fields kept);
                               MAX_RECORD_BYTES bounds what a reader keeps.
     src/scopes.ts            Scope builders for member, authority and operator sessions, derived from the registry,
                               DM_BROWSER_SCOPES (asserted disjoint from every server scope), memberGrantScopes: the
-                              browser's one grant (member set, operator rpc, DM set), and appGrantScopes: an app's own
-                              grant (its declaration, channel reads and writes, getChanges only).
-    src/workspace-summary.ts What a workspace is, summarized from its authority's records, and the v1 envelope check; the
-                              engine and the operator both use it.
+                              browser's one grant (member set including `SPACE_TYPE.tasks`, operator rpc, DM set), and
+                              appGrantScopes: an app's own grant (its declaration, channel reads and writes, getChanges only).
+    src/workspace-summary.ts What a workspace is, summarized from its authority's records (including `ext.install`), and
+                              the v1 `WORKSPACE_ENVELOPE` check (including `extensions`, `taskProjects`, `tasks`,
+                              `maxAncestorRefs`, `maxCommentsPerTask`, and STAR/oplog bounds); used by engine & operator.
     src/bounded-json.ts, src/map-limited.ts
                              Bounded JSON parsing of upstream answers; fixed fan-out concurrency.
     src/lexicons/api/        Generated lexicon types (do not hand-edit; `pnpm codegen:lex`).
@@ -98,15 +107,16 @@ packages/                 Libraries. protocol and client run in a browser: they 
       kem-key.ts               `#atproto_kem` did:key from a DID document (server and browser share it).
       repo-failure.ts          The one classifier for "this one writer's repo cannot be read" (deactivated, taken down,
                                 unauthenticated, oversized, host down): the sync, the admin inbox, DM reads, the
-                                independent channel reader and the operator set the writer aside instead of failing for
+                                independent readers and the operator set the writer aside instead of failing for
                                 everyone. describeRepoFailure is also what the operator logs about a failure it did not name.
       space-credential-core.ts Isomorphic space-credential mint/exchange (SpaceCredential, SpaceCredentialError,
-                                mintSpaceCredentialWith) and the single owner of MAC requests and verification for getRecord
-                                and getLatestCommit; isAccessLost is the one "this account lost access" predicate (refused
-                                credential or deleted space); isCredentialRefused is the different question "did the host
-                                refuse this credential itself"; credentialLifetimeMs reads the authority's chosen lifetime.
+                                mintSpaceCredentialWith) and the single owner of MAC requests and verification for getRecord,
+                                getLatestCommit, listRepoOps (strict short-page/unwritten gating), and binary streaming
+                                `fetchVerifiedRepoStar` (mid-stream byte/record bounds + EOF `verifyRepoStar` before emit),
+                                plus `verifyRecordCid`; isAccessLost / isCredentialRefused / credentialLifetimeMs.
       record-pages.ts          Bounded listRepos/listRecords/listMembers/listSpaces paging with cursor/duplicate/limit
-                                assertions; the one listBoundedSpaces and listAllSpaceUris (workspace discovery).
+                                assertions (including optional `collection`, `excludeValues`, composite `${collection}/${rkey}`
+                                dedup); the one listBoundedSpaces and listAllSpaceUris (workspace discovery).
       valid-channel-messages.ts
   client/  @flock/client        The engine and the DM engine (isomorphic; the SDK). Depends on protocol.
     src/transport.ts         ClientTransport: what the engine needs from its host (own client, DID resolution, fetch, keys).
@@ -115,22 +125,33 @@ packages/                 Libraries. protocol and client run in a browser: they 
                               DID_DOCUMENT_TTL_MS, six resolutions at once per origin in the process, each given up after
                               ten seconds; a failed MAC forces a fresh key. The ten-minute bound has one owner,
                               packages/protocol/src/atproto/kem-key.ts.
-    src/store.ts             SyncStore contract: records, per-writer state (coverage per collection, syncedRev, generation),
-                              per-space state, compare-and-set commits by generation, revision and space epoch.
+    src/store.ts             SyncStore contract: records (with CID), per-writer state (coverage, syncedRev, 2048B `LtHash` `setHash`
+                              via BLAKE3 XOF lane expansion, 32B SHA-256 `commitDigest`, generation), atomic `clock` reservation, per-DID
+                              `activity` seen/dismissed state, per-space state, and compare-and-set commits by generation, revision and space epoch.
     src/memory-store.ts, src/indexeddb-store.ts
-                             The two stores: memory (DM spaces, tests) and IndexedDB (one database per account).
+                             The two stores: memory (DM spaces, tests) and IndexedDB (one database per account; `VERSION = 2`
+                              guarded upgrade adding `clock` and `activity` while preserving v1 records and `meta` epochs).
     src/merge.ts             The merge order (newest key, then URI) and the opaque (key, uri) page cursor.
-    src/sync.ts              SyncCore: the writer set (full listRepos per session and truth interval, hints between),
-                              bracketed refresh, backfill, set-aside writers, bounds, completeness.
+    src/sync.ts              SyncCore: channel/DM `"window"` sync (preserving exact `sync-budget` call counts), plus
+                              `syncVerifiedWorkspaceSnapshot`, `syncVerifiedSpace` (union writer universe, `D11.1 #4`
+                              `RepoNotFound` trust boundary, `listRepoOps` staged `prev`-chain + materialized `LtHash`
+                              verification, STAR primary + bounded `listRecords` fallback), and `followRepoOps` (host-ordered
+                              oplog tailing, reset dedup, deferred cursor commit on ack).
+    src/write-queue.ts       Account-wide atomic HLC+TID `reserveStamp` (queue + optional Web Locks), cross-device `rkey`
+                              collision retry (`createWithTidRetry`), and per-`(accountDid, entityUri)` editing lock.
+    src/ext/tasks/           `tasks-client.ts`, `index.ts`: Tasks extension client (`TasksClient`), isolated `formChainId`/
+                              `observedContext` (`preserve-conflict` / `reject-stale`), `packCausalClosure` (`<= 256` vs
+                              `sTruncated: true` 3-tier packing), IDB Activity state, wired via `engine.tasks` (`engine.ts`)
+                              and lint-isolated (`NO_EXTENSION_IMPORT`, pinned by `eslint-boundaries.test.ts` + `tasks-reader-parity.test.ts`).
     src/lifecycle.ts         When held copies stop being served: lost access, deletion, unlisted workspaces, archived
-                              channels, the retention sweep (sign-out deletes the whole store: apps/web/src/browser/sign-out.ts).
+                              channels, active vs disabled extension space retention (`keepWorkspaceSpaces`), retention sweep.
     src/channel-client.ts, src/workspace-client.ts, src/app-inbox-client.ts, src/operator-client.ts
                              The member's operations, each rule of the route table owned here; engine.ts wires them.
-                              app-inbox-client.ts sends/retracts commands and clicks for members and syncs inboxes for apps.
-                              operator-client.ts calls every operator method, reusing one long-poll token for getChanges.
+                              `workspace-client.ts` includes extension install discovery & `rosterComplete` metadata;
+                              `operator-client.ts` includes `enableExtension` / `disableExtension` and reuses one long-poll token for getChanges.
     src/blocks.ts, src/key-window.ts
                              Typed block constructors, synchronous validateMessageInput over the registry, and the shared
-                              writer-key window used by channel messages and app-inbox records alike.
+                              writer-key window used as fallback when `engine.sync` is absent.
     src/feed.ts              ChangeFollower: follows spaces through getChanges in the order that loses nothing (head, sync,
                               follow), syncs changed and reset spaces, mints afresh for denied ones, and backs off a round
                               that could not finish.
@@ -138,10 +159,9 @@ packages/                 Libraries. protocol and client run in a browser: they 
                               redirects and a bounded body, cached; an account's PDS endpoint, KEM key and handle.
     src/session-transport.ts The engine's transport for an account's OAuth session, the browser's and a Node app's alike;
                               they differ only in the fetch they pass.
-    src/app-runtime.ts       An app's runtime (R9, R10b): runApp follows the channels and app inboxes its install grants it
-                              in each workspace it is told, gives it each new message, slash command and button click from a
-                              person once (verified against fresh workspace and private-roster state, and throttled per
-                              author), follows grant changes, and reports every failure; appGrantScope, publishAppDeclaration.
+    src/app-runtime.ts       An app's runtime (R9, R10b, R11a): `runApp` tails new messages/commands/actions via
+                              `SyncCore.followRepoOps` (retaining `KeyWindow` fallback & per-author throttles), follows grant
+                              changes, and reports resets/failures; appGrantScope, publishAppDeclaration.
     src/node/                The client's only Node code (`@flock/client/node/*`, outside the browser lint rules and the
                               no-Node typecheck; browser code may not import it): transport.ts (the session transport with
                               every host reached through @flock/net), oauth.ts (an app's OAuth client: confidential private_key_jwt
@@ -157,11 +177,14 @@ packages/                 Libraries. protocol and client run in a browser: they 
     src/dm/                  The DM feature (see below).
     src/testing/             Test fixtures over the fake network: engine-fixture.ts (channels and workspaces on it),
                               store-contract.ts (the SyncStore contract both stores pass).
-  reader/  @flock/reader        Independent second-app readers; depends on protocol only.
+  reader/  @flock/reader        Independent second-app readers; depends on `@flock/protocol` and `@atproto/{space,lex-data,lexicon}`.
     src/independent.ts       Channels/workspaces; takes injected transports (sessionCredentialDeps builds them from a
                               session), so it runs on the fake network too.
     src/independent-dm.ts    DMs (M6 independence proof).
-  testing/  @flock/testing      The in-memory multi-host PDS network every engine and DM test runs on (fake-network.ts).
+    src/independent-tasks.ts Tasks extension (`readIndependentTasksSpace`, `readIndependentTasksWorkspaceSnapshot`):
+                              stateless cold STAR/MAC/CID verified read + pure `@flock/protocol/entity-merge` (R11f proof).
+  testing/  @flock/testing      The in-memory multi-host PDS network every engine, Tasks, and DM test runs on (fake-network.ts),
+                              including `listRepoOps`, STAR `getRepo`, `clearRecords`/`importRepo`, and fault injection hooks.
   net/  @flock/net              Node only: how a server process reaches a host someone else named (safe-fetch.ts): https to a
                               public address only (loopback in loopback development), the address checked is the one
                               connected to, no redirect, a minute's timeout. The operator and a Node app both use it.
@@ -181,18 +204,24 @@ apps/
                               64 KiB stream bound, synchronous validateMessageInput, fresh write-grant check).
   web/  @flock/web              The Next.js app (`pnpm dev` / `build` / `start` run `next` here). No database, no secret.
     next.config.ts           The fixed security headers; the repository root's `.env` (Next itself reads only this app's directory).
-    src/proxy.ts             Each page's Content-Security-Policy, with a nonce made for the request (Next puts it on its scripts).
-    src/app/                 App Router: page.tsx (builds the browser session config and renders the client gate,
-                              ui/account-gate.tsx), layout.tsx, oauth/ (the sign-in callback page, client-only, and the
-                              browser client's metadata). The server has no member routes and no member session.
+    src/proxy.ts             Each page's Content-Security-Policy with a per-request nonce (`layout.tsx`) and `localhost`
+                              -> `127.0.0.1` HTTP normalization (`src/lib/loopback-redirect.ts`) preserving validated
+                              paths and query parameters across all deep routes.
+    src/app/                 App Router: persistent dynamic `(shell)/layout.tsx` + route pages (`/`,
+                              `/w/[authority]/[workspaceSkey]`, `/c/[channelSkey]`, `/m/[repo]/[rkey]`,
+                              `/ext/tasks/{list,board,activity,p/[repo]/[rkey],t/[repo]/[rkey]}`, `/dm`, `/dm/[convKey]`),
+                              `oauth/` (outside `(shell)`), and `ui/account-gate.tsx`. No member routes or sessions.
     src/app/ui/              React components. workspace-manager.tsx is the main stage; dm-*.tsx are the DM views, wired in
-                              through dm-context.tsx / dm-session-bridge.tsx. The shell's data are the engine's keyed live
-                              views, read through use-live-view.ts (useSyncExternalStore): use-discovery.ts,
-                              use-channel-content.ts, use-admin-views.ts; selection.ts derives what is shown.
-                              apps-panel.tsx is the admins' view of the workspace's apps (install only an account that
-                              declares itself one, change access, remove after saying its messages leave the view);
-                              channel-view.tsx marks an installed app's messages "APP", renders app blocks and dispatches
-                              slash commands and button clicks through interactions.ts.
+                              through dm-context.tsx / dm-session-bridge.tsx. `routes.ts` and `src/lib/return-to.ts` own
+                              single-decode route builders/parsers and validated `returnTo` OAuth lifecycles.
+                              `extensions-panel.tsx` manages workspace extensions + inline authority re-consent CTAs;
+                              `ext/tasks/` holds the Orbit-aligned Tasks UI (`tasks-workspace-view`, `tasks-list-view`,
+                              `tasks-board-view`, `task-detail-view`, `tasks-activity-view`, `use-tasks-space`,
+                              `tasks-ui-logic`). The shell's data are the engine's keyed live views, read through
+                              use-live-view.ts (useSyncExternalStore): use-discovery.ts, use-channel-content.ts,
+                              use-admin-views.ts; selection.ts derives what is shown. apps-panel.tsx is the admins' view
+                              of the workspace's apps; channel-view.tsx marks an installed app's messages "APP", renders
+                              app blocks and dispatches slash commands and button clicks through interactions.ts.
     src/browser/             The account's browser session (R6a, R6c): one OAuth grant through
                               @atproto/oauth-client-browser (session.ts: one client and one init per page, signIn,
                               signOut), sign-out (sign-out.ts: deletes the account's store and DM state and revokes the
@@ -222,15 +251,16 @@ apps/
                               step names, resume by name and request hash, "waiting for the authority's approval", and
                               the three-minute limit after which a run starts no further step; operationView.
     src/operator/kinds/      One file per operation kind; kinds/index.ts is the table every request and journal row
-                              dispatches through, and kinds/kinds.test.ts pins every persisted kind, field and step name.
+                              dispatches through, and kinds/kinds.test.ts pins all 17 persisted kinds, fields and step names.
                               A kind whose request takes away its submitter's own role says so (endsOwnRole):
                               authorizeSubmittedOperation in src/operator/security.ts lets that submitter send the
                               journaled operation again after current state refuses them.
                               create-workspace.ts creates a workspace for its creator (its first admin and member) under
                               its account; bootstrap-workspace.ts only resumes rows begun before it. Their shared space
                               and record actions are src/operator/workspace-spaces.ts. app-access.ts installs, changes and
-                              uninstalls an app: its inbox space first on install/change, then its install record and
-                              member-list entries; on uninstall, its record first, then app-first inbox removal and entries.
+                              uninstalls an app; extension-access.ts enables and disables first-party extensions (`tasks`),
+                              converging extension space membership via `members.ts` and gating removal/reconcile on
+                              active or uncleaned extensions (`AuthorityReauthorizationRequiredError`).
     src/operator/membership.ts
                              The one owner of who belongs in each member list, and with which bits: people from the roster,
                               admins and private rosters, apps from their install records (read and written here). Every
@@ -251,9 +281,11 @@ apps/
                              The SQLite database and its migrations; DM change-notice subscriptions.
     scripts/                 reconcile-workspaces.ts (`pnpm reconcile`), authority-grant.ts (`pnpm authority`).
 
-bdd/, features/           Executable Gherkin (below).
-protocol-tests/           Backend acceptance/performance against the pinned PDS checkout, plus Playwright browser acceptance
-                           (protocol-tests/browser/).
+bdd/, features/           Executable Gherkin (below), including `features/{url-routing,tasks}.feature` and
+                           `bdd/steps/{url-routing,tasks}.steps.ts` / `bdd/support/tasks-ui.ts`.
+protocol-tests/           Backend acceptance/performance against the pinned PDS checkout (`verified-sync`,
+                           `extensions-operator`, `tasks-acceptance`, `tasks-performance`), plus Playwright browser
+                           acceptance (`protocol-tests/browser/{url-routing,tasks}.spec.ts`, etc.).
   atproto/                  Protocol conformance suites copied into the pinned checkout to run (its imports are that tree's).
 docs/                     Operations runbook, protocol pin, and PRD/implementation-plan docs.
 .ai/plans/                Design docs and per-milestone task specs (dm-tasks/m0.md..m6.md).
@@ -284,7 +316,7 @@ operator or OAuth layers even by accident, and lint refuses a Node built-in in a
 
 ## Entry points
 
-- `apps/web/src/app/page.tsx` — the one page in the app; resolves session state and renders everything else.
+- `apps/web/src/app/(shell)/page.tsx` and `(shell)/**/page.tsx` — App Router entry points under the persistent dynamic `(shell)/layout.tsx`; resolves session state and renders workspace, channel, permalink, Tasks extension, and DM routes.
 - `pnpm dev` / `pnpm build` / `pnpm start` — the web app (Next.js dev/build/prod, see `package.json`). It holds no database
   and no secret.
 - `pnpm operator` (`apps/operator/src/operator/main.ts`) — the operator's own process at `OPERATOR_URL`: `apps/operator/src/operator/server.ts` serves its
@@ -300,10 +332,10 @@ operator or OAuth layers even by accident, and lint refuses a Node built-in in a
 - `pnpm test` — unit tests (`node --test` over every `*.test.ts` in `packages/*/src` and `apps/*/src`), plus `bdd/gate.test.ts`, which keeps the Gherkin features honest (below).
 - `pnpm typecheck` — the whole repository with Node types, then `packages/protocol` and `packages/client` with none (and a check that no `@types/node` reaches them).
 - `pnpm test:bdd` — builds, then runs the executable Gherkin scenarios in `features/` with `@cucumber/cucumber`, driving real browsers against a real pinned PDS network.
-- `pnpm test:acceptance` — builds, then runs `protocol-tests/{app-acceptance,reconcile-workspaces,dm-acceptance,authority-grant,platform-capabilities,engine-acceptance,feed-follow,apps,echo-bot,app-inboxes}.test.ts` against a real pinned PDS network (needs `ATPROTO_PINNED_CHECKOUT`). `platform-capabilities` and `authority-grant` hold the platform refactor's capability checks (K1, K3, K7), `engine-acceptance` the engine's parity with the independent reader on two real hosts, `apps` (R9) an app installed, refused what it is not granted and uninstalled on two real hosts, `echo-bot` (R9's gate) the echo bot answering through the feed and refused once uninstalled, `app-inboxes` (R10a's gate) per-install app inboxes, pre-R10 reconcile/grants and the 20-install 200-person envelope, and `feed-follow` (R5's gate) a cookie-less member following a channel live through `getChanges` with `next start` receiving the PDS's notices (`protocol-tests/support/app-server.ts`), all on the network-only helper `protocol-tests/support/pds-network.ts` (`actorTransport` builds the engine's transport for a real account).
-- `pnpm test:browser` — builds, then runs Playwright specs in `protocol-tests/browser/` (`--test-concurrency=1`, since the specs start real servers); `cross-origin.spec.ts` (K9) signs in through the real OAuth flow and sends every request from a separate web origin, and `webhooks.spec.ts` (R10c's gate) exercises the webhooks admin page and incoming hook endpoint in Chromium.
-- `pnpm test:performance` — `protocol-tests/{performance-envelope,dm-performance}.test.ts` (slow; the channel envelope test is ~30 minutes); each latest-100 read is repeated ten times and reported as median and p95.
-- `pnpm test:sync-budget` — `protocol-tests/sync-budget.ts` (K4, R4's gate): calls and time of the engine's first open, reopen and one new message at 20, 100 and 200 writers; it fails if a reopen's call count depends on the writer count.
+- `pnpm test:acceptance` — builds, then runs `protocol-tests/{app-acceptance,reconcile-workspaces,dm-acceptance,authority-grant,platform-capabilities,engine-acceptance,feed-follow,apps,echo-bot,app-inboxes,verified-sync,extensions-operator,tasks-acceptance}.test.ts` against a real pinned PDS network (needs `ATPROTO_PINNED_CHECKOUT`). `verified-sync` (R11a), `extensions-operator` (R11c), and `tasks-acceptance` (R11f cold reader parity) extend the prior R1–R10 acceptance suite.
+- `pnpm test:browser` — builds, then runs Playwright specs in `protocol-tests/browser/` (`--test-concurrency=1`, since the specs start real servers); includes `cross-origin.spec.ts` (K9), `webhooks.spec.ts` (R10c), `url-routing.spec.ts` (R11e routing/loopback/`returnTo`/CSP), and `tasks.spec.ts` (R11e Tasks E2E).
+- `pnpm test:performance` — `protocol-tests/{performance-envelope,dm-performance,tasks-performance}.test.ts`; channel envelope (~30 minutes) + DM performance + 50-writer Tasks STAR/oplog SLO benchmark (`D11.13`).
+- `pnpm test:sync-budget` — `protocol-tests/sync-budget.ts` (K4, R4/R11 gate): calls and time of the engine's first open, reopen and one new message at 20, 100 and 200 writers; it fails if a reopen's call count depends on the writer count.
 
 ## Executable Gherkin
 
@@ -341,11 +373,11 @@ Run: `pnpm test:bdd` (headless), `pnpm test:bdd:chrome` (visible Google Chrome),
 - Concurrency is `packages/protocol/src/map-limited.ts` (fixed fan-out, currently 8 for DM/channel fan-out),
   not ad hoc `Promise.all` over unbounded arrays.
 - Package boundaries are dependency lists: protocol and net depend on no workspace package; client on protocol and net (net
-  for its Node entry only); reader on protocol only; the operator on protocol, net and deployment; the web app on client,
+  for its Node entry only); reader on `@flock/protocol` and `@atproto/{space,lex-data,lexicon}`; the operator on protocol, net and deployment; the web app on client,
   protocol and deployment; the echo bot and the webhooks app on client only. No app imports another. Lint adds what a list cannot say: no Node
   built-ins or server configuration in browser code, no client Node entry or @flock/net in browser code or the web app,
-  member lists changed only through `members.ts`, and no DM engine in the web app's route handlers
-  (`apps/web/src/app/**/route.ts`).
+  member lists changed only through `members.ts`, no DM engine in the web app's route handlers (`apps/web/src/app/**/route.ts`),
+  and D11.11 isolation (`NO_ENTITY_MERGE_IMPORT`, `NO_EXTENSION_IMPORT`, and dynamic `ImportExpression` blocks) enforced by `eslint.config.mjs` and verified in `packages/client/src/eslint-boundaries.test.ts`.
 - DM invariants (no server session, no server cache, no app-decided access, independent-app
   parity) are treated as architectural constraints, not defaults to be revisited later; see
   `SPEC.md`'s "Direct-message invariants" and `.ai/plans/direct-messages.md` §1–§2.

@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createSpaceSigHeaders } from "@atproto/space";
-import { mintSpaceCredentialWith, SpaceCredentialError, type SpaceCredentialDeps } from "@flock/protocol/atproto/space-credential-core";
+import { toBase64 } from "@atproto/lex-data";
+import { MAC_HEADER, createSpaceSigHeaders } from "@atproto/space";
+import { listBoundedRecords } from "@flock/protocol/atproto/record-pages";
+import { SpaceMacError, mintSpaceCredentialWith, SpaceCredentialError, verifyRecordCid, type SpaceCredentialDeps } from "@flock/protocol/atproto/space-credential-core";
 import { generateSpaceKey, type SpaceKey } from "@flock/protocol/atproto/space-key";
 import { MEMBERSPACE_POLICY, memberspacePolicy } from "@flock/protocol/atproto/space-policy";
 import { dmInboxUri, type Did } from "@flock/protocol/keys";
@@ -330,4 +332,341 @@ test("an account can list its own repo with its own session and no credential, a
   // #then her own listing works and the other account is refused for the missing credential
   assert.equal(own.records.length, 1);
   await assert.rejects(network.clientFor(READER).query("com.atproto.space.listRecords", listing), /missing space credential/);
+});
+
+test("FakeNetwork.listRepos emits real commit.data digests matching getLatestCommit", async () => {
+  const { network, deps } = await setup(undefined, { $type: MEMBERSPACE_POLICY, publicRead: true, publicWrite: true });
+  await network.writeAs(OWNER, SPACE, "new.flock.dm.request", "a", { text: "one" });
+  await network.writeAs(READER, SPACE, "new.flock.dm.request", "b", { text: "two" });
+
+  const cred = await mintSpaceCredentialWith(deps, SPACE);
+  const listed = await cred.client("https://fake-pds.test/pds1").query<{
+    repos: Array<{ did: string; repoRev: string; data: { $bytes: string } }>;
+  }>("com.atproto.space.listRepos", { space: SPACE });
+  assert.equal(listed.repos.length, 2);
+
+  for (const repo of listed.repos) {
+    const pds = await network.resolvePds(repo.did);
+    const latest = await cred.client(pds).query<{ commit: { rev: string; data: { $bytes: string } } }>(
+      "com.atproto.space.getLatestCommit",
+      { space: SPACE, repo: repo.did },
+    );
+    assert.equal(repo.repoRev, latest.commit.rev);
+    assert.equal(repo.data.$bytes, latest.commit.data.$bytes);
+    assert.notEqual(repo.data.$bytes, toBase64(new Uint8Array(32)));
+  }
+});
+
+test("FakeNetwork.listRecords supports optional collection, excludeValues, and full-uri cursor pagination across shared rkeys", async () => {
+  const { network, deps } = await setup();
+  // Write records with identical rkeys across two distinct collections.
+  await network.writeAs(OWNER, SPACE, "new.flock.workspace.roster", "d-shared", { subject: READER });
+  await network.writeAs(OWNER, SPACE, "new.flock.admin", "d-shared", { subject: READER });
+  await network.writeAs(OWNER, SPACE, "new.flock.admin", "d-other", { subject: OUTSIDER });
+
+  const cred = await mintSpaceCredentialWith(deps, SPACE);
+  const client = cred.client("https://fake-pds.test/pds1");
+
+  // Omitted collection paginates by full URI across both collections without colliding on "d-shared".
+  const p1 = await client.query<{ records: Array<{ collection: string; rkey: string; value?: unknown }>; cursor?: string }>(
+    "com.atproto.space.listRecords",
+    { space: SPACE, repo: OWNER, limit: 2 },
+  );
+  assert.equal(p1.records.length, 2);
+  assert.ok(p1.cursor?.startsWith(`${SPACE}/${OWNER}/`));
+  const p2 = await client.query<{ records: Array<{ collection: string; rkey: string; value?: unknown }>; cursor?: string }>(
+    "com.atproto.space.listRecords",
+    { space: SPACE, repo: OWNER, limit: 2, cursor: p1.cursor },
+  );
+  assert.equal(p2.records.length, 1);
+  assert.equal(p2.cursor, undefined);
+  assert.deepEqual(
+    [...p1.records, ...p2.records].map((r) => `${r.collection}/${r.rkey}`),
+    [
+      "new.flock.workspace.roster/d-shared",
+      "new.flock.admin/d-shared",
+      "new.flock.admin/d-other",
+    ],
+  );
+
+  // Mid-listing deletion of the cursor record still advances cleanly by uri < cursor.
+  await network.deleteAs(OWNER, SPACE, "new.flock.admin", "d-shared");
+  const afterDelete = await client.query<{ records: Array<{ collection: string; rkey: string }> }>(
+    "com.atproto.space.listRecords",
+    { space: SPACE, repo: OWNER, limit: 2, cursor: p1.cursor },
+  );
+  assert.deepEqual(afterDelete.records.map((r) => `${r.collection}/${r.rkey}`), ["new.flock.admin/d-other"]);
+
+  // excludeValues omits values and integrates with listBoundedRecords.
+  const headers = await listBoundedRecords(client, { space: SPACE, repo: OWNER, maxRecords: 10, excludeValues: true });
+  assert.equal(headers.records.length, 2);
+  assert.equal(headers.records[0]!.value, undefined);
+  assert.ok(headers.records[0]!.cid.length > 0);
+});
+
+test("FakeNetwork.listRepoOps handles applyWrites batches, superseded values, since/cursor pagination, and MAC rules", async () => {
+  const { network, deps } = await setup();
+  // Batch 1: create two records in one rev (equal rev, idx 0 and 1).
+  await network.applyWritesAs(OWNER, SPACE, [
+    { action: "create", collection: "new.flock.dm.request", rkey: "r1", value: { text: "v1" } },
+    { action: "create", collection: "new.flock.dm.request", rkey: "r2", value: { text: "stay" } },
+  ]);
+  // Batch 2: update r1 (superseding Batch 1's r1 value!) and create r3, then delete r3 later.
+  await network.applyWritesAs(OWNER, SPACE, [
+    { action: "update", collection: "new.flock.dm.request", rkey: "r1", value: { text: "v2" } },
+    { action: "create", collection: "new.flock.dm.request", rkey: "r3", value: { text: "temp" } },
+  ]);
+  await network.deleteAs(OWNER, SPACE, "new.flock.dm.request", "r3");
+
+  const cred = await mintSpaceCredentialWith(deps, SPACE);
+  const client = cred.client("https://fake-pds.test/pds1");
+
+  type OpsPage = {
+    ops: Array<{ rev: string; collection: string; rkey: string; cid: string | null; prev: string | null; value?: Record<string, unknown> }>;
+    cursor?: string;
+    commit?: { rev: string };
+  };
+  const allOps: OpsPage["ops"] = [];
+  let cursor: string | undefined;
+  let pages = 0;
+  let finalRev: string | undefined;
+  for (;;) {
+    pages += 1;
+    const page = await client.query<OpsPage>("com.atproto.space.listRepoOps", {
+      space: SPACE, repo: OWNER, limit: 2, ...(cursor ? { cursor } : {}),
+    });
+    allOps.push(...page.ops);
+    if (page.commit) {
+      finalRev = page.commit.rev;
+      assert.equal(page.cursor, undefined);
+      break;
+    }
+    assert.equal(page.ops.length, 2);
+    assert.ok(page.cursor);
+    cursor = page.cursor;
+  }
+  assert.equal(pages, 3);
+  assert.equal(allOps.length, 5);
+  assert.equal(allOps[0]!.rev, allOps[1]!.rev, "same-rev batched ops share rev");
+  assert.equal(allOps[0]!.value, undefined, "superseded create op has value: undefined");
+  assert.deepEqual(allOps[1]!.value, { $type: "new.flock.dm.request", text: "stay" });
+  assert.deepEqual(allOps[2]!.value, { $type: "new.flock.dm.request", text: "v2" });
+  assert.equal(allOps[3]!.value, undefined, "deleted create op has value: undefined");
+  assert.equal(allOps[4]!.cid, null);
+  assert.equal(allOps[4]!.prev, allOps[3]!.cid);
+  assert.equal(allOps[4]!.value, undefined);
+
+  // since is exclusive.
+  const sinceFirst = await client.query<OpsPage>("com.atproto.space.listRepoOps", {
+    space: SPACE, repo: OWNER, since: allOps[0]!.rev, limit: 10,
+  });
+  assert.equal(sinceFirst.ops.length, 3);
+  assert.equal(sinceFirst.commit?.rev, finalRev);
+
+  // excludeValues: true omits surviving values too.
+  const metaOnly = await client.query<OpsPage>("com.atproto.space.listRepoOps", {
+    space: SPACE, repo: OWNER, excludeValues: true, limit: 10,
+  });
+  assert.equal(metaOnly.ops.every((op) => op.value === undefined), true);
+});
+
+test("FakeNetwork.clearRecords and importRepo preserve space_repo with new signed commit and reset oplog history", async () => {
+  const { network, deps } = await setup();
+  await network.writeAs(OWNER, SPACE, "new.flock.dm.request", "a", { text: "before-clear" });
+  const cred = await mintSpaceCredentialWith(deps, SPACE);
+  const client = cred.client("https://fake-pds.test/pds1");
+  const beforeCommit = await client.query<{ commit: { rev: string } }>("com.atproto.space.getLatestCommit", { space: SPACE, repo: OWNER });
+
+  // clearRecords clears records and oplog, assigns new commit rev, and NEVER returns RepoNotFound.
+  network.clearRecordsAs(OWNER, SPACE);
+  const afterClearCommit = await client.query<{ commit: { rev: string; data: { $bytes: string } } }>("com.atproto.space.getLatestCommit", { space: SPACE, repo: OWNER });
+  assert.ok(afterClearCommit.commit.rev > beforeCommit.commit.rev);
+  const afterClearOps = await client.query<{ ops: unknown[]; commit?: { rev: string } }>("com.atproto.space.listRepoOps", { space: SPACE, repo: OWNER, limit: 10 });
+  assert.deepEqual(afterClearOps.ops, []);
+  assert.equal(afterClearOps.commit?.rev, afterClearCommit.commit.rev);
+  const afterClearStar = await cred.fetchVerifiedRepoStar("https://fake-pds.test/pds1", { space: SPACE, repo: OWNER, maxBytes: 1024 * 1024, maxRecords: 10 });
+  assert.deepEqual(afterClearStar.records, []);
+
+  // importRepo replaces records with imported set, resets oplog, and preserves space_repo (even when empty).
+  await network.importRepoAs(OWNER, SPACE, [
+    { collection: "new.flock.dm.request", rkey: "imported", value: { text: "from-import" } },
+  ]);
+  const importedStar = await cred.fetchVerifiedRepoStar("https://fake-pds.test/pds1", { space: SPACE, repo: OWNER, maxBytes: 1024 * 1024, maxRecords: 10 });
+  assert.deepEqual(importedStar.records.map((r) => [r.rkey, r.record.text]), [["imported", "from-import"]]);
+  const importedOps = await client.query<{ ops: unknown[]; commit?: { rev: string } }>("com.atproto.space.listRepoOps", { space: SPACE, repo: OWNER, limit: 10 });
+  assert.deepEqual(importedOps.ops, []);
+  assert.ok(importedOps.commit?.rev && importedOps.commit.rev > afterClearCommit.commit.rev);
+
+  // Empty importRepo also preserves space_repo (never RepoNotFound).
+  await network.importRepoAs(OWNER, SPACE, []);
+  const emptyImportedStar = await cred.fetchVerifiedRepoStar("https://fake-pds.test/pds1", { space: SPACE, repo: OWNER, maxBytes: 1024 * 1024, maxRecords: 10 });
+  assert.deepEqual(emptyImportedStar.records, []);
+});
+
+test("FakeNetwork distinguishes unwritten space repo vs missing account on PDS without MAC", async () => {
+  const { network, deps } = await setup();
+  const cred = await mintSpaceCredentialWith(deps, SPACE);
+  const pds2 = "https://fake-pds.test/pds2";
+  const client = cred.client(pds2);
+
+  // Unwritten account (READER exists on pds2, never wrote to SPACE):
+  // getLatestCommit & getRepo -> HTTP 400 RepoNotFound without MAC; listRepoOps -> { ops: [] } no commit/MAC; listRecords -> { records: [] }.
+  let sawUnwrittenMac = false;
+  network.interceptResponse = ({ method, response }) => {
+    if (method === "com.atproto.space.getLatestCommit" || method === "com.atproto.space.getRepo") {
+      if (response.headers.has(MAC_HEADER)) sawUnwrittenMac = true;
+    }
+    return response;
+  };
+  await assert.rejects(client.query("com.atproto.space.getLatestCommit", { space: SPACE, repo: READER }), { status: 400, code: "RepoNotFound" });
+  await assert.rejects(cred.fetchVerifiedRepoStar(pds2, { space: SPACE, repo: READER, maxBytes: 1024 * 1024, maxRecords: 10 }), { status: 400, code: "RepoNotFound" });
+  assert.equal(sawUnwrittenMac, false);
+  assert.deepEqual(await client.query("com.atproto.space.listRepoOps", { space: SPACE, repo: READER }), { ops: [] });
+  assert.deepEqual(await client.query("com.atproto.space.listRecords", { space: SPACE, repo: READER }), { records: [] });
+
+  // Missing account on PDS: all reads (including listRepoOps and listRecords) fail with HTTP 400 RepoNotFound without MAC.
+  network.setAccountState(READER, "missing");
+  await assert.rejects(client.query("com.atproto.space.getLatestCommit", { space: SPACE, repo: READER }), { status: 400, code: "RepoNotFound" });
+  await assert.rejects(cred.fetchVerifiedRepoStar(pds2, { space: SPACE, repo: READER, maxBytes: 1024 * 1024, maxRecords: 10 }), { status: 400, code: "RepoNotFound" });
+  await assert.rejects(client.query("com.atproto.space.listRepoOps", { space: SPACE, repo: READER }), { status: 400, code: "RepoNotFound" });
+  await assert.rejects(client.query("com.atproto.space.listRecords", { space: SPACE, repo: READER }), { status: 400, code: "RepoNotFound" });
+});
+
+test("FakeNetwork fault injection hooks exercise mid-read races, pruned oplog, forged CID, and MAC faults", async () => {
+  const { network, deps } = await setup();
+  await network.writeAs(OWNER, SPACE, "new.flock.dm.request", "a", { text: "one" });
+  await network.writeAs(OWNER, SPACE, "new.flock.dm.request", "b", { text: "two" });
+  const cred = await mintSpaceCredentialWith(deps, SPACE);
+  const client = cred.client("https://fake-pds.test/pds1");
+
+  // 1. Mid-page race via beforeListRepoOps & beforeGetLatestCommit.
+  let racedOps = false;
+  network.beforeListRepoOps = async ({ cursor }) => {
+    if (cursor && !racedOps) {
+      racedOps = true;
+      await network.writeAs(OWNER, SPACE, "new.flock.dm.request", "c", { text: "race" });
+    }
+  };
+  const page1 = await client.query<{ ops: Array<{ rev: string }>; cursor?: string }>("com.atproto.space.listRepoOps", {
+    space: SPACE, repo: OWNER, limit: 1,
+  });
+  const page2 = await client.query<{ ops: Array<{ rev: string }>; cursor?: string }>("com.atproto.space.listRepoOps", {
+    space: SPACE, repo: OWNER, limit: 1, cursor: page1.cursor,
+  });
+  const page3 = await client.query<{ ops: Array<{ rkey: string }>; commit?: { rev: string } }>("com.atproto.space.listRepoOps", {
+    space: SPACE, repo: OWNER, limit: 10, cursor: page2.cursor,
+  });
+  assert.equal(racedOps, true);
+  assert.equal(page3.ops[0]!.rkey, "c");
+  network.beforeListRepoOps = undefined;
+
+  let racedCommit = false;
+  network.beforeGetLatestCommit = async () => {
+    if (!racedCommit) {
+      racedCommit = true;
+      await network.writeAs(OWNER, SPACE, "new.flock.dm.request", "d", { text: "between" });
+    }
+  };
+  const recs = await listBoundedRecords(client, { space: SPACE, repo: OWNER, maxRecords: 10 });
+  const commitAfter = await client.query<{ commit: { rev: string } }>("com.atproto.space.getLatestCommit", { space: SPACE, repo: OWNER });
+  assert.equal(racedCommit, true);
+  assert.equal(recs.records.length, 3);
+  assert.ok(commitAfter.commit.rev > page3.commit!.rev);
+  network.beforeGetLatestCommit = undefined;
+
+  // 2. pruneOplog drops history strictly before keepFromRev (leaving "c" at page3.commit.rev and "d" after it).
+  network.pruneOplog(SPACE, OWNER, page3.commit!.rev);
+  const prunedOps = await client.query<{ ops: Array<{ rkey: string; rev: string }> }>("com.atproto.space.listRepoOps", { space: SPACE, repo: OWNER, limit: 10 });
+  assert.deepEqual(prunedOps.ops.map((op) => op.rkey), ["c", "d"]);
+
+  // 3. interceptResponse can inject forged CIDs and forged MACs.
+  network.interceptResponse = async ({ method, response }) => {
+    if (method === "com.atproto.space.listRecords" && response.ok) {
+      const json = await response.json() as { records: Array<{ value: Record<string, unknown> }> };
+      json.records[0]!.value = { text: "forged-value" };
+      return new Response(JSON.stringify(json), { status: 200, headers: response.headers });
+    }
+    if (method === "com.atproto.space.getLatestCommit" && response.ok) {
+      const headers = new Headers(response.headers);
+      headers.set(MAC_HEADER, headers.get(MAC_HEADER)!.replace(/mac=:[^:]+:/, "mac=:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=:"));
+      return new Response(response.body, { status: 200, headers });
+    }
+    return response;
+  };
+  const tamperedList = await listBoundedRecords(client, { space: SPACE, repo: OWNER, maxRecords: 10 });
+  assert.equal(await verifyRecordCid(tamperedList.records[0]!.collection, tamperedList.records[0]!.rkey, tamperedList.records[0]!.value, tamperedList.records[0]!.cid), false);
+  await assert.rejects(client.query("com.atproto.space.getLatestCommit", { space: SPACE, repo: OWNER }), SpaceMacError);
+});
+
+test("reading or deleting an unwritten member repo does not mutate space.repos or pollute listSpaces", async () => {
+  const { network, deps } = await setup(undefined, { $type: MEMBERSPACE_POLICY, publicRead: true, publicWrite: true });
+  const cred = await mintSpaceCredentialWith(deps, SPACE);
+  const readerClient = network.clientFor(READER);
+  const pds2 = "https://fake-pds.test/pds2";
+  const memberClient = cred.client(pds2);
+
+  assert.deepEqual(await readerClient.query<{ spaces: Array<{ uri: string }> }>("com.atproto.space.listSpaces", {}), { spaces: [] });
+
+  // Probe READER's unwritten repo across every read endpoint (and no-op delete/clear).
+  assert.deepEqual(await memberClient.query("com.atproto.space.listRepoOps", { space: SPACE, repo: READER }), { ops: [] });
+  assert.deepEqual(await memberClient.query("com.atproto.space.listRecords", { space: SPACE, repo: READER }), { records: [] });
+  await assert.rejects(
+    memberClient.query("com.atproto.space.getRecord", { space: SPACE, repo: READER, collection: "new.flock.dm.request", rkey: "missing" }),
+    { status: 400, code: "RecordNotFound" },
+  );
+  await assert.rejects(
+    cred.fetchVerifiedRepoStar(pds2, { space: SPACE, repo: READER, maxBytes: 64 * 1024, maxRecords: 10 }),
+    { status: 400, code: "RepoNotFound" },
+  );
+  await assert.rejects(
+    memberClient.query("com.atproto.space.getLatestCommit", { space: SPACE, repo: READER }),
+    { status: 400, code: "RepoNotFound" },
+  );
+  await readerClient.procedure("com.atproto.space.deleteRecord", { space: SPACE, repo: READER, collection: "new.flock.dm.request", rkey: "missing" });
+  await readerClient.procedure("com.atproto.space.clearRecords", { space: SPACE, repo: READER });
+
+  // Unwritten repo reads/no-op deletes must NEVER add READER to listSpaces.
+  assert.deepEqual(await readerClient.query<{ spaces: Array<{ uri: string }> }>("com.atproto.space.listSpaces", {}), { spaces: [] });
+
+  // Once READER actually writes a record, listSpaces includes the space.
+  await network.writeAs(READER, SPACE, "new.flock.dm.request", "m1", { text: "hello" });
+  assert.deepEqual(await readerClient.query<{ spaces: Array<{ uri: string }> }>("com.atproto.space.listSpaces", {}), {
+    spaces: [{ uri: SPACE }],
+  });
+});
+
+test("concurrent applyWritesAs and putRecord calls on the same (space, repo) serialize cleanly and match LtHash commit", async () => {
+  const { network, deps } = await setup();
+  const cred = await mintSpaceCredentialWith(deps, SPACE);
+  const pds1 = "https://fake-pds.test/pds1";
+
+  await Promise.all([
+    network.applyWritesAs(OWNER, SPACE, [
+      { action: "create", collection: "new.flock.dm.request", rkey: "b1", value: { text: "one" } },
+      { action: "create", collection: "new.flock.dm.request", rkey: "b2", value: { text: "two" } },
+    ]),
+    network.applyWritesAs(OWNER, SPACE, [
+      { action: "create", collection: "new.flock.dm.request", rkey: "b3", value: { text: "three" } },
+    ]),
+    network.writeAs(OWNER, SPACE, "new.flock.dm.request", "p1", { text: "four" }),
+  ]);
+
+  const star = await cred.fetchVerifiedRepoStar(pds1, {
+    space: SPACE,
+    repo: OWNER,
+    maxBytes: 1024 * 1024,
+    maxRecords: 100,
+  });
+  assert.deepEqual(
+    star.records.map((r) => r.rkey).sort(),
+    ["b1", "b2", "b3", "p1"],
+  );
+  const opsPage = await cred.client(pds1).query<{ ops: Array<{ rev: string; rkey: string; prev: string | null }> }>(
+    "com.atproto.space.listRepoOps",
+    { space: SPACE, repo: OWNER, limit: 100 },
+  );
+  assert.deepEqual(opsPage.ops.map((o) => o.rkey).sort(), ["b1", "b2", "b3", "p1"]);
+  for (const op of opsPage.ops) {
+    assert.equal(op.prev, null);
+  }
 });

@@ -2,7 +2,7 @@ import { isAccessLost, SpaceCredentialError } from "@flock/protocol/atproto/spac
 import { isMissingXrpcResource } from "@flock/protocol/atproto/xrpc";
 import { appInboxUri, channelUri, parseSpaceRecordUri, parseWorkspaceUri } from "@flock/protocol/keys";
 import { COLLECTION, REPO_COLLECTION } from "@flock/protocol/nsids";
-import { isCommandName, validateAppDeclaration } from "@flock/protocol/registry";
+import { isCommandName, validateAppDeclaration, validateSpaceRecord } from "@flock/protocol/registry";
 import { appGrantScopes } from "@flock/protocol/scopes";
 import type { WorkspaceSummary } from "@flock/protocol/workspace-summary";
 import type { AppInboxClient, AppInboxRecord } from "./app-inbox-client";
@@ -14,6 +14,7 @@ import { ChangeFollower, pause, REFOLLOW_DELAY_MS, RETRY_DELAY_MS, type PollResu
 import { KeyWindow, type WindowClock } from "./key-window";
 import type { OperatorClient } from "./operator-client";
 import type { ListedWriter } from "./store";
+import type { RepoOpsResetNotice, SyncCore } from "./sync";
 import type { ClientTransport } from "./transport";
 import type { DeclaredCommand } from "./workspace-client";
 
@@ -63,6 +64,7 @@ export class AppAccessLostError extends Error {
 export type AppRuntimeEngine = Pick<Engine, "channels" | "workspaces" | "credentials"> & {
   appInboxes?: Pick<AppInboxClient, "writers" | "readPage">;
   operator: Pick<OperatorClient, "getChanges">;
+  sync?: SyncCore;
 };
 
 export type AppRuntimeInput = {
@@ -86,6 +88,8 @@ export type AppRuntimeInput = {
    * invalid or throttled inbox record that was dropped, a read cut short, and access lost (`AppAccessLostError`).
    */
   onError(error: unknown): void;
+  /** Optional diagnostic hook when a repo's oplog resets (`clearRecords`/`importRepo`/pruned oplog) and re-baselines cleanly. */
+  onReset?: (notice: RepoOpsResetNotice) => void;
   /** How long the runtime waits before following again a space it lost (a minute by default). */
   refollowDelayMs?: number;
   /** How long it waits before following again a space it could not follow for a passing failure (five seconds by default). */
@@ -295,12 +299,14 @@ export class AppRuntime {
     }
     if (this.inboxes.has(space)) {
       this.window.delete(space);
+      this.input.engine.sync?.unfollowRepoOps(space);
       this.throttles.delete(space);
     }
     for (const [inbox, workspace] of this.inboxes) {
       if (workspace !== space) continue;
       this.inboxes.delete(inbox);
       this.window.delete(inbox);
+      this.input.engine.sync?.unfollowRepoOps(inbox);
       this.throttles.delete(inbox);
       this.nextAttempt.delete(inbox);
       this.failures.delete(inbox);
@@ -315,6 +321,7 @@ export class AppRuntime {
         this.follower.unfollow(channel);
       }
       this.window.delete(channel);
+      this.input.engine.sync?.unfollowRepoOps(channel);
     }
   }
 
@@ -350,6 +357,7 @@ export class AppRuntime {
     } else if (this.inboxes.has(inbox)) {
       this.inboxes.delete(inbox);
       this.window.delete(inbox);
+      this.input.engine.sync?.unfollowRepoOps(inbox);
       this.throttles.delete(inbox);
       this.nextAttempt.delete(inbox);
       this.failures.delete(inbox);
@@ -366,6 +374,7 @@ export class AppRuntime {
       if (grant.channel.workspace !== workspace || granted.has(space)) continue;
       this.grants.delete(space);
       this.window.delete(space);
+      this.input.engine.sync?.unfollowRepoOps(space);
       this.nextAttempt.delete(space);
       this.failures.delete(space);
       this.follower.unfollow(space);
@@ -376,6 +385,45 @@ export class AppRuntime {
   private async readChannel(space: string, grant: Grant, deliver: boolean): Promise<void> {
     const onMessage = this.input.onMessage;
     if (!onMessage) return;
+    if (this.input.engine.sync) {
+      let currentCanWrite = grant.write;
+      const workspace = grant.channel.workspace;
+      await this.input.engine.sync.followRepoOps({
+        space,
+        collections: [COLLECTION.message],
+        deliver,
+        workspace,
+        clock: this.clock,
+        labels: { items: "messages", space: "channel" },
+        prepare: async (events) => {
+          const known = (did: string) => this.people.get(workspace)?.has(did) === true || this.apps.get(workspace)?.has(did) === true;
+          if (events.some((event) => !known(event.repo))) {
+            await this.readGrants(workspace);
+            const current = this.grants.get(space);
+            if (!current) return false;
+            currentCanWrite = current.write;
+          } else {
+            const current = this.grants.get(space);
+            if (current) currentCanWrite = current.write;
+          }
+          return true;
+        },
+        onEvent: async (event) => {
+          const apps = this.apps.get(workspace) ?? new Set<string>();
+          if (apps.has(event.repo)) return;
+          const valid = await this.validateChannelEvent(space, grant.channel, event.repo, event.rkey, event.value);
+          if (!valid) return;
+          await onMessage({
+            channel: grant.channel,
+            canWrite: currentCanWrite,
+            message: { uri: event.uri, repo: event.repo, rkey: event.rkey, value: event.value },
+          });
+        },
+        onReset: (notice) => this.handleReset(notice),
+        onError: this.input.onError,
+      });
+      return;
+    }
     await this.window.read<ChannelMessage>({
       space,
       deliver,
@@ -408,6 +456,50 @@ export class AppRuntime {
   }
 
   private async readInbox(space: string, workspace: string, deliver: boolean): Promise<void> {
+    if (this.input.engine.sync) {
+      let inboxContext: Awaited<ReturnType<AppRuntime["buildInboxContext"]>> = null;
+      await this.input.engine.sync.followRepoOps({
+        space,
+        collections: [COLLECTION.appCommand, COLLECTION.appAction],
+        deliver,
+        workspace,
+        clock: this.clock,
+        labels: { items: "records", space: "inbox" },
+        prepare: async (events) => {
+          if (events.length === 0) {
+            inboxContext = null;
+            return true;
+          }
+          inboxContext = await this.buildInboxContext(space, workspace);
+          return inboxContext !== null;
+        },
+        onEvent: async (event) => {
+          if (!inboxContext) return;
+          if (event.collection !== COLLECTION.appCommand && event.collection !== COLLECTION.appAction) return;
+          const validation = validateSpaceRecord(event.collection, event.value, {
+            authorityDid: inboxContext.authorityDid,
+            spaceUri: space,
+            repoDid: event.repo,
+            rkey: event.rkey,
+          });
+          if (!validation.valid) {
+            this.dropInboxRecord(event.uri, validation.reason);
+            return;
+          }
+          await this.deliverInboxRecord(space, workspace, inboxContext.authorityDid, inboxContext, {
+            uri: event.uri,
+            repo: event.repo,
+            rkey: event.rkey,
+            collection: event.collection,
+            value: event.value,
+          });
+        },
+        onReset: (notice) => this.handleReset(notice),
+        onError: this.input.onError,
+      });
+      return;
+    }
+
     const appInboxes = this.input.engine.appInboxes!;
     let writersPromise: Promise<ListedWriter[]> | undefined;
     const getWriters = () => (writersPromise ??= appInboxes.writers(workspace, this.input.did));
@@ -432,42 +524,96 @@ export class AppRuntime {
       streams: [streamOf(COLLECTION.appCommand), streamOf(COLLECTION.appAction)],
       prepare: async (fresh) => {
         if (fresh.length === 0) return async () => undefined;
-        const summary = await this.input.engine.workspaces.summary(workspace, { fresh: true });
-        this.applySummary(workspace, summary);
-        if (!summary || !this.inboxes.has(space)) return null;
-        const install = summary.installs.find((entry) => entry.did === this.input.did);
-        if (!install) return null;
-
-        const roster = new Set(summary.members.map((member) => member.did));
-        const apps = new Set(summary.installs.map((entry) => entry.did));
-        const directoryByUri = new Map(summary.channels.map((channel) => [channel.uri, channel]));
-        const appGrants = new Map(install.channels.map((grant) => [grant.skey, grant.write]));
-        const privateRosters = new Map<string, Promise<ReadonlySet<string>>>();
-        const privateRosterOf = (ref: ChannelRef): Promise<ReadonlySet<string>> => {
-          let pending = privateRosters.get(ref.skey);
-          if (!pending) {
-            pending = this.input.engine.channels
-              .roster(ref)
-              .then((members) => new Set(members))
-              .catch((error: unknown) => {
-                privateRosters.delete(ref.skey);
-                throw error;
-              });
-            privateRosters.set(ref.skey, pending);
-          }
-          return pending;
-        };
-
+        const context = await this.buildInboxContext(space, workspace);
+        if (!context) return null;
         return (record) =>
           this.deliverInboxRecord(
             space,
             workspace,
-            summary.authorityDid,
-            { roster, apps, directoryByUri, appGrants, privateRosterOf },
+            context.authorityDid,
+            context,
             record,
           );
       },
     });
+  }
+
+  private async buildInboxContext(space: string, workspace: string): Promise<{
+    authorityDid: string;
+    roster: ReadonlySet<string>;
+    apps: ReadonlySet<string>;
+    directoryByUri: ReadonlyMap<string, WorkspaceSummary["channels"][number]>;
+    appGrants: ReadonlyMap<string, boolean>;
+    privateRosterOf: (ref: ChannelRef) => Promise<ReadonlySet<string>>;
+  } | null> {
+    const summary = await this.input.engine.workspaces.summary(workspace, { fresh: true });
+    this.applySummary(workspace, summary);
+    if (!summary || !this.inboxes.has(space)) return null;
+    const install = summary.installs.find((entry) => entry.did === this.input.did);
+    if (!install) return null;
+
+    const roster = new Set(summary.members.map((member) => member.did));
+    const apps = new Set(summary.installs.map((entry) => entry.did));
+    const directoryByUri = new Map(summary.channels.map((channel) => [channel.uri, channel]));
+    const appGrants = new Map(install.channels.map((grant) => [grant.skey, grant.write]));
+    const privateRosters = new Map<string, Promise<ReadonlySet<string>>>();
+    const privateRosterOf = (ref: ChannelRef): Promise<ReadonlySet<string>> => {
+      let pending = privateRosters.get(ref.skey);
+      if (!pending) {
+        pending = this.input.engine.channels
+          .roster(ref)
+          .then((members) => new Set(members))
+          .catch((error: unknown) => {
+            privateRosters.delete(ref.skey);
+            throw error;
+          });
+        privateRosters.set(ref.skey, pending);
+      }
+      return pending;
+    };
+    return { authorityDid: summary.authorityDid, roster, apps, directoryByUri, appGrants, privateRosterOf };
+  }
+
+  private async validateChannelEvent(
+    space: string,
+    channel: ChannelRef,
+    repo: string,
+    rkey: string,
+    value: Record<string, unknown>,
+  ): Promise<boolean> {
+    const parsedWorkspace = parseWorkspaceUri(channel.workspace);
+    if (!parsedWorkspace) return false;
+    const known = new Set<string>();
+    if (value.parent !== undefined) {
+      if (typeof value.parent !== "string") return false;
+      const parentTarget = parseSpaceRecordUri(value.parent, space, COLLECTION.message);
+      if (!parentTarget) return false;
+      let parentMessage: ChannelMessage | null;
+      try {
+        parentMessage = await this.input.engine.channels.getMessage(channel, value.parent);
+      } catch (error) {
+        if (error instanceof ChannelUnavailableError || isAccessLost(error)) return false;
+        throw error;
+      }
+      if (!parentMessage || parentMessage.value.parent !== undefined) return false;
+      known.add(value.parent);
+    }
+    return validateSpaceRecord(COLLECTION.message, value, {
+      authorityDid: parsedWorkspace.authorityDid,
+      spaceUri: space,
+      repoDid: repo,
+      rkey,
+      knownMessages: known,
+      knownTopLevelMessages: known,
+    }).valid;
+  }
+
+  private handleReset(notice: RepoOpsResetNotice): void {
+    if (this.input.onReset) {
+      this.input.onReset(notice);
+      return;
+    }
+    this.input.onError(new Error(`Repo oplog reset on ${notice.space} (${notice.repo}): ${notice.reason}.`));
   }
 
   private async deliverInboxRecord(

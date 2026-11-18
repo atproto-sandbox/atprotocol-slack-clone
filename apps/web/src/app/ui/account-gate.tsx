@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { ClientUnavailableError, signedInDid, type BrowserSessionConfig } from "../../browser/session";
+import { registerAccountGateMount } from "../../browser/shell-lifecycle";
 import { messageOf } from "./client-api";
 import { LoginForm } from "./login-form";
 import { WorkspaceManager } from "./workspace-manager";
@@ -17,6 +18,8 @@ type Account = { did: string } | { signIn: string } | { retry: string };
  */
 export function AccountGate({ config }: AccountGateProps) {
   const [account, setAccount] = useState<Account>();
+
+  useEffect(() => registerAccountGateMount(), []);
 
   useEffect(() => {
     signedInDid(config).then(

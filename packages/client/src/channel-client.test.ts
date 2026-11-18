@@ -283,6 +283,62 @@ test("getMessage reads any verified message regardless of page age, validates a 
   assert.equal(await alice.channels.getMessage(ref(), spaceRecordUri(fixture.channels.other!, BOB, COLLECTION.message, key(2))), null);
 });
 
+test("getMessage gates target and parent authors against sync.writers (Carbon R2-H1 / D14)", async () => {
+  const { network, fixture, ref } = await workspace([{ skey: "general", visibility: "public" }]);
+  const space = fixture.channels.general!;
+
+  // 1. Write >5 pages (120 messages) from active writer BOB plus a valid top-level message from ALICE.
+  await writeMessage(network, BOB, space, 1, "ancient-bob");
+  for (let n = 2; n <= 120; n += 1) await writeMessage(network, BOB, space, n);
+  const evilDid = "did:web:evil.example";
+  const resolvedDids: string[] = [];
+  const fetchedUrls: string[] = [];
+  const baseTransport = transportFor(network, ALICE);
+  const inspectedAlice = createEngine({
+    ...baseTransport,
+    resolvePds: async (did) => {
+      resolvedDids.push(did);
+      return baseTransport.resolvePds(did);
+    },
+    fetchEndpoint: async (request) => {
+      fetchedUrls.push(request.url);
+      return baseTransport.fetchEndpoint(request);
+    },
+  });
+
+  // 2. Permalink to an unlisted external did:web author MUST return null without resolving PDS or sending a credential.
+  const evilMsgUri = spaceRecordUri(space, evilDid, COLLECTION.message, key(500));
+  assert.equal(await inspectedAlice.channels.getMessage(ref(), evilMsgUri), null);
+  assert.equal(resolvedDids.includes(evilDid), false, "must never resolve unlisted did:web PDS");
+  assert.equal(fetchedUrls.some((url) => url.includes("evil.example")), false, "must never leak SpaceCredential to unlisted host");
+
+  // 3. Even if an active writer's reply names an unlisted did:web parent, getMessage refuses before resolving parent PDS.
+  const spoofParentReplyUri = spaceRecordUri(space, BOB, COLLECTION.message, key(501));
+  await network.writeAs(BOB, space, COLLECTION.message, key(501), {
+    text: "reply pointing outside space",
+    createdAt: "2026-11-10T12:00:00.000Z",
+    parent: evilMsgUri,
+  });
+  assert.equal(await inspectedAlice.channels.getMessage(ref(), spoofParentReplyUri), null);
+  assert.equal(resolvedDids.includes(evilDid), false, "must never resolve unlisted parent author PDS");
+
+  // 4. Valid >5-page ancient message from active listed writer succeeds, and newly sent own message with pending listing lag succeeds.
+  const ancientUri = spaceRecordUri(space, BOB, COLLECTION.message, key(1));
+  assert.equal((await inspectedAlice.channels.getMessage(ref(), ancientUri))?.value.text, "ancient-bob");
+
+  network.setListingLag(space, true);
+  const ownSent = await inspectedAlice.channels.send(ref(), "own-pending-msg");
+  assert.equal((await inspectedAlice.channels.getMessage(ref(), ownSent.uri))?.value.text, "own-pending-msg");
+  network.setListingLag(space, false);
+
+  // 5. Evicted writer removed from authority listRepos (D14) MUST return null on getMessage.
+  await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMember", { space, did: BOB });
+  await inspectedAlice.sync.markSpaceStale(space);
+  const evictedCalls = resolvedDids.length;
+  assert.equal(await inspectedAlice.channels.getMessage(ref(), ancientUri), null);
+  assert.equal(resolvedDids.length, evictedCalls, "evicted member getMessage returns null without resolving BOB PDS");
+});
+
 test("an engine with applyOwnWrites disabled keeps nothing it sends, edits, deletes or reacts with in its local store", async () => {
   const network = new FakeNetwork();
   const fixture = await createWorkspace(network, { members: [ALICE], channels: [{ skey: "general", visibility: "public" }] });

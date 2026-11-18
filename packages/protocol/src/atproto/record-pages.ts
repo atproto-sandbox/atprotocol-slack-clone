@@ -2,15 +2,32 @@ import type * as ListRecords from "../lexicons/api/types/com/atproto/space/listR
 import type * as ListMembers from "../lexicons/api/types/com/atproto/memberspace/listMembers";
 import type * as ListRepos from "../lexicons/api/types/com/atproto/space/listRepos";
 import type * as ListSpaces from "../lexicons/api/types/com/atproto/space/listSpaces";
-import { isDid, parseSpaceUri } from "../keys";
+import { isDid, parseSpaceUri, spaceRecordUri } from "../keys";
 import type { AtprotoClient } from "./xrpc";
 
 const MAX_SCAN_PAGES = 128;
 const MAX_REPO_SCAN_PAGES = 512;
 const MAX_SPACE_PAGE = 100; // com.atproto.space.listSpaces caps `limit` at 100; the app caps listRepos/listMembers/listRecords pages at 500 itself.
 
-export type BoundedRecords = {
-  records: Array<{ rkey: string; value: Record<string, unknown> }>;
+const NSID_PATTERN = /^[a-zA-Z](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+(?:\.[a-zA-Z](?:[a-zA-Z0-9]{0,62})?)$/;
+const RKEY_PATTERN = /^[A-Za-z0-9._~:-]{1,512}$/;
+
+export type BoundedRecord = {
+  collection: string;
+  rkey: string;
+  cid: string;
+  value: Record<string, unknown>;
+};
+
+export type BoundedRecordHeader = {
+  collection: string;
+  rkey: string;
+  cid: string;
+  value?: undefined;
+};
+
+export type BoundedRecords<T = BoundedRecord> = {
+  records: T[];
   truncated: boolean;
 };
 
@@ -29,24 +46,89 @@ export type BoundedSpaces = {
   truncated: boolean;
 };
 
+function isNsid(value: unknown): value is string {
+  return typeof value === "string" && value.length >= 5 && value.length <= 317 && NSID_PATTERN.test(value);
+}
+
+function isRecordKey(value: unknown): value is string {
+  return typeof value === "string" && value !== "." && value !== ".." && RKEY_PATTERN.test(value);
+}
+
+function isPlainRecordObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isConsistentRecordUri(uri: unknown, collection: string, rkey: string, space?: string, repo?: string): boolean {
+  if (typeof uri !== "string") return false;
+  if (space !== undefined && repo !== undefined && parseSpaceUri(space) && isDid(repo)) {
+    try {
+      return uri === spaceRecordUri(space, repo, collection, rkey);
+    } catch {
+      return false;
+    }
+  }
+  const spaceIdx = uri.indexOf("/space/");
+  if (spaceIdx <= 0) return false;
+  const parts = uri.slice(spaceIdx + "/space/".length).split("/");
+  if (parts.length !== 5) return false;
+  const [spaceType, skey, uriRepo, uriCollection, uriRkey] = parts;
+  if (!spaceType || !skey || !uriRepo || uriCollection !== collection || uriRkey !== rkey) return false;
+  try {
+    const baseSpace = `${uri.slice(0, spaceIdx)}/space/${spaceType}/${skey}`;
+    return spaceRecordUri(baseSpace, uriRepo, uriCollection, uriRkey) === uri;
+  } catch {
+    return false;
+  }
+}
+
 export function assertBoundedRecordPage(
   page: unknown,
-  input: { collection: string; limit: number; cursor?: string; seenCursors?: ReadonlySet<string> },
+  input: {
+    collection?: string;
+    excludeValues?: boolean;
+    limit: number;
+    cursor?: string;
+    seenCursors?: ReadonlySet<string>;
+    space?: string;
+    repo?: string;
+  },
 ): asserts page is ListRecords.OutputSchema {
-  if (input.collection.length === 0) throw new RangeError("Record page collection must not be empty.");
+  if (input.collection !== undefined && input.collection.length === 0) {
+    throw new RangeError("Record page collection must not be empty.");
+  }
   if (!Number.isSafeInteger(input.limit) || input.limit < 1) throw new RangeError("Record page limit must be a positive safe integer.");
-  if (typeof page !== "object" || page === null) throw new Error("PDS record page is malformed.");
+  if (!isPlainRecordObject(page)) throw new Error("PDS record page is malformed.");
   const candidate = page as { records?: unknown; cursor?: unknown };
   if (!Array.isArray(candidate.records) || candidate.records.length > input.limit) throw new Error("PDS record page exceeded the requested limit.");
-  const rkeys = new Set<string>();
-  if (candidate.records.some((record) => typeof record !== "object" || record === null || typeof record.rkey !== "string" || record.rkey.length === 0 ||
-    record.collection !== input.collection ||
-    typeof record.value !== "object" || record.value === null || Array.isArray(record.value))) {
-    throw new Error("PDS record page contains a malformed record or unexpected collection.");
-  }
-  for (const record of candidate.records as Array<{ rkey: string }>) {
-    if (rkeys.has(record.rkey)) throw new Error("PDS record page contains duplicate record keys.");
-    rkeys.add(record.rkey);
+  const keys = new Set<string>();
+  for (const raw of candidate.records) {
+    if (!isPlainRecordObject(raw)) throw new Error("PDS record page contains a malformed record or unexpected collection.");
+    const record = raw as { collection?: unknown; rkey?: unknown; cid?: unknown; uri?: unknown; value?: unknown };
+    if (!isRecordKey(record.rkey) || !isNsid(record.collection)) {
+      throw new Error("PDS record page contains a malformed record or unexpected collection.");
+    }
+    if (input.collection !== undefined && record.collection !== input.collection) {
+      throw new Error("PDS record page contains a malformed record or unexpected collection.");
+    }
+    if (record.cid !== undefined && (typeof record.cid !== "string" || record.cid.length === 0)) {
+      throw new Error("PDS record page contains a malformed record or unexpected collection.");
+    }
+    if (input.excludeValues === true && (typeof record.cid !== "string" || record.cid.length === 0)) {
+      throw new Error("PDS record page contains a malformed record or unexpected collection.");
+    }
+    if (record.uri !== undefined && !isConsistentRecordUri(record.uri, record.collection, record.rkey, input.space, input.repo)) {
+      throw new Error("PDS record page contains a malformed record or unexpected collection.");
+    }
+    if (input.excludeValues === true) {
+      if (record.value !== undefined && !isPlainRecordObject(record.value)) {
+        throw new Error("PDS record page contains a malformed record or unexpected collection.");
+      }
+    } else if (!isPlainRecordObject(record.value)) {
+      throw new Error("PDS record page contains a malformed record or unexpected collection.");
+    }
+    const key = `${record.collection}/${record.rkey}`;
+    if (keys.has(key)) throw new Error("PDS record page contains duplicate record keys.");
+    keys.add(key);
   }
   if (candidate.cursor !== undefined && (typeof candidate.cursor !== "string" || candidate.cursor.length === 0)) {
     throw new Error("PDS record pagination returned an invalid cursor.");
@@ -294,12 +376,24 @@ export async function listBoundedMembers(
 
 export async function listBoundedRecords(
   client: AtprotoClient,
-  input: { space: string; repo: string; collection: string; maxRecords: number },
-): Promise<BoundedRecords> {
+  input: { space: string; repo: string; collection?: string; maxRecords: number; excludeValues?: false },
+): Promise<BoundedRecords<BoundedRecord>>;
+export async function listBoundedRecords(
+  client: AtprotoClient,
+  input: { space: string; repo: string; collection?: string; maxRecords: number; excludeValues: true },
+): Promise<BoundedRecords<BoundedRecordHeader>>;
+export async function listBoundedRecords(
+  client: AtprotoClient,
+  input: { space: string; repo: string; collection?: string; maxRecords: number; excludeValues?: boolean },
+): Promise<BoundedRecords<BoundedRecord | BoundedRecordHeader>>;
+export async function listBoundedRecords(
+  client: AtprotoClient,
+  input: { space: string; repo: string; collection?: string; maxRecords: number; excludeValues?: boolean },
+): Promise<BoundedRecords<BoundedRecord | BoundedRecordHeader>> {
   if (!Number.isSafeInteger(input.maxRecords) || input.maxRecords < 1) throw new RangeError("Record scan limit must be a positive safe integer.");
-  const records: BoundedRecords["records"] = [];
+  const records: Array<BoundedRecord | BoundedRecordHeader> = [];
   const seenCursors = new Set<string>();
-  const seenRkeys = new Set<string>();
+  const seenKeys = new Set<string>();
   let scanned = 0;
   let pages = 0;
   let cursor: string | undefined;
@@ -309,17 +403,37 @@ export async function listBoundedRecords(
     const page = await client.query<ListRecords.OutputSchema>("com.atproto.space.listRecords", {
       space: input.space,
       repo: input.repo,
-      collection: input.collection,
+      ...(input.collection !== undefined ? { collection: input.collection } : {}),
+      ...(input.excludeValues !== undefined ? { excludeValues: input.excludeValues } : {}),
       limit,
       cursor,
     });
     if (cursor) seenCursors.add(cursor);
-    assertBoundedRecordPage(page, { collection: input.collection, limit, cursor, seenCursors });
+    assertBoundedRecordPage(page, {
+      collection: input.collection,
+      excludeValues: input.excludeValues,
+      limit,
+      cursor,
+      seenCursors,
+      space: input.space,
+      repo: input.repo,
+    });
     for (const record of page.records) {
-      if (seenRkeys.has(record.rkey)) throw new Error("PDS record pagination returned a duplicate record key.");
-      seenRkeys.add(record.rkey);
+      const key = `${record.collection}/${record.rkey}`;
+      if (seenKeys.has(key)) throw new Error("PDS record pagination returned a duplicate record key.");
+      seenKeys.add(key);
     }
-    records.push(...page.records.flatMap((record) => record.value ? [{ rkey: record.rkey, value: record.value }] : []));
+    if (input.excludeValues) {
+      for (const record of page.records) {
+        records.push({ collection: record.collection, rkey: record.rkey, cid: record.cid });
+      }
+    } else {
+      for (const record of page.records) {
+        if (record.value) {
+          records.push({ collection: record.collection, rkey: record.rkey, cid: record.cid ?? "", value: record.value });
+        }
+      }
+    }
     scanned += page.records.length;
     cursor = page.cursor;
     if (cursor) seenCursors.add(cursor);
@@ -331,12 +445,23 @@ export async function listBoundedRecords(
     const page = await client.query<ListRecords.OutputSchema>("com.atproto.space.listRecords", {
       space: input.space,
       repo: input.repo,
-      collection: input.collection,
+      ...(input.collection !== undefined ? { collection: input.collection } : {}),
+      ...(input.excludeValues !== undefined ? { excludeValues: input.excludeValues } : {}),
       limit: 1,
       cursor,
     });
-    assertBoundedRecordPage(page, { collection: input.collection, limit: 1, cursor, seenCursors });
-    if (page.records.some((record) => seenRkeys.has(record.rkey))) throw new Error("PDS record pagination returned a duplicate record key.");
+    assertBoundedRecordPage(page, {
+      collection: input.collection,
+      excludeValues: input.excludeValues,
+      limit: 1,
+      cursor,
+      seenCursors,
+      space: input.space,
+      repo: input.repo,
+    });
+    if (page.records.some((record) => seenKeys.has(`${record.collection}/${record.rkey}`))) {
+      throw new Error("PDS record pagination returned a duplicate record key.");
+    }
     truncated = page.records.length > 0;
   }
   return { records, truncated };

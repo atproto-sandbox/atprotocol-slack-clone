@@ -21,6 +21,7 @@ export type DmContextValue = {
   did: string;
   dmConfig: BrowserSessionConfig;
   status: BrowserSessionStatus;
+  loaded: boolean;
   client: DmClient | null;
   store: BrowserDmStore | null;
   conversations: DmConversationSummary[];
@@ -73,6 +74,7 @@ export function DmProvider({ did, dmConfig, workspaces, activeWorkspace, view, o
   const [inbox, setInbox] = useState<DmInboxState | null>(null);
   const [labels, setLabels] = useState<Record<string, string>>({});
   const [showAll, setShowAll] = useState(false);
+  const [loaded, setLoaded] = useState(false);
   const [localError, setError] = useState("");
   const error = localError || session.error;
   const resyncedRef = useRef(false);
@@ -85,6 +87,7 @@ export function DmProvider({ did, dmConfig, workspaces, activeWorkspace, view, o
     setRequests(scan.requests);
     setSkippedNote(describeSkippedSenders(scan.skipped));
     setInbox(inboxState);
+    setLoaded(true);
     return inboxState;
   }, [client]);
 
@@ -173,6 +176,7 @@ export function DmProvider({ did, dmConfig, workspaces, activeWorkspace, view, o
     did,
     dmConfig,
     status,
+    loaded: Boolean(client && loaded),
     client,
     store,
     conversations: client ? conversations : [],
@@ -195,7 +199,7 @@ export function DmProvider({ did, dmConfig, workspaces, activeWorkspace, view, o
         setError(messageOf(caught));
       }
     },
-  }), [did, dmConfig, status, client, store, conversations, requests, skippedNote, inbox, labels, workspaces, activeWorkspace, showAll, view, openView, error, refresh]);
+  }), [did, dmConfig, status, loaded, client, store, conversations, requests, skippedNote, inbox, labels, workspaces, activeWorkspace, showAll, view, openView, error, refresh]);
 
   return (
     <DmContext.Provider value={value}>

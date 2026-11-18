@@ -1,0 +1,19 @@
+| Round 3 finding | Status | Verification |
+|---|---|---|
+| **Codex #1 — unbounded retained oplog metadata** | **RESOLVED** | Cursor and operation fields are bounded before staging; retained metadata, cursors, and values receive cumulative UTF-8 byte accounting; unknown properties are stripped. [sync.ts:1431](packages/client/src/sync.ts:1431), [sync.ts:1451](packages/client/src/sync.ts:1451), [sync.ts:1463](packages/client/src/sync.ts:1463), [sync.ts:2561](packages/client/src/sync.ts:2561). |
+| **Codex #2 — delayed cold-failure cleanup erases newer success** | **RESOLVED** | Cold and warm cleanup require the captured generation, invalidation sequence, and epoch. Both stores check these atomically before mutation. [sync.ts:1213](packages/client/src/sync.ts:1213), [memory-store.ts:81](packages/client/src/memory-store.ts:81), [indexeddb-store.ts:192](packages/client/src/indexeddb-store.ts:192). |
+| **Codex #3 — stale hints defeat permanent-failure backoff** | **RESOLVED** | Attempts capture `staleSeq` and acknowledge only that sequence, including on failure. Later hints remain pending; permanent-failure backoff remains effective. [sync.ts:693](packages/client/src/sync.ts:693), [sync.ts:723](packages/client/src/sync.ts:723), [sync.ts:869](packages/client/src/sync.ts:869). |
+| **Codex #4 — failed workspace verification permits Tasks writes** | **RESOLVED** | Writes force fresh workspace verification and reject incomplete authority snapshots before Tasks operations. The returned context is guarded again. [tasks-client.ts:1168](packages/client/src/ext/tasks/tasks-client.ts:1168), [tasks-client.ts:1223](packages/client/src/ext/tasks/tasks-client.ts:1223), [tasks-client.ts:1110](packages/client/src/ext/tasks/tasks-client.ts:1110). |
+| **Carbon M1 — metadata bypasses staging limits** | **RESOLVED** | The projection and byte limits apply to both current-state delta sync and event following. [sync.ts:1309](packages/client/src/sync.ts:1309), [sync.ts:1448](packages/client/src/sync.ts:1448), [sync.ts:1658](packages/client/src/sync.ts:1658). |
+
+**Zero remaining or newly introduced findings:** Blocker **0**, High **0**, Medium **0**, Low **0**.
+
+Additional regression checks found:
+
+- Malformed or oversized operations on either the first or later pages discard the staged result. Current-state sync performs full verified recovery; following obtains a verified baseline and emits a reset. `excludeValues` removes values from retained operations. [sync.ts:1313](packages/client/src/sync.ts:1313), [sync.ts:1469](packages/client/src/sync.ts:1469), [sync.ts:1676](packages/client/src/sync.ts:1676), [sync.ts:826](packages/client/src/sync.ts:826).
+- Successful cleanup clears hashes and optimistic overlays; rejected cleanup preserves concurrent state. Hints, optimistic writes, invalidations, and purges correctly defeat obsolete cleanup. No demonstrated legitimate-cleanup rejection remained. [store.ts:280](packages/client/src/store.ts:280), [store.ts:303](packages/client/src/store.ts:303).
+- Individual Tasks writer failures affect `spaceSync.complete`, independently of workspace verification. `deleteComment` uses the write guard; fresh Tasks credentials retain the membership check after removal. [tasks-client.ts:1237](packages/client/src/ext/tasks/tasks-client.ts:1237), [tasks-client.ts:769](packages/client/src/ext/tasks/tasks-client.ts:769), [credentials.ts:38](packages/client/src/credentials.ts:38).
+
+The independent reviewer and critic agreed. Specs, pinned protocol behavior, surrounding code, and regression tests were inspected statically. Branch/HEAD match the requested target; tracked and untracked status remained clean. No files changed, and no builds, tests, typecheckers, linters, servers, or Playwright ran.
+
+VERDICT: READY

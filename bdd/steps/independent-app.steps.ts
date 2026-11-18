@@ -281,7 +281,7 @@ async function observeSyncedViews(world: AppWorld, owner: AppViewer, member: App
   await owner.page.getByRole("heading", { name: world.workspaceName, exact: true }).waitFor({ state: "visible" });
   const pending = owner.page.locator(".roster-row").filter({ hasText: `${member.did} requested #Vault` });
   await syncInboxUntilShown(owner, options.requestPending ? pending : owner.page.getByText("No pending join requests."));
-  const rows = owner.page.locator(".roster-row").filter({ hasNotText: "requested" });
+  const rows = owner.page.locator(".roster-row:not(.extension-row):not(.app-row)").filter({ hasNotText: "requested" });
   const memberRow = rows.filter({ hasText: member.did });
 
   const memberReadsFrom = member.xrpc.length;

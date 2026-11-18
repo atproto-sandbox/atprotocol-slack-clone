@@ -344,3 +344,177 @@ test("the writers changed since a space revision are read page by page, a short 
   assert.equal(requests.length, 2, "the second page is short, so no third request asks for an empty one");
   await assert.rejects(listReposSince(client, { space: "at://did:plc:a/space/new.flock.channel/x", since: null, maxRepos: 99 }), /scan limit/);
 });
+
+test("omitted collection allows shared rkeys across collections while rejecting duplicate (collection, rkey)", async () => {
+  const space = "at://did:plc:auth/space/new.flock.workspace/ws";
+  const repo = "did:plc:auth";
+  // Same rkey "d-alice" in roster and admin is valid across collections.
+  assert.doesNotThrow(() =>
+    assertBoundedRecordPage(
+      {
+        records: [
+          { collection: "new.flock.workspace.roster", rkey: "d-alice", cid: "bafyreia", value: { subject: "did:plc:alice" } },
+          { collection: "new.flock.admin", rkey: "d-alice", cid: "bafyreib", value: { subject: "did:plc:alice" } },
+        ],
+      },
+      { limit: 10, space, repo },
+    ),
+  );
+
+  // Duplicate within the same collection is still rejected when collection is omitted.
+  assert.throws(
+    () =>
+      assertBoundedRecordPage(
+        {
+          records: [
+            { collection: "new.flock.admin", rkey: "d-alice", cid: "bafyreia", value: {} },
+            { collection: "new.flock.admin", rkey: "d-alice", cid: "bafyreib", value: {} },
+          ],
+        },
+        { limit: 10 },
+      ),
+    /duplicate record keys/,
+  );
+
+  // Across pages with collection omitted: shared rkey across collections succeeds, duplicate (collection, rkey) fails.
+  const crossCollection = fakeClient([
+    {
+      records: [
+        { collection: "new.flock.workspace.roster", rkey: "d-alice", cid: "bafyreia", value: { role: "member" } },
+      ],
+      cursor: "p2",
+    },
+    {
+      records: [
+        { collection: "new.flock.admin", rkey: "d-alice", cid: "bafyreib", value: { role: "admin" } },
+      ],
+    },
+  ]);
+  const fullRepo = await listBoundedRecords(crossCollection.client, { space, repo, maxRecords: 10 });
+  assert.deepEqual(
+    fullRepo.records.map((r) => [r.collection, r.rkey]),
+    [["new.flock.workspace.roster", "d-alice"], ["new.flock.admin", "d-alice"]],
+  );
+  assert.equal(fullRepo.truncated, false);
+  assert.equal("collection" in crossCollection.calls[0]!, false);
+
+  const dupAcrossPages = fakeClient([
+    { records: [{ collection: "new.flock.admin", rkey: "d-alice", cid: "bafyreia", value: {} }], cursor: "p2" },
+    { records: [{ collection: "new.flock.admin", rkey: "d-alice", cid: "bafyreib", value: {} }] },
+  ]);
+  await assert.rejects(
+    listBoundedRecords(dupAcrossPages.client, { space, repo, maxRecords: 10 }),
+    /duplicate record key/,
+  );
+});
+
+test("excludeValues allows omitted value on metadata pages while !excludeValues rejects missing values", async () => {
+  const space = "at://did:plc:auth/space/new.flock.channel/general";
+  const repo = "did:plc:writer";
+  // excludeValues: true allows omitted value, requires valid cid.
+  assert.doesNotThrow(() =>
+    assertBoundedRecordPage(
+      { records: [{ collection: "new.flock.channel.message", rkey: "a", cid: "bafyreia" }] },
+      { limit: 5, excludeValues: true },
+    ),
+  );
+  // excludeValues: true still rejects missing cid or non-object value if present.
+  assert.throws(
+    () => assertBoundedRecordPage({ records: [{ collection: "new.flock.channel.message", rkey: "a" }] }, { limit: 5, excludeValues: true }),
+    /malformed record/,
+  );
+  assert.throws(
+    () => assertBoundedRecordPage({ records: [{ collection: "new.flock.channel.message", rkey: "a", cid: "bafyreia", value: "bad" }] }, { limit: 5, excludeValues: true }),
+    /malformed record/,
+  );
+  // excludeValues: false / omitted rejects missing or non-object value.
+  assert.throws(
+    () => assertBoundedRecordPage({ records: [{ collection: "new.flock.channel.message", rkey: "a", cid: "bafyreia" }] }, { limit: 5 }),
+    /malformed record/,
+  );
+  assert.throws(
+    () => assertBoundedRecordPage({ records: [{ collection: "new.flock.channel.message", rkey: "a", value: ["not-plain"] }] }, { limit: 5, excludeValues: false }),
+    /malformed record/,
+  );
+
+  // listBoundedRecords with excludeValues: true + omitted collection returns header entries cleanly.
+  const headersClient = fakeClient([
+    {
+      records: [
+        { collection: "new.flock.channel.message", rkey: "k1", cid: "bafyrei1" },
+        { collection: "new.flock.channel.reaction", rkey: "k1", cid: "bafyrei2" },
+      ],
+    },
+  ]);
+  const headers = await listBoundedRecords(headersClient.client, { space, repo, maxRecords: 10, excludeValues: true });
+  assert.deepEqual(headers.records, [
+    { collection: "new.flock.channel.message", rkey: "k1", cid: "bafyrei1" },
+    { collection: "new.flock.channel.reaction", rkey: "k1", cid: "bafyrei2" },
+  ]);
+  assert.equal(headers.truncated, false);
+});
+
+test("record page validation checks collection NSID syntax and optional record.uri consistency", () => {
+  const space = "at://did:plc:auth/space/new.flock.workspace/ws";
+  const repo = "did:plc:writer";
+  assert.throws(
+    () => assertBoundedRecordPage({ records: [{ collection: "badnsid", rkey: "a", value: {} }] }, { limit: 5 }),
+    /malformed record/,
+  );
+  assert.throws(
+    () => assertBoundedRecordPage({ records: [{ collection: "", rkey: "a", value: {} }] }, { limit: 5 }),
+    /malformed record/,
+  );
+  assert.doesNotThrow(() =>
+    assertBoundedRecordPage(
+      {
+        records: [
+          {
+            collection: "new.flock.ext.tasks.task",
+            rkey: "3jzfcijpj2z2a",
+            cid: "bafyreia",
+            uri: `${space}/${repo}/new.flock.ext.tasks.task/3jzfcijpj2z2a`,
+            value: {},
+          },
+        ],
+      },
+      { limit: 5, space, repo },
+    ),
+  );
+  assert.throws(
+    () =>
+      assertBoundedRecordPage(
+        {
+          records: [
+            {
+              collection: "new.flock.ext.tasks.task",
+              rkey: "3jzfcijpj2z2a",
+              cid: "bafyreia",
+              uri: `${space}/${repo}/new.flock.ext.tasks.task/wrong-rkey`,
+              value: {},
+            },
+          ],
+        },
+        { limit: 5, space, repo },
+      ),
+    /malformed record/,
+  );
+  assert.throws(
+    () =>
+      assertBoundedRecordPage(
+        {
+          records: [
+            {
+              collection: "new.flock.ext.tasks.task",
+              rkey: "3jzfcijpj2z2a",
+              cid: "bafyreia",
+              uri: `${space}/did:plc:other/new.flock.ext.tasks.task/3jzfcijpj2z2a`,
+              value: {},
+            },
+          ],
+        },
+        { limit: 5, space, repo },
+      ),
+    /malformed record/,
+  );
+});

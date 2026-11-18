@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after, beforeEach } from "node:test";
 import { closeDb, getRawDb } from "../lib/db";
-import { appInboxUri, channelUri, inboxUri, subjectKey, workspaceUri } from "@flock/protocol/keys";
+import { appInboxUri, channelUri, inboxUri, subjectKey, tasksSpaceUri, workspaceUri } from "@flock/protocol/keys";
 import { COLLECTION } from "@flock/protocol/nsids";
 import { parseWorkspaceRef, type OperatorActor } from "./actor";
 import { isRegisteredSpace } from "./member-access";
@@ -291,4 +291,56 @@ test("the sweep keeps active present inboxes, drops inactive ones, raises no fai
   registered.length = 0;
   assert.deepEqual(await sweepRegistrations(deps), { registered: 3, failed: 0, skipped: [] });
   assert.deepEqual(registered.sort(), [WORKSPACE, INBOX, GENERAL].sort());
+});
+
+test("reconcileWorkspace and sweep manage extension space registrations and tolerate ScopeMissingError during background sweep", async () => {
+  const tasksSpace = tasksSpaceUri(OWNER, "acme");
+  let rejectTasksScope = false;
+  const pds = fakeAuthorityPds(OWNER, {
+    intercept: (method, target) => rejectTasksScope && method === "com.atproto.space.getSpace" && target.spaceType === "new.flock.ext.tasks"
+      ? Response.json({ error: "ScopeMissingError", message: "missing tasks scope" }, { status: 403 })
+      : undefined,
+  });
+  pds.recordsOf(WORKSPACE, COLLECTION.directory).set("acme-general", {
+    $type: COLLECTION.directory, skey: "acme-general", name: "general", visibility: "public",
+  });
+  const wsActor: OperatorActor = { did: OWNER, session: pds.session, workspace: parseWorkspaceRef(WORKSPACE), canRecoverOperations: true };
+  const nowIso = "2026-11-16T00:00:00.000Z";
+  pds.recordsOf(WORKSPACE, COLLECTION.extInstall).set("tasks", {
+    $type: COLLECTION.extInstall, extId: "tasks", active: true, space: tasksSpace, cleanupComplete: false,
+    enabledBy: OWNER, enabledAt: nowIso, updatedAt: nowIso,
+  });
+  pds.membersOf(tasksSpace);
+
+  const { deps, clock, registered, unregistered } = authority();
+  deps.grant = async () => pds.session;
+  deps.activeSpaces = registrationDeps.activeSpaces;
+
+  // reconcileWorkspace registers an active present extension space that is unregistered
+  await afterOperation(wsActor, {}, { kind: "reconcileWorkspace" }, { state: "completed" }, deps);
+  assert.deepEqual(registered, [tasksSpace]);
+  assert.equal(isRegisteredSpace(tasksSpace), true);
+
+  // sweep renews workspace, inbox, channel, and active extension space
+  registered.length = 0;
+  clock.now += DAY - RENEW_WITHIN_MS + 1_000;
+  assert.deepEqual(await sweepRegistrations(deps), { registered: 4, failed: 0, skipped: [] });
+  assert.deepEqual(registered.sort(), [WORKSPACE, INBOX, GENERAL, tasksSpace].sort());
+
+  // Legacy grant during background sweep still renews workspace, inbox, and channel spaces
+  rejectTasksScope = true;
+  clock.now += DAY - RENEW_WITHIN_MS + 1_000;
+  registered.length = 0;
+  assert.deepEqual(await sweepRegistrations(deps), { registered: 3, failed: 0, skipped: [] });
+  assert.deepEqual(registered.sort(), [WORKSPACE, INBOX, GENERAL].sort());
+
+  // Disabling the extension drops its registration on reconcileWorkspace
+  rejectTasksScope = false;
+  pds.recordsOf(WORKSPACE, COLLECTION.extInstall).set("tasks", {
+    $type: COLLECTION.extInstall, extId: "tasks", active: false, space: tasksSpace, cleanupComplete: true,
+    enabledBy: OWNER, enabledAt: nowIso, updatedAt: nowIso, disabledAt: nowIso,
+  });
+  await afterOperation(wsActor, {}, { kind: "reconcileWorkspace" }, { state: "completed" }, deps);
+  assert.deepEqual(unregistered, [tasksSpace]);
+  assert.equal(isRegisteredSpace(tasksSpace), false);
 });

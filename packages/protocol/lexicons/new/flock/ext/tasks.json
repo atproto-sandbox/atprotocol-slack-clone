@@ -1,0 +1,19 @@
+{
+  "lexicon": 1,
+  "id": "new.flock.ext.tasks",
+  "defs": {
+    "main": {
+      "type": "space",
+      "key": "any",
+      "name": "Tasks",
+      "collections": [
+        "new.flock.ext.tasks.project",
+        "new.flock.ext.tasks.projectEdit",
+        "new.flock.ext.tasks.task",
+        "new.flock.ext.tasks.taskEdit",
+        "new.flock.ext.tasks.comment"
+      ],
+      "description": "Shared workspace projects, tasks, causal edits, and task comments."
+    }
+  }
+}

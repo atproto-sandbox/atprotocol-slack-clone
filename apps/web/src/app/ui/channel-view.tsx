@@ -1,8 +1,8 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { BLOCK_TYPE } from "@flock/client/blocks";
-import { messageOf, splitDids, threadMessages, TRANSITIONING_STATUS, type ChannelSelection, type Message, type RunOperation } from "./client-api";
+import { messageOf, splitDids, threadMessages, TRANSITIONING_STATUS, type ChannelSelection, type Message, type PermalinkResolution, type RunOperation } from "./client-api";
 import { channelCommandContext, matchingCommands, renderableBlocks, type WorkspaceDeclarations } from "./interactions";
 import type { WorkspaceSummary } from "@flock/protocol/workspace-summary";
 import type { Snapshot } from "@flock/client/views";
@@ -29,6 +29,9 @@ type ChannelViewProps = {
   pendingActions: ReadonlySet<string>;
   replyTo: string;
   setReplyTo: (value: string) => void;
+  highlightedMessageUri?: string | null;
+  permalinkResolution?: PermalinkResolution | null;
+  onOpenPermalink?: (message: Message) => void;
   runOperation: RunOperation;
   leaveChannel: () => Promise<void>;
   requestPrivateAccess: (withdraw?: boolean) => Promise<void>;
@@ -42,21 +45,37 @@ type ChannelViewProps = {
 
 export function ChannelView(props: ChannelViewProps) {
   const { did, activeChannel, activeWorkspace, declarations, busy, workspaceDegraded, requestSubmitted, content, loadOlder, reload } = props;
-  const { messageText, setMessageText, chosenCommandApp, setChosenCommandApp, composerStatus, pendingActions, replyTo, setReplyTo } = props;
+  const { messageText, setMessageText, chosenCommandApp, setChosenCommandApp, composerStatus, pendingActions, replyTo, setReplyTo, highlightedMessageUri = null, permalinkResolution = null, onOpenPermalink } = props;
   const { runOperation, leaveChannel, requestPrivateAccess, sendMessage, sendAction, toggleReaction, editMessage, deleteMessage, setError } = props;
   const [transitionMembers, setTransitionMembers] = useState("");
-  const messages = content.value?.messages ?? [];
+  const messages = useMemo(() => content.value?.messages ?? [], [content.value?.messages]);
   const privateRoster = content.value?.roster ?? [];
+
+  useEffect(() => {
+    if (!highlightedMessageUri) return;
+    const match = [...document.querySelectorAll<HTMLElement>("[data-message-uri]")].find(
+      (element) => element.dataset.messageUri === highlightedMessageUri,
+    );
+    match?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, [highlightedMessageUri, messages, permalinkResolution]);
   // An installed app's messages are marked and may render blocks; a person's message shows its fallback text only.
   const appDids = new Set(activeWorkspace?.installs.map((install) => install.did) ?? []);
   // Busy while a read runs, and before the first one has answered; a channel in transition is not read.
   const reading = activeChannel.visibility !== "transitioning" && (content.loading || (content.value === undefined && content.error === undefined));
   const refused = content.value?.refused;
+  const linkedMessage =
+    permalinkResolution?.status === "resolved" ? permalinkResolution.message : null;
+  const commandContent = useMemo(() => {
+    if (!content.value || !linkedMessage || messages.some((entry) => entry.uri === linkedMessage.uri)) {
+      return content.value;
+    }
+    return { ...content.value, messages: [...content.value.messages, linkedMessage] };
+  }, [content.value, linkedMessage, messages]);
   const commandContext = channelCommandContext({
     workspace: activeWorkspace,
     channel: activeChannel,
     viewerDid: did,
-    content: content.value,
+    content: commandContent,
     replyTo,
     declarations,
   });
@@ -78,6 +97,53 @@ export function ChannelView(props: ChannelViewProps) {
     }
   }
 
+  function renderMessageCard(message: Message, isReply: boolean) {
+    const blocks = renderableBlocks(message, appDids);
+    const isHighlighted = highlightedMessageUri === message.uri;
+    return (
+      <article
+        className={`${isReply ? "message-card reply-card" : "message-card"}${isHighlighted ? " highlighted-message" : ""}`}
+        key={message.uri}
+        data-message-uri={message.uri}
+        data-highlighted={isHighlighted ? "true" : undefined}
+      >
+        <div className="message-meta"><strong>{message.repo.slice(0, 20)}…</strong>{appDids.has(message.repo) && <span className="eyebrow app-marker">APP</span>}<time>{message.value.createdAt}</time></div>
+        {blocks ? (
+          <div className="message-blocks">
+            {blocks.map((block, index) => {
+              if (block.$type === BLOCK_TYPE.section) return <p className="block-section" key={index}>{block.text}</p>;
+              if (block.$type === BLOCK_TYPE.context) return <div className="block-context" key={index}>{block.elements.map((item, itemIndex) => <span key={itemIndex}>{item}</span>)}</div>;
+              if (block.$type === BLOCK_TYPE.divider) return <hr className="block-divider" key={index} />;
+              return (
+                <div className="block-actions" key={index}>
+                  {block.elements.map((btn) => {
+                    const actionKey = `${message.uri} ${btn.actionId}`;
+                    const buttonClass = btn.style === "primary" ? "block-button primary" : btn.style === "danger" ? "block-button danger" : "block-button";
+                    return (
+                      <button
+                        type="button"
+                        key={btn.actionId}
+                        className={buttonClass}
+                        disabled={pendingActions.has(actionKey) || activeChannel.visibility === "transitioning"}
+                        onClick={() => void sendAction(message, btn.actionId)}
+                      >
+                        {btn.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <p>{message.value.text}</p>
+        )}
+        {message.value.parent && <small>Reply to {message.value.parent}</small>}
+        <div className="message-actions"><button onClick={() => setReplyTo(message.uri)}>Reply</button>{onOpenPermalink && <button type="button" onClick={() => onOpenPermalink(message)}>Link</button>}{(message.reactions ?? []).map((reaction) => <button className={reaction.active ? "reaction-active" : ""} key={reaction.emoji} onClick={() => void toggleReaction(message.uri, reaction.emoji, reaction.active)}>{reaction.emoji} {reaction.count}</button>)}{!(message.reactions ?? []).some((reaction) => reaction.emoji === "💜") && <button onClick={() => void toggleReaction(message.uri, "💜", false)}>💜 0</button>}{message.repo === did && <><button onClick={() => void editMessage(message)}>Edit</button><button onClick={() => void deleteMessage(message.uri)}>Delete</button></>}</div>
+      </article>
+    );
+  }
+
   return <>
     <div className="section-heading"><div><span className="eyebrow">{activeChannel.visibility === "transitioning" ? "CHANNEL TRANSITION" : activeChannel.visibility === "private" ? "PRIVATE CHANNEL" : "PUBLIC CHANNEL"}</span><h2>{activeChannel.visibility === "private" ? "▣" : "#"} {activeChannel.name}</h2></div><div><button className="text-button" disabled={activeChannel.visibility === "transitioning"} onClick={() => void reload().catch((caught: unknown) => setError(messageOf(caught)))}>Sync ↻</button>{activeWorkspace?.isAdmin && activeChannel.visibility !== "transitioning" && <><button className="text-button" disabled={workspaceDegraded} onClick={() => { const members = splitDids(transitionMembers); void runOperation({ kind: "transitionChannel", skey: activeChannel.skey, visibility: activeChannel.visibility === "public" ? "private" : "public", ...(activeChannel.visibility === "public" ? { members: members.length ? members : activeWorkspace.members.map((member) => member.did) } : {}) }); }}>{activeChannel.visibility === "public" ? "Make private" : "Make public"}</button><button className="text-button danger" disabled={workspaceDegraded} onClick={() => void runOperation({ kind: "archiveChannel", skey: activeChannel.skey })}>Archive</button></>}</div></div>
     {activeChannel.visibility === "transitioning" && <p className="status-note">{TRANSITIONING_STATUS}</p>}
@@ -88,46 +154,25 @@ export function ChannelView(props: ChannelViewProps) {
     {content.value?.degradedReasons.length ? <p className="status-note" role="status">{content.value.degradedReasons.join(" ")} Older records need operator review.</p> : null}
     {content.error !== undefined && <p className="form-error" role="alert">{messageOf(content.error)}</p>}
     {refused && activeChannel.visibility !== "private" && <p className="form-error" role="alert">{refused.message}</p>}
-    <div className="message-list" aria-busy={reading}>{threadMessages(messages).map(({ message, isReply }) => {
-      const blocks = renderableBlocks(message, appDids);
-      return (
-        <article className={isReply ? "message-card reply-card" : "message-card"} key={message.uri}>
-          <div className="message-meta"><strong>{message.repo.slice(0, 20)}…</strong>{appDids.has(message.repo) && <span className="eyebrow app-marker">APP</span>}<time>{message.value.createdAt}</time></div>
-          {blocks ? (
-            <div className="message-blocks">
-              {blocks.map((block, index) => {
-                if (block.$type === BLOCK_TYPE.section) return <p className="block-section" key={index}>{block.text}</p>;
-                if (block.$type === BLOCK_TYPE.context) return <div className="block-context" key={index}>{block.elements.map((item, itemIndex) => <span key={itemIndex}>{item}</span>)}</div>;
-                if (block.$type === BLOCK_TYPE.divider) return <hr className="block-divider" key={index} />;
-                return (
-                  <div className="block-actions" key={index}>
-                    {block.elements.map((btn) => {
-                      const actionKey = `${message.uri} ${btn.actionId}`;
-                      const buttonClass = btn.style === "primary" ? "block-button primary" : btn.style === "danger" ? "block-button danger" : "block-button";
-                      return (
-                        <button
-                          type="button"
-                          key={btn.actionId}
-                          className={buttonClass}
-                          disabled={pendingActions.has(actionKey) || activeChannel.visibility === "transitioning"}
-                          onClick={() => void sendAction(message, btn.actionId)}
-                        >
-                          {btn.label}
-                        </button>
-                      );
-                    })}
-                  </div>
-                );
-              })}
-            </div>
-          ) : (
-            <p>{message.value.text}</p>
-          )}
-          {message.value.parent && <small>Reply to {message.value.parent}</small>}
-          <div className="message-actions"><button onClick={() => setReplyTo(message.uri)}>Reply</button>{(message.reactions ?? []).map((reaction) => <button className={reaction.active ? "reaction-active" : ""} key={reaction.emoji} onClick={() => void toggleReaction(message.uri, reaction.emoji, reaction.active)}>{reaction.emoji} {reaction.count}</button>)}{!(message.reactions ?? []).some((reaction) => reaction.emoji === "💜") && <button onClick={() => void toggleReaction(message.uri, "💜", false)}>💜 0</button>}{message.repo === did && <><button onClick={() => void editMessage(message)}>Edit</button><button onClick={() => void deleteMessage(message.uri)}>Delete</button></>}</div>
-        </article>
-      );
-    })}</div>
+    {highlightedMessageUri && !reading && !content.error && !refused && !messages.some((entry) => entry.uri === highlightedMessageUri) && (
+      linkedMessage ? (
+        <section className="starter-card permission-box linked-message-banner" aria-label="Linked message">
+          <span className="eyebrow">LINKED MESSAGE</span>
+          {renderMessageCard(linkedMessage, false)}
+        </section>
+      ) : permalinkResolution?.status === "error" ? (
+        <p className="form-error" role="alert">
+          {permalinkResolution.message}
+        </p>
+      ) : (
+        <p className="status-note" role="status">
+          {permalinkResolution?.status === "not_found" || (!permalinkResolution && content.value?.next === undefined)
+            ? "The linked message was not found in this channel."
+            : "Loading linked message…"}
+        </p>
+      )
+    )}
+    <div className="message-list" aria-busy={reading}>{threadMessages(messages).map(({ message, isReply }) => renderMessageCard(message, isReply))}</div>
     {content.value?.next !== undefined && <button className="text-button load-older" onClick={() => void loadOlder().catch((caught) => setError(messageOf(caught)))}>Load older messages</button>}
     <form className="message-compose" onSubmit={sendMessage}>
       {replyTo && <p>Replying to {replyTo} <button type="button" onClick={() => setReplyTo("")}>Cancel</button></p>}

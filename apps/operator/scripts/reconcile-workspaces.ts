@@ -50,8 +50,12 @@ async function main() {
       await assertOperatorWorkspaceWithinEnvelope(actor);
       const operation = await executeOperatorOperation(actor, tidNow(), { kind: "reconcileWorkspace" }, registrationDeps);
       process.stdout.write(`${workspace.uri}: ${operation.state}\n`);
-      if (operation.state !== "completed") failed = true;
-      else {
+      if (operation.state !== "completed") {
+        failed = true;
+        if (operation.authorizationRequired) {
+          process.stderr.write(`WARN workspace=${workspace.uri} workspace account must approve its permission again\n`);
+        }
+      } else {
         try {
           if (await hasUncoveredAppInbox(actor)) {
             process.stderr.write(`WARN workspace=${workspace.uri} workspace account must approve its permission again for app commands to work\n`);

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { expectedAppInboxList, expectedChannelList, expectedInboxList, expectedWorkspaceList, listMatches, type AppInstall } from "./membership";
+import { diffMemberList, expectedAppInboxList, expectedChannelList, expectedExtList, expectedInboxList, expectedWorkspaceList, listMatches, type AppInstall } from "./membership";
 
 const AUTHORITY = "did:plc:authority";
 const ADMIN = "did:plc:admin";
@@ -71,4 +71,15 @@ test("a member list matches when it holds exactly the expected entries and bits,
   assert.equal(listMatches(expected, [...listed.filter((member) => member.did !== BOT), { did: BOT, ...RW }], AUTHORITY), false, "an app with write it was not granted");
   assert.equal(listMatches(expected, [...listed, { did: "did:plc:stranger", ...RW }], AUTHORITY), false, "someone unexpected");
   assert.equal(listMatches(expected, [...listed.filter((member) => member.did !== PERSON), { did: PERSON, read: true, write: false }], AUTHORITY), false, "a person who cannot write");
+});
+
+test("an extension space grants read and write to every roster person and excludes apps and the authority", () => {
+  const expected = expectedExtList(ROSTER);
+  assert.deepEqual(expected, new Map([[AUTHORITY, RW], [ADMIN, RW], [PERSON, RW]]));
+  assert.equal(expected.has(BOT), false);
+  const current = [{ did: ADMIN, read: true, write: false }, { did: BOT, ...RW }];
+  assert.deepEqual(diffMemberList(expected, current, AUTHORITY), {
+    toPut: [{ did: ADMIN, ...RW }, { did: PERSON, ...RW }],
+    toRemove: [BOT],
+  });
 });

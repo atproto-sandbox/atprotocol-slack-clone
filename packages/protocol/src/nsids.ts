@@ -16,6 +16,7 @@ export const SPACE_TYPE = {
   appInbox: nsid("app.inbox"),
   dmInbox: nsid("dm.inbox"),
   dmConversation: nsid("dm.conversation"),
+  tasks: nsid("ext.tasks"),
 } as const;
 
 /** Records that live in a space. */
@@ -28,6 +29,12 @@ export const COLLECTION = {
   appInstall: nsid("app.install"),
   appCommand: nsid("app.command"),
   appAction: nsid("app.action"),
+  extInstall: nsid("ext.install"),
+  taskProject: nsid("ext.tasks.project"),
+  taskProjectEdit: nsid("ext.tasks.projectEdit"),
+  task: nsid("ext.tasks.task"),
+  taskEdit: nsid("ext.tasks.taskEdit"),
+  taskComment: nsid("ext.tasks.comment"),
   joinRequest: nsid("joinRequest"),
   joinDecision: nsid("joinDecision"),
   message: nsid("channel.message"),

@@ -1,12 +1,52 @@
-import { assertBoundedRecordPage, listBoundedRepos, listReposSince } from "@flock/protocol/atproto/record-pages";
-import { classifyRepoFailure } from "@flock/protocol/atproto/repo-failure";
-import { isCredentialRefused, SpaceCredentialError } from "@flock/protocol/atproto/space-credential-core";
+import { KemKeyError } from "@flock/protocol/atproto/kem-key";
+import { assertBoundedRecordPage, listBoundedRecords, listBoundedRepos, listReposSince } from "@flock/protocol/atproto/record-pages";
+import { classifyRepoFailure, classifyVerifiedRepoFailure } from "@flock/protocol/atproto/repo-failure";
+import {
+  LTHASH_STATE_BYTES,
+  RepoCommit,
+  RepoStarLimitError,
+  RepoVerificationError,
+  SpaceCredentialError,
+  SpaceMacError,
+  StarParseError,
+  isCredentialRefused,
+  listVerifiedBoundedRecords,
+  parseCidSafe,
+  serializedRecordBytes,
+  starEntryBytes,
+  starHeaderBytes,
+  verifyRecordCid,
+  verifyRecordCidWithSize,
+  type Cid,
+  type Commit,
+  type SpaceCredential,
+} from "@flock/protocol/atproto/space-credential-core";
 import { XrpcError, type AtprotoClient } from "@flock/protocol/atproto/xrpc";
 import { mapLimited } from "@flock/protocol/map-limited";
-import { parseSpaceUri, spaceRecordUri } from "@flock/protocol/keys";
+import { isDid, parseSpaceUri, parseWorkspaceUri, spaceRecordUri, tidNow } from "@flock/protocol/keys";
+import { COLLECTION } from "@flock/protocol/nsids";
+import { validateSpaceRecord } from "@flock/protocol/registry";
+import {
+  WORKSPACE_ENVELOPE,
+  summarizeWorkspace,
+  type ScannedRecords,
+  type WorkspaceExtensionSummary,
+  type WorkspaceSummary,
+} from "@flock/protocol/workspace-summary";
 import type { CredentialCache } from "./credentials";
+import { MAX_ATTEMPTS, MAX_HOLD_MS, type WindowClock, type WindowLabels } from "./key-window";
 import { compareItems, isAfterCursor, type Cursor } from "./merge";
-import { emptyWriterState, SyncStoreError, type Coverage, type ListedWriter, type SpaceState, type StoredRecord, type SyncStore, type WriterState } from "./store";
+import {
+  COMMIT_DIGEST_BYTES,
+  SyncStoreError,
+  emptyWriterState,
+  type Coverage,
+  type ListedWriter,
+  type SpaceState,
+  type StoredRecord,
+  type SyncStore,
+  type WriterState,
+} from "./store";
 import { transportNow, type ClientTransport } from "./transport";
 
 // The sync core: one implementation for channels, DMs and anything added later. Truth is each writer's own host; hints
@@ -74,6 +114,139 @@ export type WindowResult = {
   partial: SetAside[];
 };
 
+export type VerifiedEmptyReason = "unwrittenOrAbsent";
+
+export type VerifiedWorkspaceSnapshot = {
+  summary: WorkspaceSummary | null;
+  rosterMembers: Set<string>;
+  extensions: WorkspaceExtensionSummary[];
+  workspaceSnapshotComplete: boolean;
+  setAside: SetAside[];
+  reason?: string;
+};
+
+export type VerifiedSpaceSyncInput = {
+  space: string;
+  collections: readonly string[];
+  verifiedRosterMembers?: ReadonlySet<string> | readonly string[];
+  workspaceSnapshotComplete?: boolean;
+  includeAuthority?: boolean;
+  workspace?: string | null;
+  truthIntervalMs?: number;
+  fullWriterScan?: boolean;
+  maxStarBytes?: number;
+  maxStarRecords?: number;
+  signal?: AbortSignal;
+};
+
+export type VerifiedSpaceSyncResult = {
+  records: StoredRecord[];
+  byCollection: Record<string, StoredRecord[]>;
+  writers: string[];
+  listedWriters: string[];
+  complete: boolean;
+  setAside: SetAside[];
+  changing: string[];
+  emptyUnwrittenWriters: string[];
+  emptyReasons: Record<string, VerifiedEmptyReason>;
+};
+
+export type RepoOpsEvent = {
+  space: string;
+  repo: string;
+  collection: string;
+  rkey: string;
+  uri: string;
+  cid: string;
+  rev: string;
+  value: Record<string, unknown>;
+};
+
+export type RepoOpsResetNotice = {
+  kind: "reset";
+  space: string;
+  repo: string;
+  reason: string;
+  rev: string | null;
+};
+
+export type RepoOpsFollowInput = {
+  space: string;
+  collections: readonly string[];
+  deliver: boolean;
+  workspace?: string | null;
+  writers?: readonly string[];
+  listedWriters?: ReadonlySet<string>;
+  truthIntervalMs?: number;
+  signal?: AbortSignal;
+  prepare?: (events: readonly RepoOpsEvent[]) => Promise<boolean>;
+  onEvent: (event: RepoOpsEvent) => Promise<void>;
+  onReset?: (notice: RepoOpsResetNotice) => void;
+  onError?: (error: unknown) => void;
+  clock?: WindowClock;
+  labels?: WindowLabels;
+};
+
+export type RepoOpsFollowResult = {
+  kind: "baseline" | "ops" | "reset";
+  delivered: RepoOpsEvent[];
+  resets: RepoOpsResetNotice[];
+  complete: boolean;
+  setAside: SetAside[];
+};
+
+const WORKSPACE_AUTHORITY_COLLECTIONS = [
+  COLLECTION.workspaceProfile,
+  COLLECTION.directory,
+  COLLECTION.workspaceRoster,
+  COLLECTION.admin,
+  COLLECTION.appInstall,
+  COLLECTION.extInstall,
+] as const;
+
+const MAX_OPS_SEEN_ENTRIES = 100_000;
+const MAX_REPO_OP_CURSOR_LENGTH = 1_024;
+const MAX_REPO_OP_REV_LENGTH = 64;
+const MAX_REPO_OP_COLLECTION_LENGTH = 317;
+const MAX_REPO_OP_RKEY_LENGTH = 512;
+const MAX_REPO_OP_CID_LENGTH = 256;
+const utf8Encoder = new TextEncoder();
+
+type RepoFollowAttempt = {
+  uri: string;
+  rkey: string;
+  cid: string;
+  count: number;
+  since: number;
+};
+
+type RepoFollowState = {
+  rev: string | null;
+  setHash: Uint8Array;
+  cids: Map<string, Cid>;
+  attempts: Map<string, RepoFollowAttempt>;
+  unbaselined: boolean;
+  staleSeq: number;
+  ackedStaleSeq: number;
+  checkedAt: number | null;
+  permanentFailure: boolean;
+  permanentFailedListedRev: string | null;
+  permanentAside: SetAside | null;
+  resetOnBaseline: boolean;
+  /** Elapsed clock timestamp when transient fetch failures began for this baselined writer (`MAX_HOLD_MS`). */
+  holdStartedAt: number | null;
+  /** Wall-clock `tidNow(expiryNow, 0)` floor recorded when hold expires so recovery drops pre-expiry commands and delivers post-expiry ones. */
+  expiredFloorRkey: string | null;
+};
+
+type SpaceFollowState = {
+  needsInitialWriterSeed: boolean;
+  lastCheckedAt: number | null;
+  repos: Map<string, RepoFollowState>;
+  seen: Set<string>;
+  reportedAside: Set<string>;
+};
+
 export class SyncCore {
   readonly options: SyncOptions;
   /** Spaces whose writer set this session read in full: each of their writers is checked at its host once in the session. */
@@ -82,6 +255,8 @@ export class SyncCore {
   private readonly checked = new Set<string>();
   /** The oldest key of the latest page each space's window showed in this session: how deep a refresh lists. */
   private readonly floors = new Map<string, string>();
+  /** Per-space host-ordered oplog tailing state used by `followRepoOps`. */
+  private readonly opsFollowers = new Map<string, SpaceFollowState>();
 
   constructor(private readonly deps: { transport: ClientTransport; credentials: CredentialCache; store: SyncStore; options?: Partial<SyncOptions> }) {
     this.options = { ...DEFAULT_SYNC_OPTIONS, ...deps.options };
@@ -129,24 +304,37 @@ export class SyncCore {
    * for the authority to list it, so a member's own message is never missing from the next page.
    */
   async writers(space: string, input: { workspace?: string | null } = {}): Promise<ListedWriter[]> {
+    return (await this.resolveSpaceWriters(space, input)).writers;
+  }
+
+  private async resolveSpaceWriters(
+    space: string,
+    input: { workspace?: string | null; truthIntervalMs?: number; keepWriters?: ReadonlySet<string>; fullScan?: boolean } = {},
+  ): Promise<{ writers: ListedWriter[]; listed: Set<string>; reported: Array<{ did: string; repoRev: string }>; fullScan: boolean }> {
     const authorityDid = authorityOf(space);
     const now = this.now();
+    const intervalMs = input.truthIntervalMs ?? this.options.truthIntervalMs;
     const stored = await this.deps.store.getSpace(space);
+    const startInvalidationSeq = stored?.invalidationSeq ?? 0;
     const state: SpaceState = stored ?? { space, spaceRev: null, writers: [], writersListedAt: null, workspace: input.workspace ?? null, lastOpenedAt: now };
     const client = await this.deps.credentials.clientFor(space, authorityDid);
     const held = new Map((await this.deps.store.listWriters(space)).map((writer) => [writer.repo, writer]));
     // An own write the authority has not listed yet keeps the own writer a source, for at most one truth interval: after
     // that an account the authority still does not list (say, reduced to read-only) is out of view like anyone else (D14).
-    const ownPending = state.ownWriteAt !== undefined && state.ownWriteAt !== null && now - state.ownWriteAt >= 0 && now - state.ownWriteAt < this.options.truthIntervalMs;
+    const ownPending = state.ownWriteAt !== undefined && state.ownWriteAt !== null && now - state.ownWriteAt >= 0 && now - state.ownWriteAt < intervalMs;
     const sinceListing = state.writersListedAt === null ? Number.POSITIVE_INFINITY : now - state.writersListedAt;
     let reported: Array<{ did: string; repoRev: string }>;
-    if (!this.opened.has(space) || sinceListing < 0 || sinceListing >= this.options.truthIntervalMs) {
+    let fullScan = false;
+    if (input.fullScan || !this.opened.has(space) || sinceListing < 0 || sinceListing >= intervalMs) {
+      fullScan = true;
       const scan = await listBoundedRepos(client, { space, maxRepos: this.options.maxWriters });
       if (scan.truncated) throw new Error(`The space has more than ${this.options.maxWriters} writers, more than this client reads.`);
       const listed = new Set(scan.repos.map((repo) => repo.did));
       for (const writer of held.values()) {
-        if (listed.has(writer.repo) || (writer.repo === this.did && ownPending)) continue;
-        if (writer.syncedRev !== null || Object.keys(writer.coverage).length > 0) await this.deps.store.purgeWriter(space, writer.repo);
+        if (listed.has(writer.repo) || (writer.repo === this.did && ownPending) || input.keepWriters?.has(writer.repo)) continue;
+        if (writer.syncedRev !== null || Object.keys(writer.coverage).length > 0 || writer.setHash !== undefined) {
+          await this.deps.store.purgeWriter(space, writer.repo);
+        }
       }
       state.writers = scan.repos.map((repo) => ({ did: repo.did, repoRev: repo.repoRev }));
       state.writersListedAt = now;
@@ -173,15 +361,39 @@ export class SyncCore {
     else if (!ownPending) state.ownWriteAt = null;
     state.lastOpenedAt = now;
     if (input.workspace !== undefined) state.workspace = input.workspace;
+    const latestInvalidationSeq = (await this.deps.store.getSpace(space))?.invalidationSeq ?? 0;
+    if (latestInvalidationSeq !== startInvalidationSeq) {
+      state.writersListedAt = null;
+      this.opened.delete(space);
+    }
     await this.deps.store.putSpace(state);
+    const listed = new Set(state.writers.map((writer) => writer.did));
     const writers = [...state.writers].sort((left, right) => (left.repoRev < right.repoRev ? 1 : left.repoRev > right.repoRev ? -1 : 0));
     if (state.ownWriteAt !== null && state.ownWriteAt !== undefined && !ownListed) writers.unshift({ did: this.did, repoRev: ownRev ?? "" });
-    return writers;
+    return { writers, listed, reported, fullScan };
   }
 
   /** A hint that a writer moved: it is checked at its host before its records count as current again. */
   async markStale(space: string, repo: string): Promise<void> {
     await this.deps.store.commit({ space, repo, expectedGeneration: null, markStale: true });
+    const follower = this.opsFollowers.get(space)?.repos.get(repo);
+    if (follower) follower.staleSeq += 1;
+  }
+
+  /** Marks every tracked writer (including unpersisted workspace authority / probes) in `space` stale and bumps `invalidationSeq`. */
+  async markSpaceStale(space: string): Promise<void> {
+    const extraRepos = parseWorkspaceUri(space) ? [authorityOf(space)] : [];
+    await this.deps.store.invalidateSpace(space, extraRepos);
+    this.opened.delete(space);
+    const follower = this.opsFollowers.get(space);
+    if (follower) {
+      for (const repo of follower.repos.values()) repo.staleSeq += 1;
+    }
+  }
+
+  /** Clears host-ordered oplog tailing state for `space` when unfollowed. */
+  unfollowRepoOps(space: string): void {
+    this.opsFollowers.delete(space);
   }
 
   /**
@@ -192,12 +404,1351 @@ export class SyncCore {
     const space = (await this.deps.store.getSpace(source.space))
       ?? { space: source.space, spaceRev: null, writers: [], writersListedAt: null, workspace: input.workspace ?? null, lastOpenedAt: this.now() };
     await this.deps.store.putSpace({ ...space, ownWriteAt: this.now() });
-    await this.deps.store.commit({ space: source.space, repo: source.repo, expectedGeneration: null, markStale: true, upsert: change.upsert, remove: change.remove });
+    await this.deps.store.commit({
+      space: source.space,
+      repo: source.repo,
+      expectedGeneration: null,
+      markStale: true,
+      recordOptimistic: true,
+      upsert: change.upsert,
+      remove: change.remove,
+    });
   }
 
   /** Reads one page of `window` across `sources`, refreshing and backfilling writers until the page is the true one. */
   async read(input: WindowRead): Promise<WindowResult> {
     return new ReadRun(this, input).execute();
+  }
+
+  /**
+   * Syncs and cryptographically verifies the authority's `workspace` space repo (STAR primary, bounded full `listRecords` +
+   * `getLatestCommit` fallback, or `listRepoOps` delta when seeded), validates every authority record against `REGISTRY` and
+   * `WORKSPACE_ENVELOPE`, and returns the verified snapshot and completeness status (`D11.3 #4`).
+   */
+  async syncVerifiedWorkspaceSnapshot(
+    workspaceUri: string,
+    options: { viewerDid?: string; truthIntervalMs?: number; fresh?: boolean; signal?: AbortSignal } = {},
+  ): Promise<VerifiedWorkspaceSnapshot> {
+    const workspace = parseWorkspaceUri(workspaceUri);
+    if (!workspace) throw new Error("Invalid workspace URI.");
+    const { authorityDid } = workspace;
+    const now = this.now();
+    const storedSpace = await this.deps.store.getSpace(workspaceUri);
+    await this.deps.store.putSpace(
+      storedSpace
+        ? { ...storedSpace, lastOpenedAt: now }
+        : { space: workspaceUri, spaceRev: null, writers: [], writersListedAt: null, workspace: null, lastOpenedAt: now },
+    );
+    const epoch = await this.deps.store.epoch(workspaceUri);
+    const syncOutcome = await this.syncVerifiedWriter({
+      space: workspaceUri,
+      repo: authorityDid,
+      collections: WORKSPACE_AUTHORITY_COLLECTIONS,
+      epoch,
+      intervalMs: options.fresh ? 0 : (options.truthIntervalMs ?? 0),
+      listed: new Set([authorityDid]),
+      allowTrustedEmpty: false,
+      maxStarBytes: WORKSPACE_ENVELOPE.maxStarArchiveBytes,
+      maxStarRecords: WORKSPACE_ENVELOPE.maxStarRecords,
+      signal: options.signal,
+    });
+
+    const setAside = syncOutcome.setAside ? [syncOutcome.setAside] : [];
+    const changing = syncOutcome.changing ? [authorityDid] : [];
+    if (syncOutcome.setAside?.permanent) {
+      return {
+        summary: null,
+        rosterMembers: new Set(),
+        extensions: [],
+        workspaceSnapshotComplete: false,
+        setAside,
+        reason: syncOutcome.setAside.reason,
+      };
+    }
+
+    const byCollection = new Map<string, StoredRecord[]>();
+    await Promise.all(WORKSPACE_AUTHORITY_COLLECTIONS.map(async (collection) => {
+      byCollection.set(collection, await this.deps.store.records(workspaceUri, collection, authorityDid));
+    }));
+
+    const invalidReasons: string[] = [];
+    const scannedOf = (collection: string, cap: number): ScannedRecords => {
+      const held = byCollection.get(collection) ?? [];
+      for (const record of held) {
+        const check = validateSpaceRecord(collection, record.value, {
+          authorityDid,
+          spaceUri: workspaceUri,
+          repoDid: authorityDid,
+          rkey: record.rkey,
+        });
+        if (!check.valid) invalidReasons.push(`Invalid ${collection}/${record.rkey}: ${check.reason}`);
+      }
+      return {
+        records: held.map((record) => ({ rkey: record.rkey, value: record.value })),
+        truncated: held.length > cap,
+      };
+    };
+
+    const scan = WORKSPACE_ENVELOPE.authorityRecordScan;
+    const summary = summarizeWorkspace(workspaceUri, options.viewerDid ?? this.did, {
+      profiles: scannedOf(COLLECTION.workspaceProfile, 1),
+      directory: scannedOf(COLLECTION.directory, scan),
+      roster: scannedOf(COLLECTION.workspaceRoster, scan),
+      admins: scannedOf(COLLECTION.admin, scan),
+      installs: scannedOf(COLLECTION.appInstall, scan),
+      extInstalls: scannedOf(COLLECTION.extInstall, scan),
+    });
+
+    const failureReason = syncOutcome.setAside?.reason
+      ?? (changing.length > 0 ? "Authority workspace state is changing." : undefined)
+      ?? (!summary ? "Workspace profile is missing or invalid." : undefined)
+      ?? invalidReasons[0]
+      ?? summary?.degradedReasons[0];
+
+    const workspaceSnapshotComplete = Boolean(summary)
+      && setAside.length === 0
+      && changing.length === 0
+      && invalidReasons.length === 0
+      && (summary?.degradedReasons.length ?? 1) === 0;
+
+    return {
+      summary,
+      rosterMembers: new Set(summary?.members.map((member) => member.did) ?? []),
+      extensions: summary?.extensions ?? [],
+      workspaceSnapshotComplete,
+      setAside,
+      ...(failureReason ? { reason: failureReason } : {}),
+    };
+  }
+
+  /**
+   * Cryptographically verified complete sync for `"all"` spaces (`D11.1 #4`, `D11.3 #2-#4`).
+   * Writer universe is `union(listRepos(space), verifiedRosterMembers)` (+ `authorityDid` when listed or `includeAuthority`).
+   */
+  async syncVerifiedSpace(input: VerifiedSpaceSyncInput): Promise<VerifiedSpaceSyncResult> {
+    if (input.collections.length === 0) throw new RangeError("Verified space sync requires at least one collection.");
+    const authorityDid = authorityOf(input.space);
+    const rosterSet = toDidSet(input.verifiedRosterMembers) ?? new Set<string>();
+    const keepWriters = new Set<string>(rosterSet);
+    if (input.includeAuthority) keepWriters.add(authorityDid);
+
+    const { listed } = await this.resolveSpaceWriters(input.space, {
+      workspace: input.workspace,
+      truthIntervalMs: input.truthIntervalMs,
+      keepWriters: keepWriters.size > 0 ? keepWriters : undefined,
+      fullScan: input.fullWriterScan,
+    });
+    const universeSet = new Set<string>([...listed, ...rosterSet]);
+    if (input.includeAuthority) universeSet.add(authorityDid);
+    const writers = [...universeSet].sort();
+    if (writers.length > this.options.maxWriters) {
+      throw new Error(`The space has more than ${this.options.maxWriters} writers, more than this client reads.`);
+    }
+
+    const epoch = await this.deps.store.epoch(input.space);
+    const intervalMs = input.truthIntervalMs ?? this.options.truthIntervalMs;
+    const maxStarBytes = input.maxStarBytes ?? WORKSPACE_ENVELOPE.maxStarArchiveBytes;
+    const maxStarRecords = input.maxStarRecords ?? WORKSPACE_ENVELOPE.maxStarRecords;
+
+    const outcomes = await mapLimited(writers, this.options.concurrency, (repo) =>
+      this.syncVerifiedWriter({
+        space: input.space,
+        repo,
+        collections: input.collections,
+        epoch,
+        intervalMs,
+        listed,
+        allowTrustedEmpty: !listed.has(repo),
+        maxStarBytes,
+        maxStarRecords,
+        signal: input.signal,
+      }),
+    );
+
+    const setAside: SetAside[] = [];
+    const changing: string[] = [];
+    const emptyUnwrittenWriters: string[] = [];
+    const emptyReasons: Record<string, VerifiedEmptyReason> = {};
+    const permanentAside = new Set<string>();
+    for (const outcome of outcomes) {
+      if (outcome.setAside) {
+        setAside.push(outcome.setAside);
+        if (outcome.setAside.permanent) permanentAside.add(outcome.repo);
+      }
+      if (outcome.changing) changing.push(outcome.repo);
+      if (outcome.emptyReason) {
+        emptyUnwrittenWriters.push(outcome.repo);
+        emptyReasons[outcome.repo] = outcome.emptyReason;
+      }
+    }
+
+    const byCollection: Record<string, StoredRecord[]> = {};
+    const records: StoredRecord[] = [];
+    await Promise.all(input.collections.map(async (collection) => {
+      const held = (await this.deps.store.records(input.space, collection))
+        .filter((record) => universeSet.has(record.repo) && !permanentAside.has(record.repo))
+        .sort((left, right) => (left.uri < right.uri ? -1 : left.uri > right.uri ? 1 : 0));
+      byCollection[collection] = held;
+    }));
+    for (const collection of input.collections) records.push(...(byCollection[collection] ?? []));
+
+    const complete = input.workspaceSnapshotComplete !== false && setAside.length === 0 && changing.length === 0;
+    return { records, byCollection, writers, listedWriters: [...listed].sort(), complete, setAside, changing, emptyUnwrittenWriters, emptyReasons };
+  }
+
+  /**
+   * Host-ordered oplog event tailing (`D11.3 #5`). Separates verified current-state sync from event delivery:
+   * - `deliver: false` baselines existing writers via `listRecords(excludeValues: true)` + MAC-verified `getLatestCommit`
+   *   (zero payload downloads) without invoking `onEvent`.
+   * - `deliver: true` replays `listRepoOps` in exact host `(rev, idx)` order, verifying `prev` chains, `LtHash`, and
+   *   surviving `verifyRecordCid`, advancing `(rev, setHash)` ONLY AFTER handler acknowledgement or retry exhaustion
+   *   (`MAX_ATTEMPTS = 3` / `MAX_HOLD_MS = 10 min`).
+   */
+  async followRepoOps(input: RepoOpsFollowInput): Promise<RepoOpsFollowResult> {
+    authorityOf(input.space);
+    if (input.collections.length === 0) throw new RangeError("followRepoOps requires at least one collection.");
+    const clock: WindowClock = input.clock ?? { now: () => this.now(), elapsed: () => this.now() };
+    const labels: WindowLabels = input.labels ?? { items: "records", space: "space" };
+    const collectionsSet = new Set(input.collections);
+    const intervalMs = input.truthIntervalMs ?? this.options.truthIntervalMs;
+
+    let spaceFollow = this.opsFollowers.get(input.space);
+    if (!spaceFollow) {
+      spaceFollow = {
+        needsInitialWriterSeed: !input.deliver,
+        lastCheckedAt: null,
+        repos: new Map(),
+        seen: new Set(),
+        reportedAside: new Set(),
+      };
+      this.opsFollowers.set(input.space, spaceFollow);
+    }
+
+    let writersList: string[];
+    let listedSet: Set<string>;
+    let reportedSet: Set<string>;
+    let fullScan = false;
+    if (input.writers !== undefined) {
+      writersList = [...new Set(input.writers)];
+      listedSet = input.listedWriters ? new Set(input.listedWriters) : new Set<string>();
+      reportedSet = new Set(writersList);
+      fullScan = true;
+    } else {
+      const resolved = await this.resolveSpaceWriters(input.space, {
+        workspace: input.workspace,
+        truthIntervalMs: input.truthIntervalMs,
+      });
+      writersList = resolved.writers.map((writer) => writer.did);
+      listedSet = resolved.listed;
+      reportedSet = new Set(resolved.reported.map((repo) => repo.did));
+      fullScan = resolved.fullScan;
+      if (fullScan) {
+        const active = new Set(writersList);
+        for (const repo of spaceFollow.repos.keys()) {
+          if (!active.has(repo)) {
+            spaceFollow.repos.delete(repo);
+            spaceFollow.reportedAside.delete(repo);
+          }
+        }
+      }
+    }
+
+    if (spaceFollow.needsInitialWriterSeed) {
+      for (const repo of writersList) {
+        if (!spaceFollow.repos.has(repo)) {
+          spaceFollow.repos.set(repo, createRepoFollowState(true));
+        }
+      }
+      spaceFollow.needsInitialWriterSeed = false;
+    }
+
+    const listedRepoRevs = new Map<string, string>();
+    if (input.writers === undefined) {
+      const spaceState = await this.deps.store.getSpace(input.space);
+      for (const entry of spaceState?.writers ?? []) listedRepoRevs.set(entry.did, entry.repoRev);
+    }
+
+    const now = clock.now();
+    const elapsed = clock.elapsed();
+    const intervalElapsed = spaceFollow.lastCheckedAt === null || now - spaceFollow.lastCheckedAt < 0 || now - spaceFollow.lastCheckedAt >= intervalMs;
+
+    type PreparedRepoBatch = {
+      repo: string;
+      repoState: RepoFollowState;
+      seenStaleSeq: number;
+      events: RepoOpsEvent[];
+      commitRev?: string;
+      nextSetHash?: Uint8Array;
+      nextCids?: Map<string, Cid>;
+      silentSeenKeys: string[];
+      clearExpiredFloor?: boolean;
+      reset?: RepoOpsResetNotice;
+      aside?: SetAside;
+    };
+
+    const writersToCheck = writersList.filter((repo) => {
+      const existing = spaceFollow.repos.get(repo);
+      if (!existing) return true;
+      const listedRev = listedRepoRevs.get(repo);
+      const stalePending = isRepoFollowStale(existing);
+      if (existing.permanentFailure) {
+        const writerIntervalElapsed =
+          existing.checkedAt === null || now - existing.checkedAt < 0 || now - existing.checkedAt >= intervalMs;
+        const listedRevChanged =
+          listedRev !== undefined &&
+          (existing.permanentFailedListedRev === null || listedRev > existing.permanentFailedListedRev);
+        return !input.deliver || stalePending || writerIntervalElapsed || reportedSet.has(repo) || listedRevChanged;
+      }
+      if (
+        existing.unbaselined ||
+        stalePending ||
+        existing.attempts.size > 0 ||
+        existing.holdStartedAt !== null ||
+        existing.expiredFloorRkey !== null
+      ) {
+        return true;
+      }
+      if (!input.deliver || intervalElapsed) return true;
+      if (reportedSet.has(repo)) return true;
+      return listedRev !== undefined && (existing.rev === null || listedRev > existing.rev);
+    });
+    const writersToCheckSet = new Set(writersToCheck);
+
+    const prepared = await mapLimited(writersToCheck, this.options.concurrency, async (repo): Promise<PreparedRepoBatch> => {
+      let repoState = spaceFollow.repos.get(repo);
+      if (!repoState) {
+        repoState = createRepoFollowState(!input.deliver);
+        spaceFollow.repos.set(repo, repoState);
+      }
+      repoState.checkedAt = now;
+      const seenStaleSeq = repoState.staleSeq;
+
+      const shouldBaselineOnly = !input.deliver || repoState.unbaselined;
+      const holdExpired = !shouldBaselineOnly && repoState.holdStartedAt !== null && elapsed - repoState.holdStartedAt >= MAX_HOLD_MS;
+      try {
+        const pdsUrl = await this.resolveValidPds(repo);
+        if (shouldBaselineOnly || holdExpired) {
+          const emitReset = holdExpired || repoState.resetOnBaseline;
+          const resetReason = holdExpired
+            ? `held missing writer expired after ${MAX_HOLD_MS / 60_000} minutes`
+            : "permanently failed writer recovered";
+          const baseline = await this.fetchOpsBaseline(input.space, repo, {
+            allowTrustedEmpty: !listedSet.has(repo) && repoState.rev === null,
+            signal: input.signal,
+          });
+          repoState.rev = baseline.rev;
+          repoState.setHash = baseline.setHash;
+          repoState.cids = baseline.cids;
+          repoState.attempts.clear();
+          repoState.unbaselined = false;
+          repoState.ackedStaleSeq = Math.max(repoState.ackedStaleSeq, seenStaleSeq);
+          repoState.permanentFailure = false;
+          repoState.permanentFailedListedRev = null;
+          repoState.permanentAside = null;
+          repoState.resetOnBaseline = false;
+          repoState.holdStartedAt = null;
+          repoState.expiredFloorRkey = null;
+          for (const key of baseline.seenKeys) recordSeenKey(spaceFollow.seen, key);
+          const reset: RepoOpsResetNotice | undefined = emitReset
+            ? {
+                kind: "reset",
+                space: input.space,
+                repo,
+                reason: resetReason,
+                rev: baseline.rev,
+              }
+            : undefined;
+          return { repo, repoState, seenStaleSeq, events: [], silentSeenKeys: [], ...(reset ? { reset } : {}) };
+        }
+
+        if (repoState.expiredFloorRkey !== null) {
+          const recovered = await this.recoverFullVerifiedRepo({
+            space: input.space,
+            repo,
+            pdsUrl,
+            maxBytes: WORKSPACE_ENVELOPE.maxStarArchiveBytes,
+            maxRecords: WORKSPACE_ENVELOPE.maxStarRecords,
+            signal: input.signal,
+          });
+          const minCutoff = tidNow(Math.max(0, Math.floor(now - MAX_HOLD_MS)), 0);
+          const cutoff = maxRkey(repoState.expiredFloorRkey, minCutoff);
+          const nextCids = new Map<string, Cid>();
+          const silentSeenKeys: string[] = [];
+          const events: RepoOpsEvent[] = [];
+          for (const entry of recovered.records) {
+            const parsedCid = parseCidSafe(entry.cid);
+            if (!parsedCid) throw new SpaceMacError(`Invalid CID recovered for ${repo}.`);
+            nextCids.set(pathKey(entry.collection, entry.rkey), parsedCid);
+            const uri = spaceRecordUri(input.space, repo, entry.collection, entry.rkey);
+            const seenKey = seenKeyOf(uri, entry.cid);
+            if (entry.rkey < cutoff || !collectionsSet.has(entry.collection) || spaceFollow.seen.has(seenKey)) {
+              silentSeenKeys.push(seenKey);
+              continue;
+            }
+            events.push({
+              space: input.space,
+              repo,
+              collection: entry.collection,
+              rkey: entry.rkey,
+              uri,
+              cid: entry.cid,
+              rev: recovered.commit.rev,
+              value: entry.value,
+            });
+          }
+          events.sort((left, right) => (left.rkey < right.rkey ? -1 : left.rkey > right.rkey ? 1 : left.uri < right.uri ? -1 : left.uri > right.uri ? 1 : 0));
+          if (events.length === 0) repoState.ackedStaleSeq = Math.max(repoState.ackedStaleSeq, seenStaleSeq);
+          repoState.holdStartedAt = null;
+          repoState.permanentFailure = false;
+          repoState.permanentFailedListedRev = null;
+          repoState.permanentAside = null;
+          repoState.resetOnBaseline = false;
+          return {
+            repo,
+            repoState,
+            seenStaleSeq,
+            events,
+            commitRev: recovered.commit.rev,
+            nextSetHash: recovered.setHash,
+            nextCids,
+            silentSeenKeys,
+            clearExpiredFloor: true,
+          };
+        }
+
+        const replay = await this.fetchAndReplayOpsForFollow({
+          space: input.space,
+          repo,
+          repoState,
+          listed: listedSet,
+          collectionsSet,
+          seen: spaceFollow.seen,
+          signal: input.signal,
+        });
+        if (replay.kind === "reset") {
+          const baseline = await this.fetchOpsBaseline(input.space, repo, {
+            allowTrustedEmpty: !listedSet.has(repo) && repoState.rev === null,
+            signal: input.signal,
+          });
+          repoState.rev = baseline.rev;
+          repoState.setHash = baseline.setHash;
+          repoState.cids = baseline.cids;
+          repoState.attempts.clear();
+          repoState.ackedStaleSeq = Math.max(repoState.ackedStaleSeq, seenStaleSeq);
+          repoState.permanentFailure = false;
+          repoState.permanentFailedListedRev = null;
+          repoState.permanentAside = null;
+          repoState.resetOnBaseline = false;
+          repoState.holdStartedAt = null;
+          repoState.expiredFloorRkey = null;
+          for (const key of baseline.seenKeys) recordSeenKey(spaceFollow.seen, key);
+          const reset: RepoOpsResetNotice = { kind: "reset", space: input.space, repo, reason: replay.reason, rev: baseline.rev };
+          return { repo, repoState, seenStaleSeq, events: [], silentSeenKeys: [], reset };
+        }
+        if (replay.events.length === 0) repoState.ackedStaleSeq = Math.max(repoState.ackedStaleSeq, seenStaleSeq);
+        repoState.holdStartedAt = null;
+        repoState.permanentFailure = false;
+        repoState.permanentFailedListedRev = null;
+        repoState.permanentAside = null;
+        repoState.resetOnBaseline = false;
+        return {
+          repo,
+          repoState,
+          seenStaleSeq,
+          events: replay.events,
+          commitRev: replay.commitRev,
+          nextSetHash: replay.nextSetHash,
+          nextCids: replay.nextCids,
+          silentSeenKeys: replay.silentSeenKeys,
+        };
+      } catch (error) {
+        if (error instanceof SyncStoreError || error instanceof SpaceCredentialError) throw error;
+        if (isCredentialRefused(error)) this.deps.credentials.drop(input.space);
+        const failure = this.classifyRepoNotFoundOrFailure(error, {
+          listed: listedSet.has(repo),
+          hadSyncedRev: repoState.rev !== null,
+        });
+        if (!failure) throw error;
+        repoState.ackedStaleSeq = Math.max(repoState.ackedStaleSeq, seenStaleSeq);
+        if (failure.kind === "empty") {
+          repoState.rev = null;
+          repoState.setHash = new Uint8Array(LTHASH_STATE_BYTES);
+          repoState.cids = new Map();
+          repoState.unbaselined = false;
+          repoState.permanentFailure = false;
+          repoState.permanentFailedListedRev = null;
+          repoState.permanentAside = null;
+          repoState.resetOnBaseline = false;
+          repoState.holdStartedAt = null;
+          repoState.expiredFloorRkey = null;
+          return { repo, repoState, seenStaleSeq, events: [], silentSeenKeys: [] };
+        }
+        if (failure.permanent) {
+          const wasPreviouslyBaselined = !repoState.unbaselined || repoState.expiredFloorRkey !== null;
+          repoState.rev = null;
+          repoState.setHash = new Uint8Array(LTHASH_STATE_BYTES);
+          repoState.cids = new Map();
+          repoState.attempts.clear();
+          repoState.holdStartedAt = null;
+          repoState.permanentFailure = true;
+          repoState.permanentFailedListedRev = listedRepoRevs.get(repo) ?? null;
+          const aside: SetAside = { did: repo, reason: failure.reason, permanent: true };
+          repoState.permanentAside = aside;
+          if (wasPreviouslyBaselined) {
+            repoState.unbaselined = true;
+            repoState.resetOnBaseline = true;
+            repoState.expiredFloorRkey = maxRkey(repoState.expiredFloorRkey, tidNow(Math.floor(now), 0));
+          }
+          return {
+            repo,
+            repoState,
+            seenStaleSeq,
+            events: [],
+            silentSeenKeys: [],
+            aside,
+          };
+        }
+        repoState.permanentFailure = false;
+        repoState.permanentFailedListedRev = null;
+        repoState.permanentAside = null;
+        if (!repoState.unbaselined) {
+          repoState.holdStartedAt ??= elapsed;
+          if (elapsed - repoState.holdStartedAt >= MAX_HOLD_MS) {
+            repoState.rev = null;
+            repoState.setHash = new Uint8Array(LTHASH_STATE_BYTES);
+            repoState.cids = new Map();
+            repoState.attempts.clear();
+            repoState.holdStartedAt = null;
+            repoState.expiredFloorRkey = maxRkey(repoState.expiredFloorRkey, tidNow(Math.floor(now), 0));
+            return {
+              repo,
+              repoState,
+              seenStaleSeq,
+              events: [],
+              silentSeenKeys: [],
+              reset: {
+                kind: "reset",
+                space: input.space,
+                repo,
+                reason: `held missing writer expired after ${MAX_HOLD_MS / 60_000} minutes`,
+                rev: null,
+              },
+              aside: { did: repo, reason: failure.reason, permanent: false },
+            };
+          }
+        }
+        return {
+          repo,
+          repoState,
+          seenStaleSeq,
+          events: [],
+          silentSeenKeys: [],
+          aside: { did: repo, reason: failure.reason, permanent: false },
+        };
+      }
+    });
+
+    const resets = prepared.flatMap((batch) => (batch.reset ? [batch.reset] : []));
+    const skippedAsides: SetAside[] = [];
+    for (const repo of writersList) {
+      if (writersToCheckSet.has(repo)) continue;
+      const existing = spaceFollow.repos.get(repo);
+      if (existing?.permanentFailure && existing.permanentAside) {
+        skippedAsides.push(existing.permanentAside);
+      }
+    }
+    const setAside = [...prepared.flatMap((batch) => (batch.aside ? [batch.aside] : [])), ...skippedAsides];
+
+    if (intervalElapsed) spaceFollow.lastCheckedAt = now;
+    for (const reset of resets) {
+      input.onReset?.(reset);
+      if (!input.onReset) {
+        input.onError?.(new Error(`Repo oplog reset on ${reset.space} (${reset.repo}): ${reset.reason}.`));
+      }
+    }
+
+    if (!input.deliver) {
+      return {
+        kind: resets.length > 0 ? "reset" : "baseline",
+        delivered: [],
+        resets,
+        complete: setAside.length === 0,
+        setAside,
+      };
+    }
+
+    const orderedEntries = mergeFollowQueues(prepared);
+    if (input.prepare) {
+      const proceed = await input.prepare(orderedEntries.map((entry) => entry.event));
+      if (!proceed) {
+        return { kind: resets.length > 0 ? "reset" : "ops", delivered: [], resets, complete: setAside.length === 0, setAside };
+      }
+    }
+
+    for (const batch of prepared) {
+      if (batch.events.length > 0) {
+        batch.repoState.ackedStaleSeq = Math.max(batch.repoState.ackedStaleSeq, batch.seenStaleSeq);
+      }
+      if (!batch.aside) spaceFollow.reportedAside.delete(batch.repo);
+    }
+    reportFollowSetAside(input.space, labels, setAside, spaceFollow.reportedAside, input.onError);
+
+    const delivered: RepoOpsEvent[] = [];
+    for (const { batch, event } of orderedEntries) {
+      const seenKey = seenKeyOf(event.uri, event.cid);
+      try {
+        await input.onEvent(event);
+        batch.repoState.attempts.delete(event.uri);
+        recordSeenKey(spaceFollow.seen, seenKey);
+        delivered.push(event);
+      } catch (error) {
+        input.onError?.(error);
+        const existing = batch.repoState.attempts.get(event.uri);
+        const attempt: RepoFollowAttempt = existing
+          ? { ...existing, cid: event.cid, count: existing.count + 1 }
+          : { uri: event.uri, rkey: event.rkey, cid: event.cid, count: 1, since: elapsed };
+        if (attempt.count < MAX_ATTEMPTS) {
+          batch.repoState.attempts.set(event.uri, attempt);
+          continue;
+        }
+        input.onError?.(new Error(`The app failed on ${event.uri} ${attempt.count} times; it is not given again.`));
+        batch.repoState.attempts.delete(event.uri);
+        recordSeenKey(spaceFollow.seen, seenKey);
+      }
+    }
+
+    for (const batch of prepared) {
+      if (batch.aside) continue;
+      for (const [uri, attempt] of batch.repoState.attempts) {
+        if (elapsed - attempt.since <= MAX_HOLD_MS) continue;
+        batch.repoState.attempts.delete(uri);
+        recordSeenKey(spaceFollow.seen, seenKeyOf(attempt.uri, attempt.cid));
+        input.onError?.(new Error(`The app failed on ${attempt.uri} and it has not been read again for ${MAX_HOLD_MS / 60_000} minutes; it is not given again.`));
+      }
+
+      if (batch.repoState.attempts.size === 0 && batch.nextSetHash && batch.nextCids) {
+        batch.repoState.rev = batch.commitRev ?? null;
+        batch.repoState.setHash = batch.nextSetHash;
+        batch.repoState.cids = batch.nextCids;
+        if (batch.clearExpiredFloor) batch.repoState.expiredFloorRkey = null;
+        for (const key of batch.silentSeenKeys) recordSeenKey(spaceFollow.seen, key);
+      }
+    }
+
+    return {
+      kind: resets.length > 0 ? "reset" : "ops",
+      delivered,
+      resets,
+      complete: setAside.length === 0,
+      setAside,
+    };
+  }
+
+  private async syncVerifiedWriter(input: {
+    space: string;
+    repo: string;
+    collections: readonly string[];
+    epoch: string;
+    intervalMs: number;
+    listed: ReadonlySet<string>;
+    allowTrustedEmpty: boolean;
+    maxStarBytes: number;
+    maxStarRecords: number;
+    signal?: AbortSignal;
+  }): Promise<{ repo: string; setAside?: SetAside; changing?: boolean; emptyReason?: VerifiedEmptyReason }> {
+    const now = this.now();
+    const initial = await this.deps.store.getWriter(input.space, input.repo);
+    const listedEntry = (await this.deps.store.getSpace(input.space))?.writers.find((writer) => writer.did === input.repo);
+    if (!this.verifiedWriterNeedsCheck(initial, input.collections, listedEntry?.repoRev, now, input.intervalMs)) {
+      return {
+        repo: input.repo,
+        ...(initial?.syncedRev === null ? { emptyReason: "unwrittenOrAbsent" as const } : {}),
+      };
+    }
+
+    let currentState = initial;
+    for (let casAttempt = 0; casAttempt < WORKSPACE_ENVELOPE.maxListRecordsRetry; casAttempt += 1) {
+      if ((await this.deps.store.epoch(input.space)) !== input.epoch) return { repo: input.repo };
+      const startInvalidationSeq = (await this.deps.store.getSpace(input.space))?.invalidationSeq ?? 0;
+      currentState = await this.deps.store.getWriter(input.space, input.repo);
+      const state = currentState ?? emptyWriterState(input.space, input.repo);
+      let validPds: string | null = null;
+      try {
+        validPds = await this.resolveValidPds(input.repo);
+        const canTryDelta = state.syncedRev !== null
+          && hasVerifiedSetHash(state)
+          && allPersistedCollectionsCovered(state, input.collections);
+
+        if (canTryDelta) {
+          const delta = await this.tryAdvanceViaRepoOps({
+            space: input.space,
+            repo: input.repo,
+            state,
+            collections: input.collections,
+            maxBytes: input.maxStarBytes,
+            maxRecords: input.maxStarRecords,
+            signal: input.signal,
+          });
+          if (delta.applied) {
+            const committed = await this.deps.store.commit({
+              space: input.space,
+              repo: input.repo,
+              expectedGeneration: state.generation,
+              expectedInvalidationSeq: startInvalidationSeq,
+              rev: delta.commit.rev,
+              epoch: input.epoch,
+              next: {
+                syncedRev: delta.commit.rev,
+                checkedAt: this.now(),
+                stale: false,
+                coverage: delta.coverage,
+                setHash: delta.setHash,
+                commitDigest: delta.commit.data,
+              },
+              ...(delta.upsert.length > 0 ? { upsert: delta.upsert } : {}),
+              ...(delta.remove.length > 0 ? { remove: delta.remove } : {}),
+            });
+            if (committed) return { repo: input.repo };
+            continue;
+          }
+        }
+
+        const recovered = await this.recoverFullVerifiedRepo({
+          space: input.space,
+          repo: input.repo,
+          pdsUrl: validPds,
+          maxBytes: input.maxStarBytes,
+          maxRecords: input.maxStarRecords,
+          signal: input.signal,
+        });
+        const replace = buildFullReplaceMap(input.space, input.repo, recovered.records, [
+          ...Object.keys(state.coverage),
+          ...input.collections,
+        ]);
+        const nextCoverage = buildVerifiedCoverage(replace, input.collections);
+        const committed = await this.deps.store.commit({
+          space: input.space,
+          repo: input.repo,
+          expectedGeneration: state.generation,
+          expectedInvalidationSeq: startInvalidationSeq,
+          rev: recovered.commit.rev,
+          epoch: input.epoch,
+          next: {
+            syncedRev: recovered.commit.rev,
+            checkedAt: this.now(),
+            stale: false,
+            coverage: nextCoverage,
+            setHash: recovered.setHash,
+            commitDigest: recovered.commitDigest,
+          },
+          replace,
+        });
+        if (committed) return { repo: input.repo };
+      } catch (error) {
+        if (error instanceof SyncStoreError || error instanceof SpaceCredentialError) throw error;
+        if (isCredentialRefused(error)) this.deps.credentials.drop(input.space);
+        const hadSyncedRev = state.syncedRev !== null;
+        if (error instanceof XrpcError && error.code === "RepoNotFound") {
+          if (input.allowTrustedEmpty && !hadSyncedRev && validPds !== null) {
+            const emptyReplace = buildFullReplaceMap(input.space, input.repo, [], [
+              ...Object.keys(state.coverage),
+              ...input.collections,
+            ]);
+            const emptyCoverage = buildVerifiedCoverage(emptyReplace, input.collections);
+            await this.deps.store.commit({
+              space: input.space,
+              repo: input.repo,
+              expectedGeneration: state.generation,
+              expectedInvalidationSeq: startInvalidationSeq,
+              epoch: input.epoch,
+              next: {
+                syncedRev: null,
+                checkedAt: this.now(),
+                stale: false,
+                coverage: emptyCoverage,
+                setHash: new Uint8Array(LTHASH_STATE_BYTES),
+              },
+              replace: emptyReplace,
+            });
+            return { repo: input.repo, emptyReason: "unwrittenOrAbsent" };
+          }
+          // Fail closed without dropping verified cached records on unauthenticated 400 RepoNotFound.
+          return { repo: input.repo, setAside: { did: input.repo, reason: "its host has no repo for it", permanent: false } };
+        }
+        if (error instanceof ChangingWriterError) return { repo: input.repo, changing: true };
+        const failure = classifyVerifiedRepoFailure(error);
+        if (!failure) throw error;
+        if (failure.permanent) {
+          await this.dropRecordsOnPermanentFailure(
+            input.space,
+            input.repo,
+            state,
+            input.collections,
+            input.epoch,
+            startInvalidationSeq,
+          );
+        }
+        return { repo: input.repo, setAside: { did: input.repo, reason: failure.reason, permanent: failure.permanent } };
+      }
+    }
+    return { repo: input.repo, changing: true };
+  }
+
+  private verifiedWriterNeedsCheck(
+    state: WriterState | undefined,
+    collections: readonly string[],
+    listedRepoRev: string | undefined,
+    now: number,
+    intervalMs: number,
+  ): boolean {
+    if (!state || state.stale || state.checkedAt === null || !hasVerifiedSetHash(state)) return true;
+    if (!allPersistedCollectionsCovered(state, collections)) return true;
+    if (intervalMs === 0) return true;
+    if (listedRepoRev !== undefined && (state.syncedRev === null || listedRepoRev > state.syncedRev)) return true;
+    const sinceCheck = now - state.checkedAt;
+    return sinceCheck < 0 || sinceCheck >= intervalMs;
+  }
+
+  private async dropRecordsOnPermanentFailure(
+    space: string,
+    repo: string,
+    state: WriterState,
+    collections: readonly string[],
+    epoch: string,
+    expectedInvalidationSeq: number,
+  ): Promise<void> {
+    // Guard permanent-failure record cleanup with full CAS checks (`expectedGeneration`, `expectedInvalidationSeq`, `epoch`)
+    // so a delayed cold failure never erases newer verified records or WriterState committed concurrently.
+    const emptyReplace = buildFullReplaceMap(space, repo, [], [...Object.keys(state.coverage), ...collections]);
+    await this.deps.store.commit({
+      space,
+      repo,
+      expectedGeneration: state.generation,
+      expectedInvalidationSeq,
+      epoch,
+      next: {
+        // When `state.syncedRev !== null`, preserve non-null `syncedRev` so subsequent reads keep failing closed
+        // on unauthenticated 400 `RepoNotFound`; for cold failures (`syncedRev === null`), leave `syncedRev: null`.
+        syncedRev: state.syncedRev,
+        checkedAt: null,
+        stale: false,
+        coverage: {},
+      },
+      replace: emptyReplace,
+    });
+  }
+
+  private async resolveValidPds(did: string): Promise<string> {
+    if (!isDid(did)) throw new Error(`Invalid writer DID: ${did}`);
+    const pdsUrl = await this.deps.transport.resolvePds(did);
+    if (!isValidPdsEndpointUrl(pdsUrl)) throw new Error(`Invalid PDS endpoint URL for ${did}.`);
+    return pdsUrl;
+  }
+
+  private async withCredentialRetry<T>(space: string, repo: string, run: (credential: SpaceCredential, client: AtprotoClient) => Promise<T>): Promise<T> {
+    const pdsUrl = await this.resolveValidPds(repo);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const credential = attempt === 0 ? await this.deps.credentials.get(space) : await this.deps.credentials.fresh(space);
+      try {
+        return await run(credential, credential.client(pdsUrl));
+      } catch (error) {
+        if (attempt === 0 && isCredentialRefused(error)) {
+          this.deps.credentials.drop(space);
+          continue;
+        }
+        throw error;
+      }
+    }
+    throw new Error("Credential retry exhausted.");
+  }
+
+  private async tryAdvanceViaRepoOps(input: {
+    space: string;
+    repo: string;
+    state: WriterState;
+    collections: readonly string[];
+    maxBytes: number;
+    maxRecords: number;
+    signal?: AbortSignal;
+  }): Promise<
+    | { applied: false }
+    | {
+        applied: true;
+        commit: Commit;
+        setHash: Uint8Array;
+        coverage: Record<string, Coverage>;
+        upsert: StoredRecord[];
+        remove: Array<{ collection: string; rkey: string }>;
+      }
+  > {
+    const { space, repo, state } = input;
+    const syncedRev = state.syncedRev!;
+    const persistedCols = Object.keys(state.coverage);
+    const persisted = (await Promise.all(persistedCols.map((c) => this.deps.store.records(space, c, repo)))).flat();
+    const liveRecords = new Map<string, StoredRecord>();
+    for (const record of persisted) {
+      liveRecords.set(pathKey(record.collection, record.rkey), record);
+    }
+    const overlayKeys = new Map<string, StoredRecord | null>();
+    for (const entry of state.optimisticOverlay ?? []) {
+      const path = pathKey(entry.collection, entry.rkey);
+      overlayKeys.set(path, entry.prevRecord);
+      if (entry.prevRecord === null) {
+        liveRecords.delete(path);
+      } else {
+        liveRecords.set(path, entry.prevRecord);
+      }
+    }
+    const stagedCids = new Map<string, Cid>();
+    for (const [path, record] of liveRecords) {
+      const cid = parseCidSafe(record.cid);
+      if (!cid) return { applied: false };
+      stagedCids.set(path, cid);
+    }
+    const persistedSetHash = RepoCommit.fromRecords(
+      [...stagedCids.entries()].map(([path, cid]) => {
+        const [collection, rkey] = splitPathKey(path);
+        return { collection: collection as never, rkey: rkey as never, cid };
+      }),
+    ).setHash.state();
+    if (!bytesEqual(persistedSetHash, state.setHash!)) return { applied: false };
+
+    let paged: { ops: RawRepoOp[]; commit: Commit };
+    try {
+      paged = await this.fetchRepoOpsPages(space, repo, syncedRev, false, input.signal, {
+        maxOps: Math.max(1, input.maxRecords) * 2,
+        maxPayloadBytes: input.maxBytes,
+      });
+    } catch (error) {
+      if (error instanceof DeltaFallbackError || error instanceof UnsignedEmptyRepoOpsError || isUnsupportedEndpointError(error)) {
+        return { applied: false };
+      }
+      throw error;
+    }
+
+    const replayed = await replayValidatedRepoOps({
+      space,
+      repo,
+      ops: paged.ops,
+      commit: paged.commit,
+      baseRev: syncedRev,
+      baseSetHash: state.setHash!,
+      baseCids: stagedCids,
+      maxRecords: input.maxRecords,
+    });
+    if (!replayed.ok) {
+      if (replayed.exceededLimit === "records") {
+        throw new RepoStarLimitError("records", input.maxRecords);
+      }
+      return { applied: false };
+    }
+
+    const touchedPaths = new Set<string>();
+    const touchedBytes = new Map<string, number>();
+    const upsert: StoredRecord[] = [];
+    const remove: Array<{ collection: string; rkey: string }> = [];
+    for (const item of replayed.touched) {
+      touchedPaths.add(item.path);
+      if (item.finalCid === null) {
+        liveRecords.delete(item.path);
+        remove.push({ collection: item.collection, rkey: item.rkey });
+      } else {
+        if (item.finalByteLength !== undefined) touchedBytes.set(item.path, item.finalByteLength);
+        const stored: StoredRecord = {
+          space,
+          repo,
+          collection: item.collection,
+          rkey: item.rkey,
+          uri: spaceRecordUri(space, repo, item.collection, item.rkey),
+          cid: item.finalCid.toString(),
+          value: item.finalValue!,
+        };
+        liveRecords.set(item.path, stored);
+        upsert.push(stored);
+      }
+    }
+
+    // Reconcile any optimistic keys not touched by verified oplog replay back to their verified pre-optimistic baseline.
+    for (const [path, prevRecord] of overlayKeys) {
+      if (touchedPaths.has(path)) continue;
+      if (prevRecord === null) {
+        const [collection, rkey] = splitPathKey(path);
+        remove.push({ collection, rkey });
+      } else {
+        upsert.push(prevRecord);
+      }
+    }
+
+    // Enforce aggregate 20,000-record and exact 16 MiB STAR archive byte caps over all surviving live records (matching cold STAR).
+    if (replayed.stagedCids.size > input.maxRecords) {
+      throw new RepoStarLimitError("records", input.maxRecords);
+    }
+    let liveBytes = await starHeaderBytes(paged.commit);
+    if (liveBytes > input.maxBytes) {
+      throw new RepoStarLimitError("bytes", input.maxBytes, liveBytes);
+    }
+    const byCol = new Map<string, StoredRecord[]>();
+    for (const [path] of replayed.stagedCids) {
+      const live = liveRecords.get(path);
+      if (!live) continue;
+      const recordBytes = touchedBytes.get(path) ?? await serializedRecordBytes(live.collection, live.rkey, live.value);
+      liveBytes += starEntryBytes(live.collection, live.rkey, recordBytes);
+      if (liveBytes > input.maxBytes) {
+        throw new RepoStarLimitError("bytes", input.maxBytes, liveBytes);
+      }
+      const list = byCol.get(live.collection) ?? [];
+      list.push(live);
+      byCol.set(live.collection, list);
+    }
+    return {
+      applied: true,
+      commit: paged.commit,
+      setHash: replayed.setHash,
+      coverage: buildVerifiedCoverage(Object.fromEntries(byCol), [...persistedCols, ...input.collections]),
+      upsert,
+      remove,
+    };
+  }
+
+  private async fetchRepoOpsPages(
+    space: string,
+    repo: string,
+    since: string | undefined,
+    excludeValues: boolean,
+    signal?: AbortSignal,
+    bounds?: { maxOps?: number; maxPayloadBytes?: number },
+  ): Promise<{ ops: RawRepoOp[]; commit: Commit }> {
+    const maxPayloadBytes = bounds?.maxPayloadBytes ?? WORKSPACE_ENVELOPE.maxStarArchiveBytes;
+    return this.withCredentialRetry(space, repo, async (_credential, client) => {
+      const ops: RawRepoOp[] = [];
+      const seenCursors = new Set<string>();
+      let stagedBytes = 0;
+      let cursor: string | undefined;
+      for (let pageIndex = 0; pageIndex < WORKSPACE_ENVELOPE.maxRepoOpsPages; pageIndex += 1) {
+        if (signal?.aborted) throw signal.reason ?? new Error("Aborted.");
+        const page = await client.query<{ ops?: unknown; cursor?: unknown; commit?: unknown }>("com.atproto.space.listRepoOps", {
+          space,
+          repo,
+          ...(since !== undefined && cursor === undefined ? { since } : {}),
+          limit: 500,
+          ...(excludeValues ? { excludeValues: true } : {}),
+          ...(cursor !== undefined ? { cursor } : {}),
+        });
+        if (!page || typeof page !== "object" || !Array.isArray(page.ops) || page.ops.length > 500) {
+          throw new DeltaFallbackError("Malformed listRepoOps page.");
+        }
+        if (
+          page.cursor !== undefined &&
+          (typeof page.cursor !== "string" || page.cursor.length > MAX_REPO_OP_CURSOR_LENGTH)
+        ) {
+          throw new DeltaFallbackError("Malformed or oversized listRepoOps cursor.");
+        }
+        if (bounds?.maxOps !== undefined && ops.length + page.ops.length > bounds.maxOps) {
+          throw new DeltaFallbackError("listRepoOps exceeded cumulative op staging bound.");
+        }
+        if (typeof page.cursor === "string") {
+          stagedBytes += utf8Encoder.encode(page.cursor).byteLength;
+          if (stagedBytes > maxPayloadBytes) {
+            throw new DeltaFallbackError("listRepoOps exceeded cumulative payload byte staging bound.");
+          }
+        }
+        const projectedOps: RawRepoOp[] = [];
+        for (const rawOp of page.ops as unknown[]) {
+          if (!isValidRawOp(rawOp)) {
+            throw new DeltaFallbackError("Malformed or oversized op entry in listRepoOps.");
+          }
+          stagedBytes +=
+            utf8Encoder.encode(rawOp.rev).byteLength +
+            utf8Encoder.encode(rawOp.collection).byteLength +
+            utf8Encoder.encode(rawOp.rkey).byteLength +
+            (rawOp.cid !== null ? utf8Encoder.encode(rawOp.cid).byteLength : 0) +
+            (rawOp.prev !== null ? utf8Encoder.encode(rawOp.prev).byteLength : 0);
+          if (!excludeValues && rawOp.value !== undefined && rawOp.value !== null) {
+            stagedBytes += utf8Encoder.encode(JSON.stringify(rawOp.value)).byteLength;
+          }
+          if (stagedBytes > maxPayloadBytes) {
+            throw new DeltaFallbackError("listRepoOps exceeded cumulative payload byte staging bound.");
+          }
+          projectedOps.push({
+            rev: rawOp.rev,
+            collection: rawOp.collection,
+            rkey: rawOp.rkey,
+            cid: rawOp.cid,
+            prev: rawOp.prev,
+            ...(!excludeValues && rawOp.value !== undefined ? { value: rawOp.value } : {}),
+          });
+        }
+        ops.push(...projectedOps);
+        if (page.commit !== undefined) {
+          const commit = decodeCommitResponse(page.commit, space, repo);
+          if (!commit || page.cursor !== undefined) throw new DeltaFallbackError("Malformed final listRepoOps commit.");
+          return { ops, commit };
+        }
+        if (typeof page.cursor === "string" && page.cursor.length > 0 && page.ops.length > 0) {
+          if (page.cursor === cursor || seenCursors.has(page.cursor)) {
+            throw new DeltaFallbackError("listRepoOps cursor did not advance.");
+          }
+          seenCursors.add(page.cursor);
+          cursor = page.cursor;
+          continue;
+        }
+        if (page.ops.length === 0 && page.cursor === undefined) {
+          throw new UnsignedEmptyRepoOpsError();
+        }
+        throw new DeltaFallbackError("Missing commit or cursor on listRepoOps page.");
+      }
+      throw new DeltaFallbackError("listRepoOps exceeded maxRepoOpsPages.");
+    });
+  }
+
+  private async recoverFullVerifiedRepo(input: {
+    space: string;
+    repo: string;
+    pdsUrl: string;
+    maxBytes: number;
+    maxRecords: number;
+    signal?: AbortSignal;
+  }): Promise<{ commit: Commit; setHash: Uint8Array; commitDigest: Uint8Array; records: Array<{ collection: string; rkey: string; cid: string; value: Record<string, unknown> }> }> {
+    let starUnsupported = false;
+    for (let attempt = 0; attempt < WORKSPACE_ENVELOPE.maxListRecordsRetry; attempt += 1) {
+      if (input.signal?.aborted) throw input.signal.reason ?? new Error("Aborted.");
+      try {
+        const star = await this.withCredentialRetry(input.space, input.repo, (credential) =>
+          credential.fetchVerifiedRepoStar(input.pdsUrl, {
+            space: input.space,
+            repo: input.repo,
+            maxBytes: input.maxBytes,
+            maxRecords: input.maxRecords,
+            signal: input.signal,
+          }),
+        );
+        return {
+          commit: star.commit,
+          setHash: star.setHash,
+          commitDigest: star.commitDigest,
+          records: star.records.map((entry) => ({
+            collection: entry.collection,
+            rkey: entry.rkey,
+            cid: entry.cid,
+            value: entry.record,
+          })),
+        };
+      } catch (error) {
+        if (error instanceof RepoStarLimitError || error instanceof SpaceMacError || error instanceof KemKeyError || error instanceof SpaceCredentialError || error instanceof SyncStoreError) {
+          throw error;
+        }
+        if (error instanceof XrpcError && error.code === "RepoNotFound") throw error;
+        if (isUnsupportedEndpointError(error)) {
+          starUnsupported = true;
+          break;
+        }
+        if (error instanceof RepoVerificationError || error instanceof StarParseError) {
+          if (attempt + 1 < WORKSPACE_ENVELOPE.maxListRecordsRetry) continue;
+          throw error;
+        }
+        throw error;
+      }
+    }
+
+    if (!starUnsupported) throw new RepoVerificationError(`STAR verification failed for ${input.repo}.`);
+
+    for (let attempt = 0; attempt < WORKSPACE_ENVELOPE.maxListRecordsRetry; attempt += 1) {
+      const result = await this.withCredentialRetry(input.space, input.repo, async (_credential, client) => {
+        const beforeCommit = await latestCommit(client, input.space, input.repo);
+        const listed = await listVerifiedBoundedRecords(client, {
+          space: input.space,
+          repo: input.repo,
+          maxRecords: input.maxRecords,
+          maxBytes: input.maxBytes,
+          commit: beforeCommit,
+        });
+        const afterCommit = await latestCommit(client, input.space, input.repo);
+        return { beforeCommit, listed, afterCommit };
+      });
+      if (result.beforeCommit.rev !== result.afterCommit.rev) continue;
+      const repoCommit = RepoCommit.fromRecords(
+        result.listed.records.map((entry) => ({
+          collection: entry.collection as never,
+          rkey: entry.rkey as never,
+          cid: entry.parsedCid,
+        })),
+      );
+      if (!repoCommit.matches(result.afterCommit)) {
+        throw new SpaceMacError(`Commit digest mismatch for ${input.repo} across stable listRecords bracket.`);
+      }
+      return {
+        commit: result.afterCommit,
+        setHash: repoCommit.setHash.state(),
+        commitDigest: new Uint8Array(result.afterCommit.data),
+        records: result.listed.records.map((entry) => ({
+          collection: entry.collection,
+          rkey: entry.rkey,
+          cid: entry.cid,
+          value: entry.value,
+        })),
+      };
+    }
+    throw new ChangingWriterError(input.repo);
+  }
+
+  private async fetchOpsBaseline(
+    space: string,
+    repo: string,
+    input: { allowTrustedEmpty: boolean; signal?: AbortSignal },
+  ): Promise<{ rev: string | null; setHash: Uint8Array; cids: Map<string, Cid>; seenKeys: string[] }> {
+    for (let attempt = 0; attempt < WORKSPACE_ENVELOPE.maxListRecordsRetry; attempt += 1) {
+      if (input.signal?.aborted) throw input.signal.reason ?? new Error("Aborted.");
+      try {
+        const result = await this.withCredentialRetry(space, repo, async (_credential, client) => {
+          const beforeCommit = await latestCommit(client, space, repo);
+          const listed = await listBoundedRecords(client, {
+            space,
+            repo,
+            maxRecords: WORKSPACE_ENVELOPE.maxStarRecords,
+            excludeValues: true,
+          });
+          if (listed.truncated) throw new RepoStarLimitError("records", WORKSPACE_ENVELOPE.maxStarRecords);
+          const afterCommit = await latestCommit(client, space, repo);
+          return { beforeCommit, listed, afterCommit };
+        });
+        if (result.beforeCommit.rev !== result.afterCommit.rev) continue;
+        const cids = new Map<string, Cid>();
+        const seenKeys: string[] = [];
+        const commitEntries: Array<{ collection: never; rkey: never; cid: Cid }> = [];
+        for (const entry of result.listed.records) {
+          const parsedCid = parseCidSafe(entry.cid);
+          if (!parsedCid) throw new SpaceMacError(`Invalid CID in listRecords baseline for ${repo}.`);
+          cids.set(pathKey(entry.collection, entry.rkey), parsedCid);
+          seenKeys.push(seenKeyOf(spaceRecordUri(space, repo, entry.collection, entry.rkey), entry.cid));
+          commitEntries.push({ collection: entry.collection as never, rkey: entry.rkey as never, cid: parsedCid });
+        }
+        const repoCommit = RepoCommit.fromRecords(commitEntries);
+        if (!repoCommit.matches(result.afterCommit)) {
+          throw new SpaceMacError(`Commit digest mismatch for ${repo} across stable baseline bracket.`);
+        }
+        return {
+          rev: result.afterCommit.rev,
+          setHash: repoCommit.setHash.state(),
+          cids,
+          seenKeys,
+        };
+      } catch (error) {
+        if (error instanceof XrpcError && error.code === "RepoNotFound" && input.allowTrustedEmpty) {
+          return { rev: null, setHash: new Uint8Array(LTHASH_STATE_BYTES), cids: new Map(), seenKeys: [] };
+        }
+        throw error;
+      }
+    }
+    throw new SpaceMacError(`Baseline verification failed for ${repo} due to concurrent writes or commit mismatch.`);
+  }
+
+  private async fetchAndReplayOpsForFollow(input: {
+    space: string;
+    repo: string;
+    repoState: RepoFollowState;
+    listed: ReadonlySet<string>;
+    collectionsSet: ReadonlySet<string>;
+    seen: ReadonlySet<string>;
+    signal?: AbortSignal;
+  }): Promise<
+    | { kind: "reset"; reason: string }
+    | {
+        kind: "ops";
+        events: RepoOpsEvent[];
+        commitRev: string | undefined;
+        nextSetHash: Uint8Array;
+        nextCids: Map<string, Cid>;
+        silentSeenKeys: string[];
+      }
+  > {
+    const { space, repo, repoState } = input;
+    let paged: { ops: RawRepoOp[]; commit: Commit };
+    try {
+      paged = await this.fetchRepoOpsPages(space, repo, repoState.rev ?? undefined, false, input.signal, {
+        maxOps: WORKSPACE_ENVELOPE.maxStarRecords * 2,
+        maxPayloadBytes: WORKSPACE_ENVELOPE.maxStarArchiveBytes,
+      });
+    } catch (error) {
+      if (error instanceof UnsignedEmptyRepoOpsError) {
+        if (repoState.rev === null && !input.listed.has(repo)) {
+          return {
+            kind: "ops",
+            events: [],
+            commitRev: undefined,
+            nextSetHash: new Uint8Array(LTHASH_STATE_BYTES),
+            nextCids: new Map(),
+            silentSeenKeys: [],
+          };
+        }
+        throw new SpaceMacError(`Host returned unsigned empty listRepoOps for ${repo}.`);
+      }
+      if (error instanceof DeltaFallbackError) {
+        return { kind: "reset", reason: error.message };
+      }
+      throw error;
+    }
+
+    const replayed = await replayValidatedRepoOps({
+      space,
+      repo,
+      ops: paged.ops,
+      commit: paged.commit,
+      baseRev: repoState.rev,
+      baseSetHash: repoState.setHash,
+      baseCids: repoState.cids,
+      maxRecords: WORKSPACE_ENVELOPE.maxStarRecords,
+    });
+    if (!replayed.ok) {
+      return { kind: "reset", reason: replayed.reason };
+    }
+
+    const surviving = replayed.touched
+      .filter((item) => item.finalCid !== null)
+      .sort((left, right) => left.orderIndex - right.orderIndex);
+
+    const events: RepoOpsEvent[] = [];
+    const silentSeenKeys: string[] = [];
+    for (const item of surviving) {
+      const cidStr = item.finalCid!.toString();
+      const uri = spaceRecordUri(space, repo, item.collection, item.rkey);
+      const seenKey = seenKeyOf(uri, cidStr);
+      const isCreateOrRestore = !item.hadBefore || item.sawCreateOrDelete;
+      if (!input.collectionsSet.has(item.collection) || !isCreateOrRestore || input.seen.has(seenKey)) {
+        silentSeenKeys.push(seenKey);
+        continue;
+      }
+      events.push({
+        space,
+        repo,
+        collection: item.collection,
+        rkey: item.rkey,
+        uri,
+        cid: cidStr,
+        rev: item.finalRev,
+        value: item.finalValue!,
+      });
+    }
+
+    return {
+      kind: "ops",
+      events,
+      commitRev: paged.commit.rev,
+      nextSetHash: replayed.setHash,
+      nextCids: replayed.stagedCids,
+      silentSeenKeys,
+    };
+  }
+
+  private classifyRepoNotFoundOrFailure(
+    error: unknown,
+    ctx: { listed: boolean; hadSyncedRev: boolean },
+  ): ({ kind: "empty" } | { kind: "failure"; reason: string; permanent: boolean }) | null {
+    if (error instanceof XrpcError && error.code === "RepoNotFound") {
+      if (!ctx.listed && !ctx.hadSyncedRev) return { kind: "empty" };
+      return { kind: "failure", reason: "its host has no repo for it", permanent: false };
+    }
+    const failure = classifyVerifiedRepoFailure(error);
+    return failure ? { kind: "failure", ...failure } : null;
   }
 }
 
@@ -647,14 +2198,25 @@ async function listPage(
   if (cursor) seenCursors.add(cursor);
   assertBoundedRecordPage(page, { collection, limit, cursor: cursor ?? undefined, seenCursors });
   if (page.cursor) seenCursors.add(page.cursor);
+  const records: StoredRecord[] = [];
+  for (const record of page.records) {
+    if (!record.value) throw new Error("PDS record page contains a malformed record.");
+    const cid = record.cid ?? "";
+    if (cid.length > 0 && !(await verifyRecordCid(collection, record.rkey, record.value, cid))) {
+      throw new SpaceMacError(`Record ${collection}/${record.rkey} for ${source.repo} failed CID verification.`);
+    }
+    records.push({
+      space: source.space,
+      repo: source.repo,
+      collection,
+      rkey: record.rkey,
+      uri: spaceRecordUri(source.space, source.repo, collection, record.rkey),
+      cid,
+      value: record.value,
+    });
+  }
   return {
-    records: page.records.map((record) => {
-      if (!record.value) throw new Error("PDS record page contains a malformed record.");
-      return {
-        space: source.space, repo: source.repo, collection, rkey: record.rkey,
-        uri: spaceRecordUri(source.space, source.repo, collection, record.rkey), cid: record.cid ?? "", value: record.value,
-      };
-    }),
+    records,
     ...(page.cursor ? { cursor: page.cursor } : {}),
   };
 }
@@ -667,7 +2229,14 @@ async function latestRev(client: AtprotoClient, source: Source): Promise<string>
 }
 
 function stateFields(state: WriterState): Omit<WriterState, "space" | "repo" | "generation"> {
-  return { syncedRev: state.syncedRev, checkedAt: state.checkedAt, stale: state.stale, coverage: state.coverage };
+  return {
+    syncedRev: state.syncedRev,
+    checkedAt: state.checkedAt,
+    stale: state.stale,
+    coverage: state.coverage,
+    ...(state.setHash !== undefined ? { setHash: state.setHash } : {}),
+    ...(state.commitDigest !== undefined ? { commitDigest: state.commitDigest } : {}),
+  };
 }
 
 function itemOf(record: StoredRecord): { key: string; uri: string } {
@@ -696,3 +2265,424 @@ function sourceKey(source: { space: string; repo: string }): string {
 function isTombstone(state: WriterState): boolean {
   return state.syncedRev === null && Object.keys(state.coverage).length === 0 && !state.stale;
 }
+
+type RawRepoOp = {
+  rev: string;
+  collection: string;
+  rkey: string;
+  cid: string | null;
+  prev: string | null;
+  value?: unknown;
+};
+
+type TouchedRepoPath = {
+  path: string;
+  collection: string;
+  rkey: string;
+  finalCid: Cid | null;
+  finalValue?: Record<string, unknown>;
+  finalByteLength?: number;
+  finalRev: string;
+  hadBefore: boolean;
+  sawCreateOrDelete: boolean;
+  orderIndex: number;
+};
+
+class DeltaFallbackError extends Error {}
+
+class UnsignedEmptyRepoOpsError extends Error {}
+
+class ChangingWriterError extends Error {
+  constructor(readonly repo: string) {
+    super(`Writer ${repo} kept changing during verification bracket.`);
+  }
+}
+
+async function replayValidatedRepoOps(input: {
+  space: string;
+  repo: string;
+  ops: readonly RawRepoOp[];
+  commit: Commit;
+  baseRev: string | null;
+  baseSetHash: Uint8Array;
+  baseCids: ReadonlyMap<string, Cid>;
+  maxRecords?: number;
+}): Promise<
+  | { ok: false; reason: string; exceededLimit?: "records" }
+  | { ok: true; setHash: Uint8Array; stagedCids: Map<string, Cid>; touched: TouchedRepoPath[] }
+> {
+  if (input.ops.length === 0) {
+    if (input.baseRev !== null && input.commit.rev !== input.baseRev) {
+      return { ok: false, reason: "Repository history reset (clearRecords/importRepo/pruned oplog)." };
+    }
+    if (!RepoCommit.fromState(input.baseSetHash).matches(input.commit)) {
+      return {
+        ok: false,
+        reason: input.baseRev === null
+          ? "Repository holds records without oplog history."
+          : "Repository commit digest diverged from baseline.",
+      };
+    }
+    if (input.maxRecords !== undefined && input.baseCids.size > input.maxRecords) {
+      return { ok: false, exceededLimit: "records", reason: "Repository exceeds maxRecords limit." };
+    }
+    return { ok: true, setHash: new Uint8Array(input.baseSetHash), stagedCids: new Map(input.baseCids), touched: [] };
+  }
+
+  const replayed = RepoCommit.fromState(input.baseSetHash);
+  const stagedCids = new Map(input.baseCids);
+  const pathMeta = new Map<string, {
+    collection: string;
+    rkey: string;
+    hadBefore: boolean;
+    sawCreateOrDelete: boolean;
+    orderIndex: number;
+    finalCid: Cid | null;
+    finalOp?: RawRepoOp;
+  }>();
+  let lastRev: string | null = null;
+
+  for (let index = 0; index < input.ops.length; index += 1) {
+    const rawOp = input.ops[index]!;
+    if (!isValidRawOp(rawOp)) return { ok: false, reason: "Malformed op entry in listRepoOps." };
+    if (input.baseRev !== null && rawOp.rev <= input.baseRev) {
+      return { ok: false, reason: "listRepoOps rev did not advance past baseline." };
+    }
+    if (lastRev !== null && rawOp.rev < lastRev) {
+      return { ok: false, reason: "listRepoOps returned decreasing rev." };
+    }
+    lastRev = rawOp.rev;
+
+    const nextCid = rawOp.cid === null ? null : parseCidSafe(rawOp.cid);
+    const prevCid = rawOp.prev === null ? null : parseCidSafe(rawOp.prev);
+    if ((rawOp.cid !== null && !nextCid) || (rawOp.prev !== null && !prevCid) || (nextCid === null && prevCid === null)) {
+      return { ok: false, reason: "Invalid CID in listRepoOps." };
+    }
+
+    const path = pathKey(rawOp.collection, rawOp.rkey);
+    const staged = stagedCids.get(path) ?? null;
+    if (!isValidPrevTransition(staged, prevCid, nextCid)) {
+      return { ok: false, reason: "Oplog prev-chain discontinuity (pruned or reset)." };
+    }
+
+    replayed.applyOp({ collection: rawOp.collection as never, rkey: rawOp.rkey as never, cid: nextCid, prev: prevCid });
+    const existing = pathMeta.get(path) ?? {
+      collection: rawOp.collection,
+      rkey: rawOp.rkey,
+      hadBefore: input.baseCids.has(path),
+      sawCreateOrDelete: false,
+      orderIndex: index,
+      finalCid: null,
+    };
+    if (nextCid === null) {
+      stagedCids.delete(path);
+      existing.sawCreateOrDelete = true;
+      existing.finalCid = null;
+      existing.finalOp = rawOp;
+    } else {
+      stagedCids.set(path, nextCid);
+      if (prevCid === null) {
+        existing.sawCreateOrDelete = true;
+        existing.orderIndex = index;
+      }
+      existing.finalCid = nextCid;
+      existing.finalOp = rawOp;
+    }
+    pathMeta.set(path, existing);
+  }
+
+  if (!replayed.matches(input.commit)) {
+    return { ok: false, reason: "Oplog replay commit digest mismatch." };
+  }
+  const rebuiltState = RepoCommit.fromRecords(
+    [...stagedCids.entries()].map(([path, cid]) => {
+      const [collection, rkey] = splitPathKey(path);
+      return { collection: collection as never, rkey: rkey as never, cid };
+    }),
+  ).setHash.state();
+  const replayedState = replayed.setHash.state();
+  if (!bytesEqual(rebuiltState, replayedState)) {
+    return { ok: false, reason: "Materialized LtHash mismatch after oplog replay." };
+  }
+  if (input.maxRecords !== undefined && stagedCids.size > input.maxRecords) {
+    return { ok: false, exceededLimit: "records", reason: "Repository exceeds maxRecords limit." };
+  }
+
+  const touched: TouchedRepoPath[] = [];
+  for (const [path, meta] of pathMeta) {
+    const finalOp = meta.finalOp!;
+    if (meta.finalCid === null) {
+      touched.push({
+        path,
+        collection: meta.collection,
+        rkey: meta.rkey,
+        finalCid: null,
+        finalRev: finalOp.rev,
+        hadBefore: meta.hadBefore,
+        sawCreateOrDelete: meta.sawCreateOrDelete,
+        orderIndex: meta.orderIndex,
+      });
+      continue;
+    }
+    if (!isPlainRecord(finalOp.value)) {
+      return { ok: false, reason: "Surviving op missing inlined value." };
+    }
+    const verifiedCid = await verifyRecordCidWithSize(meta.collection, meta.rkey, finalOp.value, meta.finalCid.toString());
+    if (!verifiedCid.ok) {
+      throw new SpaceMacError(`Record ${meta.collection}/${meta.rkey} for ${input.repo} failed CID verification.`);
+    }
+    touched.push({
+      path,
+      collection: meta.collection,
+      rkey: meta.rkey,
+      finalCid: meta.finalCid,
+      finalValue: finalOp.value,
+      finalByteLength: verifiedCid.byteLength,
+      finalRev: finalOp.rev,
+      hadBefore: meta.hadBefore,
+      sawCreateOrDelete: meta.sawCreateOrDelete,
+      orderIndex: meta.orderIndex,
+    });
+  }
+
+  return { ok: true, setHash: replayedState, stagedCids, touched };
+}
+
+async function latestCommit(client: AtprotoClient, space: string, repo: string): Promise<Commit> {
+  const result = await client.query<{ commit?: unknown }>("com.atproto.space.getLatestCommit", { space, repo });
+  const commit = decodeCommitResponse(result?.commit, space, repo);
+  if (!commit) throw new XrpcError(502, "The host answered getLatestCommit without a valid commit.", "InvalidResponse");
+  return commit;
+}
+
+function decodeCommitResponse(raw: unknown, expectedSpace: string, expectedRepo: string): Commit | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const candidate = raw as { ver?: unknown; repo?: unknown; space?: unknown; rev?: unknown; data?: unknown };
+  if (typeof candidate.ver !== "number" || typeof candidate.repo !== "string" || typeof candidate.space !== "string" || typeof candidate.rev !== "string") {
+    return null;
+  }
+  if (candidate.space !== expectedSpace || candidate.repo !== expectedRepo) return null;
+  const data = decodeBytes(candidate.data);
+  if (!data || data.length !== COMMIT_DIGEST_BYTES) return null;
+  return { ver: candidate.ver, repo: candidate.repo, space: candidate.space, rev: candidate.rev, data } as Commit;
+}
+
+function decodeBytes(raw: unknown): Uint8Array | null {
+  if (raw instanceof Uint8Array) return raw;
+  if (!raw || typeof raw !== "object") return null;
+  const b64 = (raw as { $bytes?: unknown }).$bytes;
+  if (typeof b64 !== "string") return null;
+  try {
+    const normalized = b64.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized.padEnd(normalized.length + ((4 - (normalized.length % 4)) % 4), "=");
+    const bin = atob(padded);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i += 1) out[i] = bin.charCodeAt(i);
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.length !== right.length) return false;
+  for (let i = 0; i < left.length; i += 1) {
+    if (left[i] !== right[i]) return false;
+  }
+  return true;
+}
+
+function isUnsupportedEndpointError(error: unknown): boolean {
+  if (!(error instanceof XrpcError)) return false;
+  return error.status === 404 || error.status === 501 || error.code === "MethodNotImplemented" || error.code === "MethodNotFound";
+}
+
+function buildFullReplaceMap(
+  space: string,
+  repo: string,
+  records: ReadonlyArray<{ collection: string; rkey: string; cid: string; value: Record<string, unknown> }>,
+  collections: readonly string[],
+): Record<string, StoredRecord[]> {
+  const replace: Record<string, StoredRecord[]> = {};
+  for (const collection of collections) replace[collection] = [];
+  for (const entry of records) {
+    const list = replace[entry.collection] ?? [];
+    list.push({
+      space,
+      repo,
+      collection: entry.collection,
+      rkey: entry.rkey,
+      uri: spaceRecordUri(space, repo, entry.collection, entry.rkey),
+      cid: entry.cid,
+      value: entry.value,
+    });
+    replace[entry.collection] = list;
+  }
+  return replace;
+}
+
+function buildVerifiedCoverage(recordsByCollection: Record<string, StoredRecord[]>, collections: readonly string[]): Record<string, Coverage> {
+  const coverage: Record<string, Coverage> = {};
+  for (const collection of collections) {
+    const records = recordsByCollection[collection] ?? [];
+    coverage[collection] = { strategy: "all", lowest: lowestKey(records), complete: true, cursor: null };
+  }
+  for (const [collection, records] of Object.entries(recordsByCollection)) {
+    if (records.length === 0 || coverage[collection] !== undefined) continue;
+    coverage[collection] = { strategy: "all", lowest: lowestKey(records), complete: true, cursor: null };
+  }
+  return coverage;
+}
+
+function allPersistedCollectionsCovered(state: WriterState, collections: readonly string[]): boolean {
+  for (const collection of collections) {
+    const entry = state.coverage[collection];
+    if (!entry || entry.strategy !== "all" || !entry.complete) return false;
+  }
+  for (const entry of Object.values(state.coverage)) {
+    if (!entry.complete) return false;
+  }
+  return true;
+}
+
+function hasVerifiedSetHash(state: WriterState): boolean {
+  return state.setHash instanceof Uint8Array && state.setHash.length === LTHASH_STATE_BYTES;
+}
+
+function toDidSet(values: ReadonlySet<string> | readonly string[] | undefined): Set<string> | undefined {
+  if (values === undefined) return undefined;
+  return new Set(values);
+}
+
+function isValidPdsEndpointUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol === "https:") return true;
+    if (parsed.protocol === "http:") {
+      return parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost" || parsed.hostname === "::1" || parsed.hostname === "[::1]";
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function isValidRawOp(op: unknown): op is RawRepoOp {
+  if (!op || typeof op !== "object" || Array.isArray(op)) return false;
+  const candidate = op as Record<string, unknown>;
+  if (typeof candidate.rev !== "string" || candidate.rev.length === 0 || candidate.rev.length > MAX_REPO_OP_REV_LENGTH) return false;
+  if (
+    typeof candidate.collection !== "string" ||
+    candidate.collection.length === 0 ||
+    candidate.collection.length > MAX_REPO_OP_COLLECTION_LENGTH
+  ) {
+    return false;
+  }
+  if (typeof candidate.rkey !== "string" || candidate.rkey.length === 0 || candidate.rkey.length > MAX_REPO_OP_RKEY_LENGTH) return false;
+  if (candidate.cid !== null && (typeof candidate.cid !== "string" || candidate.cid.length > MAX_REPO_OP_CID_LENGTH)) return false;
+  if (candidate.prev !== null && (typeof candidate.prev !== "string" || candidate.prev.length > MAX_REPO_OP_CID_LENGTH)) return false;
+  return true;
+}
+
+function isValidPrevTransition(staged: Cid | null, prev: Cid | null, next: Cid | null): boolean {
+  if (next === null) {
+    return staged !== null && prev !== null && staged.equals(prev);
+  }
+  if (prev === null) {
+    return staged === null;
+  }
+  return staged !== null && staged.equals(prev);
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function pathKey(collection: string, rkey: string): string {
+  return `${collection}\0${rkey}`;
+}
+
+function splitPathKey(path: string): [string, string] {
+  const sep = path.indexOf("\0");
+  return [path.slice(0, sep), path.slice(sep + 1)];
+}
+
+function seenKeyOf(uri: string, cid: string): string {
+  return `${uri}\0${cid}`;
+}
+
+function recordSeenKey(seen: Set<string>, key: string): void {
+  if (seen.has(key)) return;
+  seen.add(key);
+  while (seen.size > MAX_OPS_SEEN_ENTRIES) {
+    const oldest = seen.values().next().value;
+    if (oldest === undefined) break;
+    seen.delete(oldest);
+  }
+}
+
+function mergeFollowQueues<T extends { aside?: SetAside; events: readonly RepoOpsEvent[] }>(
+  batches: readonly T[],
+): Array<{ batch: T; event: RepoOpsEvent }> {
+  const cursors = batches
+    .filter((batch) => !batch.aside && batch.events.length > 0)
+    .map((batch) => ({ batch, index: 0 }));
+  const merged: Array<{ batch: T; event: RepoOpsEvent }> = [];
+  while (cursors.length > 0) {
+    let bestPos = 0;
+    for (let pos = 1; pos < cursors.length; pos += 1) {
+      const candidate = cursors[pos]!.batch.events[cursors[pos]!.index]!;
+      const best = cursors[bestPos]!.batch.events[cursors[bestPos]!.index]!;
+      if (candidate.rkey < best.rkey || (candidate.rkey === best.rkey && candidate.uri < best.uri)) {
+        bestPos = pos;
+      }
+    }
+    const chosen = cursors[bestPos]!;
+    merged.push({ batch: chosen.batch, event: chosen.batch.events[chosen.index]! });
+    chosen.index += 1;
+    if (chosen.index >= chosen.batch.events.length) cursors.splice(bestPos, 1);
+  }
+  return merged;
+}
+
+function createRepoFollowState(unbaselined: boolean): RepoFollowState {
+  return {
+    rev: null,
+    setHash: new Uint8Array(LTHASH_STATE_BYTES),
+    cids: new Map(),
+    attempts: new Map(),
+    unbaselined,
+    staleSeq: 0,
+    ackedStaleSeq: 0,
+    checkedAt: null,
+    permanentFailure: false,
+    permanentFailedListedRev: null,
+    permanentAside: null,
+    resetOnBaseline: false,
+    holdStartedAt: null,
+    expiredFloorRkey: null,
+  };
+}
+
+function isRepoFollowStale(state: RepoFollowState): boolean {
+  return state.staleSeq > state.ackedStaleSeq;
+}
+
+function maxRkey(existing: string | null, candidate: string): string {
+  return existing === null || candidate > existing ? candidate : existing;
+}
+
+function reportFollowSetAside(
+  _space: string,
+  _labels: WindowLabels,
+  setAside: readonly SetAside[],
+  reportedAside: Set<string>,
+  onError?: (error: unknown) => void,
+): void {
+  for (const aside of setAside) {
+    if (reportedAside.has(aside.did)) continue;
+    reportedAside.add(aside.did);
+    onError?.(new Error(`${aside.did} could not be synced: ${aside.reason}.`));
+  }
+}
+

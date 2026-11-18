@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { OperatorRemoteError } from "@flock/client/operator-client";
 import { ChannelUnavailableError } from "@flock/client/errors";
-import { captureInviteLink, clearAccountScopedState, INVITE_LINK_KEY, inviteLinkFor, workspaceFromInviteSearch, isAccessFailure, needsAuthorityApproval, makeTid, mergeMessages, threadMessages, workspaceCreationFrom, workspaceOperationIdFor, parsePastedWorkspaceUri, splitDids, toSlug, withReactions, type Message } from "./client-api";
+import { captureInviteLink, clearAccountScopedState, INVITE_LINK_KEY, inviteLinkFor, RETURN_TO_KEY, resolveScopedReplyTo, workspaceFromInviteSearch, isAccessFailure, needsAuthorityApproval, makeTid, mergeMessages, threadMessages, workspaceCreationFrom, workspaceOperationIdFor, parsePastedWorkspaceUri, splitDids, toSlug, withReactions, type Message } from "./client-api";
 
 const message = (rkey: string): Message => ({ uri: `at://did:plc:a/space/x/${rkey}`, rkey, repo: "did:plc:a", value: { text: rkey } });
 
@@ -93,8 +93,8 @@ test("workspace URIs must have the exact shape the server accepts, so a hostile 
   ]) assert.equal(parsePastedWorkspaceUri(bad), null, bad);
 });
 
-test("signing out clears this app's account-scoped session state and nothing else", () => {
-  const entries = new Map([["spaces.inviteLink", "a"], ["spaces.pendingInvite", "b"], ["spaces.pendingWorkspaceOperation", "c"], ["other.app", "keep"]]);
+test("signing out clears this app's account-scoped session state including returnTo and nothing else", () => {
+  const entries = new Map([["spaces.inviteLink", "a"], ["spaces.returnTo", "/w/did:plc:a/acme"], ["spaces.pendingInvite", "b"], ["spaces.pendingWorkspaceOperation", "c"], ["other.app", "keep"]]);
   const storage = {
     get length() { return entries.size; },
     key: (index: number) => [...entries.keys()][index] ?? null,
@@ -104,15 +104,15 @@ test("signing out clears this app's account-scoped session state and nothing els
   assert.deepEqual([...entries.keys()], ["other.app"]);
 });
 
-test("signing in clears a previous account's half-finished actions but keeps the pending invitation", () => {
-  const entries = new Map([["spaces.inviteLink", "a"], ["spaces.pendingInvite", "b"], ["spaces.autoCreateWorkspace", "c"], ["other.app", "keep"]]);
+test("signing in clears a previous account's half-finished actions but keeps the pending invitation and returnTo", () => {
+  const entries = new Map([["spaces.inviteLink", "a"], ["spaces.returnTo", "/w/did:plc:a/acme"], ["spaces.pendingInvite", "b"], ["spaces.autoCreateWorkspace", "c"], ["other.app", "keep"]]);
   const storage = {
     get length() { return entries.size; },
     key: (index: number) => [...entries.keys()][index] ?? null,
     removeItem: (key: string) => { entries.delete(key); },
   };
-  clearAccountScopedState(storage, [INVITE_LINK_KEY]);
-  assert.deepEqual([...entries.keys()].sort(), ["other.app", INVITE_LINK_KEY].sort());
+  clearAccountScopedState(storage, [INVITE_LINK_KEY, RETURN_TO_KEY]);
+  assert.deepEqual([...entries.keys()].sort(), ["other.app", INVITE_LINK_KEY, RETURN_TO_KEY].sort());
 });
 
 test("threadMessages places each reply under its parent, oldest reply first, and leaves orphan replies in place", () => {
@@ -125,4 +125,25 @@ test("threadMessages places each reply under its parent, oldest reply first, and
 
   // #then
   assert.deepEqual(threaded.map(({ message: { rkey }, isReply }) => `${rkey}${isReply ? "^" : ""}`), ["5", "orphan", "2", "4a^", "4b^", "1"]);
+});
+
+test("resolveScopedReplyTo never leaks another route's reply draft across Back/Forward transitions (Codex #8)", () => {
+  const routeA = "/w/did%3Aplc%3Aa/ws/c/general";
+  const routeAThread = `${routeA}?thread=at%3A%2F%2FmsgA`;
+  const routeB = "/w/did%3Aplc%3Aa/ws/c/random";
+  const routeBThread = `${routeB}?thread=at%3A%2F%2FmsgB`;
+
+  // Optimistic reply on channel B overrides channel B's routeThread immediately before router.replace settles.
+  const draftInB = { routeKey: routeB, uri: "at://msgB" };
+  assert.equal(resolveScopedReplyTo(routeB, "", draftInB), "at://msgB");
+
+  // Once router.replace updates URL to routeBThread, draft matches settled thread seamlessly.
+  assert.equal(resolveScopedReplyTo(routeBThread, "at://msgB", draftInB), "at://msgB");
+
+  // Pressing Browser Back to channel A (either with ?thread=msgA or plain) immediately ignores channel B's draft.
+  assert.equal(resolveScopedReplyTo(routeAThread, "at://msgA", draftInB), "at://msgA");
+  assert.equal(resolveScopedReplyTo(routeA, "", draftInB), "");
+
+  // Canceling reply on routeAThread overrides routeAThread with "" immediately until router.replace finishes.
+  assert.equal(resolveScopedReplyTo(routeAThread, "at://msgA", { routeKey: routeAThread, uri: "" }), "");
 });

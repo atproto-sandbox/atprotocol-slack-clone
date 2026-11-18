@@ -6,7 +6,7 @@ import { listBoundedRecords } from "@flock/protocol/atproto/record-pages";
 import { classifyRepoFailure } from "@flock/protocol/atproto/repo-failure";
 import { mintSpaceCredential } from "../atproto/space-credential";
 import { listSpaceMembers, putAuthorityRecord } from "../atproto/space-ops";
-import { isMissingXrpcResource, type AtprotoClient } from "@flock/protocol/atproto/xrpc";
+import { isMissingXrpcResource, XrpcError, type AtprotoClient } from "@flock/protocol/atproto/xrpc";
 import { parseSpaceRecordUri, subjectKey } from "@flock/protocol/keys";
 import { COLLECTION, type Collection } from "@flock/protocol/nsids";
 import { validateSpaceRecord } from "@flock/protocol/registry";
@@ -147,4 +147,8 @@ export function parseJoinRequestUri(uri: string, authorityDid: string, inbox: st
 
 export function isNotFound(error: unknown): boolean {
   return isMissingXrpcResource(error);
+}
+
+export function isSpaceNotFound(error: unknown): boolean {
+  return error instanceof XrpcError && error.code === "SpaceNotFound";
 }

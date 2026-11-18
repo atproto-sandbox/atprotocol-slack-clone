@@ -385,9 +385,9 @@ An app inbox space per install (members write, the app reads; the join-request p
 
 Its plan: `.ai/plans/r10-interactions-progress.md` (proposed 2026-11-15; owner approval pending).
 
-### R11. UI surfaces and tasks — XL, the existing plan revised first
+### R11. UI surfaces and tasks — XL, Done (`.ai/plans/r11-tasks-progress.md`)
 
-`.ai/plans/platform-extensions-tasks.md` P4 to P9, with these changes: its P2 registry and P3 kernel work are done by R2 and R4; the merge model lives in `packages/protocol`; the complete and verified sync strategy is designed and built in `packages/client` with its own conformance tests (concurrent listings, commit races, resets, superseded oplog values); clocks are stamped by the writing client, since no server writes for a member; per-entity write serialization happens in the engine. URL routing for channels, messages and extension views belongs here.
+Completed on `feat/r11-tasks` per `.ai/plans/r11-tasks-progress.md`: pure causal DAG + HLC + LWW + add-wins OR-Set merge model (`packages/protocol/src/entity-merge.ts`), declarative `"tasks"` extension manifest & lexicons, verified STAR/oplog complete sync & `followRepoOps` (`packages/client/src/sync.ts`, `app-runtime.ts`), IDB v2 (`setHash`/`clock`/`activity`), `WriteQueue` account-wide HLC+TID reservation & cross-device `rkey` retry, isolated `TasksClient`, operator `enableExtension`/`disableExtension` & removal safety, App Router `(shell)` URL routing + `proxy.ts` loopback normalization + `returnTo` OAuth lifecycle, Orbit-aligned Tasks UI, and independent cold Tasks reader (`packages/reader/src/independent-tasks.ts`).
 
 ## Decisions I will take unless you object
 
@@ -1142,11 +1142,8 @@ Reviews: Codex was unavailable, so each round used independent Sonnet reviewers 
 - The fifth round showed the page-based rule could not be made sound against chosen keys. It was replaced by a window over writer keys, starting each read at the window's upper edge.
 - A sixth reviewer tried to break the window. It found a failed message that was then deleted pinning the window open, and a jump of the app's clock silencing a channel. Both are fixed: a held message expires after ten minutes, and the lower edge moves by no more than the time that really passed. It also found duplicate reports on one read (now once per read) and doc statements wider than the rule (corrected). Every property it showed untested now has a test that fails when the property is reverted.
 
-Left as known, with the R11 sync strategy as their place:
-- A message that becomes readable more than five seconds after its key's time (a writer's clock behind, or its host slow to report it) may be taken for old.
-- A member who floods a channel with future-keyed records makes each refresh of their own repo walk those records, about one listing per hundred.
-- A first read cut short by more than five pages within its five-second slack, followed by deletions, can give an app a message written in that slack.
-- An app is given what is new by its writers' keys. R11's strategy follows each writer's operations, and is where an app can be given what is new by its host's order instead.
+Resolved in R11 (`.ai/plans/r11-tasks-progress.md`, `D11.3 #5`):
+- `SyncCore.followRepoOps` + `AppRuntime` (`packages/client/src/app-runtime.ts`) now consume host-ordered PDS `listRepoOps` ops within retained oplog history, seeding the initial 2048-byte `LtHash` `setHash` baseline via `listRecords(excludeValues: true)` + MAC-verified `getLatestCommit` and deferring cursor advancement until handler completion or retry/expiry exhaustion (closing the key-window slack, future-key flood walk, and partial-first-read gaps above). Reset/pruned recovery falls back to verified STAR/`listRecords` + `seen` refresh without re-delivering historical records.
 
 ### R9c (2026-11-15): the people's view of apps
 

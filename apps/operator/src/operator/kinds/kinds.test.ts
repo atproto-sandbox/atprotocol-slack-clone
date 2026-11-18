@@ -3,6 +3,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { extSpaceUriFor } from "@flock/protocol/extensions";
 import { appInboxUri } from "@flock/protocol/keys";
 import { stepMatcher } from "../journal";
 import { FIELD_RULES } from "../operations";
@@ -25,11 +26,11 @@ const PERSISTED_KINDS = {
   },
   inviteMember: {
     required: ["subject"], optional: [], actor: "admin", submittedThrough: "execute",
-    steps: ["member-workspace", "member-inbox-writer", "member-app-inbox-{app}", "member-public-channel-{skey}", "member-workspace-roster", "member-state-verified"],
+    steps: ["member-workspace", "member-inbox-writer", "member-app-inbox-{app}", "member-public-channel-{skey}", "member-ext-{extId}", "member-workspace-roster", "member-state-verified"],
   },
   removeMember: {
     required: ["subject"], optional: [], actor: "admin", submittedThrough: "execute",
-    steps: ["remove-inbox-membership", "remove-app-inbox-{app}", "remove-channel-{skey}", "remove-workspace-membership", "deactivate-workspace-roster", "deactivate-admin", "removal-verified"],
+    steps: ["remove-ext-{extId}", "remove-inbox-membership", "remove-app-inbox-{app}", "remove-channel-{skey}", "remove-workspace-membership", "deactivate-workspace-roster", "deactivate-admin", "removal-verified"],
   },
   setAdmin: {
     required: ["subject", "active"], optional: [], actor: "admin", submittedThrough: "execute",
@@ -63,7 +64,7 @@ const PERSISTED_KINDS = {
   },
   leaveWorkspace: {
     required: [], optional: [], actor: "member", submittedThrough: "execute",
-    steps: ["remove-inbox-membership", "remove-app-inbox-{app}", "remove-channel-{skey}", "remove-workspace-membership", "deactivate-workspace-roster", "deactivate-admin", "removal-verified"],
+    steps: ["remove-ext-{extId}", "remove-inbox-membership", "remove-app-inbox-{app}", "remove-channel-{skey}", "remove-workspace-membership", "deactivate-workspace-roster", "deactivate-admin", "removal-verified"],
   },
   leaveChannel: {
     required: ["skey"], optional: [], actor: "member", submittedThrough: "execute",
@@ -76,6 +77,7 @@ const PERSISTED_KINDS = {
       "channel-{skey}-set-{did}", "channel-{skey}-remove-{did}", "channel-{skey}-verified", "channel-{skey}-deactivate-stale-roster-{did}",
       "archived-{skey}-set-{did}", "archived-{skey}-remove-{did}", "archived-{skey}-verified", "archived-{skey}-deactivate-roster-{did}",
       "app-inbox-{did}-space", "app-inbox-{did}-set", "app-inbox-{did}-remove", "app-inbox-{did}-verified",
+      "ext-{extId}-space", "ext-{extId}-set", "ext-{extId}-remove", "ext-{extId}-verified", "ext-{extId}-cleanup-complete",
     ],
   },
   installApp: {
@@ -89,6 +91,14 @@ const PERSISTED_KINDS = {
   uninstallApp: {
     required: ["subject"], optional: [], actor: "admin", submittedThrough: "execute",
     steps: ["app-uninstall-record", "app-inbox-remove", "app-workspace-set", "app-workspace-remove", "app-channel-{skey}-set", "app-channel-{skey}-remove", "app-access-verified"],
+  },
+  enableExtension: {
+    required: ["extId"], optional: [], actor: "admin", submittedThrough: "execute",
+    steps: ["ext-space", "ext-install-record", "ext-members-set", "ext-members-remove", "ext-members-verified"],
+  },
+  disableExtension: {
+    required: ["extId"], optional: [], actor: "admin", submittedThrough: "execute",
+    steps: ["ext-disable-record", "ext-members-remove", "ext-members-cleared", "ext-cleanup-complete"],
   },
 };
 
@@ -114,6 +124,9 @@ test("step names that earlier releases recorded are still declared by their kind
       "channel-acme-general-deactivate-stale-roster-did:plc:member", "archived-acme-old-deactivate-roster-did:plc:member",
     ],
     transitionChannel: ["channel-roster-inactive-did:plc:member", "channel-set-final-visibility"],
+    enableExtension: ["ext-space", "ext-install-record", "ext-members-set", "ext-members-verified"],
+    disableExtension: ["ext-disable-record", "ext-members-remove", "ext-members-cleared", "ext-cleanup-complete"],
+    removeMember: ["remove-ext-tasks", "remove-inbox-membership", "removal-verified"],
   };
 
   // #then each one is accepted by its kind's declared steps
@@ -158,7 +171,7 @@ test("every step a kind's run body records is a step that kind declares", async 
     for (const name of names) assert.ok(declared.some((matches) => matches(name)), `${file}: step "${name}" is not declared`);
     checked += calls.length;
   }
-  assert.equal(checked, 89, "every context.step call in the kind modules was checked");
+  assert.equal(checked, 107, "every context.step call in the kind modules was checked");
 });
 
 function isKind(value: unknown): value is { kind: string; steps: readonly string[] } {
@@ -185,8 +198,10 @@ test("the kinds that create or archive spaces name them, so the operator registe
   assert.deepEqual(operationKind("installApp")!.createsSpaces!(actor, { kind: "installApp", subject: "did:plc:bot", channels: [] }), [appInboxUri(owner, "acme", "did:plc:bot")]);
   assert.deepEqual(operationKind("updateAppAccess")!.createsSpaces!(actor, { kind: "updateAppAccess", subject: "did:plc:bot", channels: [] }), [appInboxUri(owner, "acme", "did:plc:bot")]);
   assert.deepEqual(operationKind("uninstallApp")!.archivesSpaces!(actor, { kind: "uninstallApp", subject: "did:plc:bot" }), [appInboxUri(owner, "acme", "did:plc:bot")]);
+  assert.deepEqual(operationKind("enableExtension")!.createsSpaces!(actor, { kind: "enableExtension", extId: "tasks" }), [extSpaceUriFor(owner, "acme", "tasks")]);
+  assert.deepEqual(operationKind("disableExtension")!.archivesSpaces!(actor, { kind: "disableExtension", extId: "tasks" }), [extSpaceUriFor(owner, "acme", "tasks")]);
   for (const kind of Object.values(OPERATION_KINDS).filter((entry) => ![
-    "bootstrapWorkspace", "createWorkspace", "createChannel", "archiveChannel", "installApp", "updateAppAccess", "uninstallApp",
+    "bootstrapWorkspace", "createWorkspace", "createChannel", "archiveChannel", "installApp", "updateAppAccess", "uninstallApp", "enableExtension", "disableExtension",
   ].includes(entry.kind))) {
     assert.equal(kind.createsSpaces ?? kind.archivesSpaces, undefined, `${kind.kind} neither creates nor archives a space`);
   }
