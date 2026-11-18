@@ -1,0 +1,22 @@
+{
+  "lexicon": 1,
+  "id": "new.flock.app.command",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A slash command a workspace member runs for an installed app, written into that app's inbox.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["command", "text", "channel", "createdAt"],
+        "properties": {
+          "command": { "type": "string", "minLength": 1, "maxLength": 32 },
+          "text": { "type": "string", "maxLength": 40000, "maxGraphemes": 10000 },
+          "channel": { "type": "string", "format": "at-uri" },
+          "parent": { "type": "string", "format": "at-uri" },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

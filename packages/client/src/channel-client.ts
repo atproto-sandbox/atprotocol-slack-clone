@@ -1,12 +1,13 @@
 import { listBoundedRecords } from "@flock/protocol/atproto/record-pages";
 import { MAX_LISTED_SET_ASIDE } from "@flock/protocol/atproto/repo-failure";
 import { selectValidChannelMessages } from "@flock/protocol/atproto/valid-channel-messages";
-import { isAccessLost } from "@flock/protocol/atproto/space-credential-core";
+import { isAccessLost, isCredentialRefused } from "@flock/protocol/atproto/space-credential-core";
 import { isMissingXrpcResource } from "@flock/protocol/atproto/xrpc";
 import { channelUri, inboxUri, isSkey, parseSpaceRecordUri, parseWorkspaceUri, reactionRecordKey, requestRecordKey, spaceRecordUri, tidNow } from "@flock/protocol/keys";
 import { COLLECTION } from "@flock/protocol/nsids";
 import { validateSpaceRecord } from "@flock/protocol/registry";
 import { WorkspaceEnvelopeError } from "@flock/protocol/workspace-summary";
+import type { MessageBlock } from "./blocks";
 import type { CredentialCache } from "./credentials";
 import { ChannelUnavailableError } from "./errors";
 import type { Lifecycle } from "./lifecycle";
@@ -38,11 +39,26 @@ export type ChannelPage = {
   degradedReasons: string[];
 };
 
-export type ChannelClientDeps = { transport: ClientTransport; credentials: CredentialCache; sync: SyncCore; lifecycle: Lifecycle };
+export type ChannelClientDeps = {
+  transport: ClientTransport;
+  credentials: CredentialCache;
+  sync: SyncCore;
+  lifecycle: Lifecycle;
+  applyOwnWrites?: boolean;
+};
 
 /** The member's view of channels: reading pages, writing own messages and reactions, and asking to join private channels. */
 export class ChannelClient {
-  constructor(private readonly deps: ChannelClientDeps) {}
+  private applyOwnWrites: boolean;
+
+  constructor(private readonly deps: ChannelClientDeps) {
+    this.applyOwnWrites = deps.applyOwnWrites ?? true;
+  }
+
+  /** Controls whether own channel writes are recorded in the local store (`true` for members, `false` for app runtimes). */
+  setApplyOwnWrites(enabled: boolean): void {
+    this.applyOwnWrites = enabled;
+  }
 
   /** The channel's directory entry, verified at the authority's host. A missing or invalid entry, or an archived one, drops the channel. */
   async directory(ref: ChannelRef): Promise<{ authorityDid: string; space: string; visibility: Visibility }> {
@@ -131,11 +147,59 @@ export class ChannelClient {
     };
   }
 
-  async send(ref: ChannelRef, text: string, parent?: string): Promise<{ uri: string; rkey: string }> {
+  /** Reads one message in `ref` with a verified MAC, checking a reply's parent as `edit` does, or null when missing or invalid. */
+  async getMessage(ref: ChannelRef, uri: string): Promise<ChannelMessage | null> {
+    const { authorityDid, space } = await this.readable(ref);
+    const target = parseSpaceRecordUri(uri, space, COLLECTION.message);
+    if (!target) return null;
+    const record = await this.verifiedMessageRecord(space, target.repo, target.rkey);
+    if (!record) return null;
+    const known = new Set<string>();
+    if (record.value.parent !== undefined) {
+      if (typeof record.value.parent !== "string") return null;
+      const parentTarget = parseSpaceRecordUri(record.value.parent, space, COLLECTION.message);
+      if (!parentTarget) return null;
+      const parent = await this.verifiedMessageRecord(space, parentTarget.repo, parentTarget.rkey);
+      if (
+        !parent ||
+        parent.value.parent !== undefined ||
+        !validateSpaceRecord(COLLECTION.message, parent.value, {
+          authorityDid,
+          spaceUri: space,
+          repoDid: parentTarget.repo,
+          rkey: parentTarget.rkey,
+        }).valid
+      ) {
+        return null;
+      }
+      known.add(record.value.parent);
+    }
+    const validation = validateSpaceRecord(COLLECTION.message, record.value, {
+      authorityDid,
+      spaceUri: space,
+      repoDid: target.repo,
+      rkey: target.rkey,
+      knownMessages: known,
+      knownTopLevelMessages: known,
+    });
+    return validation.valid ? { uri: record.uri, repo: target.repo, rkey: target.rkey, value: record.value } : null;
+  }
+
+  async send(
+    ref: ChannelRef,
+    text: string,
+    parent?: string,
+    blocks?: readonly MessageBlock[],
+  ): Promise<{ uri: string; rkey: string }> {
     const { authorityDid, space } = await this.readable(ref);
     const credential = await this.deps.credentials.fresh(space);
     const rkey = tidNow(transportNow(this.deps.transport));
-    const record: Record<string, unknown> = { $type: COLLECTION.message, text, createdAt: new Date(transportNow(this.deps.transport)).toISOString() };
+    const record: Record<string, unknown> = {
+      $type: COLLECTION.message,
+      text,
+      ...(blocks === undefined ? {} : { blocks }),
+      createdAt: new Date(transportNow(this.deps.transport)).toISOString(),
+    };
     const known = new Set<string>();
     if (parent !== undefined) {
       await this.requireTopLevel(space, parent, credential);
@@ -151,14 +215,22 @@ export class ChannelClient {
     return { uri: spaceRecordUri(space, this.deps.transport.did, COLLECTION.message, rkey), rkey };
   }
 
-  /** Edits an own message: the fields it already had, another app's included, are written back with the new text. */
-  async edit(ref: ChannelRef, uri: string, text: string): Promise<void> {
+  /**
+   * Edits an own message: the fields it already had, another app's included, are written back with the new text. Passing
+   * `blocks` replaces them, passing `null` or `[]` clears them, and omitting `blocks` keeps whatever blocks the message had.
+   */
+  async edit(ref: ChannelRef, uri: string, text: string, blocks?: readonly MessageBlock[] | null): Promise<void> {
     const { authorityDid, space } = await this.readable(ref);
     const target = this.ownMessage(space, uri);
     const credential = await this.deps.credentials.fresh(space);
     const prior = await this.verifiedRecord(credential, space, target.repo, COLLECTION.message, target.rkey);
     if (!prior) throw new Error("Message was not found in this channel.");
     const record: Record<string, unknown> = { ...prior.value, text };
+    if (blocks === null || (blocks !== undefined && blocks.length === 0)) {
+      delete record.blocks;
+    } else if (blocks !== undefined) {
+      record.blocks = blocks;
+    }
     const known = new Set<string>();
     if (typeof record.parent === "string") {
       await this.requireTopLevel(space, record.parent, credential);
@@ -177,7 +249,9 @@ export class ChannelClient {
     const target = this.ownMessage(space, uri);
     await this.deps.credentials.fresh(space);
     await this.deps.transport.memberClient.procedure("com.atproto.space.deleteRecord", { space, repo: target.repo, collection: COLLECTION.message, rkey: target.rkey });
-    await this.deps.sync.applyOwnWrite({ space, repo: target.repo }, { remove: [{ collection: COLLECTION.message, rkey: target.rkey }] }, { workspace: ref.workspace });
+    if (this.applyOwnWrites) {
+      await this.deps.sync.applyOwnWrite({ space, repo: target.repo }, { remove: [{ collection: COLLECTION.message, rkey: target.rkey }] }, { workspace: ref.workspace });
+    }
   }
 
   /** Reacts to a message that exists in this channel, under the key derived from it, the emoji and the reactor. */
@@ -209,7 +283,9 @@ export class ChannelClient {
     } catch (error) {
       if (!isMissingXrpcResource(error)) throw error;
     }
-    await this.deps.sync.applyOwnWrite({ space, repo: this.deps.transport.did }, { remove: [{ collection: COLLECTION.reaction, rkey }] }, { workspace: ref.workspace });
+    if (this.applyOwnWrites) {
+      await this.deps.sync.applyOwnWrite({ space, repo: this.deps.transport.did }, { remove: [{ collection: COLLECTION.reaction, rkey }] }, { workspace: ref.workspace });
+    }
   }
 
   /** Asks to join a private channel: a request in the workspace inbox under the derived key, with a new request id each time. */
@@ -305,7 +381,19 @@ export class ChannelClient {
     return read;
   }
 
+  private async verifiedMessageRecord(space: string, repo: string, rkey: string): Promise<{ uri: string; value: Record<string, unknown> } | null> {
+    const credential = await this.deps.credentials.get(space);
+    try {
+      return await this.verifiedRecord(credential, space, repo, COLLECTION.message, rkey);
+    } catch (error) {
+      if (!isCredentialRefused(error)) throw error;
+      this.deps.credentials.drop(space);
+      return this.verifiedRecord(await this.deps.credentials.fresh(space), space, repo, COLLECTION.message, rkey);
+    }
+  }
+
   private async applyOwn(ref: ChannelRef, space: string, collection: string, rkey: string, cid: string, value: Record<string, unknown>): Promise<void> {
+    if (!this.applyOwnWrites) return;
     const repo = this.deps.transport.did;
     await this.deps.sync.applyOwnWrite({ space, repo }, {
       upsert: [{ space, repo, collection, rkey, uri: spaceRecordUri(space, repo, collection, rkey), cid: cid ?? "", value }],

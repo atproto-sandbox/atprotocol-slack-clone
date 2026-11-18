@@ -5,7 +5,7 @@ import { createEngine } from "./engine";
 import { OperatorRemoteError, type OperatorService } from "./operator-client";
 import type { ClientTransport } from "./transport";
 import { channelUri, decisionRecordKey, requestRecordKey, spaceRecordUri } from "@flock/protocol/keys";
-import { COLLECTION, OPERATOR_METHOD } from "@flock/protocol/nsids";
+import { COLLECTION, OPERATOR_METHOD, REPO_COLLECTION } from "@flock/protocol/nsids";
 import { AUTHORITY, createWorkspace, transportFor, writeMessage } from "./testing/engine-fixture";
 import { FakeNetwork } from "@flock/testing/fake-network";
 
@@ -162,4 +162,42 @@ test("inboxRequests is refused while the workspace is degraded", async () => {
   }
   const alice = createEngine(withOperator(network, transportFor(network, ALICE), () => ({ writers: [] })), { operator: OPERATOR });
   await assert.rejects(alice.workspaces.inboxRequests(fixture.workspace, alice.operator!), /degraded mode/);
+});
+
+test("appDeclaration reads 25 commands at their maximum bounds (~42 KiB) and rejects invalid declarations", async () => {
+  const network = new FakeNetwork();
+  const appDid = "did:plc:bigapp";
+  network.createAccount(ALICE, "pds1");
+  network.createAccount(appDid, "pds2");
+  const commands = Array.from({ length: 25 }, (_, index) => ({
+    name: `cmd-${String(index).padStart(2, "0")}-${"a".repeat(25)}`,
+    description: "👍".repeat(300),
+    usage: "👍".repeat(100),
+  }));
+  const base = transportFor(network, ALICE);
+  let storedRecord: Record<string, unknown> = {
+    $type: REPO_COLLECTION.appDeclaration,
+    name: "Big App",
+    description: "Handles 25 commands.",
+    commands,
+    createdAt: "2026-11-10T12:00:00.000Z",
+  };
+  const alice = createEngine({
+    ...base,
+    fetchEndpoint: async (request) => {
+      const url = new URL(request.url);
+      if (url.pathname === "/xrpc/com.atproto.repo.getRecord" && url.searchParams.get("repo") === appDid) {
+        return Response.json({ uri: `at://${appDid}/${REPO_COLLECTION.appDeclaration}/self`, cid: "bafy", value: storedRecord });
+      }
+      return base.fetchEndpoint(request);
+    },
+  });
+  const declaration = await alice.workspaces.appDeclaration(appDid);
+  assert.equal(declaration?.name, "Big App");
+  assert.equal(declaration?.commands?.length, 25);
+  assert.deepEqual(declaration?.commands?.[0], commands[0]);
+
+  // Duplicate command names make the declaration invalid, returning null.
+  storedRecord = { ...storedRecord, commands: [{ name: "dup" }, { name: "dup" }] };
+  assert.equal(await alice.workspaces.appDeclaration(appDid), null);
 });

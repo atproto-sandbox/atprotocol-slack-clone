@@ -13,5 +13,7 @@ test-results/
 *.log
 .DS_Store
 
-# The echo bot's session file (apps/echo-bot): DPoP keys and tokens.
+# The echo bot's and webhooks app's session and hooks files (apps/echo-bot, apps/webhooks): DPoP keys, tokens and hook hashes.
 .echo-bot-session.json*
+.webhooks-session.json*
+.webhooks-hooks.json*

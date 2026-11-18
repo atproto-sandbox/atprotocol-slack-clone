@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { channelUri, dmConversationUri, dmInboxUri, reactionRecordKey, requestRecordKey, spaceRecordUri, subjectKey } from "./keys";
-import { validateDmHeaderMatchesRequest, validateSpaceRecord } from "./registry";
+import { appInboxUri, channelUri, dmConversationUri, dmInboxUri, reactionRecordKey, requestRecordKey, spaceRecordUri, subjectKey } from "./keys";
+import { BLOCK_TYPE, SPACE_TYPE } from "./nsids";
+import { spaceCollections, validateDmHeaderMatchesRequest, validateSpaceRecord } from "./registry";
 
 const authorityDid = "did:plc:owner";
 const memberDid = "did:plc:member";
@@ -197,4 +198,80 @@ test("no source module spells an NSID: every one comes from the NSID module", as
 
   // then none contains it
   assert.deepEqual(offenders, []);
+});
+
+test("every space lexicon lists exactly the collections registered for its space type", async () => {
+  const { readdirSync, readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+  const root = fileURLToPath(new URL("../lexicons/new/flock", import.meta.url));
+  const files = (readdirSync(root, { recursive: true }) as string[]).filter((file) => file.endsWith(".json"));
+  const docs = files.map((file) => JSON.parse(readFileSync(join(root, file), "utf8")) as { id: string; defs: { main?: { type?: string; collections?: string[] } } });
+  const spaceDocs = new Map(docs.filter((doc) => doc.defs.main?.type === "space").map((doc) => [doc.id, doc.defs.main!.collections ?? []]));
+
+  assert.deepEqual([...spaceDocs.keys()].sort(), Object.values(SPACE_TYPE).sort(), "every space type has a space lexicon");
+  for (const spaceType of Object.values(SPACE_TYPE)) {
+    assert.deepEqual([...(spaceDocs.get(spaceType) ?? [])].sort(), [...spaceCollections(spaceType)].sort(), spaceType);
+  }
+});
+
+test("message blocks validate shape, bounds, closed union types, unique button actionIds, and total record size", () => {
+  const baseContext = { authorityDid, spaceUri: channel, repoDid: memberDid, rkey: "2222222222224" };
+  const validBlocks = [
+    { $type: BLOCK_TYPE.section, text: "Hello from an app" },
+    { $type: BLOCK_TYPE.context, elements: ["meta 1", "meta 2"] },
+    { $type: BLOCK_TYPE.divider },
+    {
+      $type: BLOCK_TYPE.actions,
+      elements: [
+        { actionId: "again_1", label: "Again", value: "payload", style: "primary" },
+        { $type: BLOCK_TYPE.button, actionId: "stop-2", label: "Stop", style: "danger" },
+      ],
+    },
+  ];
+  assert.equal(validateSpaceRecord("new.flock.channel.message", { text: "fallback", blocks: validBlocks, createdAt: now }, baseContext).valid, true);
+
+  const invalidBlocks: unknown[] = [
+    [{ $type: "new.flock.channel.message#unknown", text: "nope" }],
+    Array.from({ length: 21 }, () => ({ $type: BLOCK_TYPE.divider })),
+    [{ $type: BLOCK_TYPE.section, text: "" }],
+    [{ $type: BLOCK_TYPE.section, text: "😀".repeat(3_001) }],
+    [{ $type: BLOCK_TYPE.context, elements: [] }],
+    [{ $type: BLOCK_TYPE.context, elements: Array.from({ length: 11 }, () => "x") }],
+    [{ $type: BLOCK_TYPE.context, elements: ["😀".repeat(301)] }],
+    [{ $type: BLOCK_TYPE.actions, elements: [] }],
+    [{ $type: BLOCK_TYPE.actions, elements: Array.from({ length: 6 }, (_, i) => ({ actionId: `a${i}`, label: "Go" })) }],
+    [{ $type: BLOCK_TYPE.actions, elements: [{ actionId: "same", label: "One" }, { actionId: "same", label: "Two" }] }],
+    [
+      { $type: BLOCK_TYPE.actions, elements: [{ actionId: "same", label: "One" }] },
+      { $type: BLOCK_TYPE.actions, elements: [{ actionId: "same", label: "Two" }] },
+    ],
+    [{ $type: BLOCK_TYPE.actions, elements: [{ actionId: "bad id!", label: "One" }] }],
+    [{ $type: BLOCK_TYPE.actions, elements: [{ actionId: "a".repeat(65), label: "One" }] }],
+    [{ $type: BLOCK_TYPE.actions, elements: [{ actionId: "ok", label: "" }] }],
+    [{ $type: BLOCK_TYPE.actions, elements: [{ actionId: "ok", label: "😀".repeat(76) }] }],
+    [{ $type: BLOCK_TYPE.actions, elements: [{ actionId: "ok", label: "One", value: "a".repeat(2_001) }] }],
+    [{ $type: BLOCK_TYPE.actions, elements: [{ actionId: "ok", label: "One", style: "warning" }] }],
+  ];
+  for (const blocks of invalidBlocks) {
+    assert.equal(validateSpaceRecord("new.flock.channel.message", { text: "fallback", blocks, createdAt: now }, baseContext).valid, false, JSON.stringify(blocks).slice(0, 120));
+  }
+  const overRecordCap = Array.from({ length: 6 }, () => ({ $type: BLOCK_TYPE.section, text: "😀".repeat(3_000) }));
+  assert.equal(validateSpaceRecord("new.flock.channel.message", { text: "fallback", blocks: overRecordCap, createdAt: now }, baseContext).valid, false, "64 KiB record limit still holds");
+});
+
+test("app commands and actions validate TID keys, token syntax, same-authority channels, and message references", () => {
+  const appInbox = appInboxUri(authorityDid, "workspace", "did:plc:bot");
+  const top = spaceRecordUri(channel, "did:plc:bot", "new.flock.channel.message", "2222222222222");
+  const context = { authorityDid, spaceUri: appInbox, repoDid: memberDid, rkey: "2222222222224" };
+
+  assert.equal(validateSpaceRecord("new.flock.app.command", { command: "echo", text: "", channel, createdAt: now }, context).valid, true, "empty command text allowed");
+  assert.equal(validateSpaceRecord("new.flock.app.command", { command: "echo-2", text: "hi", channel, parent: top, createdAt: now }, context).valid, true);
+  assert.equal(validateSpaceRecord("new.flock.app.command", { command: "Echo", text: "", channel, createdAt: now }, context).valid, false);
+  assert.equal(validateSpaceRecord("new.flock.app.command", { command: "echo", text: "", channel: channelUri("did:plc:other", "general"), createdAt: now }, context).valid, false);
+  assert.equal(validateSpaceRecord("new.flock.app.command", { command: "echo", text: "", channel, parent: spaceRecordUri(otherChannel, "did:plc:bot", "new.flock.channel.message", "2222222222222"), createdAt: now }, context).valid, false);
+
+  assert.equal(validateSpaceRecord("new.flock.app.action", { message: top, actionId: "again_1", channel, createdAt: now }, context).valid, true);
+  assert.equal(validateSpaceRecord("new.flock.app.action", { message: top, actionId: "bad id", channel, createdAt: now }, context).valid, false);
+  assert.equal(validateSpaceRecord("new.flock.app.action", { message: spaceRecordUri(otherChannel, "did:plc:bot", "new.flock.channel.message", "2222222222222"), actionId: "again_1", channel, createdAt: now }, context).valid, false);
 });

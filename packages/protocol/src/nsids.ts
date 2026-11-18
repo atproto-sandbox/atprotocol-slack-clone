@@ -13,6 +13,7 @@ export const SPACE_TYPE = {
   workspace: nsid("workspace"),
   inbox: nsid("inbox"),
   channel: nsid("channel"),
+  appInbox: nsid("app.inbox"),
   dmInbox: nsid("dm.inbox"),
   dmConversation: nsid("dm.conversation"),
 } as const;
@@ -25,6 +26,8 @@ export const COLLECTION = {
   admin: nsid("admin"),
   acceptance: nsid("acceptance"),
   appInstall: nsid("app.install"),
+  appCommand: nsid("app.command"),
+  appAction: nsid("app.action"),
   joinRequest: nsid("joinRequest"),
   joinDecision: nsid("joinDecision"),
   message: nsid("channel.message"),
@@ -34,6 +37,15 @@ export const COLLECTION = {
   dmHeader: nsid("dm.header"),
   dmMessage: nsid("dm.message"),
   dmReaction: nsid("dm.reaction"),
+} as const;
+
+/** Block `$type` values on `new.flock.channel.message`. */
+export const BLOCK_TYPE = {
+  section: `${COLLECTION.message}#section`,
+  context: `${COLLECTION.message}#context`,
+  divider: `${COLLECTION.message}#divider`,
+  actions: `${COLLECTION.message}#actions`,
+  button: `${COLLECTION.message}#button`,
 } as const;
 
 /** Records that live in an account's own public repo. */
@@ -60,4 +72,5 @@ export const NOTICE_METHOD = {
 
 export type SpaceType = (typeof SPACE_TYPE)[keyof typeof SPACE_TYPE];
 export type Collection = (typeof COLLECTION)[keyof typeof COLLECTION];
+export type BlockType = (typeof BLOCK_TYPE)[keyof typeof BLOCK_TYPE];
 export type OperatorMethod = (typeof OPERATOR_METHOD)[keyof typeof OPERATOR_METHOD];

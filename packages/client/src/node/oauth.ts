@@ -3,6 +3,7 @@ import { basename, dirname, join } from "node:path";
 import { chmod, lstat, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { JoseKey, NodeOAuthClient, TokenInvalidError, TokenRefreshError, TokenRevokedError, type Jwk, type NodeSavedSession, type NodeSavedState, type OAuthSession } from "@atproto/oauth-client-node";
 import { safeFetch } from "@flock/net/safe-fetch";
+import { isScopeMissingError } from "@flock/protocol/atproto/xrpc";
 
 export type { Jwk, NodeOAuthClient, OAuthSession };
 
@@ -30,7 +31,7 @@ export const APP_OAUTH_PATHS = { clientMetadata: "/oauth/client-metadata.json", 
  * Whether the app runs on loopback: plain http on 127.0.0.1 or [::1], loopback development only (RFC 8252 names a loopback
  * client by its address). Any other app URL must be https: a plain-http app elsewhere is refused, not taken for loopback.
  */
-function isLoopbackApp(appUrl: string): boolean {
+export function isLoopbackApp(appUrl: string): boolean {
   const url = new URL(appUrl);
   if (url.protocol === "https:") return false;
   if (url.protocol === "http:" && (url.hostname === "127.0.0.1" || url.hostname === "[::1]")) return true;
@@ -98,9 +99,9 @@ export async function answerAppOAuthRoute(client: NodeOAuthClient, url: URL): Pr
   return { status: 200, type: "text/plain; charset=utf-8", body: `Signed in as ${session.did}. This page can be closed.`, session };
 }
 
-/** Whether a failure means the app's session is gone (refused at refresh, revoked, or invalid), so it must sign in again. */
+/** Whether a failure means the app's session is gone or lacks a required scope, so the operator must sign it in again. */
 export function isSessionLost(error: unknown): boolean {
-  return error instanceof TokenRefreshError || error instanceof TokenRevokedError || error instanceof TokenInvalidError;
+  return error instanceof TokenRefreshError || error instanceof TokenRevokedError || error instanceof TokenInvalidError || isScopeMissingError(error);
 }
 
 type Store<T> = { get(key: string): Promise<T | undefined>; set(key: string, value: T): Promise<void>; del(key: string): Promise<void> };

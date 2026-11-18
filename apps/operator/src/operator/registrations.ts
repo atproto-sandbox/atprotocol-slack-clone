@@ -3,13 +3,16 @@ import type { OAuthSession } from "@atproto/oauth-client-node";
 import type * as RegisterNotify from "@flock/protocol/lexicons/api/types/com/atproto/space/registerNotify";
 import { claimLease } from "../auth/oauth-request-lock";
 import { resolvePds } from "../atproto/identity";
+import { appInboxState } from "../atproto/space-ops";
 import { describeRepoFailure } from "@flock/protocol/atproto/repo-failure";
 import { mintSpaceCredential } from "../atproto/space-credential";
 import { getConfig } from "@flock/deployment/config";
 import { getRawDb } from "../lib/db";
-import { channelUri, inboxUri, requireSpaceAuthority } from "@flock/protocol/keys";
+import { appInboxUri, channelUri, inboxUri, parseAppInboxUri, requireSpaceAuthority } from "@flock/protocol/keys";
 import { parseWorkspaceRef, type OperatorActor } from "./actor";
 import { restoreAuthorityGrant } from "./authority-grant";
+import { isRegisteredSpace } from "./member-access";
+import { activeInstalls, allInstalls } from "./membership";
 import { adminMutationsPaused } from "./mutations-paused";
 import type { OperationView } from "./journal";
 import { listJournaledWorkspaces } from "./journal";
@@ -65,8 +68,12 @@ export async function afterOperation(
   deps: RegistrationDeps = registrationDeps,
 ): Promise<void> {
   if (view.state !== "completed") return;
-  for (const space of kind.createsSpaces?.(actor, request) ?? []) await registerSpace(actor.session, actor.workspace.uri, space, deps);
+  for (const space of kind.createsSpaces?.(actor, request) ?? []) {
+    if (parseAppInboxUri(space) && await appInboxState(actor.session, space) !== "present") continue;
+    await registerSpace(actor.session, actor.workspace.uri, space, deps);
+  }
   for (const space of kind.archivesSpaces?.(actor, request) ?? []) await unregisterSpace(actor.session, space, deps);
+  if (request.kind === "reconcileWorkspace") await syncReconciledInboxRegistrations(actor, deps);
 }
 
 /** Registers one space of `workspace`; whether it is registered now. */
@@ -192,9 +199,38 @@ async function unregisterWithGrant(session: OAuthSession, space: string): Promis
     .procedure("com.atproto.space.unregisterNotify", { space, service: getConfig().operatorServiceRef });
 }
 
+function hasRegistration(space: string): boolean {
+  return Boolean(getRawDb().prepare("SELECT 1 FROM notification_registration WHERE service_ref=? AND space_uri=?")
+    .get(getConfig().operatorServiceRef, space));
+}
+
+async function syncReconciledInboxRegistrations(actor: OperatorActor, deps: RegistrationDeps): Promise<void> {
+  const installs = await allInstalls(actor);
+  for (const install of [...installs.values()].sort((left, right) => left.subject.localeCompare(right.subject))) {
+    const inbox = appInboxUri(actor.workspace.authorityDid, actor.workspace.skey, install.subject);
+    if (install.active) {
+      if (hasRegistration(inbox)) continue;
+      if (await appInboxState(actor.session, inbox) === "present") await registerSpace(actor.session, actor.workspace.uri, inbox, deps);
+    } else if (isRegisteredSpace(inbox)) {
+      await unregisterSpace(actor.session, inbox, deps);
+    }
+  }
+}
+
 async function activeWorkspaceSpaces(session: OAuthSession, workspace: string): Promise<string[]> {
   const ref = parseWorkspaceRef(workspace);
   const actor: OperatorActor = { did: session.did, session, workspace: ref, canRecoverOperations: false };
-  const channels = (await directoryRecords(actor)).filter(({ value }) => value.visibility !== "archived");
-  return [workspace, inboxUri(ref.authorityDid, ref.skey), ...channels.map(({ value }) => channelUri(ref.authorityDid, value.skey))];
+  const [channels, installs] = await Promise.all([directoryRecords(actor), activeInstalls(actor)]);
+  const openChannels = channels.filter(({ value }) => value.visibility !== "archived");
+  const inboxes: string[] = [];
+  for (const install of [...installs.values()].sort((left, right) => left.subject.localeCompare(right.subject))) {
+    const inbox = appInboxUri(ref.authorityDid, ref.skey, install.subject);
+    if (await appInboxState(session, inbox) === "present") inboxes.push(inbox);
+  }
+  return [
+    workspace,
+    inboxUri(ref.authorityDid, ref.skey),
+    ...openChannels.map(({ value }) => channelUri(ref.authorityDid, value.skey)),
+    ...inboxes,
+  ];
 }

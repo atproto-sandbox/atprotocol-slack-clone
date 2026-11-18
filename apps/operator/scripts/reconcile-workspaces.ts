@@ -1,6 +1,7 @@
 import { hasAuthorityGrant, restoreAuthorityGrant } from "../src/operator/authority-grant";
 import { requireWorkspaceOperator } from "../src/operator/security";
 import { executeOperatorOperation, resumePendingWorkspaceCreations } from "../src/operator/operations";
+import { hasUncoveredAppInbox } from "../src/operator/kinds/reconcile-workspace";
 import { listJournaledWorkspaces, listStalledOperations } from "../src/operator/journal";
 import { tidNow } from "@flock/protocol/keys";
 import { assertOperatorWorkspaceWithinEnvelope } from "../src/operator/workspace-envelope";
@@ -50,6 +51,15 @@ async function main() {
       const operation = await executeOperatorOperation(actor, tidNow(), { kind: "reconcileWorkspace" }, registrationDeps);
       process.stdout.write(`${workspace.uri}: ${operation.state}\n`);
       if (operation.state !== "completed") failed = true;
+      else {
+        try {
+          if (await hasUncoveredAppInbox(actor)) {
+            process.stderr.write(`WARN workspace=${workspace.uri} workspace account must approve its permission again for app commands to work\n`);
+          }
+        } catch {
+          // A transient read after a completed reconcile does not fail the run; the next minute checks again.
+        }
+      }
     } catch (error) {
       // Every journaled workspace is an expected authority. Do not mistake a
       // revoked session or failed PDS read for an empty workspace list.

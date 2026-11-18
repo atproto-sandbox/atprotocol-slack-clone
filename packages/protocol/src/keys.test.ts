@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   acceptanceRecordKey,
+  appInboxSkey,
+  appInboxUri,
   canonicalJson,
   canonicalParticipants,
   decisionRecordKey,
@@ -10,6 +12,7 @@ import {
   dmInboxUri,
   isDid,
   isSkey,
+  parseAppInboxUri,
   parseChannelUri,
   parseDmConversationUri,
   parseDmInboxUri,
@@ -191,4 +194,26 @@ test("DM reaction keys reuse the channel reaction key scheme over the message UR
   const messageUri = spaceRecordUri(half, "did:plc:alice", "new.flock.dm.message", "2222222222223");
   assert.equal(reactionRecordKey(messageUri, "💜", "did:plc:bob"),
     `x-${recordKeyHash(`${messageUri}\u0000💜\u0000did:plc:bob`)}`);
+});
+
+test("appInboxUri derives a fixed 105-character colon-separated key per (workspace, app) pair", () => {
+  const skey = appInboxSkey("workspace", "did:plc:bot");
+  assert.equal(skey, "i-m:j:v:7:h:w:v:n:e:6:s:g:g:x:i:d:7:o:6:f:i:o:d:l:w:x:y:j:q:r:r:b:e:a:k:g:7:b:g:l:3:w:i:r:4:o:e:s:d:j:t:a");
+  assert.equal(skey, `i-${recordKeyHash("workspace\u0000did:plc:bot")}`);
+  assert.equal(skey.length, 105);
+  assert.equal(isSkey(skey), true);
+  assert.match(skey, /^i-[a-z2-7](?::[a-z2-7]){51}$/);
+
+  const uri = appInboxUri("did:plc:owner", "workspace", "did:plc:bot");
+  assert.equal(uri, `at://did:plc:owner/space/new.flock.app.inbox/${skey}`);
+  assert.deepEqual(parseAppInboxUri(uri), { authorityDid: "did:plc:owner", skey });
+  assert.equal(parseAppInboxUri("at://did:plc:owner/space/new.flock.inbox/workspace"), null);
+  assert.equal(parseDmSpaceUri(uri), null);
+
+  assert.notEqual(appInboxUri("did:plc:owner", "other", "did:plc:bot"), uri, "distinct per workspace skey");
+  assert.notEqual(appInboxUri("did:plc:owner", "workspace", "did:plc:other"), uri, "distinct per app DID");
+  const longestWorkspaceSkey = "w".repeat(128);
+  const longestKey = appInboxSkey(longestWorkspaceSkey, "did:plc:bot");
+  assert.equal(longestKey.length, 105);
+  assert.equal(isSkey(longestKey), true);
 });

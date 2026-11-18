@@ -11,6 +11,7 @@ import { SessionProvider, useBrowserSessionContext } from "./session-context";
 import { Sidebar } from "./sidebar";
 import { WorkspaceHome } from "./workspace-home";
 import type { AppDirectory } from "./apps-panel";
+import { channelCommandContext, resolveComposerSubmission, WorkspaceDeclarationCache, type WorkspaceDeclarations } from "./interactions";
 import { WorkspaceOnboarding } from "./workspace-onboarding";
 import { channelKey, useChannelContent } from "./use-channel-content";
 import { useAdminViews } from "./use-admin-views";
@@ -49,6 +50,13 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
   const [inviteUri, setInviteUri] = useState("");
   const [invitedTo, setInvitedTo] = useState<string | null>(null);
   const [messageText, setMessageText] = useState("");
+  const [chosenCommandApp, setChosenCommandApp] = useState<string | null>(null);
+  const [composerStatus, setComposerStatus] = useState("");
+  const [pendingActions, setPendingActions] = useState<ReadonlySet<string>>(() => new Set());
+  const pendingActionsRef = useRef(new Set<string>());
+  const [declarationsByWorkspace, setDeclarationsByWorkspace] = useState<Record<string, WorkspaceDeclarations>>({});
+  const declarationCacheRef = useRef<WorkspaceDeclarationCache | null>(null);
+  const declarationEngineRef = useRef<typeof engine>(null);
   const [replyTo, setReplyTo] = useState("");
   const [requestSubmitted, setRequestSubmitted] = useState(false);
   const [pendingOperation, setPendingOperation] = useState<PendingOperation | null>(null);
@@ -77,13 +85,34 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
   const workspacesLoaded = discovered.value !== undefined;
   const activeUri = activeWorkspace?.uri ?? "";
   const activeChannel = useMemo(() => shownChannel(activeWorkspace, chosenChannel), [activeWorkspace, chosenChannel]);
+  const activeDeclarations = useMemo<WorkspaceDeclarations>(
+    () => (activeUri ? declarationsByWorkspace[activeUri] ?? {} : {}),
+    [activeUri, declarationsByWorkspace],
+  );
   const workspaceDegraded = Boolean(activeWorkspace?.degradedReasons.length);
   // The workspace shown stays shown: one discovery fell back to becomes the choice, so a later discovery never moves the view.
   if (activeWorkspace && activeWorkspace.uri !== chosenWorkspace) setChosenWorkspace(activeWorkspace.uri);
 
+  useEffect(() => {
+    if (!engine || !activeWorkspace) return;
+    if (declarationEngineRef.current !== engine) {
+      declarationEngineRef.current = engine;
+      declarationCacheRef.current = new WorkspaceDeclarationCache();
+    }
+    const cache = (declarationCacheRef.current ??= new WorkspaceDeclarationCache());
+    const workspaceUri = activeWorkspace.uri;
+    const installDids = activeWorkspace.installs.map((install) => install.did);
+    const syncSnapshot = () => {
+      const next = cache.snapshotOf(workspaceUri);
+      setDeclarationsByWorkspace((current) => ({ ...current, [workspaceUri]: next }));
+    };
+    cache.ensureWorkspace(workspaceUri, installDids, (appDid) => engine.workspaces.appDeclaration(appDid), syncSnapshot);
+    syncSnapshot();
+  }, [engine, activeWorkspace]);
+
   /** Empties what a person was typing in the open channel, and whether they had asked to join it. */
   const resetChannelInput = useCallback(() => {
-    setReplyTo(""); setMessageText(""); setRequestSubmitted(false);
+    setReplyTo(""); setMessageText(""); setChosenCommandApp(null); setComposerStatus(""); setRequestSubmitted(false);
   }, []);
 
   const clearChannelView = useCallback(() => {
@@ -354,19 +383,62 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
   }
 
   // Messages and reactions are written by the engine to the account's own repo, with the browser session's grant; the
-  // engine keeps an own write in view until the authority lists it.
+  // engine keeps an own write in view until the authority lists it. Slash commands write only into the app's inbox.
   async function sendMessage(event: FormEvent) {
     event.preventDefault();
-    if (!engine || !activeChannel || activeChannel.visibility === "transitioning" || !messageText.trim()) return;
-    setBusy(true); setError("");
+    if (!engine || !activeChannel || activeChannel.visibility === "transitioning") return;
+    const context = channelCommandContext({
+      workspace: activeWorkspace,
+      channel: activeChannel,
+      viewerDid: did,
+      content: openContent.content.value,
+      replyTo,
+      declarations: activeDeclarations,
+    });
+    const resolution = resolveComposerSubmission(messageText, { ...context, chosenAppDid: chosenCommandApp });
+    if (resolution.kind === "empty") return;
+    if (
+      resolution.kind === "blocked" ||
+      resolution.kind === "held" ||
+      resolution.kind === "unknown" ||
+      resolution.kind === "ambiguous"
+    ) {
+      setComposerStatus(resolution.reason);
+      return;
+    }
+    setBusy(true); setError(""); setComposerStatus("");
     try {
-      await engine.channels.send(activeChannel, messageText, replyTo || undefined);
-      setMessageText(""); setReplyTo("");
+      if (resolution.kind === "command") {
+        await engine.appInboxes.sendCommand(activeChannel, resolution.appDid, resolution.command, resolution.text, replyTo || undefined);
+        setMessageText(""); setReplyTo(""); setChosenCommandApp(null);
+        setComposerStatus(`Sent /${resolution.command} to ${resolution.appName}.`);
+        return;
+      }
+      await engine.channels.send(activeChannel, resolution.text, replyTo || undefined);
+      setMessageText(""); setReplyTo(""); setChosenCommandApp(null);
       await live?.reload(channelKey(activeChannel));
     } catch (caught) {
       setError(messageOf(caught));
       rediscoverAfterAccessFailure(caught);
     } finally { setBusy(false); }
+  }
+
+  async function sendAction(message: Message, actionId: string) {
+    if (!engine || !activeChannel || activeChannel.visibility === "transitioning") return;
+    const actionKey = `${message.uri} ${actionId}`;
+    if (pendingActionsRef.current.has(actionKey)) return;
+    pendingActionsRef.current.add(actionKey);
+    setPendingActions(new Set(pendingActionsRef.current));
+    setError("");
+    try {
+      await engine.appInboxes.sendAction(activeChannel, message.repo, message.uri, actionId);
+    } catch (caught) {
+      setError(messageOf(caught));
+      rediscoverAfterAccessFailure(caught);
+    } finally {
+      pendingActionsRef.current.delete(actionKey);
+      setPendingActions(new Set(pendingActionsRef.current));
+    }
   }
 
   /** Asks to join the open private channel, or withdraws the ask: a request record in the account's own repo, in the inbox. */
@@ -421,8 +493,8 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
           {sessionStatus === "ready" && <>
           {!dmView && workspacesLoaded && invitedTo && !workspaces.some((workspace) => workspace.uri === invitedTo) && <InviteBanner workspace={invitedTo} busy={busy} join={() => void connectInvitation(invitedTo)} dismiss={dismissInvitation} />}
           {!dmView && !activeWorkspace && <WorkspaceOnboarding busy={busy} workspaceName={workspaceName} setWorkspaceName={setWorkspaceName} workspaceAccount={workspaceAccount} setWorkspaceAccount={setWorkspaceAccount} inviteUri={inviteUri} setInviteUri={setInviteUri} createWorkspace={createWorkspace} beginAccept={beginAccept} />}
-          {!dmView && activeWorkspace && (!activeChannel || activeChannel.workspace !== activeUri) && <WorkspaceHome did={did} apps={appDirectory} activeWorkspace={activeWorkspace} busy={busy} workspaceDegraded={workspaceDegraded} inbox={inboxView?.requests ?? []} inboxLoaded={inboxView !== undefined && !inboxView.refused} inboxPermissionMissing={inboxView?.refused === true} runOperation={runOperation} leaveWorkspace={leaveWorkspace} syncInbox={syncInbox} setStatus={setStatus} setError={setError} />}
-          {!dmView && activeChannel?.workspace === activeUri && <ChannelView did={did} activeChannel={activeChannel} activeWorkspace={activeWorkspace} busy={busy} workspaceDegraded={workspaceDegraded} requestSubmitted={requestSubmitted} content={openContent.content} loadOlder={openContent.loadOlder} reload={openContent.reload} messageText={messageText} setMessageText={setMessageText} replyTo={replyTo} setReplyTo={setReplyTo} runOperation={runOperation} leaveChannel={leaveChannel} requestPrivateAccess={requestPrivateAccess} sendMessage={sendMessage} toggleReaction={toggleReaction} editMessage={editMessage} deleteMessage={deleteMessage} setError={setError} />}
+          {!dmView && activeWorkspace && (!activeChannel || activeChannel.workspace !== activeUri) && <WorkspaceHome did={did} apps={appDirectory} activeWorkspace={activeWorkspace} declarations={activeDeclarations} busy={busy} workspaceDegraded={workspaceDegraded} inbox={inboxView?.requests ?? []} inboxLoaded={inboxView !== undefined && !inboxView.refused} inboxPermissionMissing={inboxView?.refused === true} runOperation={runOperation} leaveWorkspace={leaveWorkspace} syncInbox={syncInbox} setStatus={setStatus} setError={setError} />}
+          {!dmView && activeChannel?.workspace === activeUri && <ChannelView did={did} activeChannel={activeChannel} activeWorkspace={activeWorkspace} declarations={activeDeclarations} busy={busy} workspaceDegraded={workspaceDegraded} requestSubmitted={requestSubmitted} content={openContent.content} loadOlder={openContent.loadOlder} reload={openContent.reload} messageText={messageText} setMessageText={setMessageText} chosenCommandApp={chosenCommandApp} setChosenCommandApp={setChosenCommandApp} composerStatus={composerStatus} pendingActions={pendingActions} replyTo={replyTo} setReplyTo={setReplyTo} runOperation={runOperation} leaveChannel={leaveChannel} requestPrivateAccess={requestPrivateAccess} sendMessage={sendMessage} sendAction={sendAction} toggleReaction={toggleReaction} editMessage={editMessage} deleteMessage={deleteMessage} setError={setError} />}
           {dmView && <DmStage />}
           </>}
           <div className="data-note"><span className="note-icon">◈</span><span><strong>Your conversations belong to you.</strong><small>Records remain in their authors’ AT Protocol accounts. Workspace access is enforced by PDS member lists.</small></span><a href="https://atproto.com" target="_blank" rel="noreferrer">How it works ↗</a></div>

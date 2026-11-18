@@ -1,9 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { SpaceCredentialError } from "@flock/protocol/atproto/space-credential-core";
-import { tidNow } from "@flock/protocol/keys";
-import { AppAccessLostError, AppRuntime, publishAppDeclaration, type AppMessage } from "./app-runtime";
+import { memberspacePolicy } from "@flock/protocol/atproto/space-policy";
+import { appInboxSkey, appInboxUri, channelUri, spaceRecordUri, tidNow } from "@flock/protocol/keys";
+import { COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
+import { FakeNetwork } from "@flock/testing/fake-network";
+import { AppAccessLostError, AppRuntime, publishAppDeclaration, type AppAction, type AppCommand, type AppMessage } from "./app-runtime";
+import { actionsBlock, button, sectionBlock } from "./blocks";
 import type { ChannelMessage, ChannelPage, ChannelRef } from "./channel-client";
+import { createEngine } from "./engine";
+import { createWorkspace, key, transportFor, writeMessage } from "./testing/engine-fixture";
 
 const AUTHORITY = "did:plc:authority";
 const APP = "did:plc:app";
@@ -337,9 +343,12 @@ test("an app's declaration is published when it has none or it differs, keeping 
   await publishAppDeclaration(transport, { name: "Echo" });
   await publishAppDeclaration(transport, { name: "Echo" });
   await publishAppDeclaration(transport, { name: "Echo", description: "Says it back." });
-  assert.equal(writes.length, 2, "an unchanged declaration is not written again");
+  await publishAppDeclaration(transport, { name: "Echo", description: "Says it back.", commands: [{ name: "echo", description: "Repeats text", usage: "<text>" }] });
+  await publishAppDeclaration(transport, { name: "Echo", description: "Says it back.", commands: [{ name: "echo", description: "Repeats text", usage: "<text>" }] });
+  assert.equal(writes.length, 3, "an unchanged declaration (commands included) is not written again");
   assert.equal(writes[1]!.createdAt, writes[0]!.createdAt);
   assert.equal(writes[1]!.description, "Says it back.");
+  assert.deepEqual(writes[2]!.commands, [{ name: "echo", description: "Repeats text", usage: "<text>" }]);
 });
 
 test("a deleted message lets no older one slide onto the page and be answered", async () => {
@@ -696,4 +705,352 @@ test("a writer set aside for good does not hold the window", async () => {
 
   // #then it is old, as the window moved on: the writer set aside for good held nothing back
   assert.deepEqual(app.texts(), []);
+});
+
+// --- R10b: App inbox following, optional handlers, command/action checks, and per-author throttle ----------------
+
+async function inboxFixture(options: {
+  onMessage?: boolean;
+  onCommand?: boolean;
+  onAction?: boolean;
+  maxRecordsPerAuthor?: number;
+} = {}) {
+  const network = new FakeNetwork();
+  let passed = 0;
+  const clock = { now: () => network.now(), elapsed: () => passed };
+  const advance = (ms: number) => {
+    network.advanceClock(ms);
+    passed += ms;
+  };
+  const alice = "did:plc:alice";
+  const bob = "did:plc:bob2";
+  const appDid = "did:plc:app2";
+  const otherAppDid = "did:plc:otherapp";
+  const fixture = await createWorkspace(network, {
+    authority: AUTHORITY,
+    members: [alice, bob],
+    channels: [
+      { skey: "general", visibility: "public" },
+      { skey: "secret", visibility: "private", members: [alice] },
+      { skey: "moving", visibility: "transitioning" },
+    ],
+  });
+  const otherWorkspace = await createWorkspace(network, {
+    authority: AUTHORITY,
+    skey: "beta",
+    members: [alice],
+    channels: [{ skey: "general", visibility: "public" }],
+  });
+
+  network.createAccount(appDid, "pds2");
+  network.createAccount(otherAppDid, "pds1");
+  const owner = network.clientFor(AUTHORITY);
+  const inbox = appInboxUri(AUTHORITY, "acme", appDid);
+  await owner.procedure("com.atproto.space.createSpace", { spaceType: SPACE_TYPE.appInbox, skey: appInboxSkey("acme", appDid), policy: memberspacePolicy() });
+  for (const space of [fixture.workspace, fixture.channels.general!, fixture.channels.secret!, otherWorkspace.workspace, otherWorkspace.channels.general!]) {
+    await owner.procedure("com.atproto.memberspace.putMember", { space, did: appDid, read: true, write: true });
+    await owner.procedure("com.atproto.memberspace.putMember", { space, did: otherAppDid, read: true, write: true });
+  }
+  await owner.procedure("com.atproto.memberspace.putMember", { space: inbox, did: appDid, read: true, write: false });
+  for (const writer of [alice, bob]) {
+    await owner.procedure("com.atproto.memberspace.putMember", { space: inbox, did: writer, read: false, write: true });
+  }
+  const { subjectKey } = await import("@flock/protocol/keys");
+  const writeInstall = (did: string, active: boolean, channels: Array<{ skey: string; write: boolean }>) =>
+    network.writeAs(AUTHORITY, fixture.workspace, COLLECTION.appInstall, subjectKey(did), {
+      subject: did,
+      active,
+      channels,
+      installedBy: AUTHORITY,
+      installedAt: "2026-11-10T12:00:00.000Z",
+      updatedAt: "2026-11-10T12:00:00.000Z",
+    });
+  await writeInstall(appDid, true, [
+    { skey: "acme-general", write: true },
+    { skey: "acme-secret", write: true },
+    { skey: "acme-moving", write: true },
+  ]);
+  await writeInstall(otherAppDid, true, [{ skey: "acme-general", write: true }]);
+
+  const answers: string[][] = [];
+  const commands: AppCommand[] = [];
+  const actions: AppAction[] = [];
+  const messages: AppMessage[] = [];
+  const errors: unknown[] = [];
+  const appEngine = createEngine(transportFor(network, appDid));
+  const runtime = new AppRuntime({
+    did: appDid,
+    workspaces: [fixture.workspace],
+    commands: [{ name: "echo", description: "Echoes text" }],
+    ...(options.maxRecordsPerAuthor ? { maxRecordsPerAuthor: options.maxRecordsPerAuthor } : {}),
+    clock,
+    refollowDelayMs: 20,
+    retryDelayMs: 10,
+    engine: {
+      ...appEngine,
+      operator: {
+        getChanges: async (follow) => {
+          if (follow.length === 0) return { head: "9", changed: [], denied: [], reset: [] };
+          const changed = answers.shift() ?? [];
+          const following = (space: string) => follow.some((entry) => entry.space === space);
+          return { head: "9", changed: changed.filter(following).map((space) => ({ space, cursor: "9" })), denied: [], reset: [] };
+        },
+      },
+    },
+    ...(options.onMessage === false ? {} : { onMessage: async (entry) => { messages.push(entry); } }),
+    ...(options.onCommand === false ? {} : { onCommand: async (entry) => { commands.push(entry); } }),
+    ...(options.onAction === false ? {} : { onAction: async (entry) => { actions.push(entry); } }),
+    onError: (error) => errors.push(error),
+  });
+  return {
+    network,
+    clock,
+    advance,
+    alice,
+    bob,
+    appDid,
+    otherAppDid,
+    fixture,
+    otherWorkspace,
+    inbox,
+    appEngine,
+    runtime,
+    commands,
+    actions,
+    messages,
+    errors,
+    subjectKey,
+    writeInstall,
+    change: (...spaces: string[]) => answers.push(spaces),
+  };
+}
+
+test("optional handlers decide what is followed: no inbox without command/action handlers, no channels without onMessage, and unfollowed on uninstall", async () => {
+  const messageOnly = await inboxFixture({ onMessage: true, onCommand: false, onAction: false });
+  await messageOnly.runtime.poll();
+  assert.equal(messageOnly.runtime.following.includes(messageOnly.inbox), false, "no inbox followed without onCommand/onAction");
+
+  const withoutMessage = await inboxFixture({ onMessage: false, onCommand: true, onAction: false });
+  await withoutMessage.runtime.poll();
+  assert.deepEqual(withoutMessage.runtime.following.sort(), [withoutMessage.fixture.workspace, withoutMessage.inbox].sort(), "no channels followed without onMessage");
+
+  // App's own writes are kept out of its local store automatically by AppRuntime.
+  await withoutMessage.appEngine.channels.send(
+    { workspace: withoutMessage.fixture.workspace, skey: "acme-general" },
+    "posted only",
+  );
+  assert.deepEqual(await withoutMessage.appEngine.sync.store.records(withoutMessage.fixture.channels.general!, COLLECTION.message), []);
+
+  // When uninstalled, the inbox is unfollowed immediately on the workspace poll.
+  await withoutMessage.writeInstall(withoutMessage.appDid, false, []);
+  withoutMessage.change(withoutMessage.fixture.workspace);
+  await withoutMessage.runtime.poll();
+  assert.deepEqual(withoutMessage.runtime.following, [withoutMessage.fixture.workspace]);
+});
+
+test("onCommand checks declared name, fresh roster, same-workspace channel, visibility, private roster (admitting the authority), and top-level parent", async () => {
+  const env = await inboxFixture({ onMessage: false });
+  await env.runtime.poll();
+
+  const aliceEngine = createEngine(transportFor(env.network, env.alice));
+  const bobEngine = createEngine(transportFor(env.network, env.bob));
+  const authorityEngine = createEngine(transportFor(env.network, AUTHORITY));
+  const generalRef = { workspace: env.fixture.workspace, skey: "acme-general" };
+  const secretRef = { workspace: env.fixture.workspace, skey: "acme-secret" };
+  const movingRef = { workspace: env.fixture.workspace, skey: "acme-moving" };
+
+  // Create a top-level message and a reply in #general for parent checks.
+  const topMsg = await aliceEngine.channels.send(generalRef, "top");
+  env.advance(5);
+  const replyMsg = await aliceEngine.channels.send(generalRef, "reply", topMsg.uri);
+
+  // 1. Undeclared command -> dropped.
+  env.advance(5);
+  await aliceEngine.appInboxes.sendCommand(generalRef, env.appDid, "undeclared", "arg");
+
+  // 2. Private channel outsider (Bob is in the workspace but NOT on #secret's roster) -> dropped.
+  env.advance(5);
+  await bobEngine.appInboxes.sendCommand(secretRef, env.appDid, "echo", "sneak");
+
+  // 3. Channel of another workspace of the same authority -> dropped.
+  env.advance(5);
+  await env.network.writeAs(env.alice, env.inbox, COLLECTION.appCommand, tidNow(env.clock.now()), {
+    command: "echo",
+    text: "cross-workspace",
+    channel: channelUri(AUTHORITY, "beta-general"),
+    createdAt: new Date(env.clock.now()).toISOString(),
+  });
+
+  // 4. Channel in transition -> dropped.
+  env.advance(5);
+  await aliceEngine.appInboxes.sendCommand(movingRef, env.appDid, "echo", "transitioning");
+
+  // 5. Command whose parent is missing or is itself a reply -> both dropped.
+  env.advance(5);
+  await aliceEngine.appInboxes.sendCommand(generalRef, env.appDid, "echo", "missing-parent", spaceRecordUri(env.fixture.channels.general!, env.alice, COLLECTION.message, key(999)));
+  env.advance(5);
+  await aliceEngine.appInboxes.sendCommand(generalRef, env.appDid, "echo", "nested-parent", replyMsg.uri);
+
+  // 6. Valid command in #general on a top-level parent -> delivered!
+  env.advance(5);
+  await aliceEngine.appInboxes.sendCommand(generalRef, env.appDid, "echo", "in-thread", topMsg.uri);
+
+  // 7. Workspace authority in a private channel it owns (never written to channelRoster) -> admitted!
+  env.advance(5);
+  await authorityEngine.appInboxes.sendCommand(secretRef, env.appDid, "echo", "from-authority");
+
+  env.change(env.inbox);
+  await env.runtime.poll();
+
+  assert.deepEqual(
+    env.commands.map((entry) => ({ repo: entry.repo, skey: entry.channel.skey, text: entry.text, parent: entry.parent, canWrite: entry.canWrite })),
+    [
+      { repo: env.alice, skey: "acme-general", text: "in-thread", parent: topMsg.uri, canWrite: true },
+      { repo: AUTHORITY, skey: "acme-secret", text: "from-authority", parent: undefined, canWrite: true },
+    ],
+    `errors: ${env.errors.map(String).join(" || ")}`,
+  );
+  assert.equal(env.errors.length, 6, `all six invalid commands were dropped and reported: ${env.errors.map(String).join(" | ")}`);
+
+  // 8. A removed author still in the runtime's earlier cached summary is caught by the fresh summary read!
+  env.advance(10);
+  await bobEngine.appInboxes.sendCommand(generalRef, env.appDid, "echo", "after-removal");
+  await env.network.writeAs(AUTHORITY, env.fixture.workspace, COLLECTION.workspaceRoster, env.subjectKey(env.bob), {
+    subject: env.bob,
+    active: false,
+    updatedAt: "2026-11-10T12:02:00.000Z",
+  });
+  // Only the inbox changes in this poll (workspace has not been re-read by readGrants yet).
+  env.change(env.inbox);
+  await env.runtime.poll();
+  assert.equal(env.commands.length, 2, "removed member's command was dropped via fresh workspace summary");
+  assert.match(String(env.errors.at(-1)), /not on .* active roster/);
+});
+
+test("onAction checks message authorship, fresh grant, private roster, old messages beyond any page, button presence, and ignores forged action values", async () => {
+  const env = await inboxFixture({ onMessage: false });
+  await env.runtime.poll();
+
+  const aliceEngine = createEngine(transportFor(env.network, env.alice));
+  const bobEngine = createEngine(transportFor(env.network, env.bob));
+  const authorityEngine = createEngine(transportFor(env.network, AUTHORITY));
+  const generalSpace = env.fixture.channels.general!;
+  const generalRef = { workspace: env.fixture.workspace, skey: "acme-general" };
+  const secretRef = { workspace: env.fixture.workspace, skey: "acme-secret" };
+
+  // Write an old app message with a button, then 120 newer messages so it is older than any 100-message page.
+  const ancientAppRkey = key(1);
+  const ancientAppUri = spaceRecordUri(generalSpace, env.appDid, COLLECTION.message, ancientAppRkey);
+  await env.network.writeAs(env.appDid, generalSpace, COLLECTION.message, ancientAppRkey, {
+    text: "echo: ancient",
+    blocks: [sectionBlock("echo: ancient"), actionsBlock([button({ actionId: "again", label: "Again", value: "trusted-button-value" })])],
+    createdAt: "2026-11-10T12:00:00.000Z",
+  });
+  for (let index = 2; index <= 122; index += 1) await writeMessage(env.network, env.alice, generalSpace, index);
+
+  // Also write an app message in #secret, and a person's message + another app's message with buttons.
+  const secretAppMsg = await env.appEngine.channels.send(
+    secretRef,
+    "secret card",
+    undefined,
+    [actionsBlock([button({ actionId: "confirm", label: "Confirm", value: "secret-ok" })])],
+  );
+  env.advance(5);
+  const personMsg = await aliceEngine.channels.send(
+    generalRef,
+    "person card",
+    undefined,
+    [actionsBlock([button({ actionId: "again", label: "Spoof", value: "spoofed" })])],
+  );
+  env.advance(5);
+  const editableAppMsg = await env.appEngine.channels.send(
+    generalRef,
+    "one-shot",
+    undefined,
+    [actionsBlock([button({ actionId: "once", label: "Once", value: "1" })])],
+  );
+  // Edit editableAppMsg to clear its blocks before the click is processed.
+  await env.appEngine.channels.edit(generalRef, editableAppMsg.uri, "done", null);
+
+  // 1. Click on someone else's message -> dropped.
+  env.advance(5);
+  await aliceEngine.appInboxes.sendAction(generalRef, env.appDid, personMsg.uri, "again");
+
+  // 2. Click on a button that is gone -> dropped.
+  env.advance(5);
+  await aliceEngine.appInboxes.sendAction(generalRef, env.appDid, editableAppMsg.uri, "once");
+
+  // 3. Click on private channel by outsider -> dropped.
+  env.advance(5);
+  await bobEngine.appInboxes.sendAction(secretRef, env.appDid, secretAppMsg.uri, "confirm");
+
+  // 4. Forged `value` written directly into the action record on an ancient message -> delivered with the button's OWN value!
+  env.advance(5);
+  await env.network.writeAs(env.alice, env.inbox, COLLECTION.appAction, tidNow(env.clock.now()), {
+    message: ancientAppUri,
+    actionId: "again",
+    channel: generalSpace,
+    value: "FORGED-BY-CALLER",
+    createdAt: new Date(env.clock.now()).toISOString(),
+  });
+
+  // 5. Workspace authority clicking a button in private channel #secret -> admitted!
+  env.advance(5);
+  await authorityEngine.appInboxes.sendAction(secretRef, env.appDid, secretAppMsg.uri, "confirm");
+
+  env.change(env.inbox);
+  await env.runtime.poll();
+
+  assert.deepEqual(
+    env.actions.map((entry) => ({ repo: entry.repo, message: entry.message.uri, actionId: entry.actionId, value: entry.value, canWrite: entry.canWrite })),
+    [
+      { repo: env.alice, message: ancientAppUri, actionId: "again", value: "trusted-button-value", canWrite: true },
+      { repo: AUTHORITY, message: secretAppMsg.uri, actionId: "confirm", value: "secret-ok", canWrite: true },
+    ],
+  );
+  assert.equal(env.errors.length, 3, `three invalid actions dropped: ${env.errors.map(String).join(" | ")}`);
+
+  // 6. Grant changed to read-only -> canWrite is false; grant removed -> dropped even though app still holds a cached credential!
+  await env.writeInstall(env.appDid, true, [{ skey: "acme-general", write: false }]);
+  env.advance(5);
+  await aliceEngine.appInboxes.sendAction(generalRef, env.appDid, ancientAppUri, "again");
+  env.advance(5);
+  await authorityEngine.appInboxes.sendAction(secretRef, env.appDid, secretAppMsg.uri, "confirm");
+  env.change(env.inbox);
+  await env.runtime.poll();
+
+  assert.equal(env.actions.length, 3);
+  assert.equal(env.actions[2]!.canWrite, false, "read-only grant passes canWrite: false");
+  assert.match(String(env.errors.at(-1)), /not granted to this app/, "ungranted channel dropped despite cached credential");
+});
+
+test("per-author inbox throttle caps each author per minute, reports excess once per minute per author, and resets next minute", async () => {
+  const env = await inboxFixture({ onMessage: false, maxRecordsPerAuthor: 3 });
+  await env.runtime.poll();
+
+  const aliceEngine = createEngine(transportFor(env.network, env.alice));
+  const bobEngine = createEngine(transportFor(env.network, env.bob));
+  const generalRef = { workspace: env.fixture.workspace, skey: "acme-general" };
+
+  // Alice writes 5 commands in one minute; Bob writes 1.
+  for (let index = 0; index < 5; index += 1) {
+    env.advance(10);
+    await aliceEngine.appInboxes.sendCommand(generalRef, env.appDid, "echo", `a${index}`);
+  }
+  env.advance(10);
+  await bobEngine.appInboxes.sendCommand(generalRef, env.appDid, "echo", "b0");
+
+  env.change(env.inbox);
+  await env.runtime.poll();
+
+  assert.deepEqual(env.commands.map((entry) => entry.text), ["a0", "a1", "a2", "b0"]);
+  const throttleErrors = env.errors.filter((error) => /exceeded 3 inbox records per minute/.test(String(error)));
+  assert.equal(throttleErrors.length, 1, "excess records reported once per minute per author");
+
+  // After a minute passes, Alice's budget resets and a Dropped record is NOT re-delivered.
+  env.advance(60_000);
+  await aliceEngine.appInboxes.sendCommand(generalRef, env.appDid, "echo", "after-minute");
+  env.change(env.inbox);
+  await env.runtime.poll();
+  assert.deepEqual(env.commands.map((entry) => entry.text), ["a0", "a1", "a2", "b0", "after-minute"]);
 });

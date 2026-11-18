@@ -1,0 +1,21 @@
+{
+  "lexicon": 1,
+  "id": "new.flock.app.action",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A button click a workspace member sends to the app that authored the message, written into that app's inbox.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["message", "actionId", "channel", "createdAt"],
+        "properties": {
+          "message": { "type": "string", "format": "at-uri" },
+          "actionId": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "channel": { "type": "string", "format": "at-uri" },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

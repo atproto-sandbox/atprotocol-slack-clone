@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { actionsBlock, button, sectionBlock } from "./blocks";
 import { createEngine } from "./engine";
 import { ChannelUnavailableError } from "./errors";
 import { key, transportFor, createWorkspace, AUTHORITY, writeMessage } from "./testing/engine-fixture";
@@ -226,4 +227,77 @@ test("roster refuses a private channel whose roster exceeds the supported member
     await network.writeAs(AUTHORITY, fixture.channels.secret!, COLLECTION.channelRoster, subjectKey(did), { subject: did, active: true, updatedAt: "2026-11-10T12:00:00.000Z" });
   }
   await assert.rejects(alice.channels.roster(ref("secret")), /exceeds 200 members/);
+});
+
+test("send and edit carry blocks, preserve them when omitted, and replace or clear them when asked", async () => {
+  const { network, alice, ref } = await workspace();
+  const initial = [sectionBlock("v1"), actionsBlock([button({ actionId: "one", label: "One", value: "1" })])];
+  const sent = await alice.channels.send(ref(), "v1", undefined, initial);
+  assert.deepEqual((await alice.channels.getMessage(ref(), sent.uri))?.value.blocks, initial);
+
+  // Editing text alone preserves existing blocks.
+  await alice.channels.edit(ref(), sent.uri, "v1-text-only");
+  assert.deepEqual((await alice.channels.getMessage(ref(), sent.uri))?.value.blocks, initial);
+
+  // Editing with new blocks replaces them.
+  const replaced = [sectionBlock("v2")];
+  await alice.channels.edit(ref(), sent.uri, "v2", replaced);
+  assert.deepEqual((await alice.channels.getMessage(ref(), sent.uri))?.value.blocks, replaced);
+
+  // Editing with null or [] clears blocks.
+  await alice.channels.edit(ref(), sent.uri, "cleared-null", null);
+  assert.equal((await alice.channels.getMessage(ref(), sent.uri))?.value.blocks, undefined);
+
+  network.advanceClock(1);
+  const second = await alice.channels.send(ref(), "with-blocks", undefined, initial);
+  await alice.channels.edit(ref(), second.uri, "cleared-empty", []);
+  assert.equal((await alice.channels.getMessage(ref(), second.uri))?.value.blocks, undefined);
+});
+
+test("getMessage reads any verified message regardless of page age, validates a reply's parent, and returns null when missing or invalid", async () => {
+  const { network, fixture, alice, ref } = await workspace([{ skey: "general", visibility: "public" }, { skey: "other", visibility: "public" }]);
+  const space = fixture.channels.general!;
+  // Write a message older than a 100-message page.
+  await writeMessage(network, BOB, space, 1, "ancient");
+  for (let n = 2; n <= 120; n += 1) await writeMessage(network, BOB, space, n);
+  const ancientUri = spaceRecordUri(space, BOB, COLLECTION.message, key(1));
+  const ancient = await alice.channels.getMessage(ref(), ancientUri);
+  assert.equal(ancient?.value.text, "ancient");
+
+  // Valid reply to ancient top-level message resolves.
+  const validReplyUri = spaceRecordUri(space, BOB, COLLECTION.message, key(121));
+  await network.writeAs(BOB, space, COLLECTION.message, key(121), { text: "reply", createdAt: "2026-11-10T12:00:00.000Z", parent: ancientUri });
+  assert.equal((await alice.channels.getMessage(ref(), validReplyUri))?.value.text, "reply");
+
+  // Nested reply (parent is itself a reply) is rejected with null.
+  const nestedUri = spaceRecordUri(space, BOB, COLLECTION.message, key(122));
+  await network.writeAs(BOB, space, COLLECTION.message, key(122), { text: "nested", createdAt: "2026-11-10T12:00:00.000Z", parent: validReplyUri });
+  assert.equal(await alice.channels.getMessage(ref(), nestedUri), null);
+
+  // Reply whose parent was deleted returns null.
+  await network.clientFor(BOB).procedure("com.atproto.space.deleteRecord", { space, repo: BOB, collection: COLLECTION.message, rkey: key(1) });
+  assert.equal(await alice.channels.getMessage(ref(), validReplyUri), null);
+
+  // Missing or cross-channel message URIs return null.
+  assert.equal(await alice.channels.getMessage(ref(), spaceRecordUri(space, BOB, COLLECTION.message, key(999))), null);
+  assert.equal(await alice.channels.getMessage(ref(), spaceRecordUri(fixture.channels.other!, BOB, COLLECTION.message, key(2))), null);
+});
+
+test("an engine with applyOwnWrites disabled keeps nothing it sends, edits, deletes or reacts with in its local store", async () => {
+  const network = new FakeNetwork();
+  const fixture = await createWorkspace(network, { members: [ALICE], channels: [{ skey: "general", visibility: "public" }] });
+  const space = fixture.channels.general!;
+  const bot = createEngine(transportFor(network, ALICE), { applyOwnWrites: false });
+  const ref = { workspace: fixture.workspace, skey: "acme-general" };
+
+  const sent = await bot.channels.send(ref, "from bot", undefined, [sectionBlock("from bot")]);
+  await bot.channels.edit(ref, sent.uri, "updated");
+  await bot.channels.react(ref, sent.uri, "👍");
+  await bot.channels.unreact(ref, sent.uri, "👍");
+  assert.deepEqual(await bot.sync.store.records(space, COLLECTION.message), []);
+  assert.deepEqual(await bot.sync.store.records(space, COLLECTION.reaction), []);
+  assert.equal(await bot.sync.store.getSpace(space), undefined);
+
+  await bot.channels.delete(ref, sent.uri);
+  assert.equal(await bot.sync.store.getSpace(space), undefined);
 });

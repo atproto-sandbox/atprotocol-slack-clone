@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { appGrantScopes, DM_BROWSER_SCOPES, OPERATOR_METHODS, operatorMethodsScope, workspaceAuthorityScopes } from "./scopes";
+import { appGrantScopes, DM_BROWSER_SCOPES, memberGrantScopes, OPERATOR_METHODS, operatorMethodsScope, workspaceAuthorityScopes } from "./scopes";
 
 const serviceRef = "did:web:slack.example#atproto_flock_operator";
 
@@ -22,11 +22,13 @@ test("workspace authority scopes contain no message or reaction writes", () => {
   assert.ok(scopes.every((scope) => !scope.includes("channel.message") && !scope.includes("channel.reaction")));
 });
 
-test("workspace authority combines equivalent read actions into compact scopes", () => {
+test("workspace authority combines equivalent read actions into compact scopes and emits no collection scope for app inboxes", () => {
   const scopes = workspaceAuthorityScopes();
   assert.ok(scopes.includes("space:new.flock.workspace?authority=self&skey=*&action=read_self&action=read&manage=create&manage=update"));
   assert.ok(scopes.includes("space:new.flock.inbox?authority=self&skey=*&action=read_self&action=read&manage=create&manage=update"));
   assert.ok(scopes.includes("space:new.flock.channel?authority=self&skey=*&action=read_self&action=read&manage=create&manage=update"));
+  assert.ok(scopes.includes("space:new.flock.app.inbox?authority=self&skey=*&action=read_self&action=read&manage=create&manage=update"));
+  assert.equal(scopes.filter((scope) => scope.startsWith("space:new.flock.app.inbox?")).length, 1, "the authority writes no records in an app inbox");
 });
 
 test("DM_BROWSER_SCOPES is the exact DM part of the browser grant (M3)", () => {
@@ -44,13 +46,22 @@ test("the workspace authority grant, which the server holds, never carries a DM 
   for (const scope of workspaceAuthorityScopes()) assert.ok(!scope.includes("new.flock.dm"), scope);
 });
 
-test("an app asks for its declaration, channel reads and writes, and the change feed: no inbox and no DM", () => {
+test("an app asks for its declaration, workspace/channel/app-inbox reads, channel writes, and the change feed: no workspace inbox and no DM", () => {
   assert.deepEqual(appGrantScopes("did:web:operator.example#atproto_flock_operator"), [
     "atproto",
     "repo:new.flock.app.declaration?action=create&action=update",
     "space:new.flock.workspace?authority=*&action=read",
     "space:new.flock.channel?authority=*&action=read",
     "space:new.flock.channel?authority=*&collection=new.flock.channel.message&collection=new.flock.channel.reaction&action=create&action=update&action=delete",
+    "space:new.flock.app.inbox?authority=*&action=read",
     "rpc?lxm=new.flock.operator.getChanges&aud=did:web:operator.example%23atproto_flock_operator",
+  ]);
+});
+
+test("a member's browser grant creates and deletes commands and actions in app inboxes, with no read and no update", () => {
+  const scopes = memberGrantScopes(serviceRef);
+  const appInboxScopes = scopes.filter((scope) => scope.startsWith("space:new.flock.app.inbox?"));
+  assert.deepEqual(appInboxScopes, [
+    "space:new.flock.app.inbox?authority=*&collection=new.flock.app.command&collection=new.flock.app.action&action=create&action=delete",
   ]);
 });

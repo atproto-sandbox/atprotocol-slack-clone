@@ -5,9 +5,11 @@ import { mapLimited } from "@flock/protocol/map-limited";
 import { readUpstreamJson } from "@flock/protocol/bounded-json";
 import { acceptanceRecordKey, decisionRecordKey, inboxUri, isDid, parseWorkspaceUri } from "@flock/protocol/keys";
 import { COLLECTION, REPO_COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
-import { validateAppDeclaration, validateSpaceRecord } from "@flock/protocol/registry";
+import { MAX_RECORD_BYTES, validateAppDeclaration, validateSpaceRecord } from "@flock/protocol/registry";
 import { summarizeWorkspace, WORKSPACE_ENVELOPE, WorkspaceEnvelopeError, workspaceDegradedMessage, type WorkspaceSummary } from "@flock/protocol/workspace-summary";
 import type { CredentialCache } from "./credentials";
+
+export type { WorkspaceSummary };
 import { readWriterJoinRequests, type InboxJoinRequest, type SkippedInboxWriter } from "./inbox-requests";
 import type { Lifecycle } from "./lifecycle";
 import type { OperatorClient } from "./operator-client";
@@ -15,10 +17,15 @@ import { transportNow, type ClientTransport } from "./transport";
 
 const MAX_DISCOVERABLE_WORKSPACES = 1_000;
 const MAX_INBOX_WRITERS = 2_000;
-const MAX_DECLARATION_BYTES = 16 * 1024;
+// Allows the `com.atproto.repo.getRecord` `{ uri, cid, value }` wrapper around a full 64 KiB declaration record;
+// `validateAppDeclaration` still enforces `MAX_RECORD_BYTES` on `value` itself.
+const MAX_DECLARATION_BYTES = MAX_RECORD_BYTES + 4 * 1024;
 
-/** What an app account says it is, in its own repo: the name people see. A label, never a grant. */
-export type AppDeclaration = { name: string; description?: string };
+/** A slash command an app advertises in its public declaration. */
+export type DeclaredCommand = { name: string; description?: string; usage?: string };
+
+/** What an app account says it is, in its own repo: the name people see and the commands it offers. A label, never a grant. */
+export type AppDeclaration = { name: string; description?: string; commands?: DeclaredCommand[] };
 
 export type WorkspaceCandidate = { uri: string; authorityDid: string; skey: string };
 export type WorkspaceDiscovery = { workspaces: WorkspaceSummary[]; candidates: WorkspaceCandidate[] };
@@ -45,8 +52,24 @@ export class WorkspaceClient {
     }
     const value = body?.value;
     if (!validateAppDeclaration(value).valid) return null;
-    const { name, description } = value as { name: string; description?: string };
-    return { name, ...(description === undefined ? {} : { description }) };
+    const { name, description, commands } = value as {
+      name: string;
+      description?: string;
+      commands?: Array<{ name: string; description?: string; usage?: string }>;
+    };
+    return {
+      name,
+      ...(description === undefined ? {} : { description }),
+      ...(commands === undefined
+        ? {}
+        : {
+          commands: commands.map((command) => ({
+            name: command.name,
+            ...(command.description === undefined ? {} : { description: command.description }),
+            ...(command.usage === undefined ? {} : { usage: command.usage }),
+          })),
+        }),
+    };
   }
 
   /** The DID an admin means by an account they typed: a DID as it is, or a handle resolved by the signed-in account's own host. */

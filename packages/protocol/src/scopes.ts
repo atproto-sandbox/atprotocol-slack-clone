@@ -29,27 +29,35 @@ export const DM_BROWSER_SCOPES: readonly string[] = [
 ] as const;
 
 /**
- * The workspace authority grant: manage and read its own workspace, inbox and channel spaces, and write the collections the
- * registry says the authority writes in each. The same for every workspace, so one OAuth client serves every authority.
+ * The workspace authority grant: manage and read its own workspace, inbox, channel and app-inbox spaces, and write the
+ * collections the registry says the authority writes in each. The same for every workspace, so one OAuth client serves every
+ * authority.
  */
 export function workspaceAuthorityScopes(): string[] {
-  return [SPACE_TYPE.workspace, SPACE_TYPE.inbox, SPACE_TYPE.channel].flatMap((spaceType) => [
-    `space:${spaceType}?authority=self&skey=*&action=read_self&action=read&manage=create&manage=update`,
-    `space:${spaceType}?authority=self&skey=*&collection=${authorityCollections(spaceType).join("&collection=")}&action=create&action=update&action=delete`,
-  ]);
+  return [SPACE_TYPE.workspace, SPACE_TYPE.inbox, SPACE_TYPE.channel, SPACE_TYPE.appInbox].flatMap((spaceType) => {
+    const collections = authorityCollections(spaceType);
+    return [
+      `space:${spaceType}?authority=self&skey=*&action=read_self&action=read&manage=create&manage=update`,
+      ...(collections.length > 0
+        ? [`space:${spaceType}?authority=self&skey=*&collection=${collections.join("&collection=")}&action=create&action=update&action=delete`]
+        : []),
+    ];
+  });
 }
 
 export const OPERATOR_METHODS = Object.values(OPERATOR_METHOD);
 
 /**
  * The one grant a person gives the app in the browser (R6), requested once at sign-in: read every workspace, inbox and
- * channel of any authority, with each space's member list as the gate (D5); write the collections a member writes there;
- * call the operator's methods; and the DM set. Built from the registry, so a collection added there is asked for here.
+ * channel of any authority, with each space's member list as the gate (D5); write the collections a member writes there, and
+ * create or delete commands and actions in app inboxes without reading them; call the operator's methods; and the DM set.
+ * Built from the registry, so a collection added there is asked for here.
  */
 export function memberGrantScopes(serviceRef: string): string[] {
   return [
     ...DM_BROWSER_SCOPES,
     ...[SPACE_TYPE.workspace, SPACE_TYPE.inbox, SPACE_TYPE.channel].flatMap((spaceType) => [memberReadScope(spaceType), memberWriteScope(spaceType)]),
+    memberWriteScope(SPACE_TYPE.appInbox),
     operatorMethodsScope(OPERATOR_METHODS, serviceRef),
   ];
 }
@@ -60,9 +68,9 @@ export function operatorMethodsScope(methods: readonly string[], serviceRef: str
 }
 
 /**
- * The grant an app asks its own account for: read the workspace and channel spaces of any authority (its installs' member
- * lists decide which), write a channel's messages and reactions, follow its spaces through the operator, and publish its
- * declaration. No inbox and no DMs: an app is no person. Built from the registry, as the person's grant is.
+ * The grant an app asks its own account for: read the workspace, channel and app-inbox spaces of any authority (its installs'
+ * member lists decide which), write a channel's messages and reactions, follow its spaces through the operator, and publish its
+ * declaration. No workspace inbox and no DMs: an app is no person. Built from the registry, as the person's grant is.
  */
 export function appGrantScopes(serviceRef: string): string[] {
   return [
@@ -71,6 +79,7 @@ export function appGrantScopes(serviceRef: string): string[] {
     memberReadScope(SPACE_TYPE.workspace),
     memberReadScope(SPACE_TYPE.channel),
     memberWriteScope(SPACE_TYPE.channel),
+    memberReadScope(SPACE_TYPE.appInbox),
     operatorMethodsScope([OPERATOR_METHOD.getChanges], serviceRef),
   ];
 }
@@ -80,7 +89,12 @@ function memberReadScope(spaceType: SpaceType): string {
   return `space:${spaceType}?authority=*&action=read`;
 }
 
-/** Writing the collections a member writes in a space of this type. An acceptance is never withdrawn; a join request, a message and a reaction are. */
+/** Writing the collections a member writes in a space of this type. An acceptance is never withdrawn; commands and actions are never updated; a join request, a message and a reaction are created, updated and deleted. */
 function memberWriteScope(spaceType: SpaceType): string {
-  return `space:${spaceType}?authority=*&collection=${memberCollections(spaceType).join("&collection=")}&action=create&action=update${spaceType === SPACE_TYPE.workspace ? "" : "&action=delete"}`;
+  const actions = spaceType === SPACE_TYPE.workspace
+    ? ["create", "update"]
+    : spaceType === SPACE_TYPE.appInbox
+      ? ["create", "delete"]
+      : ["create", "update", "delete"];
+  return `space:${spaceType}?authority=*&collection=${memberCollections(spaceType).join("&collection=")}&${actions.map((action) => `action=${action}`).join("&")}`;
 }

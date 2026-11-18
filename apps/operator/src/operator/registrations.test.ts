@@ -4,11 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after, beforeEach } from "node:test";
 import { closeDb, getRawDb } from "../lib/db";
-import { channelUri, inboxUri, workspaceUri } from "@flock/protocol/keys";
+import { appInboxUri, channelUri, inboxUri, subjectKey, workspaceUri } from "@flock/protocol/keys";
+import { COLLECTION } from "@flock/protocol/nsids";
 import { parseWorkspaceRef, type OperatorActor } from "./actor";
 import { isRegisteredSpace } from "./member-access";
 import { isNotificationAccepted, purgeSpaceNotifications, recordWriteNotification } from "./notices";
-import { afterOperation, registrationProblems, registerSpace, RENEW_WITHIN_MS, sweepRegistrations, type SweepDeps } from "./registrations";
+import { afterOperation, registrationDeps, registrationProblems, registerSpace, RENEW_WITHIN_MS, sweepRegistrations, type SweepDeps } from "./registrations";
 import { fakeAuthorityPds } from "./testing/fake-authority-pds";
 
 // The operator's change-notice registrations: made when an operation creates a space, kept alive by the sweep, dropped on
@@ -208,4 +209,86 @@ test("the feed knows a space the operator registered or failed to, for this oper
   purgeSpaceNotifications(RANDOM);
   assert.equal(isRegisteredSpace(RANDOM), false);
   assert.deepEqual(registrationProblems(WORKSPACE, deps.now()), []);
+});
+
+test("after reconcileWorkspace, present unregistered active inboxes are registered and only registered inactive inboxes are unregistered", async () => {
+  const pds = fakeAuthorityPds(OWNER);
+  const wsActor: OperatorActor = { did: OWNER, session: pds.session, workspace: parseWorkspaceRef(WORKSPACE), canRecoverOperations: true };
+  const activeNew = "did:plc:bot-new";
+  const activeAlready = "did:plc:bot-already";
+  const activeMissing = "did:plc:bot-missing";
+  const inactiveRegistered = "did:plc:bot-gone-reg";
+  const inactiveUnregistered = "did:plc:bot-gone-unreg";
+  const nowIso = "2026-11-15T00:00:00.000Z";
+  for (const [did, active] of [
+    [activeNew, true], [activeAlready, true], [activeMissing, true], [inactiveRegistered, false], [inactiveUnregistered, false],
+  ] as const) {
+    pds.recordsOf(WORKSPACE, COLLECTION.appInstall).set(subjectKey(did), {
+      $type: COLLECTION.appInstall, subject: did, active, channels: [], installedBy: OWNER, installedAt: nowIso, updatedAt: nowIso,
+    });
+  }
+  const inboxNew = appInboxUri(OWNER, "acme", activeNew);
+  const inboxAlready = appInboxUri(OWNER, "acme", activeAlready);
+  const inboxGoneReg = appInboxUri(OWNER, "acme", inactiveRegistered);
+  const inboxGoneUnreg = appInboxUri(OWNER, "acme", inactiveUnregistered);
+  pds.membersOf(inboxNew);
+  pds.membersOf(inboxAlready);
+  pds.membersOf(inboxGoneReg);
+  pds.membersOf(inboxGoneUnreg);
+
+  const { deps, registered, unregistered } = authority(Date.now());
+  await registerSpace(pds.session, WORKSPACE, inboxAlready, deps);
+  await registerSpace(pds.session, WORKSPACE, inboxGoneReg, deps);
+  registered.length = 0;
+
+  await afterOperation(wsActor, {}, { kind: "reconcileWorkspace" }, { state: "completed" }, deps);
+  assert.deepEqual(registered, [inboxNew], "only the present, unregistered active inbox is registered; missing and already-registered are skipped");
+  assert.deepEqual(unregistered, [inboxGoneReg], "only the registered inactive inbox is unregistered; already-unregistered inactive inbox makes no host call");
+  assert.equal(isRegisteredSpace(inboxNew), true);
+  assert.equal(isRegisteredSpace(inboxGoneReg), false);
+});
+
+test("the sweep keeps active present inboxes, drops inactive ones, raises no failure for missing ones, and renews other spaces under an old grant", async () => {
+  let rejectAppInboxScope = false;
+  const pds = fakeAuthorityPds(OWNER, {
+    intercept: (method, target) => rejectAppInboxScope && method === "com.atproto.space.getSpace" && target.space?.includes("/new.flock.app.inbox/")
+      ? Response.json({ error: "ScopeMissingError", message: "missing scope" }, { status: 403 })
+      : undefined,
+  });
+  pds.recordsOf(WORKSPACE, COLLECTION.directory).set("acme-general", {
+    $type: COLLECTION.directory, skey: "acme-general", name: "general", visibility: "public",
+  });
+  const nowIso = "2026-11-15T00:00:00.000Z";
+  const botPresent = "did:plc:bot-present";
+  const botMissing = "did:plc:bot-missing";
+  const botInactive = "did:plc:bot-inactive";
+  for (const [did, active] of [[botPresent, true], [botMissing, true], [botInactive, false]] as const) {
+    pds.recordsOf(WORKSPACE, COLLECTION.appInstall).set(subjectKey(did), {
+      $type: COLLECTION.appInstall, subject: did, active, channels: [], installedBy: OWNER, installedAt: nowIso, updatedAt: nowIso,
+    });
+  }
+  const inboxPresent = appInboxUri(OWNER, "acme", botPresent);
+  const inboxMissing = appInboxUri(OWNER, "acme", botMissing);
+  const inboxInactive = appInboxUri(OWNER, "acme", botInactive);
+  pds.membersOf(inboxPresent);
+  pds.membersOf(inboxInactive);
+
+  const { deps, clock, registered, unregistered } = authority();
+  deps.grant = async () => pds.session;
+  deps.activeSpaces = registrationDeps.activeSpaces;
+  await registerSpace(pds.session, WORKSPACE, inboxInactive, deps);
+  registered.length = 0;
+
+  assert.deepEqual(await sweepRegistrations(deps), { registered: 4, failed: 0, skipped: [] });
+  assert.deepEqual(registered.sort(), [WORKSPACE, INBOX, GENERAL, inboxPresent].sort());
+  assert.equal(registered.includes(inboxMissing), false, "missing pre-R10 inbox is not attempted");
+  assert.deepEqual(unregistered, [inboxInactive], "inactive inbox registration is dropped");
+  assert.deepEqual(registrationProblems(WORKSPACE, clock.now), []);
+
+  // With an authority grant that predates app.inbox, the sweep still renews workspace, inbox and channel spaces.
+  rejectAppInboxScope = true;
+  clock.now += DAY - RENEW_WITHIN_MS + 1_000;
+  registered.length = 0;
+  assert.deepEqual(await sweepRegistrations(deps), { registered: 3, failed: 0, skipped: [] });
+  assert.deepEqual(registered.sort(), [WORKSPACE, INBOX, GENERAL].sort());
 });

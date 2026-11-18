@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useState, type FormEvent } from "react";
 import type { AppDeclaration } from "@flock/client/workspace-client";
 import { REPO_COLLECTION } from "@flock/protocol/nsids";
 import type { WorkspaceSummary } from "@flock/protocol/workspace-summary";
 import { messageOf, type RunOperation } from "./client-api";
+import type { WorkspaceDeclarations } from "./interactions";
 
 /** What the panel asks of the engine: an account's app declaration, and the DID of an account an admin typed. */
 export type AppDirectory = { declaration(did: string): Promise<AppDeclaration | null>; resolve(account: string): Promise<string> };
@@ -16,30 +17,25 @@ type Access = "none" | "read" | "write";
  * installs an account only when it declares itself an app (or changes an installed app's channels), and removal, said first
  * to take the app's earlier messages out of every channel's view.
  */
-export function AppsPanel({ activeWorkspace, busy, workspaceDegraded, runOperation, apps, setError }: {
+export function AppsPanel({ activeWorkspace, declarations, busy, workspaceDegraded, runOperation, apps, setError }: {
   activeWorkspace: WorkspaceSummary;
+  declarations: WorkspaceDeclarations;
   busy: boolean;
   workspaceDegraded: boolean;
   runOperation: RunOperation;
   apps: AppDirectory | null;
   setError: (message: string) => void;
 }) {
-  const [names, setNames] = useState<Record<string, string>>({});
   const [account, setAccount] = useState("");
   const [access, setAccess] = useState<Record<string, Access>>({});
   const [editing, setEditing] = useState<string | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
   const channels = activeWorkspace.channels.filter((channel) => channel.visibility === "public" || channel.visibility === "private");
   const channelName = (skey: string) => channels.find((channel) => channel.skey === skey)?.name ?? skey;
-  const nameOf = (did: string) => names[did] ?? did;
-
-  useEffect(() => {
-    if (!apps) return;
-    for (const { did } of activeWorkspace.installs) {
-      if (names[did]) continue;
-      void apps.declaration(did).then((declared) => setNames((current) => ({ ...current, [did]: declared?.name ?? did })), () => undefined);
-    }
-  }, [apps, activeWorkspace.installs, names]);
+  const nameOf = (did: string) => {
+    const entry = declarations[did];
+    return entry?.status === "loaded" && entry.declaration ? entry.declaration.name : did;
+  };
 
   function reset() {
     setAccount("");
