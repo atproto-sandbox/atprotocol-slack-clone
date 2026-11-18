@@ -57,6 +57,20 @@ The behavior contract is [`features/*.feature`](features). 68 of 69 scenarios ar
 
 The suite needs the pinned checkout, so set `ATPROTO_PINNED_CHECKOUT` as above.
 
+## Conference deck
+
+GitHub’s README cannot run interactive HTML (no slide keyboard navigation in the markdown view). Use **GitHub Pages** for the full deck, or open the HTML file locally.
+
+[![Conference deck overview](docs/presentation/overview.png)](https://atproto-sandbox.github.io/atprotocol-slack-clone/presentation/r12-atproto-conference-deck.html)
+
+| Format | Link |
+|---|---|
+| **Interactive slides** (arrow keys, fullscreen) | [GitHub Pages](https://atproto-sandbox.github.io/atprotocol-slack-clone/presentation/r12-atproto-conference-deck.html) |
+| **Source in repo** | [`docs/presentation/r12-atproto-conference-deck.html`](docs/presentation/r12-atproto-conference-deck.html) |
+| **UI demo video** (slide 1) | [`docs/media/bdd-session.mp4`](docs/media/bdd-session.mp4) |
+
+After the first Pages deploy, enable **Settings → Pages → Build and deployment: GitHub Actions** if the site URL is not live yet. A GIF is not required; it would not preserve navigation anyway.
+
 ## Project notes
 
 - [`PROGRESS.md`](PROGRESS.md): what was built and the verification evidence.

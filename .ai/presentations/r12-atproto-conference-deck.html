@@ -1,0 +1,492 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flock on ATProto Spaces — conference deck</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* ── Tokens ─────────────────────────────────────────────────────────────
+   Every size is in px on a fixed 1920×1080 canvas; the engine scales the
+   canvas to the screen, so 1px here is 0.5pt on a standard 16:9 slide. */
+:root {
+  --font-sans: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --t-hero: 168px;
+  --t-display: 100px;
+  --t-statement: 76px;
+  --t-title: 56px;
+  --t-subhead: 44px;
+  --t-lead: 36px;
+  --t-body: 30px;
+  --t-dense: 28px;
+  --t-label: 24px;
+  --t-source: 20px;
+
+  --pad-x: 120px;
+  --pad-top: 88px;
+  --pad-bottom: 104px;
+  --gap: 48px;
+
+  --footer: "Flock / atproto Spaces · R12 drift · alpha";
+}
+[data-theme="light"] {
+  --bg: #FBFAF7; --surface: #F1EFE9; --ink: #14171C; --muted: #5A6170; --rule: #D9D5CB; --quiet: #948F84;
+  --accent: #1D4ED8; --accent-soft: #E3EAFB; --good: #17794A; --bad: #BF3A2B; --warn: #9A5B00; --backdrop: #1B1B1B;
+}
+[data-theme="dark"] {
+  --bg: #0E1116; --surface: #171B22; --ink: #F1F3F6; --muted: #A0A8B6; --rule: #2B313C; --quiet: #5F6877;
+  --accent: #6EA8FF; --accent-soft: #16233B; --good: #4CC38A; --bad: #FF7B6B; --warn: #F2B450; --backdrop: #000;
+}
+
+/* ── Canvas ───────────────────────────────────────────────────────────── */
+* { box-sizing: border-box; margin: 0; }
+html, body { height: 100%; overflow: hidden; background: var(--backdrop); }
+body { font: 400 var(--t-body)/1.4 var(--font-sans); color: var(--ink); -webkit-font-smoothing: antialiased; }
+.deck {
+  position: fixed; top: 50%; left: 50%; width: 1920px; height: 1080px;
+  transform: translate(-50%, -50%) scale(var(--scale, 1)); counter-reset: slide;
+}
+.slide {
+  position: absolute; top: 0; left: 0; width: 1920px; height: 1080px; overflow: hidden;
+  padding: var(--pad-top) var(--pad-x) var(--pad-bottom); background: var(--bg);
+  display: grid; grid-template-rows: auto minmax(0, 1fr) auto; gap: var(--gap); counter-increment: slide;
+}
+.slide::before, .slide::after {
+  position: absolute; bottom: 44px; font-size: var(--t-source); line-height: 1.4; color: var(--muted);
+}
+.slide::before { content: var(--footer); left: var(--pad-x); }
+.slide::after { content: counter(slide); right: var(--pad-x); font-variant-numeric: tabular-nums; }
+.cover::before, .cover::after { content: none; }
+
+/* ── Type ─────────────────────────────────────────────────────────────── */
+h1 { font: 600 var(--t-display)/1.05 var(--font-sans); letter-spacing: -0.025em; max-width: 1560px; text-wrap: balance; }
+h2 { font: 600 var(--t-title)/1.14 var(--font-sans); letter-spacing: -0.015em; max-width: 1560px; text-wrap: balance; }
+h3 { font: 600 var(--t-lead)/1.2 var(--font-sans); }
+.kicker { font: 500 var(--t-label)/1.2 var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); margin-bottom: 20px; }
+.lead { font-size: var(--t-lead); line-height: 1.35; color: var(--muted); max-width: 1320px; margin-top: 24px; }
+.source { font-size: var(--t-source); color: var(--muted); max-width: 1500px; }
+.label { font-size: var(--t-label); color: var(--muted); }
+p, li, td { text-wrap: pretty; }
+strong { font-weight: 600; }
+.accent { color: var(--accent); } .good { color: var(--good); } .bad { color: var(--bad); } .warn { color: var(--warn); }
+/* Marks a figure the author still has to confirm, so a placeholder can never pass for data. */
+.tbd { color: var(--warn); outline: 2px dashed var(--warn); outline-offset: 2px; margin: 0 6px; }
+
+ul, ol { list-style: none; padding: 0; display: grid; gap: 20px; }
+ul > li { position: relative; padding-left: 36px; }
+ul > li::before { content: ""; position: absolute; left: 0; top: 0.68em; width: 16px; height: 3px; background: var(--accent); }
+ol.points { counter-reset: point; gap: 32px; }
+ol.points > li { counter-increment: point; display: grid; grid-template-columns: 72px 1fr; align-items: baseline; }
+ol.points > li::before { content: counter(point, decimal-leading-zero); font: 500 var(--t-label) var(--font-mono); color: var(--accent); }
+
+/* ── Layout primitives ────────────────────────────────────────────────── */
+.split { display: grid; grid-template-columns: 1fr 1fr; gap: 80px; align-items: start; }
+.split.l-wide { grid-template-columns: 7fr 5fr; }
+.split.r-wide { grid-template-columns: 5fr 7fr; }
+.stack { display: grid; gap: 32px; align-content: start; }
+.callout { background: var(--accent-soft); border-left: 6px solid var(--accent); padding: 36px 40px; display: grid; gap: 16px; }
+.callout .kicker { margin-bottom: 0; }
+.callout .big { font: 600 var(--t-subhead)/1.2 var(--font-sans); letter-spacing: -0.01em; }
+
+/* ── Slide types ──────────────────────────────────────────────────────── */
+.cover { grid-template-rows: 1fr auto; padding-top: 150px; }
+.cover .lead { margin-top: 40px; }
+.cover .meta { display: flex; gap: 56px; padding-top: 28px; border-top: 3px solid var(--ink); font: 400 var(--t-label)/1.4 var(--font-mono); color: var(--muted); }
+
+.section { background: var(--surface); grid-template-rows: 1fr; align-items: end; }
+.section::before { content: none; }
+.section h2 { font-size: var(--t-display); letter-spacing: -0.025em; }
+
+.statement { grid-template-rows: 1fr; align-items: center; }
+.statement .big { font: 500 var(--t-statement)/1.14 var(--font-sans); letter-spacing: -0.02em; max-width: 1560px; text-wrap: balance; }
+.statement .big em { font-style: normal; color: var(--accent); }
+
+/* ── Components ───────────────────────────────────────────────────────── */
+.stats { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 64px; align-self: center; }
+.stats:has(.stat:nth-child(4)) { --t-hero: 120px; --t-unit: var(--t-lead); gap: 48px; }
+.stat { border-top: 4px solid var(--ink); padding-top: 28px; }
+.stat .value { font: 600 var(--t-hero)/1 var(--font-sans); letter-spacing: -0.04em; font-variant-numeric: tabular-nums; }
+.stat .unit { font-size: var(--t-unit, var(--t-subhead)); font-weight: 500; letter-spacing: 0; margin-left: 0.2em; color: var(--muted); }
+.stat .what { line-height: 1.3; margin-top: 24px; }
+.stat .label { margin-top: 12px; }
+
+table.data { width: 100%; align-self: start; border-collapse: collapse; font-size: var(--t-dense); line-height: 1.3; font-variant-numeric: tabular-nums; }
+table.data th, table.data td { text-align: left; vertical-align: top; padding: 20px 28px; border-bottom: 1px solid var(--rule); }
+table.data thead th { font-size: var(--t-label); font-weight: 600; border-bottom: 3px solid var(--ink); vertical-align: bottom; }
+table.data tr > :first-child { padding-left: 0; }
+table.data tbody th { font-weight: 400; color: var(--muted); white-space: nowrap; }
+.backup table.data :is(th, td) { padding-top: 12px; padding-bottom: 12px; }
+table.data .pick { background: var(--accent-soft); font-weight: 600; }
+table.data thead .pick { color: var(--accent); }
+.tag { display: block; font: 500 var(--t-label)/1.4 var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; }
+
+.bars { display: grid; grid-template-columns: max-content 1fr max-content; gap: 28px 32px; align-items: center; align-content: start; }
+.bar { display: contents; }
+.bar .track { height: 56px; }
+.bar .track i { display: block; height: 100%; width: calc(var(--v) / var(--max) * 100%); background: var(--quiet); }
+.bar.hl .track i { background: var(--accent); }
+.bar .val { font-weight: 600; font-variant-numeric: tabular-nums; text-align: right; }
+.bar:not(.hl) .name, .bar:not(.hl) .val { color: var(--muted); }
+
+.chart { display: block; }
+.chart text { font: 400 var(--t-label) var(--font-sans); fill: var(--muted); }
+.chart .grid { stroke: var(--rule); stroke-width: 1; }
+.chart .series { fill: none; stroke: var(--accent); stroke-width: 5; stroke-linejoin: round; stroke-linecap: round; }
+.chart .dot { fill: var(--accent); }
+.chart .target { stroke: var(--good); stroke-width: 3; stroke-dasharray: 10 8; }
+.chart text.hl { font-weight: 600; font-size: var(--t-dense); fill: var(--accent); }
+.chart text.target-label { font-weight: 600; fill: var(--good); }
+
+.lane { display: grid; grid-template-columns: 200px 1fr; gap: 32px; align-items: center; }
+.lane + .lane { margin-top: 56px; }
+.lane .when { font: 500 var(--t-label)/1.3 var(--font-mono); color: var(--muted); }
+.lane .when strong { display: block; font: 600 var(--t-subhead)/1.1 var(--font-sans); color: var(--ink); }
+.flow { display: flex; gap: 40px; }
+.node { flex: 1; position: relative; padding: 28px; border: 2px solid var(--ink); font-size: var(--t-dense); font-weight: 600; line-height: 1.25; }
+.node small { display: block; margin-top: 12px; font: 400 var(--t-label)/1.2 var(--font-mono); color: var(--muted); }
+.node + .node::before { content: ""; position: absolute; top: 50%; left: -40px; width: 28px; height: 2px; background: var(--ink); }
+.node + .node::after { content: ""; position: absolute; top: calc(50% - 7px); left: -14px; border: 7px solid transparent; border-right: 0; border-left: 12px solid var(--ink); }
+.node.hl { border-color: var(--accent); background: var(--accent-soft); }
+.node.waste { border-color: var(--bad); }
+.node.waste small { color: var(--bad); }
+
+.timeline { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; align-content: start; padding-top: 14px; }
+.phase { position: relative; display: grid; grid-template-rows: auto auto 1fr auto; gap: 20px; padding: 36px 48px 0 0; border-top: 4px solid var(--ink); }
+.phase::before { content: ""; position: absolute; top: -14px; left: 0; width: 24px; height: 24px; border-radius: 50%; background: var(--accent); }
+.phase .when { font: 500 var(--t-label)/1.2 var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); }
+.phase ul { font-size: var(--t-dense); gap: 12px; }
+.phase .gate { font-size: var(--t-label); padding-left: 20px; border-left: 4px solid var(--accent); }
+
+.code { font: 400 var(--t-label)/1.5 var(--font-mono); background: var(--surface); border-left: 6px solid var(--rule); padding: 32px 40px; overflow: hidden; white-space: pre; }
+.code mark { display: inline-block; width: 100%; background: var(--accent-soft); color: inherit; }
+.code .c { color: var(--muted); }
+
+.demo-media { width: 100%; max-height: 520px; border: 2px solid var(--rule); background: #0a0c10; object-fit: contain; }
+.demo-media.hero { max-height: 640px; align-self: center; }
+.repo-link { font: 500 var(--t-body) var(--font-mono); color: var(--accent); text-decoration: underline; text-underline-offset: 6px; }
+.repo-link:hover { color: var(--ink); }
+
+.flow-map { display: grid; gap: 16px; align-self: center; width: 100%; }
+.flow-row { display: grid; grid-template-columns: 200px 1fr 200px; grid-template-rows: auto auto; gap: 6px 24px; align-items: center; }
+.flow-lane { display: contents; }
+.flow-end { font: 600 var(--t-dense) var(--font-sans); line-height: 1.25; text-align: center; padding: 12px 8px; border: 2px solid var(--rule); background: var(--surface); }
+.flow-end.hl { border-color: var(--accent); background: var(--accent-soft); }
+.flow-track { position: relative; height: 6px; background: var(--rule); border-radius: 3px; overflow: visible; }
+.flow-track::after { content: ""; position: absolute; right: -2px; top: 50%; width: 0; height: 0; margin-top: -6px; border: 7px solid transparent; border-left: 10px solid var(--quiet); }
+.packet { position: absolute; top: 50%; width: 18px; height: 18px; margin-top: -9px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); animation: packet-run 4s ease-in-out infinite; }
+.packet.p2 { animation-delay: 0.9s; background: var(--good); box-shadow: 0 0 0 4px color-mix(in srgb, var(--good) 25%, transparent); }
+.packet.p3 { animation-delay: 1.8s; }
+.packet.p4 { animation-delay: 2.6s; background: var(--warn); box-shadow: 0 0 0 4px color-mix(in srgb, var(--warn) 25%, transparent); }
+.packet.p5 { animation-delay: 3.2s; }
+.flow-cap { font: 500 var(--t-label) var(--font-mono); color: var(--muted); text-align: center; grid-column: 2; }
+.flow-map > .label { text-align: center; margin-bottom: 4px; }
+@keyframes packet-run {
+  0% { left: 0%; opacity: 0; transform: scale(0.6); }
+  8% { opacity: 1; transform: scale(1); }
+  92% { opacity: 1; }
+  100% { left: calc(100% - 18px); opacity: 0; transform: scale(0.85); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .packet { animation: none; left: 62%; opacity: 1; }
+}
+
+.lex-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px 18px; font: 400 var(--t-label)/1.25 var(--font-mono); align-self: start; overflow-wrap: anywhere; }
+table.data.compact :is(th, td) { padding: 8px 14px; font-size: var(--t-label); }
+table.data.compact tbody th { font-family: var(--font-mono); white-space: normal; }
+
+/* ── Modes: present (default), overview (press O), print/PDF ──────────── */
+@media screen {
+  body:not(.overview) .slide:not(.active) { visibility: hidden; }
+  html:has(.overview), body.overview { height: auto; overflow: auto; }
+  .overview .deck { position: static; transform: none; width: auto; height: auto; display: flex; flex-wrap: wrap; justify-content: center; gap: 28px; padding: 28px; }
+  .overview .slide { position: relative; flex: none; zoom: 0.3; cursor: pointer; }
+  .overview .slide.active { outline: 14px solid var(--accent); }
+}
+@page { size: 1920px 1080px; margin: 0; }
+@media print {
+  html, body { height: auto; overflow: visible; background: none; }
+  .deck { position: static; transform: none; width: auto; height: auto; }
+  .slide { position: relative; break-after: page; break-inside: avoid; print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+}
+</style>
+</head>
+<body>
+<main class="deck">
+
+<section class="slide">
+  <div class="split r-wide">
+    <video class="demo-media hero" controls preload="metadata" playsinline>
+      <source src="../../docs/media/bdd-session.mp4" type="video/mp4">
+    </video>
+            <div class="stack" style="align-self: center;">
+      <p class="kicker">Flock · atproto Spaces</p>
+      <h2>Team chat can live on the open web without a vendor-owned database</h2>
+      <p class="lead">Flock is an alpha Slack-style workspace where channels and membership live on members’ PDSes. This talk is about <strong>why</strong> we built it that way and <strong>how</strong> we stay aligned as Spaces evolves.</p>
+      <p><a class="repo-link" href="https://github.com/atproto-sandbox/atprotocol-slack-clone">https://github.com/atproto-sandbox/atprotocol-slack-clone</a></p>
+      <p><a class="repo-link" href="https://bsky.app/profile/mikestaub.social">Mike Staub · bsky.app/profile/mikestaub.social</a></p>
+    </div>
+  </div>
+  <p class="source">Demo: docs/media/bdd-session.mp4 — full UI scenario walkthrough</p>
+</section>
+
+<section class="slide section">
+  <div>
+    <p class="kicker">Part 1</p>
+    <h2>Why</h2>
+  </div>
+</section>
+
+<section class="slide">
+  <header>
+    <p class="kicker">Why</p>
+    <h2>Workspaces should be portable, permissioned, and readable without our servers</h2>
+  </header>
+  <div class="split">
+    <ul>
+      <li><strong>No app database of record.</strong> Workspace state is spaces + member lists on each person’s host.</li>
+      <li><strong>Permission follows the protocol.</strong> If you’re on the member list, you can read; the app doesn’t re-decide.</li>
+      <li><strong>Anyone can verify.</strong> Our independent reader rebuilds workspaces from lexicons and PDS data alone.</li>
+    </ul>
+    <aside class="callout">
+      <p class="kicker">The bet</p>
+      <p class="big">A credible team app on ATProto proves Spaces are ready for real products—not only demos.</p>
+    </aside>
+  </div>
+</section>
+
+<section class="slide statement">
+  <p class="big">Apps still need a <em>small</em> operator: someone trusted to apply membership changes safely and tell clients when repos change—<em>without</em> holding the messages.</p>
+</section>
+
+<section class="slide">
+  <header>
+    <p class="kicker">Why now</p>
+    <h2>Spaces are moving fast; app builders need a reference that tracks upstream</h2>
+  </header>
+  <div class="stats">
+    <article class="stat">
+      <p class="value">Alpha</p>
+      <p class="what">Targeting ATProto Spaces proposal work (not a frozen release)</p>
+      <p class="label">We expect breakage—and plan for it</p>
+    </article>
+    <article class="stat">
+      <p class="value">68</p>
+      <p class="what">Browser scenarios exercise the product every CI run</p>
+      <p class="label">Plus protocol acceptance tests</p>
+    </article>
+    <article class="stat">
+      <p class="value">Open</p>
+      <p class="what">Lexicons, operator, and tests are in the repo</p>
+      <p class="label">Feedback welcome</p>
+    </article>
+  </div>
+</section>
+
+<section class="slide section">
+  <div>
+    <p class="kicker">Part 2</p>
+    <h2>How</h2>
+  </div>
+</section>
+
+<section class="slide">
+  <header>
+    <p class="kicker">How · data flow</p>
+    <h2>Messages live on PDSes; the operator journals changes and relays “something changed” without holding content</h2>
+  </header>
+  <div class="flow-map">
+    <p class="label">Animated packets (loop) show direction; captions stay plain language</p>
+    <article class="flow-row">
+      <p class="flow-end hl">Web app</p>
+      <div class="flow-track" role="presentation"><i class="packet" aria-hidden="true"></i></div>
+      <p class="flow-end hl">Operator</p>
+      <p class="flow-cap">Admin action · service auth</p>
+    </article>
+    <article class="flow-row">
+      <p class="flow-end">Operator</p>
+      <div class="flow-track"><i class="packet p2" aria-hidden="true"></i></div>
+      <p class="flow-end">Space PDS</p>
+      <p class="flow-cap">Journaled writes · roster / channels</p>
+    </article>
+    <article class="flow-row">
+      <p class="flow-end">Space PDS</p>
+      <div class="flow-track"><i class="packet p3" aria-hidden="true"></i></div>
+      <p class="flow-end hl">Operator</p>
+      <p class="flow-cap">Wake · repo cursor (no message body)</p>
+    </article>
+    <article class="flow-row">
+      <p class="flow-end hl">Web app</p>
+      <div class="flow-track"><i class="packet p4" aria-hidden="true"></i></div>
+      <p class="flow-end hl">Operator</p>
+      <p class="flow-cap">Change feed · long poll</p>
+    </article>
+    <article class="flow-row">
+      <p class="flow-end hl">Web app</p>
+      <div class="flow-track"><i class="packet p5" aria-hidden="true"></i></div>
+      <p class="flow-end">Space PDS</p>
+      <p class="flow-cap">STAR read · space credential</p>
+    </article>
+  </div>
+  <p class="source">Operator URL serves XRPC; web talks to member PDSes directly for reads</p>
+</section>
+
+<section class="slide backup">
+  <header>
+    <p class="kicker">How · lexicons</p>
+    <h2>Thirty-nine Flock lexicons define spaces, records, operator RPC, and OAuth permissions</h2>
+  </header>
+  <div class="lex-grid">
+    <div>new.flock.workspace</div><div>new.flock.channel</div><div>new.flock.inbox</div>
+    <div>new.flock.app.inbox</div><div>new.flock.dm.inbox</div><div>new.flock.dm.conversation</div>
+    <div>new.flock.ext.tasks</div><div>new.flock.workspace.profile</div><div>new.flock.directory</div>
+    <div>new.flock.workspace.roster</div><div>new.flock.admin</div><div>new.flock.acceptance</div>
+    <div>new.flock.joinRequest</div><div>new.flock.joinDecision</div><div>new.flock.channel.message</div>
+    <div>new.flock.channel.reaction</div><div>new.flock.channel.roster</div><div>new.flock.dm.message</div>
+    <div>new.flock.dm.reaction</div><div>new.flock.dm.request</div><div>new.flock.dm.header</div>
+    <div>new.flock.dm.declaration</div><div>new.flock.app.install</div><div>new.flock.app.declaration</div>
+    <div>new.flock.app.command</div><div>new.flock.app.action</div><div>new.flock.ext.install</div>
+    <div>new.flock.ext.tasks.project</div><div>new.flock.ext.tasks.task</div><div>new.flock.ext.tasks.comment</div>
+    <div>new.flock.ext.tasks.projectEdit</div><div>new.flock.ext.tasks.taskEdit</div>
+    <div>new.flock.permissions.member</div><div>new.flock.permissions.workspaceAuthority</div>
+    <div>new.flock.operator.execute</div><div>new.flock.operator.getOperation</div><div>new.flock.operator.getChanges</div>
+    <div>new.flock.operator.createWorkspace</div><div>new.flock.operator.startAuthorityFlow</div>
+    <div>new.flock.operator.listInboxWriters</div><div>new.flock.operator.listStalledOperations</div>
+    <div>new.flock.operator.getDmNotifyTarget</div>
+  </div>
+  <p class="source">39 lexicon documents · com.atproto.space.* lexicons are vendored from the pinned upstream pin</p>
+</section>
+
+<section class="slide backup">
+  <header>
+    <p class="kicker">How · public API</p>
+    <h2>The operator exposes XRPC to the web app plus a few HTTP routes PDS OAuth needs</h2>
+  </header>
+  <table class="data compact">
+    <thead><tr><th>Kind</th><th>Endpoint</th><th>Who calls</th></tr></thead>
+    <tbody>
+      <tr><th>procedure</th><td>/xrpc/new.flock.operator.execute</td><td>Web (admin mutations)</td></tr>
+      <tr><th>query</th><td>/xrpc/new.flock.operator.getOperation</td><td>Web</td></tr>
+      <tr><th>query</th><td>/xrpc/new.flock.operator.listInboxWriters</td><td>Web</td></tr>
+      <tr><th>query</th><td>/xrpc/new.flock.operator.listStalledOperations</td><td>Web</td></tr>
+      <tr><th>procedure</th><td>/xrpc/new.flock.operator.getChanges</td><td>Web (feed)</td></tr>
+      <tr><th>procedure</th><td>/xrpc/new.flock.operator.createWorkspace</td><td>Web</td></tr>
+      <tr><th>procedure</th><td>/xrpc/new.flock.operator.startAuthorityFlow</td><td>Web</td></tr>
+      <tr><th>procedure</th><td>/xrpc/new.flock.operator.getDmNotifyTarget</td><td>Browser DM client</td></tr>
+      <tr><th>procedure</th><td>/xrpc/com.atproto.space.confirmRegistration</td><td>Space PDS</td></tr>
+      <tr><th>procedure</th><td>/xrpc/com.atproto.space.notifySpaceUpdate</td><td>Space PDS</td></tr>
+      <tr><th>GET</th><td>/.well-known/did.json</td><td>Discovery</td></tr>
+      <tr><th>GET</th><td>/authority/start · /authority/callback</td><td>Browser OAuth</td></tr>
+    </tbody>
+  </table>
+  <p class="source">packages/protocol/src/nsids.ts · apps/operator/src/operator/server.ts (main may still serve legacy notify endpoints during R12 migration)</p>
+</section>
+
+<section class="slide">
+  <header>
+    <p class="kicker">How we stay current</p>
+    <h2>Pin upstream, regenerate lexicons, mirror the PDS in tests, then migrate the operator in focused waves</h2>
+  </header>
+  <div class="timeline">
+    <article class="phase">
+      <p class="when">Pin</p>
+      <h3>Known good commit</h3>
+      <ul><li>Reproducible builds</li><li>Documented checkout</li></ul>
+    </article>
+    <article class="phase">
+      <p class="when">Test</p>
+      <h3>Fake network</h3>
+      <ul><li>Same rules as upstream</li><li>Fast feedback</li></ul>
+    </article>
+    <article class="phase">
+      <p class="when">Ship</p>
+      <h3>Operator + UI</h3>
+      <ul><li>Journaled migrations</li><li>Recorded UI demo</li></ul>
+    </article>
+  </div>
+  <p class="source">Active branch: chore/protocol-drift-6747610 (R12 alignment work)</p>
+</section>
+
+<section class="slide section">
+  <div>
+    <p class="kicker">Part 3</p>
+    <h2>Next steps</h2>
+  </div>
+</section>
+
+<section class="slide">
+  <header>
+    <p class="kicker">Next steps</p>
+    <h2>We are finishing operator notify alignment, then inviting collaborators to stress-test Spaces apps</h2>
+  </header>
+  <ol class="points">
+    <li><span><strong>For product teams:</strong> Clone the repo, run the playground, watch the recording on slide&nbsp;1.</span></li>
+    <li><span><strong>For protocol folk:</strong> Tell us where app-hosted webhooks feel sharp-edged (renewal, grace, multi-tenant tokens).</span></li>
+    <li><span><strong>For us:</strong> Land R12c, refresh the demo video, publish a short migration note for app operators.</span></li>
+  </ol>
+</section>
+
+<section class="slide">
+  <header>
+    <p class="kicker">Next steps</p>
+    <h2>Explore the code, run the tests, and tell us what would make Spaces easier for your app</h2>
+  </header>
+  <div class="callout">
+    <p class="kicker">Repository</p>
+    <p class="big"><a class="repo-link" href="https://github.com/atproto-sandbox/atprotocol-slack-clone">https://github.com/atproto-sandbox/atprotocol-slack-clone</a></p>
+    <p class="label">Quick start: README → playground · Tests: pnpm test:bdd · Architecture diagrams: .ai/diagrams/r12/</p>
+    <p class="label"><a class="repo-link" href="https://bsky.app/profile/mikestaub.social">Mike Staub · bsky.app/profile/mikestaub.social</a></p>
+  </div>
+</section>
+</main>
+<script>
+(() => {
+  const slides = [...document.querySelectorAll('.slide')];
+  let current = 0;
+
+  const fit = () => document.documentElement.style.setProperty('--scale', Math.min(innerWidth / 1920, innerHeight / 1080));
+  const inOverview = () => document.body.classList.contains('overview');
+  const show = (index) => {
+    current = Math.max(0, Math.min(slides.length - 1, index));
+    slides.forEach((slide, i) => slide.classList.toggle('active', i === current));
+    history.replaceState(null, '', `#${current + 1}`);
+    if (inOverview()) slides[current].scrollIntoView({ block: 'nearest' });
+  };
+  const showFromHash = () => show((parseInt(location.hash.slice(1), 10) || 1) - 1);
+  const toggleOverview = () => {
+    if (document.body.classList.toggle('overview')) slides[current].scrollIntoView({ block: 'center' });
+  };
+
+  const keys = {
+    ArrowRight: () => show(current + 1), PageDown: () => show(current + 1), ' ': () => show(current + 1),
+    ArrowLeft: () => show(current - 1), PageUp: () => show(current - 1),
+    Home: () => show(0), End: () => show(slides.length - 1),
+    o: toggleOverview, Escape: () => inOverview() && toggleOverview(),
+    f: () => (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen()),
+  };
+  addEventListener('keydown', (event) => {
+    const action = keys[event.key] ?? keys[event.key.toLowerCase()];
+    if (event.metaKey || event.ctrlKey || event.altKey || !action) return;
+    event.preventDefault();
+    action();
+  });
+  addEventListener('click', (event) => {
+    if (event.target.closest('a') || String(getSelection())) return;
+    if (inOverview()) {
+      const picked = event.target.closest('.slide');
+      if (picked) { show(slides.indexOf(picked)); toggleOverview(); }
+      return;
+    }
+    show(current + (event.clientX < innerWidth / 3 ? -1 : 1));
+  });
+  addEventListener('hashchange', showFromHash);
+  addEventListener('resize', fit);
+  fit();
+  showFromHash();
+})();
+</script>
+</body>
+</html>
