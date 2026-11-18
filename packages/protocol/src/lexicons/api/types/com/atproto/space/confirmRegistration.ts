@@ -13,15 +13,18 @@ import {
 
 const is$typed = _is$typed,
   validate = _validate
-const id = 'com.atproto.space.unregisterNotify'
+const id = 'com.atproto.space.confirmRegistration'
 
 export type QueryParams = {}
 
 export interface InputSchema {
-  /** Reference to the space. */
   space: string
-  /** Service identifier of the subscriber to remove, as passed to registerNotify. */
-  service: string
+  token: string
+  challenge: string
+}
+
+export interface OutputSchema {
+  challenge: string
 }
 
 export interface CallOptions {
@@ -34,18 +37,9 @@ export interface CallOptions {
 export interface Response {
   success: boolean
   headers: HeadersMap
-}
-
-export class SpaceNotFoundError extends XRPCError {
-  constructor(src: XRPCError) {
-    super(src.status, src.error, src.message, src.headers, { cause: src })
-  }
+  data: OutputSchema
 }
 
 export function toKnownErr(e: any) {
-  if (e instanceof XRPCError) {
-    if (e.error === 'SpaceNotFound') return new SpaceNotFoundError(e)
-  }
-
   return e
 }

@@ -14,12 +14,12 @@ const is$typed = _is$typed,
   validate = _validate
 const id = 'com.atproto.managedspace.policy'
 
-/** Space policy that defers each user access decision to an external managing app, which the authority asks via checkUserAccess. */
+/** Space policy that delegates access decisions to an external app through checkAccess. */
 export interface Main {
   $type?: 'com.atproto.managedspace.policy'
-  /** Service identifier of the managing app: a DID with an optional service fragment (e.g. 'did:web:example.com#forum'). */
+  /** The `did#serviceId` reference of the managing app. */
   managingApp: string
-  /** Publish the policy to readers as a com.atproto.space.policy record in the authority's repo in the space. */
+  /** Publish the policy as a com.atproto.space.policy record in the space. */
   publishPolicy: boolean
 }
 

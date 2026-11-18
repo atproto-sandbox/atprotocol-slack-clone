@@ -13,23 +13,19 @@ import {
 
 const is$typed = _is$typed,
   validate = _validate
-const id = 'com.atproto.space.notifyWrite'
+const id = 'new.flock.operator.getDmNotifyTarget'
 
 export type QueryParams = {}
 
 export interface InputSchema {
-  /** Reference to the space. */
   space: string
-  /** The DID of the account whose repo advanced. */
-  repo: string
-  /** The repo revision after the write. */
-  repoRev: string
-  /** The repo's current commit data (sha256 of the LtHash state) after the write. Lets the space host maintain each repo's commit data for listRepos. */
-  data: Uint8Array
-  /** The space revision assigned by the space host. Present only on notifications forwarded to syncers. */
-  spaceRev?: string
-  /** The previous space revision. Omitted on the first update in a space. A gap indicates missed notifications; recover using listRepos with cursor. */
-  prevSpaceRev?: string
+  credential: string
+  proof: CredentialProof
+}
+
+export interface OutputSchema {
+  endpoint: string
+  token: string
 }
 
 export interface CallOptions {
@@ -42,15 +38,16 @@ export interface CallOptions {
 export interface Response {
   success: boolean
   headers: HeadersMap
+  data: OutputSchema
 }
 
-export class SpaceNotFoundError extends XRPCError {
+export class UnauthorizedError extends XRPCError {
   constructor(src: XRPCError) {
     super(src.status, src.error, src.message, src.headers, { cause: src })
   }
 }
 
-export class FutureRevError extends XRPCError {
+export class InvalidRequestError extends XRPCError {
   constructor(src: XRPCError) {
     super(src.status, src.error, src.message, src.headers, { cause: src })
   }
@@ -58,9 +55,26 @@ export class FutureRevError extends XRPCError {
 
 export function toKnownErr(e: any) {
   if (e instanceof XRPCError) {
-    if (e.error === 'SpaceNotFound') return new SpaceNotFoundError(e)
-    if (e.error === 'FutureRev') return new FutureRevError(e)
+    if (e.error === 'Unauthorized') return new UnauthorizedError(e)
+    if (e.error === 'InvalidRequest') return new InvalidRequestError(e)
   }
 
   return e
+}
+
+export interface CredentialProof {
+  $type?: 'new.flock.operator.getDmNotifyTarget#credentialProof'
+  authorization: string
+  signatureInput: string
+  signature: string
+}
+
+const hashCredentialProof = 'credentialProof'
+
+export function isCredentialProof<V>(v: V) {
+  return is$typed(v, id, hashCredentialProof)
+}
+
+export function validateCredentialProof<V>(v: V) {
+  return validate<CredentialProof & V>(v, id, hashCredentialProof)
 }

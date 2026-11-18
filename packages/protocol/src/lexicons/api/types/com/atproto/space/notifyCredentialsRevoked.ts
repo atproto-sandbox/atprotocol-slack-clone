@@ -13,13 +13,14 @@ import {
 
 const is$typed = _is$typed,
   validate = _validate
-const id = 'com.atproto.space.notifySpaceDeleted'
+const id = 'com.atproto.space.notifyCredentialsRevoked'
 
 export type QueryParams = {}
 
 export interface InputSchema {
-  /** Reference to the deleted space. */
   space: string
+  /** The IDs (jti) of the revoked credentials. */
+  credentials: string[]
 }
 
 export interface CallOptions {

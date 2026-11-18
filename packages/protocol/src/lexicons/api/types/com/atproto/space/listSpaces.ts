@@ -16,11 +16,9 @@ const is$typed = _is$typed,
 const id = 'com.atproto.space.listSpaces'
 
 export type QueryParams = {
-  /** Filter to spaces of this space type. */
+  /** Filter to spaces with this DID as their authority. */
+  spaceDid?: string
   spaceType?: string
-  /** Filter to spaces under this authority DID. */
-  did?: string
-  /** The number of spaces to return. */
   limit?: number
   cursor?: string
 }
@@ -42,14 +40,29 @@ export interface Response {
   data: OutputSchema
 }
 
+export class InvalidCursorError extends XRPCError {
+  constructor(src: XRPCError) {
+    super(src.status, src.error, src.message, src.headers, { cause: src })
+  }
+}
+
 export function toKnownErr(e: any) {
+  if (e instanceof XRPCError) {
+    if (e.error === 'InvalidCursor') return new InvalidCursorError(e)
+  }
+
   return e
 }
 
 export interface SpaceView {
   $type?: 'com.atproto.space.listSpaces#spaceView'
-  /** URI of the space. */
-  uri: string
+  space: string
+  /** The current revision of the account's repo in the space, if it has one. */
+  repoRev?: string
+  /** The current commit data of the account's repo in the space, if it has one. */
+  data?: Uint8Array
+  /** The current revision of the space. Only included if the account is the space's authority. */
+  spaceRev?: string
 }
 
 const hashSpaceView = 'spaceView'

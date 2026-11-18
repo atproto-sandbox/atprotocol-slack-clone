@@ -16,13 +16,11 @@ const is$typed = _is$typed,
 const id = 'com.atproto.space.getDelegationToken'
 
 export type QueryParams = {
-  /** Reference to the space. */
   space: string
 }
 export type InputSchema = undefined
 
 export interface OutputSchema {
-  /** A signed JWT delegation token. */
   token: string
 }
 

@@ -5,7 +5,7 @@
     "main": {
       "type": "space",
       "key": "literal:self",
-      "name": "DM inbox",
+      "title": "DM inbox",
       "collections": ["new.flock.dm.request"],
       "description": "A personal DM request inbox that its owner reads and configures the write policy for."
     }

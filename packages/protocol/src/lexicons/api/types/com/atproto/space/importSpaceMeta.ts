@@ -22,7 +22,7 @@ export interface CallOptions {
   signal?: AbortSignal
   headers?: HeadersMap
   qp?: QueryParams
-  encoding?: 'application/octet-stream'
+  encoding?: 'application/vnd.dasl.star'
 }
 
 export interface Response {
@@ -30,7 +30,7 @@ export interface Response {
   headers: HeadersMap
 }
 
-export class NotSpaceOwnerError extends XRPCError {
+export class NotAuthorizedError extends XRPCError {
   constructor(src: XRPCError) {
     super(src.status, src.error, src.message, src.headers, { cause: src })
   }
@@ -42,10 +42,17 @@ export class UnsupportedPolicyError extends XRPCError {
   }
 }
 
+export class InvalidSpaceMetaError extends XRPCError {
+  constructor(src: XRPCError) {
+    super(src.status, src.error, src.message, src.headers, { cause: src })
+  }
+}
+
 export function toKnownErr(e: any) {
   if (e instanceof XRPCError) {
-    if (e.error === 'NotSpaceOwner') return new NotSpaceOwnerError(e)
+    if (e.error === 'NotAuthorized') return new NotAuthorizedError(e)
     if (e.error === 'UnsupportedPolicy') return new UnsupportedPolicyError(e)
+    if (e.error === 'InvalidSpaceMeta') return new InvalidSpaceMetaError(e)
   }
 
   return e

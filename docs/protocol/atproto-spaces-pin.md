@@ -1,21 +1,49 @@
 # atproto Spaces Protocol Pin and Conformance
 
-Status: pinned PDS API/policy and strict-expiry conformance pass with the checked-in verifier patch; the unmodified upstream base still fails the PRD cutoff  
-Verified: 2026-10-30 (re-based from `619c6e85`, verified 2026-10-21; before that `5b95b2f2`, 2026-10-09, and `787a730f`, 2026-09-25)
+Status: **R12a pinned (`6747610566`, `0.0.0-spaces-alpha-20261117141222`); `@atproto/space` patched & passing (173/173); downstream Flock protocol/runtime updates pending Waves `R12b`–`R12f`**  
+Verified pin & patch: 2026-11-17 (updated from `5d88b414`, 2026-10-30; before that `619c6e85`, `5b95b2f2`, `787a730f`)
 
 ## Pinned source
 
 | Component | Pin |
 |---|---|
-| Proposal 0016 | `bluesky-social/proposals` `main` at `701ef9c6be5a99c2d3e87e107fe2531459d1c984` (the October 29 combined proposal; previously `c76714ac`, `119fa6b6`) |
-| PDS implementation | `bluesky-social/atproto` `permissioned-data`, PR [#5187](https://github.com/bluesky-social/atproto/pull/5187), commit `5d88b414a98de1ada22c94c78fa0667a7028163c` (the "combined implementation" of the October 29 alpha; previously `619c6e85`, `5b95b2f2`, `787a730f`) |
-| `@atproto/pds` | `0.5.32` |
-| `@atproto/oauth-scopes` | `0.5.11` |
-| `@atproto/oauth-provider` | `0.22.6` |
-| `@atproto/space` | `0.0.1` |
-| PDS development environment | Same pinned monorepo commit; `@atproto/dev-env` multi-PDS fixture |
-| App dependencies | `@atproto/space`, `@atproto/crypto` and `@atproto/lex-data` at `0.0.0-spaces-alpha-20261029171913`, the npm snapshot built from this commit. Other `@atproto/*` copies remain at their own versions because the unchanged packages depend on them (`crypto` 0.5.5 for `identity` and `xrpc-server`, `lex-data` 0.1.7 and `lex-cbor` 0.1.6 for `lex-client`, `xrpc` and friends, `syntax` 0.7.6); the alpha copies serve `@atproto/space` and the app's own signing and MAC code. Their `^0.0.0-spaces-alpha-…` ranges also match stray `0.0.0` releases of `@atproto/lex-cbor` and `@atproto/lex-data` that still list `workspace:*` dependencies and cannot install, so `pnpm-workspace.yaml` overrides both ranges to the snapshot |
-| Strict credential-expiry overlay | [`protocol-tests/atproto/strict-credential-expiry.patch`](../../protocol-tests/atproto/strict-credential-expiry.patch), SHA-256 `e9cfae5beb29d01c494087abf79eaf58fd48312956422c91ff29a405977aae3f` |
+| Upstream PR / Commit | `bluesky-social/atproto` `permissioned-data`, PR [#5187](https://github.com/bluesky-social/atproto/pull/5187), commit `6747610566eee1b6d743617bd8eb1136adccb362` (previously `5d88b414a98de1ada22c94c78fa0667a7028163c`) |
+| PDS development environment | Same pinned monorepo commit in `../atproto-spaces-r12`; `@atproto/dev-env` multi-PDS fixture (`devMode: true`, `disableSsrfProtection: true`) |
+| App Spaces dependencies | `@atproto/space`, `@atproto/star`, `@atproto/crypto`, `@atproto/lex-data`, `@atproto/lexicon`, `@atproto/xrpc-server` at `0.0.0-spaces-alpha-20261117141222` (snapshot from `223114799`, byte-identical to `6747610566` across `lexicons/`, `packages/{space,star,crypto,xrpc-server}`, and `packages/oauth/{oauth-client*,jwk-jose,oauth-provider}`). Stable non-Spaces packages (`@atproto/oauth-client-{node,browser}`, `@atproto/identity`, `@atproto/jwk-jose`, `@atproto/xrpc`, `@atproto/lex-cli`) stay on their existing pins. `pnpm-workspace.yaml` pins all `^0.0.0-spaces-alpha-*` overrides and `minimumReleaseAgeExclude` entries to `0.0.0-spaces-alpha-20261117141222` to prevent matching stray uninstallable `0.0.0` releases |
+| Strict credential-expiry overlay | [`protocol-tests/atproto/strict-credential-expiry.patch`](../../protocol-tests/atproto/strict-credential-expiry.patch), SHA-256 `3f413baa779473b5466e8e6ca9edc92335f5056edbd13aa3d4bfc57a509b32dd` (rebased onto `6747610566`: `packages/space/src/credential.ts` + `packages/space/src/credential.test.ts`) |
+
+PR #5187 (`permissioned-data`) remains in active development, and unmodified `6747610566` still applies five seconds of expiry tolerance (`CLOCK_SKEW_SEC = 5`) to all space tokens including credentials (`packages/space/src/credential.ts:296`). The rebased overlay preserves strict zero-skew cutoff on `'credential'` (`type === 'credential' ? 0 : CLOCK_SKEW_SEC`) while keeping five-second tolerance on `'delegation'` and `'clientAttestation'`, and updates `packages/space/src/credential.test.ts` (moved from `packages/space/tests/` in upstream PR `#5924`). Any deployment must retain this overlay or an upstream fix and rerun Gate 4 conformance.
+
+Production operator & webhook deployment notes:
+- Upstream `authorizeSpaceSync` and `SpaceNotifications` deliver `confirmRegistration` and `notifySpaceUpdate` through `ctx.safeClient(endpoint)` (with `disableSsrfProtection` disabled outside `devMode: true`). Production `OPERATOR_URL` must therefore be a **public HTTPS origin**; loopback/private IPs are rejected in non-dev PDS deployments.
+- Production deployments using OAuth space-permission consent screens must republish the 7 updated `new.flock.*` space lexicons carrying `"title"` (replacing `"name"`).
+
+## Reproduce the pinned checkout & build (`../atproto-spaces-r12`)
+
+Upstream `6747610566` uses `pnpm@12.16.1` (`lockfileVersion: '9.0'`) and declares `devEngines.runtime` `^22.23.4 || ^24.22.1 || ^26.12.1` (with `undici@8.12.3`). Use Node `>= 22.23.4` (`< 23`, matching root `NODE_MODULE_VERSION` 127) if installed; on hosts with Node `22.17.0` + `/opt/homebrew/bin/node` (`v25.4.0`), `oauth-provider-ui` Lingui extraction (`lingui` CLI `import.meta.main`) runs once under Node `>= 24.2`, while native addons (`better-sqlite3`, `@swc/core`, `sharp`) and `dev-env` build under Node `22.x` (`PUPPETEER_SKIP_DOWNLOAD=true`, `--runtime-on-fail=ignore`):
+
+```sh
+git clone --filter=blob:none --no-checkout https://github.com/bluesky-social/atproto.git atproto-spaces-r12
+git -C atproto-spaces-r12 fetch --depth=1 origin 6747610566eee1b6d743617bd8eb1136adccb362
+git -C atproto-spaces-r12 checkout --detach 6747610566eee1b6d743617bd8eb1136adccb362
+cd atproto-spaces-r12
+shasum -a 256 /path/to/atproto-slack-clone-r12/protocol-tests/atproto/strict-credential-expiry.patch
+git apply /path/to/atproto-slack-clone-r12/protocol-tests/atproto/strict-credential-expiry.patch
+PUPPETEER_SKIP_DOWNLOAD=true pnpm --runtime-on-fail=ignore install --frozen-lockfile
+pnpm --runtime-on-fail=ignore run build:tooling
+# Run oauth-provider-ui prebuild with Node >= 24.2 if on Node 22.x:
+pnpm --runtime-on-fail=ignore --filter @atproto/oauth-provider-ui prebuild
+pnpm --runtime-on-fail=ignore --filter @atproto/dev-env... --filter @atproto/space --filter @atproto/star prebuild
+pnpm --runtime-on-fail=ignore --filter @atproto/dev-env... --filter @atproto/space --filter @atproto/star --filter @atproto/lex-cli build
+pnpm --runtime-on-fail=ignore --filter @atproto/space test
+```
+
+Verified on 2026-11-17: `@atproto/space` passed 9/9 test files, 173/173 tests (including 33 tests in `src/credential.test.ts` with strict expiry enforced).
+
+## Historical Pin Log (Prior `5d88b414`, `619c6e85`, `5b95b2f2`, `787a730f` verification notes — preserved for reference)
+
+Status (historical `5d88b414`): pinned PDS API/policy and strict-expiry conformance pass with the checked-in verifier patch; the unmodified upstream base still fails the PRD cutoff  
+Verified (`5d88b414`): 2026-10-30 (re-based from `619c6e85`, verified 2026-10-21; before that `5b95b2f2`, 2026-10-09, and `787a730f`, 2026-09-25)
 
 The proposal describes itself as a proposal, and PR #5187 (branch `permissioned-data`) is still marked Draft as of this verification. The unmodified `5d88b414` source still allows five seconds of expiry skew for credentials. The checked-in overlay changes `verifySpaceToken` in `packages/space/src/credential.ts` so a space credential is rejected at `exp` (zero skew) while delegation tokens and client attestations keep the five-second allowance, and it replaces the skew test in `packages/space/tests/credential.test.ts` with an at-`exp` rejection test plus a delegation-skew test. Space credentials are presented with HTTP message signatures (tagged `atproto-space-credential`), not DPoP, so the overlay does not mention DPoP proofs. It applies to the `5d88b414` sources with line offsets only. This is a local protocol fork requirement: any deployment must use this overlay or a compatible upstream revision and rerun conformance. Treat protocol drift as a release blocker.
 

@@ -13,24 +13,24 @@ import {
 
 const is$typed = _is$typed,
   validate = _validate
-const id = 'com.atproto.space.getSpaceCredential'
+const id = 'com.atproto.space.authorizeSpaceSync'
 
 export type QueryParams = {}
 
 export interface InputSchema {
-  /** Reference to the space. */
   space: string
-  /** P-256 did:key to bind the credential to. Each request using the credential is signed by this key. */
-  credentialKid: string
-  /** Optional delegation token establishing the user being acted for. Required only when the space gates on the user. */
+  /** P-256 did:key that the credential is bound to. */
+  credentialKey: string
+  /** Obtained from getDelegationToken. */
   delegationToken?: string
-  /** Optional client attestation JWT establishing the app's identity. Required only when the space gates on app identity. */
   clientAttestation?: string
+  notify?: Notify
 }
 
 export interface OutputSchema {
-  /** A signed JWT space credential. */
   credential: string
+  /** The space's current revision. Omitted before the space's first update. */
+  spaceRev?: string
 }
 
 export interface CallOptions {
@@ -58,7 +58,7 @@ export class SpaceDeletedError extends XRPCError {
   }
 }
 
-export class UserNotAuthorizedError extends XRPCError {
+export class AccountNotAuthorizedError extends XRPCError {
   constructor(src: XRPCError) {
     super(src.status, src.error, src.message, src.headers, { cause: src })
   }
@@ -88,18 +88,59 @@ export class InvalidClientAttestationError extends XRPCError {
   }
 }
 
+export class RegistrationNotConfirmedError extends XRPCError {
+  constructor(src: XRPCError) {
+    super(src.status, src.error, src.message, src.headers, { cause: src })
+  }
+}
+
+export class RepoTakendownError extends XRPCError {
+  constructor(src: XRPCError) {
+    super(src.status, src.error, src.message, src.headers, { cause: src })
+  }
+}
+
+export class RepoDeactivatedError extends XRPCError {
+  constructor(src: XRPCError) {
+    super(src.status, src.error, src.message, src.headers, { cause: src })
+  }
+}
+
 export function toKnownErr(e: any) {
   if (e instanceof XRPCError) {
     if (e.error === 'SpaceNotFound') return new SpaceNotFoundError(e)
     if (e.error === 'SpaceDeleted') return new SpaceDeletedError(e)
-    if (e.error === 'UserNotAuthorized') return new UserNotAuthorizedError(e)
+    if (e.error === 'AccountNotAuthorized')
+      return new AccountNotAuthorizedError(e)
     if (e.error === 'AppNotAuthorized') return new AppNotAuthorizedError(e)
     if (e.error === 'NotAuthorized') return new NotAuthorizedError(e)
     if (e.error === 'InvalidDelegationToken')
       return new InvalidDelegationTokenError(e)
     if (e.error === 'InvalidClientAttestation')
       return new InvalidClientAttestationError(e)
+    if (e.error === 'RegistrationNotConfirmed')
+      return new RegistrationNotConfirmedError(e)
+    if (e.error === 'RepoTakendown') return new RepoTakendownError(e)
+    if (e.error === 'RepoDeactivated') return new RepoDeactivatedError(e)
   }
 
   return e
+}
+
+export interface Notify {
+  $type?: 'com.atproto.space.authorizeSpaceSync#notify'
+  /** Base HTTPS URL that notification methods are called against. */
+  endpoint: string
+  /** Opaque secret, included in the body of each request to the endpoint. The endpoint and token together identify the registration, so the token should stay the same across authorizations. */
+  token: string
+}
+
+const hashNotify = 'notify'
+
+export function isNotify<V>(v: V) {
+  return is$typed(v, id, hashNotify)
+}
+
+export function validateNotify<V>(v: V) {
+  return validate<Notify & V>(v, id, hashNotify)
 }

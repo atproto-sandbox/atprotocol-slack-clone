@@ -13,20 +13,15 @@ import {
 
 const is$typed = _is$typed,
   validate = _validate
-const id = 'com.atproto.space.registerNotify'
+const id = 'com.atproto.space.notifyRepoUpdate'
 
 export type QueryParams = {}
 
 export interface InputSchema {
-  /** Reference to the space. */
   space: string
-  /** Service identifier of the subscriber: a DID with an optional service fragment naming the entry in its DID document to deliver to (e.g. 'did:web:syncer.example.com#atproto_space_syncer'). notifyWrite calls are addressed to this identifier. */
-  service: string
-}
-
-export interface OutputSchema {
-  /** When the registration expires. May be later than the expiry of the space credential the request was authenticated with; renew before this time to stay subscribed. */
-  expiresAt: string
+  repo: string
+  repoRev: string
+  data: Uint8Array
 }
 
 export interface CallOptions {
@@ -39,7 +34,6 @@ export interface CallOptions {
 export interface Response {
   success: boolean
   headers: HeadersMap
-  data: OutputSchema
 }
 
 export class SpaceNotFoundError extends XRPCError {
@@ -48,7 +42,7 @@ export class SpaceNotFoundError extends XRPCError {
   }
 }
 
-export class ServiceNotResolvableError extends XRPCError {
+export class FutureRevError extends XRPCError {
   constructor(src: XRPCError) {
     super(src.status, src.error, src.message, src.headers, { cause: src })
   }
@@ -57,8 +51,7 @@ export class ServiceNotResolvableError extends XRPCError {
 export function toKnownErr(e: any) {
   if (e instanceof XRPCError) {
     if (e.error === 'SpaceNotFound') return new SpaceNotFoundError(e)
-    if (e.error === 'ServiceNotResolvable')
-      return new ServiceNotResolvableError(e)
+    if (e.error === 'FutureRev') return new FutureRevError(e)
   }
 
   return e

@@ -14,18 +14,15 @@ const is$typed = _is$typed,
   validate = _validate
 const id = 'com.atproto.space.defs'
 
-/** A commit over the current state of a permissioned repo. Carries no signature: the repo host authenticates it to a syncer with a MAC in the Atproto-Space-Mac response header. */
+/** Commit to the current state of a space repo. Not signed; authenticated by the repo host with a MAC instead. */
 export interface Commit {
   $type?: 'com.atproto.space.defs#commit'
   /** Commit format version, currently 1. */
   ver: number
-  /** The author DID of the repo. */
   repo: string
-  /** Reference to the space. */
   space: string
-  /** Commit revision (TID). */
   rev: string
-  /** sha256 digest of the LtHash state (32 bytes). */
+  /** SHA-256 digest of the repo's LtHash state. */
   data: Uint8Array
 }
 
@@ -37,4 +34,46 @@ export function isCommit<V>(v: V) {
 
 export function validateCommit<V>(v: V) {
   return validate<Commit & V>(v, id, hashCommit)
+}
+
+/** A repo in the space advanced to a new revision. */
+export interface RepoWrite {
+  $type?: 'com.atproto.space.defs#repoWrite'
+  repo: string
+  repoRev: string
+  data: Uint8Array
+  /** The space revision at which this update was sequenced. */
+  spaceRev: string
+  /** The space revision before this update, if any. Set in notifySpaceUpdate, where a gap indicates missed notifications, which can be recovered with listWriters. */
+  prevSpaceRev?: string
+}
+
+const hashRepoWrite = 'repoWrite'
+
+export function isRepoWrite<V>(v: V) {
+  return is$typed(v, id, hashRepoWrite)
+}
+
+export function validateRepoWrite<V>(v: V) {
+  return validate<RepoWrite & V>(v, id, hashRepoWrite)
+}
+
+/** A repo was removed from the writer set. */
+export interface RepoRemoved {
+  $type?: 'com.atproto.space.defs#repoRemoved'
+  repo: string
+  /** The space revision at which this update was sequenced. */
+  spaceRev: string
+  /** The space revision before this update, if any. Set in notifySpaceUpdate, where a gap indicates missed notifications, which can be recovered with listWriters. */
+  prevSpaceRev?: string
+}
+
+const hashRepoRemoved = 'repoRemoved'
+
+export function isRepoRemoved<V>(v: V) {
+  return is$typed(v, id, hashRepoRemoved)
+}
+
+export function validateRepoRemoved<V>(v: V) {
+  return validate<RepoRemoved & V>(v, id, hashRepoRemoved)
 }

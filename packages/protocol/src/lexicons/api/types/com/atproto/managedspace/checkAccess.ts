@@ -13,23 +13,19 @@ import {
 
 const is$typed = _is$typed,
   validate = _validate
-const id = 'com.atproto.managedspace.checkUserAccess'
+const id = 'com.atproto.managedspace.checkAccess'
 
 export type QueryParams = {
-  /** Reference to the space. */
   space: string
-  /** The DID of the requesting user. */
-  user: string
-  /** The kind of access being checked. */
-  access: 'read' | 'write' | (string & {})
-  /** The attested client_id, if a client attestation was presented. Omitted for write checks. */
+  repo?: string
+  /** OAuth client ID of the requesting app, if attested. */
   clientId?: string
 }
 export type InputSchema = undefined
 
 export interface OutputSchema {
-  /** Whether the managing app authorizes the request. */
-  authorized: boolean
+  read: boolean
+  write: boolean
 }
 
 export interface CallOptions {

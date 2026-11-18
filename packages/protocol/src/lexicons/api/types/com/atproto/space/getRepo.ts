@@ -16,9 +16,7 @@ const is$typed = _is$typed,
 const id = 'com.atproto.space.getRepo'
 
 export type QueryParams = {
-  /** Reference to the space. */
   space: string
-  /** The DID of the account whose repo to download. */
   repo: string
 }
 export type InputSchema = undefined
@@ -34,7 +32,7 @@ export interface Response {
   data: Uint8Array
 }
 
-export class BadSpaceMacError extends XRPCError {
+export class InvalidSpaceMacError extends XRPCError {
   constructor(src: XRPCError) {
     super(src.status, src.error, src.message, src.headers, { cause: src })
   }
@@ -72,7 +70,7 @@ export class RepoDeactivatedError extends XRPCError {
 
 export function toKnownErr(e: any) {
   if (e instanceof XRPCError) {
-    if (e.error === 'BadSpaceMac') return new BadSpaceMacError(e)
+    if (e.error === 'InvalidSpaceMac') return new InvalidSpaceMacError(e)
     if (e.error === 'SpaceNotFound') return new SpaceNotFoundError(e)
     if (e.error === 'RepoNotFound') return new RepoNotFoundError(e)
     if (e.error === 'RepoTakendown') return new RepoTakendownError(e)

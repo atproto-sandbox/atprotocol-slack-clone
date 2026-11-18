@@ -18,9 +18,7 @@ const id = 'com.atproto.space.applyWrites'
 export type QueryParams = {}
 
 export interface InputSchema {
-  /** Reference to the space. */
   space: string
-  /** The DID of the repo to write to (the authenticated member). */
   repo: string
   /** Can be set to 'false' to skip Lexicon schema validation of record data across all operations, 'true' to require it, or leave unset to validate only for known Lexicons. */
   validate?: boolean

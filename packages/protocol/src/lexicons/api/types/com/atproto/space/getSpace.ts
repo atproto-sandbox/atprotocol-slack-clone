@@ -19,14 +19,12 @@ const is$typed = _is$typed,
 const id = 'com.atproto.space.getSpace'
 
 export type QueryParams = {
-  /** Reference to the space. */
   space: string
 }
 export type InputSchema = undefined
 
 export interface OutputSchema {
-  /** URI of the space. */
-  uri: string
+  space: string
   policy:
     | $Typed<ComAtprotoPersonalspacePolicy.Main>
     | $Typed<ComAtprotoMemberspacePolicy.Main>
@@ -51,9 +49,16 @@ export class SpaceNotFoundError extends XRPCError {
   }
 }
 
+export class NotAuthorizedError extends XRPCError {
+  constructor(src: XRPCError) {
+    super(src.status, src.error, src.message, src.headers, { cause: src })
+  }
+}
+
 export function toKnownErr(e: any) {
   if (e instanceof XRPCError) {
     if (e.error === 'SpaceNotFound') return new SpaceNotFoundError(e)
+    if (e.error === 'NotAuthorized') return new NotAuthorizedError(e)
   }
 
   return e

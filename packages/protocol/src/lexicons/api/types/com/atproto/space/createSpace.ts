@@ -21,9 +21,8 @@ const id = 'com.atproto.space.createSpace'
 export type QueryParams = {}
 
 export interface InputSchema {
-  /** The NSID of the space type, describing the modality of the space (e.g. app.bsky.group, app.bsky.personal). */
   spaceType: string
-  /** The space key. Used to differentiate multiple spaces of the same type under the same owner. Same syntax requirements as a record key. If not provided, one will be auto-generated (TID). */
+  /** Space key. Generated as a TID if not provided. */
   skey?: string
   policy:
     | $Typed<ComAtprotoPersonalspacePolicy.Main>
@@ -33,8 +32,7 @@ export interface InputSchema {
 }
 
 export interface OutputSchema {
-  /** URI of the created space. */
-  uri: string
+  space: string
 }
 
 export interface CallOptions {

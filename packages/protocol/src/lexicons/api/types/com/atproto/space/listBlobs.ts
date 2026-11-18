@@ -16,12 +16,8 @@ const is$typed = _is$typed,
 const id = 'com.atproto.space.listBlobs'
 
 export type QueryParams = {
-  /** Reference to the space. */
   space: string
-  /** The DID of the account whose blobs to list. */
   repo: string
-  /** Optional revision of the permissioned repo to list blobs since. */
-  since?: string
   limit?: number
   cursor?: string
 }

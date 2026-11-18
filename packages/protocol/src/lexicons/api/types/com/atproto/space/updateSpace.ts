@@ -21,7 +21,6 @@ const id = 'com.atproto.space.updateSpace'
 export type QueryParams = {}
 
 export interface InputSchema {
-  /** Reference to the space to update. */
   space: string
   policy:
     | $Typed<ComAtprotoPersonalspacePolicy.Main>
@@ -48,7 +47,7 @@ export class SpaceNotFoundError extends XRPCError {
   }
 }
 
-export class NotSpaceOwnerError extends XRPCError {
+export class NotAuthorizedError extends XRPCError {
   constructor(src: XRPCError) {
     super(src.status, src.error, src.message, src.headers, { cause: src })
   }
@@ -63,7 +62,7 @@ export class UnsupportedPolicyError extends XRPCError {
 export function toKnownErr(e: any) {
   if (e instanceof XRPCError) {
     if (e.error === 'SpaceNotFound') return new SpaceNotFoundError(e)
-    if (e.error === 'NotSpaceOwner') return new NotSpaceOwnerError(e)
+    if (e.error === 'NotAuthorized') return new NotAuthorizedError(e)
     if (e.error === 'UnsupportedPolicy') return new UnsupportedPolicyError(e)
   }
 

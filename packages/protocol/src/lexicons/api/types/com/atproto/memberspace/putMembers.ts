@@ -10,22 +10,17 @@ import {
   is$typed as _is$typed,
   type OmitKey,
 } from '../../../../util.js'
+import type * as ComAtprotoMemberspaceDefs from './defs.js'
 
 const is$typed = _is$typed,
   validate = _validate
-const id = 'com.atproto.memberspace.putMember'
+const id = 'com.atproto.memberspace.putMembers'
 
 export type QueryParams = {}
 
 export interface InputSchema {
-  /** Reference to the space. */
   space: string
-  /** The DID of the member. */
-  did: string
-  /** Whether the member may read when the policy's publicRead is not set. */
-  read: boolean
-  /** Whether the member's writes are tracked when the policy's publicWrite is not set. */
-  write: boolean
+  members: ComAtprotoMemberspaceDefs.Member[]
 }
 
 export interface CallOptions {
@@ -46,7 +41,7 @@ export class SpaceNotFoundError extends XRPCError {
   }
 }
 
-export class NotSpaceOwnerError extends XRPCError {
+export class NotAuthorizedError extends XRPCError {
   constructor(src: XRPCError) {
     super(src.status, src.error, src.message, src.headers, { cause: src })
   }
@@ -61,7 +56,7 @@ export class PolicyMismatchError extends XRPCError {
 export function toKnownErr(e: any) {
   if (e instanceof XRPCError) {
     if (e.error === 'SpaceNotFound') return new SpaceNotFoundError(e)
-    if (e.error === 'NotSpaceOwner') return new NotSpaceOwnerError(e)
+    if (e.error === 'NotAuthorized') return new NotAuthorizedError(e)
     if (e.error === 'PolicyMismatch') return new PolicyMismatchError(e)
   }
 

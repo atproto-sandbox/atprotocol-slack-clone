@@ -5,7 +5,7 @@
     "main": {
       "type": "space",
       "key": "any",
-      "name": "Channel",
+      "title": "Channel",
       "collections": ["new.flock.channel.message", "new.flock.channel.reaction", "new.flock.channel.roster"],
       "description": "A public or private team conversation and its private roster."
     }

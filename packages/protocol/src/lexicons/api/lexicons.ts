@@ -10,37 +10,31 @@ import {
 import { type $Typed, is$typed, maybe$typed } from './util.js'
 
 export const schemaDict = {
-  ComAtprotoManagedspaceCheckUserAccess: {
+  ComAtprotoManagedspaceCheckAccess: {
     lexicon: 1,
-    id: 'com.atproto.managedspace.checkUserAccess',
+    id: 'com.atproto.managedspace.checkAccess',
     defs: {
       main: {
         type: 'query',
         description:
-          "Ask a space's managing app whether to authorize a user to read or write. Served by the managingApp (not the PDS), called by the authority of a space governed by the managedspace policy. Authenticated with service auth from the authority.",
+          "Check an account's read and write access to a managed space. Called by the space host, implemented by the space's managing app. Requires service auth.",
         parameters: {
           type: 'params',
-          required: ['space', 'user', 'access'],
+          required: ['space'],
           properties: {
             space: {
               type: 'string',
               format: 'space-ref',
-              description: 'Reference to the space.',
             },
-            user: {
+            repo: {
               type: 'string',
               format: 'did',
-              description: 'The DID of the requesting user.',
-            },
-            access: {
-              type: 'string',
-              knownValues: ['read', 'write'],
-              description: 'The kind of access being checked.',
             },
             clientId: {
               type: 'string',
+              format: 'uri',
               description:
-                'The attested client_id, if a client attestation was presented. Omitted for write checks.',
+                'OAuth client ID of the requesting app, if attested.',
             },
           },
         },
@@ -48,11 +42,13 @@ export const schemaDict = {
           encoding: 'application/json',
           schema: {
             type: 'object',
-            required: ['authorized'],
+            required: ['read', 'write'],
             properties: {
-              authorized: {
+              read: {
                 type: 'boolean',
-                description: 'Whether the managing app authorizes the request.',
+              },
+              write: {
+                type: 'boolean',
               },
             },
           },
@@ -67,19 +63,40 @@ export const schemaDict = {
       main: {
         type: 'object',
         description:
-          'Space policy that defers each user access decision to an external managing app, which the authority asks via checkUserAccess.',
+          'Space policy that delegates access decisions to an external app through checkAccess.',
         required: ['managingApp'],
         properties: {
           managingApp: {
             type: 'string',
-            description:
-              "Service identifier of the managing app: a DID with an optional service fragment (e.g. 'did:web:example.com#forum').",
+            description: 'The `did#serviceId` reference of the managing app.',
           },
           publishPolicy: {
             type: 'boolean',
             default: false,
             description:
-              "Publish the policy to readers as a com.atproto.space.policy record in the authority's repo in the space.",
+              'Publish the policy as a com.atproto.space.policy record in the space.',
+          },
+        },
+      },
+    },
+  },
+  ComAtprotoMemberspaceDefs: {
+    lexicon: 1,
+    id: 'com.atproto.memberspace.defs',
+    defs: {
+      member: {
+        type: 'object',
+        required: ['did', 'read', 'write'],
+        properties: {
+          did: {
+            type: 'string',
+            format: 'did',
+          },
+          read: {
+            type: 'boolean',
+          },
+          write: {
+            type: 'boolean',
           },
         },
       },
@@ -92,7 +109,7 @@ export const schemaDict = {
       main: {
         type: 'query',
         description:
-          "List the members of a space governed by the memberspace policy, and their read and write access. Must be called on the space authority's PDS. Requires OAuth with a covering read_self grant; a space credential is not sufficient, so members hosted elsewhere cannot enumerate the list. To make the list visible to readers, set the policy's publishMembers.",
+          'List the members of a space with a memberspace policy. Requires auth as the space authority, implemented by PDS.',
         parameters: {
           type: 'params',
           required: ['space'],
@@ -100,14 +117,12 @@ export const schemaDict = {
             space: {
               type: 'string',
               format: 'space-ref',
-              description: 'Reference to the space.',
             },
             limit: {
               type: 'integer',
               minimum: 1,
               maximum: 1000,
               default: 100,
-              description: 'Maximum number of members to return.',
             },
             cursor: {
               type: 'string',
@@ -127,7 +142,7 @@ export const schemaDict = {
                 type: 'array',
                 items: {
                   type: 'ref',
-                  ref: 'lex:com.atproto.memberspace.listMembers#member',
+                  ref: 'lex:com.atproto.memberspace.defs#member',
                 },
               },
             },
@@ -138,26 +153,16 @@ export const schemaDict = {
             name: 'SpaceNotFound',
           },
           {
+            name: 'NotAuthorized',
+          },
+          {
             name: 'PolicyMismatch',
-            description: 'The space is not governed by the memberspace policy.',
+            description: 'The space does not have a memberspace policy.',
+          },
+          {
+            name: 'InvalidCursor',
           },
         ],
-      },
-      member: {
-        type: 'object',
-        required: ['did', 'read', 'write'],
-        properties: {
-          did: {
-            type: 'string',
-            format: 'did',
-          },
-          read: {
-            type: 'boolean',
-          },
-          write: {
-            type: 'boolean',
-          },
-        },
       },
     },
   },
@@ -167,79 +172,70 @@ export const schemaDict = {
     defs: {
       main: {
         type: 'object',
-        description:
-          'Space policy that governs access via a member list maintained by the space host, managed with putMember and removeMember.',
+        description: 'Space policy that grants access based on a member list.',
         properties: {
           publicRead: {
             type: 'boolean',
             default: false,
             description:
-              'If true, the authority issues a space credential to anyone, with or without a delegation token. Otherwise, only to members whose entry has read set.',
+              'If true, anyone may read the space. Otherwise, only members with read access.',
           },
           publicWrite: {
             type: 'boolean',
             default: false,
             description:
-              "If true, the authority tracks and forwards notifications for any user's writes. Otherwise, only for members whose entry has write set.",
+              "If true, any account's writes are tracked in the writer set, except members without write access. Otherwise, only members with write access.",
           },
           allowedApps: {
             type: 'array',
             description:
-              'If set, the authority mints a credential only for these apps, evaluated against the attested client_id. When omitted, any app may read the space and no client attestation is required. Does not apply to writes.',
+              'If set, only these apps (by OAuth client ID) may read the space.',
             items: {
               type: 'string',
-              description: 'An OAuth client ID.',
+              format: 'uri',
             },
           },
           publishPolicy: {
             type: 'boolean',
             default: false,
             description:
-              "Publish the policy to readers as a com.atproto.space.policy record in the authority's repo in the space.",
+              'Publish the policy as a com.atproto.space.policy record in the space.',
           },
           publishMembers: {
             type: 'boolean',
             default: false,
             description:
-              "Publish the member list to readers as com.atproto.memberspace.member records in the authority's repo in the space.",
+              'Publish the member list as com.atproto.memberspace.member records in the space.',
           },
         },
       },
     },
   },
-  ComAtprotoMemberspacePutMember: {
+  ComAtprotoMemberspacePutMembers: {
     lexicon: 1,
-    id: 'com.atproto.memberspace.putMember',
+    id: 'com.atproto.memberspace.putMembers',
     defs: {
       main: {
         type: 'procedure',
         description:
-          'Add a member to the member list of a space governed by the memberspace policy, or replace their read and write access. Requires auth as the space owner.',
+          "Add members to a space, or update existing members' access, in a single commit. Requires auth as the space authority, implemented by PDS.",
         input: {
           encoding: 'application/json',
           schema: {
             type: 'object',
-            required: ['space', 'did', 'read', 'write'],
+            required: ['space', 'members'],
             properties: {
               space: {
                 type: 'string',
                 format: 'space-ref',
-                description: 'Reference to the space.',
               },
-              did: {
-                type: 'string',
-                format: 'did',
-                description: 'The DID of the member.',
-              },
-              read: {
-                type: 'boolean',
-                description:
-                  "Whether the member may read when the policy's publicRead is not set.",
-              },
-              write: {
-                type: 'boolean',
-                description:
-                  "Whether the member's writes are tracked when the policy's publicWrite is not set.",
+              members: {
+                type: 'array',
+                maxLength: 100,
+                items: {
+                  type: 'ref',
+                  ref: 'lex:com.atproto.memberspace.defs#member',
+                },
               },
             },
           },
@@ -249,39 +245,41 @@ export const schemaDict = {
             name: 'SpaceNotFound',
           },
           {
-            name: 'NotSpaceOwner',
+            name: 'NotAuthorized',
           },
           {
             name: 'PolicyMismatch',
-            description: 'The space is not governed by the memberspace policy.',
+            description: 'The space does not have a memberspace policy.',
           },
         ],
       },
     },
   },
-  ComAtprotoMemberspaceRemoveMember: {
+  ComAtprotoMemberspaceRemoveMembers: {
     lexicon: 1,
-    id: 'com.atproto.memberspace.removeMember',
+    id: 'com.atproto.memberspace.removeMembers',
     defs: {
       main: {
         type: 'procedure',
         description:
-          'Remove a member from the member list of a space governed by the memberspace policy. Requires auth as the space owner.',
+          'Remove members from a space in a single commit. DIDs that are not members are ignored. Requires auth as the space authority, implemented by PDS.',
         input: {
           encoding: 'application/json',
           schema: {
             type: 'object',
-            required: ['space', 'did'],
+            required: ['space', 'dids'],
             properties: {
               space: {
                 type: 'string',
                 format: 'space-ref',
-                description: 'Reference to the space.',
               },
-              did: {
-                type: 'string',
-                format: 'did',
-                description: 'The DID of the member to remove.',
+              dids: {
+                type: 'array',
+                maxLength: 100,
+                items: {
+                  type: 'string',
+                  format: 'did',
+                },
               },
             },
           },
@@ -291,11 +289,11 @@ export const schemaDict = {
             name: 'SpaceNotFound',
           },
           {
-            name: 'NotSpaceOwner',
+            name: 'NotAuthorized',
           },
           {
             name: 'PolicyMismatch',
-            description: 'The space is not governed by the memberspace policy.',
+            description: 'The space does not have a memberspace policy.',
           },
         ],
       },
@@ -308,7 +306,7 @@ export const schemaDict = {
       main: {
         type: 'object',
         description:
-          "Space policy for data that only its owner should see, such as bookmarks, mutes, or drafts. Only the space authority's own account is authorized to read, and the authority tracks no other writers. Has no configuration fields.",
+          'Space policy for personal data that only the space authority and authorized apps can read, such as bookmarks or drafts.',
         properties: {},
       },
     },
@@ -373,7 +371,7 @@ export const schemaDict = {
       main: {
         type: 'procedure',
         description:
-          'Apply a batch transaction of creates, updates, and deletes in a permissioned space. Requires auth, implemented by PDS.',
+          'Apply a batch transaction of creates, updates, and deletes to a space repo. Requires auth, implemented by PDS.',
         input: {
           encoding: 'application/json',
           schema: {
@@ -383,13 +381,10 @@ export const schemaDict = {
               space: {
                 type: 'string',
                 format: 'space-ref',
-                description: 'Reference to the space.',
               },
               repo: {
                 type: 'string',
                 format: 'did',
-                description:
-                  'The DID of the repo to write to (the authenticated member).',
               },
               validate: {
                 type: 'boolean',
@@ -437,13 +432,9 @@ export const schemaDict = {
           },
           {
             name: 'RecordNotFound',
-            description:
-              'An update or delete targeted a record that does not exist.',
           },
           {
             name: 'RecordAlreadyExists',
-            description:
-              'A create targeted a collection and rkey that already holds a record.',
           },
         ],
       },
@@ -459,7 +450,6 @@ export const schemaDict = {
           rkey: {
             type: 'string',
             format: 'record-key',
-            maxLength: 512,
           },
           value: {
             type: 'unknown',
@@ -542,6 +532,123 @@ export const schemaDict = {
       },
     },
   },
+  ComAtprotoSpaceAuthorizeSpaceSync: {
+    lexicon: 1,
+    id: 'com.atproto.space.authorizeSpaceSync',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          "Authorize syncing a space, returning a new credential for reading data across it and the space's current revision, and optionally registering for notifications of updates to it. Depending on the space's policy, a delegation token and/or client attestation may be required. Implemented by the space host.",
+        input: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['space', 'credentialKey'],
+            properties: {
+              space: {
+                type: 'string',
+                format: 'space-ref',
+              },
+              credentialKey: {
+                type: 'string',
+                description: 'P-256 did:key that the credential is bound to.',
+              },
+              delegationToken: {
+                type: 'string',
+                description: 'Obtained from getDelegationToken.',
+              },
+              clientAttestation: {
+                type: 'string',
+              },
+              notify: {
+                type: 'ref',
+                ref: 'lex:com.atproto.space.authorizeSpaceSync#notify',
+                description:
+                  "Register an endpoint to be notified of updates to the space via notifySpaceUpdate. The registration stays active while this credential is valid. After it expires, the endpoint receives only a prompt to reauthorize, or notice of the space's deletion.",
+              },
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['credential'],
+            properties: {
+              credential: {
+                type: 'string',
+              },
+              spaceRev: {
+                type: 'string',
+                format: 'tid',
+                description:
+                  "The space's current revision. Omitted before the space's first update.",
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'SpaceNotFound',
+            description:
+              'May also be returned in place of AccountNotAuthorized, to avoid revealing that the space exists.',
+          },
+          {
+            name: 'SpaceDeleted',
+          },
+          {
+            name: 'AccountNotAuthorized',
+          },
+          {
+            name: 'AppNotAuthorized',
+          },
+          {
+            name: 'NotAuthorized',
+            description:
+              'Generic refusal. May be returned in place of AccountNotAuthorized or AppNotAuthorized.',
+          },
+          {
+            name: 'InvalidDelegationToken',
+          },
+          {
+            name: 'InvalidClientAttestation',
+          },
+          {
+            name: 'RegistrationNotConfirmed',
+            description:
+              'The notify endpoint did not confirm the registration.',
+          },
+          {
+            name: 'RepoTakendown',
+            description: 'The space authority has been taken down.',
+          },
+          {
+            name: 'RepoDeactivated',
+            description: 'The space authority has been deactivated.',
+          },
+        ],
+      },
+      notify: {
+        type: 'object',
+        required: ['endpoint', 'token'],
+        properties: {
+          endpoint: {
+            type: 'string',
+            format: 'uri',
+            description:
+              'Base HTTPS URL that notification methods are called against.',
+          },
+          token: {
+            type: 'string',
+            maxLength: 512,
+            description:
+              'Opaque secret, included in the body of each request to the endpoint. The endpoint and token together identify the registration, so the token should stay the same across authorizations.',
+          },
+        },
+      },
+    },
+  },
   ComAtprotoSpaceClearRecords: {
     lexicon: 1,
     id: 'com.atproto.space.clearRecords',
@@ -549,7 +656,7 @@ export const schemaDict = {
       main: {
         type: 'procedure',
         description:
-          "Delete every record in the authenticated account's space repo. The repo advances to a new revision with the empty repo's digest, and its oplog is cleared. In the space authority's own repo, the records the host publishes from the space's configuration (com.atproto.space.policy and com.atproto.memberspace.member) are kept, and the digest is that of the records that remain. Succeeds whether or not the repo held any records to delete. Requires auth, implemented by PDS.",
+          "Delete all records in the authenticated account's space repo. In the space authority's repo, records published from the space's configuration (such as its policy) are kept. Requires auth, implemented by PDS.",
         input: {
           encoding: 'application/json',
           schema: {
@@ -559,13 +666,10 @@ export const schemaDict = {
               space: {
                 type: 'string',
                 format: 'space-ref',
-                description: 'Reference to the space.',
               },
               repo: {
                 type: 'string',
                 format: 'did',
-                description:
-                  'The DID of the repo to clear (the authenticated member).',
               },
             },
           },
@@ -580,6 +684,51 @@ export const schemaDict = {
       },
     },
   },
+  ComAtprotoSpaceConfirmRegistration: {
+    lexicon: 1,
+    id: 'com.atproto.space.confirmRegistration',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          'Confirm a new notification registration. Called by the space host on an endpoint passed to authorizeSpaceSync, before registering it. The syncing service checks that it issued the token for the space, and echoes back the challenge.',
+        input: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['space', 'token', 'challenge'],
+            properties: {
+              space: {
+                type: 'string',
+                format: 'space-ref',
+              },
+              token: {
+                type: 'string',
+                maxLength: 512,
+              },
+              challenge: {
+                type: 'string',
+                maxLength: 512,
+              },
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['challenge'],
+            properties: {
+              challenge: {
+                type: 'string',
+                maxLength: 512,
+              },
+            },
+          },
+        },
+      },
+    },
+  },
   ComAtprotoSpaceCreateRecord: {
     lexicon: 1,
     id: 'com.atproto.space.createRecord',
@@ -587,7 +736,7 @@ export const schemaDict = {
       main: {
         type: 'procedure',
         description:
-          'Create a single new record in a permissioned space. Requires auth, implemented by PDS.',
+          'Create a single new record in a space repo. Requires auth, implemented by PDS.',
         input: {
           encoding: 'application/json',
           schema: {
@@ -597,24 +746,18 @@ export const schemaDict = {
               space: {
                 type: 'string',
                 format: 'space-ref',
-                description: 'Reference to the space.',
               },
               repo: {
                 type: 'string',
                 format: 'did',
-                description:
-                  'The DID of the repo to write to (the authenticated member).',
               },
               collection: {
                 type: 'string',
                 format: 'nsid',
-                description: 'The NSID of the record collection.',
               },
               rkey: {
                 type: 'string',
                 format: 'record-key',
-                description: 'The Record Key.',
-                maxLength: 512,
               },
               validate: {
                 type: 'boolean',
@@ -637,7 +780,6 @@ export const schemaDict = {
               uri: {
                 type: 'string',
                 format: 'at-uri',
-                description: 'URI of the created record.',
               },
               cid: {
                 type: 'string',
@@ -656,8 +798,6 @@ export const schemaDict = {
           },
           {
             name: 'RecordAlreadyExists',
-            description:
-              'A record already exists at this collection and rkey. Retry with a different rkey, or use putRecord.',
           },
         ],
       },
@@ -670,7 +810,7 @@ export const schemaDict = {
       main: {
         type: 'procedure',
         description:
-          "Create a new space governed by the given policy. The space is anchored on the authenticated user's DID, who becomes the space owner. Requires auth, implemented by PDS.",
+          'Create a new space, with the authenticated account as its authority. Requires auth, implemented by PDS.',
         input: {
           encoding: 'application/json',
           schema: {
@@ -680,19 +820,16 @@ export const schemaDict = {
               spaceType: {
                 type: 'string',
                 format: 'nsid',
-                description:
-                  'The NSID of the space type, describing the modality of the space (e.g. app.bsky.group, app.bsky.personal).',
               },
               skey: {
                 type: 'string',
                 format: 'record-key',
-                description:
-                  'The space key. Used to differentiate multiple spaces of the same type under the same owner. Same syntax requirements as a record key. If not provided, one will be auto-generated (TID).',
+                description: 'Space key. Generated as a TID if not provided.',
               },
               policy: {
                 type: 'union',
                 description:
-                  'The policy governing the space, including its configuration.',
+                  'PDSes must support all of the listed policies. Other space hosts may support only some of them, and any host may support policies beyond those listed.',
                 refs: [
                   'lex:com.atproto.personalspace.policy',
                   'lex:com.atproto.memberspace.policy',
@@ -706,12 +843,11 @@ export const schemaDict = {
           encoding: 'application/json',
           schema: {
             type: 'object',
-            required: ['uri'],
+            required: ['space'],
             properties: {
-              uri: {
+              space: {
                 type: 'string',
                 format: 'space-ref',
-                description: 'URI of the created space.',
               },
             },
           },
@@ -719,12 +855,9 @@ export const schemaDict = {
         errors: [
           {
             name: 'SpaceAlreadyExists',
-            description:
-              'A space with this owner, type, and skey already exists. A space that was previously deleted may be created again.',
           },
           {
             name: 'UnsupportedPolicy',
-            description: 'The requested policy is not one the host implements.',
           },
         ],
       },
@@ -737,7 +870,7 @@ export const schemaDict = {
       commit: {
         type: 'object',
         description:
-          'A commit over the current state of a permissioned repo. Carries no signature: the repo host authenticates it to a syncer with a MAC in the Atproto-Space-Mac response header.',
+          'Commit to the current state of a space repo. Not signed; authenticated by the repo host with a MAC instead.',
         required: ['ver', 'repo', 'space', 'rev', 'data'],
         properties: {
           ver: {
@@ -747,21 +880,71 @@ export const schemaDict = {
           repo: {
             type: 'string',
             format: 'did',
-            description: 'The author DID of the repo.',
           },
           space: {
             type: 'string',
             format: 'space-ref',
-            description: 'Reference to the space.',
           },
           rev: {
             type: 'string',
             format: 'tid',
-            description: 'Commit revision (TID).',
           },
           data: {
             type: 'bytes',
-            description: 'sha256 digest of the LtHash state (32 bytes).',
+            description: "SHA-256 digest of the repo's LtHash state.",
+          },
+        },
+      },
+      repoWrite: {
+        type: 'object',
+        description: 'A repo in the space advanced to a new revision.',
+        required: ['repo', 'repoRev', 'data', 'spaceRev'],
+        properties: {
+          repo: {
+            type: 'string',
+            format: 'did',
+          },
+          repoRev: {
+            type: 'string',
+            format: 'tid',
+          },
+          data: {
+            type: 'bytes',
+          },
+          spaceRev: {
+            type: 'string',
+            format: 'tid',
+            description:
+              'The space revision at which this update was sequenced.',
+          },
+          prevSpaceRev: {
+            type: 'string',
+            format: 'tid',
+            description:
+              'The space revision before this update, if any. Set in notifySpaceUpdate, where a gap indicates missed notifications, which can be recovered with listWriters.',
+          },
+        },
+      },
+      repoRemoved: {
+        type: 'object',
+        description: 'A repo was removed from the writer set.',
+        required: ['repo', 'spaceRev'],
+        properties: {
+          repo: {
+            type: 'string',
+            format: 'did',
+          },
+          spaceRev: {
+            type: 'string',
+            format: 'tid',
+            description:
+              'The space revision at which this update was sequenced.',
+          },
+          prevSpaceRev: {
+            type: 'string',
+            format: 'tid',
+            description:
+              'The space revision before this update, if any. Set in notifySpaceUpdate, where a gap indicates missed notifications, which can be recovered with listWriters.',
           },
         },
       },
@@ -774,7 +957,7 @@ export const schemaDict = {
       main: {
         type: 'procedure',
         description:
-          "Delete a record from a permissioned space, or ensure it doesn't exist. Succeeds whether or not the record was present. Requires auth, implemented by PDS.",
+          "Delete a record from a space repo, or ensure it doesn't exist. Requires auth, implemented by PDS.",
         input: {
           encoding: 'application/json',
           schema: {
@@ -784,23 +967,18 @@ export const schemaDict = {
               space: {
                 type: 'string',
                 format: 'space-ref',
-                description: 'Reference to the space.',
               },
               repo: {
                 type: 'string',
                 format: 'did',
-                description:
-                  'The DID of the repo to delete from (the authenticated member).',
               },
               collection: {
                 type: 'string',
                 format: 'nsid',
-                description: 'The NSID of the record collection.',
               },
               rkey: {
                 type: 'string',
                 format: 'record-key',
-                description: 'The Record Key.',
               },
             },
           },
@@ -827,7 +1005,7 @@ export const schemaDict = {
       main: {
         type: 'procedure',
         description:
-          "Delete a space. Requires auth as the space owner. Deletes the owner's own repo in the space; other members' repos are left in place. Afterwards, reads and writes fail with SpaceNotFound and getSpaceCredential returns SpaceDeleted. Idempotent. Implemented by PDS.",
+          "Delete a space, along with the authority's space repo. Requires auth as the space authority, implemented by PDS.",
         input: {
           encoding: 'application/json',
           schema: {
@@ -837,7 +1015,6 @@ export const schemaDict = {
               space: {
                 type: 'string',
                 format: 'space-ref',
-                description: 'Reference to the space to delete.',
               },
             },
           },
@@ -847,7 +1024,7 @@ export const schemaDict = {
             name: 'SpaceNotFound',
           },
           {
-            name: 'NotSpaceOwner',
+            name: 'NotAuthorized',
           },
         ],
       },
@@ -860,7 +1037,7 @@ export const schemaDict = {
       main: {
         type: 'query',
         description:
-          "Download a space's host-side state as a space meta archive, for account migration: a STAR file with the atproto-space-meta profile. The archive's metadata is the space. Its body is the space's policy, then any state the policy keeps (such as a memberspace member list), then the writer set. Served by the space host. Requires OAuth as the space owner with a covering read_self grant.",
+          "Export a space's state, such as its policy and member list, as a STAR file for account migration. Requires auth as the space authority, implemented by PDS.",
         parameters: {
           type: 'params',
           required: ['space'],
@@ -868,19 +1045,18 @@ export const schemaDict = {
             space: {
               type: 'string',
               format: 'space-ref',
-              description: 'Reference to the space.',
             },
           },
         },
         output: {
-          encoding: 'application/octet-stream',
+          encoding: 'application/vnd.dasl.star',
         },
         errors: [
           {
             name: 'SpaceNotFound',
           },
           {
-            name: 'NotSpaceOwner',
+            name: 'NotAuthorized',
           },
         ],
       },
@@ -893,7 +1069,7 @@ export const schemaDict = {
       main: {
         type: 'query',
         description:
-          "Get a blob referenced from a record in a permissioned space. Returns the full blob as originally uploaded. Blobs are not uploaded through this namespace: a space record references a blob uploaded via com.atproto.repo.uploadBlob, so a client writing blob-bearing records into a space needs a blob permission alongside its space permission. Use listBlobs to enumerate a repo's blobs in a space. Callable with either OAuth (for the authenticated user's own data) or a space credential (for syncing services).",
+          "Get a blob referenced by a record in a space repo. Returns the full blob as originally uploaded. Requires auth as the repo's account or with a space credential; implemented by PDS.",
         parameters: {
           type: 'params',
           required: ['space', 'repo', 'cid'],
@@ -901,17 +1077,14 @@ export const schemaDict = {
             space: {
               type: 'string',
               format: 'space-ref',
-              description: 'Reference to the space.',
             },
             repo: {
               type: 'string',
               format: 'did',
-              description: 'The DID of the account whose repo holds the blob.',
             },
             cid: {
               type: 'string',
               format: 'cid',
-              description: 'The CID of the blob to fetch.',
             },
           },
         },
@@ -948,7 +1121,7 @@ export const schemaDict = {
       main: {
         type: 'query',
         description:
-          "Mint a delegation token for a space, proving the requesting app is acting on the user's behalf. Exchanged with the space authority for a space credential. Served by the requesting user's PDS. Requires OAuth auth.",
+          'Get a delegation token for a space, to exchange with the space host for a space credential. Requires auth, implemented by PDS.',
         parameters: {
           type: 'params',
           required: ['space'],
@@ -956,7 +1129,6 @@ export const schemaDict = {
             space: {
               type: 'string',
               format: 'space-ref',
-              description: 'Reference to the space.',
             },
           },
         },
@@ -968,7 +1140,6 @@ export const schemaDict = {
             properties: {
               token: {
                 type: 'string',
-                description: 'A signed JWT delegation token.',
               },
             },
           },
@@ -983,7 +1154,7 @@ export const schemaDict = {
       main: {
         type: 'query',
         description:
-          "Get the current commit for an account's permissioned repo within a space. Served by a repo host. When called with a space credential, the caller must send an Atproto-Space-Want-Mac header, and the commit's MAC is returned in the Atproto-Space-Mac response header. Throws RepoNotFound when the account holds no repo in the space, including the case of a member that has never written to it. Callable with either OAuth (for the authenticated user's own data) or a space credential (for syncing services).",
+          "Get the current commit of a space repo. Responses are authenticated with a MAC. Requires auth as the repo's account or with a space credential; implemented by PDS.",
         parameters: {
           type: 'params',
           required: ['space', 'repo'],
@@ -991,13 +1162,10 @@ export const schemaDict = {
             space: {
               type: 'string',
               format: 'space-ref',
-              description: 'Reference to the space.',
             },
             repo: {
               type: 'string',
               format: 'did',
-              description:
-                'The DID of the account whose latest commit to retrieve.',
             },
           },
         },
@@ -1009,7 +1177,6 @@ export const schemaDict = {
               commit: {
                 type: 'ref',
                 ref: 'lex:com.atproto.space.defs#commit',
-                description: "The account's current commit.",
               },
             },
             required: ['commit'],
@@ -1017,9 +1184,9 @@ export const schemaDict = {
         },
         errors: [
           {
-            name: 'BadSpaceMac',
+            name: 'InvalidSpaceMac',
             description:
-              'The Atproto-Space-Want-Mac header is missing or malformed, names an unsupported type or version, or carries an invalid key share.',
+              'The MAC requested in the Accept-Signature header is missing or invalid.',
           },
           {
             name: 'SpaceNotFound',
@@ -1047,7 +1214,7 @@ export const schemaDict = {
       main: {
         type: 'query',
         description:
-          "Get a single record from a permissioned space. Callable with either OAuth (for the authenticated user's own data) or a space credential (for syncing services). When called with a space credential, the caller must send an Atproto-Space-Want-Mac header, and the record's MAC is returned in the Atproto-Space-Mac response header. Throws RepoNotFound when the account holds no repo in the space; this does not distinguish a member that has never written from a non-member.",
+          "Get a single record from a space repo. Responses are authenticated with a MAC. Requires auth as the repo's account or with a space credential; implemented by PDS.",
         parameters: {
           type: 'params',
           required: ['space', 'repo', 'collection', 'rkey'],
@@ -1055,22 +1222,18 @@ export const schemaDict = {
             space: {
               type: 'string',
               format: 'space-ref',
-              description: 'Reference to the space.',
             },
             repo: {
               type: 'string',
               format: 'did',
-              description: 'The DID of the account whose repo to read from.',
             },
             collection: {
               type: 'string',
               format: 'nsid',
-              description: 'The NSID of the record collection.',
             },
             rkey: {
               type: 'string',
               format: 'record-key',
-              description: 'The Record Key.',
             },
           },
         },
@@ -1096,9 +1259,9 @@ export const schemaDict = {
         },
         errors: [
           {
-            name: 'BadSpaceMac',
+            name: 'InvalidSpaceMac',
             description:
-              'The Atproto-Space-Want-Mac header is missing or malformed, names an unsupported type or version, or carries an invalid key share.',
+              'The MAC requested in the Accept-Signature header is missing or invalid.',
           },
           {
             name: 'RecordNotFound',
@@ -1129,7 +1292,7 @@ export const schemaDict = {
       main: {
         type: 'query',
         description:
-          "Download an account's permissioned repo within a space as a STAR file, for full-state recovery. The archive's metadata is the repo's commit; each key/value pair is a record path ('{collection}/{rkey}') and the record's DRISL encoding, in strict lexicographic order of the path. Blobs are not included and are fetched separately via getBlob. Served by a repo host. Callable with either OAuth (for the authenticated user's own data) or a space credential (for syncing services). When called with a space credential, the caller must send an Atproto-Space-Want-Mac header, and the commit's MAC is returned in the Atproto-Space-Mac response header.",
+          "Download a space repo as a STAR file. Responses are authenticated with a MAC. Requires auth as the repo's account or with a space credential; implemented by PDS.",
         parameters: {
           type: 'params',
           required: ['space', 'repo'],
@@ -1137,23 +1300,21 @@ export const schemaDict = {
             space: {
               type: 'string',
               format: 'space-ref',
-              description: 'Reference to the space.',
             },
             repo: {
               type: 'string',
               format: 'did',
-              description: 'The DID of the account whose repo to download.',
             },
           },
         },
         output: {
-          encoding: 'application/octet-stream',
+          encoding: 'application/vnd.dasl.star',
         },
         errors: [
           {
-            name: 'BadSpaceMac',
+            name: 'InvalidSpaceMac',
             description:
-              'The Atproto-Space-Want-Mac header is missing or malformed, names an unsupported type or version, or carries an invalid key share.',
+              'The MAC requested in the Accept-Signature header is missing or invalid.',
           },
           {
             name: 'SpaceNotFound',
@@ -1181,7 +1342,7 @@ export const schemaDict = {
       main: {
         type: 'query',
         description:
-          'Describe a space, including the policy that governs it. Served by the space host for every space it hosts, regardless of policy. Requires OAuth as the space owner with a covering read_self grant. A policy may optionally be published in the space, as a com.atproto.space.policy record, so that syncers can view it.',
+          'Get a space and its policy. Requires auth as the space authority, implemented by PDS.',
         parameters: {
           type: 'params',
           required: ['space'],
@@ -1189,7 +1350,6 @@ export const schemaDict = {
             space: {
               type: 'string',
               format: 'space-ref',
-              description: 'Reference to the space.',
             },
           },
         },
@@ -1197,17 +1357,16 @@ export const schemaDict = {
           encoding: 'application/json',
           schema: {
             type: 'object',
-            required: ['uri', 'policy'],
+            required: ['space', 'policy'],
             properties: {
-              uri: {
+              space: {
                 type: 'string',
                 format: 'space-ref',
-                description: 'URI of the space.',
               },
               policy: {
                 type: 'union',
                 description:
-                  'The policy governing the space, including its configuration.',
+                  'PDSes must support all of the listed policies. Other space hosts may support only some of them, and any host may support policies beyond those listed.',
                 refs: [
                   'lex:com.atproto.personalspace.policy',
                   'lex:com.atproto.memberspace.policy',
@@ -1221,87 +1380,8 @@ export const schemaDict = {
           {
             name: 'SpaceNotFound',
           },
-        ],
-      },
-    },
-  },
-  ComAtprotoSpaceGetSpaceCredential: {
-    lexicon: 1,
-    id: 'com.atproto.space.getSpaceCredential',
-    defs: {
-      main: {
-        type: 'procedure',
-        description:
-          'Request a space credential. Called on the space authority. A delegation token is required when the space gates on the user. A client attestation is required when the space gates on app identity. A space that requires neither offers public access. The resulting space credential reads repos across the space.',
-        input: {
-          encoding: 'application/json',
-          schema: {
-            type: 'object',
-            required: ['space', 'credentialKid'],
-            properties: {
-              space: {
-                type: 'string',
-                format: 'space-ref',
-                description: 'Reference to the space.',
-              },
-              credentialKid: {
-                type: 'string',
-                description:
-                  'P-256 did:key to bind the credential to. Each request using the credential is signed by this key.',
-              },
-              delegationToken: {
-                type: 'string',
-                description:
-                  'Optional delegation token establishing the user being acted for. Required only when the space gates on the user.',
-              },
-              clientAttestation: {
-                type: 'string',
-                description:
-                  "Optional client attestation JWT establishing the app's identity. Required only when the space gates on app identity.",
-              },
-            },
-          },
-        },
-        output: {
-          encoding: 'application/json',
-          schema: {
-            type: 'object',
-            required: ['credential'],
-            properties: {
-              credential: {
-                type: 'string',
-                description: 'A signed JWT space credential.',
-              },
-            },
-          },
-        },
-        errors: [
-          {
-            name: 'SpaceNotFound',
-            description:
-              'The space does not exist. An authority may also answer this in place of UserNotAuthorized, so that a refusal does not disclose that the space exists to a user who may not read it.',
-          },
-          {
-            name: 'SpaceDeleted',
-          },
-          {
-            name: 'UserNotAuthorized',
-            description: 'Refused on the basis of the requesting user.',
-          },
-          {
-            name: 'AppNotAuthorized',
-            description: 'Refused on the basis of the requesting app.',
-          },
           {
             name: 'NotAuthorized',
-            description:
-              'Refused without attributing the refusal to the user or the app. Authorities that do not wish to disclose which perimeter failed may return this in place of UserNotAuthorized or AppNotAuthorized.',
-          },
-          {
-            name: 'InvalidDelegationToken',
-          },
-          {
-            name: 'InvalidClientAttestation',
           },
         ],
       },
@@ -1314,15 +1394,24 @@ export const schemaDict = {
       main: {
         type: 'procedure',
         description:
-          "Import the authenticated account's repo in a space from a STAR file, as served by getRepo, during account migration, replacing whatever this host holds for that repo. The archive's commit names the space and must name the account as its repo. If the account is the space's authority, the space must first be imported with importSpaceMeta. Blobs are not included and are uploaded separately. Requires OAuth with a create grant for every collection in the archive, implemented by PDS.",
+          "Import the authenticated account's space repo from a STAR file, for account migration. If the account is the space's authority, the space must first be imported with importSpaceMeta. Requires auth, implemented by PDS.",
         input: {
-          encoding: 'application/octet-stream',
+          encoding: 'application/vnd.dasl.star',
         },
         errors: [
           {
             name: 'SpaceNotFound',
             description:
-              "The account is the space's authority, and the space has not been imported.",
+              "The account is the space's authority, and the space has not been imported yet.",
+          },
+          {
+            name: 'InvalidRepoFile',
+            description: 'The STAR file is malformed or fails verification.',
+          },
+          {
+            name: 'RepoMismatch',
+            description:
+              'The repo in the STAR file does not belong to the authenticated account.',
           },
         ],
       },
@@ -1335,18 +1424,20 @@ export const schemaDict = {
       main: {
         type: 'procedure',
         description:
-          "Import a space from a space meta archive, as served by exportSpaceMeta, during account migration, replacing whatever this host holds for that space. The space must be anchored on the authenticated account's DID. Must come before importing the account's own repo in the space with importRepo. Notification registrations, credential revocations, and deleted space tombstones are not carried over. Requires OAuth with manage=create and manage=update grants for the space, implemented by PDS.",
+          "Import a space's state from an archive produced by exportSpaceMeta, for account migration. Must be called before importing the authority's space repo with importRepo. Requires auth as the space authority, implemented by PDS.",
         input: {
-          encoding: 'application/octet-stream',
+          encoding: 'application/vnd.dasl.star',
         },
         errors: [
           {
-            name: 'NotSpaceOwner',
+            name: 'NotAuthorized',
           },
           {
             name: 'UnsupportedPolicy',
-            description:
-              "The archive's policy, or a value within it, is not one the host implements. A host will not store a policy it cannot enforce.",
+          },
+          {
+            name: 'InvalidSpaceMeta',
+            description: 'The STAR file is malformed or fails verification.',
           },
         ],
       },
@@ -1359,7 +1450,7 @@ export const schemaDict = {
       main: {
         type: 'query',
         description:
-          "List the CIDs of blobs referenced by an account's records within a permissioned space, optionally since some revision of that repo. Lets a syncer discover which blobs to fetch via getBlob, and lets an account enumerate the blobs it must carry when migrating a permissioned repo. Scoped to one space: blobs behind permissioned records are never enumerated by com.atproto.sync.listBlobs, which is unauthenticated. Callable with either OAuth (for the authenticated user's own data) or a space credential (for syncing services).",
+          "List blob CIDs referenced by records in a space repo. Requires auth as the repo's account or with a space credential; implemented by PDS.",
         parameters: {
           type: 'params',
           required: ['space', 'repo'],
@@ -1367,18 +1458,10 @@ export const schemaDict = {
             space: {
               type: 'string',
               format: 'space-ref',
-              description: 'Reference to the space.',
             },
             repo: {
               type: 'string',
               format: 'did',
-              description: 'The DID of the account whose blobs to list.',
-            },
-            since: {
-              type: 'string',
-              format: 'tid',
-              description:
-                'Optional revision of the permissioned repo to list blobs since.',
             },
             limit: {
               type: 'integer',
@@ -1437,7 +1520,7 @@ export const schemaDict = {
       main: {
         type: 'query',
         description:
-          "List the records in an account's repo within a permissioned space, optionally filtered by collection. By default each record's value is inlined; set excludeValues for a metadata-only listing (collection, rkey, cid). Used for full-state recovery. Callable with either OAuth (for the authenticated user's own data) or a space credential (for syncing services). Throws RepoNotFound when the account holds no repo in the space; this does not distinguish a member that has never written from a non-member.",
+          "List records in a space repo, optionally filtered by collection. Requires auth as the repo's account or with a space credential; implemented by PDS.",
         parameters: {
           type: 'params',
           required: ['space', 'repo'],
@@ -1445,38 +1528,28 @@ export const schemaDict = {
             space: {
               type: 'string',
               format: 'space-ref',
-              description: 'Reference to the space.',
             },
             repo: {
               type: 'string',
               format: 'did',
-              description: 'The DID of the account whose repo to list.',
             },
             collection: {
               type: 'string',
               format: 'nsid',
-              description:
-                'The NSID of the record collection. If omitted, lists records across all collections.',
+              description: 'If omitted, lists records across all collections.',
             },
             limit: {
               type: 'integer',
               minimum: 1,
               maximum: 1000,
               default: 50,
-              description: 'The number of records to return.',
             },
             cursor: {
               type: 'string',
             },
-            reverse: {
-              type: 'boolean',
-              description: 'Flag to reverse the order of the returned records.',
-            },
             excludeValues: {
               type: 'boolean',
               default: false,
-              description:
-                'If true, omit inlined record values and return only metadata (collection, rkey, cid).',
             },
           },
         },
@@ -1515,6 +1588,9 @@ export const schemaDict = {
           {
             name: 'RepoDeactivated',
           },
+          {
+            name: 'InvalidCursor',
+          },
         ],
       },
       record: {
@@ -1535,8 +1611,6 @@ export const schemaDict = {
           },
           value: {
             type: 'unknown',
-            description:
-              "The record's value. Inlined by default; omitted when excludeValues is set.",
           },
         },
       },
@@ -1549,7 +1623,7 @@ export const schemaDict = {
       main: {
         type: 'query',
         description:
-          "List the operation log for an account's permissioned repo within a space, returning operations after a given revision. Primary incremental sync mechanism. By default each created or updated operation inlines the record's current value; set excludeValues for metadata-only entries. Note the oplog is a transport optimization with no history guarantee: a host may compact it or drop it, and it does not survive account migration, so omitting `since` returns the retained window rather than the repo's full history. Use getRepo for an initial sync or when a `since` revision is no longer available. Callable with either OAuth (for the authenticated user's own data) or a space credential (for syncing services). When called with a space credential, the caller must send an Atproto-Space-Want-Mac header, and a response that includes the commit carries its MAC in the Atproto-Space-Mac response header.",
+          "List operations on a space repo after a given revision. Used for incremental sync. Hosts may truncate the log, so use getRepo for a full sync. Responses are authenticated with a MAC. Requires auth as the repo's account or with a space credential; implemented by PDS.",
         parameters: {
           type: 'params',
           required: ['space', 'repo'],
@@ -1557,36 +1631,27 @@ export const schemaDict = {
             space: {
               type: 'string',
               format: 'space-ref',
-              description: 'Reference to the space.',
             },
             repo: {
               type: 'string',
               format: 'did',
-              description: 'The DID of the account whose oplog to retrieve.',
             },
             since: {
               type: 'string',
               format: 'tid',
-              description:
-                "Return operations after this revision. The caller's own sync position; use `cursor` to continue a paginated response.",
             },
             limit: {
               type: 'integer',
               minimum: 1,
               maximum: 1000,
               default: 100,
-              description: 'Maximum number of operations to return.',
             },
             cursor: {
               type: 'string',
-              description:
-                'Opaque pagination cursor from a previous response. Takes precedence over `since` when both are supplied.',
             },
             excludeValues: {
               type: 'boolean',
               default: false,
-              description:
-                'If true, omit inlined record values and return only operation metadata.',
             },
           },
         },
@@ -1594,7 +1659,7 @@ export const schemaDict = {
           encoding: 'application/json',
           schema: {
             type: 'object',
-            required: ['ops'],
+            required: ['ops', 'commit'],
             properties: {
               ops: {
                 type: 'array',
@@ -1607,21 +1672,19 @@ export const schemaDict = {
                 type: 'ref',
                 ref: 'lex:com.atproto.space.defs#commit',
                 description:
-                  "The account's current commit. Included when the response reaches the head of the oplog; omitted on backfill responses.",
+                  "The repo's current commit. A syncer compares it against its own set hash once it has applied the last page, which has no cursor.",
               },
               cursor: {
                 type: 'string',
-                description:
-                  'Pass as `cursor` to fetch the next page. Absent once the response reaches the head of the oplog.',
               },
             },
           },
         },
         errors: [
           {
-            name: 'BadSpaceMac',
+            name: 'InvalidSpaceMac',
             description:
-              'The Atproto-Space-Want-Mac header is missing or malformed, names an unsupported type or version, or carries an invalid key share.',
+              'The MAC requested in the Accept-Signature header is missing or invalid.',
           },
           {
             name: 'SpaceNotFound',
@@ -1638,12 +1701,15 @@ export const schemaDict = {
           {
             name: 'RepoDeactivated',
           },
+          {
+            name: 'InvalidCursor',
+          },
         ],
       },
       opEntry: {
         type: 'object',
         description:
-          "A single operation in a permissioned repo's oplog. cid is null for deletes; prev is null for creates. Operations sharing the same rev belong to the same batch. value carries the record's current value for creates and updates, unless excludeValues was set or the value is stale (superseded by a later operation).",
+          'Operations that share a rev were applied in the same commit.',
         required: ['rev', 'collection', 'rkey', 'cid', 'prev'],
         nullable: ['cid', 'prev'],
         properties: {
@@ -1662,105 +1728,19 @@ export const schemaDict = {
           cid: {
             type: 'string',
             format: 'cid',
+            description:
+              'CID of the record after the operation. Null for deletes.',
           },
           prev: {
             type: 'string',
             format: 'cid',
+            description:
+              'CID of the record before the operation. Null for creates.',
           },
           value: {
             type: 'unknown',
             description:
-              "The record's current value, inlined for create and update operations. Omitted when excludeValues is set, for deletes, or when the value has been superseded by a later operation.",
-          },
-        },
-      },
-    },
-  },
-  ComAtprotoSpaceListRepos: {
-    lexicon: 1,
-    id: 'com.atproto.space.listRepos',
-    defs: {
-      main: {
-        type: 'query',
-        description:
-          "List the known repos that hold data in a space (the writer set), with each repo's current repoRev and commit data. Served by the space host. This is the sync boundary, not an access-control list: it enumerates only writers, never readers. The set is what the authority claims from write notifications and is not itself authoritative; a repo's host is the source of truth.",
-        parameters: {
-          type: 'params',
-          required: ['space'],
-          properties: {
-            space: {
-              type: 'string',
-              format: 'space-ref',
-              description: 'Reference to the space.',
-            },
-            limit: {
-              type: 'integer',
-              minimum: 1,
-              maximum: 1000,
-              default: 100,
-              description: 'Maximum number of repos to return.',
-            },
-            cursor: {
-              type: 'string',
-              description:
-                "Return repos updated after this space revision (exclusive). Use a previous response's cursor or a previously processed spaceRev.",
-            },
-          },
-        },
-        output: {
-          encoding: 'application/json',
-          schema: {
-            type: 'object',
-            required: ['repos'],
-            properties: {
-              repos: {
-                type: 'array',
-                items: {
-                  type: 'ref',
-                  ref: 'lex:com.atproto.space.listRepos#repo',
-                },
-                description:
-                  'Returned in ascending spaceRev order. A repo may reappear if updated while paginating.',
-              },
-              cursor: {
-                type: 'string',
-                description:
-                  'Pass this cursor on the next request. Omitted when no repos are returned.',
-              },
-            },
-          },
-        },
-        errors: [
-          {
-            name: 'SpaceNotFound',
-          },
-        ],
-      },
-      repo: {
-        type: 'object',
-        required: ['did', 'repoRev', 'data', 'spaceRev'],
-        properties: {
-          did: {
-            type: 'string',
-            format: 'did',
-            description: 'The DID of a repo that holds data in the space.',
-          },
-          repoRev: {
-            type: 'string',
-            description:
-              "The repo's current revision (TID), as last reported to the authority. May lag the repo host, which is the source of truth.",
-            format: 'tid',
-          },
-          data: {
-            type: 'bytes',
-            description:
-              "The repo's current commit data (sha256 of the LtHash state), as last reported to the authority.",
-          },
-          spaceRev: {
-            type: 'string',
-            format: 'tid',
-            description:
-              'The space revision at which this repo was last updated.',
+              'Omitted for deletes, if excludeValues is set, or if the record has since changed.',
           },
         },
       },
@@ -1773,26 +1753,24 @@ export const schemaDict = {
       main: {
         type: 'query',
         description:
-          "List the spaces the authenticated user holds a repo in (i.e. spaces the user has written data to) or is the authority of, optionally filtered by type and/or authority DID. Note this is not 'spaces I'm a member of' — a member's PDS only tracks spaces its user has written to. Requires auth, implemented by PDS.",
+          'List spaces that the authenticated account has written to or is the authority for. Requires auth, implemented by PDS.',
         parameters: {
           type: 'params',
           properties: {
+            spaceDid: {
+              type: 'string',
+              format: 'did',
+              description: 'Filter to spaces with this DID as their authority.',
+            },
             spaceType: {
               type: 'string',
               format: 'nsid',
-              description: 'Filter to spaces of this space type.',
-            },
-            did: {
-              type: 'string',
-              format: 'did',
-              description: 'Filter to spaces under this authority DID.',
             },
             limit: {
               type: 'integer',
               minimum: 1,
               maximum: 100,
               default: 50,
-              description: 'The number of spaces to return.',
             },
             cursor: {
               type: 'string',
@@ -1818,28 +1796,118 @@ export const schemaDict = {
             },
           },
         },
+        errors: [
+          {
+            name: 'InvalidCursor',
+          },
+        ],
       },
       spaceView: {
         type: 'object',
-        required: ['uri'],
+        required: ['space'],
         properties: {
-          uri: {
+          space: {
             type: 'string',
             format: 'space-ref',
-            description: 'URI of the space.',
+          },
+          repoRev: {
+            type: 'string',
+            format: 'tid',
+            description:
+              "The current revision of the account's repo in the space, if it has one.",
+          },
+          data: {
+            type: 'bytes',
+            description:
+              "The current commit data of the account's repo in the space, if it has one.",
+          },
+          spaceRev: {
+            type: 'string',
+            format: 'tid',
+            description:
+              "The current revision of the space. Only included if the account is the space's authority.",
           },
         },
       },
     },
   },
-  ComAtprotoSpaceNotifyCredentialRevoked: {
+  ComAtprotoSpaceListWriters: {
     lexicon: 1,
-    id: 'com.atproto.space.notifyCredentialRevoked',
+    id: 'com.atproto.space.listWriters',
+    defs: {
+      main: {
+        type: 'query',
+        description:
+          "List the repos in a space's writer set, with the latest known state of each: its current revision, or its removal from the writer set. Requires a space credential, implemented by the space host.",
+        parameters: {
+          type: 'params',
+          required: ['space'],
+          properties: {
+            space: {
+              type: 'string',
+              format: 'space-ref',
+            },
+            limit: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 1000,
+              default: 100,
+            },
+            cursor: {
+              type: 'string',
+              description:
+                'Return repos updated after this space revision. Removed repos may be garbage collected after 72 hrs, so a syncer whose last seen space revision is older should list the whole writer set instead.',
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['repos'],
+            properties: {
+              repos: {
+                type: 'array',
+                items: {
+                  type: 'union',
+                  refs: [
+                    'lex:com.atproto.space.defs#repoWrite',
+                    'lex:com.atproto.space.defs#repoRemoved',
+                  ],
+                },
+                description:
+                  'The latest update to each repo, ordered by spaceRev, ascending. prevSpaceRev is not set.',
+              },
+              cursor: {
+                type: 'string',
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'SpaceNotFound',
+          },
+          {
+            name: 'RepoTakendown',
+            description: 'The space authority has been taken down.',
+          },
+          {
+            name: 'RepoDeactivated',
+            description: 'The space authority has been deactivated.',
+          },
+        ],
+      },
+    },
+  },
+  ComAtprotoSpaceNotifyCredentialsRevoked: {
+    lexicon: 1,
+    id: 'com.atproto.space.notifyCredentialsRevoked',
     defs: {
       main: {
         type: 'procedure',
         description:
-          'Notify a repo host that the space authority has revoked one or more credentials. Authenticated with service auth from the space authority, addressed to the repo DID.',
+          'Notify a repo host that space credentials have been revoked. Sent by the space host. Requires service auth, implemented by PDS.',
         input: {
           encoding: 'application/json',
           schema: {
@@ -1849,13 +1917,12 @@ export const schemaDict = {
               space: {
                 type: 'string',
                 format: 'space-ref',
-                description: 'Reference to the space.',
               },
               credentials: {
                 type: 'array',
                 minLength: 1,
                 maxLength: 100,
-                description: 'The jti of the revoked credentials.',
+                description: 'The IDs (jti) of the revoked credentials.',
                 items: {
                   type: 'string',
                   minLength: 1,
@@ -1867,39 +1934,14 @@ export const schemaDict = {
       },
     },
   },
-  ComAtprotoSpaceNotifySpaceDeleted: {
+  ComAtprotoSpaceNotifyRepoUpdate: {
     lexicon: 1,
-    id: 'com.atproto.space.notifySpaceDeleted',
+    id: 'com.atproto.space.notifyRepoUpdate',
     defs: {
       main: {
         type: 'procedure',
         description:
-          'Notify a syncing service that a space was deleted and its copy should be dropped. Sent by the space authority to registered services, retried until delivered or the registration expires. Requires service auth.',
-        input: {
-          encoding: 'application/json',
-          schema: {
-            type: 'object',
-            required: ['space'],
-            properties: {
-              space: {
-                type: 'string',
-                format: 'space-ref',
-                description: 'Reference to the deleted space.',
-              },
-            },
-          },
-        },
-      },
-    },
-  },
-  ComAtprotoSpaceNotifyWrite: {
-    lexicon: 1,
-    id: 'com.atproto.space.notifyWrite',
-    defs: {
-      main: {
-        type: 'procedure',
-        description:
-          'Notify that a repo in a space has advanced. Repo hosts reliably deliver their latest state to the space host, which sequences updates and forwards them to registered syncers with reasonable-effort delivery. Authenticated with service auth.',
+          'Notify the space host that a space repo has been updated. Sent by repo hosts, with service auth.',
         input: {
           encoding: 'application/json',
           schema: {
@@ -1909,34 +1951,17 @@ export const schemaDict = {
               space: {
                 type: 'string',
                 format: 'space-ref',
-                description: 'Reference to the space.',
               },
               repo: {
                 type: 'string',
                 format: 'did',
-                description: 'The DID of the account whose repo advanced.',
               },
               repoRev: {
                 type: 'string',
-                description: 'The repo revision after the write.',
                 format: 'tid',
               },
               data: {
                 type: 'bytes',
-                description:
-                  "The repo's current commit data (sha256 of the LtHash state) after the write. Lets the space host maintain each repo's commit data for listRepos.",
-              },
-              spaceRev: {
-                type: 'string',
-                format: 'tid',
-                description:
-                  'The space revision assigned by the space host. Present only on notifications forwarded to syncers.',
-              },
-              prevSpaceRev: {
-                type: 'string',
-                format: 'tid',
-                description:
-                  'The previous space revision. Omitted on the first update in a space. A gap indicates missed notifications; recover using listRepos with cursor.',
               },
             },
           },
@@ -1947,9 +1972,65 @@ export const schemaDict = {
           },
           {
             name: 'FutureRev',
-            description: 'The repo revision exceeds the permitted clock skew.',
+            description: 'The repo revision is too far in the future.',
           },
         ],
+      },
+    },
+  },
+  ComAtprotoSpaceNotifySpaceUpdate: {
+    lexicon: 1,
+    id: 'com.atproto.space.notifySpaceUpdate',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          'Notify a syncing service of an update to a space. Sent by the space host to the notification endpoint registered through authorizeSpaceSync.',
+        input: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['space', 'token', 'update'],
+            properties: {
+              space: {
+                type: 'string',
+                format: 'space-ref',
+              },
+              token: {
+                type: 'string',
+                maxLength: 512,
+                description: 'The token the endpoint was registered with.',
+              },
+              update: {
+                type: 'union',
+                refs: [
+                  'lex:com.atproto.space.defs#repoWrite',
+                  'lex:com.atproto.space.defs#repoRemoved',
+                  'lex:com.atproto.space.notifySpaceUpdate#spaceDeleted',
+                  'lex:com.atproto.space.notifySpaceUpdate#registrationExpired',
+                ],
+              },
+            },
+          },
+        },
+      },
+      spaceDeleted: {
+        type: 'object',
+        description:
+          'The space has been deleted. Confirm with authorizeSpaceSync before dropping its data.',
+        properties: {},
+      },
+      registrationExpired: {
+        type: 'object',
+        description:
+          "The endpoint's registration has expired. Sent in place of the first update after expiry. Call authorizeSpaceSync to keep receiving notifications.",
+        required: ['spaceRev'],
+        properties: {
+          spaceRev: {
+            type: 'string',
+            format: 'tid',
+          },
+        },
       },
     },
   },
@@ -1960,7 +2041,7 @@ export const schemaDict = {
       main: {
         type: 'procedure',
         description:
-          'Write a record in a permissioned space, creating or updating it as needed. Requires auth, implemented by PDS.',
+          'Write a record in a space repo, creating or updating it as needed. Requires auth, implemented by PDS.',
         input: {
           encoding: 'application/json',
           schema: {
@@ -1970,24 +2051,18 @@ export const schemaDict = {
               space: {
                 type: 'string',
                 format: 'space-ref',
-                description: 'Reference to the space.',
               },
               repo: {
                 type: 'string',
                 format: 'did',
-                description:
-                  'The DID of the repo to write to (the authenticated member).',
               },
               collection: {
                 type: 'string',
                 format: 'nsid',
-                description: 'The NSID of the record collection.',
               },
               rkey: {
                 type: 'string',
                 format: 'record-key',
-                description: 'The Record Key.',
-                maxLength: 512,
               },
               validate: {
                 type: 'boolean',
@@ -1996,7 +2071,6 @@ export const schemaDict = {
               },
               record: {
                 type: 'unknown',
-                description: 'The record to write.',
               },
             },
           },
@@ -2010,7 +2084,6 @@ export const schemaDict = {
               uri: {
                 type: 'string',
                 format: 'at-uri',
-                description: 'URI of the written record.',
               },
               cid: {
                 type: 'string',
@@ -2031,61 +2104,6 @@ export const schemaDict = {
       },
     },
   },
-  ComAtprotoSpaceRegisterNotify: {
-    lexicon: 1,
-    id: 'com.atproto.space.registerNotify',
-    defs: {
-      main: {
-        type: 'procedure',
-        description:
-          "Register a service to be notified of writes to any repo in a space. Called on the space host. The registering service is named by its service identifier rather than a bare URL, because notifyWrite is delivered with service auth addressed to that identifier; the delivery endpoint is resolved from the service's DID document. Authenticated with a space credential. Re-registering an existing service replaces its registration and extends the expiry.",
-        input: {
-          encoding: 'application/json',
-          schema: {
-            type: 'object',
-            required: ['space', 'service'],
-            properties: {
-              space: {
-                type: 'string',
-                format: 'space-ref',
-                description: 'Reference to the space.',
-              },
-              service: {
-                type: 'string',
-                description:
-                  "Service identifier of the subscriber: a DID with an optional service fragment naming the entry in its DID document to deliver to (e.g. 'did:web:syncer.example.com#atproto_space_syncer'). notifyWrite calls are addressed to this identifier.",
-              },
-            },
-          },
-        },
-        output: {
-          encoding: 'application/json',
-          schema: {
-            type: 'object',
-            required: ['expiresAt'],
-            properties: {
-              expiresAt: {
-                type: 'string',
-                format: 'datetime',
-                description:
-                  'When the registration expires. May be later than the expiry of the space credential the request was authenticated with; renew before this time to stay subscribed.',
-              },
-            },
-          },
-        },
-        errors: [
-          {
-            name: 'SpaceNotFound',
-          },
-          {
-            name: 'ServiceNotResolvable',
-            description:
-              'The service identifier could not be resolved to a DID document with a matching service endpoint.',
-          },
-        ],
-      },
-    },
-  },
   ComAtprotoSpaceRemoveWriter: {
     lexicon: 1,
     id: 'com.atproto.space.removeWriter',
@@ -2093,22 +2111,20 @@ export const schemaDict = {
       main: {
         type: 'procedure',
         description:
-          "Remove an account from a space's writer set, so that listRepos no longer lists it. The account is tracked again if it later writes while still authorized. Idempotent: succeeds whether or not the account was in the writer set. Requires auth as an account that may manage the space.",
+          "Remove an account from a space's writer set, as returned by listWriters. The removal is sent to registered syncers. The account is added back if it makes another authorized write to the space. Does nothing if the account is not in the writer set. Requires auth as the space authority, implemented by PDS.",
         input: {
           encoding: 'application/json',
           schema: {
             type: 'object',
-            required: ['space', 'did'],
+            required: ['space', 'repo'],
             properties: {
               space: {
                 type: 'string',
                 format: 'space-ref',
-                description: 'Reference to the space.',
               },
-              did: {
+              repo: {
                 type: 'string',
                 format: 'did',
-                description: 'The DID of the writer to remove.',
               },
             },
           },
@@ -2118,42 +2134,7 @@ export const schemaDict = {
             name: 'SpaceNotFound',
           },
           {
-            name: 'NotSpaceOwner',
-          },
-        ],
-      },
-    },
-  },
-  ComAtprotoSpaceUnregisterNotify: {
-    lexicon: 1,
-    id: 'com.atproto.space.unregisterNotify',
-    defs: {
-      main: {
-        type: 'procedure',
-        description:
-          'Withdraw a write-notification registration made through registerNotify. Called on the space host. Idempotent: succeeds whether or not a matching registration existed. Registrations also lapse on their own at the expiry returned by registerNotify, so this is for explicit withdrawal rather than cleanup. Authenticated with a space credential.',
-        input: {
-          encoding: 'application/json',
-          schema: {
-            type: 'object',
-            required: ['space', 'service'],
-            properties: {
-              space: {
-                type: 'string',
-                format: 'space-ref',
-                description: 'Reference to the space.',
-              },
-              service: {
-                type: 'string',
-                description:
-                  'Service identifier of the subscriber to remove, as passed to registerNotify.',
-              },
-            },
-          },
-        },
-        errors: [
-          {
-            name: 'SpaceNotFound',
+            name: 'NotAuthorized',
           },
         ],
       },
@@ -2166,7 +2147,7 @@ export const schemaDict = {
       main: {
         type: 'procedure',
         description:
-          'Replace the policy of a space wholesale. A policy with a different $type migrates the space, discarding state held by the previous policy (such as a member list). The authenticated user must be the space owner. Requires auth, implemented by PDS.',
+          'Replace the policy of a space. Changing to a different policy type discards state held by the previous policy, such as a member list. Requires auth as the space authority, implemented by PDS.',
         input: {
           encoding: 'application/json',
           schema: {
@@ -2176,12 +2157,11 @@ export const schemaDict = {
               space: {
                 type: 'string',
                 format: 'space-ref',
-                description: 'Reference to the space to update.',
               },
               policy: {
                 type: 'union',
                 description:
-                  'The policy governing the space, including its configuration. Replaces the current policy.',
+                  'PDSes must support all of the listed policies. Other space hosts may support only some of them, and any host may support policies beyond those listed.',
                 refs: [
                   'lex:com.atproto.personalspace.policy',
                   'lex:com.atproto.memberspace.policy',
@@ -2196,11 +2176,10 @@ export const schemaDict = {
             name: 'SpaceNotFound',
           },
           {
-            name: 'NotSpaceOwner',
+            name: 'NotAuthorized',
           },
           {
             name: 'UnsupportedPolicy',
-            description: 'The requested policy is not one the host implements.',
           },
         ],
       },
@@ -2626,6 +2605,81 @@ export const schemaDict = {
       },
     },
   },
+  NewFlockOperatorGetDmNotifyTarget: {
+    lexicon: 1,
+    id: 'new.flock.operator.getDmNotifyTarget',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          'Issue a stateless per-caller PDS webhook notification target for a DM space after verifying the caller holds a valid space credential and key possession proof for that space.',
+        input: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['space', 'credential', 'proof'],
+            properties: {
+              space: {
+                type: 'string',
+                format: 'space-ref',
+              },
+              credential: {
+                type: 'string',
+                maxLength: 8192,
+              },
+              proof: {
+                type: 'ref',
+                ref: 'lex:new.flock.operator.getDmNotifyTarget#credentialProof',
+              },
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['endpoint', 'token'],
+            properties: {
+              endpoint: {
+                type: 'string',
+                format: 'uri',
+              },
+              token: {
+                type: 'string',
+                maxLength: 512,
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'Unauthorized',
+          },
+          {
+            name: 'InvalidRequest',
+          },
+        ],
+      },
+      credentialProof: {
+        type: 'object',
+        required: ['authorization', 'signatureInput', 'signature'],
+        properties: {
+          authorization: {
+            type: 'string',
+            maxLength: 16384,
+          },
+          signatureInput: {
+            type: 'string',
+            maxLength: 2048,
+          },
+          signature: {
+            type: 'string',
+            maxLength: 2048,
+          },
+        },
+      },
+    },
+  },
   NewFlockOperatorGetOperation: {
     lexicon: 1,
     id: 'new.flock.operator.getOperation',
@@ -2920,17 +2974,19 @@ export function validate(
 }
 
 export const ids = {
-  ComAtprotoManagedspaceCheckUserAccess:
-    'com.atproto.managedspace.checkUserAccess',
+  ComAtprotoManagedspaceCheckAccess: 'com.atproto.managedspace.checkAccess',
   ComAtprotoManagedspacePolicy: 'com.atproto.managedspace.policy',
+  ComAtprotoMemberspaceDefs: 'com.atproto.memberspace.defs',
   ComAtprotoMemberspaceListMembers: 'com.atproto.memberspace.listMembers',
   ComAtprotoMemberspacePolicy: 'com.atproto.memberspace.policy',
-  ComAtprotoMemberspacePutMember: 'com.atproto.memberspace.putMember',
-  ComAtprotoMemberspaceRemoveMember: 'com.atproto.memberspace.removeMember',
+  ComAtprotoMemberspacePutMembers: 'com.atproto.memberspace.putMembers',
+  ComAtprotoMemberspaceRemoveMembers: 'com.atproto.memberspace.removeMembers',
   ComAtprotoPersonalspacePolicy: 'com.atproto.personalspace.policy',
   ComAtprotoServerGetServiceAuth: 'com.atproto.server.getServiceAuth',
   ComAtprotoSpaceApplyWrites: 'com.atproto.space.applyWrites',
+  ComAtprotoSpaceAuthorizeSpaceSync: 'com.atproto.space.authorizeSpaceSync',
   ComAtprotoSpaceClearRecords: 'com.atproto.space.clearRecords',
+  ComAtprotoSpaceConfirmRegistration: 'com.atproto.space.confirmRegistration',
   ComAtprotoSpaceCreateRecord: 'com.atproto.space.createRecord',
   ComAtprotoSpaceCreateSpace: 'com.atproto.space.createSpace',
   ComAtprotoSpaceDefs: 'com.atproto.space.defs',
@@ -2943,26 +2999,24 @@ export const ids = {
   ComAtprotoSpaceGetRecord: 'com.atproto.space.getRecord',
   ComAtprotoSpaceGetRepo: 'com.atproto.space.getRepo',
   ComAtprotoSpaceGetSpace: 'com.atproto.space.getSpace',
-  ComAtprotoSpaceGetSpaceCredential: 'com.atproto.space.getSpaceCredential',
   ComAtprotoSpaceImportRepo: 'com.atproto.space.importRepo',
   ComAtprotoSpaceImportSpaceMeta: 'com.atproto.space.importSpaceMeta',
   ComAtprotoSpaceListBlobs: 'com.atproto.space.listBlobs',
   ComAtprotoSpaceListRecords: 'com.atproto.space.listRecords',
   ComAtprotoSpaceListRepoOps: 'com.atproto.space.listRepoOps',
-  ComAtprotoSpaceListRepos: 'com.atproto.space.listRepos',
   ComAtprotoSpaceListSpaces: 'com.atproto.space.listSpaces',
-  ComAtprotoSpaceNotifyCredentialRevoked:
-    'com.atproto.space.notifyCredentialRevoked',
-  ComAtprotoSpaceNotifySpaceDeleted: 'com.atproto.space.notifySpaceDeleted',
-  ComAtprotoSpaceNotifyWrite: 'com.atproto.space.notifyWrite',
+  ComAtprotoSpaceListWriters: 'com.atproto.space.listWriters',
+  ComAtprotoSpaceNotifyCredentialsRevoked:
+    'com.atproto.space.notifyCredentialsRevoked',
+  ComAtprotoSpaceNotifyRepoUpdate: 'com.atproto.space.notifyRepoUpdate',
+  ComAtprotoSpaceNotifySpaceUpdate: 'com.atproto.space.notifySpaceUpdate',
   ComAtprotoSpacePutRecord: 'com.atproto.space.putRecord',
-  ComAtprotoSpaceRegisterNotify: 'com.atproto.space.registerNotify',
   ComAtprotoSpaceRemoveWriter: 'com.atproto.space.removeWriter',
-  ComAtprotoSpaceUnregisterNotify: 'com.atproto.space.unregisterNotify',
   ComAtprotoSpaceUpdateSpace: 'com.atproto.space.updateSpace',
   NewFlockOperatorCreateWorkspace: 'new.flock.operator.createWorkspace',
   NewFlockOperatorExecute: 'new.flock.operator.execute',
   NewFlockOperatorGetChanges: 'new.flock.operator.getChanges',
+  NewFlockOperatorGetDmNotifyTarget: 'new.flock.operator.getDmNotifyTarget',
   NewFlockOperatorGetOperation: 'new.flock.operator.getOperation',
   NewFlockOperatorListInboxWriters: 'new.flock.operator.listInboxWriters',
   NewFlockOperatorListStalledOperations:

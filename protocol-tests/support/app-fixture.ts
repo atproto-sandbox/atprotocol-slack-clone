@@ -48,7 +48,7 @@ export type AppFixture = {
 };
 
 export function pinnedCheckoutPath(): string {
-  return resolve(process.env.ATPROTO_PINNED_CHECKOUT ?? join(process.cwd(), "../atproto-spaces-phase3"));
+  return resolve(process.env.ATPROTO_PINNED_CHECKOUT ?? process.env.ATPROTO_PIN_CHECKOUT ?? join(process.cwd(), "../atproto-spaces-r12"));
 }
 
 /** Starts the stack. `preferredPort` is used when free; otherwise any free port. Always call `stop()`. */

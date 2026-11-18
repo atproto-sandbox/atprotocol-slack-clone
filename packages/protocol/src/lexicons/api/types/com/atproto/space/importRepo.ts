@@ -22,7 +22,7 @@ export interface CallOptions {
   signal?: AbortSignal
   headers?: HeadersMap
   qp?: QueryParams
-  encoding?: 'application/octet-stream'
+  encoding?: 'application/vnd.dasl.star'
 }
 
 export interface Response {
@@ -36,9 +36,23 @@ export class SpaceNotFoundError extends XRPCError {
   }
 }
 
+export class InvalidRepoFileError extends XRPCError {
+  constructor(src: XRPCError) {
+    super(src.status, src.error, src.message, src.headers, { cause: src })
+  }
+}
+
+export class RepoMismatchError extends XRPCError {
+  constructor(src: XRPCError) {
+    super(src.status, src.error, src.message, src.headers, { cause: src })
+  }
+}
+
 export function toKnownErr(e: any) {
   if (e instanceof XRPCError) {
     if (e.error === 'SpaceNotFound') return new SpaceNotFoundError(e)
+    if (e.error === 'InvalidRepoFile') return new InvalidRepoFileError(e)
+    if (e.error === 'RepoMismatch') return new RepoMismatchError(e)
   }
 
   return e

@@ -13,15 +13,13 @@ import {
 
 const is$typed = _is$typed,
   validate = _validate
-const id = 'com.atproto.memberspace.removeMember'
+const id = 'com.atproto.memberspace.removeMembers'
 
 export type QueryParams = {}
 
 export interface InputSchema {
-  /** Reference to the space. */
   space: string
-  /** The DID of the member to remove. */
-  did: string
+  dids: string[]
 }
 
 export interface CallOptions {
@@ -42,7 +40,7 @@ export class SpaceNotFoundError extends XRPCError {
   }
 }
 
-export class NotSpaceOwnerError extends XRPCError {
+export class NotAuthorizedError extends XRPCError {
   constructor(src: XRPCError) {
     super(src.status, src.error, src.message, src.headers, { cause: src })
   }
@@ -57,7 +55,7 @@ export class PolicyMismatchError extends XRPCError {
 export function toKnownErr(e: any) {
   if (e instanceof XRPCError) {
     if (e.error === 'SpaceNotFound') return new SpaceNotFoundError(e)
-    if (e.error === 'NotSpaceOwner') return new NotSpaceOwnerError(e)
+    if (e.error === 'NotAuthorized') return new NotAuthorizedError(e)
     if (e.error === 'PolicyMismatch') return new PolicyMismatchError(e)
   }
 
