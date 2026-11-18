@@ -3,11 +3,11 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
-import { kemKeyFromDidDocument } from "@/atproto/kem-key";
-import { generateSpaceKey } from "@/atproto/space-key";
-import { AtprotoClient } from "@/atproto/xrpc";
-import { DmClient, type DmConversationPage, type DmDeps, type DmStore } from "@/dm/dm-client";
-import { readIndependentDmConversation } from "@/reader/independent-dm";
+import { kemKeyFromDidDocument } from "@flock/protocol/atproto/kem-key";
+import { generateSpaceKey } from "@flock/protocol/atproto/space-key";
+import { AtprotoClient } from "@flock/protocol/atproto/xrpc";
+import { DmClient, type DmConversationPage, type DmDeps, type DmStore } from "@flock/client/dm/dm-client";
+import { readIndependentDmConversation } from "@flock/reader/independent-dm";
 import { createFixtureTempRoot } from "./fixture-temp";
 
 // Backend acceptance for M4 (.ai/plans/dm-tasks/m4.md) against the pinned PDS
@@ -19,8 +19,8 @@ import { createFixtureTempRoot } from "./fixture-temp";
 //
 // M6 (.ai/plans/dm-tasks/m6.md) parity: after the 1:1 and group flows below,
 // `assertDmParity` re-reads the same conversation through the independent
-// reader (`src/reader/independent-dm.ts`, which imports nothing from
-// `src/dm/`) using the same acting identity as the `DmClient` read it is
+// reader (`packages/reader/src/independent-dm.ts`, which imports nothing from
+// the DM engine) using the same acting identity as the `DmClient` read it is
 // compared against, and asserts identical message URIs/texts, reactions, and
 // per-half statuses.
 
@@ -159,6 +159,12 @@ test("DM acceptance: 1:1, group, dropped-notification recovery, all with the ser
     const afterLeave = await dmFor(alice).readConversation(started.convKey, started.participants);
     assert.equal(afterLeave.halves[bob.did], "missing", "leaving removes alice from bob's own half");
     await assertDmParity(alice, afterLeave, started.convKey, started.participants);
+
+    const rejoined = await bobDm.startConversation([alice.did]);
+    assert.equal(rejoined.convKey, started.convKey, "starting it again is the same conversation");
+    const afterRejoin = await dmFor(alice).readConversation(started.convKey, started.participants);
+    assert.equal(afterRejoin.halves[bob.did], "ok", "the PDS readmits a member it removed, and mints for them again");
+    await assertDmParity(alice, afterRejoin, started.convKey, started.participants);
 
     await aliceDm.deleteEverything(started.convKey);
     const afterDelete = await dmFor(bob).readConversation(started.convKey, started.participants);

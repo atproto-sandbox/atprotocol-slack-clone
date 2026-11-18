@@ -1,0 +1,13 @@
+{
+  "lexicon": 1,
+  "id": "new.flock.channel",
+  "defs": {
+    "main": {
+      "type": "space",
+      "key": "any",
+      "name": "Channel",
+      "collections": ["new.flock.channel.message", "new.flock.channel.reaction", "new.flock.channel.roster"],
+      "description": "A public or private team conversation and its private roster."
+    }
+  }
+}

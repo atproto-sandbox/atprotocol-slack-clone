@@ -1,18 +1,19 @@
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
 import { Given, Then, When } from "@cucumber/cucumber";
-import { DM_RENOTIFY_BACKOFF_MS } from "@/dm/backoff";
-import { readIndependentDmConversation } from "@/reader/independent-dm";
-import { dmConversationUri, dmInboxUri, recordKeyHash, stableHash, tidNow } from "@/protocol/keys";
-import { validateDmHeaderMatchesRequest, validateSpaceRecord } from "@/protocol/records";
+import { DM_RENOTIFY_BACKOFF_MS } from "@flock/client/dm/backoff";
+import { readIndependentDmConversation } from "@flock/reader/independent-dm";
+import { dmConversationUri, dmInboxUri, recordKeyHash, stableHash, tidNow } from "@flock/protocol/keys";
+import { validateDmHeaderMatchesRequest, validateSpaceRecord } from "@flock/protocol/registry";
 import type { SecondApp } from "../../protocol-tests/support/app-fixture";
 import { completeConsent, signIn, submitWorkspaceName, uniqueWorkspaceName } from "../support/ui";
 import { PAGE_TIMEOUT_MS, type Actor, type AppWorld } from "../support/world";
 import {
   DmpProbe, type DmpHostileHalf, type DmpMintedCredential, dmpAcceptRequestFrom, dmpAllowlistDids, dmpAllowDid, dmpChooseMode, dmpConnectDms, dmpEnableDms, dmpMessageTexts, dmpOpenConversationWith,
   dmpOwnConvKeys, dmpOwnHeader, dmpOwnMessages, dmpParticipantRows, dmpPoll, dmpReadRequests, dmpReadRequestsScanned, dmpReload, dmpRequestCount, dmpSend, dmpSidebarConversationLabels,
-  dmpAppDataRowCount, dmpConnectDmsReadingScope, dmpEverythingTheAppStored, dmpFilesContain, dmpServerSessions, dmpWaitForOrigin, dmpJwtClaims, dmpLatestCommitRev, dmpOpenRequests, dmpOpenSettings, dmpRequestSenders, dmpSignInAt, dmpWatchCredentials, dmpRenotifyState, dmpReloadThroughCycle, dmpRequestOps, dmpSetRenotifyElapsed, dmpStartConversation, dmpSync, dmpWriteHostileHalf,
+  dmpAppDataRowCount, dmpEverythingTheAppStored, dmpFilesContain, dmpAuthorityGrants, dmpWaitForOrigin, dmpJwtClaims, dmpLatestCommitRev, dmpOpenRequests, dmpOpenSettings, dmpRequestSenders, dmpSignInAt, dmpWatchCredentials, dmpRenotifyState, dmpReloadThroughCycle, dmpRequestOps, dmpSetRenotifyElapsed, dmpStartConversation, dmpSync, dmpWriteHostileHalf,
 } from "../support/dm-policy-ui";
+import { memberSessionTablesIn } from "../support/app-database";
 
 const SETUP_TIMEOUT = 300_000;
 
@@ -332,18 +333,18 @@ Given("another member stored a record scoped to someone else's half in their own
   const aliceHalf = dmConversationUri(alice.did, convKey);
   const hostile = "HOSTILE record in bob's repo, scoped to alice's half";
   const spoofed = await this.pdsPost(bob, "com.atproto.space.putRecord", {
-    space: aliceHalf, repo: alice.did, collection: "org.slack.dm.message", rkey: tidNow(),
-    record: { $type: "org.slack.dm.message", text: "spoofed as alice", createdAt: new Date().toISOString() },
+    space: aliceHalf, repo: alice.did, collection: "new.flock.dm.message", rkey: tidNow(),
+    record: { $type: "new.flock.dm.message", text: "spoofed as alice", createdAt: new Date().toISOString() },
   });
   assert.equal(spoofed.status, 403, "the PDS itself refuses a write into someone else's repo, so the only reachable hostile write is in the writer's own repo");
   const planted = await this.pdsPost(bob, "com.atproto.space.putRecord", {
-    space: aliceHalf, repo: bob.did, collection: "org.slack.dm.message", rkey: tidNow(Date.now() + 60_000),
-    record: { $type: "org.slack.dm.message", text: hostile, createdAt: new Date().toISOString() },
+    space: aliceHalf, repo: bob.did, collection: "new.flock.dm.message", rkey: tidNow(Date.now() + 60_000),
+    record: { $type: "new.flock.dm.message", text: hostile, createdAt: new Date().toISOString() },
   });
   assert.equal(planted.status, 200, JSON.stringify(planted.body));
-  const inBobsRepo = await this.pdsGet<{ records: Array<{ value: { text: string } }> }>(bob, "com.atproto.space.listRecords", { space: aliceHalf, repo: bob.did, collection: "org.slack.dm.message", limit: "100" });
+  const inBobsRepo = await this.pdsGet<{ records: Array<{ value: { text: string } }> }>(bob, "com.atproto.space.listRecords", { space: aliceHalf, repo: bob.did, collection: "new.flock.dm.message", limit: "100" });
   assert.deepEqual(inBobsRepo.body.records.map((record) => record.value.text), [hostile], "the hostile record really is stored in bob's own repo, scoped to alice's half");
-  const asReader = await probeFor(this, alice).records(aliceHalf, bob, "org.slack.dm.message");
+  const asReader = await probeFor(this, alice).records(aliceHalf, bob, "new.flock.dm.message");
   assert.deepEqual(asReader.map((record) => record.value.text), [hostile], "and a credential holder for alice's half can fetch it from bob's repo");
   this.scratch.set("convKey", convKey);
   this.scratch.set("hostileText", hostile);
@@ -399,7 +400,7 @@ Given("a half header names a different conversation key or participant set", { t
   await dmpWriteHostileHalf(this, halfWithKey);
 
   const headerContext = (owner: Actor) => ({ authorityDid: owner.did, spaceUri: dmConversationUri(owner.did, convKey), repoDid: owner.did, rkey: "self" });
-  assert.equal(validateSpaceRecord("org.slack.dm.header", { $type: "org.slack.dm.header", ...subsetHeader, createdAt: new Date().toISOString() }, headerContext(wrongSet)).valid, true, "the differing participant set is a well-formed header on its own");
+  assert.equal(validateSpaceRecord("new.flock.dm.header", { $type: "new.flock.dm.header", ...subsetHeader, createdAt: new Date().toISOString() }, headerContext(wrongSet)).valid, true, "the differing participant set is a well-formed header on its own");
   assert.equal(validateDmHeaderMatchesRequest(subsetHeader, requested), false, "but it does not match the conversation being read");
   assert.equal(validateDmHeaderMatchesRequest(keyHeader, requested), false, "a header naming another conversation key does not match either");
   this.scratch.set("convKey", convKey);
@@ -418,7 +419,7 @@ Then("that half is ignored", async function (this: AppWorld) {
   for (const half of this.scratch.get("hostileHalves") as DmpHostileHalf[]) {
     const space = dmConversationUri(half.owner.did, half.convKey);
     assert.equal(await probe.credentialOutcome(space), "minted", `alice can mint a credential for ${half.owner.handle}'s half, so ignoring it is the client's decision and not a failed read`);
-    assert.deepEqual((await probe.records(space, half.owner, "org.slack.dm.message")).map((record) => record.value.text), [half.message], `and ${half.owner.handle}'s hostile message is served to her`);
+    assert.deepEqual((await probe.records(space, half.owner, "new.flock.dm.message")).map((record) => record.value.text), [half.message], `and ${half.owner.handle}'s hostile message is served to her`);
   }
   const independent = await readIndependentDmConversation(probeFor(this, alice).deps(), convKey, [alice.did, dana.did, wrongSet.did, wrongKey.did]);
   assert.deepEqual(independent.halves, { [alice.did]: "ok", [dana.did]: "ok", [wrongSet.did]: "missing", [wrongKey.did]: "missing" }, "an independent reader classifies the same halves as ignored");
@@ -431,7 +432,7 @@ type CrossedConversations = { first: { owner: string; convKey: string }; second:
 const TID_ALPHABET = "234567abcdefghijklmnopqrstuvwxyz";
 const RFC4648_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567";
 const SEPARATORS = ["", ",", "|", ":", "+", " ", "\n", "\0"];
-const PREFIXES = ["", "dm:", "org.slack.dm.conversation:", "org.slack.dm.conversation/"];
+const PREFIXES = ["", "dm:", "new.flock.dm.conversation:", "new.flock.dm.conversation/"];
 const DIGESTS = ["sha256", "sha512", "sha1", "md5"] as const;
 
 function encodeBase32(bytes: Uint8Array, alphabet: string): string {
@@ -576,7 +577,8 @@ When("the sender's re-notify backoff elapses", { timeout: 900_000 }, async funct
 
   for (let attempts = 1; attempts < DM_RENOTIFY_BACKOFF_MS.length; attempts += 1) {
     const backoff = DM_RENOTIFY_BACKOFF_MS[attempts]!;
-    assert.equal((await dmpRenotifyState(sender, convKey, recipient))?.attempts, attempts, "the sender persisted how many re-sends it has made");
+    // The re-send reaches the PDS before the sender's page records it, so the count is waited for.
+    await dmpPoll(async () => (await dmpRenotifyState(sender, convKey, recipient))?.attempts === attempts, { what: `the sender to persist ${attempts} re-send(s)` });
     await dmpSetRenotifyElapsed(sender, convKey, recipient, backoff - 2 * ONE_MINUTE);
     await dmpReloadThroughCycle(sender);
     assert.equal(await opCount(), attempts + 1, `${backoff - 2 * ONE_MINUTE} ms is not enough for a ${backoff} ms step`);
@@ -592,7 +594,7 @@ Then("the same request record is re-put with a new revision", async function (th
   const convKey = this.scratch.get("convKey") as string;
   const ops = await dmpRequestOps(this, sender, recipient);
   assert.equal(ops.length, 1 + DM_RENOTIFY_BACKOFF_MS.length, "one original write and one re-put per backoff step");
-  assert.ok(ops.every((op) => op.collection === "org.slack.dm.request" && op.rkey === convKey), "every write is to the same request record");
+  assert.ok(ops.every((op) => op.collection === "new.flock.dm.request" && op.rkey === convKey), "every write is to the same request record");
   assert.equal(new Set(ops.map((op) => op.cid)).size, 1, "with identical content");
   assert.deepEqual(ops.slice(1).map((op) => op.prev), ops.slice(0, -1).map((op) => op.cid), "each re-put replaces the previous version of that record");
   assert.deepEqual(ops.map((op) => op.rev), [...new Set(ops.map((op) => op.rev))].sort(), "and carries a new, later revision");
@@ -607,7 +609,7 @@ Then("the recipient side treats the repeat as idempotent", async function (this:
   const sender = actorNamed(this, "sender");
   const convKey = this.scratch.get("convKey") as string;
   assert.deepEqual((await probeFor(this, recipient).trackedWriters(recipient)).map((writer) => writer.did), [sender.did], "one tracked writer, however many times it notified");
-  const stored = await probeFor(this, recipient).records(dmInboxUri(recipient.did), sender, "org.slack.dm.request");
+  const stored = await probeFor(this, recipient).records(dmInboxUri(recipient.did), sender, "new.flock.dm.request");
   assert.deepEqual(stored.map((record) => record.rkey), [convKey], "one request record");
   const rows = await dmpReadRequests(recipient);
   assert.deepEqual(rows.map(({ section, sender: from }) => ({ section, sender: from })), [{ section: "others", sender: sender.did }], "and one request in the recipient's folder");
@@ -685,17 +687,17 @@ When("a participant signs in with any conforming OAuth client", { timeout: SETUP
   const second = this.scratch.get("secondApp") as SecondApp;
   const context = await this.newContext("alice-elsewhere");
   const requested: string[] = [];
-  const notificationStreamAttempts: string[] = [];
+  const changeFeedAttempts: string[] = [];
   context.on("request", (request) => { requested.push(request.url()); });
-  await context.route(`${this.appOrigin}/**`, (route) => route.abort("connectionrefused"));
-  await context.route("**/api/notifications/dm**", (route) => { notificationStreamAttempts.push(route.request().url()); return route.abort("connectionrefused"); });
+  for (const origin of [this.appOrigin, this.operatorOrigin]) await context.route(`${origin}/**`, (route) => route.abort("connectionrefused"));
+  await context.route("**/xrpc/new.flock.operator.getChanges", (route) => { changeFeedAttempts.push(route.request().url()); return route.abort("connectionrefused"); });
   const page = await context.newPage();
   page.setDefaultTimeout(PAGE_TIMEOUT_MS);
-  const elsewhere: Actor = { ...alice, role: "alice-elsewhere", context, page, calls: [] };
+  const elsewhere: Actor = { ...alice, role: "alice-elsewhere", context, page, xrpc: [] };
   this.actors.set(elsewhere.role, elsewhere);
   this.scratch.set("rebuiltCredentials", dmpWatchCredentials(page));
   this.scratch.set("rebuildRequests", requested);
-  this.scratch.set("notificationStreamAttempts", notificationStreamAttempts);
+  this.scratch.set("changeFeedAttempts", changeFeedAttempts);
   this.scratch.set("rebuildStartedAt", Date.now());
   await dmpSignInAt(elsewhere, second.appUrl.origin);
   await dmpConnectDms(elsewhere);
@@ -721,15 +723,15 @@ Then("their conversations are rebuilt from their own spaces, halves, and inbox",
 
   const second = this.scratch.get("secondApp") as SecondApp;
   const contacted = [...new Set((this.scratch.get("rebuildRequests") as string[]).filter((url) => /^https?:/.test(url)).map((url) => new URL(url).origin))].sort();
-  const localServers = [second.appUrl.origin, ...this.fixture.pdsUrls.map((url) => new URL(url).origin), new URL(this.fixture.plcUrl).origin];
+  const localServers = [second.appUrl.origin, second.operatorUrl.origin, ...this.fixture.pdsUrls.map((url) => new URL(url).origin), new URL(this.fixture.plcUrl).origin];
   const outsideServers = ["https://fonts.googleapis.com", "https://fonts.gstatic.com", ...[...this.actors.values()].map((actor) => `https://${actor.handle}`)];
   const isLocal = (origin: string): boolean => ["127.0.0.1", "localhost"].includes(new URL(origin).hostname);
   assert.ok(contacted.includes(second.appUrl.origin), "the rebuilt page was served by the replacement app");
   assert.ok(this.fixture.pdsUrls.some((url) => contacted.includes(new URL(url).origin)), "and talked to the PDS hosts, so the observation below covers the rebuild itself");
   assert.deepEqual(contacted.filter((origin) => isLocal(origin) && !localServers.includes(origin)), [], "of the servers on this machine the rebuild contacted only the replacement app, the PDS hosts, and the PLC directory");
   assert.deepEqual(contacted.filter((origin) => !isLocal(origin) && !outsideServers.includes(origin)), [], "and beyond them only web fonts and handle-domain lookups");
-  assert.equal(contacted.includes(this.appOrigin), false, "so nothing in it so much as tried the original app server");
-  assert.ok((this.scratch.get("notificationStreamAttempts") as string[]).length > 0, "the notification stream was tried and refused while the conversations were rebuilt anyway");
+  assert.equal(contacted.includes(this.appOrigin) || contacted.includes(this.operatorOrigin), false, "so nothing in it so much as tried the original app server or its operator");
+  assert.ok((this.scratch.get("changeFeedAttempts") as string[]).length > 0, "the operator's change feed was tried and refused while the conversations were rebuilt anyway");
   assert.equal(dmpAppDataRowCount(second.databasePath), 0, "and the replacement app, which only ever saw a sign-in, holds no workspace or channel data");
   assert.equal(dmpFilesContain(second.databasePath, "alice to bob"), false, "or any conversation text");
 });
@@ -767,36 +769,28 @@ Then("the other halves are read with freshly minted credentials", { timeout: SET
 
 // --- The app server never holds DM scopes or DM content ---------------------------------------------
 
-const DM_SPACE_TYPE = "org.slack.dm";
+const DM_SPACE_TYPE = "new.flock.dm";
 
-type ServerSession = { second: SecondApp; key: string; dmScopeShown: string[]; texts: string[] };
+type AppUnderTest = { second: SecondApp; key: string; dmScopeShown: string[]; texts: string[] };
 
-Given("the app runs its own server session for workspaces", { timeout: SETUP_TIMEOUT }, async function (this: AppWorld) {
+Given("people sign in to an app with its own database and create a workspace there", { timeout: SETUP_TIMEOUT }, async function (this: AppWorld) {
   const key = randomBytes(32).toString("hex");
   const second = await this.fixture.startSecondApp({ env: { AUTH_ENCRYPTION_KEY: key } });
   const alice = await this.actor("alice", 0);
-  await dmpSignInAt(alice, second.appUrl.origin);
+  const aliceScopes = await dmpSignInAt(alice, second.appUrl.origin);
   await submitWorkspaceName(alice, uniqueWorkspaceName());
   await completeConsent(alice);
   await dmpWaitForOrigin(alice, second.appUrl.origin);
-  await alice.page.getByRole("heading", { level: 1 }).or(alice.page.locator(".mono-note").filter({ hasText: "at://" }).first()).waitFor({ state: "visible" });
-
-  const sessions = dmpServerSessions(second.databasePath, key);
-  const own = sessions.find((session) => session.did === alice.did);
-  assert.ok(own, "the app server holds an OAuth session for alice");
-  assert.ok(own.scope.some((scope) => scope.startsWith(`space:org.slack.workspace?authority=${alice.did}`) && scope.includes("collection=org.slack.admin")),
-    `the session carries the workspace-authority scopes it was approved for: ${own.scope.join(" ")}`);
-  this.scratch.set("serverSession", { second, key, dmScopeShown: [], texts: [] } satisfies ServerSession);
+  await alice.page.locator(".mono-note").filter({ hasText: "at://" }).first().waitFor({ state: "visible" });
+  this.scratch.set("appUnderTest", { second, key, dmScopeShown: aliceScopes, texts: [] } satisfies AppUnderTest);
 });
 
 When("direct messages are exchanged", { timeout: SETUP_TIMEOUT }, async function (this: AppWorld) {
-  const session = this.scratch.get("serverSession") as ServerSession;
+  const session = this.scratch.get("appUnderTest") as AppUnderTest;
   const origin = session.second.appUrl.origin;
   const alice = actorNamed(this, "alice");
   const bob = await this.actor("bob", 1);
-  session.dmScopeShown.push(...await dmpConnectDmsReadingScope(alice));
-  await dmpSignInAt(bob, origin);
-  session.dmScopeShown.push(...await dmpConnectDmsReadingScope(bob));
+  session.dmScopeShown.push(...await dmpSignInAt(bob, origin));
   await dmpEnableDms(bob);
   await dmpChooseMode(bob, "Everyone");
 
@@ -811,59 +805,41 @@ When("direct messages are exchanged", { timeout: SETUP_TIMEOUT }, async function
   session.texts.push(...secrets);
 });
 
-Then("that session holds no DM scope", function (this: AppWorld) {
-  const session = this.scratch.get("serverSession") as ServerSession;
-  const held = dmpServerSessions(session.second.databasePath, session.key);
-  assert.deepEqual(held.map((entry) => entry.did).sort(), [actorNamed(this, "alice").did, actorNamed(this, "bob").did].sort(), "the server holds a session for each person who signed in");
-  for (const entry of held) {
-    assert.ok(entry.scope.includes("atproto"), "a real, granted session");
-    assert.deepEqual(entry.scope.filter((scope) => scope.includes(DM_SPACE_TYPE)), [], `no granted scope names a DM space: ${entry.scope.join(" ")}`);
-    assert.deepEqual(entry.clientScope.filter((scope) => scope.includes(DM_SPACE_TYPE)), [], "nor does the scope its OAuth client requested");
+Then("the app server holds no member session and no member token", async function (this: AppWorld) {
+  const session = this.scratch.get("appUnderTest") as AppUnderTest;
+  const alice = actorNamed(this, "alice");
+  const bob = actorNamed(this, "bob");
+  assert.deepEqual(memberSessionTablesIn(session.second.databasePath), [], "the app's database has nowhere to keep a member session");
+  for (const actor of [alice, bob]) {
+    for (const origin of [session.second.appUrl.origin, session.second.operatorUrl.origin]) {
+      assert.deepEqual(await actor.context.cookies(origin), [], "neither the app nor its operator keeps a cookie: the browser holds the session");
+    }
   }
-  assert.ok(session.dmScopeShown.some((scope) => scope.includes(`space:${DM_SPACE_TYPE}.conversation`)), "the DM permission does exist: it was asked of, and approved at the PDS by, the separate browser-held session");
+  // What the server does hold: the workspace authority's grant to its operator, which alice approved when she created a workspace.
+  const grants = dmpAuthorityGrants(session.second.databasePath, session.key);
+  assert.deepEqual(grants.map((grant) => grant.did), [alice.did], "the only grant is the workspace authority's; bob, who only exchanged DMs, has none");
+  for (const grant of grants) {
+    assert.ok(grant.scope.some((scope) => scope.startsWith(`space:new.flock.workspace?authority=${alice.did}`) && scope.includes("collection=new.flock.admin")), `it is the workspace-authority grant: ${grant.scope.join(" ")}`);
+    assert.deepEqual(grant.scope.filter((scope) => scope.includes(DM_SPACE_TYPE)), [], `it names no DM space: ${grant.scope.join(" ")}`);
+  }
+  assert.ok(session.dmScopeShown.some((scope) => scope.includes(`space:${DM_SPACE_TYPE}.conversation`)), "the DM permission does exist: it was asked of, and approved at the PDS by, the browser's session");
 });
 
 Then("no server route stores or returns DM content", async function (this: AppWorld) {
-  const session = this.scratch.get("serverSession") as ServerSession;
+  const session = this.scratch.get("appUnderTest") as AppUnderTest;
   const alice = actorNamed(this, "alice");
   const bob = actorNamed(this, "bob");
   assert.equal(session.texts.length, 2);
-  const everyCall = [alice, bob].flatMap((actor) => actor.calls);
+  const appOrigins = [session.second.appUrl.origin, session.second.operatorUrl.origin];
+  const everyCall = [alice, bob].flatMap((actor) => actor.xrpc.filter((call) => appOrigins.includes(call.origin)));
   assert.ok(everyCall.length > 0, "the people's browsers did talk to the app server");
-  const stream = await readStream(`${session.second.appUrl.origin}/api/notifications/dm?space=${encodeURIComponent(dmInboxUri(alice.did))}&after=0`, await cookieHeader(alice));
   const stored = dmpEverythingTheAppStored(session.second.databasePath, session.key);
-  assert.ok(stored.some((value) => value.includes(alice.did)), "the scan of the database sees what the app does keep: accounts and sessions");
+  assert.ok(stored.some((value) => value.includes(alice.did)), "the scan of the database sees what the app does keep: the authority's grant and its operations");
   for (const text of session.texts) {
-    assert.equal(everyCall.some((call) => call.requestBody.includes(text) || call.responseBody.includes(text) || call.path.includes(text)), false, `no /api request or response carries "${text}"`);
-    assert.equal(stream.includes(text), false, "nor does the notification stream");
+    assert.equal(everyCall.some((call) => call.requestBody.includes(text) || call.responseBody.includes(text) || call.path.includes(text)), false, `no request to the app's origin, nor its answer, carries "${text}"`);
     assert.equal(dmpFilesContain(session.second.databasePath, text), false, "nor do the database files");
     assert.equal(stored.some((value) => value.includes(text)), false, "nor any value in it, once decrypted");
     assert.equal(session.second.serverOutput().includes(text), false, "nor the server's own output");
   }
-  assert.match(stream, /^(: keepalive|id: \d+\nevent: change\ndata: \{"cursor":\d+\})/m, "the stream is the content-free change feed");
 });
 
-async function cookieHeader(actor: Actor): Promise<string> {
-  return (await actor.context.cookies()).map((cookie) => `${cookie.name}=${cookie.value}`).join("; ");
-}
-
-async function readStream(url: string, cookie: string): Promise<string> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 3_000);
-  let received = "";
-  try {
-    const response = await fetch(url, { headers: { cookie, accept: "text/event-stream" }, signal: controller.signal });
-    assert.equal(response.status, 200);
-    const reader = response.body!.getReader();
-    for (;;) {
-      const chunk = await reader.read();
-      if (chunk.done) break;
-      received += Buffer.from(chunk.value).toString("utf8");
-    }
-  } catch (error) {
-    if (!(error instanceof Error) || error.name !== "AbortError") throw error;
-  } finally {
-    clearTimeout(timer);
-  }
-  return received;
-}

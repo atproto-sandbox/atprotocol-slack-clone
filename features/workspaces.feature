@@ -42,15 +42,6 @@ Feature: Workspace membership and discovery
       When the member joins the workspace
       Then the workspace appears in the member's dashboard with 2 active members
 
-    Scenario: Declining the join permission explains itself and keeps the invitation
-      Given a member has been invited to a workspace and given its invite link
-      When the member opens the invite link and signs in
-      And the member declines the permission screen when joining
-      Then the app says the permission was not granted
-      And the invitation is still offered
-      When the member joins the workspace
-      Then the workspace appears in the member's dashboard with 2 active members
-
     Scenario: A forwarded workspace URI does not grant access
       Given a DID is absent from a workspace member list
       When that DID opens a forwarded invite link and tries to join
@@ -65,6 +56,15 @@ Feature: Workspace membership and discovery
       And a second app reads the same directory and workspace roster
 
   Rule: Workspace administration follows current authority state
+
+    Scenario: A workspace owned by a dedicated account outlives every admin signing out
+      Given a person is signed in, and a workspace account exists that has never signed in to the app
+      When the person creates a workspace owned by that account, approved by signing in as the account
+      Then the workspace belongs to the account, and the person is its first admin while the account is not an admin
+      When the person makes a second member an admin
+      And both admins sign out
+      Then an admin who signs in again still administers the workspace
+      And the workspace account never signed in to the app
 
     Scenario: The authority remains the first active admin
       Given a workspace authority DID owns the workspace

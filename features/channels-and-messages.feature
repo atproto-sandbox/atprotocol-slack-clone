@@ -24,8 +24,10 @@ Feature: Channel conversations
 
     Scenario: A member edits or deletes their own message
       Given a member authored a channel message
+      And another app added a field this app does not know to that message
       When they edit or delete it
       Then the change is visible to every authorized app
+      And the field the other app added is still on the edited message
 
     Scenario: A member cannot edit or delete another person's message
       Given another member authored a channel message
@@ -44,7 +46,7 @@ Feature: Channel conversations
       Then all apps show only the current reaction record
 
     Scenario: Reject an overlong message
-      Given a message contains more than 10000 Unicode code points
+      Given a message contains more than 10000 graphemes
       When the member submits it
       Then the message is rejected
 

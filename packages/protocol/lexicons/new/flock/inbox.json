@@ -1,0 +1,13 @@
+{
+  "lexicon": 1,
+  "id": "new.flock.inbox",
+  "defs": {
+    "main": {
+      "type": "space",
+      "key": "any",
+      "name": "Admin inbox",
+      "collections": ["new.flock.joinRequest", "new.flock.joinDecision"],
+      "description": "An inbox where workspace members can write requests and active admins can read them."
+    }
+  }
+}

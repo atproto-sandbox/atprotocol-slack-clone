@@ -1,0 +1,28 @@
+{
+  "lexicon": 1,
+  "id": "new.flock.operator.listInboxWriters",
+  "defs": {
+    "main": {
+      "type": "query",
+      "description": "Return DIDs in the current inbox member list with write=true. It never returns request records or request contents.",
+      "parameters": {
+        "type": "params",
+        "required": ["workspace"],
+        "properties": { "workspace": { "type": "string", "format": "space-ref" } }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["inbox", "writers", "checkedAt"],
+          "properties": {
+            "inbox": { "type": "string", "format": "space-ref" },
+            "writers": { "type": "array", "items": { "type": "string", "format": "did" }, "maxLength": 200 },
+            "checkedAt": { "type": "string", "format": "datetime" }
+          }
+        }
+      },
+      "errors": [{ "name": "Unauthorized" }]
+    }
+  }
+}

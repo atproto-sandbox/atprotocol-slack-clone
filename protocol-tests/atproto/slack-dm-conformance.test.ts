@@ -29,12 +29,12 @@ afterAll(() => {
   }
 })
 
-const INBOX_TYPE = 'org.slack.dm.inbox' as NsidString
-const CONVERSATION_TYPE = 'org.slack.dm.conversation' as NsidString
-const REQUEST = 'org.slack.dm.request' as NsidString
-const HEADER = 'org.slack.dm.header' as NsidString
-const MESSAGE = 'org.slack.dm.message' as NsidString
-const REACTION = 'org.slack.dm.reaction' as NsidString
+const INBOX_TYPE = 'new.flock.dm.inbox' as NsidString
+const CONVERSATION_TYPE = 'new.flock.dm.conversation' as NsidString
+const REQUEST = 'new.flock.dm.request' as NsidString
+const HEADER = 'new.flock.dm.header' as NsidString
+const MESSAGE = 'new.flock.dm.message' as NsidString
+const REACTION = 'new.flock.dm.reaction' as NsidString
 const { memberspace } = com.atproto
 // DM half and inbox reads: member list. Inbox writes: anyone. updateSpace replaces
 // the whole policy, so each call below passes the full policy it wants.
@@ -618,7 +618,7 @@ describe('atproto Slack direct-message protocol conformance', () => {
         'atproto',
         `space:${INBOX_TYPE}?authority=*&collection=${REQUEST}&action=create&action=update&action=delete`,
         `space:${INBOX_TYPE}?authority=self&action=read&manage=create&manage=update`,
-        'repo:org.slack.dm.declaration?action=create&action=update',
+        'repo:new.flock.dm.declaration?action=create&action=update',
         `space:${CONVERSATION_TYPE}?authority=self&collection=${HEADER}&collection=${MESSAGE}&collection=${REACTION}&action=create&action=update&action=delete&manage=create&manage=update&manage=delete`,
         `space:${CONVERSATION_TYPE}?authority=*&action=read`,
       ]
@@ -693,7 +693,7 @@ describe('atproto Slack direct-message protocol conformance', () => {
       await callAsOAuth(dmToken.access_token, 'com.atproto.space.deleteSpace', { space: aliceHalf })
 
       // publish the public inbox declaration in its own repo (the one repo grant)
-      const DECLARATION = 'org.slack.dm.declaration'
+      const DECLARATION = 'new.flock.dm.declaration'
       await callAsOAuth(dmToken.access_token, 'com.atproto.repo.putRecord', {
         repo: alice.did, collection: DECLARATION, rkey: 'self', record: { $type: DECLARATION, createdAt: new Date().toISOString() },
       })
@@ -747,7 +747,7 @@ describe('atproto Slack direct-message protocol conformance', () => {
 
       // cannot create a space of a non-DM type
       await expect(callAsOAuth(dmToken.access_token, 'com.atproto.space.createSpace', {
-        spaceType: 'org.slack.channel', skey: 'general', policy: MEMBER_LIST_POLICY,
+        spaceType: 'new.flock.channel', skey: 'general', policy: MEMBER_LIST_POLICY,
       })).rejects.toThrow()
     } finally {
       await network.close()

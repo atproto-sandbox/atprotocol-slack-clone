@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
+import { loadavg } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { acceptedTimestamps, loadSlurFilter } from "./support/accepted-tid";
@@ -33,6 +34,7 @@ const MEMBERS = 200;
 const CHANNELS = 100;
 const MESSAGES = 20_000;
 const REACTIONS = 20_000;
+const READ_RUNS = 10;
 
 test("supported-size workload: 200 members, 100 channels, 20,000 messages and reactions per channel", { timeout: 60 * 60 * 1000 }, async () => {
   const fixtureTemp = createFixtureTempRoot("slack-performance-fixture-");
@@ -57,24 +59,26 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
     const { TestNetworkNoAppView } = await import(pathToFileURL(join(PINNED_CHECKOUT, "packages/dev-env/src/index.ts")).href) as {
       TestNetworkNoAppView: { create(options: { extraPdses: number; lexiconAuthority: boolean; pds?: { rateLimitsEnabled?: boolean } }): Promise<TestNetwork> };
     };
-    network = await TestNetworkNoAppView.create({ extraPdses: 1, lexiconAuthority: true, pds: { rateLimitsEnabled: false } });
+    const fixture = await TestNetworkNoAppView.create({ extraPdses: 1, lexiconAuthority: true, pds: { rateLimitsEnabled: false } });
+    network = fixture;
     process.stdout.write("PERFORMANCE_PROGRESS two-PDS fixture ready\n");
     const directory = mkdtempSync(join(fixtureTemp.path, "slack-performance-"));
-    process.env.NODE_ENV = "test";
+    Object.assign(process.env, { NODE_ENV: "test" });
     process.env.APP_URL = "http://127.0.0.1:3000";
     process.env.AUTH_ENCRYPTION_KEY = "4b".repeat(32);
-    process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_slack_admin";
-    process.env.PLC_URL = network.plc.url;
+    process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
+    process.env.PLC_URL = fixture.plc.url;
     process.env.DATABASE_PATH = join(directory, "app.db");
 
     try {
-      await publishAppLexicons(network);
-      const [{ bootstrapWorkspace }, { ensureMemberListSpace, listSpaceMembers, putAuthorityRecord, putSpaceMember }, { executeOperatorOperation, listInboxWriters }, { mintSpaceCredential }, { readIndependentChannelPage }, { inboxUri, reactionRecordKey, requestRecordKey, spaceRecordUri, subjectKey, tidNow }, { readChannelPage }, { parseWorkspaceRef }, { getRawDb }, { resolvePds }] = await Promise.all([
-        import("@/workspaces/bootstrap"), import("@/atproto/space-ops"), import("@/operator/operations"), import("@/atproto/space-credential"), import("@/reader/independent"), import("@/protocol/keys"), import("@/workspaces/channel-sync"), import("@/operator/security"), import("@/lib/db"), import("@/atproto/identity"),
+      await publishAppLexicons(fixture);
+      const [{ createWorkspace }, { ensureMemberListSpace, listSpaceMembers, putAuthorityRecord, putSpaceMember }, { executeOperatorOperation, listInboxWriters }, { mintSpaceCredential, sessionCredentialDeps }, { readIndependentChannelPage }, { inboxUri, reactionRecordKey, requestRecordKey, spaceRecordUri, subjectKey, tidNow }, { parseWorkspaceRef }, { getRawDb }, { resolvePds }, { createEngine }] = await Promise.all([
+        import("@flock/operator/operator/kinds/create-workspace"), import("@flock/operator/atproto/space-ops"), import("@flock/operator/operator/operations"), import("@flock/operator/atproto/space-credential"), import("@flock/reader/independent"), import("@flock/protocol/keys"), import("@flock/operator/operator/actor"), import("@flock/operator/lib/db"), import("@flock/operator/atproto/identity"),
+        import("@flock/client/engine"),
       ]);
       const owner = await createActor(network.pds, "scaleowner", "test");
       const ownerSession = sessionFor(owner);
-      const bootstrap = await bootstrapWorkspace(ownerSession as never, { name: "Scale Workspace", operationId: tidNow() });
+      const bootstrap = await createWorkspace(ownerSession as never, { creator: owner.did, name: "Scale Workspace", operationId: tidNow() });
       assert.equal(bootstrap.state, "completed");
       const registration = getRawDb().prepare("INSERT INTO notification_registration (service_ref,space_uri,expires_at) VALUES (?,?,?)");
       for (const space of [bootstrap.workspace, bootstrap.channel]) {
@@ -85,8 +89,8 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
       const channels = [bootstrap.channel];
       for (let index = 1; index < CHANNELS - 1; index += 1) {
         const skey = `${workspaceSkey}-scale-${String(index).padStart(3, "0")}`;
-        const uri = await ensureMemberListSpace(ownerSession as never, "org.slack.channel", skey);
-        await putAuthorityRecord(ownerSession as never, bootstrap.workspace, "org.slack.directory", skey, {
+        const uri = await ensureMemberListSpace(ownerSession as never, "new.flock.channel", skey);
+        await putAuthorityRecord(ownerSession as never, bootstrap.workspace, "new.flock.directory", skey, {
           skey, name: `scale-${String(index).padStart(3, "0")}`, visibility: index === CHANNELS - 2 ? "private" : "public",
         });
         channels.push(uri);
@@ -95,7 +99,7 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
       const accountStartedAt = performance.now();
       const members = await mapLimited(Array.from({ length: MEMBERS - 1 }, (_, index) => index), 8, async (index) => {
         const extra = index % 2 === 0;
-        return createActor(extra ? network.extraPdses[0] : network.pds, `scale${String(index).padStart(3, "0")}`, extra ? "test2" : "test");
+        return createActor(extra ? fixture.extraPdses[0] : fixture.pds, `scale${String(index).padStart(3, "0")}`, extra ? "test2" : "test");
       });
       const accountMs = elapsed(accountStartedAt);
       process.stdout.write(`PERFORMANCE_PROGRESS accounts=${MEMBERS} elapsedMs=${accountMs}\n`);
@@ -113,16 +117,16 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
         memberTasks.push(() => putSpaceMember(ownerSession as never, privateChannel, member.did, true, true));
       }
       await mapLimited(memberTasks, 8, (task) => task());
-      await mapLimited(seededMembers, 8, (member) => putAuthorityRecord(ownerSession as never, bootstrap.workspace, "org.slack.workspace.roster", subjectKey(member.did), {
+      await mapLimited(seededMembers, 8, (member) => putAuthorityRecord(ownerSession as never, bootstrap.workspace, "new.flock.workspace.roster", subjectKey(member.did), {
         subject: member.did, active: true, updatedAt: new Date().toISOString(),
       }).then(() => undefined));
       const membershipSetupMs = elapsed(rosterStartedAt);
       process.stdout.write(`PERFORMANCE_PROGRESS memberAndRosterSetup elapsedMs=${membershipSetupMs}\n`);
-      await mapLimited(seededMembers.slice(0, MEMBERS - 2), 8, (member) => putAuthorityRecord(ownerSession as never, privateChannel, "org.slack.channel.roster", subjectKey(member.did), {
+      await mapLimited(seededMembers.slice(0, MEMBERS - 2), 8, (member) => putAuthorityRecord(ownerSession as never, privateChannel, "new.flock.channel.roster", subjectKey(member.did), {
         subject: member.did, active: true, updatedAt: new Date().toISOString(),
       }).then(() => undefined));
       const privateSkey = privateChannel.split("/").at(-1)!;
-      await putAuthorityRecord(ownerSession as never, bootstrap.workspace, "org.slack.admin", subjectKey(members[0].did), {
+      await putAuthorityRecord(ownerSession as never, bootstrap.workspace, "new.flock.admin", subjectKey(members[0].did), {
         subject: members[0].did, active: true, updatedAt: new Date().toISOString(),
       });
       await putSpaceMember(ownerSession as never, inbox, members[0].did, true, true);
@@ -147,7 +151,7 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
       } as never, tidNow(), { kind: "createChannel", skey: "scale-final", name: "scale-final", visibility: "public" });
       const channelCreateAtEnvelopeMs = elapsed(channelCreateStartedAt);
       assert.equal(channelCreateOperation.state, "completed");
-      channels.push(`at://${owner.did}/space/org.slack.channel/${workspaceSkey}-scale-final`);
+      channels.push(`at://${owner.did}/space/new.flock.channel/${workspaceSkey}-scale-final`);
       assert.equal(channels.length, CHANNELS);
       assert.equal((await listSpaceMembers(ownerSession as never, channels.at(-1)!)).length, MEMBERS - 1);
 
@@ -157,8 +161,8 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
         const requestId = tidNow();
         const rkey = requestRecordKey(privateChannel, requester.did);
         const write = {
-          $type: "com.atproto.space.applyWrites#create", collection: "org.slack.joinRequest", rkey,
-          value: { $type: "org.slack.joinRequest", channelSkey: privateSkey, requestId, createdAt: new Date().toISOString() },
+          $type: "com.atproto.space.applyWrites#create", collection: "new.flock.joinRequest", rkey,
+          value: { $type: "new.flock.joinRequest", channelSkey: privateSkey, requestId, createdAt: new Date().toISOString() },
         };
         await requester.pds.getAgent().com.atproto.space.applyWrites({ space: inbox, repo: requester.did, writes: [write] }, {
           headers: { authorization: `Bearer ${requester.accessJwt}` },
@@ -172,7 +176,7 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
       const recoveredRequests = await mapLimited(inboxWriters.writers, 8, async (repoDid) => {
         const client = inboxCredential.client(await resolvePds(repoDid));
         const page = await client.query<{ records: Array<{ rkey: string }> }>("com.atproto.space.listRecords", {
-          space: inbox, repo: repoDid, collection: "org.slack.joinRequest", limit: 100,
+          space: inbox, repo: repoDid, collection: "new.flock.joinRequest", limit: 100,
         });
         return page.records.length;
       });
@@ -196,8 +200,8 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
             const timestamp = stamps[channelIndex * MESSAGES + sequence]!;
             const rkey = tidNow(timestamp, 0);
             return {
-              $type: "com.atproto.space.applyWrites#create", collection: "org.slack.channel.message", rkey,
-              value: { $type: "org.slack.channel.message", text: `scale channel ${channelIndex} message ${sequence}`, createdAt: new Date(timestamp).toISOString() },
+              $type: "com.atproto.space.applyWrites#create", collection: "new.flock.channel.message", rkey,
+              value: { $type: "new.flock.channel.message", text: `scale channel ${channelIndex} message ${sequence}`, createdAt: new Date(timestamp).toISOString() },
             };
           });
           const response = await actor.pds.getAgent().com.atproto.space.applyWrites({ space: channel, repo: actor.did, writes }, { headers: { authorization: `Bearer ${actor.accessJwt}` } });
@@ -222,14 +226,14 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
           const messageAuthorIndex = sequence % writers.length;
           const timestamp = stamps[channelIndex * MESSAGES + sequence]!;
           const messageRkey = tidNow(timestamp, 0);
-          const messageUri = spaceRecordUri(channel, writers[messageAuthorIndex].did, "org.slack.channel.message", messageRkey);
+          const messageUri = spaceRecordUri(channel, writers[messageAuthorIndex].did, "new.flock.channel.message", messageRkey);
           const rkey = reactionRecordKey(messageUri, "👍", reactionAuthor.did);
           writes.push({
             $type: "com.atproto.space.applyWrites#create",
-            collection: "org.slack.channel.reaction",
+            collection: "new.flock.channel.reaction",
             rkey,
             value: {
-              $type: "org.slack.channel.reaction",
+              $type: "new.flock.channel.reaction",
               subject: messageUri,
               emoji: "👍",
               createdAt: new Date(timestamp).toISOString(),
@@ -260,25 +264,71 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
       const listedWriters = await authorityCredential.client(network.pds.url).query<{ repos: Array<{ did: string }> }>("com.atproto.space.listRepos", { space: bootstrap.channel, limit: 500 });
       assert.equal(listedWriters.repos.length, MEMBERS - 1, "each target-channel member wrote at least one message");
       const independentStartedAt = performance.now();
-      const independentPage = await readIndependentChannelPage(ownerSession as never, bootstrap.workspace, `${workspaceSkey}-general`);
+      const independentPage = await readIndependentChannelPage(sessionCredentialDeps(ownerSession as never), bootstrap.workspace, `${workspaceSkey}-general`);
       const independentReadMs = elapsed(independentStartedAt);
       assert.equal(independentPage.messages.length, 100);
       assert.equal(independentPage.messages[0]?.value.text, `scale channel 0 message ${MESSAGES - 1}`);
       assert.equal(independentPage.reactions.length, 100, "every message on the latest page has its supported-size reaction");
       assert.equal(independentPage.degraded, false, "exactly 20,000 reactions per channel stays within the supported envelope");
 
-      const primaryStartedAt = performance.now();
-      const primaryPage = await readChannelPage(ownerSession as never, bootstrap.workspace, `${workspaceSkey}-general`);
-      const primaryReadMs = elapsed(primaryStartedAt);
-      assert.equal(primaryPage.messages.length, 100);
-      assert.equal(primaryPage.messages[0]?.value.text, `scale channel 0 message ${MESSAGES - 1}`);
-      assert.equal(primaryPage.reactions.length, 100, "the primary reader returns reactions for the full latest page");
-      assert.equal(primaryPage.degraded, false, "the primary reader does not mark an exact-cap reaction history degraded");
+      // The bar for later phases (`.ai/plans/platform-refactor.md`, R0 baseline and R4 gate): each latest-100 read repeated,
+      // reported as median and 95th percentile. The independent reader always reads from scratch; the engine is timed from an
+      // empty store (a first open) and with a warm one (a reopen). The readers take turns, so load from elsewhere on the machine
+      // falls on both alike.
+      const channelSkey = `${workspaceSkey}-general`;
       const normalized = (records: Array<{ uri: string; value: Record<string, unknown> }>) => records
         .map(({ uri, value }) => ({ uri, value }))
         .sort((left, right) => left.uri.localeCompare(right.uri));
-      assert.deepEqual(normalized(independentPage.messages), normalized(primaryPage.messages), "the two readers return the same latest-100 URI and content set");
-      assert.deepEqual(independentPage.reactions, primaryPage.reactions, "the two readers return the same latest-100 reaction records");
+      const engineRef = { workspace: bootstrap.workspace, skey: channelSkey };
+      const engineTransport = { did: owner.did, ...sessionCredentialDeps(ownerSession as never) };
+      const engineColdReadsMs: number[] = [];
+      const engineWarmReadsMs: number[] = [];
+      let warmEngine = createEngine(engineTransport);
+      const engineColdRead = async () => {
+        warmEngine = createEngine(engineTransport);
+        const coldRun = performance.now();
+        const coldPage = await warmEngine.channels.readPage(engineRef);
+        engineColdReadsMs.push(elapsed(coldRun));
+        return coldPage;
+      };
+      const enginePage = await engineColdRead();
+      assert.equal(enginePage.messages.length, 100);
+      assert.equal(enginePage.messages[0]?.value.text, `scale channel 0 message ${MESSAGES - 1}`);
+      assert.equal(enginePage.reactions.length, 100, "the engine returns reactions for the full latest page");
+      assert.deepEqual(enginePage.degradedReasons, [], "the engine does not mark an exact-cap reaction history degraded");
+      assert.equal(enginePage.complete, true, "the engine's first read is complete");
+      assert.deepEqual(normalized(independentPage.messages), normalized(enginePage.messages), "the two readers return the same latest-100 URI and content set");
+      assert.deepEqual(normalized(independentPage.reactions), normalized(enginePage.reactions), "the two readers return the same latest-100 reaction records");
+
+      const loadAverageBeforeReads = loadavg()[0]!;
+      const independentReadsMs = [independentReadMs];
+      // Every timed read must return the page the first, fully checked reads returned; it is checked after its timer stops.
+      const assertSameIndependentPage = (page: { messages: Array<{ uri: string; value: Record<string, unknown> }>; reactions: Array<{ uri: string; value: Record<string, unknown> }>; degraded: boolean }, what: string) => {
+        assert.deepEqual(normalized(page.messages), normalized(enginePage.messages), `${what} returns the same latest-100 messages`);
+        assert.deepEqual(normalized(page.reactions), normalized(enginePage.reactions), `${what} returns the same reactions`);
+        assert.equal(page.degraded, false, `${what} is not degraded`);
+      };
+      const assertSameEnginePage = (page: Awaited<ReturnType<ReturnType<typeof createEngine>["channels"]["readPage"]>>, what: string) => {
+        assert.deepEqual(normalized(page.messages), normalized(enginePage.messages), `${what} returns the same latest-100 messages`);
+        assert.deepEqual(normalized(page.reactions), normalized(enginePage.reactions), `${what} returns the same reactions`);
+        assert.equal(page.reactions.length, 100, `${what} has every reaction on the latest page`);
+        assert.deepEqual(page.degradedReasons, [], `${what} is not degraded`);
+        assert.equal(page.complete, true, `${what} is complete`);
+      };
+      for (let run = 1; run < READ_RUNS; run += 1) {
+        const independentRun = performance.now();
+        const independentRepeat = await readIndependentChannelPage(sessionCredentialDeps(ownerSession as never), bootstrap.workspace, channelSkey);
+        independentReadsMs.push(elapsed(independentRun));
+        assertSameIndependentPage(independentRepeat, "a repeated independent read");
+        assertSameEnginePage(await engineColdRead(), "an engine read from an empty store");
+      }
+      for (let run = 0; run < READ_RUNS; run += 1) {
+        const engineWarmRun = performance.now();
+        const engineWarmPage = await warmEngine.channels.readPage(engineRef);
+        engineWarmReadsMs.push(elapsed(engineWarmRun));
+        assertSameEnginePage(engineWarmPage, "a warm engine read");
+      }
+      const loadAverageAfterReads = loadavg()[0]!;
 
       const allWorkspaceMembers = [owner.did, ...members.map((member) => member.did)];
       const visibilityStartedAt = performance.now();
@@ -326,7 +376,11 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
         privateRequestWriteMs: requestWriteMs,
         inboxWriterReconciliationMs,
         independentLatest100ReadMs: independentReadMs,
-        primaryLatest100ReadMs: primaryReadMs,
+        independentLatest100Reads: summary(independentReadsMs),
+        engineLatest100ColdReads: summary(engineColdReadsMs),
+        engineLatest100WarmReads: summary(engineWarmReadsMs),
+        // The machine's one-minute load average around the timed reads, this test's own work included.
+        machineLoadAverage: { beforeReads: loadAverageBeforeReads, afterReads: loadAverageAfterReads },
       };
       process.stdout.write(`PERFORMANCE_ENVELOPE ${JSON.stringify(report)}\n`);
     } finally {
@@ -349,7 +403,7 @@ async function publishAppLexicons(network: TestNetwork): Promise<void> {
   assert.ok(network.lexiconAuthority, "fixture must expose its lexicon authority");
   const agent = network.pds.getAgent();
   const session = await agent.com.atproto.server.createSession({ identifier: "lex-authority.test", password: "hunter2" });
-  const root = join(process.cwd(), "lexicons/org/slack");
+  const root = join(process.cwd(), "packages/protocol/lexicons/new/flock");
   const { readdir, readFile } = await import("node:fs/promises");
   const files = await readdir(root, { recursive: true });
   const published = new Set<string>();
@@ -379,6 +433,13 @@ function sessionFor(actor: Actor): Session {
 
 function elapsed(startedAt: number): number {
   return Math.round(performance.now() - startedAt);
+}
+
+/** Median and 95th percentile, with every run in the order it ran, so one slow run can be told from a slow read. */
+function summary(samples: number[]): { runs: number; medianMs: number; p95Ms: number; samplesMs: number[] } {
+  const sorted = [...samples].sort((left, right) => left - right);
+  const at = (fraction: number) => sorted[Math.min(sorted.length - 1, Math.ceil(fraction * sorted.length) - 1)]!;
+  return { runs: sorted.length, medianMs: at(0.5), p95Ms: at(0.95), samplesMs: samples.map(Math.round) };
 }
 
 async function mapLimited<T, R>(items: T[], concurrency: number, action: (item: T, index: number) => Promise<R>): Promise<R[]> {

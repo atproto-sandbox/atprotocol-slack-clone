@@ -1,0 +1,13 @@
+{
+  "lexicon": 1,
+  "id": "new.flock.dm.conversation",
+  "defs": {
+    "main": {
+      "type": "space",
+      "key": "tid",
+      "name": "DM conversation half",
+      "collections": ["new.flock.dm.header", "new.flock.dm.message", "new.flock.dm.reaction"],
+      "description": "One participant's half of a conversation; only the owner writes to it."
+    }
+  }
+}

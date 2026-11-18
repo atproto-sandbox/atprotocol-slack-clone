@@ -34,7 +34,7 @@ Build a small, interoperable Slack-style workspace on atproto spaces. PDS member
 ## Phase 1 — App foundation and authority records
 
 1. Create the separate app checkout and establish build, lint, typecheck, deployment configuration, and the pinned PDS development environment.
-2. Publish and generate `org.slack.*` lexicons and space-type permission sets. Define validators for stable record keys, request generations, same-channel reply references, message length, and authority authorship.
+2. Publish and generate `new.flock.*` lexicons and space-type permission sets. Define validators for stable record keys, request generations, same-channel reply references, message length, and authority authorship.
 3. Implement OAuth login, narrowly scoped member permissions, space credential acquisition/renewal, and shared repo sync primitives. Keep user OAuth sessions, workspace authority sessions, and space credentials separate.
 4. Implement the authority operator's authenticated admin request contract, operation lookup, and `listInboxWriters` recovery method. Persist only an operation journal and audit events; never use its database as the current membership or role source. The recovery method returns writer DIDs only; the admin client reads request records using its own inbox credential.
 5. Implement canonical upsert/read helpers for the directory, workspace roster, admin state, private roster, join requests, and decisions. Stable keys use the PRD's exact hash encoding.

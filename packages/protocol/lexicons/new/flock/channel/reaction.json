@@ -1,0 +1,19 @@
+{
+  "lexicon": 1,
+  "id": "new.flock.channel.reaction",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": ["subject", "emoji", "createdAt"],
+        "properties": {
+          "subject": { "type": "string", "format": "at-uri" },
+          "emoji": { "type": "string", "minLength": 1, "maxLength": 128, "maxGraphemes": 32 },
+          "createdAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

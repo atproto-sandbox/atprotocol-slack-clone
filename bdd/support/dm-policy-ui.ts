@@ -1,17 +1,17 @@
 import assert from "node:assert/strict";
 import { createDecipheriv } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { generateSpaceKey } from "@/atproto/space-key";
+import { generateSpaceKey } from "@flock/protocol/atproto/space-key";
 import type { Frame, Locator, Page, Response as PlaywrightResponse } from "@playwright/test";
 import Database from "better-sqlite3";
-import { listBoundedRecords, listBoundedRepos } from "@/atproto/record-pages";
-import { mintSpaceCredentialWith, SpaceCredentialError, type SpaceCredential, type SpaceCredentialDeps } from "@/atproto/space-credential-core";
-import { AtprotoClient } from "@/atproto/xrpc";
-import { dmConversationUri, dmInboxUri, parseDmConversationUri, tidNow } from "@/protocol/keys";
+import { listBoundedRecords, listBoundedRepos } from "@flock/protocol/atproto/record-pages";
+import { mintSpaceCredentialWith, SpaceCredentialError, type SpaceCredential, type SpaceCredentialDeps } from "@flock/protocol/atproto/space-credential-core";
+import { AtprotoClient } from "@flock/protocol/atproto/xrpc";
+import { dmConversationUri, dmInboxUri, parseDmConversationUri, tidNow } from "@flock/protocol/keys";
 import type { FixtureAccount } from "../../protocol-tests/support/app-fixture";
-import { completeConsent, signInIfPrompted } from "./ui";
+import { signInFromLoginFormAt, waitForOrigin } from "./ui";
 import type { Actor, AppWorld } from "./world";
-import { memberspacePolicy } from "@/atproto/space-policy";
+import { memberspacePolicy } from "@flock/protocol/atproto/space-policy";
 
 // One helper per thing a person does with direct messages, plus an independent Node-side view of the PDS
 // (`DmpProbe`) so a step can check what the recipient's PDS tracks without trusting the browser client.
@@ -32,45 +32,22 @@ export async function dmpPoll<T>(read: () => Promise<T | undefined | null | fals
 
 // --- Signing in and connecting direct messages ------------------------------------------------------
 
-/** Signs in to the app served at `origin` with the actor's DID and approves the PDS consent screen. */
-export async function dmpSignInAt(actor: Actor, origin: string): Promise<void> {
+/**
+ * Signs in to the app served at `origin` with the actor's DID and approves its one grant (workspaces, channels, DMs and the
+ * operator). Returns the scopes the consent screen listed.
+ */
+export async function dmpSignInAt(actor: Actor, origin: string): Promise<string[]> {
   await actor.page.goto(origin);
-  await actor.page.getByLabel("Your AT Protocol handle").fill(actor.did);
-  await actor.page.getByRole("button", { name: /Continue with atproto/i }).click();
-  await actor.page.locator("input[name=password]").waitFor({ state: "visible" });
-  await completeConsent(actor);
-  await dmpWaitForOrigin(actor, origin);
+  return signInFromLoginFormAt(actor, origin);
 }
 
 export async function dmpWaitForOrigin(actor: Actor, origin: string): Promise<void> {
-  await actor.page.waitForURL((url) => url.origin === origin && !url.pathname.startsWith("/oauth"), { timeout: 30_000 });
+  await waitForOrigin(actor, origin);
 }
 
-/** Clicks the sidebar's connect button; when it never shows, says what the sidebar showed instead, so a rare miss can be diagnosed. */
-async function clickConnectDms(actor: Actor): Promise<void> {
-  await actor.page.getByRole("button", { name: /Connect direct messages/ }).click().catch(async (error: unknown) => {
-    const sidebar = await actor.page.locator(".channel-nav").first().innerText({ timeout: 2_000 }).catch(() => "(no sidebar)");
-    throw new Error(`The "Connect direct messages" button never appeared at ${actor.page.url()}; the sidebar showed: ${sidebar.replace(/\s+/g, " ")}`, { cause: error });
-  });
-}
-
-/** The separate, browser-held DM sign-in: its own consent screen, its own OAuth client. */
+/** Direct messages run on the browser session connected at sign-in: this only waits for them to be ready. */
 export async function dmpConnectDms(actor: Actor): Promise<void> {
-  await clickConnectDms(actor);
-  await completeConsent(actor);
   await dmpWaitForDmReady(actor);
-}
-
-/** Like `dmpConnectDms`, and reports the scopes the PDS consent screen listed for this separate DM sign-in. */
-export async function dmpConnectDmsReadingScope(actor: Actor): Promise<string[]> {
-  await clickConnectDms(actor);
-  await actor.page.waitForURL(/\/oauth\/authorize\?/, { timeout: 30_000 });
-  await signInIfPrompted(actor);
-  await actor.page.getByRole("button", { name: "Authorize", exact: true }).waitFor({ state: "visible" });
-  const shown = await actor.page.evaluate(() => (window as unknown as { __authorizeData?: { scope?: string } }).__authorizeData?.scope ?? "");
-  await actor.page.getByRole("button", { name: "Authorize", exact: true }).click();
-  await dmpWaitForDmReady(actor);
-  return shown.split(" ").filter(Boolean);
 }
 
 export async function dmpWaitForDmReady(actor: Actor): Promise<void> {
@@ -321,7 +298,7 @@ export type DmpMessageRecord = { rkey: string; text: string };
 
 /** The conversation keys of the halves an account owns, from its own PDS. */
 export async function dmpOwnConvKeys(world: AppWorld, owner: FixtureAccount): Promise<string[]> {
-  const listed = await world.pdsGet<{ spaces?: Array<{ uri: string }> }>(owner, "com.atproto.space.listSpaces", { spaceType: "org.slack.dm.conversation", limit: "100" });
+  const listed = await world.pdsGet<{ spaces?: Array<{ uri: string }> }>(owner, "com.atproto.space.listSpaces", { spaceType: "new.flock.dm.conversation", limit: "100" });
   if (listed.status !== 200) throw new Error(`listSpaces for ${owner.handle}: ${JSON.stringify(listed.body)}`);
   return (listed.body.spaces ?? []).flatMap((space) => {
     const parsed = parseDmConversationUri(space.uri);
@@ -332,7 +309,7 @@ export async function dmpOwnConvKeys(world: AppWorld, owner: FixtureAccount): Pr
 /** An author's own messages in their own half, as their PDS stores them. */
 export async function dmpOwnMessages(world: AppWorld, author: FixtureAccount, convKey: string): Promise<DmpMessageRecord[]> {
   const listed = await world.pdsGet<{ records?: Array<{ rkey: string; value: { text: string } }> }>(author, "com.atproto.space.listRecords", {
-    space: dmConversationUri(author.did, convKey), repo: author.did, collection: "org.slack.dm.message", limit: "100",
+    space: dmConversationUri(author.did, convKey), repo: author.did, collection: "new.flock.dm.message", limit: "100",
   });
   if (listed.status !== 200) throw new Error(`listRecords for ${author.handle}: ${JSON.stringify(listed.body)}`);
   return (listed.body.records ?? []).map((record) => ({ rkey: record.rkey, text: record.value.text }));
@@ -340,7 +317,7 @@ export async function dmpOwnMessages(world: AppWorld, author: FixtureAccount, co
 
 export async function dmpOwnHeader(world: AppWorld, owner: FixtureAccount, convKey: string): Promise<{ convKey: string; participants: string[]; createdAt: string }> {
   const header = await world.pdsGet<{ value: { convKey: string; participants: string[]; createdAt: string } }>(owner, "com.atproto.space.getRecord", {
-    space: dmConversationUri(owner.did, convKey), repo: owner.did, collection: "org.slack.dm.header", rkey: "self",
+    space: dmConversationUri(owner.did, convKey), repo: owner.did, collection: "new.flock.dm.header", rkey: "self",
   });
   if (header.status !== 200) throw new Error(`getRecord header for ${owner.handle}: ${JSON.stringify(header.body)}`);
   return header.body.value;
@@ -358,9 +335,9 @@ export type DmpHostileHalf = {
 export async function dmpWriteHostileHalf(world: AppWorld, half: DmpHostileHalf): Promise<{ messageRkey: string }> {
   const space = dmConversationUri(half.owner.did, half.convKey);
   const steps: Array<[string, unknown]> = [
-    ["com.atproto.space.createSpace", { spaceType: "org.slack.dm.conversation", skey: half.convKey, policy: memberspacePolicy() }],
+    ["com.atproto.space.createSpace", { spaceType: "new.flock.dm.conversation", skey: half.convKey, policy: memberspacePolicy() }],
     ...half.readers.map((reader): [string, unknown] => ["com.atproto.memberspace.putMember", { space, did: reader.did, read: true, write: false }]),
-    ["com.atproto.space.putRecord", { space, repo: half.owner.did, collection: "org.slack.dm.header", rkey: "self", record: { $type: "org.slack.dm.header", ...half.header, createdAt: new Date().toISOString() } }],
+    ["com.atproto.space.putRecord", { space, repo: half.owner.did, collection: "new.flock.dm.header", rkey: "self", record: { $type: "new.flock.dm.header", ...half.header, createdAt: new Date().toISOString() } }],
   ];
   for (const [nsid, input] of steps) {
     const result = await world.pdsPost(half.owner, nsid, input);
@@ -368,8 +345,8 @@ export async function dmpWriteHostileHalf(world: AppWorld, half: DmpHostileHalf)
   }
   const messageRkey = tidNow();
   const written = await world.pdsPost(half.owner, "com.atproto.space.putRecord", {
-    space, repo: half.owner.did, collection: "org.slack.dm.message", rkey: messageRkey,
-    record: { $type: "org.slack.dm.message", text: half.message, createdAt: new Date().toISOString() },
+    space, repo: half.owner.did, collection: "new.flock.dm.message", rkey: messageRkey,
+    record: { $type: "new.flock.dm.message", text: half.message, createdAt: new Date().toISOString() },
   });
   if (written.status !== 200) throw new Error(`hostile message as ${half.owner.handle}: ${written.status} ${JSON.stringify(written.body)}`);
   return { messageRkey };
@@ -477,15 +454,15 @@ export function dmpEverythingTheAppStored(databasePath: string, hexKey: string):
   }
 }
 
-export type DmpSavedServerSession = { did: string; scope: string[]; clientScope: string[] };
+export type DmpAuthorityGrant = { did: string; scope: string[] };
 
-/** The OAuth sessions the app server holds, decrypted: the scope each one was actually granted by the PDS. */
-export function dmpServerSessions(databasePath: string, hexKey: string): DmpSavedServerSession[] {
+/** The OAuth grants the app server holds, decrypted: only workspace authorities' grants to its operator, each with its scope. */
+export function dmpAuthorityGrants(databasePath: string, hexKey: string): DmpAuthorityGrant[] {
   const db = new Database(databasePath, { readonly: true, fileMustExist: true });
   try {
-    return (db.prepare("SELECT key, value FROM oauth_session").all() as Array<{ key: string; value: string }>).map(({ key, value }) => {
-      const saved = JSON.parse(dmpDecrypt(hexKey, value)) as { tokenSet: { scope?: string }; oauthClientScope?: string };
-      return { did: key, scope: (saved.tokenSet.scope ?? "").split(" ").filter(Boolean), clientScope: (saved.oauthClientScope ?? "").split(" ").filter(Boolean) };
+    return (db.prepare("SELECT key, value FROM authority_grant").all() as Array<{ key: string; value: string }>).map(({ key, value }) => {
+      const saved = JSON.parse(dmpDecrypt(hexKey, value)) as { tokenSet: { scope?: string } };
+      return { did: key, scope: (saved.tokenSet.scope ?? "").split(" ").filter(Boolean) };
     });
   } finally {
     db.close();
@@ -497,7 +474,7 @@ export function dmpFilesContain(databasePath: string, needle: string): boolean {
   return ["", "-wal", "-shm"].some((suffix) => existsSync(`${databasePath}${suffix}`) && readFileSync(`${databasePath}${suffix}`).includes(Buffer.from(needle)));
 }
 
-const APP_DATA_TABLES = ["operation", "operation_workspace_catalog", "audit_event", "sync_cursor", "channel_record_cache", "workspace_channel_cache", "space_collection_cursor"];
+const APP_DATA_TABLES = ["operation", "operation_workspace_catalog", "audit_event"];
 
 /** How many rows of workspace, channel or operation data an app's database holds (zero for a database that was never written). */
 export function dmpAppDataRowCount(databasePath: string): number {

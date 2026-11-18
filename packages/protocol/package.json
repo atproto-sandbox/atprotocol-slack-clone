@@ -1,0 +1,18 @@
+{
+  "name": "@flock/protocol",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./lexicons/*.json": "./lexicons/*.json",
+    "./*": "./src/*.ts"
+  },
+  "dependencies": {
+    "@atproto/crypto": "0.0.0-spaces-alpha-20261029171913",
+    "@atproto/lex-data": "0.0.0-spaces-alpha-20261029171913",
+    "@atproto/lexicon": "0.0.0-spaces-alpha-20261029171913",
+    "@atproto/space": "0.0.0-spaces-alpha-20261029171913",
+    "@atproto/xrpc": "0.8.13",
+    "@noble/hashes": "1.8.0",
+    "multiformats": "13.4.2"
+  }
+}

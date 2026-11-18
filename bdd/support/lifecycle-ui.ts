@@ -5,18 +5,19 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { generateSpaceKey } from "@/atproto/space-key";
+import { generateSpaceKey } from "@flock/protocol/atproto/space-key";
 import type { Locator } from "@playwright/test";
 import Database from "better-sqlite3";
-import { inviteLinkFor } from "@/app/ui/client-api";
-import { AtprotoClient, XrpcError } from "@/atproto/xrpc";
-import { mintSpaceCredentialWith, SpaceCredential, SpaceCredentialError } from "@/atproto/space-credential-core";
-import { inboxUri, subjectKey } from "@/protocol/keys";
+import { inviteLinkFor } from "@flock/web/app/ui/client-api";
+import { AtprotoClient, XrpcError } from "@flock/protocol/atproto/xrpc";
+import { mintSpaceCredentialWith, SpaceCredential, SpaceCredentialError } from "@flock/protocol/atproto/space-credential-core";
+import { inboxUri, subjectKey } from "@flock/protocol/keys";
 import type { Actor, AppWorld } from "./world";
-import { memberspacePolicy } from "@/atproto/space-policy";
+import { submitAndWait, type Executed } from "./operator-calls";
+import { memberspacePolicy } from "@flock/protocol/atproto/space-policy";
 import {
-  approveAdminControls, completeConsent, createWorkspaceAs, escapeRegExp, eventually, inviteMemberAs,
-  joinFromInvitation, openInviteLinkAndSignIn, waitForApp,
+  waitForAdminControls, createWorkspaceAs, escapeRegExp, inviteMemberAs,
+  joinFromInvitation, openInviteLinkAndSignIn,
 } from "./ui";
 
 // Helpers for the membership, privacy and archive lifecycle scenarios: what a person does in the app, plus the
@@ -24,8 +25,6 @@ import {
 
 export type Member = { did: string; read: boolean; write: boolean };
 export type ChannelRef = { name: string; skey: string; uri: string; visibility: string };
-export type OperationView = { operationId: string; requestHash: string; state: string; completedSteps: string[]; error?: string; updatedAt: string };
-export type Executed = { status: number; operationId: string; request: Record<string, unknown>; operation?: OperationView; error?: string };
 export type JournalEntry = {
   operationId: string; workspace: string; workspaceUri: string | null; actor: string; requestHash: string; state: string; steps: string[];
   error: string | null; request: Record<string, unknown>; createdAt: number; updatedAt: number;
@@ -80,16 +79,24 @@ export async function subjectRecordActive(world: AppWorld, owner: Actor, space: 
 
 export async function directory(world: AppWorld, owner: Actor): Promise<ChannelRef[]> {
   const result = await world.pdsGet<{ records?: Array<{ value: { skey: string; name: string; visibility: string } }> }>(
-    owner, "com.atproto.space.listRecords", { space: world.workspaceUri, repo: owner.did, collection: "org.slack.directory", limit: "100" },
+    owner, "com.atproto.space.listRecords", { space: world.workspaceUri, repo: owner.did, collection: "new.flock.directory", limit: "100" },
   );
   assert.equal(result.status, 200, JSON.stringify(result.body));
   return (result.body.records ?? []).map(({ value }) => ({
-    name: value.name, skey: value.skey, visibility: value.visibility, uri: `at://${owner.did}/space/org.slack.channel/${value.skey}`,
+    name: value.name, skey: value.skey, visibility: value.visibility, uri: `at://${owner.did}/space/new.flock.channel/${value.skey}`,
   }));
 }
 
+/** The scenario's account that owns the workspace: the one its URI names (the "owner", or a dedicated workspace account). */
+function workspaceAuthority(world: AppWorld): Actor {
+  const did = world.workspaceUri.split("/")[2];
+  const authority = [...world.actors.values()].find((actor) => actor.did === did);
+  assert.ok(authority, `no actor of this scenario owns ${world.workspaceUri}`);
+  return authority;
+}
+
 export async function channelNamed(world: AppWorld, name: string): Promise<ChannelRef> {
-  const channel = (await directory(world, actorNamed(world, "owner"))).find((entry) => entry.name === name);
+  const channel = (await directory(world, workspaceAuthority(world))).find((entry) => entry.name === name);
   assert.ok(channel, `the directory has no channel named ${name}`);
   return channel;
 }
@@ -205,16 +212,12 @@ export async function eventuallyAsync<T>(read: () => Promise<T | undefined | nul
   }
 }
 
-export function recentCalls(actor: Actor, count = 12): string {
-  return actor.calls.slice(-count).map((call) => `${call.method} ${call.path} -> ${call.status} ${call.responseBody.slice(0, 120)}`).join("\n");
-}
-
 // --- Driving the app ---------------------------------------------------------------------------------
 
 export async function workspaceWithAdmin(world: AppWorld): Promise<Actor> {
   const owner = await world.actor("owner", 0);
   await createWorkspaceAs(world, owner);
-  await approveAdminControls(world, owner);
+  await waitForAdminControls(world, owner);
   return owner;
 }
 
@@ -224,19 +227,6 @@ export async function showWorkspaceHome(world: AppWorld, actor: Actor): Promise<
 }
 
 /** Runs `act`, then waits for the app's reply to the operator call it caused and decodes it. */
-export async function submitAndWait(world: AppWorld, actor: Actor, act: () => Promise<void>): Promise<Executed> {
-  const before = world.callsTo(actor, "/api/operator/execute").length;
-  await act();
-  const call = await eventually(() => world.callsTo(actor, "/api/operator/execute")[before], { what: "the operator reply", timeoutMs: 120_000 });
-  return decodeExecuted(call.status, call.requestBody, call.responseBody);
-}
-
-export function decodeExecuted(status: number, requestBody: string, responseBody: string): Executed {
-  const request = JSON.parse(requestBody) as { operationId: string; request: Record<string, unknown> };
-  const body = (responseBody ? JSON.parse(responseBody) : {}) as { operation?: OperationView; error?: string };
-  return { status, operationId: request.operationId, request: request.request, operation: body.operation, error: body.error };
-}
-
 export async function createChannelAs(world: AppWorld, owner: Actor, name: string, visibility: "public" | "private", memberDids: string[] = []): Promise<ChannelRef> {
   await showWorkspaceHome(world, owner);
   const done = await submitAndWait(world, owner, async () => {
@@ -262,49 +252,10 @@ export async function removeMemberViaRoster(world: AppWorld, admin: Actor, did: 
 
 export async function joinWorkspaceAs(world: AppWorld, member: Actor): Promise<void> {
   await openInviteLinkAndSignIn(world, member, inviteLinkFor(world.appOrigin, world.workspaceUri));
-  await joinFromInvitation(world, member);
+  await joinFromInvitation(member);
   await member.page.getByRole("heading", { name: world.workspaceName, exact: true }).waitFor({ state: "visible" });
 }
 
-/**
- * Opens a channel from the sidebar, approving the one-time channel-read permission if the app asks for it.
- * After approving, the page comes back on the channel with its messages but without the private roster, so a person
- * opens the channel once more to see it in full.
- */
-export async function openChannelAs(world: AppWorld, actor: Actor, name: string): Promise<{ status: number }> {
-  const before = world.callsTo(actor, "/api/channels/messages").length;
-  await channelButton(actor, name).click();
-  const first = await eventually(() => world.callsTo(actor, "/api/channels/messages")[before], { what: `the first sync of ${name}` });
-  if (first.status !== 401 && first.status !== 403) return { status: first.status };
-  await actor.page.getByRole("button", { name: "Grant channel read →" }).click();
-  await completeConsent(actor);
-  await waitForApp(world, actor);
-  await actor.page.getByRole("heading", { name: new RegExp(`${escapeRegExp(name)}$`) }).waitFor({ state: "visible" });
-  const reopened = world.callsTo(actor, "/api/channels/messages").length;
-  await channelButton(actor, name).click();
-  const again = await eventually(() => world.callsTo(actor, "/api/channels/messages")[reopened], { what: `the sync of ${name} after approval`, timeoutMs: 60_000 });
-  return { status: again.status };
-}
-
-export async function postMessageAs(world: AppWorld, actor: Actor, text: string): Promise<void> {
-  const composer = actor.page.getByPlaceholder("Write a message…");
-  await composer.fill(text);
-  await actor.page.getByRole("button", { name: "Send", exact: true }).click();
-  const grant = actor.page.getByRole("button", { name: "Grant message posting →" });
-  const posted = actor.page.locator(".message-card").filter({ hasText: text });
-  await Promise.race([grant.waitFor({ state: "visible" }), posted.waitFor({ state: "visible" })]);
-  if (await grant.isVisible()) {
-    await grant.click();
-    await completeConsent(actor);
-    await waitForApp(world, actor);
-    await composer.waitFor({ state: "visible" });
-    await composer.fill(text);
-    await actor.page.getByRole("button", { name: "Send", exact: true }).click();
-  }
-  await posted.waitFor({ state: "visible" }).catch((error: unknown) => {
-    throw new Error(`The message "${text}" never appeared. Recent app calls:\n${recentCalls(actor)}`, { cause: error });
-  });
-}
 
 /** An invited member's first visit: sign in from the invite link and join. */
 export async function inviteAndJoin(world: AppWorld, owner: Actor, member: Actor): Promise<void> {
@@ -341,13 +292,6 @@ export function auditTrail(world: AppWorld, operationId: string): AuditEvent[] {
 
 export function journalRowsFor(world: AppWorld, actorDid: string): number {
   return world.withAppDatabase((db) => (db.prepare("SELECT count(*) AS count FROM operation WHERE actor = ?").get(actorDid) as { count: number }).count);
-}
-
-export function cachedRows(world: AppWorld, accountDid: string): { records: number; cursors: number; syncs: number } {
-  return world.withAppDatabase((db) => {
-    const count = (table: string) => (db.prepare(`SELECT count(*) AS count FROM ${table} WHERE account_did = ?`).get(accountDid) as { count: number }).count;
-    return { records: count("channel_record_cache"), cursors: count("space_collection_cursor"), syncs: count("sync_cursor") };
-  });
 }
 
 // --- Sampling a live operation -----------------------------------------------------------------------
@@ -401,7 +345,7 @@ export async function breakChannelSpace(world: AppWorld, owner: Actor, channel: 
 /** Lifts the fault: the authority creates the channel space again, with the policies the app uses. */
 export async function repairChannelSpace(world: AppWorld, owner: Actor, channel: ChannelRef): Promise<void> {
   const result = await world.pdsPost(owner, "com.atproto.space.createSpace", {
-    spaceType: "org.slack.channel", skey: channel.skey, policy: memberspacePolicy(),
+    spaceType: "new.flock.channel", skey: channel.skey, policy: memberspacePolicy(),
   });
   assert.equal(result.status, 200, JSON.stringify(result.body));
 }
@@ -410,6 +354,7 @@ export async function repairChannelSpace(world: AppWorld, owner: Actor, channel:
 
 export type OwnApp = {
   readonly origin: string;
+  readonly operatorOrigin: string;
   readonly databasePath: string;
   readonly environment: NodeJS.ProcessEnv;
   restart(): Promise<void>;
@@ -430,10 +375,17 @@ async function freePort(): Promise<number> {
   });
 }
 
-async function launch(environment: NodeJS.ProcessEnv, port: number): Promise<ChildProcess> {
-  const child = spawn(process.execPath, [join(process.cwd(), "node_modules/next/dist/bin/next"), "start", "--hostname", "127.0.0.1", "--port", String(port)], {
-    cwd: process.cwd(), env: environment, stdio: ["ignore", "pipe", "pipe"],
-  });
+/** The app's two processes: its operator at `OPERATOR_URL` and its web app on `port`, each once it answers. */
+async function launch(environment: NodeJS.ProcessEnv, port: number): Promise<ChildProcess[]> {
+  const operatorUrl = environment.OPERATOR_URL;
+  assert.ok(operatorUrl, "OPERATOR_URL says where the operator serves");
+  const operator = await launchProcess(["--import", "tsx", join(process.cwd(), "apps/operator/src/operator/main.ts")], environment, `${operatorUrl}/.well-known/did.json`, "the operator");
+  const web = await launchProcess([join(process.cwd(), "apps/web/node_modules/next/dist/bin/next"), "start", "apps/web", "--hostname", "127.0.0.1", "--port", String(port)], environment, `http://127.0.0.1:${port}/`, "the app");
+  return [operator, web];
+}
+
+async function launchProcess(args: string[], environment: NodeJS.ProcessEnv, readyUrl: string, what: string): Promise<ChildProcess> {
+  const child = spawn(process.execPath, args, { cwd: process.cwd(), env: environment, stdio: ["ignore", "pipe", "pipe"] });
   runningApps.add(child);
   let output = "";
   const capture = (chunk: Buffer) => { output = `${output}${chunk}`.slice(-4_000); };
@@ -441,13 +393,13 @@ async function launch(environment: NodeJS.ProcessEnv, port: number): Promise<Chi
   child.stderr?.on("data", capture);
   const deadline = Date.now() + 60_000;
   for (;;) {
-    assert.equal(child.exitCode, null, `the app exited before it was ready\n${output}`);
+    assert.equal(child.exitCode, null, `${what} exited before it was ready\n${output}`);
     try {
-      if ((await fetch(`http://127.0.0.1:${port}/`)).ok) return child;
+      if ((await fetch(readyUrl)).ok) return child;
     } catch (error) {
       if (!(error instanceof TypeError)) throw error;
     }
-    assert.ok(Date.now() < deadline, `the app did not become ready\n${output}`);
+    assert.ok(Date.now() < deadline, `${what} did not become ready\n${output}`);
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
 }
@@ -468,24 +420,26 @@ async function terminate(child: ChildProcess): Promise<void> {
  */
 export async function startOwnApp(world: AppWorld): Promise<OwnApp> {
   const port = await freePort();
+  const operatorPort = await freePort();
   const origin = `http://127.0.0.1:${port}`;
+  const operatorOrigin = `http://127.0.0.1:${operatorPort}`;
   const directory = mkdtempSync(join(tmpdir(), "slack-lifecycle-app-"));
   const databasePath = join(directory, "app.db");
   const environment: NodeJS.ProcessEnv = {
     PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? tmpdir(), TMPDIR: process.env.TMPDIR ?? tmpdir(),
     NODE_ENV: "production", NEXT_TELEMETRY_DISABLED: "1", ATPROTO_ACCEPTANCE_TEST: "true",
-    APP_URL: origin, DATABASE_PATH: databasePath, AUTH_ENCRYPTION_KEY: randomBytes(32).toString("hex"),
-    PLC_URL: world.fixture.plcUrl, OPERATOR_SERVICE_REF: `did:web:localhost%3A${port}#atproto_slack_admin`,
+    APP_URL: origin, OPERATOR_URL: operatorOrigin, DATABASE_PATH: databasePath, AUTH_ENCRYPTION_KEY: randomBytes(32).toString("hex"),
+    PLC_URL: world.fixture.plcUrl, OPERATOR_SERVICE_REF: `did:web:localhost%3A${operatorPort}#atproto_flock_operator`,
   };
-  let child = await launch(environment, port);
+  let children = await launch(environment, port);
   const app: OwnApp = {
-    origin, databasePath, environment,
+    origin, operatorOrigin, databasePath, environment,
     async restart() {
-      await terminate(child);
-      child = await launch(environment, port);
+      await Promise.all(children.map(terminate));
+      children = await launch(environment, port);
     },
     async stop() {
-      await terminate(child);
+      await Promise.all(children.map(terminate));
       rmSync(directory, { recursive: true, force: true });
     },
   };
@@ -497,6 +451,8 @@ export function worldOn(world: AppWorld, app: OwnApp): AppWorld {
   return new Proxy(world, {
     get(target, property) {
       if (property === "appOrigin") return app.origin;
+      if (property === "operatorOrigin") return app.operatorOrigin;
+      if (property === "operatorServiceRef") return `did:web:localhost%3A${new URL(app.operatorOrigin).port}#atproto_flock_operator`;
       if (property === "withAppDatabase") {
         return <T>(read: (db: Database.Database) => T): T => {
           const db = new Database(app.databasePath, { readonly: true, fileMustExist: true });
@@ -516,7 +472,7 @@ const RECONCILE_DEADLINE_MS = 120_000;
 
 /** The scheduled reconcile job (`pnpm reconcile`), run as a new process against the app's database and key. Killed if it outlives its deadline or the cucumber process. */
 export async function runReconcileJob(app: OwnApp): Promise<ReconcileRun> {
-  const child = spawn(process.execPath, ["--import", "tsx", "scripts/reconcile-workspaces.ts"], {
+  const child = spawn(process.execPath, ["--import", "tsx", "apps/operator/scripts/reconcile-workspaces.ts"], {
     cwd: process.cwd(), env: { ...app.environment }, stdio: ["ignore", "pipe", "pipe"],
   });
   runningApps.add(child);

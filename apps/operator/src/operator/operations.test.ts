@@ -1,0 +1,113 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { SpaceMacError } from "@atproto/space";
+import { KemKeyError } from "@flock/protocol/atproto/kem-key";
+import { UpstreamResponseTooLargeError } from "@flock/protocol/bounded-json";
+import { XrpcError } from "@flock/protocol/atproto/xrpc";
+import { channelUri, inboxUri, requestRecordKey } from "@flock/protocol/keys";
+import { savedWorkspaceOperations, validateOperatorRequest } from "./operations";
+import { readJoinRequestRecord } from "./workspace-state";
+import type { OperatorActor } from "./actor";
+
+const actor = { workspace: { authorityDid: "did:plc:owner" } } as OperatorActor;
+
+test("operator accepts only exact self-leave shapes and reconciliation request", () => {
+  assert.deepEqual(validateOperatorRequest({ kind: "leaveWorkspace" }, actor, "execute").request, { kind: "leaveWorkspace" });
+  assert.deepEqual(validateOperatorRequest({ kind: "reconcileWorkspace" }, actor, "execute").request, { kind: "reconcileWorkspace" });
+  assert.throws(() => validateOperatorRequest({ kind: "leaveWorkspace", subject: "did:plc:other" }, actor, "execute"), /unexpected fields/i);
+  assert.throws(() => validateOperatorRequest({ kind: "leaveChannel", skey: "general", subject: "did:plc:other" }, actor, "execute"), /unexpected fields/i);
+});
+
+test("workspace creation is a journaled kind but is never submitted through execute", () => {
+  // #given a bootstrap request, as a client would send it and as its journal row holds it
+  const bootstrap = { kind: "bootstrapWorkspace", name: "Acme" };
+
+  // #then execute refuses it, and journal recovery reads it
+  assert.throws(() => validateOperatorRequest(bootstrap, actor, "execute"), /unsupported operation kind/i);
+  assert.equal(validateOperatorRequest(bootstrap, actor, "journal").kind.kind, "bootstrapWorkspace");
+  assert.throws(() => validateOperatorRequest({ kind: "bootstrapWorkspace", name: "Acme <script>" }, actor, "journal"), /1 to 60 plain-text characters/);
+});
+
+test("a kind outside the table, a wrong lexicon type, or a wrongly typed field is refused", () => {
+  for (const kind of ["deleteWorkspace", "toString", "__proto__", 7]) {
+    assert.throws(() => validateOperatorRequest({ kind }, actor, "execute"), /unsupported operation kind|operation kind is required/i, String(kind));
+  }
+  assert.throws(() => validateOperatorRequest({ kind: "reconcileWorkspace", $type: "org.example.other" }, actor, "execute"), /invalid operation type/i);
+  assert.equal(validateOperatorRequest({ kind: "reconcileWorkspace", $type: "new.flock.operator.execute#operationRequest" }, actor, "execute").kind.kind, "reconcileWorkspace");
+  assert.throws(() => validateOperatorRequest({ kind: "setAdmin", subject: "did:plc:member", active: "yes" }, actor, "execute"), /must be boolean/i);
+  assert.throws(() => validateOperatorRequest({ kind: "inviteMember" }, actor, "execute"), /missing or unexpected fields/i);
+  assert.throws(() => validateOperatorRequest({ kind: "createChannel", skey: "x", name: " ", visibility: "public" }, actor, "execute"), /1 to 80 characters/i);
+});
+
+test("a channel name is accepted exactly when the directory record that will carry it accepts it", () => {
+  const create = (name: string) => () => validateOperatorRequest({ kind: "createChannel", skey: "x", name, visibility: "public" }, actor, "execute");
+
+  // #then the limit is 80 graphemes within 320 bytes, however many code points a grapheme takes
+  const accented = "é"; // one grapheme, two code points, three bytes
+  const family = "\u{1F468}‍\u{1F469}‍\u{1F467}"; // one grapheme, five code points, 18 bytes
+  const flag = "\u{1F1E8}\u{1F1E6}"; // one grapheme, two code points, eight bytes
+  for (const name of ["a".repeat(80), "\u{1F600}".repeat(80), accented.repeat(80), family.repeat(17), flag.repeat(40)]) assert.doesNotThrow(create(name), name);
+  for (const name of ["a".repeat(81), "\u{1F600}".repeat(81), accented.repeat(81), family.repeat(18), flag.repeat(41)]) assert.throws(create(name), /1 to 80 characters/i, name);
+});
+
+test("private visibility transitions require a selected member list", () => {
+  assert.throws(() => validateOperatorRequest({ kind: "transitionChannel", skey: "general", visibility: "private" }, actor, "execute"), /selected member list/i);
+  assert.deepEqual(validateOperatorRequest({ kind: "transitionChannel", skey: "general", visibility: "private", members: ["did:plc:member"] }, actor, "execute").request.members, ["did:plc:member"]);
+});
+
+test("recovery keeps unreadable journal rows visible instead of silently skipping them", () => {
+  const workspace = "at://did:plc:owner/space/new.flock.workspace/team";
+  const recoveringActor = { did: "did:plc:admin", workspace: { authorityDid: "did:plc:owner", uri: workspace } } as OperatorActor;
+  const rows = [
+    { actor: "did:plc:admin", operationId: "current", completedSteps: [], requestJson: JSON.stringify({ workspace, request: { kind: "reconcileWorkspace" } }) },
+    { actor: "did:plc:other", operationId: "valid", completedSteps: [], requestJson: JSON.stringify({ workspace, request: { kind: "leaveWorkspace" } }) },
+    { actor: "did:plc:other", operationId: "corrupt", completedSteps: [], requestJson: "{not json" },
+    { actor: "did:plc:other", operationId: "no-request", completedSteps: [], requestJson: JSON.stringify({ workspace }) },
+    { actor: "did:plc:other", operationId: "elsewhere", completedSteps: [], requestJson: JSON.stringify({ workspace: `${workspace}-2`, request: { kind: "leaveWorkspace" } }) },
+  ];
+  assert.deepEqual(savedWorkspaceOperations(rows, recoveringActor, "current"), [
+    { actor: "did:plc:other", operationId: "valid", completedSteps: [], request: { kind: "leaveWorkspace" } },
+    { actor: "did:plc:other", operationId: "corrupt", completedSteps: [], request: null },
+    { actor: "did:plc:other", operationId: "no-request", completedSteps: [], request: null },
+  ]);
+});
+
+test("a join request from a repo that cannot be read for good reads as no current request instead of failing the operation", async () => {
+  const authority = "did:plc:owner";
+  const requester = "did:plc:requester";
+  const inbox = inboxUri(authority);
+  const rkey = requestRecordKey(channelUri(authority, "secret"), requester);
+  const request = { channelSkey: "secret", requestId: "2222222222222", createdAt: "2026-11-01T00:00:00.000Z" };
+  const read = (outcome: () => unknown) => readJoinRequestRecord(
+    { query: async () => outcome() as never },
+    inbox, requester, rkey, authority,
+  );
+
+  assert.deepEqual(await read(() => ({ uri: "", value: request })), request, "a verified request is returned");
+  assert.equal(await read(() => { throw new KemKeyError(requester, "the DID document lists no #atproto_kem verification method"); }), null, "no usable KEM key");
+  assert.equal(await read(() => { throw new SpaceMacError("getRecord failed MAC verification"); }), null, "a MAC that does not verify");
+  assert.equal(await read(() => { throw new XrpcError(404, "not found", "RecordNotFound"); }), null, "no such record");
+  assert.equal(await read(() => ({ uri: "", value: { ...request, requestId: "not-a-tid" } })), null, "an invalid record");
+  assert.equal(await read(() => { throw new XrpcError(400, "Repo has been deactivated", "RepoDeactivated"); }), null, "a deactivated account");
+  assert.equal(await read(() => { throw new XrpcError(400, "Repo has been takendown", "RepoTakendown"); }), null, "a taken-down account");
+  assert.equal(await read(() => { throw new UpstreamResponseTooLargeError(8 * 1024 * 1024); }), null, "an answer larger than this app reads");
+  await assert.rejects(read(() => { throw new XrpcError(500, "upstream failure", "InternalServerError"); }), /upstream failure/, "a host that is down still fails the operation so it can be retried");
+  await assert.rejects(read(() => { throw new TypeError("fetch failed"); }), /fetch failed/, "an unreachable host still fails the operation so it can be retried");
+});
+
+test("an app's channels are each granted once, by key and write flag only", () => {
+  const install = (channels: unknown) => validateOperatorRequest({ kind: "installApp", subject: "did:plc:bot", channels }, actor, "execute");
+  assert.deepEqual(install([{ skey: "acme-general", write: true }]).request.channels, [{ skey: "acme-general", write: true }]);
+  assert.doesNotThrow(() => install([{ $type: "new.flock.operator.execute#channelGrant", skey: "acme-general", write: false }]), "the lexicon's own type");
+  for (const channels of [
+    [{ skey: "acme-general", write: true }, { skey: "acme-general", write: false }],
+    [{ skey: "acme-general", write: true, extra: 1 }],
+    [{ $type: "new.flock.other#grant", skey: "acme-general", write: true }],
+    [{ skey: "acme-general", write: "yes" }],
+    [{ skey: "acme-general" }],
+    [{ skey: "Not A Key!", write: true }],
+    Array.from({ length: 101 }, (_, index) => ({ skey: `acme-c${index}`, write: false })),
+    "acme-general",
+  ]) assert.throws(() => install(channels), /channels/i, JSON.stringify(channels).slice(0, 80));
+  assert.throws(() => validateOperatorRequest({ kind: "uninstallApp", subject: "did:plc:bot", channels: [] }, actor, "execute"), "uninstall takes no channels");
+});

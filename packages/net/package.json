@@ -1,0 +1,11 @@
+{
+  "name": "@flock/net",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./*": "./src/*.ts"
+  },
+  "dependencies": {
+    "undici": "7.29.1"
+  }
+}

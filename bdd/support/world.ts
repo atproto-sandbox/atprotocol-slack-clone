@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { World, type IWorldOptions } from "@cucumber/cucumber";
 import Database from "better-sqlite3";
-import { resolveKemKey } from "../../src/dm/browser-identity";
+import { resolveKemKey } from "@flock/client/did-documents";
 import type { Browser, BrowserContext, Page, Response as PlaywrightResponse } from "@playwright/test";
 import type { AppFixture, FixtureAccount } from "../../protocol-tests/support/app-fixture";
 
@@ -9,15 +9,22 @@ import type { AppFixture, FixtureAccount } from "../../protocol-tests/support/ap
 export const PAGE_TIMEOUT_MS = 90_000;
 
 /**
- * `body` says what `responseBody` holds: "recorded" is the response text. "streamed" (text/event-stream) and "navigated-away" (the
- * page left before the browser would hand over the body, as it does right after an OAuth permission reply) are recorded headers-only
- * with an empty `responseBody`, which says nothing about what they carried. Leak scans must report such calls as not covered.
+ * `body` says what `responseBody` holds: "recorded" is the response text. "streamed" (text/event-stream) and "navigated-away" are
+ * recorded headers-only with an empty `responseBody`, which says nothing about what they carried. "navigated-away" is Playwright's
+ * report of any body the browser would not hand over: the page left (as it does right after an OAuth permission reply), or Chromium
+ * had dropped the body from its buffer before it was read. Leak scans must report such calls as not covered.
  */
 export type ApiCall = {
   method: string; path: string; query: string; status: number; requestBody: string; responseBody: string;
   body: "recorded" | "streamed" | "navigated-away";
+  /** Where the call went: a PDS host or the operator, for an XRPC call the browser made itself. */
+  origin: string;
 };
-export type Actor = FixtureAccount & { role: string; context: BrowserContext; page: Page; calls: ApiCall[] };
+/**
+ * `xrpc` holds the XRPC calls the browser made itself, to PDS hosts and to the operator at its own origin. The app's servers
+ * have no member routes, so a leak scan of them reads the calls whose `origin` is the web app's or the operator's.
+ */
+export type Actor = FixtureAccount & { role: string; context: BrowserContext; page: Page; xrpc: ApiCall[] };
 
 let sequence = 0;
 const VIDEO_SIZE = { width: 1280, height: 720 };
@@ -36,6 +43,8 @@ export class AppWorld extends World {
   scratch = new Map<string, unknown>();
   startedAt = Date.now();
   readonly contexts: BrowserContext[] = [];
+  /** What a scenario started outside its browsers (an app running in this process), stopped when the scenario ends. */
+  readonly teardown: Array<() => Promise<void>> = [];
   /** Pages in creation order with the label of the session they belong to, for the optional session recording. */
   readonly clips: Array<{ page: Page; label: string; startedAt: number }> = [];
   private readonly recordings = new Set<Promise<void>>();
@@ -50,6 +59,16 @@ export class AppWorld extends World {
     return this.fixture.appUrl.origin;
   }
 
+  /** Where the app's operator serves its methods: its own process and origin. */
+  get operatorOrigin(): string {
+    return this.fixture.operatorUrl.origin;
+  }
+
+  /** The audience of the app's operator: its `did:web` and service fragment, as service tokens name it. */
+  get operatorServiceRef(): string {
+    return `did:web:localhost%3A${this.fixture.operatorUrl.port}#atproto_flock_operator`;
+  }
+
   /** The actor for a role, created on first use with a fresh account and its own browser context. */
   async actor(role: string, host: 0 | 1 = 0): Promise<Actor> {
     const existing = this.actors.get(role);
@@ -61,7 +80,7 @@ export class AppWorld extends World {
     await context.grantPermissions(["clipboard-read", "clipboard-write"], { origin: this.appOrigin });
     const page = await context.newPage();
     page.setDefaultTimeout(PAGE_TIMEOUT_MS);
-    const actor: Actor = { ...account, role, context, page, calls: [] };
+    const actor: Actor = { ...account, role, context, page, xrpc: [] };
     this.recordCalls(actor);
     this.actors.set(role, actor);
     return actor;
@@ -77,7 +96,8 @@ export class AppWorld extends World {
   }
 
   /**
-   * Records every /api call the actor's page makes into `actor.calls`, in the order their bodies finish. The one recorder
+   * Records every XRPC call the actor's page makes itself to a PDS host or the operator into `actor.xrpc`, in the order their
+   * bodies finish. The one recorder
    * for every browser session of a scenario, including sessions on a second app. A body that cannot be read fails the
    * scenario when it ends, except where `ApiCall.body` says the call is recorded headers-only (and a redirect has no body).
    */
@@ -92,12 +112,16 @@ export class AppWorld extends World {
 
   private async record(actor: Actor, response: PlaywrightResponse): Promise<void> {
     const url = new URL(response.url());
-    if (!url.pathname.startsWith("/api/")) return;
+    if (!url.pathname.startsWith("/xrpc/")) return;
     const request = response.request();
+    if (request.method() === "OPTIONS") return;
     const status = response.status();
+    // A held change-feed poll can be cut off when its page closes, so only its headers are recorded.
+    const heldPoll = url.pathname === "/xrpc/new.flock.operator.getChanges";
     const call: ApiCall = {
       method: request.method(), path: url.pathname, query: url.search, status, requestBody: request.postData() ?? "", responseBody: "",
-      body: (response.headers()["content-type"] ?? "").startsWith("text/event-stream") ? "streamed" : "recorded",
+      body: heldPoll || (response.headers()["content-type"] ?? "").startsWith("text/event-stream") ? "streamed" : "recorded",
+      origin: url.origin,
     };
     if (call.body === "recorded" && !(status >= 300 && status < 400)) {
       try {
@@ -107,11 +131,7 @@ export class AppWorld extends World {
         call.body = "navigated-away";
       }
     }
-    actor.calls.push(call);
-  }
-
-  callsTo(actor: Actor, path: string): ApiCall[] {
-    return actor.calls.filter((call) => call.path === path);
+    actor.xrpc.push(call);
   }
 
   /** Read-only view of the app's own database, for facts only the app records (operation journal, audit trail). */

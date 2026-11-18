@@ -1,14 +1,21 @@
 import assert from "node:assert/strict";
 import { Given, Then, When } from "@cucumber/cucumber";
-import { inboxUri } from "@/protocol/keys";
-import { withIndependentReader, type WorkspaceState } from "../support/independent-app-ui";
+import { inboxUri } from "@flock/protocol/keys";
+import { withIndependentReader } from "../support/independent-app-ui";
+import { credentialCalls, credentialOutcome, workspaceChannels } from "../support/channels-ui";
 import type { AppWorld, Actor } from "../support/world";
 import {
-  approveAdminControls, completeConsent, copyInviteLink, createWorkspaceAs, escapeRegExp, eventually, inviteMemberAs,
-  joinFromInvitation, openInviteLinkAndSignIn, ownerInvites, signIn, submitWorkspaceName, uniqueWorkspaceName, waitForApp, workspaceUriOnPage,
+  approveConsentAs, waitForAdminControls, completeConsent, copyInviteLink, createWorkspaceAs, escapeRegExp, eventually, inviteMemberAs,
+  joinFromInvitation, openInviteLinkAndSignIn, ownerInvites, signIn, signOutAs, submitWorkspaceName, uniqueWorkspaceName, waitForApp, workspaceUriOnPage,
 } from "../support/ui";
+import { createChannelAs } from "../support/lifecycle-ui";
+import { OPERATOR_AUTHORITY_FLOW, OPERATOR_CREATE_WORKSPACE, operatorCalls } from "../support/operator-calls";
 
 type Member = { did: string; read: boolean; write: boolean };
+
+/** The browser's own listings of the account's workspaces, from its PDS. */
+const workspaceListings = (actor: Actor) => actor.xrpc.filter((call) => call.path === "/xrpc/com.atproto.space.listSpaces" && call.status === 200
+  && new URLSearchParams(call.query).get("spaceType") === "new.flock.workspace");
 
 const owner = (world: AppWorld): Actor => {
   const actor = world.actors.get("owner");
@@ -30,7 +37,7 @@ async function membersOf(world: AppWorld, as: Actor, space: string): Promise<Mem
 
 async function adminRecords(world: AppWorld, as: Actor): Promise<Array<{ subject: string; active: boolean }>> {
   const result = await world.pdsGet<{ records?: Array<{ value: { subject: string; active: boolean } }> }>(
-    as, "com.atproto.space.listRecords", { space: world.workspaceUri, repo: as.did, collection: "org.slack.admin", limit: "100" },
+    as, "com.atproto.space.listRecords", { space: world.workspaceUri, repo: as.did, collection: "new.flock.admin", limit: "100" },
   );
   assert.equal(result.status, 200, JSON.stringify(result.body));
   return (result.body.records ?? []).map((record) => record.value);
@@ -40,7 +47,7 @@ const workspaceSkey = (world: AppWorld): string => world.workspaceUri.split("/")
 
 /** The workspace spaces an account's own PDS lists, whatever the app says about them. */
 async function workspaceSpacesOn(world: AppWorld, as: Actor): Promise<string[]> {
-  const listed = await world.pdsGet<{ spaces: Array<{ uri: string }> }>(as, "com.atproto.space.listSpaces", { spaceType: "org.slack.workspace", limit: "100" });
+  const listed = await world.pdsGet<{ spaces: Array<{ uri: string }> }>(as, "com.atproto.space.listSpaces", { spaceType: "new.flock.workspace", limit: "100" });
   assert.equal(listed.status, 200, JSON.stringify(listed.body));
   return listed.body.spaces.map((space) => space.uri);
 }
@@ -60,11 +67,10 @@ When("the account submits a workspace name", async function (this: AppWorld) {
 });
 
 Then("the app reports that permission is required, not a raw scope error", async function (this: AppWorld) {
-  const first = await eventually(() => this.callsTo(owner(this), "/api/workspaces/bootstrap")[0], { what: "the first create request" });
+  const first = await eventually(() => operatorCalls(owner(this), OPERATOR_CREATE_WORKSPACE)[0], { what: "the first create request" });
   assert.equal(first.status, 403);
-  const body = JSON.parse(first.responseBody) as { code?: string; action?: string };
-  assert.equal(body.code, "authorization_required");
-  assert.equal(body.action, "workspaceAuthority");
+  const body = JSON.parse(first.responseBody) as { error?: string; message?: string };
+  assert.equal(body.error, "AuthorizationRequired", "the operator answers with its typed error, which the app turns into the approval");
   assert.doesNotMatch(first.responseBody, /Missing required scope/);
   this.scratch.set("operationId", (JSON.parse(first.requestBody) as { operationId: string }).operationId);
 });
@@ -79,8 +85,9 @@ Then("after approval the same operation ID is retried and the workspace is creat
   await waitForApp(this, actor);
   await actor.page.getByRole("heading", { name: this.workspaceName, exact: true }).waitFor({ state: "visible" });
   const operationId = this.scratch.get("operationId") as string;
-  const retried = this.callsTo(actor, "/api/workspaces/bootstrap").filter((call) => (JSON.parse(call.requestBody) as { operationId: string }).operationId === operationId);
-  assert.ok(retried.length >= 2, "the same operation ID was submitted again after approval");
+  // The page shows the workspace as soon as the retry answered; the recorder files that answer a moment later.
+  await eventually(() => operatorCalls(actor, OPERATOR_CREATE_WORKSPACE).filter((call) => (JSON.parse(call.requestBody) as { operationId: string }).operationId === operationId).length >= 2,
+    { what: "the same operation ID to be submitted again after approval" });
   const journal = this.withAppDatabase((db) => db.prepare("SELECT state FROM operation WHERE operation_id = ?").get(operationId) as { state: string } | undefined);
   assert.equal(journal?.state, "completed");
 });
@@ -100,16 +107,17 @@ Given("the account returns from the permission screen without the required permi
 
 When("the app resumes the setup once", async function (this: AppWorld) {
   const actor = owner(this);
-  await eventually(() => this.callsTo(actor, "/api/workspaces/bootstrap").length >= 2, { what: "the setup to resume after returning" });
-  await actor.page.waitForLoadState("networkidle");
-  assert.equal(this.callsTo(actor, "/api/workspaces/bootstrap").length, 2, "setup was attempted once at submit and resumed exactly once");
+  await eventually(() => operatorCalls(actor, OPERATOR_CREATE_WORKSPACE).length >= 2, { what: "the setup to resume after returning" });
+  // The resumed attempt ends in the refusal shown to the person; nothing runs after it.
+  await actor.page.getByText(/Permission was not granted/).waitFor({ state: "visible" });
+  assert.equal(operatorCalls(actor, OPERATOR_CREATE_WORKSPACE).length, 2, "setup was attempted once at submit and resumed exactly once");
 });
 
 Then("it shows a clear error instead of redirecting again", async function (this: AppWorld) {
   const actor = owner(this);
   await actor.page.getByText(/Permission was not granted/).waitFor({ state: "visible" });
   assert.doesNotMatch(actor.page.url(), /\/oauth\/authorize/, "the account was not sent to approve the permission a second time");
-  assert.equal(this.callsTo(actor, "/api/oauth/permission").length, 1, "only the first attempt asked for permission");
+  assert.equal(operatorCalls(actor, OPERATOR_AUTHORITY_FLOW).length, 1, "only the first attempt asked for permission");
 });
 
 // --- Invitations ------------------------------------------------------------------------------------
@@ -117,7 +125,7 @@ Then("it shows a clear error instead of redirecting again", async function (this
 Given("a workspace has one active owner and two public channels", async function (this: AppWorld) {
   const actor = await this.actor("owner");
   await createWorkspaceAs(this, actor);
-  await approveAdminControls(this, actor);
+  await waitForAdminControls(this, actor);
   await actor.page.getByLabel("Channel name").fill("Second Room");
   await actor.page.locator("form").filter({ has: actor.page.getByLabel("Channel name") }).getByRole("button", { name: /Create channel/ }).click();
   await actor.page.getByRole("button", { name: /Second Room/ }).waitFor({ state: "visible" });
@@ -140,7 +148,7 @@ Then("the DID has write-only access to the admin inbox", async function (this: A
 });
 
 Then("the DID has read and write access to each public channel", async function (this: AppWorld) {
-  const spaces = await this.pdsGet<{ spaces: Array<{ uri: string }> }>(owner(this), "com.atproto.space.listSpaces", { spaceType: "org.slack.channel", limit: "100" });
+  const spaces = await this.pdsGet<{ spaces: Array<{ uri: string }> }>(owner(this), "com.atproto.space.listSpaces", { spaceType: "new.flock.channel", limit: "100" });
   assert.equal(spaces.body.spaces.length, 2, "the workspace has exactly two public channels");
   for (const space of spaces.body.spaces) {
     const member = (await membersOf(this, owner(this), space.uri)).find((entry) => entry.did === actorNamed(this, "invitee").did);
@@ -165,7 +173,7 @@ Then("the invite is reported complete only after every member list matches", fun
 Given("a workspace owner has created a workspace and approved admin controls", async function (this: AppWorld) {
   const actor = await this.actor("owner");
   await createWorkspaceAs(this, actor);
-  await approveAdminControls(this, actor);
+  await waitForAdminControls(this, actor);
 });
 
 When("the owner invites a member by DID", async function (this: AppWorld) {
@@ -200,7 +208,7 @@ Then("the member is offered to join that workspace", async function (this: AppWo
 });
 
 When("the member joins the workspace", async function (this: AppWorld) {
-  await joinFromInvitation(this, actorNamed(this, "member"));
+  await joinFromInvitation(actorNamed(this, "member"));
 });
 
 Then("the workspace appears in the member's dashboard with {int} active members", async function (this: AppWorld, count: number) {
@@ -220,23 +228,22 @@ Given("a DID is absent from a workspace member list", async function (this: AppW
 When("that DID opens a forwarded invite link and tries to join", async function (this: AppWorld) {
   const stranger = actorNamed(this, "stranger");
   await openInviteLinkAndSignIn(this, stranger, this.inviteLink);
-  await joinFromInvitation(this, stranger);
+  await joinFromInvitation(stranger);
 });
 
 Then("the app says the account has not been added to the workspace", async function (this: AppWorld) {
-  await actorNamed(this, "stranger").page.getByRole("alert").filter({ hasText: /may not have been added to it yet/ }).waitFor({ state: "visible" });
-  const accept = this.callsTo(actorNamed(this, "stranger"), "/api/workspaces/accept").at(-1);
-  assert.equal(accept?.status, 404, "the authority gives an account it never added the same answer it gives for a missing workspace");
-  assert.equal((JSON.parse(accept!.responseBody) as { code: string }).code, "workspace_unavailable");
+  const stranger = actorNamed(this, "stranger");
+  await stranger.page.getByRole("alert").filter({ hasText: /may not have been added to it yet/ }).waitFor({ state: "visible" });
+  const asked = credentialCalls(stranger, this.workspaceUri);
+  assert.ok(asked.length > 0, "joining asked the authority for the workspace's credential");
+  assert.deepEqual([...new Set(asked.map(credentialOutcome))], ["SpaceNotFound"], "the authority gives an account it never added the same answer it gives for a missing workspace");
 });
 
 Then("the workspace does not appear in that account's dashboard", async function (this: AppWorld) {
   const stranger = actorNamed(this, "stranger");
   const page = stranger.page;
-  await page.waitForLoadState("networkidle");
-  const listing = this.callsTo(stranger, "/api/workspaces").at(-1);
-  assert.ok(listing, "the dashboard asked the server for this account's workspaces");
-  assert.deepEqual((JSON.parse(listing.responseBody) as { workspaces: Array<{ uri: string }> }).workspaces.map((entry) => entry.uri), [], "the server lists no workspace for this account");
+  const listing = await eventually(() => workspaceListings(stranger).at(-1), { what: "the app to list this account's workspaces" });
+  assert.deepEqual((JSON.parse(listing.responseBody) as { spaces: Array<{ uri: string }> }).spaces.map((entry) => entry.uri), [], "the account's own PDS lists no workspace to the app");
   assert.equal(await page.getByRole("heading", { name: this.workspaceName, exact: true }).count(), 0);
   assert.equal(await page.locator(".sidebar").getByRole("button", { name: new RegExp(escapeRegExp(this.workspaceName)) }).count(), 0);
 });
@@ -245,7 +252,7 @@ Then("the DID is still absent from the member list and left no acceptance marker
   const stranger = actorNamed(this, "stranger");
   const members = await membersOf(this, owner(this), this.workspaceUri);
   assert.equal(members.some((entry) => entry.did === stranger.did), false);
-  const spaces = await this.pdsGet<{ spaces: Array<{ uri: string }> }>(stranger, "com.atproto.space.listSpaces", { spaceType: "org.slack.workspace", limit: "100" });
+  const spaces = await this.pdsGet<{ spaces: Array<{ uri: string }> }>(stranger, "com.atproto.space.listSpaces", { spaceType: "new.flock.workspace", limit: "100" });
   assert.equal(spaces.body.spaces.some((space) => space.uri === this.workspaceUri), false, "no acceptance marker was written for a non-member");
 });
 
@@ -257,34 +264,94 @@ Given("an invitee has been added to the workspace member list", async function (
 When("the invitee joins the workspace from its invite link", async function (this: AppWorld) {
   const invitee = actorNamed(this, "invitee");
   await openInviteLinkAndSignIn(this, invitee, this.inviteLink);
-  await joinFromInvitation(this, invitee);
+  await joinFromInvitation(invitee);
   await invitee.page.getByRole("heading", { name: this.workspaceName, exact: true }).waitFor({ state: "visible" });
 });
 
 Then("the workspace appears in that account's spaces index", async function (this: AppWorld) {
-  const spaces = await this.pdsGet<{ spaces: Array<{ uri: string }> }>(actorNamed(this, "invitee"), "com.atproto.space.listSpaces", { spaceType: "org.slack.workspace", limit: "100" });
+  const spaces = await this.pdsGet<{ spaces: Array<{ uri: string }> }>(actorNamed(this, "invitee"), "com.atproto.space.listSpaces", { spaceType: "new.flock.workspace", limit: "100" });
   assert.ok(spaces.body.spaces.some((space) => space.uri === this.workspaceUri), "the acceptance marker makes the workspace discoverable from the invitee's own PDS");
 });
 
 Then("a second app reads the same directory and workspace roster", async function (this: AppWorld) {
   const invitee = actorNamed(this, "invitee");
-  const seen = await withIndependentReader(this, invitee, async (reader, session) =>
-    (await reader.listIndependentWorkspaces(session)).find((entry) => entry.uri === this.workspaceUri));
+  const seen = await withIndependentReader(this, invitee, async (reader, deps) =>
+    (await reader.listIndependentWorkspaces(deps)).find((entry) => entry.uri === this.workspaceUri));
   assert.ok(seen, "the second app finds the workspace from the invitee's credentials alone");
 
-  const { workspaces } = await invitee.page.evaluate(async () => (await fetch("/api/workspaces")).json()) as { workspaces: WorkspaceState[] };
-  const primary = workspaces.find((entry) => entry.uri === this.workspaceUri);
-  assert.ok(primary, "the app the invitee joined through lists the workspace");
-  assert.ok(primary.members.length > 0 && primary.channels.length > 0, "the first app shows a roster and a directory to compare with");
-
-  const directory = (channels: Array<{ skey: string; name: string; visibility: string }>) =>
-    channels.map(({ skey, name, visibility }) => ({ skey, name, visibility })).sort((left, right) => left.name.localeCompare(right.name));
-  assert.deepEqual([...seen.members].sort(), primary.members.map((member) => member.did).sort(), "the second app's roster is the first app's");
-  assert.deepEqual([...seen.admins].sort(), [...primary.admins].sort(), "the second app's admins are the first app's");
-  assert.deepEqual(directory(seen.channels), directory(primary.channels), "the second app's directory is the first app's");
+  const summary = (await invitee.page.locator(".welcome-banner p").first().innerText()).trim();
+  const directory = (await workspaceChannels(invitee.page).allInnerTexts()).map((entry) => entry.slice(1).trim()).sort();
+  assert.ok(directory.length > 0, "the first app shows a directory to compare with");
+  assert.equal(summary, `${seen.members.length} active members · ${seen.channels.length} channels`, "the second app's roster is the one the first app shows");
+  assert.deepEqual(seen.channels.map((channel) => channel.name).sort(), directory, "the second app's directory is the first app's");
 });
 
 // --- Administration ---------------------------------------------------------------------------------
+
+// --- A workspace owned by a dedicated account (R8) -------------------------------------------------------------------
+
+Given("a person is signed in, and a workspace account exists that has never signed in to the app", async function (this: AppWorld) {
+  const person = await this.actor("owner", 0);
+  await this.actor("account", 0);
+  await signIn(this, person);
+});
+
+When("the person creates a workspace owned by that account, approved by signing in as the account", async function (this: AppWorld) {
+  const person = owner(this);
+  const account = actorNamed(this, "account");
+  const name = uniqueWorkspaceName();
+  await person.page.getByLabel("Workspace account (optional DID)").fill(account.did);
+  await submitWorkspaceName(person, name);
+  await approveConsentAs(person, account);
+  await waitForApp(this, person);
+  await person.page.getByRole("heading", { name, exact: true }).waitFor({ state: "visible", timeout: 90_000 }).catch(async (error: unknown) => {
+    throw new Error(`The workspace did not appear after the account's approval. Page: ${(await person.page.locator("body").innerText()).slice(0, 2_000)}`, { cause: error });
+  });
+  this.workspaceName = name;
+  this.workspaceUri = await workspaceUriOnPage(person);
+});
+
+Then("the workspace belongs to the account, and the person is its first admin while the account is not an admin", async function (this: AppWorld) {
+  const person = owner(this);
+  const account = actorNamed(this, "account");
+  assert.equal(this.workspaceUri.split("/")[2], account.did, "the workspace's URIs name the account");
+  await waitForAdminControls(this, person);
+  // Read at the account's own host, where its records live (a read by the test, not a sign-in to the app).
+  const admins = await this.pdsGet<{ records?: Array<{ value: { subject: string; active: boolean } }> }>(
+    account, "com.atproto.space.listRecords", { space: this.workspaceUri, repo: account.did, collection: "new.flock.admin", limit: "100" },
+  );
+  assert.equal(admins.status, 200, JSON.stringify(admins.body));
+  assert.deepEqual(admins.body.records?.map(({ value }) => ({ subject: value.subject, active: value.active })), [{ subject: person.did, active: true }],
+    "the one admin record is the person's, none is the account's");
+  // A member list is the owner's to read.
+  assert.equal((await membersOf(this, account, this.workspaceUri)).some((entry) => entry.did === person.did && entry.read && entry.write), true, "the person is a member");
+});
+
+When("the person makes a second member an admin", async function (this: AppWorld) {
+  const person = owner(this);
+  const second = await this.actor("deputy", 1);
+  await inviteMemberAs(person, second.did);
+  const link = await copyInviteLink(person);
+  await openInviteLinkAndSignIn(this, second, link);
+  await joinFromInvitation(second);
+  await promote(this, second);
+});
+
+When("both admins sign out", async function (this: AppWorld) {
+  for (const role of ["owner", "deputy"]) await signOutAs(actorNamed(this, role));
+});
+
+Then("an admin who signs in again still administers the workspace", async function (this: AppWorld) {
+  const second = actorNamed(this, "deputy");
+  await signIn(this, second);
+  await createChannelAs(this, second, "after sign out", "public");
+});
+
+Then("the workspace account never signed in to the app", function (this: AppWorld) {
+  const account = actorNamed(this, "account");
+  assert.equal(account.page.url(), "about:blank", "the account's own browser never opened the app");
+  assert.deepEqual(account.xrpc, [], "and made no call");
+});
 
 Given("a workspace authority DID owns the workspace", async function (this: AppWorld) {
   const actor = await this.actor("owner");
@@ -310,7 +377,7 @@ Then("the authority can read the workspace without a member-list entry", async f
   const actor = owner(this);
   assert.equal((await membersOf(this, actor, this.workspaceUri)).some((entry) => entry.did === actor.did), false, "the authority is not on its own member list");
   const profile = await this.pdsGet<{ records?: Array<{ value: { name?: string } }> }>(actor, "com.atproto.space.listRecords", {
-    space: this.workspaceUri, repo: actor.did, collection: "org.slack.workspace.profile", limit: "10",
+    space: this.workspaceUri, repo: actor.did, collection: "new.flock.workspace.profile", limit: "10",
   });
   assert.equal(profile.status, 200, `the authority's PDS lets it read its workspace: ${JSON.stringify(profile.body)}`);
   assert.deepEqual(profile.body.records?.map((record) => record.value.name), [this.workspaceName], "what it reads is the workspace it just created");
@@ -378,21 +445,3 @@ Then("inbox read access is removed before the admin record becomes inactive", as
   assert.ok(steps.indexOf("remove-inbox-read") >= 0 && steps.indexOf("remove-inbox-read") < steps.indexOf("write-admin-inactive"), `step order was ${steps.join(", ")}`);
 });
 
-// --- Declining the join permission ------------------------------------------------------------------
-
-When("the member declines the permission screen when joining", async function (this: AppWorld) {
-  const member = actorNamed(this, "member");
-  await member.page.getByRole("region", { name: "Workspace invitation" }).getByRole("button", { name: "Join this workspace" }).click();
-  await completeConsent(member, "deny");
-  await waitForApp(this, member);
-});
-
-Then("the app says the permission was not granted", async function (this: AppWorld) {
-  const member = actorNamed(this, "member");
-  await member.page.getByRole("alert").filter({ hasText: /Permission was not granted/ }).waitFor({ state: "visible" });
-  assert.doesNotMatch(await member.page.locator("body").innerText(), /Missing required scope/, "no raw scope error reaches the person");
-});
-
-Then("the invitation is still offered", async function (this: AppWorld) {
-  await actorNamed(this, "member").page.getByRole("region", { name: "Workspace invitation" }).waitFor({ state: "visible" });
-});

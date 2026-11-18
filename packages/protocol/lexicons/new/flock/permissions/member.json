@@ -1,0 +1,20 @@
+{
+  "lexicon": 1,
+  "id": "new.flock.permissions.member",
+  "defs": {
+    "main": {
+      "type": "permission-set",
+      "title": "Member workspace access",
+      "detail": "Read the workspaces, inboxes and channels this account is a member of, publish member-owned messages, reactions and requests, write an acceptance marker, and call the workspace operator.",
+      "permissions": [
+        { "type": "permission", "resource": "space", "spaceType": "new.flock.workspace", "authority": "*", "action": ["read"] },
+        { "type": "permission", "resource": "space", "spaceType": "new.flock.workspace", "authority": "*", "collection": ["new.flock.acceptance"], "action": ["create", "update"] },
+        { "type": "permission", "resource": "space", "spaceType": "new.flock.inbox", "authority": "*", "action": ["read"] },
+        { "type": "permission", "resource": "space", "spaceType": "new.flock.inbox", "authority": "*", "collection": ["new.flock.joinRequest"], "action": ["create", "update", "delete"] },
+        { "type": "permission", "resource": "space", "spaceType": "new.flock.channel", "authority": "*", "action": ["read"] },
+        { "type": "permission", "resource": "space", "spaceType": "new.flock.channel", "authority": "*", "collection": ["new.flock.channel.message", "new.flock.channel.reaction"], "action": ["create", "update", "delete"] },
+        { "type": "permission", "resource": "rpc", "inheritAud": true, "lxm": ["new.flock.operator.execute", "new.flock.operator.getOperation", "new.flock.operator.listInboxWriters", "new.flock.operator.getChanges", "new.flock.operator.createWorkspace", "new.flock.operator.startAuthorityFlow", "new.flock.operator.listStalledOperations"] }
+      ]
+    }
+  }
+}

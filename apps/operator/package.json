@@ -1,0 +1,27 @@
+{
+  "name": "@flock/operator",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./*": "./src/*.ts"
+  },
+  "dependencies": {
+    "@atproto-labs/simple-store-memory": "0.2.6",
+    "@atproto/identity": "0.5.13",
+    "@atproto/jwk-jose": "0.2.4",
+    "@atproto/oauth-client-node": "0.5.7",
+    "@atproto/xrpc-server": "0.0.0-spaces-alpha-20261029171913",
+    "@flock/deployment": "workspace:*",
+    "@flock/net": "workspace:*",
+    "@flock/protocol": "workspace:*",
+    "better-sqlite3": "12.6.0",
+    "express": "4.22.3",
+    "kysely": "0.29.5"
+  },
+  "devDependencies": {
+    "@atproto/crypto": "0.0.0-spaces-alpha-20261029171913",
+    "@atproto/space": "0.0.0-spaces-alpha-20261029171913",
+    "@types/better-sqlite3": "7.6.13",
+    "@types/express": "4.17.23"
+  }
+}

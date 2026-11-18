@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { mkdtempSync, rmSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
@@ -9,13 +8,14 @@ import { pathToFileURL } from "node:url";
 import { after, before, test } from "node:test";
 import { chromium, type Page } from "@playwright/test";
 import { createFixtureTempRoot } from "../fixture-temp";
+import { startStack, type Stack } from "../support/app-server";
 
 // M5 browser acceptance (.ai/plans/dm-tasks/m5.md): two accounts on two PDS
-// hosts complete a full DM round trip through the real browser OAuth flow
-// (both the app's own session and the separate browser-held DM session),
-// then one side revokes and the other loses access after reload. Alongside
-// the UI assertions, every /api/* request made by either page is captured so
-// the test can prove message text never reaches this app's own server.
+// hosts complete a full DM round trip through the real browser OAuth flow (the
+// one browser-held session, which signing in creates), then one side revokes
+// and the other loses access after reload. Alongside the UI assertions, every
+// request either page sends to the app's own origin is captured so the test
+// can prove message text never reaches this app's server.
 
 const projectRoot = process.cwd();
 const pinnedCheckout = process.env.ATPROTO_PINNED_CHECKOUT;
@@ -41,15 +41,14 @@ type TestNetwork = {
 
 let network: TestNetwork | undefined;
 let fixtureTemp: ReturnType<typeof createFixtureTempRoot> | undefined;
-let server: ChildProcess | undefined;
+let stack: Stack | undefined;
 let scratchDirectory: string | undefined;
 let appUrl: URL | undefined;
 let aliceDid = "";
 let bobDid = "";
-let serverOutput = "";
 
-type ApiRequestRecord = { actor: string; method: string; url: string; body: string };
-const apiRequests: ApiRequestRecord[] = [];
+type AppRequestRecord = { actor: string; method: string; url: string; body: string };
+const appRequests: AppRequestRecord[] = [];
 const macResponses: Array<Promise<{ actor: string; url: string; headers: Record<string, string> }>> = [];
 
 before(async () => {
@@ -77,33 +76,27 @@ before(async () => {
   bobDid = bob.data.did;
 
   scratchDirectory = mkdtempSync(join(tmpdir(), "slack-dm-oauth-browser-"));
-  const port = await freePort();
-  appUrl = new URL(`http://127.0.0.1:${port}`);
-  const childEnv = {
+  const [port, operatorPort] = [await freePort(), await freePort()];
+  stack = await startStack({
     PATH: process.env.PATH ?? "",
     HOME: process.env.HOME ?? tmpdir(),
     TMPDIR: process.env.TMPDIR ?? tmpdir(),
     NODE_ENV: "production",
     NEXT_TELEMETRY_DISABLED: "1",
     ATPROTO_ACCEPTANCE_TEST: "true",
-    APP_URL: appUrl.origin,
+    APP_URL: `http://127.0.0.1:${port}`,
+    OPERATOR_URL: `http://127.0.0.1:${operatorPort}`,
     DATABASE_PATH: join(scratchDirectory, "app.db"),
     AUTH_ENCRYPTION_KEY: Buffer.alloc(32, 0x3c).toString("hex"),
     PLC_URL: network.plc.url,
-    OPERATOR_SERVICE_REF: `did:web:localhost%3A${port}#atproto_slack_admin`,
-  };
-  server = spawn(process.execPath, [
-    join(projectRoot, "node_modules/next/dist/bin/next"),
-    "start", "--hostname", "127.0.0.1", "--port", String(port),
-  ], { cwd: projectRoot, env: childEnv, stdio: ["ignore", "pipe", "pipe"] });
-  server.stdout?.on("data", (chunk: Buffer) => { serverOutput = `${serverOutput}${chunk}`.slice(-20_000); });
-  server.stderr?.on("data", (chunk: Buffer) => { serverOutput = `${serverOutput}${chunk}`.slice(-20_000); });
-  await waitForApp(appUrl, server);
+    OPERATOR_SERVICE_REF: `did:web:localhost%3A${operatorPort}#atproto_flock_operator`,
+  });
+  appUrl = stack.appUrl;
 }, { timeout: 60_000 });
 
 after(async () => {
   try {
-    await stopServer(server);
+    await stack?.stop();
     await network?.close();
   } finally {
     if (scratchDirectory) rmSync(scratchDirectory, { recursive: true, force: true });
@@ -121,13 +114,13 @@ test("real browsers complete a DM round trip across two PDS hosts, then a leave 
     const bobPage = await bobContext.newPage();
     alicePage.setDefaultTimeout(30_000);
     bobPage.setDefaultTimeout(30_000);
-    recordApiRequests("alice", alicePage);
-    recordApiRequests("bob", bobPage);
+    recordAppRequests("alice", alicePage, stack!);
+    recordAppRequests("bob", bobPage, stack!);
     recordMacResponses("alice", alicePage);
     recordMacResponses("bob", bobPage);
 
-    await loginAndConnectDms(alicePage, appUrl, aliceDid, "dm-alice.test", alicePassword);
-    await loginAndConnectDms(bobPage, appUrl, bobDid, "dm-bob.test2", bobPassword);
+    await signInForDms(alicePage, appUrl, aliceDid, alicePassword);
+    await signInForDms(bobPage, appUrl, bobDid, bobPassword);
 
     // Bob enables DMs (default "Only people I allow") then switches to
     // "Everyone" so alice's request is tracked without needing a prior allowlist entry.
@@ -194,9 +187,9 @@ test("real browsers complete a DM round trip across two PDS hosts, then a leave 
     await alicePage.getByText("hasn't replied or removed your access", { exact: true }).waitFor({ state: "visible" });
     assert.equal(await alicePage.getByText(bobReply, { exact: true }).count(), 0, "bob's messages disappear once his half is revoked");
 
-    const forbiddenBodies = apiRequests.filter((entry) => entry.body.includes(aliceMessage) || entry.body.includes(bobReply));
-    assert.deepEqual(forbiddenBodies, [], `no /api/* request body may contain DM message text: ${JSON.stringify(forbiddenBodies)}`);
-    assert.ok(apiRequests.length > 0, "sanity check: /api/* traffic was actually observed during the flow");
+    const forbidden = appRequests.filter((entry) => [aliceMessage, bobReply].some((text) => entry.body.includes(text) || decodeURIComponent(entry.url).includes(text)));
+    assert.deepEqual(forbidden, [], `no request to the app's origin may carry DM message text: ${JSON.stringify(forbidden)}`);
+    assert.ok(appRequests.length > 0, "sanity check: traffic to the app's origin was actually observed during the flow");
   } finally {
     await bobContext.close();
     await aliceContext.close();
@@ -213,16 +206,17 @@ function recordMacResponses(actor: string, page: Page): void {
   });
 }
 
-function recordApiRequests(actor: string, page: Page): void {
+/** Every request a page sends to either of the app's servers: the web app's origin and its operator's. */
+function recordAppRequests(actor: string, page: Page, app: Stack): void {
   page.on("request", (request) => {
     const url = new URL(request.url());
-    if (!url.pathname.startsWith("/api/")) return;
+    if (url.origin !== app.appUrl.origin && url.origin !== app.operatorUrl.origin) return;
     const body = request.postData() ?? "";
-    apiRequests.push({ actor, method: request.method(), url: request.url(), body });
+    appRequests.push({ actor, method: request.method(), url: request.url(), body });
   });
 }
 
-async function loginAndConnectDms(page: Page, app: URL, did: string, handle: string, password: string): Promise<void> {
+async function signInForDms(page: Page, app: URL, did: string, password: string): Promise<void> {
   await page.goto(app.origin);
   await page.getByLabel("Your AT Protocol handle").fill(did);
   await page.getByRole("button", { name: /Continue with atproto/i }).click();
@@ -231,34 +225,16 @@ async function loginAndConnectDms(page: Page, app: URL, did: string, handle: str
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page.getByRole("button", { name: "Authorize", exact: true }).waitFor({ state: "visible" });
   await page.getByRole("button", { name: "Authorize", exact: true }).click();
-  await page.waitForURL(app.origin, { timeout: 30_000 });
-
-  await page.getByRole("button", { name: /Connect direct messages/ }).click();
-  await page.waitForURL(/\/oauth\/authorize\?/, { timeout: 30_000 }).catch(async (error: unknown) => {
-    throw new Error(`DM connect did not redirect to PDS authorize. URL: ${page.url()} Page: ${(await page.locator("body").innerText()).slice(0, 2_000)}`, { cause: error });
-  });
-  await signInIfPrompted(page, handle, password);
-  await page.getByRole("button", { name: "Authorize", exact: true }).waitFor({ state: "visible" });
-  await page.getByRole("button", { name: "Authorize", exact: true }).click();
-  await page.waitForURL(`${app.origin}/dm/callback**`, { timeout: 30_000 });
+  await page.waitForURL(`${app.origin}/oauth/callback**`, { timeout: 30_000 });
   await page.waitForURL(app.origin, { timeout: 30_000 });
   await page.getByRole("button", { name: /New message/ }).waitFor({ state: "visible" });
-}
-
-async function signInIfPrompted(page: Page, handle: string, password: string): Promise<void> {
-  const passwordInput = page.locator("input[name=password]");
-  if (!await passwordInput.isVisible().catch(() => false)) return;
-  const usernameInput = page.locator("input[name=username]");
-  if (await usernameInput.isVisible().catch(() => false) && !await usernameInput.inputValue()) await usernameInput.fill(handle);
-  await passwordInput.fill(password);
-  await page.getByRole("button", { name: "Sign in", exact: true }).click();
 }
 
 async function publishAppLexicons(fixture: TestNetwork): Promise<void> {
   assert.ok(fixture.lexiconAuthority, "fixture must expose its lexicon authority");
   const agent = fixture.pds.getAgent();
   const session = await agent.com.atproto.server.createSession({ identifier: "lex-authority.test", password: "hunter2" });
-  const root = join(projectRoot, "lexicons/org/slack");
+  const root = join(projectRoot, "packages/protocol/lexicons/new/flock");
   const files = await readdir(root, { recursive: true });
   const published = new Set<string>();
   for (const relative of files.filter((file) => file.endsWith(".json"))) {
@@ -286,27 +262,3 @@ async function freePort(): Promise<number> {
   return address.port;
 }
 
-async function stopServer(child: ChildProcess | undefined): Promise<void> {
-  if (!child || child.killed) return;
-  child.kill("SIGTERM");
-  await new Promise<void>((resolve) => {
-    if (child.exitCode !== null) return resolve();
-    const timer = setTimeout(() => resolve(), 5_000);
-    child.once("exit", () => { clearTimeout(timer); resolve(); });
-  });
-}
-
-async function waitForApp(url: URL, child: ChildProcess): Promise<void> {
-  const deadline = Date.now() + 45_000;
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null) throw new Error(`Next server exited before becoming ready.\n${serverOutput}`);
-    try {
-      const response = await fetch(url);
-      if (response.ok) return;
-    } catch {
-      // Continue polling while Next starts.
-    }
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-  throw new Error(`Next server did not become ready.\n${serverOutput}`);
-}

@@ -1,0 +1,19 @@
+{
+  "lexicon": 1,
+  "id": "new.flock.admin",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "any",
+      "record": {
+        "type": "object",
+        "required": ["subject", "active", "updatedAt"],
+        "properties": {
+          "subject": { "type": "string", "format": "did" },
+          "active": { "type": "boolean" },
+          "updatedAt": { "type": "string", "format": "datetime" }
+        }
+      }
+    }
+  }
+}

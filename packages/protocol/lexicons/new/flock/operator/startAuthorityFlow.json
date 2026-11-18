@@ -1,0 +1,27 @@
+{
+  "lexicon": 1,
+  "id": "new.flock.operator.startAuthorityFlow",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Issues a single-use, two-minute ticket for the caller to grant the operator authority over a workspace account's workspaces (the caller's own account, or the one named by authority), and returns the operator URL that starts the flow. The caller opens it as a top-level navigation; the flow succeeds only for someone who signs in as that account. For createWorkspace with another account, it also leaves the caller an approval to create that one workspace.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["purpose"],
+          "properties": {
+            "purpose": { "type": "string", "knownValues": ["createWorkspace", "reauthorize"] },
+            "name": { "type": "string", "minLength": 1, "maxLength": 60, "description": "The workspace to create, for purpose createWorkspace." },
+            "authority": { "type": "string", "format": "did", "description": "The workspace account to approve for. Omitted, the caller's own." }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": { "type": "object", "required": ["url"], "properties": { "url": { "type": "string", "format": "uri" } } }
+      },
+      "errors": [{ "name": "Unauthorized" }]
+    }
+  }
+}

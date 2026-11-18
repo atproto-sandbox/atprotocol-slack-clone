@@ -20,10 +20,10 @@ afterAll(() => {
   }
 })
 
-const REQUEST_COLLECTION = 'org.slack.joinRequest' as NsidString
-const WORKSPACE_TYPE = 'org.slack.workspace' as NsidString
-const INBOX_TYPE = 'org.slack.inbox' as NsidString
-const CHANNEL_TYPE = 'org.slack.channel' as NsidString
+const REQUEST_COLLECTION = 'new.flock.joinRequest' as NsidString
+const WORKSPACE_TYPE = 'new.flock.workspace' as NsidString
+const INBOX_TYPE = 'new.flock.inbox' as NsidString
+const CHANNEL_TYPE = 'new.flock.channel' as NsidString
 
 describe('atproto Slack inbox protocol conformance', () => {
   it('separates request writing from inbox reading across PDS hosts', async () => {
@@ -49,20 +49,20 @@ describe('atproto Slack inbox protocol conformance', () => {
         members: [admin, requester, ordinary],
       })
       await spaces.write(authority, workspace, {
-        collection: 'org.slack.directory' as NsidString,
+        collection: 'new.flock.directory' as NsidString,
         rkey: 'secret',
         record: {
-          $type: 'org.slack.directory',
+          $type: 'new.flock.directory',
           skey: 'secret',
           name: 'secret',
           visibility: 'private',
         },
       })
       await spaces.write(requester, workspace, {
-        collection: 'org.slack.acceptance' as NsidString,
+        collection: 'new.flock.acceptance' as NsidString,
         rkey: 'a-discovery',
         record: {
-          $type: 'org.slack.acceptance',
+          $type: 'new.flock.acceptance',
           workspace,
           createdAt: new Date().toISOString(),
         },
@@ -86,7 +86,7 @@ describe('atproto Slack inbox protocol conformance', () => {
         .call(com.atproto.space.listRecords, {
           space: workspace,
           repo: authority.did,
-          collection: 'org.slack.directory' as NsidString,
+          collection: 'new.flock.directory' as NsidString,
         })
       expect(secondAppDirectory.records[0].value).toMatchObject({
         skey: 'secret',
@@ -99,10 +99,10 @@ describe('atproto Slack inbox protocol conformance', () => {
         members: [admin, requester],
       })
       await spaces.write(requester, privateChannel, {
-        collection: 'org.slack.channel.message' as NsidString,
+        collection: 'new.flock.channel.message' as NsidString,
         rkey: 'message',
         record: {
-          $type: 'org.slack.channel.message',
+          $type: 'new.flock.channel.message',
           text: 'only joined members can fetch this repo',
           createdAt: new Date().toISOString(),
         },
@@ -216,9 +216,9 @@ describe('atproto Slack inbox protocol conformance', () => {
       // A user-level admin record cannot grant PDS management authority: only
       // the workspace DID session owns this space and can mutate its members.
       await spaces.write(authority, inbox, {
-        collection: 'org.slack.admin' as NsidString,
+        collection: 'new.flock.admin' as NsidString,
         record: {
-          $type: 'org.slack.admin',
+          $type: 'new.flock.admin',
           subject: admin.did,
           active: true,
           updatedAt: new Date().toISOString(),
@@ -313,7 +313,7 @@ describe('atproto Slack inbox protocol conformance', () => {
         skey: 'inbox',
         members: [member],
       })
-      await spaces.write(authority, inbox, { collection: 'org.slack.admin' as NsidString })
+      await spaces.write(authority, inbox, { collection: 'new.flock.admin' as NsidString })
       await spaces.write(member, inbox, {
         collection: REQUEST_COLLECTION,
         rkey: 'r-short-lived-credential',
@@ -360,7 +360,7 @@ describe('atproto Slack inbox protocol conformance', () => {
       const shortPayload = parseSpaceToken('credential', shortCredential).payload
       const shortLived = new SpaceCredential(shortCredential, shortKey, spaces.idResolver)
       for (const [pds, repo, collection] of [
-        [authority.pds, authority.did, 'org.slack.admin' as NsidString],
+        [authority.pds, authority.did, 'new.flock.admin' as NsidString],
         [member.pds, member.did, REQUEST_COLLECTION],
       ] as const) {
         await expect(shortLived.clientFor(pds).call(com.atproto.space.listRecords, {
@@ -375,7 +375,7 @@ describe('atproto Slack inbox protocol conformance', () => {
       }
       await waitUntil(shortPayload.exp * 1000 + 2_000)
       for (const [pds, repo, collection] of [
-        [authority.pds, authority.did, 'org.slack.admin' as NsidString],
+        [authority.pds, authority.did, 'new.flock.admin' as NsidString],
         [member.pds, member.did, REQUEST_COLLECTION],
       ] as const) {
         await expect(shortLived.clientFor(pds).call(com.atproto.space.listRecords, {
@@ -386,7 +386,7 @@ describe('atproto Slack inbox protocol conformance', () => {
       }
       await waitUntil(shortPayload.exp * 1000 + 6_000)
       for (const [pds, repo, collection] of [
-        [authority.pds, authority.did, 'org.slack.admin' as NsidString],
+        [authority.pds, authority.did, 'new.flock.admin' as NsidString],
         [member.pds, member.did, REQUEST_COLLECTION],
       ] as const) {
         await expect(shortLived.clientFor(pds).call(com.atproto.space.listRecords, {

@@ -1,0 +1,28 @@
+{
+  "name": "@flock/web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev --webpack --hostname 127.0.0.1",
+    "build": "next build --webpack",
+    "start": "next start --hostname 127.0.0.1"
+  },
+  "exports": {
+    "./*": "./src/*.ts"
+  },
+  "dependencies": {
+    "@atproto/oauth-client-browser": "0.5.7",
+    "@flock/client": "workspace:*",
+    "@flock/deployment": "workspace:*",
+    "@flock/protocol": "workspace:*",
+    "next": "16.3.6",
+    "react": "19.2.3",
+    "react-dom": "19.2.3"
+  },
+  "devDependencies": {
+    "@atproto/crypto": "0.0.0-spaces-alpha-20261029171913",
+    "@types/react": "19.0.0",
+    "@types/react-dom": "19.0.0",
+    "fake-indexeddb": "6.2.6"
+  }
+}

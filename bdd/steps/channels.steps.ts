@@ -1,16 +1,18 @@
 import assert from "node:assert/strict";
 import { Given, Then, When } from "@cucumber/cucumber";
 import { expect } from "@playwright/test";
-import { reactionRecordKey, spaceRecordUri, tidNow } from "@/protocol/keys";
+import { reactionRecordKey, spaceRecordUri, tidNow } from "@flock/protocol/keys";
 import { PAGE_TIMEOUT_MS, type Actor, type AppWorld } from "../support/world";
 import {
-  approveAdminControls, completeConsent, copyInviteLink, createWorkspaceAs, inviteMemberAs, joinFromInvitation, openInviteLinkAndSignIn, ownerInvites,
+  waitForAdminControls, copyInviteLink, createWorkspaceAs, eventually, inviteMemberAs, joinFromInvitation, openInviteLinkAndSignIn, ownerInvites,
 } from "../support/ui";
+import { browserRecords } from "../support/browser-store";
+import { engineAs } from "../support/engine";
+import type { Engine } from "@flock/client/engine";
 import {
   channelNamed, clickReaction, completedOperationSteps, composer, createChannelAs, deliveredMessage, deliveredReactions, directoryOf,
-  grantedCredential, listMembers, messageCard, messageCards, messageCollection, messagesCalls, openChannel, openChannelReading, ownRecords,
-  postMessage, primarySite, reactionCollection, requestChannelCredential, setUpRoster, settles, sidebarChannel, syncUntil, trackApiRequests,
-  waitForSite, writeOwnRecords,
+  credentialCalls, credentialOutcome, grantedCredential, listingCalls, listMembers, messageCard, messageCards, messageCollection, openChannel, ownRecords,
+  postMessage, reactionCollection, requestChannelCredential, setUpRoster, settles, sidebarChannel, syncUntil, writeOwnRecords,
   type ChannelRef, type CredentialOutcome, type Member, type Roster,
 } from "../support/channels-ui";
 
@@ -48,7 +50,7 @@ function watchPublication(world: AppWorld, authority: Actor, name: string, space
 }
 
 async function listChannelSpaces(world: AppWorld, authority: Actor): Promise<string[]> {
-  const listed = await world.pdsGet<{ spaces: Array<{ uri: string }> }>(authority, "com.atproto.space.listSpaces", { spaceType: "org.slack.channel", limit: "100" });
+  const listed = await world.pdsGet<{ spaces: Array<{ uri: string }> }>(authority, "com.atproto.space.listSpaces", { spaceType: "new.flock.channel", limit: "100" });
   assert.equal(listed.status, 200, JSON.stringify(listed.body));
   return listed.body.spaces.map((space) => space.uri);
 }
@@ -56,7 +58,7 @@ async function listChannelSpaces(world: AppWorld, authority: Actor): Promise<str
 Given("a workspace has current members", async function (this: AppWorld) {
   const admin = await this.actor("owner");
   await createWorkspaceAs(this, admin);
-  await approveAdminControls(this, admin);
+  await waitForAdminControls(this, admin);
   const invitees = [await this.actor("alice", 1), await this.actor("bob", 0), await this.actor("carol", 1)];
   for (const invitee of invitees) await inviteMemberAs(admin, invitee.did);
   const removed = admin.page.locator(".roster-row").filter({ hasText: actorNamed(this, "carol").did });
@@ -100,12 +102,7 @@ Then("the directory shows the channel as public only after membership is applied
   const current = didsOf(await listMembers(this, admin, this.workspaceUri));
 
   const sidebar = await sidebarChannel(admin, name).innerText();
-  assert.match(sidebar, /^#/, "the sidebar lists the channel with the public marker");
-  const listing = this.callsTo(admin, "/api/workspaces").at(-1);
-  assert.ok(listing);
-  const listed = (JSON.parse(listing.responseBody) as { workspaces: Array<{ uri: string; channels: Array<{ name: string; visibility: string }> }> })
-    .workspaces.find((workspace) => workspace.uri === this.workspaceUri)?.channels.find((entry) => entry.name === name);
-  assert.equal(listed?.visibility, "public", "the app's own directory view lists the channel as public");
+  assert.match(sidebar, /^#/, "the app's own directory view, the sidebar, lists the channel with the public marker");
 
   const samples = this.scratch.get("publication") as PublicationSample[];
   const published = samples.filter((sample) => sample.published);
@@ -143,11 +140,11 @@ Given("a member is absent from a private channel member list", async function (t
   const link = await copyInviteLink(admin);
   for (const person of [outsider, insider]) {
     await openInviteLinkAndSignIn(this, person, link);
-    await joinFromInvitation(this, person);
+    await joinFromInvitation(person);
   }
   const secret = `secret plans ${Math.random().toString(36).slice(2, 8)}`;
-  await openChannelReading(primarySite(this), insider, name);
-  await postMessage(primarySite(this), insider, secret);
+  await openChannel(insider, name);
+  await postMessage(insider, secret);
   this.scratch.set("channel", channel);
   this.scratch.set("secret", secret);
 });
@@ -155,17 +152,10 @@ Given("a member is absent from a private channel member list", async function (t
 When("that member opens the channel URI", async function (this: AppWorld) {
   const outsider = actorNamed(this, "outsider");
   const channel = this.scratch.get("channel") as ChannelRef;
-  const opened = await openChannel(outsider, channel.name);
-  await outsider.page.getByRole("button", { name: "Grant channel read →" }).click();
-  await completeConsent(outsider);
-  await waitForSite(primarySite(this), outsider);
-  const history = new URLSearchParams({ workspace: this.workspaceUri, skey: channel.skey });
-  const refusal = await outsider.page.evaluate(async (query) => {
-    const response = await fetch(`/api/channels/messages?${query}`, { cache: "no-store" });
-    return { status: response.status, body: await response.text() };
-  }, history.toString());
-  this.scratch.set("appAnswers", [opened.status, refusal.status]);
-  this.scratch.set("appRefusal", refusal.body);
+  const since = outsider.xrpc.length;
+  await openChannel(outsider, channel.name);
+  const answers = await eventually(() => credentialCalls(outsider, channel.uri, since).length > 0 && credentialCalls(outsider, channel.uri, since), { what: "the browser's own request for the channel's credential" });
+  this.scratch.set("appAnswers", answers.map(credentialOutcome));
   this.scratch.set("credential", await requestChannelCredential(this, outsider, channel.uri));
 });
 
@@ -179,16 +169,17 @@ Then("the PDS refuses a channel read credential", async function (this: AppWorld
 
   await grantedCredential(this, actorNamed(this, "insider"), channel.uri);
 
-  assert.deepEqual(this.scratch.get("appAnswers"), [403, 403], "the app could not read the channel for this account, before or after approving read permission");
-  assert.match(this.scratch.get("appRefusal") as string, /Space not found/, "the app reports the PDS's refusal");
+  assert.deepEqual([...new Set(this.scratch.get("appAnswers") as string[])], ["SpaceNotFound"], "the PDS refused every credential the app asked for this account, with the session's channel read permission granted");
   await outsider.page.getByText("You are not on this channel’s active roster.").waitFor({ state: "visible" });
   const secret = this.scratch.get("secret") as string;
   assert.equal(await messageCards(outsider).count(), 0, "no message is shown to the account");
   assert.doesNotMatch(await outsider.page.locator("body").innerText(), new RegExp(secret));
-  const scanned = outsider.calls.filter((call) => call.body === "recorded");
-  assert.ok(scanned.length > 0, "the account's recorded app responses were scanned");
-  for (const call of scanned) assert.doesNotMatch(call.responseBody, new RegExp(secret), `${call.path} must not leak the private message`);
-  this.log(`leak scan: ${scanned.length} responses read; headers only, not covered: ${outsider.calls.filter((call) => call.body !== "recorded").map((call) => `${call.path} (${call.body})`).join(", ") || "none"}`);
+  // What the browser was answered by every XRPC host it called itself, the app's operator among them.
+  const read = outsider.xrpc.filter((call) => call.body === "recorded");
+  assert.ok(read.length > 0, "the account's recorded responses were scanned");
+  for (const call of read) assert.doesNotMatch(call.responseBody, new RegExp(secret), `${call.origin}${call.path} must not carry the private message`);
+  assert.equal((await browserRecords(outsider, messageCollection)).some((record) => record.value.text === secret), false, "the account's browser store holds no message of the channel");
+  this.log(`leak scan: ${read.length} XRPC responses read; headers only, not covered: ${outsider.xrpc.filter((call) => call.body !== "recorded").map((call) => `${call.path} (${call.body})`).join(", ") || "none"}`);
 });
 
 // --- Messages and reactions remain owned by their authors ------------------------------------------
@@ -200,7 +191,7 @@ Given("two independent apps have authorized channel credentials", async function
   const people = await setUpRoster(this, [{ role: "alice", host: 1, app: 2 }, { role: "bob", host: 0, app: 1 }]);
   this.scratch.set("roster", people);
   for (const [role, session] of people.sessions) {
-    assert.ok(messagesCalls(session).some((call) => call.status === 200), `the app serving ${role} read the channel history with a PDS credential`);
+    assert.ok(credentialCalls(session, people.general.uri).map(credentialOutcome).includes("granted"), `the app serving ${role} holds a PDS credential for the channel`);
   }
   assert.notEqual(people.sites.get("alice")!.origin, people.sites.get("bob")!.origin, "the two members use different apps");
 });
@@ -208,7 +199,7 @@ Given("two independent apps have authorized channel credentials", async function
 When("a member creates a message", async function (this: AppWorld) {
   const people = roster(this);
   const text = unique("hello from the second app");
-  await postMessage(people.sites.get("alice")!, people.sessions.get("alice")!, text);
+  await postMessage(people.sessions.get("alice")!, text);
   this.scratch.set("text", text);
 });
 
@@ -245,8 +236,8 @@ Given("a member authored a channel message", async function (this: AppWorld) {
   const bob = people.sessions.get("bob")!;
   const kept = unique("alice says before editing");
   const dropped = unique("bob says before deleting");
-  await postMessage(people.sites.get("alice")!, alice, kept);
-  await postMessage(people.sites.get("bob")!, bob, dropped);
+  await postMessage(alice, kept);
+  await postMessage(bob, dropped);
   await syncUntil(bob, () => expect(messageCard(bob, kept)).toBeVisible({ timeout: 4_000 }));
   await syncUntil(alice, () => expect(messageCard(alice, dropped)).toBeVisible({ timeout: 4_000 }));
   const edited = unique("alice says after editing");
@@ -260,6 +251,29 @@ Given("a member authored a channel message", async function (this: AppWorld) {
     bob.page.once("dialog", (dialog) => void dialog.accept());
     await messageCard(bob, dropped).getByRole("button", { name: "Delete", exact: true }).click();
   });
+});
+
+// Records are open: a field another app writes is kept by every reader, and written back by this app's edit.
+const ANOTHER_APPS_FIELD = { name: "pinnedBy", value: { app: "another-client", at: "2026-11-01T12:00:00.000Z" } };
+
+Given("another app added a field this app does not know to that message", async function (this: AppWorld) {
+  const people = roster(this);
+  const alice = people.sessions.get("alice")!;
+  const message = (await ownRecords(this, alice, people.general.uri, messageCollection)).find((record) => record.uri === this.scratch.get("keptUri"));
+  assert.ok(message, "the member's message is on their PDS");
+  const result = await this.pdsPost(alice, "com.atproto.space.putRecord", {
+    space: people.general.uri, repo: alice.did, collection: messageCollection, rkey: message.rkey,
+    record: { ...message.value, [ANOTHER_APPS_FIELD.name]: ANOTHER_APPS_FIELD.value },
+  });
+  assert.equal(result.status, 200, `putRecord: ${JSON.stringify(result.body)}`);
+});
+
+Then("the field the other app added is still on the edited message", async function (this: AppWorld) {
+  const people = roster(this);
+  const alice = people.sessions.get("alice")!;
+  const [edited] = await ownRecords(this, alice, people.general.uri, messageCollection);
+  assert.equal(edited?.value.text, this.scratch.get("edited"), "this is the edited record");
+  assert.deepEqual(edited?.value[ANOTHER_APPS_FIELD.name], ANOTHER_APPS_FIELD.value, "the edit wrote the other app's field back");
 });
 
 Then("the change is visible to every authorized app", async function (this: AppWorld) {
@@ -284,12 +298,18 @@ Then("the change is visible to every authorized app", async function (this: AppW
   assert.equal((await deliveredMessage(bob, edited)).uri, aliceRecords[0].uri);
 });
 
-type Attempt = { status: number; body: string };
+/** What the app's engine said to a write: null when it wrote, else why it refused. */
+type Attempt = { refused: string | null };
 
-const forgedWrite = (actor: Actor, body: Record<string, unknown>): Promise<Attempt> => actor.page.evaluate(async (payload) => {
-  const response = await fetch("/api/channels/messages/write", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
-  return { status: response.status, body: await response.text() };
-}, body);
+/** A write through the app's engine as `actor`, made around the page, whose buttons and composer would not offer it. */
+async function forgedWrite(world: AppWorld, actor: Actor, write: (engine: Engine) => Promise<unknown>): Promise<Attempt> {
+  try {
+    await write(engineAs(world, actor));
+    return { refused: null };
+  } catch (error) {
+    return { refused: error instanceof Error ? error.message : String(error) };
+  }
+}
 
 Given("another member authored a channel message", async function (this: AppWorld) {
   const people = await setUpRoster(this, [{ role: "alice", host: 1, app: 1 }, { role: "bob", host: 0, app: 1 }]);
@@ -298,9 +318,9 @@ Given("another member authored a channel message", async function (this: AppWorl
   const bob = people.sessions.get("bob")!;
   const theirs = unique("alice wrote this");
   const mine = unique("bob wrote this");
-  await postMessage(people.sites.get("alice")!, alice, theirs);
+  await postMessage(alice, theirs);
   await syncUntil(bob, () => expect(messageCard(bob, theirs)).toBeVisible({ timeout: 4_000 }));
-  await postMessage(people.sites.get("bob")!, bob, mine);
+  await postMessage(bob, mine);
   this.scratch.set("theirs", theirs);
   this.scratch.set("mine", mine);
   this.scratch.set("before", await ownRecords(this, alice, people.general.uri, messageCollection));
@@ -316,9 +336,9 @@ When("a member attempts to edit or delete it", async function (this: AppWorld) {
   const buttons = async (text: string) => messageCard(bob, text).getByRole("button", { name: /^(Edit|Delete)$/ }).allInnerTexts();
   this.scratch.set("buttons", { onTheirs: await buttons(theirs), onMine: await buttons(mine) });
 
-  const target = { workspace: this.workspaceUri, skey: people.general.skey, uri: message.uri };
-  this.scratch.set("forgedEdit", await forgedWrite(bob, { ...target, action: "edit", text: "hijacked by bob" }));
-  this.scratch.set("forgedDelete", await forgedWrite(bob, { ...target, action: "delete" }));
+  const ref = { workspace: this.workspaceUri, skey: people.general.skey };
+  this.scratch.set("forgedEdit", await forgedWrite(this, bob, (engine) => engine.channels.edit(ref, message.uri, "hijacked by bob")));
+  this.scratch.set("forgedDelete", await forgedWrite(this, bob, (engine) => engine.channels.delete(ref, message.uri)));
   const record = { $type: messageCollection, text: "hijacked by bob", createdAt: new Date().toISOString() };
   this.scratch.set("directEdit", await this.pdsPost(bob, "com.atproto.space.putRecord", { space: people.general.uri, repo: alice.did, collection: messageCollection, rkey: message.rkey, record }));
   this.scratch.set("directDelete", await this.pdsPost(bob, "com.atproto.space.deleteRecord", { space: people.general.uri, repo: alice.did, collection: messageCollection, rkey: message.rkey }));
@@ -333,8 +353,7 @@ Then("the app refuses the action", async function (this: AppWorld) {
   assert.deepEqual(this.scratch.get("buttons"), { onTheirs: [], onMine: ["Edit", "Delete"] }, "the page offers Edit and Delete only on the viewer's own message");
   for (const key of ["forgedEdit", "forgedDelete"]) {
     const attempt = this.scratch.get(key) as Attempt;
-    assert.equal(attempt.status, 403, `${key}: ${attempt.body}`);
-    assert.match(attempt.body, /only your own messages/);
+    assert.match(attempt.refused ?? "it wrote", /only your own messages/, key);
   }
   for (const key of ["directEdit", "directDelete"]) {
     const attempt = this.scratch.get(key) as { status: number; body: unknown };
@@ -354,7 +373,7 @@ Given("a top-level message exists in a channel", async function (this: AppWorld)
   const alice = people.sessions.get("alice")!;
   const bob = people.sessions.get("bob")!;
   const parent = unique("top-level message");
-  await postMessage(people.sites.get("bob")!, bob, parent);
+  await postMessage(bob, parent);
   await syncUntil(alice, () => expect(messageCard(alice, parent)).toBeVisible({ timeout: 4_000 }));
   this.scratch.set("parent", { text: parent, uri: (await deliveredMessage(alice, parent)).uri });
 });
@@ -364,7 +383,7 @@ When("a member replies to that message", async function (this: AppWorld) {
   const alice = people.sessions.get("alice")!;
   const parent = this.scratch.get("parent") as { text: string };
   const reply = unique("reply sent through the app");
-  await postMessage(people.sites.get("alice")!, alice, reply, { replyToCard: parent.text });
+  await postMessage(alice, reply, { replyToCard: parent.text });
   this.scratch.set("reply", reply);
 });
 
@@ -411,7 +430,7 @@ Then("a cross-channel parent or a reply to another reply is ignored", async func
   const stored = (await ownRecords(this, alice, people.general.uri, messageCollection)).map((record) => record.value.text);
   for (const text of [validDirect.text, hostile.crossChannel.text, hostile.nested.text]) assert.ok(stored.includes(text), "the record really is in alice's repo on her PDS");
 
-  await openChannelReading(people.sites.get("alice")!, admin, "general");
+  await openChannel(admin, "general");
   await expect(messageCard(admin, validDirect.text)).toBeVisible({ timeout: 30_000 });
   await expect(messageCard(admin, reply)).toBeVisible({ timeout: 30_000 });
   await expect(messageCard(admin, parent.text)).toBeVisible({ timeout: 30_000 });
@@ -440,7 +459,7 @@ Given("a member reacts to a message with an emoji", async function (this: AppWor
   const alice = people.sessions.get("alice")!;
   const bob = people.sessions.get("bob")!;
   const text = unique("message to react to");
-  await postMessage(people.sites.get("bob")!, bob, text);
+  await postMessage(bob, text);
   const uri = (await deliveredMessage(bob, text)).uri;
   const bobsThumb = reactionRecordKey(uri, "👍", bob.did);
   await writeOwnRecords(this, bob, people.general.uri, [{ collection: reactionCollection, rkey: bobsThumb, value: { subject: uri, emoji: "👍", createdAt: new Date().toISOString() } }]);
@@ -449,7 +468,7 @@ Given("a member reacts to a message with an emoji", async function (this: AppWor
     await expect(reactionButton(alice, text, "👍 1")).toBeVisible({ timeout: 4_000 });
   });
 
-  const reacted = await clickReaction(people.sites.get("alice")!, alice, text, "💜 0");
+  const reacted = await clickReaction(alice, text, "💜 0");
   assert.equal(reacted.status, 200, reacted.responseBody);
   await syncUntil(alice, () => expect(reactionButton(alice, text, "💜 1")).toBeVisible({ timeout: 4_000 }));
   assert.deepEqual(await reactionRecords(this, alice, people.general.uri), [{ emoji: "💜", subject: uri, rkey: reactionRecordKey(uri, "💜", alice.did) }]);
@@ -460,11 +479,13 @@ When("the member changes or removes that reaction", async function (this: AppWor
   const people = roster(this);
   const alice = people.sessions.get("alice")!;
   const { text, uri } = this.scratch.get("reacted") as { text: string; uri: string };
-  for (const label of ["👍 1", "👍 1", "💜 1"]) {
-    const answer = await clickReaction(people.sites.get("alice")!, alice, text, label);
+  for (const label of ["👍 1", "💜 1"]) {
+    const answer = await clickReaction(alice, text, label);
     assert.equal(answer.status, 200, answer.responseBody);
   }
-  assert.deepEqual(await reactionRecords(this, alice, people.general.uri), [{ emoji: "👍", subject: uri, rkey: reactionRecordKey(uri, "👍", alice.did) }], "alice's repo holds exactly one reaction now, the thumbs-up she clicked twice");
+  // The same thumbs-up once more, from another app of alice's (her page shows it active, so it offers only to remove it).
+  await engineAs(this, alice).channels.react({ workspace: this.workspaceUri, skey: people.general.skey }, uri, "👍");
+  assert.deepEqual(await reactionRecords(this, alice, people.general.uri), [{ emoji: "👍", subject: uri, rkey: reactionRecordKey(uri, "👍", alice.did) }], "alice's repo holds exactly one reaction now, the thumbs-up she gave twice");
 });
 
 Then("all apps show only the current reaction record", async function (this: AppWorld) {
@@ -479,7 +500,7 @@ Then("all apps show only the current reaction record", async function (this: App
       await expect(reactionButton(viewer, text, "💜 1")).toHaveCount(0);
     });
     await expect(reactionButton(viewer, text, "👍 2")).toHaveClass(/reaction-active/, { timeout: 30_000 });
-    await settles(() => assert.deepEqual(deliveredReactions(viewer, uri).map((reaction) => [reaction.repo, reaction.emoji]).sort(), [[alice.did, "👍"], [bob.did, "👍"]].sort(), `${viewer.role}'s app delivered exactly the two current reaction records`));
+    await settles(async () => assert.deepEqual((await deliveredReactions(viewer, uri)).map((reaction) => [reaction.repo, reaction.emoji]).sort(), [[alice.did, "👍"], [bob.did, "👍"]].sort(), `${viewer.role}'s app delivered exactly the two current reaction records`));
   }
   assert.deepEqual((await reactionRecords(this, bob, people.general.uri)).map((record) => record.emoji), ["👍"]);
   assert.deepEqual((await reactionRecords(this, alice, people.general.uri)).map((record) => record.emoji), ["👍"]);
@@ -489,14 +510,14 @@ Then("all apps show only the current reaction record", async function (this: App
 
 const EMOJI = "\u{1F600}";
 
-Given("a message contains more than 10000 Unicode code points", async function (this: AppWorld) {
+Given("a message contains more than 10000 graphemes", async function (this: AppWorld) {
   const people = await setUpRoster(this, [{ role: "alice", host: 1, app: 1 }]);
   this.scratch.set("roster", people);
   const atLimit = EMOJI.repeat(10_000);
   const overlong = EMOJI.repeat(10_001);
   assert.equal(Array.from(overlong).length, 10_001);
   assert.equal(Array.from(atLimit).length, 10_000);
-  assert.ok(atLimit.length > 10_000, "the accepted text is longer than 10000 UTF-16 units, so only a code point count admits it");
+  assert.ok(atLimit.length > 10_000, "the accepted text is longer than 10000 UTF-16 units, so only a grapheme count admits it");
   this.scratch.set("atLimit", atLimit);
   this.scratch.set("overlong", overlong);
 });
@@ -514,8 +535,8 @@ When("the member submits it", async function (this: AppWorld) {
   });
   await composer(alice).fill("");
 
-  await postMessage(people.sites.get("alice")!, alice, atLimit, { appears: messageCards(alice) });
-  this.scratch.set("forged", await forgedWrite(alice, { workspace: this.workspaceUri, skey: people.general.skey, action: "create", text: overlong }));
+  await postMessage(alice, atLimit, { appears: messageCards(alice) });
+  this.scratch.set("forged", await forgedWrite(this, alice, (engine) => engine.channels.send({ workspace: this.workspaceUri, skey: people.general.skey }, overlong)));
   const directRkey = tidNow();
   const direct = await this.pdsPost(alice, "com.atproto.space.createRecord", {
     space: people.general.uri, repo: alice.did, collection: messageCollection, rkey: directRkey, record: { $type: messageCollection, text: overlong, createdAt: new Date().toISOString() },
@@ -530,9 +551,9 @@ Then("the message is rejected", async function (this: AppWorld) {
   const overlong = this.scratch.get("overlong") as string;
 
   assert.deepEqual(this.scratch.get("composer"), { codePoints: 10_000, counter: "10000/10,000" }, "the composer cannot hold more than 10000 code points");
-  const forged = this.scratch.get("forged") as { status: number; body: string };
-  assert.equal(forged.status, 400, forged.body);
-  assert.match(forged.body, /1 to 10000 Unicode code points/);
+  const forged = this.scratch.get("forged") as Attempt;
+  // 10,001 four-byte emoji exceed both of the lexicon's limits (10,000 graphemes, 40,000 UTF-8 bytes); the byte limit is reported first.
+  assert.match(forged.refused ?? "it wrote", /text must not be longer than 40000 characters/, "the app refuses the message before it reaches the PDS");
 
   const stored = await ownRecords(this, alice, people.general.uri, messageCollection);
   const lengths = new Map(stored.map((record) => [record.rkey, Array.from(String(record.value.text)).length]));
@@ -541,7 +562,7 @@ Then("the message is rejected", async function (this: AppWorld) {
   assert.equal(lengths.get(this.scratch.get("directRkey") as string), 10_001);
 
   const reader = people.owner;
-  await openChannelReading(people.sites.get("alice")!, reader, "general");
+  await openChannel(reader, "general");
   await syncUntil(reader, async () => assert.equal(await messageCards(reader).count(), 1, "a reader sees one message: the one at the limit"));
   const shown = await messageCards(reader).locator("> p").innerText();
   assert.equal(Array.from(shown).length, 10_000);
@@ -562,9 +583,12 @@ function seedMessages(prefix: string, count: number): Array<{ collection: string
   });
 }
 
-const cachedSpaces = (world: AppWorld, who: Actor): string[] => world.withAppDatabase((db) => (db.prepare(
-  "SELECT DISTINCT space_uri FROM space_collection_cursor WHERE account_did = ? AND collection = ?",
-).all(who.did, messageCollection) as Array<{ space_uri: string }>).map((row) => row.space_uri));
+/** The spaces whose messages the app's engine holds in this browser for the account. */
+const heldMessageSpaces = async (who: Actor): Promise<string[]> => [...new Set((await browserRecords(who, messageCollection)).map((record) => record.space))].sort();
+
+/** The message texts the browser's own listings carried. */
+const listedTexts = (listings: ReturnType<typeof listingCalls>): string[] =>
+  listings.flatMap(({ call }) => (JSON.parse(call.responseBody) as { records: Array<{ value: { text?: unknown } }> }).records.map((record) => String(record.value.text)));
 
 Given("a channel contains more than 100 messages", async function (this: AppWorld) {
   const people = await setUpRoster(this, [{ role: "alice", host: 1, app: 1 }]);
@@ -585,13 +609,14 @@ When("a member opens that channel", { timeout: 420_000 }, async function (this: 
   const people = roster(this);
   const alice = people.sessions.get("alice")!;
   const channels = this.scratch.get("channels") as { history: ChannelRef };
-  this.scratch.set("requests", trackApiRequests(alice));
-  this.scratch.set("spacesBefore", cachedSpaces(this, alice));
-  await openChannelReading(people.sites.get("alice")!, alice, channels.history.name);
+  this.scratch.set("xrpcBefore", alice.xrpc.length);
+  this.scratch.set("spacesBefore", await heldMessageSpaces(alice));
+  await openChannel(alice, channels.history.name);
   await expect(messageCards(alice).first()).toBeVisible({ timeout: PAGE_TIMEOUT_MS });
 });
 
-const historyRequests = (world: AppWorld): URL[] => (world.scratch.get("requests") as URL[]).filter((url) => url.pathname === "/api/channels/messages");
+/** The browser's own message listings since the member opened the channel. */
+const historyListings = (world: AppWorld, alice: Actor): ReturnType<typeof listingCalls> => listingCalls(alice, messageCollection, world.scratch.get("xrpcBefore") as number);
 
 Then("the initial view contains the latest 100 messages", async function (this: AppWorld) {
   const people = roster(this);
@@ -599,26 +624,29 @@ Then("the initial view contains the latest 100 messages", async function (this: 
   const channels = this.scratch.get("channels") as { history: ChannelRef };
   await expect(messageCards(alice)).toHaveCount(100, { timeout: PAGE_TIMEOUT_MS });
   assert.deepEqual(await messageCards(alice).locator("> p").allInnerTexts(), newestFirst("history", 31, 130), "the view shows the newest 100 messages, newest first");
+  await expect(alice.page.getByRole("button", { name: "Load older messages", exact: true })).toBeVisible();
 
-  assert.ok(historyRequests(this).some((url) => url.searchParams.get("offset") === "0"), "the first request asked for the newest page");
   await settles(() => {
-    const answer = messagesCalls(alice).filter((call) => call.status === 200).at(-1);
-    assert.ok(answer, "the app answered the history request");
-    const page = JSON.parse(answer.responseBody) as { messages: unknown[]; hasMore: boolean; nextOffset: number };
-    assert.deepEqual({ count: page.messages.length, hasMore: page.hasMore, nextOffset: page.nextOffset }, { count: 100, hasMore: true, nextOffset: 100 });
+    const listings = historyListings(this, alice);
+    assert.ok(listings.length > 0, "the browser listed the channel's messages itself");
+    assert.equal(listings[0]!.query.get("cursor"), null, "the first request asked for the newest page");
+    assert.deepEqual([...new Set(listedTexts(listings))].sort(), newestFirst("history", 31, 130).sort(), "the browser fetched the newest 100 messages and nothing older");
+    assert.equal(listings.every(({ query }) => query.get("space") === channels.history.uri), true);
   });
-  assert.equal(historyRequests(this).every((url) => url.searchParams.get("skey") === channels.history.skey), true);
 });
 
 Then("older messages load by page", { timeout: 420_000 }, async function (this: AppWorld) {
   const people = roster(this);
   const alice = people.sessions.get("alice")!;
-  const before = historyRequests(this).length;
+  const since = alice.xrpc.length;
   await alice.page.getByRole("button", { name: "Load older messages", exact: true }).click();
   await expect(messageCards(alice)).toHaveCount(HISTORY_SIZE, { timeout: PAGE_TIMEOUT_MS });
   assert.deepEqual(await messageCards(alice).locator("> p").allInnerTexts(), newestFirst("history", 1, 130), "the older 30 messages are appended after the newest 100");
-  const requested = historyRequests(this).slice(before);
-  assert.deepEqual(requested.map((url) => url.searchParams.get("offset")), ["100"], "exactly one more page was requested, starting after the first 100");
+  await settles(() => {
+    const requested = listingCalls(alice, messageCollection, since);
+    assert.deepEqual(requested.map(({ query }) => query.get("cursor") !== null), [true], "exactly one more page was requested, continuing below the first 100");
+    assert.deepEqual(listedTexts(requested).sort(), newestFirst("history", 1, 30).sort(), "that page carried the older 30 messages");
+  });
   await expect(alice.page.getByRole("button", { name: "Load older messages", exact: true })).toHaveCount(0);
 });
 
@@ -626,13 +654,10 @@ Then("no other channel history is fetched", async function (this: AppWorld) {
   const people = roster(this);
   const alice = people.sessions.get("alice")!;
   const channels = this.scratch.get("channels") as { history: ChannelRef; decoy: ChannelRef };
-  assert.deepEqual([...new Set(historyRequests(this).map((url) => url.searchParams.get("skey")))], [channels.history.skey], "every history request named the opened channel");
-  for (const call of messagesCalls(alice)) assert.doesNotMatch(call.responseBody, /decoy \d{3}/, "no response carried another channel's messages");
-  assert.deepEqual(
-    cachedSpaces(this, alice).filter((space) => !(this.scratch.get("spacesBefore") as string[]).includes(space)),
-    [channels.history.uri],
-    "the app synced only the opened channel's records for this account",
-  );
-  assert.equal(cachedSpaces(this, alice).includes(channels.decoy.uri), false);
+  assert.deepEqual([...new Set(historyListings(this, alice).map(({ query }) => query.get("space")))], [channels.history.uri], "every history request named the opened channel");
+  for (const call of alice.xrpc.slice(this.scratch.get("xrpcBefore") as number)) assert.doesNotMatch(call.responseBody, /decoy \d{3}/, "no response carried another channel's messages");
+  const held = await heldMessageSpaces(alice);
+  assert.deepEqual(held.filter((space) => !(this.scratch.get("spacesBefore") as string[]).includes(space)), [channels.history.uri], "the app synced only the opened channel's records for this account");
+  assert.equal(held.includes(channels.decoy.uri), false);
   assert.equal(await alice.page.getByText(/decoy \d{3}/).count(), 0);
 });

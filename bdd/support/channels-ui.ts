@@ -1,20 +1,21 @@
 import assert from "node:assert/strict";
-import { generateSpaceKey } from "@/atproto/space-key";
-import { expect, type Locator } from "@playwright/test";
-import { mintSpaceCredentialWith, SpaceCredentialError, type SpaceCredential } from "@/atproto/space-credential-core";
-import { AtprotoClient } from "@/atproto/xrpc";
-import { channelUri, spaceRecordUri } from "@/protocol/keys";
-import { inviteLinkFor } from "@/app/ui/client-api";
+import { generateSpaceKey } from "@flock/protocol/atproto/space-key";
+import { expect, type Locator, type Page } from "@playwright/test";
+import { mintSpaceCredentialWith, SpaceCredentialError, type SpaceCredential } from "@flock/protocol/atproto/space-credential-core";
+import { AtprotoClient } from "@flock/protocol/atproto/xrpc";
+import { channelUri, spaceRecordUri } from "@flock/protocol/keys";
+import { inviteLinkFor } from "@flock/web/app/ui/client-api";
 import type { SecondApp } from "../../protocol-tests/support/app-fixture";
 import { PAGE_TIMEOUT_MS, type Actor, type ApiCall, type AppWorld } from "./world";
-import { approveAdminControls, completeConsent, createWorkspaceAs, eventually, inviteMemberAs } from "./ui";
+import { browserRecords } from "./browser-store";
+import { waitForAdminControls, createWorkspaceAs, eventually, inviteMemberAs, signInFromLoginFormAt } from "./ui";
 
 export type ChannelRef = { skey: string; name: string; uri: string; visibility: string };
 export type Member = { did: string; read: boolean; write: boolean };
 export type SpaceRecord = { uri: string; rkey: string; cid?: string; value: Record<string, unknown> };
 
-export const messageCollection = "org.slack.channel.message";
-export const reactionCollection = "org.slack.channel.reaction";
+export const messageCollection = "new.flock.channel.message";
+export const reactionCollection = "new.flock.channel.reaction";
 
 // --- PDS facts, read straight from the host with an account's own access token ------------------------
 
@@ -26,7 +27,7 @@ export async function listMembers(world: AppWorld, as: Actor, space: string): Pr
 
 export async function directoryOf(world: AppWorld, owner: Actor): Promise<ChannelRef[]> {
   const result = await world.pdsGet<{ records?: Array<{ value: { skey: string; name: string; visibility: string } }> }>(
-    owner, "com.atproto.space.listRecords", { space: world.workspaceUri, repo: owner.did, collection: "org.slack.directory", limit: "100" },
+    owner, "com.atproto.space.listRecords", { space: world.workspaceUri, repo: owner.did, collection: "new.flock.directory", limit: "100" },
   );
   assert.equal(result.status, 200, JSON.stringify(result.body));
   return (result.body.records ?? []).map(({ value }) => ({ ...value, uri: channelUri(owner.did, value.skey) }));
@@ -107,51 +108,32 @@ export type Site = { origin: string };
 export const primarySite = (world: AppWorld): Site => ({ origin: world.appOrigin });
 export const siteOf = (app: SecondApp): Site => ({ origin: app.appUrl.origin });
 
-export async function waitForSite(site: Site, actor: Actor): Promise<void> {
-  await actor.page.waitForURL((url) => url.origin === site.origin && !url.pathname.startsWith("/oauth"), { timeout: 30_000 });
-}
-
 /** The same account in another browser context, signed in to a different app. Registered so the scenario closes it. */
 export async function startSessionOn(world: AppWorld, actor: Actor, site: Site, label: string): Promise<Actor> {
   const role = `${actor.role}@${label}`;
   const context = await world.newContext(role);
   const page = await context.newPage();
   page.setDefaultTimeout(PAGE_TIMEOUT_MS);
-  const session: Actor = { ...actor, role, context, page, calls: [] };
+  const session: Actor = { ...actor, role, context, page, xrpc: [] };
   world.recordCalls(session);
   world.actors.set(role, session);
   await page.goto(site.origin);
   return session;
 }
 
-/** Every /api request an actor's page makes, with its query string, in order. */
-export function trackApiRequests(actor: Actor): URL[] {
-  const requests: URL[] = [];
-  actor.page.on("request", (request) => {
-    const url = new URL(request.url());
-    if (url.pathname.startsWith("/api/")) requests.push(url);
-  });
-  return requests;
-}
 
-async function signInFromLoginFormOn(site: Site, actor: Actor): Promise<void> {
-  await actor.page.getByLabel("Your AT Protocol handle").fill(actor.did);
-  await actor.page.getByRole("button", { name: /Continue with atproto/i }).click();
-  await actor.page.locator("input[name=password]").waitFor({ state: "visible" });
-  await completeConsent(actor);
-  await waitForSite(site, actor);
-}
 
 export async function joinWorkspaceOn(site: Site, actor: Actor, inviteLink: string): Promise<void> {
   await actor.page.goto(inviteLink);
   await actor.page.getByText(/invited to a workspace/).waitFor({ state: "visible" });
-  await signInFromLoginFormOn(site, actor);
+  await signInFromLoginFormAt(actor, site.origin);
   await actor.page.getByRole("region", { name: "Workspace invitation" }).getByRole("button", { name: "Join this workspace" }).click();
-  await completeConsent(actor);
-  await waitForSite(site, actor);
 }
 
-export const sidebarChannel = (actor: Actor, name: string) => actor.page.locator(".sidebar .channel-nav-item").filter({ hasText: name });
+/** The open workspace's channels in the sidebar (the direct-message list beside them uses the same item style). */
+export const workspaceChannels = (page: Page) => page.locator(".channel-nav").filter({ has: page.locator(".section-label", { hasText: "CHANNELS" }) }).locator(".channel-nav-item");
+
+export const sidebarChannel = (actor: Actor, name: string) => workspaceChannels(actor.page).filter({ hasText: name });
 
 export async function createChannelAs(actor: Actor, name: string, options: { visibility?: "public" | "private"; members?: string[] } = {}): Promise<void> {
   const { page } = actor;
@@ -164,28 +146,47 @@ export async function createChannelAs(actor: Actor, name: string, options: { vis
   await sidebarChannel(actor, name).waitFor({ state: "visible", timeout: 60_000 });
 }
 
-export const messagesCalls = (actor: Actor): ApiCall[] => actor.calls.filter((call) => call.path === "/api/channels/messages");
+const SPACE_CREDENTIAL = "/xrpc/com.atproto.space.getSpaceCredential";
 
-/** Opens a channel from the sidebar and returns the app's answer to the first history request it caused. */
-export async function openChannel(actor: Actor, name: string): Promise<ApiCall> {
-  const entry = sidebarChannel(actor, name);
-  await refreshUntil(actor, () => expect(entry).toBeVisible({ timeout: 3_000 }), 60_000);
-  const before = messagesCalls(actor).length;
-  await entry.click();
-  await actor.page.getByRole("heading", { name: new RegExp(`${name}$`) }).waitFor({ state: "visible" });
-  return eventually(() => messagesCalls(actor)[before], { what: `the history request for ${name}` });
+/** The space a recorded credential request asked for. */
+function credentialSpace(call: ApiCall): string | undefined {
+  try { return (JSON.parse(call.requestBody) as { space?: string }).space; }
+  catch { return undefined; }
 }
 
-/** Opens a channel and, like a person would, approves the channel-read permission if the app asks for it. */
-export async function openChannelReading(site: Site, actor: Actor, name: string): Promise<void> {
-  const first = await openChannel(actor, name);
-  if (first.status === 200) return;
-  assert.ok(first.status === 401 || first.status === 403, `unexpected first history answer ${first.status}: ${first.responseBody}`);
-  const before = messagesCalls(actor).length;
-  await actor.page.getByRole("button", { name: "Grant channel read →" }).click();
-  await completeConsent(actor);
-  await waitForSite(site, actor);
-  await eventually(() => messagesCalls(actor).slice(before).find((call) => call.status === 200), { what: `a successful history answer for ${name} after approving read (saw ${messagesCalls(actor).slice(before).map((call) => call.status).join(", ")})` });
+/**
+ * How the authority's PDS answered one of the browser's credential requests: "granted", or the refusal's error code. The PDS
+ * answers every refusal as HTTP 400 with a code (SpaceNotFound for a space it will not admit the caller to).
+ */
+export function credentialOutcome(call: ApiCall): string {
+  if (call.status === 200) return "granted";
+  try { return (JSON.parse(call.responseBody) as { error?: string }).error ?? `HTTP ${call.status}`; }
+  catch { return `HTTP ${call.status}`; }
+}
+
+/** The browser's own requests for a space's credential since `since`, as the authority's PDS answered them. */
+export const credentialCalls = (actor: Actor, space: string, since = 0): ApiCall[] =>
+  actor.xrpc.slice(since).filter((call) => call.path === SPACE_CREDENTIAL && credentialSpace(call) === space);
+
+/** The browser's own record listings of one collection since `since`, with the query each named. */
+export const listingCalls = (actor: Actor, collection: string, since = 0): Array<{ call: ApiCall; query: URLSearchParams }> =>
+  actor.xrpc.slice(since).filter((call) => call.path === "/xrpc/com.atproto.space.listRecords").map((call) => ({ call, query: new URLSearchParams(call.query) }))
+    .filter(({ query }) => query.get("collection") === collection);
+
+/** Waits for the open channel's reads to settle: no read of it is in flight. */
+export async function channelSettled(actor: Actor): Promise<void> {
+  await actor.page.locator('.message-list[aria-busy="false"]').waitFor({ state: "attached" });
+}
+
+/** Opens a channel from the sidebar and waits until its reads have settled without an error. */
+export async function openChannel(actor: Actor, name: string): Promise<void> {
+  const entry = sidebarChannel(actor, name);
+  await refreshUntil(actor, () => expect(entry).toBeVisible({ timeout: 3_000 }), 60_000);
+  await entry.click();
+  await actor.page.getByRole("heading", { name: new RegExp(`${escapeForRegExp(name)}$`) }).waitFor({ state: "visible" });
+  await channelSettled(actor);
+  const failure = actor.page.locator(".form-error");
+  assert.equal(await failure.count(), 0, `${name} could not be read: ${await failure.allInnerTexts()}`);
 }
 
 export const composer = (actor: Actor) => actor.page.getByPlaceholder("Write a message…");
@@ -196,34 +197,16 @@ function escapeForRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/** Types a message and sends it. The first post in a channel needs the write permission, which a person approves once. */
-export async function postMessage(site: Site, actor: Actor, text: string, options: { replyToCard?: string; appears?: Locator } = {}): Promise<void> {
-  const appears = options.appears ?? messageCard(actor, text);
+/** Types a message and sends it: the browser writes it to the account's own repo with the session's grant, and shows it at once. */
+export async function postMessage(actor: Actor, text: string, options: { replyToCard?: string; appears?: Locator } = {}): Promise<void> {
   const { page } = actor;
-  const needsPermission = page.getByRole("button", { name: "Grant message posting →" });
-  const send = async (): Promise<void> => {
-    await composer(actor).fill(text);
-    await page.getByRole("button", { name: "Send", exact: true }).click();
-  };
   if (options.replyToCard) await messageCard(actor, options.replyToCard).getByRole("button", { name: "Reply", exact: true }).click();
-  await send();
+  await composer(actor).fill(text);
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  const appears = (options.appears ?? messageCard(actor, text)).first();
   const refused = page.locator(".form-error");
-  await appears.or(needsPermission).or(refused).first().waitFor({ state: "visible" });
-  if (!await needsPermission.isVisible() && await refused.isVisible()) throw new Error(`The app refused the message: ${await refused.innerText()}`);
-  if (!await needsPermission.isVisible()) {
-    await syncUntil(actor, () => expect(appears.first()).toBeVisible({ timeout: 4_000 }));
-    return;
-  }
-  await needsPermission.click();
-  await completeConsent(actor);
-  await waitForSite(site, actor);
-  await composer(actor).waitFor({ state: "visible" });
-  if (options.replyToCard) {
-    await messageCard(actor, options.replyToCard).waitFor({ state: "visible" });
-    await messageCard(actor, options.replyToCard).getByRole("button", { name: "Reply", exact: true }).click();
-  }
-  await send();
-  await syncUntil(actor, () => expect(appears.first()).toBeVisible({ timeout: 4_000 }));
+  await appears.or(refused).first().waitFor({ state: "visible" });
+  if (await refused.isVisible()) throw new Error(`The app refused the message: ${await refused.innerText()}`);
 }
 
 // --- Operator journal, for facts only the app records ----------------------------------------------
@@ -248,7 +231,7 @@ export type Roster = { owner: Actor; general: ChannelRef; sessions: Map<string, 
 export async function setUpRoster(world: AppWorld, people: Person[]): Promise<Roster> {
   const owner = await world.actor("owner");
   await createWorkspaceAs(world, owner);
-  await approveAdminControls(world, owner);
+  await waitForAdminControls(world, owner);
   const accounts = new Map<string, Actor>();
   for (const person of people) {
     const account = await world.actor(person.role, person.host);
@@ -269,7 +252,7 @@ export async function setUpRoster(world: AppWorld, people: Person[]): Promise<Ro
     sites.set(person.role, site);
   }
   const general = await channelNamed(world, owner, "general");
-  for (const person of people) await openChannelReading(sites.get(person.role)!, sessions.get(person.role)!, "general");
+  for (const person of people) await openChannel(sessions.get(person.role)!, "general");
   return { owner, general, sessions, sites };
 }
 
@@ -302,45 +285,32 @@ async function retryAfter(check: () => Promise<void>, press: () => Promise<void>
 
 export type DeliveredMessage = { uri: string; rkey: string; repo: string; value: Record<string, unknown> };
 
-/** The message as the app delivered it to this page, taken from the newest history answer that contains it. */
+/** The message as the app's engine holds it in this browser: the record the page renders. */
 export async function deliveredMessage(actor: Actor, text: string): Promise<DeliveredMessage> {
-  return eventually(() => {
-    for (const call of [...messagesCalls(actor)].reverse()) {
-      if (call.status !== 200 || !call.responseBody) continue;
-      const page = JSON.parse(call.responseBody) as { messages: DeliveredMessage[] };
-      const found = page.messages.find((message) => message.value.text === text);
-      if (found) return found;
-    }
-    return undefined;
-  }, { what: `${actor.role}'s app to deliver the message`, timeoutMs: 15_000 });
+  let found: DeliveredMessage | undefined;
+  await settles(async () => {
+    found = (await browserRecords(actor, messageCollection)).find((record) => record.value.text === text);
+    assert.ok(found, `${actor.role}'s app holds the message`);
+  });
+  assert.ok(found);
+  return found;
 }
 
-/** The reaction records the app delivered to this page for a message, from the newest history answer. */
-export function deliveredReactions(actor: Actor, subject: string): Array<{ repo: string; emoji: unknown }> {
-  const answer = [...messagesCalls(actor)].reverse().find((call) => call.status === 200);
-  assert.ok(answer, `${actor.role} received no channel history`);
-  const page = JSON.parse(answer.responseBody) as { reactions: Array<{ repo: string; value: { subject?: string; emoji?: unknown } }> };
-  return page.reactions.filter((reaction) => reaction.value.subject === subject).map((reaction) => ({ repo: reaction.repo, emoji: reaction.value.emoji }));
+/** The reaction records the app's engine holds in this browser for a message. */
+export async function deliveredReactions(actor: Actor, subject: string): Promise<Array<{ repo: string; emoji: unknown }>> {
+  return (await browserRecords(actor, reactionCollection)).filter((reaction) => reaction.value.subject === subject)
+    .map((reaction) => ({ repo: reaction.repo, emoji: reaction.value.emoji }));
 }
 
-const reactionCalls = (actor: Actor): ApiCall[] => actor.calls.filter((call) => call.path === "/api/channels/reactions");
-
-/** Clicks a reaction button and returns the app's answer. A first write needs the channel write permission, which a person approves once. */
-export async function clickReaction(site: Site, actor: Actor, message: string, label: string): Promise<ApiCall> {
-  const click = async (): Promise<ApiCall> => {
-    const before = reactionCalls(actor).length;
-    await messageCard(actor, message).getByRole("button", { name: label, exact: true }).click();
-    return eventually(() => reactionCalls(actor)[before], { what: `the app to answer the ${label} click` });
-  };
-  const answer = await click();
-  const needsPermission = actor.page.getByRole("button", { name: "Grant message posting →" });
-  if (answer.status !== 403 || !await needsPermission.isVisible()) return answer;
-  await needsPermission.click();
-  await completeConsent(actor);
-  await waitForSite(site, actor);
-  await syncUntil(actor, () => expect(messageCard(actor, message).getByRole("button", { name: label, exact: true })).toBeVisible({ timeout: 4_000 }));
-  return click();
+/** Clicks a reaction button and returns the PDS's answer to the browser's own write (a putRecord, or a deleteRecord to remove it). */
+export async function clickReaction(actor: Actor, message: string, label: string): Promise<ApiCall> {
+  const before = actor.xrpc.length;
+  await messageCard(actor, message).getByRole("button", { name: label, exact: true }).click();
+  return eventually(() => actor.xrpc.slice(before).find((call) => REACTION_WRITES.has(call.path) && call.requestBody.includes(reactionCollection)),
+    { what: `the browser to write the ${label} reaction` });
 }
+
+const REACTION_WRITES = new Set(["/xrpc/com.atproto.space.putRecord", "/xrpc/com.atproto.space.deleteRecord"]);
 
 /** Re-runs an assertion over facts that arrive asynchronously (recorded network answers) until it holds or time runs out. */
 export async function settles(check: () => void | Promise<void>, timeoutMs = 15_000): Promise<void> {

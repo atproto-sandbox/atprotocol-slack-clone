@@ -8,6 +8,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Keypair } from "@atproto/crypto";
 import { createFixtureTempRoot } from "../fixture-temp";
+import { mintAppSession, type OAuthProviderHost } from "./pds-network";
 
 // A complete local stack for driving the real app: two in-memory PDS hosts plus a PLC directory from the
 // pinned atproto checkout, this app's lexicons published to the fixture's lexicon authority, and `next start`
@@ -21,19 +22,23 @@ type TestAgent = {
     createSession(input: Record<string, unknown>): Promise<{ data: { accessJwt: string } }>;
   }; repo: { createRecord(input: Record<string, unknown>, options: { headers: { authorization: string } }): Promise<unknown> } } };
 };
-type TestPds = { url: string; getAgent(): TestAgent; ctx: { actorStore: { keypair(did: string): Promise<Keypair> } } };
+type TestPds = { url: string; getAgent(): TestAgent; ctx: { actorStore: { keypair(did: string): Promise<Keypair> } } & OAuthProviderHost["ctx"] };
 type TestNetwork = { pds: TestPds; extraPdses: TestPds[]; plc: { url: string }; close(): Promise<void>; lexiconAuthority?: { did: string } };
 
 export type FixtureAccount = { handle: string; did: string; password: string; host: 0 | 1; pdsUrl: string; accessJwt: string };
 
-export type SecondApp = { appUrl: URL; databasePath: string; serverOutput(): string };
+/** One app: its web process at `appUrl` and its operator's process at `operatorUrl`, with the operator's database. */
+export type SecondApp = { appUrl: URL; operatorUrl: URL; databasePath: string; serverOutput(): string };
 
 export type AppFixture = {
   appUrl: URL;
+  operatorUrl: URL;
   databasePath: string;
   plcUrl: string;
   pdsUrls: readonly [string, string];
   createAccount(handle: string, host: 0 | 1, password?: string): Promise<FixtureAccount>;
+  /** An app account's own OAuth session with the app's grant, restored through the app's OAuth client and `stateFile`, as its sign-in leaves it. */
+  appSession(account: FixtureAccount, serviceRef: string, stateFile: string): ReturnType<typeof mintAppSession>;
   /** A second, fully independent app instance (own port, own database, own encryption key) on the same PDS network. */
   startSecondApp(options?: { env?: Record<string, string> }): Promise<SecondApp>;
   /** The credential's own header and claims, re-signed with new claims by the authority's signing key on `authorityHost`: a genuinely expired (or extended) credential that keeps its jti and DPoP binding. */
@@ -93,13 +98,14 @@ export async function startAppFixture(options: { preferredPort?: number } = {}):
 
     const launch = async (name: string, preferredPort?: number, extraEnv: Record<string, string> = {}): Promise<SecondApp> => {
       const app = await spawnApp(net, projectRoot, scratchDirectory, name, preferredPort, extraEnv);
-      servers.push({ child: app.child, output: app.serverOutput });
+      for (const child of app.children) servers.push({ child, output: app.serverOutput });
       return app;
     };
     const primary = await launch("app", options.preferredPort);
 
     return {
       appUrl: primary.appUrl,
+      operatorUrl: primary.operatorUrl,
       databasePath: primary.databasePath,
       plcUrl: net.plc.url,
       pdsUrls: [hosts[0].url, hosts[1].url],
@@ -109,6 +115,8 @@ export async function startAppFixture(options: { preferredPort?: number } = {}):
         });
         return { handle, did: created.data.did, password, host, pdsUrl: hosts[host].url, accessJwt: created.data.accessJwt };
       },
+      appSession: (account, serviceRef, stateFile) =>
+        mintAppSession(hosts[account.host], account.did, { serviceRef, plcUrl: net.plc.url, stateFile }, `app-${account.handle}`),
       startSecondApp: (secondOptions) => launch(`second-app-${servers.length}`, undefined, secondOptions?.env),
       async resignSpaceCredential(authorityHost, credential, claims) {
         const [header, payload] = credential.split(".");
@@ -127,11 +135,14 @@ export async function startAppFixture(options: { preferredPort?: number } = {}):
   }
 }
 
-type SpawnedApp = SecondApp & { child: ChildProcess };
+type SpawnedApp = SecondApp & { children: ChildProcess[] };
 
+/** The web app's production server and its operator's process, each on its own port and origin, sharing one environment. */
 async function spawnApp(network: TestNetwork, projectRoot: string, scratchDirectory: string, name: string, preferredPort?: number, extraEnv: Record<string, string> = {}): Promise<SpawnedApp> {
   const port = await choosePort(preferredPort);
+  const operatorPort = await choosePort();
   const appUrl = new URL(`http://127.0.0.1:${port}`);
+  const operatorUrl = new URL(`http://127.0.0.1:${operatorPort}`);
   const databasePath = join(scratchDirectory, `${name}.db`);
   const env: NodeJS.ProcessEnv = {
     PATH: process.env.PATH ?? "",
@@ -141,35 +152,41 @@ async function spawnApp(network: TestNetwork, projectRoot: string, scratchDirect
     NEXT_TELEMETRY_DISABLED: "1",
     ATPROTO_ACCEPTANCE_TEST: "true",
     APP_URL: appUrl.origin,
+    OPERATOR_URL: operatorUrl.origin,
     DATABASE_PATH: databasePath,
     AUTH_ENCRYPTION_KEY: randomBytes(32).toString("hex"),
     PLC_URL: network.plc.url,
-    OPERATOR_SERVICE_REF: `did:web:localhost%3A${port}#atproto_slack_admin`,
+    OPERATOR_SERVICE_REF: `did:web:localhost%3A${operatorPort}#atproto_flock_operator`,
     ...extraEnv,
   };
+  const operator = spawn(process.execPath, ["--import", "tsx", join(projectRoot, "apps/operator/src/operator/main.ts")], { cwd: projectRoot, env, stdio: ["ignore", "pipe", "pipe"] });
   const child = spawn(process.execPath, [
-    join(projectRoot, "node_modules/next/dist/bin/next"),
-    "start", "--hostname", "127.0.0.1", "--port", String(port),
+    join(projectRoot, "apps/web/node_modules/next/dist/bin/next"),
+    "start", "apps/web", "--hostname", "127.0.0.1", "--port", String(port),
   ], { cwd: projectRoot, env, stdio: ["ignore", "pipe", "pipe"] });
   let output = "";
-  const capture = (chunk: Buffer) => { output = `${output}${chunk}`.slice(-20_000); };
-  child.stdout?.on("data", capture);
-  child.stderr?.on("data", capture);
-  const serverOutput = () => output;
+  let operatorOutput = "";
+  child.stdout?.on("data", (chunk: Buffer) => { output = `${output}${chunk}`.slice(-20_000); });
+  child.stderr?.on("data", (chunk: Buffer) => { output = `${output}${chunk}`.slice(-20_000); });
+  operator.stdout?.on("data", (chunk: Buffer) => { operatorOutput = `${operatorOutput}${chunk}`.slice(-20_000); });
+  operator.stderr?.on("data", (chunk: Buffer) => { operatorOutput = `${operatorOutput}${chunk}`.slice(-20_000); });
+  // Both processes' output, which leak scans read as the app's own.
+  const serverOutput = () => `${output}\n--- operator ---\n${operatorOutput}`;
   try {
-    await waitForApp(appUrl, child, serverOutput);
+    await waitForReady(new URL("/.well-known/did.json", operatorUrl), operator, serverOutput, "The operator");
+    await waitForReady(appUrl, child, serverOutput, "The Next server");
   } catch (error) {
-    await stopServer(child);
+    await Promise.all([stopServer(child), stopServer(operator)]);
     throw error;
   }
-  return { appUrl, databasePath, serverOutput, child };
+  return { appUrl, operatorUrl, databasePath, serverOutput, children: [child, operator] };
 }
 
 async function publishAppLexicons(fixture: TestNetwork, projectRoot: string): Promise<void> {
   if (!fixture.lexiconAuthority) throw new Error("The fixture must expose its lexicon authority.");
   const agent = fixture.pds.getAgent();
   const session = await agent.com.atproto.server.createSession({ identifier: "lex-authority.test", password: "hunter2" });
-  const root = join(projectRoot, "lexicons/org/slack");
+  const root = join(projectRoot, "packages/protocol/lexicons/new/flock");
   const files = await readdir(root, { recursive: true });
   const published = new Set<string>();
   for (const relative of files.filter((file) => file.endsWith(".json"))) {
@@ -212,10 +229,10 @@ async function stopServer(child: ChildProcess | undefined): Promise<void> {
   });
 }
 
-async function waitForApp(url: URL, child: ChildProcess, output: () => string): Promise<void> {
+async function waitForReady(url: URL, child: ChildProcess, output: () => string, what: string): Promise<void> {
   const deadline = Date.now() + 45_000;
   while (Date.now() < deadline) {
-    if (child.exitCode !== null) throw new Error(`Next server exited before becoming ready.\n${output()}`);
+    if (child.exitCode !== null) throw new Error(`${what} exited before becoming ready.\n${output()}`);
     try {
       const response = await fetch(url);
       if (response.ok) return;
@@ -224,5 +241,5 @@ async function waitForApp(url: URL, child: ChildProcess, output: () => string): 
     }
     await new Promise((resolveWait) => setTimeout(resolveWait, 250));
   }
-  throw new Error(`Next server did not become ready.\n${output()}`);
+  throw new Error(`${what} did not become ready.\n${output()}`);
 }
