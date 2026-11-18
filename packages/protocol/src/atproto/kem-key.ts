@@ -1,5 +1,5 @@
 import { P256_JWT_ALG, formatDidKey, multibaseToBytes } from "@atproto/crypto";
-import { SpaceMacError, isP256DidKey } from "@atproto/space";
+import { SpaceKemError, SpaceMacError, isP256DidKey } from "@atproto/space";
 
 /**
  * How long what a DID document said (its PDS host, its `#atproto_kem` key) is trusted before it is read again, wherever this
@@ -42,10 +42,11 @@ export function kemKeyFromDidDocument(did: string, document: { verificationMetho
 
 /**
  * Whether a read failed because the author's repo cannot be authenticated: the account publishes no usable `#atproto_kem`
- * key, or the host's MAC does not verify. Such a repo is set aside; it must not take down a read of other people's data.
+ * key, KEM encapsulation rejected the key, or the host's MAC does not verify. Such a repo is set aside; it must not take
+ * down a read of other people's data.
  */
 export function isUnverifiableRepo(error: unknown): boolean {
-  return error instanceof KemKeyError || error instanceof SpaceMacError;
+  return error instanceof KemKeyError || error instanceof SpaceKemError || error instanceof SpaceMacError;
 }
 
 export type KemKeyResolver = (did: string, forceRefresh: boolean) => Promise<string>;

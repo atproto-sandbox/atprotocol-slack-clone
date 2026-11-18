@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { P256Keypair, Secp256k1Keypair, bytesToMultibase, parseDidKey } from "@atproto/crypto";
-import { KemKeyError, cacheKemKeys, kemKeyFromDidDocument } from "./kem-key";
+import { SpaceKemError, SpaceMacError } from "@atproto/space";
+import { KemKeyError, cacheKemKeys, isUnverifiableRepo, kemKeyFromDidDocument } from "./kem-key";
 
 const DID = "did:plc:author";
 
@@ -76,4 +77,11 @@ test("cacheKemKeys keeps at most maxEntries keys, dropping the oldest, and does 
   assert.deepEqual(loads, [], "the two newest are still cached");
   await resolve("did:plc:a", false);
   assert.deepEqual(loads, ["did:plc:a"], "the oldest was dropped");
+});
+
+test("isUnverifiableRepo recognizes KemKeyError, SpaceKemError, and SpaceMacError", () => {
+  assert.equal(isUnverifiableRepo(new KemKeyError(DID, "missing")), true);
+  assert.equal(isUnverifiableRepo(new SpaceKemError("invalid KEM key")), true);
+  assert.equal(isUnverifiableRepo(new SpaceMacError("MAC does not match")), true);
+  assert.equal(isUnverifiableRepo(new Error("transient")), false);
 });

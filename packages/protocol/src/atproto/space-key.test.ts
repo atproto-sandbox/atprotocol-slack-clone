@@ -15,20 +15,39 @@ test("a generated key is a P-256 did:key the library accepts as a credential bin
 
 test("requests signed by a generated key verify against its did:key and fail for any other covered value", async () => {
   const key = await generateSpaceKey();
-  const headers = await createSpaceSigHeaders(key, { authorization, audience: AUDIENCE });
-  assert.equal(headers["signature-input"], 'atproto-space-credential=("authorization" "atproto-space-audience");tag="atproto-space-credential"');
+  const { headers } = await createSpaceSigHeaders({ keypair: key, authorization, audience: AUDIENCE });
+  assert.equal(headers["signature-input"], 'sig=("authorization" "atproto-space-audience");tag="atproto-space-credential"');
   await verifyCredentialSig(headers, key.did() as `did:key:${string}`);
   await assert.rejects(verifyCredentialSig({ ...headers, "atproto-space-audience": "did:plc:other" }, key.did() as `did:key:${string}`), /invalid HTTP message signature/);
   await assert.rejects(verifyCredentialSig(headers, (await generateSpaceKey()).did() as `did:key:${string}`), /invalid HTTP message signature/);
 });
 
-test("the library emits padded base64 and rejects the old scheme label", async () => {
+test("the library emits padded base64, resolves signatures by tag under any label, and rejects wrong or missing tags", async () => {
   const key = await generateSpaceKey();
-  const headers = await createSpaceSigHeaders(key, { authorization, audience: AUDIENCE });
-  assert.match(headers.signature, /^atproto-space-credential=:[A-Za-z0-9+/]+={0,2}:$/);
-  assert.equal(headers.signature.replace(/^atproto-space-credential=:|:$/g, "").length % 4, 0);
-  const legacy = { ...headers, signature: headers.signature.replace("atproto-space-credential", "atproto-space"), "signature-input": headers["signature-input"].replace("atproto-space-credential=", "atproto-space=") };
-  await assert.rejects(verifyCredentialSig(legacy, key.did() as `did:key:${string}`), /malformed/);
+  const { headers } = await createSpaceSigHeaders({ keypair: key, authorization, audience: AUDIENCE });
+  assert.match(headers.signature, /^sig=:[A-Za-z0-9+/]+={0,2}:$/);
+  assert.equal(headers.signature.replace(/^sig=:|:$/g, "").length % 4, 0);
+
+  // Under a different label but keeping tag="atproto-space-credential", verifyCredentialSig still finds and verifies it.
+  const customLabel = {
+    ...headers,
+    signature: headers.signature.replace(/^sig=/, "custom="),
+    "signature-input": headers["signature-input"].replace(/^sig=/, "custom="),
+  };
+  await verifyCredentialSig(customLabel, key.did() as `did:key:${string}`);
+
+  // A wrong or missing tag is rejected even if the signature bytes are valid for the base.
+  const wrongTag = {
+    ...headers,
+    "signature-input": headers["signature-input"].replace('tag="atproto-space-credential"', 'tag="atproto-space"'),
+  };
+  await assert.rejects(verifyCredentialSig(wrongTag, key.did() as `did:key:${string}`), /missing or malformed signature with tag/);
+
+  const missingTag = {
+    ...headers,
+    "signature-input": headers["signature-input"].replace(';tag="atproto-space-credential"', ""),
+  };
+  await assert.rejects(verifyCredentialSig(missingTag, key.did() as `did:key:${string}`), /missing or malformed signature with tag/);
 });
 
 test("generated keys are distinct", async () => {

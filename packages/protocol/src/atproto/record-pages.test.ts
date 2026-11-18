@@ -1,19 +1,60 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { AtprotoClient } from "./xrpc";
-import { assertBoundedRecordPage, listAllSpaceUris, listBoundedMembers, listBoundedRecords, listBoundedRepos, listBoundedSpaces } from "./record-pages";
+import { XrpcError, type AtprotoClient } from "./xrpc";
+import {
+  RepoOpsPageError,
+  WRITER_CURSOR_MAX_AGE_MS,
+  WRITER_REMOVED_TYPE,
+  WRITER_WRITE_TYPE,
+  assertBoundedRecordPage,
+  fetchRepoOpsPages,
+  listAllSpaceUris,
+  listBoundedMembers,
+  listBoundedRecords,
+  listBoundedSpaces,
+  listBoundedWriters,
+  listWritersSince,
+  tidTimestampMs,
+} from "./record-pages";
 
-function repo(did: string, rev: string) {
-  return { did: `did:plc:${did}`, repoRev: `r${rev}`, data: { $bytes: "AAAA" }, spaceRev: rev };
+function writerWrite(did: string, rev: string, opts: { withType?: boolean } = {}) {
+  const withType = opts.withType ?? true;
+  return {
+    ...(withType ? { $type: WRITER_WRITE_TYPE } : {}),
+    repo: `did:plc:${did}`,
+    repoRev: `r${rev}`,
+    data: { $bytes: "AAAA" },
+    spaceRev: rev,
+  };
 }
 
-test("bounded repo lookahead distinguishes an exact limit from actual overflow", async () => {
+function writerRemoved(did: string, rev: string) {
+  return {
+    $type: WRITER_REMOVED_TYPE,
+    repo: `did:plc:${did}`,
+    spaceRev: rev,
+  };
+}
+
+const TID_CHARS = "234567abcdefghijklmnopqrstuvwxyz";
+function tidAtMs(ms: number): string {
+  let val = BigInt(ms) * 1000n * 1024n;
+  const out = Array<string>(13);
+  for (let i = 12; i >= 0; i--) {
+    out[i] = TID_CHARS[Number(val & 31n)]!;
+    val >>= 5n;
+  }
+  return out.join("");
+}
+
+test("bounded writer lookahead distinguishes an exact limit from actual overflow", async () => {
   const exact = fakeClient([
-    { repos: [repo("a", "2"), repo("b", "3")], cursor: "page-two" },
+    { repos: [writerWrite("a", "2"), writerWrite("b", "3")], cursor: "page-two" },
     { repos: [] },
   ]);
-  const exactResult = await listBoundedRepos(exact.client, { space: "space", maxRepos: 2 });
-  assert.equal(exactResult.repos.length, 2);
+  const exactResult = await listBoundedWriters(exact.client, { space: "space", maxRepos: 2 });
+  assert.equal(exactResult.writers.length, 2);
+  assert.equal(exactResult.spaceRev, "3");
   assert.equal(exactResult.truncated, false);
   assert.deepEqual(exact.calls.map(({ limit, cursor }) => ({ limit, cursor })), [
     { limit: 2, cursor: undefined },
@@ -21,97 +62,153 @@ test("bounded repo lookahead distinguishes an exact limit from actual overflow",
   ]);
 
   const overflow = fakeClient([
-    { repos: [repo("a", "2"), repo("b", "3")], cursor: "page-two" },
-    { repos: [repo("c", "4")] },
+    { repos: [writerWrite("a", "2", { withType: true }), writerWrite("b", "3")], cursor: "page-two" },
+    { repos: [writerWrite("c", "4")] },
   ]);
-  const overflowResult = await listBoundedRepos(overflow.client, { space: "space", maxRepos: 2 });
-  assert.equal(overflowResult.repos.length, 2);
+  const overflowResult = await listBoundedWriters(overflow.client, { space: "space", maxRepos: 2 });
+  assert.equal(overflowResult.writers.length, 2);
+  assert.equal(overflowResult.spaceRev, "3");
   assert.equal(overflowResult.truncated, true);
 });
 
-test("bounded repo scan rejects oversized pages and empty nonterminal pages", async () => {
-  const oversized = fakeClient([{ repos: [repo("a", "2"), repo("b", "3")] }]);
+test("bounded writer scan stops when page.repos.length < limit even with a non-empty cursor", async () => {
+  const shortWithCursor = fakeClient([
+    { repos: [writerWrite("a", "2"), writerWrite("b", "3")], cursor: "3" },
+  ]);
+  const result = await listBoundedWriters(shortWithCursor.client, { space: "space", maxRepos: 5 });
+  assert.equal(result.writers.length, 2);
+  assert.equal(result.spaceRev, "3");
+  assert.equal(result.truncated, false);
+  assert.equal(shortWithCursor.calls.length, 1);
+});
+
+test("bounded writer scan rejects oversized pages and malformed entries", async () => {
+  const oversized = fakeClient([{ repos: [writerWrite("a", "2"), writerWrite("b", "3")] }]);
   await assert.rejects(
-    listBoundedRepos(oversized.client, { space: "space", maxRepos: 1 }),
-    /PDS repo page exceeded the requested limit/,
+    listBoundedWriters(oversized.client, { space: "space", maxRepos: 1 }),
+    /PDS writer page exceeded the requested limit/,
   );
 
   const emptyNonterminal = fakeClient([{ repos: [], cursor: "next" }]);
   await assert.rejects(
-    listBoundedRepos(emptyNonterminal.client, { space: "space", maxRepos: 2 }),
+    listBoundedWriters(emptyNonterminal.client, { space: "space", maxRepos: 2 }),
     /empty nonterminal page/,
   );
 
-  const malformedDid = fakeClient([{ repos: [{ did: "not-a-did" }] }]);
-  await assert.rejects(listBoundedRepos(malformedDid.client, { space: "space", maxRepos: 2 }), /malformed repo DID/);
+  const malformedDid = fakeClient([{ repos: [{ $type: WRITER_WRITE_TYPE, repo: "not-a-did" }] }]);
+  await assert.rejects(listBoundedWriters(malformedDid.client, { space: "space", maxRepos: 2 }), /malformed repo DID/);
 
-  const missingRevs = fakeClient([{ repos: [{ did: "did:plc:a", rev: "old-shape" }] }]);
-  await assert.rejects(listBoundedRepos(missingRevs.client, { space: "space", maxRepos: 2 }), /without repoRev and spaceRev/);
+  const unknownType = fakeClient([{ repos: [writerWrite("a", "2", { withType: false })] }]);
+  await assert.rejects(listBoundedWriters(unknownType.client, { space: "space", maxRepos: 2 }), /unknown writer entry type/);
 
-  const descending = fakeClient([{ repos: [repo("a", "3"), repo("b", "2")] }]);
-  await assert.rejects(listBoundedRepos(descending.client, { space: "space", maxRepos: 2 }), /ascending spaceRev order/);
+  const missingRevs = fakeClient([{ repos: [{ $type: WRITER_WRITE_TYPE, repo: "did:plc:a", rev: "old-shape", spaceRev: "2" }] }]);
+  await assert.rejects(listBoundedWriters(missingRevs.client, { space: "space", maxRepos: 2 }), /without repoRev/);
 
-  const stuck = fakeClient([{ repos: [repo("a", "2")], cursor: "next" }, { repos: [repo("b", "3")], cursor: "next" }]);
-  await assert.rejects(listBoundedRepos(stuck.client, { space: "space", maxRepos: 5 }), /did not advance/);
+  const descending = fakeClient([{ repos: [writerWrite("a", "3"), writerWrite("b", "2")] }]);
+  await assert.rejects(listBoundedWriters(descending.client, { space: "space", maxRepos: 2 }), /ascending spaceRev order/);
+
+  const stuck = fakeClient([{ repos: [writerWrite("a", "2")], cursor: "next" }, { repos: [writerWrite("b", "3")], cursor: "next" }]);
+  await assert.rejects(listBoundedWriters(stuck.client, { space: "space", maxRepos: 1 }), /did not advance/);
 });
 
-test("a repo updated while paginating reappears and the writer set keeps its latest entry", async () => {
+test("a writer updated or removed while paginating uses latest-wins cross-page dedup", async () => {
   const reappearing = fakeClient([
-    { repos: [repo("a", "2"), repo("b", "3")], cursor: "3" },
-    { repos: [repo("a", "5"), repo("c", "6")] },
+    { repos: [writerWrite("a", "2"), writerWrite("b", "3")], cursor: "3" },
+    { repos: [writerRemoved("a", "4")], cursor: "4" },
+    { repos: [writerWrite("c", "5")], cursor: "5" },
+    { repos: [writerWrite("b", "6")] },
   ]);
-  const result = await listBoundedRepos(reappearing.client, { space: "space", maxRepos: 4 });
-  assert.deepEqual(result.repos.map(({ did, spaceRev }) => [did, spaceRev]), [["did:plc:a", "5"], ["did:plc:b", "3"], ["did:plc:c", "6"]]);
+  const result = await listBoundedWriters(reappearing.client, { space: "space", maxRepos: 2 });
+  assert.deepEqual(
+    result.writers.map(({ repo, spaceRev }) => [repo, spaceRev]),
+    [["did:plc:b", "6"], ["did:plc:c", "5"]],
+  );
+  assert.equal(result.spaceRev, "6");
   assert.equal(result.truncated, false);
-  assert.deepEqual(reappearing.calls.map(({ cursor }) => cursor), [undefined, "3"]);
+  assert.deepEqual(reappearing.calls.map(({ cursor }) => cursor), [undefined, "3", "4", "5"]);
 });
 
-test("reappearing repos count once toward the bound and do not cause false truncation", async () => {
+test("remove-then-write across pages re-adds the writer at the newer entry", async () => {
+  const readded = fakeClient([
+    { repos: [writerRemoved("a", "2"), writerWrite("b", "3")], cursor: "3" },
+    { repos: [writerWrite("a", "4")] },
+  ]);
+  const result = await listBoundedWriters(readded.client, { space: "space", maxRepos: 2 });
+  assert.deepEqual(
+    result.writers.map(({ repo, spaceRev }) => [repo, spaceRev]),
+    [["did:plc:b", "3"], ["did:plc:a", "4"]],
+  );
+  assert.equal(result.spaceRev, "4");
+  assert.equal(result.truncated, false);
+});
+
+test("removals do not consume maxRepos and do not trigger false truncation", async () => {
+  const onlyRemovalsLookahead = fakeClient([
+    { repos: [writerWrite("a", "2"), writerWrite("b", "3")], cursor: "3" },
+    { repos: [writerRemoved("c", "4")], cursor: "4" },
+    { repos: [writerRemoved("b", "5")], cursor: "5" },
+    { repos: [writerWrite("d", "6")], cursor: "6" },
+    { repos: [writerWrite("e", "7")] },
+  ]);
+  const result = await listBoundedWriters(onlyRemovalsLookahead.client, { space: "space", maxRepos: 2 });
+  assert.deepEqual(
+    result.writers.map(({ repo, spaceRev }) => [repo, spaceRev]),
+    [["did:plc:a", "2"], ["did:plc:d", "6"]],
+  );
+  assert.equal(result.spaceRev, "6");
+  assert.equal(result.truncated, true);
+});
+
+test("reappearing writers count once toward the bound and do not cause false truncation", async () => {
   const noisy = fakeClient([
-    { repos: [repo("a", "2"), repo("b", "3")], cursor: "3" },
-    { repos: [repo("a", "4")], cursor: "4" },
-    { repos: [repo("b", "5")], cursor: "5" },
-    { repos: [repo("a", "6")] },
+    { repos: [writerWrite("a", "2"), writerWrite("b", "3")], cursor: "3" },
+    { repos: [writerWrite("a", "4")], cursor: "4" },
+    { repos: [writerWrite("b", "5")], cursor: "5" },
+    { repos: [writerWrite("a", "6")] },
   ]);
-  const result = await listBoundedRepos(noisy.client, { space: "space", maxRepos: 2 });
-  assert.deepEqual(result.repos.map(({ did, spaceRev }) => [did, spaceRev]), [["did:plc:a", "6"], ["did:plc:b", "5"]]);
+  const result = await listBoundedWriters(noisy.client, { space: "space", maxRepos: 2 });
+  assert.deepEqual(result.writers.map(({ repo, spaceRev }) => [repo, spaceRev]), [["did:plc:a", "6"], ["did:plc:b", "5"]]);
   assert.equal(result.truncated, false);
 });
 
-test("a lookahead entry for an already collected repo does not truncate, a later new repo does", async () => {
+test("a lookahead entry for an already collected writer does not truncate, a later new writer does", async () => {
   const lookahead = fakeClient([
-    { repos: [repo("a", "2"), repo("b", "3")], cursor: "3" },
-    { repos: [repo("a", "4")], cursor: "4" },
-    { repos: [repo("c", "5")] },
+    { repos: [writerWrite("a", "2"), writerWrite("b", "3")], cursor: "3" },
+    { repos: [writerWrite("a", "4")], cursor: "4" },
+    { repos: [writerWrite("c", "5")] },
   ]);
-  const result = await listBoundedRepos(lookahead.client, { space: "space", maxRepos: 2 });
-  assert.deepEqual(result.repos.map(({ did, spaceRev }) => [did, spaceRev]), [["did:plc:a", "4"], ["did:plc:b", "3"]]);
+  const result = await listBoundedWriters(lookahead.client, { space: "space", maxRepos: 2 });
+  assert.deepEqual(result.writers.map(({ repo, spaceRev }) => [repo, spaceRev]), [["did:plc:a", "4"], ["did:plc:b", "3"]]);
   assert.equal(result.truncated, true);
 });
 
-test("more distinct repos than the bound truncates", async () => {
+test("more distinct writers than the bound truncates", async () => {
   const overflow = fakeClient([
-    { repos: [repo("a", "2"), repo("b", "3")], cursor: "3" },
-    { repos: [repo("c", "4")] },
+    { repos: [writerWrite("a", "2"), writerWrite("b", "3")], cursor: "3" },
+    { repos: [writerWrite("c", "4")] },
   ]);
-  const result = await listBoundedRepos(overflow.client, { space: "space", maxRepos: 2 });
-  assert.equal(result.repos.length, 2);
+  const result = await listBoundedWriters(overflow.client, { space: "space", maxRepos: 2 });
+  assert.equal(result.writers.length, 2);
   assert.equal(result.truncated, true);
 });
 
-test("the repo scan page cap still applies when every page repeats a known repo", async () => {
-  const pages = Array.from({ length: 600 }, (_, i) => ({ repos: [repo("a", String(i).padStart(4, "0"))], cursor: `c${i}` }));
+test("the writer scan page cap still applies when every page repeats a known writer", async () => {
+  const pages = Array.from({ length: 600 }, (_, i) => ({ repos: [writerWrite("a", String(i).padStart(4, "0"))], cursor: `c${i}` }));
   await assert.rejects(
-    listBoundedRepos(fakeClient(pages).client, { space: "space", maxRepos: 2 }),
+    listBoundedWriters(fakeClient(pages).client, { space: "space", maxRepos: 1 }),
     /exceeded the bounded page limit/,
   );
 });
+
+function spaceEntry(space: string, id = 1) {
+  return { spaceDid: `did:plc:sp${String(id).padStart(20, "0")}`, space };
+}
 
 test("bounded space lookahead distinguishes an exact limit from actual overflow", async () => {
   const owner = "did:plc:a";
   const uri = (skey: string) => `at://${owner}/space/new.flock.dm.conversation/${skey}`;
   const exact = fakeClient([
-    { spaces: [{ uri: uri("2222222222221") }, { uri: uri("2222222222222") }], cursor: "page-two" },
+    { spaces: [spaceEntry(uri("2222222222221"), 1), spaceEntry(uri("2222222222222"), 2)], cursor: "page-two" },
     { spaces: [] },
   ]);
   const exactResult = await listBoundedSpaces(exact.client, { spaceType: "new.flock.dm.conversation", maxSpaces: 2 });
@@ -119,19 +216,19 @@ test("bounded space lookahead distinguishes an exact limit from actual overflow"
   assert.equal(exactResult.truncated, false);
 
   const overflow = fakeClient([
-    { spaces: [{ uri: uri("2222222222221") }, { uri: uri("2222222222222") }], cursor: "page-two" },
-    { spaces: [{ uri: uri("2222222222223") }] },
+    { spaces: [spaceEntry(uri("2222222222221"), 1), spaceEntry(uri("2222222222222"), 2)], cursor: "page-two" },
+    { spaces: [spaceEntry(uri("2222222222223"), 3)] },
   ]);
   const overflowResult = await listBoundedSpaces(overflow.client, { spaceType: "new.flock.dm.conversation", maxSpaces: 2 });
   assert.equal(overflowResult.spaces.length, 2);
   assert.equal(overflowResult.truncated, true);
 
-  const malformed = fakeClient([{ spaces: [{ uri: 5 }] }]);
+  const malformed = fakeClient([{ spaces: [{ spaceDid: "did:plc:a", space: 5 }] }]);
   await assert.rejects(listBoundedSpaces(malformed.client, { maxSpaces: 2 }), /malformed space/);
 
   const repeated = fakeClient([
-    { spaces: [{ uri: uri("2222222222221") }], cursor: "next" },
-    { spaces: [{ uri: uri("2222222222221") }] },
+    { spaces: [spaceEntry(uri("2222222222221"), 1)], cursor: "next" },
+    { spaces: [spaceEntry(uri("2222222222221"), 1)] },
   ]);
   await assert.rejects(listBoundedSpaces(repeated.client, { maxSpaces: 2 }), /duplicate space URI/);
 });
@@ -203,6 +300,12 @@ test("bounded scanners reject malformed and non-advancing PDS pages", async () =
   );
   assert.equal(emptyMembers.calls.length, 1);
 
+  const typedMember = fakeClient([
+    { members: [{ $type: "com.atproto.memberspace.defs#member", did: "did:plc:member", read: true, write: false }] },
+  ]);
+  const typedResult = await listBoundedMembers(typedMember.client, { space: "space", maxMembers: 2 });
+  assert.equal(typedResult.members.length, 1);
+
   for (const member of [
     { did: "not-a-did", read: true, write: true },
     { did: "did:plc:member", read: 1, write: true },
@@ -267,8 +370,8 @@ function fakeClient(pages: Array<Record<string, unknown>>) {
 test("workspace discovery returns every space URI at the exact limit and refuses to hide some when there are more", async () => {
   // #given an account with exactly as many workspaces as the limit, and another with one more
   const uri = (skey: string) => `at://did:plc:a/space/new.flock.workspace/${skey}`;
-  const exact = fakeClient([{ spaces: [{ uri: uri("a") }, { uri: uri("b") }], cursor: "next" }, { spaces: [] }]);
-  const overflow = fakeClient([{ spaces: [{ uri: uri("a") }, { uri: uri("b") }], cursor: "next" }, { spaces: [{ uri: uri("c") }] }]);
+  const exact = fakeClient([{ spaces: [spaceEntry(uri("a"), 1), spaceEntry(uri("b"), 2)], cursor: "next" }, { spaces: [] }]);
+  const overflow = fakeClient([{ spaces: [spaceEntry(uri("a"), 1), spaceEntry(uri("b"), 2)], cursor: "next" }, { spaces: [spaceEntry(uri("c"), 3)] }]);
 
   // #when each is listed with a limit of two
   const listed = await listAllSpaceUris(exact.client, { spaceType: "new.flock.workspace", maxSpaces: 2 });
@@ -281,7 +384,9 @@ test("workspace discovery returns every space URI at the exact limit and refuses
 test("a space whose URI this app cannot parse is skipped, not a reason to fail the whole listing", async () => {
   // #given an account whose store holds a workspace with a record key longer than this app creates, between two ordinary ones
   const uri = (skey: string) => `at://did:plc:a/space/new.flock.workspace/${skey}`;
-  const page = fakeClient([{ spaces: [{ uri: uri("a") }, { uri: uri("k".repeat(200)) }, { uri: "not-a-space-uri" }, { uri: uri("b") }] }]);
+  const page = fakeClient([
+    { spaces: [spaceEntry(uri("a"), 1), spaceEntry(uri("k".repeat(200)), 2), spaceEntry("not-a-space-uri", 3), spaceEntry(uri("b"), 4)] },
+  ]);
 
   // #when workspaces are discovered
   const listed = await listAllSpaceUris(page.client, { spaceType: "new.flock.workspace", maxSpaces: 10 });
@@ -292,15 +397,18 @@ test("a space whose URI this app cannot parse is skipped, not a reason to fail t
 
 test("an unparseable space past the limit is not overflow, and a usable one behind it still is", async () => {
   const uri = (skey: string) => `at://did:plc:a/space/new.flock.dm.conversation/${skey}`;
-  const junk = { uri: `at://did:plc:a/space/new.flock.dm.conversation/${"k".repeat(200)}` };
+  const junk = spaceEntry(`at://did:plc:a/space/new.flock.dm.conversation/${"k".repeat(200)}`, 99);
 
   // #given exactly two usable spaces, then an entry the app cannot parse and nothing after it
-  const exact = fakeClient([{ spaces: [{ uri: uri("2222222222221") }, { uri: uri("2222222222222") }], cursor: "more" }, { spaces: [junk] }]);
+  const exact = fakeClient([
+    { spaces: [spaceEntry(uri("2222222222221"), 1), spaceEntry(uri("2222222222222"), 2)], cursor: "more" },
+    { spaces: [junk] },
+  ]);
   // #and the same, but with a usable space behind the unparseable one
   const behind = fakeClient([
-    { spaces: [{ uri: uri("2222222222221") }, { uri: uri("2222222222222") }], cursor: "more" },
+    { spaces: [spaceEntry(uri("2222222222221"), 1), spaceEntry(uri("2222222222222"), 2)], cursor: "more" },
     { spaces: [junk], cursor: "later" },
-    { spaces: [{ uri: uri("2222222222223") }] },
+    { spaces: [spaceEntry(uri("2222222222223"), 3)] },
   ]);
 
   // #when each is listed with a limit of two
@@ -316,33 +424,207 @@ test("an unparseable space past the limit is not overflow, and a usable one behi
 test("skipped spaces do not count toward the limit, across pages", async () => {
   const uri = (skey: string) => `at://did:plc:a/space/new.flock.workspace/${skey}`;
   const pages = fakeClient([
-    { spaces: [{ uri: uri("a") }, { uri: "not-a-space-uri" }], cursor: "p2" },
-    { spaces: [{ uri: uri("b") }] },
+    { spaces: [spaceEntry(uri("a"), 1), spaceEntry("not-a-space-uri", 2)], cursor: "p2" },
+    { spaces: [spaceEntry(uri("b"), 3)] },
   ]);
 
   const result = await listBoundedSpaces(pages.client, { spaceType: "new.flock.workspace", maxSpaces: 2 });
 
-  assert.deepEqual(result.spaces.map((space) => space.uri), [uri("a"), uri("b")]);
+  assert.deepEqual(result.spaces.map((space) => space.space), [uri("a"), uri("b")]);
   assert.equal(result.truncated, false);
 });
 
 test("the writers changed since a space revision are read page by page, a short page ending the scan", async () => {
-  const { listReposSince } = await import("./record-pages");
-  const repos = Array.from({ length: 150 }, (_, index) => ({ did: `did:plc:w${String(index).padStart(3, "0")}`, repoRev: "3jzfcijpj2z2a", spaceRev: `3jzfcijpj${String(index).padStart(4, "0")}` }));
+  const entries = Array.from({ length: 150 }, (_, index) =>
+    writerWrite(`w${String(index).padStart(3, "0")}`, `3jzfcijpj${String(index).padStart(4, "0")}`),
+  );
   const requests: Array<string | undefined> = [];
   const client = {
     query: async (_method: string, params: { cursor?: string; limit: number }) => {
       requests.push(params.cursor);
-      const start = params.cursor ? repos.findIndex((repo) => repo.spaceRev === params.cursor) + 1 : 0;
-      const page = repos.slice(start, start + params.limit);
+      const start = params.cursor ? entries.findIndex((entry) => entry.spaceRev === params.cursor) + 1 : 0;
+      const page = entries.slice(start, start + params.limit);
       return { repos: page, ...(page.length > 0 ? { cursor: page.at(-1)!.spaceRev } : {}) };
     },
-  } as unknown as Parameters<typeof listReposSince>[0];
-  const changed = await listReposSince(client, { space: "at://did:plc:a/space/new.flock.channel/x", since: null, maxRepos: 1_000 });
-  assert.equal(changed.repos.length, 150);
-  assert.equal(changed.spaceRev, repos.at(-1)!.spaceRev);
+  } as unknown as AtprotoClient;
+  const changed = await listWritersSince(client, { space: "at://did:plc:a/space/new.flock.channel/x", since: null, maxRepos: 1_000 });
+  assert.equal(changed.fullReconcile, false);
+  assert.equal(changed.updates.length, 150);
+  assert.equal(changed.spaceRev, entries.at(-1)!.spaceRev);
   assert.equal(requests.length, 2, "the second page is short, so no third request asks for an empty one");
-  await assert.rejects(listReposSince(client, { space: "at://did:plc:a/space/new.flock.channel/x", since: null, maxRepos: 99 }), /scan limit/);
+  await assert.rejects(listWritersSince(client, { space: "at://did:plc:a/space/new.flock.channel/x", since: null, maxRepos: 99 }), /scan limit/);
+});
+
+test("listWritersSince handles removals and falls back to full reconcile on InvalidCursor or >72h cursor age", async () => {
+  const space = "at://did:plc:a/space/new.flock.channel/x";
+  const now = 1_760_000_000_000;
+  const recentTid = tidAtMs(now - 60_000);
+  const expiredTid = tidAtMs(now - WRITER_CURSOR_MAX_AGE_MS - 1_000);
+  assert.equal(tidTimestampMs(recentTid), now - 60_000);
+  assert.equal(tidTimestampMs("not-a-tid"), null);
+
+  // Incremental page with write + removed
+  const incrementalCalls: Array<{ cursor?: string }> = [];
+  const incremental = {
+    query: async (_method: string, params: { cursor?: string }) => {
+      incrementalCalls.push({ cursor: params.cursor });
+      return {
+        repos: [
+          writerWrite("a", tidAtMs(now - 30_000)),
+          writerRemoved("b", tidAtMs(now - 10_000)),
+        ],
+      };
+    },
+  } as unknown as AtprotoClient;
+  const incResult = await listWritersSince(incremental, { space, since: recentTid, now, maxRepos: 10 });
+  assert.equal(incResult.fullReconcile, false);
+  assert.deepEqual(incResult.updates.map((u) => [u.kind, u.repo]), [
+    ["write", "did:plc:a"],
+    ["removed", "did:plc:b"],
+  ]);
+  assert.equal(incrementalCalls[0]?.cursor, recentTid);
+
+  // Expired TID (>72h) triggers fullReconcile without passing since cursor
+  const expiredCalls: Array<{ cursor?: string }> = [];
+  const fullFallback = {
+    query: async (_method: string, params: { cursor?: string }) => {
+      expiredCalls.push({ cursor: params.cursor });
+      return { repos: [writerWrite("a", recentTid)] };
+    },
+  } as unknown as AtprotoClient;
+  const expiredResult = await listWritersSince(fullFallback, { space, since: expiredTid, now, maxRepos: 10 });
+  assert.equal(expiredResult.fullReconcile, true);
+  assert.equal(expiredResult.writers?.length, 1);
+  assert.equal(expiredCalls.length, 1);
+  assert.equal(expiredCalls[0]?.cursor, undefined);
+
+  // Expired sinceListedAt (>72h) triggers fullReconcile even for non-timestamp cursor
+  const oldListedResult = await listWritersSince(fullFallback, {
+    space,
+    since: "0000000000001",
+    sinceListedAt: now - WRITER_CURSOR_MAX_AGE_MS - 1,
+    now,
+    maxRepos: 10,
+  });
+  assert.equal(oldListedResult.fullReconcile, true);
+
+  // Server InvalidCursor error triggers fullReconcile fallback
+  let attempts = 0;
+  const invalidCursorClient = {
+    query: async (_method: string, params: { cursor?: string }) => {
+      attempts++;
+      if (params.cursor === recentTid) throw new XrpcError(400, "Cursor expired", "InvalidCursor");
+      return { repos: [writerWrite("a", recentTid)] };
+    },
+  } as unknown as AtprotoClient;
+  const recovered = await listWritersSince(invalidCursorClient, { space, since: recentTid, now, maxRepos: 10 });
+  assert.equal(attempts, 2);
+  assert.equal(recovered.fullReconcile, true);
+  assert.equal(recovered.writers?.length, 1);
+});
+
+test("fetchRepoOpsPages verifies commit presence on every page, passes RepoNotFound through, and strips/bounds fields", async () => {
+  const space = "at://did:plc:a/space/new.flock.channel/x";
+  const repo = "did:plc:writer1";
+  const commitFor = (rev: string) => ({
+    ver: 1,
+    space,
+    repo,
+    rev,
+    data: { $bytes: "AAAA" },
+  });
+
+  // Multi-page valid ops + unknown field stripped
+  const queries: Array<Record<string, unknown>> = [];
+  const multiPage = {
+    query: async (_method: string, params: Record<string, unknown>) => {
+      queries.push(params);
+      if (!params.cursor) {
+        return {
+          cursor: "page2",
+          commit: commitFor("3jzfcijpj2z2a"),
+          ops: [
+            {
+              collection: "org.test.rec",
+              rkey: "r1",
+              rev: "3jzfcijpj2z2a",
+              cid: "bafyreiaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              prev: null,
+              value: { $type: "org.test.rec", body: "hello" },
+              extraField: "should-be-stripped",
+            },
+          ],
+        };
+      }
+      return {
+        commit: commitFor("3jzfcijpj2z2b"),
+        ops: [
+          {
+            collection: "org.test.rec",
+            rkey: "r0",
+            rev: "3jzfcijpj2z2b",
+            cid: null,
+            prev: "bafyreiaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          },
+        ],
+      };
+    },
+  } as unknown as AtprotoClient;
+  const full = await fetchRepoOpsPages(multiPage, { space, repo, since: "3jzfcijpj2z20" });
+  assert.equal(full.ops.length, 2);
+  assert.equal(full.commit?.rev, "3jzfcijpj2z2b");
+  assert.equal("extraField" in full.ops[0]!, false);
+  assert.deepEqual(full.ops[0]!.value, { $type: "org.test.rec", body: "hello" });
+  assert.equal(queries[0]?.excludeValues, undefined);
+
+  // excludeValues omits record bodies and passes excludeValues: true
+  const stripped = await fetchRepoOpsPages(
+    {
+      query: async (_method: string, params: Record<string, unknown>) => {
+        assert.equal(params.excludeValues, true);
+        return {
+          commit: commitFor("3jzfcijpj2z2a"),
+          ops: [
+            {
+              collection: "org.test.rec",
+              rkey: "r1",
+              rev: "3jzfcijpj2z2a",
+              cid: "bafyreiaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              prev: null,
+              value: { ignored: true },
+            },
+          ],
+        };
+      },
+    } as unknown as AtprotoClient,
+    { space, repo, excludeValues: true },
+  );
+  assert.equal("value" in stripped.ops[0]!, false);
+
+  // Missing commit on an intermediate or empty final page rejects with RepoOpsPageError
+  const missingIntermediateCommit = {
+    query: async () => ({
+      cursor: "next",
+      ops: [{ collection: "org.test.rec", rkey: "r1", rev: "3jzfcijpj2z2a", cid: "bafyrei", prev: null }],
+    }),
+  } as unknown as AtprotoClient;
+  await assert.rejects(fetchRepoOpsPages(missingIntermediateCommit, { space, repo }), RepoOpsPageError);
+
+  const missingFinalCommit = {
+    query: async () => ({ ops: [] }),
+  } as unknown as AtprotoClient;
+  await assert.rejects(fetchRepoOpsPages(missingFinalCommit, { space, repo }), RepoOpsPageError);
+
+  // RepoNotFound passes through untouched
+  const notFound = {
+    query: async () => {
+      throw new XrpcError(400, "Repo not found", "RepoNotFound");
+    },
+  } as unknown as AtprotoClient;
+  await assert.rejects(
+    fetchRepoOpsPages(notFound, { space, repo }),
+    (err: unknown) => err instanceof XrpcError && err.code === "RepoNotFound",
+  );
 });
 
 test("omitted collection allows shared rkeys across collections while rejecting duplicate (collection, rkey)", async () => {

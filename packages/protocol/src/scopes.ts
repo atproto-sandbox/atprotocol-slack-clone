@@ -13,7 +13,7 @@ export const DM_BROWSER_SCOPES: readonly string[] = [
   // inbox. Collection-restricted so the same grant cannot write anything else.
   `space:${SPACE_TYPE.dmInbox}?authority=*&collection=${COLLECTION.dmRequest}&action=create&action=update&action=delete`,
   // The user's own inbox: create it, read it and its member list, switch its
-  // request policy (updateSpace), and manage its allowlist (putMember/removeMember).
+  // request policy (updateSpace), and manage its allowlist (putMembers/removeMembers).
   `space:${SPACE_TYPE.dmInbox}?authority=self&action=read&manage=create&manage=update`,
   // The public declaration that this account runs an inbox, which a sender reads before writing a request: the space
   // authority answers a stranger asking for the inbox exactly as it answers for a space that does not exist, and the PDS
@@ -48,17 +48,34 @@ export function workspaceAuthorityScopes(): string[] {
 export const OPERATOR_METHODS = Object.values(OPERATOR_METHOD);
 
 /**
+ * Operator RPC methods granted before R12 added `OPERATOR_METHOD.getDmNotifyTarget`. Pre-R12 browser sessions holding
+ * only this set remain admissible for reads and polling fallback without forcing immediate sign-out.
+ */
+export const LEGACY_OPERATOR_METHODS = OPERATOR_METHODS.filter(
+  (method) => method !== OPERATOR_METHOD.getDmNotifyTarget,
+);
+
+/**
  * The one grant a person gives the app in the browser (R6), requested once at sign-in: read every workspace, inbox,
  * channel and extension space of any authority, with each space's member list as the gate (D5); write the collections a
  * member writes there, and create or delete commands and actions in app inboxes without reading them; call the operator's
  * methods; and the DM set. Built from the registry, so a collection added there is asked for here.
  */
 export function memberGrantScopes(serviceRef: string): string[] {
+  return memberScopesFor(OPERATOR_METHODS, serviceRef);
+}
+
+/** Pre-R12 member grant scopes omitting optional `OPERATOR_METHOD.getDmNotifyTarget`. */
+export function legacyMemberGrantScopes(serviceRef: string): string[] {
+  return memberScopesFor(LEGACY_OPERATOR_METHODS, serviceRef);
+}
+
+function memberScopesFor(operatorMethods: readonly string[], serviceRef: string): string[] {
   return [
     ...DM_BROWSER_SCOPES,
     ...[SPACE_TYPE.workspace, SPACE_TYPE.inbox, SPACE_TYPE.channel, SPACE_TYPE.tasks].flatMap((spaceType) => [memberReadScope(spaceType), memberWriteScope(spaceType)]),
     memberWriteScope(SPACE_TYPE.appInbox),
-    operatorMethodsScope(OPERATOR_METHODS, serviceRef),
+    operatorMethodsScope(operatorMethods, serviceRef),
   ];
 }
 

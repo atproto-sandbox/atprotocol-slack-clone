@@ -76,3 +76,13 @@ export function isMissingXrpcResource(error: unknown): boolean {
   if ("status" in error && error.status === 404) return true;
   return "code" in error && (error.code === "RecordNotFound" || error.code === "RepoNotFound");
 }
+
+/** Whether the PDS rejected a pagination cursor as malformed or stale (`InvalidCursor`). */
+export function isInvalidCursorError(error: unknown): boolean {
+  return error instanceof XrpcError && error.code === "InvalidCursor";
+}
+
+/** Whether an account-authenticated management call was refused because the authority account is taken down or deactivated. */
+export function isAccountSuspendedError(error: unknown): boolean {
+  return error instanceof XrpcError && (error.code === "AccountTakedown" || error.code === "AccountDeactivated");
+}

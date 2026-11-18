@@ -1,9 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { RepoVerificationError, SpaceMacError, StarParseError } from "@atproto/space";
+import { SpaceKemError, SpaceMacError, SpaceRepoVerificationError } from "@atproto/space";
+import { StarParseError } from "@atproto/star";
 import { UpstreamResponseTooLargeError } from "../bounded-json";
 import { KemKeyError, kemKeyFromDidDocument } from "./kem-key";
-import { classifyRepoFailure, classifyVerifiedRepoFailure, describeRepoFailure } from "./repo-failure";
+import {
+  classifyRepoFailure,
+  classifySpaceHostFailure,
+  classifyVerifiedRepoFailure,
+  describeRepoFailure,
+  isAuthoritySuspendedError,
+} from "./repo-failure";
 import { RepoStarLimitError } from "./space-credential-core";
 import { XrpcError } from "./xrpc";
 
@@ -20,7 +27,9 @@ test("a repo whose account is deactivated, taken down, suspended or gone is a pe
 
 test("a repo that cannot be authenticated, or whose answer exceeds the read limit, is permanent", () => {
   assert.deepEqual(classifyRepoFailure(new KemKeyError("did:plc:x", "the DID document lists no #atproto_kem verification method")), { reason: "it publishes no usable #atproto_kem key", permanent: true });
+  assert.deepEqual(classifyRepoFailure(new SpaceKemError("KEM key must be a P-256 did:key")), { reason: "it publishes no usable #atproto_kem key", permanent: true });
   assert.deepEqual(classifyRepoFailure(new SpaceMacError("getLatestCommit failed MAC verification")), { reason: "its records could not be authenticated", permanent: true });
+  assert.deepEqual(classifyRepoFailure(new SpaceRepoVerificationError("record value does not match its cid")), { reason: "its records could not be authenticated", permanent: true });
   assert.deepEqual(classifyRepoFailure(new UpstreamResponseTooLargeError(8 * 1024 * 1024)), { reason: "its answer is larger than this app reads", permanent: true });
 });
 
@@ -71,7 +80,7 @@ test("classifyVerifiedRepoFailure treats unauthenticated RepoNotFound as transie
     reason: "its answer is larger than this app reads",
     permanent: true,
   });
-  assert.deepEqual(classifyVerifiedRepoFailure(new RepoVerificationError("bad root")), {
+  assert.deepEqual(classifyVerifiedRepoFailure(new SpaceRepoVerificationError("bad root")), {
     reason: "its records could not be authenticated",
     permanent: true,
   });
@@ -84,4 +93,24 @@ test("classifyVerifiedRepoFailure treats unauthenticated RepoNotFound as transie
     permanent: true,
   });
   assert.equal(classifyVerifiedRepoFailure(Object.assign(new Error("locked"), { code: "SQLITE_BUSY" })), null);
+});
+
+test("authority suspension on authority repo reads and authority endpoints is transient while non-authority writer takedowns stay permanent", () => {
+  const space = "at://did:plc:auth/space/new.flock.channel/general";
+  const authority = "did:plc:auth";
+  const member = "did:plc:writer";
+  for (const [code, reason] of [
+    ["RepoTakendown", "its account was taken down"],
+    ["RepoDeactivated", "its account is deactivated"],
+  ] as const) {
+    const err = new XrpcError(400, `${code}: ${authority}`, code);
+    assert.equal(isAuthoritySuspendedError(err), true);
+    assert.deepEqual(classifySpaceHostFailure(err), { reason, permanent: false });
+    assert.deepEqual(classifyRepoFailure(err, { space, repo: authority }), { reason, permanent: false });
+    assert.deepEqual(classifyVerifiedRepoFailure(err, { space, repo: authority }), { reason, permanent: false });
+    assert.deepEqual(classifyRepoFailure(err, { space, repo: member }), { reason, permanent: true });
+    assert.deepEqual(classifyVerifiedRepoFailure(err, { space, repo: member }), { reason, permanent: true });
+  }
+  assert.equal(isAuthoritySuspendedError(new XrpcError(400, "RepoNotFound", "RepoNotFound")), false);
+  assert.equal(isAuthoritySuspendedError(new XrpcError(403, "NotAuthorized", "NotAuthorized")), false);
 });
