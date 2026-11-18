@@ -194,7 +194,17 @@ table.data thead .pick { color: var(--accent); }
   .packet { animation: none; left: 62%; opacity: 1; }
 }
 
-.lex-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px 18px; font: 400 var(--t-label)/1.25 var(--font-mono); align-self: start; overflow-wrap: anywhere; }
+.lex-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  grid-template-rows: repeat(11, auto);
+  grid-auto-flow: column;
+  gap: 3px 20px;
+  font: 400 var(--t-label)/1.25 var(--font-mono);
+  align-self: start;
+  overflow-wrap: anywhere;
+}
+table.data.compact tr:has(th[colspan]) th { padding-top: 18px; color: var(--accent); border-bottom: none; }
 table.data.compact :is(th, td) { padding: 8px 14px; font-size: var(--t-label); }
 table.data.compact tbody th { font-family: var(--font-mono); white-space: normal; }
 
@@ -334,55 +344,108 @@ table.data.compact tbody th { font-family: var(--font-mono); white-space: normal
   <p class="source">Operator URL serves XRPC; web talks to member PDSes directly for reads</p>
 </section>
 
+<section class="slide">
+  <header>
+    <p class="kicker">Privacy assumptions</p>
+    <h2>Channel chat is governed by the PDS; DMs stay off the app server; the operator is a control plane—not a message store</h2>
+  </header>
+  <div class="split">
+    <ul>
+      <li><strong>Who can read channels.</strong> Only accounts on each space’s member list (enforced by the host). The app does not run a shadow ACL or central message database.</li>
+      <li><strong>Where messages live.</strong> Authors write to their own repos; other members pull with space credentials in the browser. What you see is merged client-side (and cacheable in IndexedDB on your device).</li>
+      <li><strong>Direct messages.</strong> Reads and writes go browser → participant PDS only. Our Next.js app and operator APIs do not carry DM bodies; losing the vendor does not delete your DM repo.</li>
+      <li><strong>What the operator must see.</strong> Journaled admin actions, encrypted workspace-authority OAuth, and <em>content-free</em> “something changed” hints—enough to resume invites and channel setup, not enough to render history.</li>
+    </ul>
+    <aside class="callout">
+      <p class="kicker">Still true in alpha</p>
+      <ul>
+        <li>Your <strong>PDS operator</strong> can still read what it hosts (same as any atproto account).</li>
+        <li>Notify registration can record <strong>who wrote</strong> into a followed space and <strong>when</strong>—not what they wrote.</li>
+        <li>Workspace <strong>admins</strong> choose membership; treat them like Slack admins, not like end-to-end encryption.</li>
+      </ul>
+    </aside>
+  </div>
+</section>
+
 <section class="slide backup">
   <header>
     <p class="kicker">How · lexicons</p>
-    <h2>Thirty-nine Flock lexicons define spaces, records, operator RPC, and OAuth permissions</h2>
+    <h2>Forty-one new.flock lexicons, A–Z down each column (com.atproto.* is vendored separately)</h2>
   </header>
   <div class="lex-grid">
-    <div>new.flock.workspace</div><div>new.flock.channel</div><div>new.flock.inbox</div>
-    <div>new.flock.app.inbox</div><div>new.flock.dm.inbox</div><div>new.flock.dm.conversation</div>
-    <div>new.flock.ext.tasks</div><div>new.flock.workspace.profile</div><div>new.flock.directory</div>
-    <div>new.flock.workspace.roster</div><div>new.flock.admin</div><div>new.flock.acceptance</div>
-    <div>new.flock.joinRequest</div><div>new.flock.joinDecision</div><div>new.flock.channel.message</div>
-    <div>new.flock.channel.reaction</div><div>new.flock.channel.roster</div><div>new.flock.dm.message</div>
-    <div>new.flock.dm.reaction</div><div>new.flock.dm.request</div><div>new.flock.dm.header</div>
-    <div>new.flock.dm.declaration</div><div>new.flock.app.install</div><div>new.flock.app.declaration</div>
-    <div>new.flock.app.command</div><div>new.flock.app.action</div><div>new.flock.ext.install</div>
-    <div>new.flock.ext.tasks.project</div><div>new.flock.ext.tasks.task</div><div>new.flock.ext.tasks.comment</div>
-    <div>new.flock.ext.tasks.projectEdit</div><div>new.flock.ext.tasks.taskEdit</div>
-    <div>new.flock.permissions.member</div><div>new.flock.permissions.workspaceAuthority</div>
-    <div>new.flock.operator.execute</div><div>new.flock.operator.getOperation</div><div>new.flock.operator.getChanges</div>
-    <div>new.flock.operator.createWorkspace</div><div>new.flock.operator.startAuthorityFlow</div>
-    <div>new.flock.operator.listInboxWriters</div><div>new.flock.operator.listStalledOperations</div>
-    <div>new.flock.operator.getDmNotifyTarget</div>
+    <div>new.flock.acceptance</div>
+    <div>new.flock.admin</div>
+    <div>new.flock.app.action</div>
+    <div>new.flock.app.command</div>
+    <div>new.flock.app.declaration</div>
+    <div>new.flock.app.inbox</div>
+    <div>new.flock.app.install</div>
+    <div>new.flock.channel</div>
+    <div>new.flock.channel.message</div>
+    <div>new.flock.channel.reaction</div>
+    <div>new.flock.channel.roster</div>
+    <div>new.flock.directory</div>
+    <div>new.flock.dm.conversation</div>
+    <div>new.flock.dm.declaration</div>
+    <div>new.flock.dm.header</div>
+    <div>new.flock.dm.inbox</div>
+    <div>new.flock.dm.message</div>
+    <div>new.flock.dm.reaction</div>
+    <div>new.flock.dm.request</div>
+    <div>new.flock.ext.install</div>
+    <div>new.flock.ext.tasks</div>
+    <div>new.flock.ext.tasks.comment</div>
+    <div>new.flock.ext.tasks.project</div>
+    <div>new.flock.ext.tasks.projectEdit</div>
+    <div>new.flock.ext.tasks.task</div>
+    <div>new.flock.ext.tasks.taskEdit</div>
+    <div>new.flock.inbox</div>
+    <div>new.flock.joinDecision</div>
+    <div>new.flock.joinRequest</div>
+    <div>new.flock.operator.createWorkspace</div>
+    <div>new.flock.operator.execute</div>
+    <div>new.flock.operator.getChanges</div>
+    <div>new.flock.operator.getOperation</div>
+    <div>new.flock.operator.listInboxWriters</div>
+    <div>new.flock.operator.listStalledOperations</div>
+    <div>new.flock.operator.startAuthorityFlow</div>
+    <div>new.flock.permissions.member</div>
+    <div>new.flock.permissions.workspaceAuthority</div>
+    <div>new.flock.workspace</div>
+    <div>new.flock.workspace.profile</div>
+    <div>new.flock.workspace.roster</div>
   </div>
-  <p class="source">39 lexicon documents · com.atproto.space.* lexicons are vendored from the pinned upstream pin</p>
+  <p class="source">packages/protocol/lexicons/new/flock · sorted ascending</p>
 </section>
 
 <section class="slide backup">
   <header>
     <p class="kicker">How · public API</p>
-    <h2>The operator exposes XRPC to the web app plus a few HTTP routes PDS OAuth needs</h2>
+    <h2>Flock exposes three surfaces: operator service, web OAuth metadata, and direct PDS Spaces XRPC</h2>
   </header>
   <table class="data compact">
-    <thead><tr><th>Kind</th><th>Endpoint</th><th>Who calls</th></tr></thead>
+    <thead><tr><th>Surface</th><th>Endpoint</th><th>Who calls</th></tr></thead>
     <tbody>
-      <tr><th>procedure</th><td>/xrpc/new.flock.operator.execute</td><td>Web (admin mutations)</td></tr>
-      <tr><th>query</th><td>/xrpc/new.flock.operator.getOperation</td><td>Web</td></tr>
-      <tr><th>query</th><td>/xrpc/new.flock.operator.listInboxWriters</td><td>Web</td></tr>
-      <tr><th>query</th><td>/xrpc/new.flock.operator.listStalledOperations</td><td>Web</td></tr>
-      <tr><th>procedure</th><td>/xrpc/new.flock.operator.getChanges</td><td>Web (feed)</td></tr>
-      <tr><th>procedure</th><td>/xrpc/new.flock.operator.createWorkspace</td><td>Web</td></tr>
-      <tr><th>procedure</th><td>/xrpc/new.flock.operator.startAuthorityFlow</td><td>Web</td></tr>
-      <tr><th>procedure</th><td>/xrpc/new.flock.operator.getDmNotifyTarget</td><td>Browser DM client</td></tr>
-      <tr><th>procedure</th><td>/xrpc/com.atproto.space.confirmRegistration</td><td>Space PDS</td></tr>
-      <tr><th>procedure</th><td>/xrpc/com.atproto.space.notifySpaceUpdate</td><td>Space PDS</td></tr>
+      <tr><th colspan="3" class="tag">Operator service (OPERATOR_URL)</th></tr>
+      <tr><th>procedure</th><td>/xrpc/new.flock.operator.execute</td><td>Browser (admin)</td></tr>
+      <tr><th>query</th><td>/xrpc/new.flock.operator.getOperation</td><td>Browser</td></tr>
+      <tr><th>query</th><td>/xrpc/new.flock.operator.listInboxWriters</td><td>Browser</td></tr>
+      <tr><th>query</th><td>/xrpc/new.flock.operator.listStalledOperations</td><td>Browser</td></tr>
+      <tr><th>procedure</th><td>/xrpc/new.flock.operator.getChanges</td><td>Browser (change feed)</td></tr>
+      <tr><th>procedure</th><td>/xrpc/new.flock.operator.createWorkspace</td><td>Browser</td></tr>
+      <tr><th>procedure</th><td>/xrpc/new.flock.operator.startAuthorityFlow</td><td>Browser</td></tr>
+      <tr><th>procedure</th><td>/xrpc/com.atproto.space.notifyWrite</td><td>Space PDS → operator</td></tr>
+      <tr><th>procedure</th><td>/xrpc/com.atproto.space.notifySpaceDeleted</td><td>Space PDS → operator</td></tr>
       <tr><th>GET</th><td>/.well-known/did.json</td><td>Discovery</td></tr>
-      <tr><th>GET</th><td>/authority/start · /authority/callback</td><td>Browser OAuth</td></tr>
+      <tr><th>GET</th><td>/authority/start · /authority/callback · client-metadata · jwks</td><td>Workspace authority OAuth</td></tr>
+      <tr><th colspan="3" class="tag">Web app (APP_URL) — no member XRPC on the server</th></tr>
+      <tr><th>GET</th><td>/oauth/client-metadata.json</td><td>Member OAuth (browser only)</td></tr>
+      <tr><th colspan="3" class="tag">Member PDS (browser + space credential)</th></tr>
+      <tr><th>—</th><td>com.atproto.space.* (STAR read/write, credentials)</td><td>Browser sync engine</td></tr>
+      <tr><th>—</th><td>com.atproto.memberspace.*</td><td>Operator journal + browser</td></tr>
+      <tr><th>—</th><td>com.atproto.server.getServiceAuth</td><td>Service JWT → operator</td></tr>
     </tbody>
   </table>
-  <p class="source">packages/protocol/src/nsids.ts · apps/operator/src/operator/server.ts (main may still serve legacy notify endpoints during R12 migration)</p>
 </section>
 
 <section class="slide">
