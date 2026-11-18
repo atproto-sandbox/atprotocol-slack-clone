@@ -30,7 +30,7 @@ test("a page on the web origin signs in, reaches PDS hosts and a separate operat
     const web = await listen((request, response) => { response.writeHead(200, { "content-type": "text/html" }).end(`<!doctype html><title>${request.url}</title>`); });
     servers.push(web.server);
     const operatorPreflights: string[] = [];
-    const operator = await listen(operatorStandIn(web.origin, pds.serviceRef, operatorPreflights));
+    const operator = await listen(operatorStandIn(pds.serviceRef, operatorPreflights));
     servers.push(operator.server);
     const unreachable = await closedOrigin();
     browser = await chromium.launch({ headless: true });
@@ -215,8 +215,9 @@ async function fetchFromPage(page: Page, request: Request, failures: BrowserFail
   return new Response([101, 204, 205, 304].includes(answer.status) ? null : answer.body, { status: answer.status, headers: answer.headers });
 }
 
-function operatorStandIn(webOrigin: string, serviceRef: string, preflights: string[]): (request: IncomingMessage, response: ServerResponse) => void {
-  const cors = { "access-control-allow-origin": webOrigin, "access-control-allow-headers": "authorization, content-type", "access-control-allow-methods": "GET, POST", vary: "origin" };
+/** A stand-in for the operator's methods, with its CORS rule: any origin, the bearer token's header admitted, no credentials. */
+function operatorStandIn(serviceRef: string, preflights: string[]): (request: IncomingMessage, response: ServerResponse) => void {
+  const cors = { "access-control-allow-origin": "*", "access-control-allow-headers": "authorization, content-type", "access-control-allow-methods": "GET, POST" };
   return (request, response) => {
     if (request.method === "OPTIONS") {
       preflights.push(`${request.headers["access-control-request-method"]} ${request.url?.split("?")[0]} [${request.headers["access-control-request-headers"]}]`);
