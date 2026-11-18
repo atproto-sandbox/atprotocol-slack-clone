@@ -1,8 +1,7 @@
 import type * as GetRecord from "@flock/protocol/lexicons/api/types/com/atproto/space/getRecord";
 import type * as ListRecords from "@flock/protocol/lexicons/api/types/com/atproto/space/listRecords";
-import type * as ListRepos from "@flock/protocol/lexicons/api/types/com/atproto/space/listRepos";
 import { mintSpaceCredentialWith, SpaceCredentialError, type SpaceCredential, type SpaceCredentialDeps } from "@flock/protocol/atproto/space-credential-core";
-import { assertBoundedRecordPage, listAllSpaceUris, listBoundedRecords, listBoundedRepos } from "@flock/protocol/atproto/record-pages";
+import { assertBoundedRecordPage, listAllSpaceUris, listBoundedRecords, listBoundedWriters, type WriterWrite } from "@flock/protocol/atproto/record-pages";
 import { selectValidChannelMessages } from "@flock/protocol/atproto/valid-channel-messages";
 import { classifyRepoFailure, describeRepoFailure, MAX_LISTED_SET_ASIDE } from "@flock/protocol/atproto/repo-failure";
 import { channelUri, parseWorkspaceUri, spaceRecordUri } from "@flock/protocol/keys";
@@ -125,9 +124,9 @@ export async function readIndependentChannelPage(
   if (!summary || !channel || (channel.visibility !== "public" && channel.visibility !== "private")) throw new Error("Channel is unavailable for new reads.");
   const credential = await mintSpaceCredentialWith(deps, channel.uri);
   const authorityClient = credential.client(await deps.resolvePds(summary.authorityDid));
-  const repoScan = await listBoundedRepos(authorityClient, { space: channel.uri, maxRepos: MAX_CHANNEL_WRITERS });
+  const repoScan = await listBoundedWriters(authorityClient, { space: channel.uri, maxRepos: MAX_CHANNEL_WRITERS });
   if (repoScan.truncated) throw new Error("Channel writer count exceeds the v1 envelope.");
-  const repos = repoScan.repos;
+  const repos = repoScan.writers;
   // A writer whose repo cannot be read (deactivated, taken down, unauthenticated, oversized, or on a host that is down) is reported and
   // read no further, so one member cannot make the channel unreadable for everyone else. What was read from it before it failed is
   // kept; its reactions are skipped. This covers a failed page read. A page that arrives but breaks the record rules (a record with no
@@ -137,7 +136,11 @@ export async function readIndependentChannelPage(
     try {
       return await run();
     } catch (error) {
-      const failure = classifyRepoFailure(error);
+      const failure = classifyRepoFailure(error, {
+        space: channel.uri,
+        repo: did,
+        authorityDid: summary.authorityDid,
+      });
       if (!failure) throw error;
       console.warn(`Independent reader set a writer aside (${failure.permanent ? "permanent" : "transient"}): ${describeRepoFailure(error)}`);
       setAside.set(did, failure.reason);
@@ -145,7 +148,7 @@ export async function readIndependentChannelPage(
     }
   };
   const finishPage = async (messages: IndependentMessage[]): Promise<IndependentChannelPage> => {
-    const { reactions, truncated } = await readIndependentReactions(deps, credential, channel.uri, summary.authorityDid, repos.filter((repo) => !setAside.has(repo.did)), messages, readWriter);
+    const { reactions, truncated } = await readIndependentReactions(deps, credential, channel.uri, summary.authorityDid, repos.filter((repo) => !setAside.has(repo.repo)), messages, readWriter);
     const degradedReasons = [
       ...[...setAside].slice(0, MAX_LISTED_SET_ASIDE).map(([did, reason]) => `Messages or reactions from ${did} may be missing: ${reason}`),
       ...(setAside.size > MAX_LISTED_SET_ASIDE ? [`${setAside.size - MAX_LISTED_SET_ASIDE} more writers' messages or reactions may be missing.`] : []),
@@ -196,12 +199,12 @@ export async function readIndependentChannelPage(
     if (pageLimit < 1) {
       if (pageRequests + candidates.length > MAX_CHANNEL_RECORD_PAGES) throw new Error("Channel pagination exceeded the bounded page request limit.");
       pageRequests += candidates.length;
-      const lookahead = (await mapLimited(candidates, 8, (state) => readWriter(state.repo.did, async () => {
+      const lookahead = (await mapLimited(candidates, 8, (state) => readWriter(state.repo.repo, async () => {
         if (state.cursor) state.seenCursors.add(state.cursor);
-        const page = await credential.client(await deps.resolvePds(state.repo.did)).query<ListRecords.OutputSchema>("com.atproto.space.listRecords", {
-          space: channel.uri, repo: state.repo.did, collection: COLLECTION.message, cursor: state.cursor, limit: 1,
+        const page = await credential.client(await deps.resolvePds(state.repo.repo)).query<ListRecords.OutputSchema>("com.atproto.space.listRecords", {
+          space: channel.uri, repo: state.repo.repo, collection: COLLECTION.message, cursor: state.cursor, limit: 1,
         });
-        assertBoundedRecordPage(page, { collection: COLLECTION.message, limit: 1, cursor: state.cursor, seenCursors: state.seenCursors });
+        assertBoundedRecordPage(page, { collection: COLLECTION.message, limit: 1, cursor: state.cursor, seenCursors: state.seenCursors, space: channel.uri, repo: state.repo.repo });
         return { state, page };
       }).then((read) => { if (!read) state.finished = true; return read; }))).flatMap((read) => read ? [read] : []);
       const lookaheadRecordCount = lookahead.reduce((count, { page }) => count + page.records.length, 0);
@@ -212,9 +215,9 @@ export async function readIndependentChannelPage(
           if (state.seenRkeys.has(record.rkey)) throw new Error("PDS record pagination returned a duplicate record key.");
           state.seenRkeys.add(record.rkey);
           records.push({
-            uri: spaceRecordUri(channel.uri, state.repo.did, COLLECTION.message, record.rkey),
+            uri: spaceRecordUri(channel.uri, state.repo.repo, COLLECTION.message, record.rkey),
             rkey: record.rkey,
-            repo: state.repo.did,
+            repo: state.repo.repo,
             value: record.value,
           });
         }
@@ -229,12 +232,12 @@ export async function readIndependentChannelPage(
     }
     if (pageRequests + candidates.length > MAX_CHANNEL_RECORD_PAGES) throw new Error("Channel pagination exceeded the bounded page request limit.");
     pageRequests += candidates.length;
-    const pages = (await mapLimited(candidates, 8, (state) => readWriter(state.repo.did, async () => {
+    const pages = (await mapLimited(candidates, 8, (state) => readWriter(state.repo.repo, async () => {
       if (state.cursor) state.seenCursors.add(state.cursor);
-      const page = await credential.client(await deps.resolvePds(state.repo.did)).query<ListRecords.OutputSchema>("com.atproto.space.listRecords", {
-        space: channel.uri, repo: state.repo.did, collection: COLLECTION.message, cursor: state.cursor, limit: pageLimit,
+      const page = await credential.client(await deps.resolvePds(state.repo.repo)).query<ListRecords.OutputSchema>("com.atproto.space.listRecords", {
+        space: channel.uri, repo: state.repo.repo, collection: COLLECTION.message, cursor: state.cursor, limit: pageLimit,
       });
-      assertBoundedRecordPage(page, { collection: COLLECTION.message, limit: pageLimit, cursor: state.cursor, seenCursors: state.seenCursors });
+      assertBoundedRecordPage(page, { collection: COLLECTION.message, limit: pageLimit, cursor: state.cursor, seenCursors: state.seenCursors, space: channel.uri, repo: state.repo.repo });
       return { state, page };
     }).then((read) => { if (!read) state.finished = true; return read; }))).flatMap((read) => read ? [read] : []);
     for (const { state, page } of pages) {
@@ -243,9 +246,9 @@ export async function readIndependentChannelPage(
         if (state.seenRkeys.has(record.rkey)) throw new Error("PDS record pagination returned a duplicate record key.");
         state.seenRkeys.add(record.rkey);
         records.push({
-          uri: spaceRecordUri(channel.uri, state.repo.did, COLLECTION.message, record.rkey),
+          uri: spaceRecordUri(channel.uri, state.repo.repo, COLLECTION.message, record.rkey),
           rkey: record.rkey,
-          repo: state.repo.did,
+          repo: state.repo.repo,
           value: record.value,
         });
       }
@@ -265,7 +268,7 @@ async function readIndependentReactions(
   credential: SpaceCredential,
   space: string,
   authorityDid: string,
-  repos: ListRepos.Repo[],
+  repos: WriterWrite[],
   messages: IndependentMessage[],
   readWriter: <T>(did: string, run: () => Promise<T>) => Promise<T | null>,
 ): Promise<{ reactions: IndependentReaction[]; truncated: boolean }> {
@@ -284,28 +287,28 @@ async function readIndependentReactions(
       if (cursor) seenCursors.add(cursor);
       const remaining = MAX_CHANNEL_REACTION_RECORDS - scanned;
       const limit = Math.min(100, remaining > 0 ? remaining + 1 : 1);
-      const page = await readWriter(repo.did, async () => {
-        const read = await credential.client(await deps.resolvePds(repo.did)).query<ListRecords.OutputSchema>("com.atproto.space.listRecords", {
-          space, repo: repo.did, collection: COLLECTION.reaction, cursor, limit,
+      const page = await readWriter(repo.repo, async () => {
+        const read = await credential.client(await deps.resolvePds(repo.repo)).query<ListRecords.OutputSchema>("com.atproto.space.listRecords", {
+          space, repo: repo.repo, collection: COLLECTION.reaction, cursor, limit,
         });
-        assertBoundedRecordPage(read, { collection: COLLECTION.reaction, limit, cursor, seenCursors });
+        assertBoundedRecordPage(read, { collection: COLLECTION.reaction, limit, cursor, seenCursors, space, repo: repo.repo });
         return read;
       });
       if (!page) break;
       const overflow = page.records.length > remaining;
       const rows = overflow ? page.records.slice(0, remaining) : page.records;
-      const repoRkeys = seenRkeys.get(repo.did) ?? new Set<string>();
-      seenRkeys.set(repo.did, repoRkeys);
+      const repoRkeys = seenRkeys.get(repo.repo) ?? new Set<string>();
+      seenRkeys.set(repo.repo, repoRkeys);
       for (const record of rows) {
         if (!record.value) throw new Error("PDS record page contains a malformed reaction.");
         if (repoRkeys.has(record.rkey)) throw new Error("PDS reaction pagination returned a duplicate record key.");
         repoRkeys.add(record.rkey);
-        const uri = spaceRecordUri(space, repo.did, COLLECTION.reaction, record.rkey);
+        const uri = spaceRecordUri(space, repo.repo, COLLECTION.reaction, record.rkey);
         if (typeof record.value.subject !== "string" || !knownMessages.has(record.value.subject)) continue;
         if (!validateSpaceRecord(COLLECTION.reaction, record.value, {
-          authorityDid, spaceUri: space, repoDid: repo.did, rkey: record.rkey, knownMessages,
+          authorityDid, spaceUri: space, repoDid: repo.repo, rkey: record.rkey, knownMessages,
         }).valid) continue;
-        reactions.push({ uri, rkey: record.rkey, repo: repo.did, value: record.value });
+        reactions.push({ uri, rkey: record.rkey, repo: repo.repo, value: record.value });
       }
       scanned += rows.length;
       if (overflow) return result(true);

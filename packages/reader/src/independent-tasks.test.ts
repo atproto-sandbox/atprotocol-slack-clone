@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { COMMIT_MAC_TYPE, MAC_HEADER, RECORD_MAC_TYPE } from "@atproto/space";
+import { COMMIT_MAC_PROFILE, MAC_COVERED_HEADER, RECORD_MAC_PROFILE, SpaceMacError, SpaceRepoVerificationError } from "@atproto/space";
+import { fetchRepoOpsPages, listBoundedWriters, listWritersSince, RepoOpsPageError, WRITER_CURSOR_MAX_AGE_MS, WRITER_REMOVED_TYPE, WRITER_WRITE_TYPE } from "@flock/protocol/atproto/record-pages";
+import { mintSpaceCredentialWith } from "@flock/protocol/atproto/space-credential-core";
 import { memberspacePolicy } from "@flock/protocol/atproto/space-policy";
+import { XrpcError } from "@flock/protocol/atproto/xrpc";
 import {
   advanceHlc,
   buildEditClosure,
@@ -63,7 +66,7 @@ async function createTasksWorkspaceFixture(
   if (!network.hasAccount(AUTHORITY)) network.createAccount(AUTHORITY, "pds1");
   const owner = network.clientFor(AUTHORITY);
 
-  const { uri: workspace } = await owner.procedure<unknown, { uri: string }>("com.atproto.space.createSpace", {
+  const { space: workspace } = await owner.procedure<unknown, { space: string }>("com.atproto.space.createSpace", {
     spaceType: SPACE_TYPE.workspace,
     skey,
     policy: memberspacePolicy(),
@@ -108,9 +111,9 @@ async function createTasksWorkspaceFixture(
       updatedAt: TIMESTAMP,
     });
     if (did === AUTHORITY) continue;
-    await owner.procedure("com.atproto.memberspace.putMember", { space: workspace, did, read: true, write: true });
+    await owner.procedure("com.atproto.memberspace.putMembers", { space: workspace, members: [{ did, read: true, write: true }] });
     if (enableTasks && tasksMembers.has(did)) {
-      await owner.procedure("com.atproto.memberspace.putMember", { space: tasksSpace, did, read: true, write: true });
+      await owner.procedure("com.atproto.memberspace.putMembers", { space: tasksSpace, members: [{ did, read: true, write: true }] });
     }
   }
 
@@ -483,7 +486,7 @@ test("rejects forged MAC, tampered STAR, oversized STAR (>16 MiB), and forged fa
     network.interceptResponse = ({ method, params, response }) => {
       if (method === "com.atproto.space.getRepo" && params.repo === BOB && response.ok) {
         const headers = new Headers(response.headers);
-        headers.set(MAC_HEADER, headers.get(MAC_HEADER)!.replace(COMMIT_MAC_TYPE, RECORD_MAC_TYPE));
+        headers.set("signature-input", headers.get("signature-input")!.replaceAll(COMMIT_MAC_PROFILE, RECORD_MAC_PROFILE));
         return new Response(response.body, { status: 200, headers });
       }
       return response;
@@ -712,7 +715,7 @@ test("rejects forged MAC, tampered STAR, oversized STAR (>16 MiB), and forged fa
       }
       if (method === "com.atproto.space.getLatestCommit" && params.space === tasksSpace && params.repo === BOB && response.ok) {
         const headers = new Headers(response.headers);
-        headers.set(MAC_HEADER, headers.get(MAC_HEADER)!.replace(/mac=:[^:]+:/, "mac=:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=:"));
+        headers.set("signature", headers.get("signature")!.replace(/mac=:[^:]+:/, "mac=:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=:"));
         return new Response(response.body, { status: 200, headers });
       }
       return response;
@@ -881,7 +884,7 @@ test("removed intermediate writer B (D -> B -> R and >256 sTruncated overflow) y
       active: false,
       updatedAt: TIMESTAMP,
     });
-    await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMember", { space: tasksSpace, did: BOB });
+    await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMembers", { space: tasksSpace, dids: [BOB] });
 
     const result = await readIndependentTasksSpace(depsFor(network, ALICE), workspace);
     assert.equal(result.complete, true);
@@ -939,7 +942,7 @@ test("removed intermediate writer B (D -> B -> R and >256 sTruncated overflow) y
       active: false,
       updatedAt: TIMESTAMP,
     });
-    await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMember", { space: tasksSpace, did: BOB });
+    await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMembers", { space: tasksSpace, dids: [BOB] });
 
     const runA = await readIndependentTasksSpace(depsFor(network, ALICE), workspace);
     const runB = await readIndependentTasksSpace(depsFor(network, CAROL), workspace);
@@ -1025,7 +1028,7 @@ test("workspace snapshot forged MAC, oversized roster (>200), and deactivated Ta
     network.interceptResponse = ({ method, params, response }) => {
       if (method === "com.atproto.space.getRepo" && params.space === workspace && response.ok) {
         const headers = new Headers(response.headers);
-        headers.set(MAC_HEADER, headers.get(MAC_HEADER)!.replace(COMMIT_MAC_TYPE, RECORD_MAC_TYPE));
+        headers.set("signature-input", headers.get("signature-input")!.replaceAll(COMMIT_MAC_PROFILE, RECORD_MAC_PROFILE));
         return new Response(response.body, { status: 200, headers });
       }
       return response;
@@ -1182,4 +1185,404 @@ test("JSON listRecords fallback enforces aggregate CBOR byte cap and classifies 
       { did: BOB, reason: "its records could not be authenticated", permanent: true },
     ]);
   }
+});
+
+test("listWriters #repoRemoved, cross-page removal override, and >72h / InvalidCursor fallback reconcile Tasks writers cleanly", async () => {
+  // 1. Live FakeNetwork removeMembers emits #repoRemoved so Bob is excluded from listWriters & readIndependentTasksSpace.
+  {
+    const network = new FakeNetwork();
+    const { workspace, tasksSpace } = await createTasksWorkspaceFixture(network, { members: [ALICE, BOB] });
+    await network.writeAs(ALICE, tasksSpace, COLLECTION.task, tidFor(1), {
+      title: "Alice task",
+      status: "todo",
+      priority: "none",
+      t: hlcAt(0),
+      createdAt: TIMESTAMP,
+    });
+    await network.writeAs(BOB, tasksSpace, COLLECTION.task, tidFor(2), {
+      title: "Bob task",
+      status: "todo",
+      priority: "none",
+      t: hlcAt(10),
+      createdAt: TIMESTAMP,
+    });
+
+    const cred = await mintSpaceCredentialWith(depsFor(network, ALICE), tasksSpace);
+    const beforeScan = await listBoundedWriters(cred.client(await network.resolvePds(AUTHORITY)), { space: tasksSpace, maxRepos: 100 });
+    assert.deepEqual(beforeScan.writers.map((w) => w.repo).sort(), [ALICE, BOB]);
+
+    await network.writeAs(AUTHORITY, workspace, COLLECTION.workspaceRoster, subjectKey(BOB), {
+      subject: BOB,
+      active: false,
+      updatedAt: TIMESTAMP,
+    });
+    await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMembers", { space: tasksSpace, dids: [BOB] });
+
+    const afterScan = await listBoundedWriters(cred.client(await network.resolvePds(AUTHORITY)), { space: tasksSpace, maxRepos: 100 });
+    assert.deepEqual(afterScan.writers.map((w) => w.repo), [ALICE]);
+
+    const res = await readIndependentTasksSpace(depsFor(network, ALICE), workspace);
+    assert.equal(res.complete, true);
+    assert.deepEqual(res.tasks.map((t) => t.title), ["Alice task"]);
+
+    // Incremental listWritersSince sees #repoRemoved; >72h cursor or InvalidCursor falls back to full listBoundedWriters.
+    const inc = await listWritersSince(cred.client(await network.resolvePds(AUTHORITY)), {
+      space: tasksSpace,
+      since: beforeScan.spaceRev,
+      now: network.now(),
+      maxRepos: 100,
+    });
+    assert.equal(inc.fullReconcile, false);
+    assert.deepEqual(inc.updates.map((u) => [u.kind, u.repo]), [["removed", BOB]]);
+
+    const staleFallback = await listWritersSince(cred.client(await network.resolvePds(AUTHORITY)), {
+      space: tasksSpace,
+      since: beforeScan.spaceRev,
+      sinceListedAt: network.now() - WRITER_CURSOR_MAX_AGE_MS - 1,
+      now: network.now(),
+      maxRepos: 100,
+    });
+    assert.equal(staleFallback.fullReconcile, true);
+    assert.deepEqual(staleFallback.writers?.map((w) => w.repo), [ALICE]);
+
+    network.interceptResponse = ({ method, params, response }) => {
+      if (method === "com.atproto.space.listWriters" && params.cursor === beforeScan.spaceRev) {
+        return new Response(JSON.stringify({ error: "InvalidCursor", message: "Cursor expired" }), {
+          status: 400,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return response;
+    };
+    const invalidCursorFallback = await listWritersSince(cred.client(await network.resolvePds(AUTHORITY)), {
+      space: tasksSpace,
+      since: beforeScan.spaceRev,
+      now: network.now(),
+      maxRepos: 100,
+    });
+    assert.equal(invalidCursorFallback.fullReconcile, true);
+    assert.deepEqual(invalidCursorFallback.writers?.map((w) => w.repo), [ALICE]);
+  }
+
+  // 2. Cross-page latest-wins: page 1 emits #repoWrite for BOB, page 2 emits #repoRemoved for BOB -> BOB excluded from readIndependentTasksSpace.
+  {
+    const network = new FakeNetwork();
+    const { workspace, tasksSpace } = await createTasksWorkspaceFixture(network, { members: [ALICE, BOB] });
+    await network.writeAs(ALICE, tasksSpace, COLLECTION.task, tidFor(1), {
+      title: "Alice survives",
+      status: "todo",
+      priority: "none",
+      t: hlcAt(0),
+      createdAt: TIMESTAMP,
+    });
+    await network.writeAs(BOB, tasksSpace, COLLECTION.task, tidFor(2), {
+      title: "Bob removed across pages",
+      status: "todo",
+      priority: "none",
+      t: hlcAt(10),
+      createdAt: TIMESTAMP,
+    });
+    await network.writeAs(AUTHORITY, workspace, COLLECTION.workspaceRoster, subjectKey(BOB), {
+      subject: BOB,
+      active: false,
+      updatedAt: TIMESTAMP,
+    });
+
+    let bobProbed = false;
+    network.interceptResponse = ({ method, params, response }) => {
+      if (method === "com.atproto.space.listWriters" && params.space === tasksSpace && response.ok) {
+        if (!params.cursor) {
+          return Response.json({
+            repos: [
+              { $type: WRITER_WRITE_TYPE, repo: BOB, repoRev: tidFor(10), spaceRev: tidFor(11), data: { $bytes: "AAAA" } },
+              { $type: WRITER_WRITE_TYPE, repo: ALICE, repoRev: tidFor(12), spaceRev: tidFor(13), data: { $bytes: "AAAA" } },
+            ],
+            cursor: tidFor(13),
+          });
+        }
+        return Response.json({
+          repos: [{ $type: WRITER_REMOVED_TYPE, repo: BOB, spaceRev: tidFor(14) }],
+        });
+      }
+      if ((method === "com.atproto.space.getRepo" || method === "com.atproto.space.listRecords") && params.repo === BOB) {
+        bobProbed = true;
+      }
+      return response;
+    };
+
+    // Pass maxStarRecords=2? No, limit in listBoundedWriters is Math.min(500, maxRepos); test cross-page via listWriters returning cursor + full page.
+    // Force 2-page scan by temporarily testing with listBoundedWriters(maxRepos=2) AND in readIndependentTasksSpace by setting cursor on a full-limit or short page?
+    // Wait: listBoundedWriters stops when repos.length < limit! So page 1 returning 2 items when limit is 100 stops on page 1 unless we check listBoundedWriters(maxRepos=2) directly OR limit=2!
+    const cred = await mintSpaceCredentialWith(depsFor(network, ALICE), tasksSpace);
+    const crossPageScan = await listBoundedWriters(cred.client(await network.resolvePds(AUTHORITY)), {
+      space: tasksSpace,
+      maxRepos: 2,
+    });
+    assert.deepEqual(crossPageScan.writers.map((w) => w.repo), [ALICE]);
+    assert.equal(crossPageScan.truncated, false);
+    assert.equal(bobProbed, false);
+
+    // And with readIndependentTasksSpace (whose limit is MAX_TASKS_WRITERS), simulate a page of length MAX_TASKS_WRITERS? Or pass maxStarRecords? MAX_TASKS_WRITERS = 20_000.
+    // On a single page where #repoWrite appears first and #repoRemoved appears later in ascending spaceRev order, latest-wins also deletes BOB:
+    network.interceptResponse = ({ method, params, response }) => {
+      if (method === "com.atproto.space.listWriters" && params.space === tasksSpace && response.ok) {
+        return Response.json({
+          repos: [
+            { $type: WRITER_WRITE_TYPE, repo: BOB, repoRev: tidFor(10), spaceRev: tidFor(11), data: { $bytes: "AAAA" } },
+            { $type: WRITER_WRITE_TYPE, repo: ALICE, repoRev: tidFor(12), spaceRev: tidFor(13), data: { $bytes: "AAAA" } },
+            { $type: WRITER_REMOVED_TYPE, repo: BOB, spaceRev: tidFor(14) },
+          ],
+          cursor: tidFor(14),
+        });
+      }
+      if ((method === "com.atproto.space.getRepo" || method === "com.atproto.space.listRecords") && params.repo === BOB) {
+        bobProbed = true;
+      }
+      return response;
+    };
+    const res = await readIndependentTasksSpace(depsFor(network, ALICE), workspace);
+    assert.equal(res.complete, true);
+    assert.equal(bobProbed, false);
+    assert.deepEqual(res.tasks.map((t) => t.title), ["Alice survives"]);
+  }
+});
+
+test("host-level RepoTakendown/RepoDeactivated on authorizeSpaceSync/listWriters and repo===authorityDid (N3) are transient while non-authority writer takedown stays permanent", async () => {
+  for (const state of ["takendown", "deactivated"] as const) {
+    const code = state === "takendown" ? "RepoTakendown" : "RepoDeactivated";
+    const expectedReason = state === "takendown" ? "its account was taken down" : "its account is deactivated";
+
+    // 1. Host-level suspension on workspace authorizeSpaceSync -> transient setAside (permanent: false), does not throw.
+    {
+      const network = new FakeNetwork();
+      const { workspace } = await createTasksWorkspaceFixture(network, { members: [ALICE] });
+      network.setAccountState(AUTHORITY, state);
+      const res = await readIndependentTasksSpace(depsFor(network, ALICE), workspace);
+      assert.equal(res.enabled, false);
+      assert.equal(res.workspaceSnapshotComplete, false);
+      assert.equal(res.complete, false);
+      assert.equal(res.degraded, true);
+      assert.deepEqual(res.setAside, [{ did: AUTHORITY, reason: expectedReason, permanent: false }]);
+    }
+
+    // 2. Host-level suspension on tasksSpace authorizeSpaceSync and listWriters -> transient setAside (permanent: false).
+    for (const targetEndpoint of ["com.atproto.space.authorizeSpaceSync", "com.atproto.space.listWriters"] as const) {
+      const network = new FakeNetwork();
+      const { workspace, tasksSpace } = await createTasksWorkspaceFixture(network, { members: [ALICE] });
+      network.interceptResponse = ({ method, params, response }) => {
+        if (method === targetEndpoint && params.space === tasksSpace) {
+          return new Response(JSON.stringify({ error: code, message: `${code}: ${AUTHORITY}` }), {
+            status: 400,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return response;
+      };
+      const res = await readIndependentTasksSpace(depsFor(network, ALICE), workspace);
+      assert.equal(res.enabled, true);
+      assert.equal(res.workspaceSnapshotComplete, true);
+      assert.equal(res.complete, false);
+      assert.equal(res.degraded, true);
+      assert.deepEqual(res.setAside, [{ did: AUTHORITY, reason: expectedReason, permanent: false }]);
+    }
+
+    // 3. N3 repo === authorityDid vs non-authority writer BOB on repo reads:
+    //    authority repo suspension classifies transient (permanent: false), while BOB's classifies permanent (permanent: true).
+    {
+      const network = new FakeNetwork();
+      const { workspace, tasksSpace } = await createTasksWorkspaceFixture(network, { members: [ALICE, BOB] });
+      await network.writeAs(AUTHORITY, tasksSpace, COLLECTION.task, tidFor(1), {
+        title: "Authority task",
+        status: "todo",
+        priority: "none",
+        t: hlcAt(0),
+        createdAt: TIMESTAMP,
+      });
+      await network.writeAs(ALICE, tasksSpace, COLLECTION.task, tidFor(2), {
+        title: "Alice task",
+        status: "todo",
+        priority: "none",
+        t: hlcAt(10),
+        createdAt: TIMESTAMP,
+      });
+      await network.writeAs(BOB, tasksSpace, COLLECTION.task, tidFor(3), {
+        title: "Bob task",
+        status: "todo",
+        priority: "none",
+        t: hlcAt(20),
+        createdAt: TIMESTAMP,
+      });
+
+      network.setAccountState(BOB, state);
+      network.interceptResponse = ({ method, params, response }) => {
+        if (method === "com.atproto.space.getRepo" && params.space === tasksSpace && params.repo === AUTHORITY && response.ok) {
+          return new Response(JSON.stringify({ error: code, message: `${code}: ${AUTHORITY}` }), {
+            status: 400,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return response;
+      };
+
+      const res = await readIndependentTasksSpace(depsFor(network, ALICE), workspace);
+      assert.equal(res.complete, false);
+      assert.equal(res.degraded, true);
+      assert.deepEqual(res.tasks.map((t) => t.title), ["Alice task"]);
+      assert.deepEqual(
+        res.setAside,
+        [
+          { did: AUTHORITY, reason: expectedReason, permanent: false },
+          { did: BOB, reason: expectedReason, permanent: true },
+        ].sort((a, b) => a.did.localeCompare(b.did)),
+      );
+    }
+
+    // 4. N3 repo === authorityDid on workspace snapshot getRepo -> transient setAside (permanent: false).
+    {
+      const network = new FakeNetwork();
+      const { workspace } = await createTasksWorkspaceFixture(network, { members: [ALICE] });
+      network.interceptResponse = ({ method, params, response }) => {
+        if (method === "com.atproto.space.getRepo" && params.space === workspace && params.repo === AUTHORITY && response.ok) {
+          return new Response(JSON.stringify({ error: code, message: `${code}: ${AUTHORITY}` }), {
+            status: 400,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return response;
+      };
+      const res = await readIndependentTasksSpace(depsFor(network, ALICE), workspace);
+      assert.equal(res.enabled, false);
+      assert.equal(res.workspaceSnapshotComplete, false);
+      assert.deepEqual(res.setAside, [{ did: AUTHORITY, reason: expectedReason, permanent: false }]);
+    }
+  }
+});
+
+test("verifies RFC 9421 MACs on every listRepoOps page, refreshes rotated KEM keys, and enforces SpaceKemError/SpaceMacError/RepoNotFound", async () => {
+  const network = new FakeNetwork();
+  const { workspace, tasksSpace } = await createTasksWorkspaceFixture(network, { members: [ALICE, BOB, CAROL] });
+  await network.writeAs(ALICE, tasksSpace, COLLECTION.task, tidFor(1), {
+    title: "Alice task",
+    status: "todo",
+    priority: "none",
+    t: hlcAt(0),
+    createdAt: TIMESTAMP,
+  });
+  for (let i = 0; i < 3; i += 1) {
+    await network.writeAs(BOB, tasksSpace, COLLECTION.task, tidFor(10 + i), {
+      title: `Bob ${i}`,
+      status: "todo",
+      priority: "none",
+      t: hlcAt(10 + i),
+      createdAt: TIMESTAMP,
+    });
+  }
+
+  // 1. Multi-page listRepoOps with limit=1 verifies commit + RFC 9421 MAC on EVERY page; rotated KEM key refreshes cleanly.
+  const cred = await mintSpaceCredentialWith(depsFor(network, ALICE), tasksSpace);
+  const bobPds = await network.resolvePds(BOB);
+  const seenListRepoOpsHeaders: Array<{ acceptSig: string | null; covered: string | null; sigInput: string | null; sig: string | null }> = [];
+  const spyCred = await mintSpaceCredentialWith({
+    ...depsFor(network, ALICE),
+    fetchEndpoint: async (request) => {
+      const response = await network.fetchEndpoint(request);
+      if (new URL(request.url).pathname === "/xrpc/com.atproto.space.listRepoOps" && response.ok) {
+        seenListRepoOpsHeaders.push({
+          acceptSig: request.headers.get("accept-signature"),
+          covered: response.headers.get(MAC_COVERED_HEADER[COMMIT_MAC_PROFILE]),
+          sigInput: response.headers.get("signature-input"),
+          sig: response.headers.get("signature"),
+        });
+      }
+      return response;
+    },
+  }, tasksSpace);
+
+  const paged = await fetchRepoOpsPages(spyCred.client(bobPds), { space: tasksSpace, repo: BOB, limit: 1 });
+  assert.equal(paged.ops.length, 3);
+  assert.ok(paged.commit.rev);
+  assert.equal(seenListRepoOpsHeaders.length, 4);
+  for (const pageHeaders of seenListRepoOpsHeaders) {
+    assert.match(pageHeaders.acceptSig ?? "", /^mac=\("atproto-space-commit";sf\);keyid="did:key:zDn[^"]*";tag="atproto-space-commit"$/);
+    assert.ok(pageHeaders.covered?.includes(`repo="${BOB}"`));
+    assert.ok(pageHeaders.sigInput?.includes(`tag="${COMMIT_MAC_PROFILE}"`));
+    assert.match(pageHeaders.sig ?? "", /^mac=:/);
+  }
+
+  await network.rotateKemKey(BOB);
+  const afterRotate = await fetchRepoOpsPages(cred.client(bobPds), { space: tasksSpace, repo: BOB, limit: 2 });
+  assert.equal(afterRotate.ops.length, 3);
+
+  // Unwritten writer CAROL -> listRepoOps preserves XrpcError RepoNotFound.
+  await assert.rejects(
+    fetchRepoOpsPages(cred.client(await network.resolvePds(CAROL)), { space: tasksSpace, repo: CAROL, limit: 10 }),
+    (err: unknown) => err instanceof XrpcError && err.code === "RepoNotFound",
+  );
+
+  // 2. Intermediate page (cursor !== undefined) missing commit -> RepoOpsPageError / SpaceRepoVerificationError.
+  network.interceptResponse = async ({ method, params, response }) => {
+    if (method === "com.atproto.space.listRepoOps" && params.repo === BOB && !params.cursor && response.ok) {
+      const body = await response.json() as Record<string, unknown>;
+      delete body.commit;
+      return new Response(JSON.stringify(body), { status: 200, headers: response.headers });
+    }
+    return response;
+  };
+  await assert.rejects(
+    fetchRepoOpsPages(cred.client(bobPds), { space: tasksSpace, repo: BOB, limit: 1 }),
+    (err: unknown) => err instanceof SpaceRepoVerificationError || err instanceof RepoOpsPageError,
+  );
+
+  // 3. Intermediate page forged commit.repo -> SpaceRepoVerificationError; forged MAC -> SpaceMacError.
+  network.interceptResponse = async ({ method, params, response }) => {
+    if (method === "com.atproto.space.listRepoOps" && params.repo === BOB && !params.cursor && response.ok) {
+      const body = await response.json() as { commit: Record<string, unknown> };
+      body.commit.repo = CAROL;
+      return new Response(JSON.stringify(body), { status: 200, headers: response.headers });
+    }
+    return response;
+  };
+  await assert.rejects(
+    fetchRepoOpsPages(cred.client(bobPds), { space: tasksSpace, repo: BOB, limit: 1 }),
+    SpaceRepoVerificationError,
+  );
+
+  network.interceptResponse = ({ method, params, response }) => {
+    if (method === "com.atproto.space.listRepoOps" && params.repo === BOB && !params.cursor && response.ok) {
+      const headers = new Headers(response.headers);
+      headers.set("signature", "mac=:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=:");
+      return new Response(response.body, { status: 200, headers });
+    }
+    return response;
+  };
+  await assert.rejects(
+    fetchRepoOpsPages(cred.client(bobPds), { space: tasksSpace, repo: BOB, limit: 1 }),
+    SpaceMacError,
+  );
+  network.interceptResponse = undefined;
+
+  // 4. STAR getRepo sends application/vnd.dasl.star + RFC 9421 Accept-Signature, refreshes rotated KEM key, and handles SpaceKemError permanently.
+  const getRepoHeaders: Array<{ accept: string | null; acceptSig: string | null }> = [];
+  await network.rotateKemKey(BOB);
+  const baseDeps = depsFor(network, ALICE);
+  const starOk = await readIndependentTasksSpace({
+    ...baseDeps,
+    fetchEndpoint: async (req) => {
+      if (new URL(req.url).pathname === "/xrpc/com.atproto.space.getRepo") {
+        getRepoHeaders.push({ accept: req.headers.get("accept"), acceptSig: req.headers.get("accept-signature") });
+      }
+      return baseDeps.fetchEndpoint(req);
+    },
+  }, workspace);
+  assert.equal(starOk.complete, true);
+  assert.ok(getRepoHeaders.some((h) => h.accept === "application/vnd.dasl.star" && /^mac=\("atproto-space-commit";sf\)/.test(h.acceptSig ?? "")));
+
+  const badKem = await readIndependentTasksSpace({
+    ...baseDeps,
+    resolveKemKey: async (did, forceRefresh) => (did === BOB ? "not-a-kem-did-key" : baseDeps.resolveKemKey(did, forceRefresh)),
+  }, workspace);
+  assert.equal(badKem.complete, false);
+  assert.deepEqual(badKem.setAside, [
+    { did: BOB, reason: "it publishes no usable #atproto_kem key", permanent: true },
+  ]);
 });
