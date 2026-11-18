@@ -16,7 +16,7 @@ There is no app database of record. Each workspace, channel and conversation liv
 
 ## How it is built
 
-Next.js 16 (App Router) with SQLite for session state, caches and the operator journal. Lexicons are in `packages/protocol/lexicons/new/flock/`. See [`ARCHITECTURE.md`](ARCHITECTURE.md) for runtime boundaries and data flow, [`CODE-MAP.md`](CODE-MAP.md) for the directory map and who owns what, and [`SPEC.md`](SPEC.md) for product scope.
+Next.js 16 (App Router) with SQLite for session state, caches and the operator journal. Lexicons are in `packages/protocol/lexicons/new/flock/`. New to **atproto Spaces**? Start with [`docs/dev-onboarding.md`](docs/dev-onboarding.md) (diagrams and FAQ). See [`ARCHITECTURE.md`](ARCHITECTURE.md) for runtime boundaries and data flow, [`CODE-MAP.md`](CODE-MAP.md) for the directory map and who owns what, and [`SPEC.md`](SPEC.md) for product scope.
 
 ## Run it locally
 
@@ -56,6 +56,20 @@ For a real deployment, run the web app and the operator (`corepack pnpm operator
 The behavior contract is [`features/*.feature`](features). 68 of 69 scenarios are executable; the last one, that the final admin cannot leave, has no UI path and is covered by `protocol-tests/app-acceptance.test.ts`. The gate fails if that count grows or if a bound scenario has an undefined step. A recording of the full run is in [`docs/media/bdd-session.mp4`](docs/media/bdd-session.mp4) (Git LFS).
 
 The suite needs the pinned checkout, so set `ATPROTO_PINNED_CHECKOUT` as above.
+
+## Conference deck
+
+GitHub’s README cannot run interactive HTML (no slide keyboard navigation in the markdown view). Use **GitHub Pages** for the full deck, or open the HTML file locally.
+
+[![Conference deck overview](docs/presentation/overview.png)](https://atproto-sandbox.github.io/atprotocol-slack-clone/presentation/r12-atproto-conference-deck.html)
+
+| Format | Link |
+|---|---|
+| **Interactive slides** (arrow keys, fullscreen) | [GitHub Pages](https://atproto-sandbox.github.io/atprotocol-slack-clone/presentation/r12-atproto-conference-deck.html) |
+| **Source in repo** | [`docs/presentation/r12-atproto-conference-deck.html`](docs/presentation/r12-atproto-conference-deck.html) |
+| **UI demo video** (slide 1) | [`docs/media/bdd-session.mp4`](docs/media/bdd-session.mp4) |
+
+After the first Pages deploy, enable **Settings → Pages → Build and deployment: GitHub Actions** if the site URL is not live yet. A GIF is not required; it would not preserve navigation anyway.
 
 ## Project notes
 
