@@ -884,48 +884,6 @@ function broadcastResetFromHub(hub: Extract<IpcState, { mode: "hub" }>): void {
   }
 }
 
-type FencedHubMutationResult =
-  | { kind: "lost" }
-  | { kind: "rate_limit"; error: DmRateLimitError }
-  | { kind: "ok"; mutation: WakeMutation };
-
-function applyFencedHubMutationAtomically(
-  hub: Extract<IpcState, { mode: "hub" }>,
-  callerDid: string,
-  space: string,
-  nowMs: number,
-): FencedHubMutationResult {
-  if (ipcState.mode !== "hub" || ipcState !== hub) return { kind: "lost" };
-  try {
-    const db = getRawDb();
-    return db.transaction((): FencedHubMutationResult => {
-      if (ipcState.mode !== "hub" || ipcState !== hub) return { kind: "lost" };
-      const now = Date.now();
-      if (now >= hub.leaseExpiresAt) return { kind: "lost" };
-      const nextExpiresAt = now + HUB_LEASE_TTL_MS;
-      const res = db
-        .prepare("UPDATE oauth_request_lock SET expires_at = ? WHERE name = ? AND token = ? AND expires_at > ?")
-        .run(nextExpiresAt, DM_IPC_HUB_LOCK_NAME, hub.leaseToken, now);
-      if (res.changes !== 1) return { kind: "lost" };
-      hub.leaseExpiresAt = nextExpiresAt;
-      try {
-        checkAndRecordRateLimit(callerDid, space, nowMs);
-      } catch (err) {
-        if (err instanceof DmRateLimitError) {
-          return { kind: "rate_limit", error: err };
-        }
-        throw err;
-      }
-      // Applied while holding SQLite's RESERVED/EXCLUSIVE write lock on oauth_request_lock,
-      // so no other worker can claim dm_ipc_hub concurrently with this authoritative mutation.
-      const mutation = applyAuthoritativeWake(callerDid, space);
-      return { kind: "ok", mutation };
-    }).immediate();
-  } catch {
-    return { kind: "lost" };
-  }
-}
-
 async function applyAuthoritativeWakeOnHub(
   hub: Extract<IpcState, { mode: "hub" }>,
   opId: string | undefined,
@@ -947,16 +905,18 @@ async function applyAuthoritativeWakeOnHub(
     }
   }
 
-  const outcome = applyFencedHubMutationAtomically(hub, callerDid, space, nowMs);
-  if (outcome.kind === "lost") {
-    stepDownHub(hub);
+  // Never wrap JS rate-limiting or in-memory mutation in `BEGIN IMMEDIATE` (`db.transaction`),
+  // so a process paused (`SIGSTOP`) at any JS boundary holds zero SQLite locks and never blocks failover!
+  // Instead, single-statement autocommit lease checks + monotonic `(fence, leaseToken)` on broadcasts
+  // + synchronous read eviction (`evictStaleIpcAttachmentSync`) fence stale hubs lock-free.
+  checkAndRecordRateLimit(callerDid, space, nowMs);
+  if (!assertAndRefreshHubLease(hub)) {
     throw new HubOwnershipLostError();
   }
-  if (outcome.kind === "rate_limit") {
-    throw outcome.error;
+  const mutation = applyAuthoritativeWake(callerDid, space);
+  if (!assertAndRefreshHubLease(hub)) {
+    throw new HubOwnershipLostError();
   }
-
-  const { mutation } = outcome;
   notifyMutationListeners(mutation);
   const bcast = broadcastFromHub(hub, mutation);
 
@@ -1445,31 +1405,36 @@ function claimVacantOrExpiredHubLease(
   expectedDigest: string,
 ): { won: boolean; leaseToken: string; fence: number; expiresAt: number; staleSockPath: string | null } {
   const db = getRawDb();
-  return db.transaction(() => {
-    const now = Date.now();
-    const expiresAt = now + HUB_LEASE_TTL_MS;
-    const prev = db
-      .prepare("SELECT token, expires_at FROM oauth_request_lock WHERE name = ?")
-      .get(DM_IPC_HUB_LOCK_NAME) as { token: string; expires_at: number } | undefined;
-    if (prev && prev.expires_at > now) {
-      return { won: false, leaseToken: "", fence: 0, expiresAt: 0, staleSockPath: null };
-    }
-    const prevParsed = prev ? parseHubLeaseToken(prev.token) : null;
-    const fence = Math.max(highestSeenFence, prevParsed?.fence ?? 0) + 1;
+  const prev = readHubLeaseRow();
+  const now = Date.now();
+  if (prev && prev.expires_at > now) {
+    return { won: false, leaseToken: "", fence: 0, expiresAt: 0, staleSockPath: null };
+  }
+  const expiresAt = now + HUB_LEASE_TTL_MS;
+  if (!prev) {
+    const fence = Math.max(highestSeenFence, 0) + 1;
     const myToken = formatHubLeaseToken(hubId, sockPath, fence);
     const res = db
-      .prepare(`
-        INSERT INTO oauth_request_lock (name, token, expires_at) VALUES (?, ?, ?)
-        ON CONFLICT(name) DO UPDATE SET token = excluded.token, expires_at = excluded.expires_at
-        WHERE oauth_request_lock.expires_at <= ?
-      `)
-      .run(DM_IPC_HUB_LOCK_NAME, myToken, expiresAt, now);
+      .prepare("INSERT INTO oauth_request_lock (name, token, expires_at) VALUES (?, ?, ?) ON CONFLICT(name) DO NOTHING")
+      .run(DM_IPC_HUB_LOCK_NAME, myToken, expiresAt);
     if (res.changes === 1) {
-      const staleSockPath = prev ? parseHubLeaseToken(prev.token, expectedDigest)?.sockPath ?? null : null;
-      return { won: true, leaseToken: myToken, fence, expiresAt, staleSockPath };
+      return { won: true, leaseToken: myToken, fence, expiresAt, staleSockPath: null };
     }
     return { won: false, leaseToken: "", fence: 0, expiresAt: 0, staleSockPath: null };
-  }).immediate();
+  }
+  const prevParsed = parseHubLeaseToken(prev.token);
+  const fence = Math.max(highestSeenFence, prevParsed?.fence ?? 0) + 1;
+  const myToken = formatHubLeaseToken(hubId, sockPath, fence);
+  // Single autocommit CAS statement conditioned on exact `token = prev.token AND expires_at <= now`:
+  // strictly advances `fence` while never holding a multi-statement SQLite writer lock across JS frames!
+  const res = db
+    .prepare("UPDATE oauth_request_lock SET token = ?, expires_at = ? WHERE name = ? AND token = ? AND expires_at <= ?")
+    .run(myToken, expiresAt, DM_IPC_HUB_LOCK_NAME, prev.token, now);
+  if (res.changes === 1) {
+    const staleSockPath = parseHubLeaseToken(prev.token, expectedDigest)?.sockPath ?? null;
+    return { won: true, leaseToken: myToken, fence, expiresAt, staleSockPath };
+  }
+  return { won: false, leaseToken: "", fence: 0, expiresAt: 0, staleSockPath: null };
 }
 
 function takeOverDeadHubLease(
@@ -1479,40 +1444,44 @@ function takeOverDeadHubLease(
   expectedDigest: string,
 ): { won: boolean; leaseToken: string; fence: number; expiresAt: number; deadSockPath: string | null } {
   const db = getRawDb();
-  return db.transaction(() => {
-    const now = Date.now();
-    const expiresAt = now + HUB_LEASE_TTL_MS;
-    const deadParsed = parseHubLeaseToken(deadToken);
-    const cur = db
-      .prepare("SELECT token, expires_at FROM oauth_request_lock WHERE name = ?")
-      .get(DM_IPC_HUB_LOCK_NAME) as { token: string; expires_at: number } | undefined;
-    const curParsed = cur ? parseHubLeaseToken(cur.token) : null;
-    const fence = Math.max(highestSeenFence, deadParsed?.fence ?? 0, curParsed?.fence ?? 0) + 1;
+  const cur = readHubLeaseRow();
+  const now = Date.now();
+  const expiresAt = now + HUB_LEASE_TTL_MS;
+  const deadParsed = parseHubLeaseToken(deadToken);
+  if (!cur) {
+    const fence = Math.max(highestSeenFence, deadParsed?.fence ?? 0) + 1;
     const myToken = formatHubLeaseToken(hubId, sockPath, fence);
-    if (!cur) {
-      db.prepare("INSERT INTO oauth_request_lock (name, token, expires_at) VALUES (?, ?, ?)")
-        .run(DM_IPC_HUB_LOCK_NAME, myToken, expiresAt);
+    const res = db
+      .prepare("INSERT INTO oauth_request_lock (name, token, expires_at) VALUES (?, ?, ?) ON CONFLICT(name) DO NOTHING")
+      .run(DM_IPC_HUB_LOCK_NAME, myToken, expiresAt);
+    if (res.changes === 1) {
       return { won: true, leaseToken: myToken, fence, expiresAt, deadSockPath: parseHubLeaseToken(deadToken, expectedDigest)?.sockPath ?? null };
     }
-    if (cur.token === deadToken) {
-      const res = db
-        .prepare("UPDATE oauth_request_lock SET token = ?, expires_at = ? WHERE name = ? AND token = ?")
-        .run(myToken, expiresAt, DM_IPC_HUB_LOCK_NAME, deadToken);
-      if (res.changes === 1) {
-        return { won: true, leaseToken: myToken, fence, expiresAt, deadSockPath: parseHubLeaseToken(deadToken, expectedDigest)?.sockPath ?? null };
-      }
-      return { won: false, leaseToken: "", fence: 0, expiresAt: 0, deadSockPath: null };
-    }
-    if (cur.expires_at <= now) {
-      const res = db
-        .prepare("UPDATE oauth_request_lock SET token = ?, expires_at = ? WHERE name = ? AND expires_at <= ?")
-        .run(myToken, expiresAt, DM_IPC_HUB_LOCK_NAME, now);
-      if (res.changes === 1) {
-        return { won: true, leaseToken: myToken, fence, expiresAt, deadSockPath: parseHubLeaseToken(cur.token, expectedDigest)?.sockPath ?? null };
-      }
+    return { won: false, leaseToken: "", fence: 0, expiresAt: 0, deadSockPath: null };
+  }
+  if (cur.token === deadToken) {
+    const fence = Math.max(highestSeenFence, deadParsed?.fence ?? 0) + 1;
+    const myToken = formatHubLeaseToken(hubId, sockPath, fence);
+    const res = db
+      .prepare("UPDATE oauth_request_lock SET token = ?, expires_at = ? WHERE name = ? AND token = ?")
+      .run(myToken, expiresAt, DM_IPC_HUB_LOCK_NAME, deadToken);
+    if (res.changes === 1) {
+      return { won: true, leaseToken: myToken, fence, expiresAt, deadSockPath: parseHubLeaseToken(deadToken, expectedDigest)?.sockPath ?? null };
     }
     return { won: false, leaseToken: "", fence: 0, expiresAt: 0, deadSockPath: null };
-  }).immediate();
+  }
+  if (cur.expires_at <= now) {
+    const curParsed = parseHubLeaseToken(cur.token);
+    const fence = Math.max(highestSeenFence, deadParsed?.fence ?? 0, curParsed?.fence ?? 0) + 1;
+    const myToken = formatHubLeaseToken(hubId, sockPath, fence);
+    const res = db
+      .prepare("UPDATE oauth_request_lock SET token = ?, expires_at = ? WHERE name = ? AND token = ? AND expires_at <= ?")
+      .run(myToken, expiresAt, DM_IPC_HUB_LOCK_NAME, cur.token, now);
+    if (res.changes === 1) {
+      return { won: true, leaseToken: myToken, fence, expiresAt, deadSockPath: parseHubLeaseToken(cur.token, expectedDigest)?.sockPath ?? null };
+    }
+  }
+  return { won: false, leaseToken: "", fence: 0, expiresAt: 0, deadSockPath: null };
 }
 
 async function tryElectSelfAsHub(

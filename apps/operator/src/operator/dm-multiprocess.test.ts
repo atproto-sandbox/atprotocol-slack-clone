@@ -831,5 +831,85 @@ test("R3 & R4: concurrent multi-worker election never split-brains, mismatched I
     } catch {
       // Ignore
     }
+    closeDb();
+  }
+
+  // 5. R6-M2: Lock-free SQLite failover when Hub A is SIGSTOPped MID-MUTATION (after lease update & local mutation, while awaiting peer ACK):
+  //    Because dm-feed-wakes.ts uses single-statement autocommit CAS SQL (zero `BEGIN IMMEDIATE` across JS frames),
+  //    freezing Hub A mid-wake holds ZERO SQLite writer locks, so Hub C claims `dm_ipc_hub` in <300ms with zero SQLITE_BUSY!
+  getRawDb().prepare("DELETE FROM oauth_request_lock WHERE name = 'dm_ipc_hub'").run();
+  const midHubA = await spawnWorkerB();
+  const midHubAHead = await postGetChanges(midHubA.url, bobAuth, []);
+  assert.ok(midHubAHead.head);
+  const midLeaseRow = getRawDb()
+    .prepare("SELECT token FROM oauth_request_lock WHERE name = 'dm_ipc_hub'")
+    .get() as { token: string };
+  const midHubASock = midLeaseRow.token.split("|")[3]!;
+
+  // Connect a raw peer to midHubA that intentionally withholds `wake_ack`, then trigger a wake on midHubA and SIGSTOP midHubA
+  // the instant `wake` arrives on the wire (proving midHubA is frozen right inside `applyAuthoritativeWakeOnHub`!)
+  let receivedWakeFromMidHubA!: () => void;
+  const midHubAInWake = new Promise<void>((r) => {
+    receivedWakeFromMidHubA = r;
+  });
+  const stallingPeer = net.createConnection(midHubASock);
+  let stallBuf = Buffer.alloc(0);
+  stallingPeer.on("error", () => undefined);
+  stallingPeer.on("data", (chunk: Buffer) => {
+    stallBuf = Buffer.concat([stallBuf, chunk]);
+    while (stallBuf.byteLength >= 36) {
+      const len = stallBuf.readUInt32BE(0);
+      if (stallBuf.byteLength < 36 + len) return;
+      const body = JSON.parse(stallBuf.subarray(36, 36 + len).toString("utf8")) as Record<string, unknown>;
+      stallBuf = stallBuf.subarray(36 + len);
+      if (body.type === "challenge") {
+        stallingPeer.write(encodeRawFrame({ type: "auth", nonce: body.nonce, version: 2 }));
+      } else if (body.type === "wake") {
+        // Withhold wake_ack so midHubA stays suspended inside applyAuthoritativeWakeOnHub!
+        receivedWakeFromMidHubA();
+      }
+    }
+  });
+  await new Promise((r) => setTimeout(r, 40));
+
+  const midHubC = await spawnWorkerB();
+  let midSafetyKill: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const midSpace = dmConversationUri(ALICE_DID, tidNow(1_705_000_000_000));
+    const midToken = deriveDmNotifyToken(midSpace, BOB_DID);
+    const pendingWebhookOnMidA = postNotifyUpdate(midHubA.url, midSpace, midToken, ALICE_DID).catch(() => null);
+    await midHubAInWake;
+
+    // Freeze midHubA mid-request!
+    process.kill(midHubA.child.pid!, "SIGSTOP");
+    midSafetyKill = setTimeout(() => {
+      try {
+        process.kill(midHubA.child.pid!, "SIGKILL");
+      } catch {
+        // Ignore
+      }
+    }, 5_000);
+    midSafetyKill.unref?.();
+
+    // Expire lease & promote midHubC while midHubA is frozen mid-request -> MUST complete in <500ms (zero SQLITE_BUSY)!
+    const failoverStart = performance.now();
+    getRawDb().prepare("UPDATE oauth_request_lock SET expires_at = 0 WHERE name = 'dm_ipc_hub'").run();
+    const midHubCHead = await postGetChanges(midHubC.url, bobAuth, []);
+    const failoverMs = performance.now() - failoverStart;
+    assert.notEqual(midHubCHead.head.split(".")[0], midHubAHead.head.split(".")[0], "midHubC took over while midHubA was frozen mid-mutation");
+    assert.ok(failoverMs < 500, `R6-M2: lock-free failover completed in ${failoverMs.toFixed(1)}ms (<500ms, zero SQLITE_BUSY)`);
+
+    process.kill(midHubA.child.pid!, "SIGCONT");
+    stallingPeer.destroy();
+    await pendingWebhookOnMidA;
+  } finally {
+    if (midSafetyKill) clearTimeout(midSafetyKill);
+    stallingPeer.destroy();
+    for (const c of [midHubA, midHubC]) {
+      if (c.child.exitCode === null && c.child.signalCode === null) {
+        c.child.kill("SIGTERM");
+        await once(c.child, "close").catch(() => undefined);
+      }
+    }
   }
 });

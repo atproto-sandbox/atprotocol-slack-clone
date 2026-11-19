@@ -2768,3 +2768,230 @@ test("R12 Round 5 M3 & L1: superseded SpaceCredentialError never destroys an act
     alice2.close();
   }
 });
+
+test("R12 Round 6 M1: reverse-order stale sidecars (SpaceCredentialError, RegistrationNotConfirmed fallback, and stale success) never overwrite or destroy newer ordinary/sidecar credentials or active watches", async () => {
+  const OPERATOR: OperatorService = {
+    serviceRef: "did:web:operator.test#atproto_flock_operator",
+    endpoint: "https://operator.test",
+  };
+
+  // 1. Reverse-order race on CredentialCache:
+  //    Sidecar #1 (`opSeq = 1`) starts FIRST and hangs -> Ordinary #2 (`opSeq = 2`) starts SECOND and succeeds ->
+  //    Sidecar #1 (`opSeq = 1`) then completes via SpaceCredentialError("NotAuthorized"), RegistrationNotConfirmed fallback, or stale 200 success!
+  for (const staleSidecarOutcome of ["NotAuthorized", "RegistrationNotConfirmed", "StaleSuccess"] as const) {
+    const network = new FakeNetwork();
+    network.createAccount("did:plc:alice", "pds1");
+    const setupAlice = new DmClient({
+      did: "did:plc:alice",
+      memberClient: network.clientFor("did:plc:alice"),
+      resolvePds: network.resolvePds,
+      resolveKemKey: network.resolveKemKey,
+      fetchEndpoint: network.fetchEndpoint,
+      generateKey: network.generateKey,
+      store: createStore(),
+      now: network.now,
+    });
+    await setupAlice.enableDms("everyone");
+    const inbox = dmInboxUri("did:plc:alice");
+
+    network.registerEndpoint(OPERATOR.endpoint, async (req) => {
+      const url = new URL(req.url);
+      if (url.pathname === "/xrpc/com.atproto.space.confirmRegistration") {
+        const body = (await req.json()) as { challenge: string };
+        return Response.json({ challenge: body.challenge });
+      }
+      return Response.json({});
+    });
+
+    let interceptStaleSidecar = true;
+    let savedStaleRequest!: Request;
+    let enteredStaleSidecar!: () => void;
+    const staleSidecarInFlight = new Promise<void>((r) => {
+      enteredStaleSidecar = r;
+    });
+    let resolveStaleSidecar!: (resp: Response) => void;
+    const accessLostSpaces: string[] = [];
+
+    const cache = new CredentialCache(
+      {
+        did: "did:plc:alice",
+        memberClient: network.clientFor("did:plc:alice"),
+        resolvePds: network.resolvePds,
+        resolveKemKey: network.resolveKemKey,
+        fetchEndpoint: async (request) => {
+          if (request.url.includes("com.atproto.space.authorizeSpaceSync") && request.method === "POST") {
+            const parsed = JSON.parse(await request.clone().text()) as { notify?: { token: string } };
+            if (interceptStaleSidecar && parsed.notify?.token === "dm1-stale-first") {
+              interceptStaleSidecar = false;
+              savedStaleRequest = request.clone();
+              enteredStaleSidecar();
+              return new Promise<Response>((res) => {
+                resolveStaleSidecar = res;
+              });
+            }
+          }
+          return network.fetchEndpoint(request);
+        },
+        generateKey: network.generateKey,
+        now: network.now,
+      },
+      async (sp) => {
+        accessLostSpaces.push(sp);
+      },
+    );
+
+    // Sidecar #1 starts FIRST (`opSeq = 1`) and hangs
+    const staleTarget = { endpoint: OPERATOR.endpoint, token: "dm1-stale-first" };
+    const staleSidecarPromise = cache.get(inbox, { notify: staleTarget });
+    await staleSidecarInFlight;
+
+    // Ordinary #2 (or newer Sidecar #2 when testing RegistrationNotConfirmed / StaleSuccess) starts SECOND and succeeds!
+    const newerTarget = { endpoint: OPERATOR.endpoint, token: "dm1-newer-second" };
+    const newerCred = staleSidecarOutcome === "NotAuthorized"
+      ? await cache.get(inbox) // Pure ordinary mint becoming current without prior cacheGen trickery!
+      : await cache.get(inbox, { notify: newerTarget });
+
+    // Now settle older Sidecar #1!
+    if (staleSidecarOutcome === "NotAuthorized") {
+      resolveStaleSidecar(Response.json({ error: "NotAuthorized", message: "stale sidecar refusal" }, { status: 403 }));
+      let caughtErr: unknown;
+      await staleSidecarPromise.catch((err) => {
+        caughtErr = err;
+      });
+      assert.equal(cache.isAuthoritativeAccessLoss(inbox, caughtErr), false, "superseded sidecar SpaceCredentialError is NOT authoritative");
+      assert.deepEqual(accessLostSpaces, [], "superseded sidecar SpaceCredentialError did NOT invoke onAccessLost");
+      const currentAfter = await cache.get(inbox);
+      assert.equal(currentAfter.token, newerCred.token, "newer ordinary credential remained cached after stale sidecar SpaceCredentialError");
+    } else if (staleSidecarOutcome === "RegistrationNotConfirmed") {
+      resolveStaleSidecar(Response.json({ error: "RegistrationNotConfirmed", message: "stale confirm failed" }, { status: 400 }));
+      await staleSidecarPromise;
+      const currentAfter = await cache.get(inbox);
+      assert.equal(currentAfter.token, newerCred.token, "stale sidecar RegistrationNotConfirmed fallback did NOT overwrite newer credential");
+      assert.deepEqual(currentAfter.notify, newerTarget, "newer notify target remained intact");
+    } else {
+      // StaleSuccess: let FakeNetwork issue a real credential for Sidecar #1's original request, and prove it STILL does NOT overwrite `newerCred`!
+      const realResp = await network.fetchEndpoint(savedStaleRequest);
+      resolveStaleSidecar(realResp);
+      await staleSidecarPromise;
+      const currentAfter = await cache.get(inbox);
+      assert.equal(currentAfter.token, newerCred.token, "stale sidecar 200 success did NOT overwrite newer credential");
+      assert.deepEqual(currentAfter.notify, newerTarget, "newer notify target was NOT overwritten by stale sidecar success");
+    }
+  }
+
+  // 2. End-to-end DmClient reverse-order race (`dm-client.ts:1014`):
+  //    Background performNotifyRegistration starts Sidecar #1 (`opSeq = 2`) which hangs ->
+  //    time advances into renewal window and a read (`listRequests()`) mints newer Ordinary #3 (`opSeq = 3`) ->
+  //    Sidecar #1 (`opSeq = 2`) rejects with SpaceCredentialError("NotAuthorized") ->
+  //    DmClient MUST NOT clear the active watch, schedules retry timer cleanly, and recovers live notifications!
+  {
+    const network = new FakeNetwork();
+    network.createAccount("did:plc:alice", "pds1");
+    network.createAccount("did:plc:bob", "pds2");
+
+    const deliveredSpaces: string[] = [];
+    network.registerEndpoint(OPERATOR.endpoint, async (req) => {
+      const url = new URL(req.url);
+      if (url.pathname === "/xrpc/com.atproto.space.confirmRegistration") {
+        const body = (await req.json()) as { challenge: string };
+        return Response.json({ challenge: body.challenge });
+      }
+      if (url.pathname === "/xrpc/com.atproto.space.notifySpaceUpdate") {
+        const body = (await req.json()) as { space: string };
+        deliveredSpaces.push(body.space);
+        return Response.json({});
+      }
+      return Response.json({});
+    });
+
+    type ScheduledTimer = { fn: () => void; delayMs: number; cleared: boolean; fired: boolean };
+    const timers: ScheduledTimer[] = [];
+    let interceptBgSidecarOnce = true;
+    let enteredBgSidecar!: () => void;
+    const bgSidecarInFlight = new Promise<void>((r) => {
+      enteredBgSidecar = r;
+    });
+    let resolveBgSidecar!: (resp: Response) => void;
+
+    const alice = new DmClient({
+      did: "did:plc:alice",
+      memberClient: network.clientFor("did:plc:alice"),
+      resolvePds: network.resolvePds,
+      resolveKemKey: network.resolveKemKey,
+      fetchEndpoint: async (request) => {
+        const url = new URL(request.url);
+        if (url.origin === OPERATOR.endpoint && url.pathname.includes(OPERATOR_METHOD.getDmNotifyTarget)) {
+          return Response.json({ endpoint: OPERATOR.endpoint, token: "dm1-r6-m1-bg" });
+        }
+        if (
+          interceptBgSidecarOnce
+          && request.url.includes("com.atproto.space.authorizeSpaceSync")
+          && request.method === "POST"
+        ) {
+          const parsed = JSON.parse(await request.clone().text()) as { notify?: { token: string } };
+          if (parsed.notify?.token === "dm1-r6-m1-bg") {
+            interceptBgSidecarOnce = false;
+            enteredBgSidecar();
+            return new Promise<Response>((res) => {
+              resolveBgSidecar = res;
+            });
+          }
+        }
+        return network.fetchEndpoint(request);
+      },
+      generateKey: network.generateKey,
+      store: createStore(),
+      now: network.now,
+      operator: OPERATOR,
+      timers: {
+        setTimeout: (fn, delayMs) => {
+          const entry: ScheduledTimer = { fn: () => { entry.fired = true; fn(); }, delayMs, cleared: false, fired: false };
+          timers.push(entry);
+          return entry as unknown as ReturnType<typeof setTimeout>;
+        },
+        clearTimeout: (handle) => {
+          if (handle) (handle as unknown as ScheduledTimer).cleared = true;
+        },
+      },
+    });
+    const bob = new DmClient({
+      did: "did:plc:bob",
+      memberClient: network.clientFor("did:plc:bob"),
+      resolvePds: network.resolvePds,
+      resolveKemKey: network.resolveKemKey,
+      fetchEndpoint: network.fetchEndpoint,
+      generateKey: network.generateKey,
+      store: createStore(),
+      now: network.now,
+    });
+
+    await alice.enableDms("everyone");
+    const inbox = dmInboxUri("did:plc:alice");
+
+    // Start Watcher 1 -> initial un-notified get() (`opSeq = 1`) succeeds, background Sidecar (`opSeq = 2`) hangs!
+    const sig1 = new AbortController();
+    await alice.watch([inbox], { signal: sig1.signal });
+    await bgSidecarInFlight;
+
+    // Advance clock into renewal window and run `listRequests()` -> Ordinary mint (`opSeq = 3`) succeeds and becomes current!
+    network.advanceClock(SPACE_CREDENTIAL_LIFETIME_MS - SPACE_CREDENTIAL_RENEW_BEFORE_MS + 1_000);
+    await alice.listRequests();
+
+    // Now older background Sidecar (`opSeq = 2`) rejects with SpaceCredentialError("NotAuthorized")!
+    resolveBgSidecar(Response.json({ error: "NotAuthorized", message: "stale bg sidecar refusal" }, { status: 403 }));
+    await alice.flushWatchNotifications();
+
+    // Active watch MUST NOT have been cleared -> retry timer was scheduled and succeeds on next tick!
+    const retryTimer = timers.find((t) => !t.cleared && !t.fired);
+    assert.ok(retryTimer, "R6-M1: DmClient preserved active watch and scheduled retry timer after superseded sidecar SpaceCredentialError");
+    retryTimer.fn();
+    await alice.flushWatchNotifications();
+
+    await bob.startConversation(["did:plc:alice"]);
+    await network.flushNotifications();
+    assert.deepEqual(deliveredSpaces, [inbox], "R6-M1: preserved DmClient watch recovered webhook notifications");
+
+    sig1.abort();
+    alice.close();
+  }
+});
