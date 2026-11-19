@@ -123,8 +123,8 @@ type IpcFrame =
   | { type: "wake"; bcastId: number; fence: number; leaseToken: string; mutation: WakeMutation }
   | { type: "wake_ack"; bcastId: number }
   | { type: "record_wake"; reqId: number; opId?: string; callerDid: string; space: string; nowMs: number }
-  | { type: "record_ok"; reqId: number }
-  | { type: "record_err"; reqId: number; code: "rate_limit" | "error"; message: string }
+  | { type: "record_ok"; reqId: number; fence: number; leaseToken: string }
+  | { type: "record_err"; reqId: number; fence: number; leaseToken: string; code: "rate_limit" | "error"; message: string }
   | { type: "reset"; fence: number; leaseToken: string; epoch: string; maxSpaces: number };
 
 function generateBootEpoch(previous?: string): string {
@@ -254,7 +254,16 @@ export function waitForDmWake(
   });
 }
 
-function checkAndRecordRateLimit(callerDid: string, space: string, nowMs: number): void {
+function isRateLimited(callerDid: string, space: string, nowMs: number): boolean {
+  const existing = rateBuckets.get(`${callerDid}\0${space}`);
+  if (!existing) return false;
+  if (nowMs < existing.windowStartMs || nowMs - existing.windowStartMs >= DM_WAKE_RATE_LIMIT_WINDOW_MS) {
+    return false;
+  }
+  return existing.count >= DM_WAKE_RATE_LIMIT_MAX;
+}
+
+function recordRateLimitHit(callerDid: string, space: string, nowMs: number): void {
   const key = `${callerDid}\0${space}`;
   const existing = rateBuckets.get(key);
   if (!existing || nowMs < existing.windowStartMs || nowMs - existing.windowStartMs >= DM_WAKE_RATE_LIMIT_WINDOW_MS) {
@@ -267,10 +276,14 @@ function checkAndRecordRateLimit(callerDid: string, space: string, nowMs: number
     }
     return;
   }
-  if (existing.count >= DM_WAKE_RATE_LIMIT_MAX) {
+  existing.count += 1;
+}
+
+function checkAndRecordRateLimit(callerDid: string, space: string, nowMs: number): void {
+  if (isRateLimited(callerDid, space, nowMs)) {
     throw new DmRateLimitError();
   }
-  existing.count += 1;
+  recordRateLimitHit(callerDid, space, nowMs);
 }
 
 function applyAuthoritativeWake(callerDid: string, space: string): WakeMutation {
@@ -491,6 +504,7 @@ function loadSnapshot(
   }
   callers.clear();
   globalEntries.clear();
+  rateBuckets.clear();
   seenOpIds.clear();
   for (const [callerDid, state] of snapshotCallers) {
     const spaces = new Map<string, number>();
@@ -788,6 +802,7 @@ function stepDownHub(hub: Extract<IpcState, { mode: "hub" }>): void {
     evictedCallers = 0;
     callers.clear();
     globalEntries.clear();
+    rateBuckets.clear();
     seenOpIds.clear();
     notifyListeners(undefined);
     scheduleReconnect();
@@ -907,12 +922,18 @@ async function applyAuthoritativeWakeOnHub(
 
   // Never wrap JS rate-limiting or in-memory mutation in `BEGIN IMMEDIATE` (`db.transaction`),
   // so a process paused (`SIGSTOP`) at any JS boundary holds zero SQLite locks and never blocks failover!
-  // Instead, single-statement autocommit lease checks + monotonic `(fence, leaseToken)` on broadcasts
-  // + synchronous read eviction (`evictStaleIpcAttachmentSync`) fence stale hubs lock-free.
-  checkAndRecordRateLimit(callerDid, space, nowMs);
+  // Revalidate lease ownership AFTER pure-read rate-limit check (before throwing DmRateLimitError) AND
+  // before/after recording rate-bucket & wake mutations; `stepDownHub` clears `rateBuckets` on any loss.
+  if (isRateLimited(callerDid, space, nowMs)) {
+    if (!assertAndRefreshHubLease(hub)) {
+      throw new HubOwnershipLostError();
+    }
+    throw new DmRateLimitError();
+  }
   if (!assertAndRefreshHubLease(hub)) {
     throw new HubOwnershipLostError();
   }
+  recordRateLimitHit(callerDid, space, nowMs);
   const mutation = applyAuthoritativeWake(callerDid, space);
   if (!assertAndRefreshHubLease(hub)) {
     throw new HubOwnershipLostError();
@@ -1041,18 +1062,36 @@ function tryListenAsHub(
             return;
           }
           if (!isDid(frame.callerDid) || !parseDmSpaceUri(frame.space)) {
-            peerSocket.write(encodeIpcFrame(ipcKey, { type: "record_ok", reqId: frame.reqId }));
+            peerSocket.write(
+              encodeIpcFrame(ipcKey, {
+                type: "record_ok",
+                reqId: frame.reqId,
+                fence: hubRef.fence,
+                leaseToken: hubRef.leaseToken,
+              }),
+            );
             return;
           }
-          void applyAuthoritativeWakeOnHub(hubRef, frame.opId, frame.callerDid, frame.space, frame.nowMs).then(
+          const activeHub = hubRef;
+          void applyAuthoritativeWakeOnHub(activeHub, frame.opId, frame.callerDid, frame.space, frame.nowMs).then(
             () => {
-              if (!peerSocket.destroyed) {
-                peerSocket.write(encodeIpcFrame(ipcKey, { type: "record_ok", reqId: frame.reqId }));
+              if (peerSocket.destroyed) return;
+              if (!assertAndRefreshHubLease(activeHub)) {
+                peerSocket.destroy();
+                return;
               }
+              peerSocket.write(
+                encodeIpcFrame(ipcKey, {
+                  type: "record_ok",
+                  reqId: frame.reqId,
+                  fence: activeHub.fence,
+                  leaseToken: activeHub.leaseToken,
+                }),
+              );
             },
             (err: unknown) => {
               if (peerSocket.destroyed) return;
-              if (err instanceof HubOwnershipLostError) {
+              if (err instanceof HubOwnershipLostError || !assertAndRefreshHubLease(activeHub)) {
                 peerSocket.destroy();
                 return;
               }
@@ -1061,6 +1100,8 @@ function tryListenAsHub(
                   encodeIpcFrame(ipcKey, {
                     type: "record_err",
                     reqId: frame.reqId,
+                    fence: activeHub.fence,
+                    leaseToken: activeHub.leaseToken,
                     code: "rate_limit",
                     message: err.message,
                   }),
@@ -1071,6 +1112,8 @@ function tryListenAsHub(
                 encodeIpcFrame(ipcKey, {
                   type: "record_err",
                   reqId: frame.reqId,
+                  fence: activeHub.fence,
+                  leaseToken: activeHub.leaseToken,
                   code: "error",
                   message: "DM wake failed.",
                 }),
@@ -1272,6 +1315,7 @@ function tryConnectToHub(
         evictedCallers = 0;
         callers.clear();
         globalEntries.clear();
+        rateBuckets.clear();
         seenOpIds.clear();
         notifyListeners(undefined);
         scheduleReconnect();
@@ -1357,12 +1401,18 @@ function tryConnectToHub(
         evictedCallers = 0;
         callers.clear();
         globalEntries.clear();
+        rateBuckets.clear();
         seenOpIds.clear();
         notifyListeners(undefined);
         return;
       }
 
       if (frame.type === "record_ok") {
+        if (!clientRef || !isClientBroadcastValid(clientRef, frame.fence, frame.leaseToken)) {
+          if (clientRef) disconnectClientState(clientRef);
+          else socket.destroy();
+          return;
+        }
         const req = pendingReqs.get(frame.reqId);
         if (req) {
           pendingReqs.delete(frame.reqId);
@@ -1372,6 +1422,11 @@ function tryConnectToHub(
       }
 
       if (frame.type === "record_err") {
+        if (!clientRef || !isClientBroadcastValid(clientRef, frame.fence, frame.leaseToken)) {
+          if (clientRef) disconnectClientState(clientRef);
+          else socket.destroy();
+          return;
+        }
         const req = pendingReqs.get(frame.reqId);
         if (req) {
           pendingReqs.delete(frame.reqId);
@@ -1737,7 +1792,12 @@ export async function recordDmWake(callerDid: string, space: string, nowMs = Dat
         await applyAuthoritativeWakeOnHub(hub, opId, callerDid, space, nowMs);
         return;
       } catch (error) {
-        if (error instanceof DmRateLimitError) throw error;
+        if (error instanceof DmRateLimitError) {
+          if (!assertAndRefreshHubLease(hub)) {
+            continue;
+          }
+          throw error;
+        }
         lastIpcError = error;
         if (error instanceof HubOwnershipLostError) {
           continue;

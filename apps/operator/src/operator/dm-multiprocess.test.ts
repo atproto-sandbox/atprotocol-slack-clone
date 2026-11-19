@@ -911,5 +911,100 @@ test("R3 & R4: concurrent multi-worker election never split-brains, mismatched I
         await once(c.child, "close").catch(() => undefined);
       }
     }
+    closeDb();
+  }
+
+  // 6. R7-M2: Superseded hub (`fence = 1`) whose local rate bucket is full MUST NOT emit an authoritative `rate_limit`
+  //    error after Hub C (`fence = 2`) acquires the lease, and Client B MUST reject any stale `record_err` (`fence = 1`)
+  //    and retry `opId` through Hub C (`fence = 2`)!
+  const rlFakeHubId = "f00d00000001";
+  const rlFakeSock = dmWakeSocketPath(undefined, undefined, rlFakeHubId)!;
+  const rlFakeToken = formatHubLeaseToken(rlFakeHubId, rlFakeSock, 1);
+  let onRecordWakeOnFakeHub: ((reqId: number, peerSock: net.Socket) => void) | null = null;
+  const rlFakeServer = net.createServer((peerSock) => {
+    const nonce = "11223344556677889900aabbccddeeff";
+    let buf = Buffer.alloc(0);
+    peerSock.on("error", () => undefined);
+    peerSock.on("data", (chunk: Buffer) => {
+      buf = Buffer.concat([buf, chunk]);
+      while (buf.byteLength >= 36) {
+        const len = buf.readUInt32BE(0);
+        if (buf.byteLength < 36 + len) return;
+        const body = JSON.parse(buf.subarray(36, 36 + len).toString("utf8")) as Record<string, unknown>;
+        buf = buf.subarray(36 + len);
+        if (body.type === "auth") {
+          peerSock.write(
+            encodeRawFrame({
+              type: "snapshot_begin",
+              fence: 1,
+              leaseToken: rlFakeToken,
+              epoch: "yyy",
+              evictedCallers: 0,
+              maxSpaces: 50_000,
+            }),
+          );
+          peerSock.write(encodeRawFrame({ type: "snapshot_end" }));
+        } else if (body.type === "record_wake" && onRecordWakeOnFakeHub) {
+          onRecordWakeOnFakeHub(Number(body.reqId), peerSock);
+        }
+      }
+    });
+    peerSock.write(encodeRawFrame({ type: "challenge", nonce, version: 2 }));
+  });
+  await new Promise<void>((resolveListen) => rlFakeServer.listen(rlFakeSock, resolveListen));
+  getRawDb()
+    .prepare("INSERT OR REPLACE INTO oauth_request_lock (name, token, expires_at) VALUES ('dm_ipc_hub', ?, ?)")
+    .run(rlFakeToken, Date.now() + HUB_LEASE_TTL_MS);
+
+  const rlHubC = await spawnWorkerB();
+  try {
+    await ensureDmWakeReady();
+    let capturedReq: { reqId: number; peerSock: net.Socket } | null = null;
+    let enteredRecordWake!: () => void;
+    const recordWakeArrived = new Promise<void>((r) => {
+      enteredRecordWake = r;
+    });
+    onRecordWakeOnFakeHub = (reqId, peerSock) => {
+      capturedReq = { reqId, peerSock };
+      enteredRecordWake();
+    };
+
+    const rlSpace = dmConversationUri(ALICE_DID, tidNow(1_706_000_000_000));
+    const wakeAttempt = recordDmWake(BOB_DID, rlSpace);
+    await recordWakeArrived;
+
+    // Expire fakeHub (`fence = 1`) so real rlHubC claims `fence = 2`, then have fakeHub emit a stale `rate_limit` `record_err` (`fence = 1`)!
+    getRawDb().prepare("UPDATE oauth_request_lock SET expires_at = 0 WHERE name = 'dm_ipc_hub'").run();
+    const rlHubCHead = await postGetChanges(rlHubC.url, bobAuth, []);
+    assert.notEqual(rlHubCHead.head.split(".")[0], "yyy");
+
+    const reqInfo = capturedReq as { reqId: number; peerSock: net.Socket } | null;
+    assert.ok(reqInfo);
+    reqInfo.peerSock.write(
+      encodeRawFrame({
+        type: "record_err",
+        reqId: reqInfo.reqId,
+        fence: 1,
+        leaseToken: rlFakeToken,
+        code: "rate_limit",
+        message: "Too many DM notifications for this caller and space.",
+      }),
+    );
+
+    // Client B MUST reject the stale `fence = 1` rate_limit error, reconnect to rlHubC (`fence = 2`), and succeed!
+    await wakeAttempt;
+    const afterRlRetry = await postGetChanges(rlHubC.url, bobAuth, [{ space: rlSpace, after: rlHubCHead.head }]);
+    assert.deepEqual(afterRlRetry.changed.map((c) => c.space), [rlSpace], "R7-M2: Client B ignored stale fence=1 rate_limit and delivered wake to Hub C");
+  } finally {
+    if (rlHubC.child.exitCode === null && rlHubC.child.signalCode === null) {
+      rlHubC.child.kill("SIGTERM");
+      await once(rlHubC.child, "close").catch(() => undefined);
+    }
+    await new Promise<void>((resolveClose) => rlFakeServer.close(() => resolveClose()));
+    try {
+      rmSync(rlFakeSock, { force: true });
+    } catch {
+      // Ignore
+    }
   }
 });

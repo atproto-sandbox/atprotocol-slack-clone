@@ -2995,3 +2995,192 @@ test("R12 Round 6 M1: reverse-order stale sidecars (SpaceCredentialError, Regist
     alice.close();
   }
 });
+
+test("R12 Round 7 M1: older sidecars are fenced while a newer sidecar is STILL pending in-flight, and committedNotifySeq advances monotonically across clearNotify() + stale access loss", async () => {
+  const OPERATOR: OperatorService = {
+    serviceRef: "did:web:operator.test#atproto_flock_operator",
+    endpoint: "https://operator.test",
+  };
+
+  // 1. Older sidecar (`opSeq = 1`) settles WHILE newer sidecar (`opSeq = 2`) is STILL pending in-flight!
+  for (const staleOutcome of ["NotAuthorized", "RegistrationNotConfirmed", "StaleSuccess"] as const) {
+    const network = new FakeNetwork();
+    network.createAccount("did:plc:alice", "pds1");
+    const setupAlice = new DmClient({
+      did: "did:plc:alice",
+      memberClient: network.clientFor("did:plc:alice"),
+      resolvePds: network.resolvePds,
+      resolveKemKey: network.resolveKemKey,
+      fetchEndpoint: network.fetchEndpoint,
+      generateKey: network.generateKey,
+      store: createStore(),
+      now: network.now,
+    });
+    await setupAlice.enableDms("everyone");
+    const inbox = dmInboxUri("did:plc:alice");
+
+    network.registerEndpoint(OPERATOR.endpoint, async (req) => {
+      const url = new URL(req.url);
+      if (url.pathname === "/xrpc/com.atproto.space.confirmRegistration") {
+        const body = (await req.json()) as { challenge: string };
+        return Response.json({ challenge: body.challenge });
+      }
+      return Response.json({});
+    });
+
+    let savedReq1!: Request;
+    let savedReq2!: Request;
+    let resolveReq1!: (resp: Response) => void;
+    let resolveReq2!: (resp: Response) => void;
+    let entered1!: () => void;
+    let entered2!: () => void;
+    const inFlight1 = new Promise<void>((r) => { entered1 = r; });
+    const inFlight2 = new Promise<void>((r) => { entered2 = r; });
+    const accessLost: string[] = [];
+
+    const cache = new CredentialCache(
+      {
+        did: "did:plc:alice",
+        memberClient: network.clientFor("did:plc:alice"),
+        resolvePds: network.resolvePds,
+        resolveKemKey: network.resolveKemKey,
+        fetchEndpoint: async (request) => {
+          if (request.url.includes("com.atproto.space.authorizeSpaceSync") && request.method === "POST") {
+            const parsed = JSON.parse(await request.clone().text()) as { notify?: { token: string } };
+            if (parsed.notify?.token === "dm1-pending-old") {
+              savedReq1 = request.clone();
+              entered1();
+              return new Promise<Response>((res) => { resolveReq1 = res; });
+            }
+            if (parsed.notify?.token === "dm1-pending-new") {
+              savedReq2 = request.clone();
+              entered2();
+              return new Promise<Response>((res) => { resolveReq2 = res; });
+            }
+          }
+          return network.fetchEndpoint(request);
+        },
+        generateKey: network.generateKey,
+        now: network.now,
+      },
+      async (sp) => {
+        accessLost.push(sp);
+      },
+    );
+
+    const oldTarget = { endpoint: OPERATOR.endpoint, token: "dm1-pending-old" };
+    const newTarget = { endpoint: OPERATOR.endpoint, token: "dm1-pending-new" };
+
+    // Start Sidecar #1 (`opSeq = 1`) AND Sidecar #2 (`opSeq = 2`) — BOTH are simultaneously pending in-flight!
+    const p1 = cache.get(inbox, { notify: oldTarget });
+    await inFlight1;
+    const p2 = cache.get(inbox, { notify: newTarget });
+    await inFlight2;
+
+    // Settle older Sidecar #1 (`opSeq = 1`) FIRST while newer Sidecar #2 (`opSeq = 2`) is STILL pending!
+    if (staleOutcome === "NotAuthorized") {
+      resolveReq1(Response.json({ error: "NotAuthorized", message: "stale while p2 pending" }, { status: 403 }));
+      let err1: unknown;
+      await p1.catch((e) => { err1 = e; });
+      assert.equal(cache.isAuthoritativeAccessLoss(inbox, err1), false, "R7-M1: older sidecar loss is NOT authoritative while newer sidecar is pending");
+      assert.deepEqual(accessLost, [], "R7-M1: onAccessLost NOT invoked while newer sidecar is pending");
+    } else if (staleOutcome === "RegistrationNotConfirmed") {
+      resolveReq1(Response.json({ error: "RegistrationNotConfirmed", message: "stale unconfirmed" }, { status: 400 }));
+      await p1;
+    } else {
+      resolveReq1(await network.fetchEndpoint(savedReq1));
+      await p1;
+    }
+
+    // Now resolve newer Sidecar #2 (`opSeq = 2`) -> its credential & target MUST win cleanly!
+    resolveReq2(await network.fetchEndpoint(savedReq2));
+    const cred2 = await p2;
+    assert.deepEqual(cred2.notify, newTarget);
+    const cachedFinal = await cache.get(inbox);
+    assert.equal(cachedFinal.token, cred2.token, `R7-M1 (${staleOutcome}): newer sidecar credential owns slot`);
+    assert.deepEqual(cachedFinal.notify, newTarget, `R7-M1 (${staleOutcome}): newer sidecar notify target owns slot`);
+  }
+
+  // 2. Monotonic committedNotifySeq: clearNotify() (`opSeq = 3`) followed by older `SpaceCredentialError` or older sidecar
+  //    MUST NEVER lower committedNotifySeq or restore a cleared notify target!
+  {
+    const network = new FakeNetwork();
+    network.createAccount("did:plc:alice", "pds1");
+    const setupAlice = new DmClient({
+      did: "did:plc:alice",
+      memberClient: network.clientFor("did:plc:alice"),
+      resolvePds: network.resolvePds,
+      resolveKemKey: network.resolveKemKey,
+      fetchEndpoint: network.fetchEndpoint,
+      generateKey: network.generateKey,
+      store: createStore(),
+      now: network.now,
+    });
+    await setupAlice.enableDms("everyone");
+    const inbox = dmInboxUri("did:plc:alice");
+
+    network.registerEndpoint(OPERATOR.endpoint, async (req) => {
+      const url = new URL(req.url);
+      if (url.pathname === "/xrpc/com.atproto.space.confirmRegistration") {
+        const body = (await req.json()) as { challenge: string };
+        return Response.json({ challenge: body.challenge });
+      }
+      return Response.json({});
+    });
+
+    let savedSidecar2!: Request;
+    let resolveOp1!: (resp: Response) => void;
+    let resolveSidecar2!: (resp: Response) => void;
+    let e1!: () => void;
+    let e2!: () => void;
+    const p1InFlight = new Promise<void>((r) => { e1 = r; });
+    const p2InFlight = new Promise<void>((r) => { e2 = r; });
+    const seenPayloads: Array<unknown> = [];
+
+    const cache = new CredentialCache({
+      did: "did:plc:alice",
+      memberClient: network.clientFor("did:plc:alice"),
+      resolvePds: network.resolvePds,
+      resolveKemKey: network.resolveKemKey,
+      fetchEndpoint: async (request) => {
+        if (request.url.includes("com.atproto.space.authorizeSpaceSync") && request.method === "POST") {
+          const parsed = JSON.parse(await request.clone().text()) as { notify?: { token: string } };
+          seenPayloads.push(parsed.notify ?? null);
+          if (!parsed.notify && resolveOp1 === undefined) {
+            e1();
+            return new Promise<Response>((res) => { resolveOp1 = res; });
+          }
+          if (parsed.notify?.token === "dm1-before-clear") {
+            savedSidecar2 = request.clone();
+            e2();
+            return new Promise<Response>((res) => { resolveSidecar2 = res; });
+          }
+        }
+        return network.fetchEndpoint(request);
+      },
+      generateKey: network.generateKey,
+      now: network.now,
+    });
+
+    // Op 1 (`opSeq = 1`): ordinary mint hangs
+    const op1 = cache.get(inbox);
+    await p1InFlight;
+    // Op 2 (`opSeq = 2`): sidecar mint hangs
+    const op2 = cache.get(inbox, { notify: { endpoint: OPERATOR.endpoint, token: "dm1-before-clear" } });
+    await p2InFlight;
+    // Op 3 (`opSeq = 3`): clearNotify() advances committedNotifySeq = 3!
+    cache.clearNotify(inbox);
+
+    // Op 1 (`opSeq = 1`) fails with SpaceCredentialError, then Op 2 (`opSeq = 2`) succeeds:
+    resolveOp1(Response.json({ error: "NotAuthorized", message: "stale" }, { status: 403 }));
+    await assert.rejects(op1);
+    resolveSidecar2(await network.fetchEndpoint(savedSidecar2));
+    await op2;
+
+    // Next fresh/get mint MUST NOT carry "dm1-before-clear" because clearNotify (`opSeq = 3`) was never lowered!
+    seenPayloads.length = 0;
+    const afterClear = await cache.get(inbox);
+    assert.equal(afterClear.notify, undefined, "R7-M1: clearNotify remained monotonic; older sidecar did NOT restore cleared target");
+    assert.deepEqual(seenPayloads, [null]);
+  }
+});
