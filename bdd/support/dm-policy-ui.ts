@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { createDecipheriv } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { generateSpaceKey } from "@flock/protocol/atproto/space-key";
-import type { Frame, Locator, Page, Response as PlaywrightResponse } from "@playwright/test";
+import type { Frame, Locator, Page, Request as PlaywrightRequest, Response as PlaywrightResponse } from "@playwright/test";
 import Database from "better-sqlite3";
-import { listBoundedRecords, listBoundedRepos } from "@flock/protocol/atproto/record-pages";
+import { listBoundedRecords, listBoundedWriters } from "@flock/protocol/atproto/record-pages";
 import { mintSpaceCredentialWith, SpaceCredentialError, type SpaceCredential, type SpaceCredentialDeps } from "@flock/protocol/atproto/space-credential-core";
 import { AtprotoClient } from "@flock/protocol/atproto/xrpc";
 import { dmConversationUri, dmInboxUri, parseDmConversationUri, tidNow } from "@flock/protocol/keys";
@@ -158,6 +158,18 @@ export async function dmpOpenRequests(actor: Actor): Promise<void> {
 
 export type DmpRequestsRead = { rows: DmpRequestRow[]; scannedWriters: string[] };
 
+type RawWriterEntry = { $type?: string; repo?: string };
+
+function isInboxNotifySync(request: PlaywrightRequest, inbox: string): boolean {
+  if (!request.url().includes("/xrpc/com.atproto.space.authorizeSpaceSync")) return false;
+  try {
+    const body = JSON.parse(request.postData() ?? "{}") as { space?: string; notify?: unknown };
+    return body.space === inbox && body.notify !== undefined;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Reloads and waits for the new document's first scan to finish before anything is read. The DM provider renews the
  * inbox notification registration only after `refresh()` (conversations, request scan, inbox) and `renotifyPending()`
@@ -168,22 +180,22 @@ export async function dmpReloadThroughScan(actor: Actor): Promise<string[]> {
   const { page } = actor;
   const inbox = dmInboxUri(actor.did);
   let committed = false;
-  const listings: Array<Promise<string[]>> = [];
+  const listings: Array<Promise<RawWriterEntry[]>> = [];
   const markCommitted = (frame: Frame): void => {
     if (frame === page.mainFrame()) committed = true;
   };
   const collectListing = (response: PlaywrightResponse): void => {
     const url = new URL(response.url());
-    if (!committed || response.status() !== 200 || !url.pathname.endsWith("/xrpc/com.atproto.space.listRepos") || url.searchParams.get("space") !== inbox) return;
-    const listing = response.json().then((body: { repos?: Array<{ did: string }> }) => (body.repos ?? []).map((repo) => repo.did));
+    if (!committed || response.status() !== 200 || !url.pathname.endsWith("/xrpc/com.atproto.space.listWriters") || url.searchParams.get("space") !== inbox) return;
+    const listing = response.json().then((body: { repos?: RawWriterEntry[] }) => body.repos ?? []);
     listings.push(listing);
     void listing.catch(() => undefined);
   };
   page.on("framenavigated", markCommitted);
   page.on("response", collectListing);
   try {
-    const registered = page.waitForRequest(
-      (request) => committed && request.url().includes("/xrpc/com.atproto.space.registerNotify") && (request.postData() ?? "").includes(inbox),
+    const registered = page.waitForResponse(
+      (response) => committed && isInboxNotifySync(response.request(), inbox),
       { timeout: 60_000 },
     );
     await page.reload();
@@ -194,7 +206,15 @@ export async function dmpReloadThroughScan(actor: Actor): Promise<string[]> {
     page.off("response", collectListing);
   }
   assert.ok(listings.length > 0, "the browser listed the writers of its own inbox after the reload, so the scan ran");
-  return [...new Set((await Promise.all(listings)).flat())].sort();
+  const active = new Set<string>();
+  for (const entries of await Promise.all(listings)) {
+    for (const entry of entries) {
+      if (!entry.repo) continue;
+      if (entry.$type === "com.atproto.space.defs#repoRemoved") active.delete(entry.repo);
+      else if (entry.$type === "com.atproto.space.defs#repoWrite") active.add(entry.repo);
+    }
+  }
+  return [...active].sort();
 }
 
 /** Reloads through a finished scan, opens the requests folder, and reads which section each listed request sits in. */
@@ -277,12 +297,12 @@ export class DmpProbe {
     }
   }
 
-  /** The writers the inbox owner's PDS tracks (`com.atproto.space.listRepos`), readable only by the owner. */
+  /** The writers the inbox owner's PDS tracks (`com.atproto.space.listWriters`), readable only by the owner. */
   async trackedWriters(inboxOwner: Actor): Promise<DmpTrackedWriter[]> {
     const space = dmInboxUri(inboxOwner.did);
     const credential = await this.mint(space);
-    const scan = await listBoundedRepos(credential.client(inboxOwner.pdsUrl), { space, maxRepos: 1_000 });
-    return scan.repos.map((repo) => ({ did: repo.did, rev: repo.repoRev }));
+    const scan = await listBoundedWriters(credential.client(inboxOwner.pdsUrl), { space, maxRepos: 1_000 });
+    return scan.writers.map((writer) => ({ did: writer.repo, rev: writer.repoRev }));
   }
 
   /** A record collection as the half owner's PDS serves it to a credential holder for `space`. */
@@ -298,10 +318,10 @@ export type DmpMessageRecord = { rkey: string; text: string };
 
 /** The conversation keys of the halves an account owns, from its own PDS. */
 export async function dmpOwnConvKeys(world: AppWorld, owner: FixtureAccount): Promise<string[]> {
-  const listed = await world.pdsGet<{ spaces?: Array<{ uri: string }> }>(owner, "com.atproto.space.listSpaces", { spaceType: "new.flock.dm.conversation", limit: "100" });
+  const listed = await world.pdsGet<{ spaces?: Array<{ space: string }> }>(owner, "com.atproto.space.listSpaces", { spaceType: "new.flock.dm.conversation", limit: "100" });
   if (listed.status !== 200) throw new Error(`listSpaces for ${owner.handle}: ${JSON.stringify(listed.body)}`);
-  return (listed.body.spaces ?? []).flatMap((space) => {
-    const parsed = parseDmConversationUri(space.uri);
+  return (listed.body.spaces ?? []).flatMap((entry) => {
+    const parsed = parseDmConversationUri(entry.space);
     return parsed && parsed.ownerDid === owner.did ? [parsed.convKey] : [];
   }).sort();
 }
@@ -336,7 +356,9 @@ export async function dmpWriteHostileHalf(world: AppWorld, half: DmpHostileHalf)
   const space = dmConversationUri(half.owner.did, half.convKey);
   const steps: Array<[string, unknown]> = [
     ["com.atproto.space.createSpace", { spaceType: "new.flock.dm.conversation", skey: half.convKey, policy: memberspacePolicy() }],
-    ...half.readers.map((reader): [string, unknown] => ["com.atproto.memberspace.putMember", { space, did: reader.did, read: true, write: false }]),
+    ...(half.readers.length > 0
+      ? [["com.atproto.memberspace.putMembers", { space, members: half.readers.map((reader) => ({ did: reader.did, read: true, write: false })) }] as [string, unknown]]
+      : []),
     ["com.atproto.space.putRecord", { space, repo: half.owner.did, collection: "new.flock.dm.header", rkey: "self", record: { $type: "new.flock.dm.header", ...half.header, createdAt: new Date().toISOString() } }],
   ];
   for (const [nsid, input] of steps) {
@@ -363,10 +385,24 @@ export type DmpRepoOp = { rev: string; collection: string; rkey: string; cid: st
  * due re-notification has already been sent.
  */
 export async function dmpReloadThroughCycle(actor: Actor): Promise<void> {
-  const cycled = actor.page.waitForRequest((request) => request.url().includes("/xrpc/com.atproto.space.registerNotify"), { timeout: 60_000 });
-  await actor.page.reload();
-  await cycled;
-  await dmpWaitForDmReady(actor);
+  const { page } = actor;
+  const inbox = dmInboxUri(actor.did);
+  let committed = false;
+  const markCommitted = (frame: Frame): void => {
+    if (frame === page.mainFrame()) committed = true;
+  };
+  page.on("framenavigated", markCommitted);
+  try {
+    const cycled = page.waitForResponse(
+      (response) => committed && isInboxNotifySync(response.request(), inbox),
+      { timeout: 60_000 },
+    );
+    await page.reload();
+    await cycled;
+    await dmpWaitForDmReady(actor);
+  } finally {
+    page.off("framenavigated", markCommitted);
+  }
 }
 
 function renotifyKey(sender: FixtureAccount, convKey: string, recipient: FixtureAccount): string {
@@ -407,13 +443,13 @@ export async function dmpLatestCommitRev(world: AppWorld, sender: FixtureAccount
 
 export type DmpMintedCredential = { space: string; token: string; status: number; issuedAt: number; error?: string };
 
-const GET_SPACE_CREDENTIAL = "/xrpc/com.atproto.space.getSpaceCredential";
+const AUTHORIZE_SPACE_SYNC = "/xrpc/com.atproto.space.authorizeSpaceSync";
 
 /** Records every space credential this page obtains from a PDS, as the browser sees the exchange on the wire. */
 export function dmpWatchCredentials(page: Page): DmpMintedCredential[] {
   const minted: DmpMintedCredential[] = [];
   page.on("response", (response) => {
-    if (!response.url().includes(GET_SPACE_CREDENTIAL)) return;
+    if (!response.url().includes(AUTHORIZE_SPACE_SYNC)) return;
     const space = (response.request().postDataJSON() as { space?: string } | null)?.space ?? "";
     void (async () => {
       try {

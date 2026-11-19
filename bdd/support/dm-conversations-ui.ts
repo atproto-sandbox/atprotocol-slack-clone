@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { generateSpaceKey } from "@flock/protocol/atproto/space-key";
 import type { Locator } from "@playwright/test";
+import { listBoundedWriters } from "@flock/protocol/atproto/record-pages";
 import { mintSpaceCredentialWith, SpaceCredentialError } from "@flock/protocol/atproto/space-credential-core";
 import { AtprotoClient } from "@flock/protocol/atproto/xrpc";
 import { resolvePds } from "@flock/client/did-documents";
@@ -47,15 +48,15 @@ export async function dmcMembers(world: AppWorld, owner: FixtureAccount, space: 
 
 /** The conversation halves the account itself hosts. The PDS also lists foreign halves the account has written into. */
 export async function dmcHalfUris(world: AppWorld, as: FixtureAccount): Promise<string[]> {
-  const result = await world.pdsGet<{ spaces?: Array<{ uri: string }> }>(as, "com.atproto.space.listSpaces", { spaceType: "new.flock.dm.conversation", limit: "100" });
+  const result = await world.pdsGet<{ spaces?: Array<{ space: string }> }>(as, "com.atproto.space.listSpaces", { spaceType: "new.flock.dm.conversation", limit: "100" });
   assert.equal(result.status, 200, `listSpaces: ${JSON.stringify(result.body)}`);
-  return (result.body.spaces ?? []).map((space) => space.uri).filter((uri) => uri.startsWith(`at://${as.did}/`)).sort();
+  return (result.body.spaces ?? []).map((entry) => entry.space).filter((uri) => uri.startsWith(`at://${as.did}/`)).sort();
 }
 
 export async function dmcInboxUris(world: AppWorld, as: FixtureAccount): Promise<string[]> {
-  const result = await world.pdsGet<{ spaces?: Array<{ uri: string }> }>(as, "com.atproto.space.listSpaces", { spaceType: "new.flock.dm.inbox", limit: "100" });
+  const result = await world.pdsGet<{ spaces?: Array<{ space: string }> }>(as, "com.atproto.space.listSpaces", { spaceType: "new.flock.dm.inbox", limit: "100" });
   assert.equal(result.status, 200, `listSpaces: ${JSON.stringify(result.body)}`);
-  return (result.body.spaces ?? []).map((space) => space.uri);
+  return (result.body.spaces ?? []).map((entry) => entry.space);
 }
 
 export async function dmcHeaderOf(world: AppWorld, owner: FixtureAccount, convKey: string): Promise<DmcRecord<DmcHeader>> {
@@ -105,8 +106,8 @@ export async function dmcMint(world: AppWorld, as: FixtureAccount, space: string
 /** The accounts the space authority tracks as writers of `space` and each one's last recorded revision, listed with a credential minted by `member`. */
 export async function dmcWriterRevs(world: AppWorld, member: FixtureAccount, authority: FixtureAccount, space: string): Promise<Record<string, string>> {
   const credential = await mintSpaceCredentialWith(dmcDeps(world, member), space);
-  const page = await credential.client(authority.pdsUrl).query<{ repos: Array<{ did: string; repoRev: string }> }>("com.atproto.space.listRepos", { space });
-  return Object.fromEntries(page.repos.map((repo): [string, string] => [repo.did, repo.repoRev]).sort(([left], [right]) => left.localeCompare(right)));
+  const scan = await listBoundedWriters(credential.client(authority.pdsUrl), { space, maxRepos: 1_000 });
+  return Object.fromEntries(scan.writers.map((writer): [string, string] => [writer.repo, writer.repoRev]).sort(([left], [right]) => left.localeCompare(right)));
 }
 
 /** The accounts the space authority tracks as writers of `space`, listed with a credential minted by `member`. */

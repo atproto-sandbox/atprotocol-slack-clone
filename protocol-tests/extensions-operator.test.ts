@@ -166,7 +166,7 @@ test("extensions at the pinned PDS: enable, discovery, getChanges, membership li
         }
         cursor = answer.head;
       }
-      assert.equal(delivered, true, `real PDS notifyWrite delivered Tasks space change\n${server!.output()}`);
+      assert.equal(delivered, true, `real PDS notifySpaceUpdate delivered Tasks space change\n${server!.output()}`);
 
       const m1Cred = await mintSpaceCredential(memberOneBrowser.session, tasksSpace);
       const readProject = await m1Cred.client(await resolvePds(owner.did)).query<{ value: { name?: string } }>(

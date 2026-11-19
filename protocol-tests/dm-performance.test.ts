@@ -14,9 +14,9 @@ import { memberspacePolicy } from "@flock/protocol/atproto/space-policy";
 
 // M4 exit evidence (.ai/plans/dm-tasks/m4.md): a 100-participant conversation
 // with 20,000 total messages must let `readConversation` fetch the latest 100
-// within the budget below on the local two-PDS fixture. The budget was 5 s until 2026-10-31. Every credentialed read now carries a MAC
-// (an ephemeral ECDH on both sides, all in one process here), and four runs on the 5d88b414 pin measured 4.84, 4.96, 5.01 and
-// 5.14 s, so the owner raised it to 8 s explicitly. It still fails on a slowdown well beyond that.
+// within the budget below on the local two-PDS fixture. The budget was 5 s until 2026-10-31. Every credentialed read now carries an
+// RFC 9421 HMAC signature (an ephemeral ML-KEM / X25519 key encapsulation on both sides, all in one process here), so the budget is 8 s.
+// It still fails on a slowdown well beyond that.
 
 type TestAgent = {
   com: { atproto: { server: {
@@ -104,8 +104,12 @@ test("DM read budget: 100 participants, 20,000 total messages, latest-100 read i
         spaceType: "new.flock.dm.conversation", skey: convKey,
         policy: memberspacePolicy(),
       });
-      await mapLimited(participants.filter((other) => other.did !== owner.did), 16, (other) =>
-        client.procedure("com.atproto.memberspace.putMember", { space: half, did: other.did, read: true, write: false }));
+      await client.procedure("com.atproto.memberspace.putMembers", {
+        space: half,
+        members: participants
+          .filter((other) => other.did !== owner.did)
+          .map((other) => ({ did: other.did, read: true, write: false })),
+      });
       await client.procedure("com.atproto.space.putRecord", {
         space: half, repo: owner.did, collection: "new.flock.dm.header", rkey: "self",
         record: { $type: "new.flock.dm.header", convKey, participants: allDids, createdAt },

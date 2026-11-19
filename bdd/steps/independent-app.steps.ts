@@ -406,7 +406,7 @@ Given("a workspace member has not written to a channel", { timeout: 900_000 }, a
   this.scratch.set("generalSpace", channelUri(owner.did, general.skey));
 });
 
-When("an app reads listRepos", async function (this: AppWorld) {
+When("an app reads listWriters", async function (this: AppWorld) {
   const owner = actorNamed(this, "owner");
   const space = this.scratch.get("generalSpace") as string;
   this.scratch.set("writers", await listWriters(this, owner, space));
@@ -417,7 +417,7 @@ Then("it does not treat absence from that writer set as absence from membership"
   const member = viewerNamed(this, "member");
   const space = this.scratch.get("generalSpace") as string;
   const writers = this.scratch.get("writers") as string[];
-  assert.deepEqual(writers, [owner.did], "listRepos names only the account that has written");
+  assert.deepEqual(writers, [owner.did], "listWriters names only the account that has written");
 
   const members = await this.pdsGet<{ members?: Array<{ did: string; read: boolean; write: boolean }> }>(owner, "com.atproto.memberspace.listMembers", { space, limit: "1000" });
   const onList = (members.body.members ?? []).find((entry) => entry.did === member.did);
@@ -585,8 +585,8 @@ async function runProtocolReconcile(world: AppWorld): Promise<ChildRun> {
 const PAUSED_MESSAGE = "Workspace admin mutations are paused.";
 
 async function pdsSnapshot(world: AppWorld, owner: Actor): Promise<unknown> {
-  const channels = await world.pdsGet<{ spaces: Array<{ uri: string }> }>(owner, "com.atproto.space.listSpaces", { spaceType: "new.flock.channel", limit: "100" });
-  const spaces = [world.workspaceUri, inboxUri(owner.did, workspaceSkeyOf(world)), ...channels.body.spaces.map((space) => space.uri)].sort();
+  const channels = await world.pdsGet<{ spaces: Array<{ space: string }> }>(owner, "com.atproto.space.listSpaces", { spaceType: "new.flock.channel", limit: "100" });
+  const spaces = [world.workspaceUri, inboxUri(owner.did, workspaceSkeyOf(world)), ...channels.body.spaces.map((entry) => entry.space)].sort();
   const memberLists: Record<string, string[]> = {};
   for (const space of spaces) {
     const listed = await world.pdsGet<{ members?: Array<{ did: string; read: boolean; write: boolean }> }>(owner, "com.atproto.memberspace.listMembers", { space, limit: "1000" });

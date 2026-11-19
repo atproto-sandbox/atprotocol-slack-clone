@@ -47,32 +47,43 @@ test("platform capabilities at the pinned PDS (K3, K7)", async (t) => {
       assert.deepEqual(Object.entries(results).filter(([, result]) => !result.ok).map(([operation]) => operation), []);
     });
 
-    await t.test("an app-password session can write and get service tokens but cannot read a space (K7)", async (st) => {
+    await t.test("an app-password session can get service tokens, while account-authenticated space writes and delegation tokens are refused with Bad token scope (K7, #5923)", async (st) => {
       // given a bot account signed in with an app password and invited to the workspace
       const bot = await appPasswordActor(pds, "k7apppw");
       await workspace.invite(bot.did);
-      const [{ mintSpaceCredential }, { sessionClient }, { tidNow }] = await Promise.all([
-        import("@flock/operator/atproto/space-credential"), import("@flock/operator/atproto/client"), import("@flock/protocol/keys"),
+      const [{ mintSpaceCredential }, { sessionClient }, { XrpcError }, { tidNow }] = await Promise.all([
+        import("@flock/operator/atproto/space-credential"),
+        import("@flock/operator/atproto/client"),
+        import("@flock/protocol/atproto/xrpc"),
+        import("@flock/protocol/keys"),
       ]);
       const session = bearerSession(bot) as never;
 
-      // when it writes into its own repo, asks for a service token, and asks for a space credential
+      // when it asks for a service token, writes into its own repo, asks for a delegation token, and asks for a space credential
       const results: Record<string, Outcome> = {
-        "writes a message into its own repo": await outcome(() => sessionClient(session).procedure("com.atproto.space.createRecord", {
-          space: workspace.general, repo: bot.did, collection: "new.flock.channel.message", rkey: tidNow(),
-          record: { $type: "new.flock.channel.message", text: "k7 app password", createdAt: new Date().toISOString() },
-        })),
         "gets a service token for an operator method": await outcome(async () => {
           const { token } = await sessionClient(session).query<{ token: string }>("com.atproto.server.getServiceAuth", { aud: pds.serviceRef, lxm: "new.flock.operator.getChanges" });
           await verifyServiceToken(token, pds.serviceRef, "new.flock.operator.getChanges");
         }),
       };
       for (const [operation, result] of Object.entries(results)) st.diagnostic(`${operation}: ${result.ok ? "ok" : result.error}`);
-      const refusal = await mintSpaceCredential(session, workspace.general).then(() => null, (error: unknown) => error);
 
-      // then the write and the token succeed, and its own host refuses the delegation token (pinned getDelegationToken.ts requires ACCESS_FULL)
+      const writeRefusal = await sessionClient(session).procedure("com.atproto.space.createRecord", {
+        space: workspace.general, repo: bot.did, collection: "new.flock.channel.message", rkey: tidNow(),
+        record: { $type: "new.flock.channel.message", text: "k7 app password", createdAt: new Date().toISOString() },
+      }).then(() => null, (error: unknown) => error);
+      const delegationRefusal = await sessionClient(session).query("com.atproto.space.getDelegationToken", {
+        space: workspace.general,
+      }).then(() => null, (error: unknown) => error);
+      const credentialRefusal = await mintSpaceCredential(session, workspace.general).then(() => null, (error: unknown) => error);
+
+      // then getServiceAuth succeeds, while createRecord and getDelegationToken (and mintSpaceCredential) are refused with InvalidToken: Bad token scope (#5923)
       assert.deepEqual(Object.entries(results).filter(([, result]) => !result.ok).map(([operation]) => operation), []);
-      assert.match(String(refusal), /Bad token scope/);
+      assert.ok(writeRefusal instanceof XrpcError && writeRefusal.code === "InvalidToken", `expected InvalidToken on createRecord, got: ${String(writeRefusal)}`);
+      assert.match(writeRefusal.message, /Bad token scope/);
+      assert.ok(delegationRefusal instanceof XrpcError && delegationRefusal.code === "InvalidToken", `expected InvalidToken on getDelegationToken, got: ${String(delegationRefusal)}`);
+      assert.match(delegationRefusal.message, /Bad token scope/);
+      assert.match(String(credentialRefusal), /Bad token scope/);
     });
 
     await t.test("a bot with its own OAuth session reads, writes, calls the operator and loses access on removal (K7)", async (st) => {
@@ -189,7 +200,7 @@ async function memberGrantOperations(pds: PdsNetwork, workspace: Workspace, hold
   });
   results["the admin calls new.flock.operator.getChanges: head at once, and a space it may not follow denied at once"] = await outcome(async () => {
     const head = await callOperator("new.flock.operator.getChanges", {}, { follow: [] }) as { head?: string };
-    assert.match(head.head ?? "", /^[0-9]+$/);
+    assert.match(head.head ?? "", /^[a-z][0-9a-z]{2}\.(0|[1-9a-z][0-9a-z]*)\.(0|[1-9a-z][0-9a-z]*)$/);
     const elsewhere = `at://${member.did}/space/new.flock.channel/not-${operationId}`;
     const denied = await callOperator("new.flock.operator.getChanges", {}, { follow: [{ space: elsewhere, after: head.head }] }) as { denied?: string[] };
     assert.deepEqual(denied.denied, [elsewhere]);
@@ -232,7 +243,7 @@ async function botOperations(pds: PdsNetwork, workspace: Workspace, bot: Network
   ]);
   const results: Record<string, Outcome> = {};
   let messageUri = "";
-  results["mints a channel credential (getDelegationToken, getSpaceCredential)"] = await outcome(() => mintSpaceCredential(session, workspace.general));
+  results["mints a channel credential (getDelegationToken, authorizeSpaceSync)"] = await outcome(() => mintSpaceCredential(session, workspace.general));
   results["writes a message into its own repo in the channel"] = await outcome(async () => {
     const record = { $type: "new.flock.channel.message", text: "k7 bot", createdAt: new Date().toISOString() };
     const created = await sessionClient(session).procedure<unknown, { uri: string }>("com.atproto.space.createRecord", { space: workspace.general, repo: bot.did, collection: "new.flock.channel.message", rkey: keys.tidNow(), record });
@@ -252,8 +263,8 @@ async function botOperations(pds: PdsNetwork, workspace: Workspace, bot: Network
     const authority = credential.client(await resolvePds(keys.parseWorkspaceUri(workspace.uri)!.authorityDid));
     // The authority lists a writer once the writer's host has delivered the write notice, which is asynchronous.
     for (let attempt = 0; ; attempt += 1) {
-      const listed = await authority.query<{ repos: Array<{ did: string }> }>("com.atproto.space.listRepos", { space: workspace.general, limit: 100 });
-      if (listed.repos.some((repo) => repo.did === bot.did)) return;
+      const listed = await authority.query<{ repos: Array<{ $type?: string; repo: string }> }>("com.atproto.space.listWriters", { space: workspace.general, limit: 100 });
+      if (listed.repos.some((entry) => entry.$type === "com.atproto.space.defs#repoWrite" && entry.repo === bot.did)) return;
       assert.ok(attempt < 40, "the authority lists the bot as a writer");
       await new Promise((resolve) => setTimeout(resolve, 250));
     }

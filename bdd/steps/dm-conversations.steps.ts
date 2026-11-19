@@ -73,7 +73,7 @@ Then("only its owner can read it", async function (this: AppWorld) {
   assert.equal(space.body.policy.publicRead, false, "reads are limited to the member list");
 
   const writer = await this.actor("writer", 1);
-  const allowed = await this.pdsPost(user, "com.atproto.memberspace.putMember", { space: inbox, did: writer.did, read: false, write: true });
+  const allowed = await this.pdsPost(user, "com.atproto.memberspace.putMembers", { space: inbox, members: [{ did: writer.did, read: false, write: true }] });
   assert.equal(allowed.status, 200, JSON.stringify(allowed.body));
   assert.deepEqual(await dmcMembers(this, user, inbox), [{ did: writer.did, read: false, write: true }], "an allowed writer is on the member list without read access");
 
@@ -453,7 +453,7 @@ Then("another participant cannot edit it because the record lives in its author'
   await assert.rejects(dmcClientFor(this, reader).edit(uri, "forged edit"), /Can only modify your own DM messages/);
   await assert.rejects(dmcClientFor(this, reader).delete(uri), /Can only modify your own DM messages/);
 
-  const granted = await this.pdsPost(author, "com.atproto.memberspace.putMember", { space: half, did: reader.did, read: true, write: true });
+  const granted = await this.pdsPost(author, "com.atproto.memberspace.putMembers", { space: half, members: [{ did: reader.did, read: true, write: true }] });
   assert.equal(granted.status, 200, "the reader is even given write access to the author's half, so only the repo boundary can stop the edit");
   const forged = { space: half, repo: author.did, collection: "new.flock.dm.message", rkey: message!.rkey };
   const edit = await this.pdsPost(reader, "com.atproto.space.putRecord", {
@@ -688,8 +688,14 @@ Then("the recipient reads the request from the sender's repo", async function (t
     return url.origin === new URL(host.pdsUrl).origin && url.pathname === `/xrpc/com.atproto.space.${method}` && url.searchParams.get("space") === dmcInboxOf(recipient);
   });
 
-  const writerListing = await dmcUntil(async () => reads(recipient, "listRepos")[0], "the recipient's browser to list the writers of its inbox on its own PDS");
-  assert.deepEqual((JSON.parse(writerListing.body!) as { repos: Array<{ did: string }> }).repos.map((repo) => repo.did), [sender.did], "its own PDS tracks the sender as a writer");
+  const writerListing = await dmcUntil(async () => reads(recipient, "listWriters")[0], "the recipient's browser to list the writers of its inbox on its own PDS");
+  assert.deepEqual(
+    (JSON.parse(writerListing.body!) as { repos: Array<{ $type: string; repo: string }> }).repos
+      .filter((entry) => entry.$type === "com.atproto.space.defs#repoWrite")
+      .map((entry) => entry.repo),
+    [sender.did],
+    "its own PDS tracks the sender as a writer",
+  );
 
   const senderRead = await dmcUntil(async () => reads(sender, "listRecords").find((read) => new URL(read.url).searchParams.get("repo") === sender.did), "the recipient's browser to read the sender's repo on the sender's PDS");
   assert.equal(senderRead.status, 200);
@@ -720,11 +726,7 @@ Then("no app server is asked for the request", async function (this: AppWorld) {
   const stored = dmcAppDatabaseText(this);
   for (const needle of ["new.flock.dm.request", '"participants"']) assert.ok(!stored.includes(needle), `the app's database holds no request: it contains no ${needle}`);
   const mentions = dmcAppDatabaseMentions(this, convKey);
-  assert.deepEqual(
-    [...new Set(mentions.map(({ table, column }) => `${table}.${column}`))].filter((place) => place !== "space_notification.space_uri"), [],
-    "the only place the app's database mentions the conversation key is the notified space URI of a space write notification",
-  );
-  for (const mention of mentions) assert.equal(mention.value, dmcHalfOf(sender, convKey), "that mention is the sender's own half URI as notified, not a request record");
+  assert.deepEqual(mentions, [], "the app's database holds zero DM rows across all tables");
 });
 
 Given("a recipient found a request", async function (this: AppWorld) {

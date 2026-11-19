@@ -1,6 +1,6 @@
 # R12 Protocol Drift Plan & Progress (`bluesky-social/atproto#5187` @ `674761056`)
 
-**Status:** Finalized after Round 2 Codex (`gpt-6.1-sol`) + Claude Opus (`claude-opus-5-5-high`) plan reviews — executing `R12a`
+**Status:** Waves `R12a`–`R12e` + Gates 1–6 complete and 100% green — running Round 1 Codex + Claude adversarial implementation reviews
 **Branch:** `chore/protocol-drift-6747610` in worktree `../atproto-slack-clone-r12`
 **Baseline:** `origin/main` at `f4a4c16` (PRs #7 `feat/r10-interactions` -> `f7b7bdc` and #8 `feat/r11-tasks` -> `f4a4c16` merged cleanly; `908/908` unit/component tests green before drift)
 **Target Upstream Pin:** `bluesky-social/atproto#5187` HEAD `6747610566eee1b6d743617bd8eb1136adccb362` (88 commits past `5d88b414`, detached worktree `../atproto-spaces-r12` — unbuilt on creation, built and patched in Wave `R12a`; `../atproto-spaces-phase3` stays untouched at `5d88b414`)
@@ -293,7 +293,20 @@ Every gate runs **after** the final edit against built `../atproto-spaces-r12` (
 - [x] **Plan Review Round 2 (Complete):** Codex (`gpt-6.1-sol`) + Claude Opus (`claude-opus-5-5-high`) reviews archived under `.ai/reviews/{codex,opus}-r12-plan-round-2.md`; all N1–N9 / Round 2 High/Medium/Low items resolved cleanly in finalized plan (`D12.1`–`D12.12`).
 - [x] **Wave `R12a` (Complete):** `strict-credential-expiry.patch` rebased onto `6747610566` (SHA-256 `3f413baa779473b5466e8e6ca9edc92335f5056edbd13aa3d4bfc57a509b32dd`) and applied in `../atproto-spaces-r12`; installed (`pnpm@12.16.1`) & built `tooling`, `dev-env`, `pds`, `bsky`, `ozone`, `space`, `star`, `lex-cli` cleanly (`oauth-provider-ui` Lingui prebuild under `/opt/homebrew/bin/node` `v25.4.0`, TypeScript/native ABI 127 build under Node `v22.17.0`); `@atproto/space` tests **9/9 files, 173/173 tests passing**; upgraded Flock workspace packages to `0.0.0-spaces-alpha-20261117141222` (+ direct `@atproto/star`, `pnpm install --frozen-lockfile` verified with zero stale `20261029171913` entries); synced all 4 upstream lexicon directories + Flock `"title"` + `getDmNotifyTarget.json` + permissions + regenerated API types cleanly via `ATPROTO_PIN_CHECKOUT=../atproto-spaces-r12 pnpm codegen:lex`.
 - [x] **Wave `R12b` (Complete):** Cherry-picked `r12b-protocol` (`1bf5b228` -> `62d8958`) and `r12b-fakenetwork` (`0950cfcc` -> `679d6ef`) onto `chore/protocol-drift-6747610`; Wave `R12b` exit gate **100% green** (`187/187` combined tests across `packages/protocol/src/**/*.test.ts` and `packages/testing/src/**/*.test.ts`, `tsc -p packages/protocol --noEmit` 0 errors and `@types/node`-free, `eslint` clean).
-- [ ] **Wave `R12c`:** `apps/operator` & `@flock/reader`
-- [ ] **Wave `R12d`:** `@flock/client` & `apps/web`
-- [ ] **Wave `R12e`:** `protocol-tests` & `bdd`
-- [ ] **Wave `R12f`:** Docs, R12 regression tests, 6-Gate Acceptance & Adversarial Code Reviews
+- [x] **Wave `R12c` (Complete):** `apps/operator` & `@flock/reader` aligned (`83bc8bd`, `40f1f31`, plus `operatorNotifyEndpoint` loopback `localhost` mapping for `@atproto/pds` `safeClient` `allowIpHost: false`); Wave `R12c` exit gate **100% green** (`263/263` combined tests: `237/237` operator + `26/26` reader, `0` ESLint/TS errors).
+- [x] **Wave `R12d` (Complete):** `@flock/client` & `apps/web` aligned (`40f1f31` + `session.ts` NSID JSDoc fix); Wave `R12d` exit gate **100% green** (`445/445` tests across `client` `368`, `web` `57`, `echo-bot` + `webhooks` `20`, `@types/node`-free `tsc -p packages/client --noEmit`, Next.js `pnpm build` green).
+- [x] **Wave `R12e` (Complete):** `protocol-tests` (`r12-protocol-tests`) & `features`/`bdd` (`r12-bdd`) aligned and verified against real pinned `@atproto/pds` (`6747610566`).
+- [ ] **Wave `R12f` (Gates 1–6 Green; Running Adversarial Reviews):**
+  - **Docs & R12 Regression Coverage:** Updated all 8 docs (`SPEC.md`, `ARCHITECTURE.md`, `CODE-MAP.md`, `docs/operations.md`, `docs/prd/atproto-slack-clone.md`, `docs/prd/atproto-slack-implementation-plan.md`, `docs/protocol/operator-contract.md`, `docs/protocol/atproto-spaces-pin.md`) and added full R12 security/regression suites across `protocol`, `testing`, `reader`, `operator`, `client`, `web`, `protocol-tests`, and `bdd`.
+  - **Gate 1 — Static & Unit/Component (`Node v22.17.0` ABI 127):** `ATPROTO_PIN_CHECKOUT=../atproto-spaces-r12 pnpm codegen:lex && pnpm typecheck && pnpm lint && pnpm test` -> **PASS (`917/917` tests, `0` failed, `0` skipped, `28,554.47 ms`)**.
+  - **Gate 2 — Protocol Acceptance:** `ATPROTO_PINNED_CHECKOUT=../atproto-spaces-r12 pnpm test:acceptance` -> **PASS (`13/13` suites, `44/44` tests, `153.71 s`)**.
+  - **Gate 3 — Browser Playwright:** `ATPROTO_PINNED_CHECKOUT=../atproto-spaces-r12 pnpm test:browser` -> **PASS (`8/8` specs, `10/10` tests, `179.79 s`)**.
+  - **Gate 4 — Upstream `@atproto/space` + Real PDS Conformance:**
+    - `pnpm --config.runtimeOnFail=ignore --pm-on-fail=ignore -C ../atproto-spaces-r12 --filter @atproto/space test` -> **PASS (`9/9` files, `173/173` tests, `655 ms`)**.
+    - `NODE_OPTIONS=--experimental-vm-modules pnpm -C ../atproto-spaces-r12 --filter @atproto/pds exec jest --runInBand tests/space/{slack-*,platform-spike-k*}` -> **PASS (`5/5` suites, `12/12` tests, `128.77 s`; temporary copies removed cleanly)**.
+  - **Gate 5 — BDD:** `ATPROTO_PINNED_CHECKOUT=../atproto-spaces-r12 pnpm test:bdd` -> **PASS (`74/74` scenarios, `537/537` steps, `2/2` hooks, `18m 19.41s`)**.
+  - **Gate 6 — Performance & Sync Budgets:**
+    - `pnpm test:sync-budget` -> **PASS (`177 s`; warm reopen = `1` `listWriters` call across `20`/`100`/`200` writers)**.
+    - `pnpm test:sync-budget:browser` -> **PASS (`288 s`; warm reopen = `2` requests across `20`/`100`/`200` writers)**.
+    - `pnpm test:performance` -> **PASS (`3/3` suites: `dm-performance` `77.24 s`, `performance-envelope` `1,752.49 s`, `tasks-performance` `23.27 s`; total `30m 54.25s`)**.
+  - **Adversarial Code Reviews:** Pending Round 1 Codex + Claude reviews.

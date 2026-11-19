@@ -1,9 +1,23 @@
 import { createHash, createHmac, hkdfSync, timingSafeEqual } from "node:crypto";
-import { getConfig } from "@flock/deployment/config";
+import { getConfig, isLoopback } from "@flock/deployment/config";
 import { isDid, parseDmSpaceUri, parseSpaceUri } from "@flock/protocol/keys";
 import { getOperatorConfig } from "../config";
 import { getRawDb } from "../lib/db";
 import { WebhookAuthError } from "./errors";
+
+/**
+ * The webhook endpoint URL advertised to an ATProto PDS (`authorizeSpaceSync` `notify.endpoint` and `getDmNotifyTarget`).
+ * Outside loopback development this is `operatorUrl.origin` verbatim (`https://...`). On loopback development, OAuth
+ * redirect URIs require an IP literal (`127.0.0.1` or `[::1]`, per RFC 8252 and `serviceUrl`), whereas `@atproto/pds`
+ * routes outbound webhook calls through `safeFetchWrap({ allowIpHost: false })`, which rejects IP literals and requires
+ * `localhost` (matching `did:web:localhost%3A<port>`).
+ */
+export function operatorNotifyEndpoint(operatorUrl: URL = getConfig().operatorUrl): string {
+  if (!isLoopback(operatorUrl.hostname)) return operatorUrl.origin;
+  const endpoint = new URL(operatorUrl.origin);
+  endpoint.hostname = "localhost";
+  return endpoint.origin;
+}
 
 const DM_NOTIFY_KEY_INFO = "flock-dm-notify-v1";
 const DM_TOKEN_VERSION = "dm1";

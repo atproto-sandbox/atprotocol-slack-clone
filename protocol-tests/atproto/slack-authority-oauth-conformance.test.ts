@@ -43,7 +43,7 @@ describe('atproto Slack authority OAuth protocol conformance', () => {
             main: {
               type: 'space',
               key: 'any',
-              name: 'Slack workspace',
+              title: 'Slack workspace',
               collections: ['new.flock.admin'],
             },
           },
@@ -52,7 +52,7 @@ describe('atproto Slack authority OAuth protocol conformance', () => {
       )
       const spaces = new SpaceClient(network)
       const authority = await spaces.createActor('alice', network.pds)
-      const member = await spaces.createActor('bob', network.extraPdses[0], 'test2')
+      const member = await spaces.createActor('bob', network.extraPdses[0])
       const space = await spaces.createSpace(authority, {
         spaceType: 'new.flock.workspace' as NsidString,
         skey: 'workspace',
@@ -162,8 +162,8 @@ describe('atproto Slack authority OAuth protocol conformance', () => {
 
       await callAsOAuth(
         token.access_token,
-        'com.atproto.memberspace.putMember',
-        { space, did: member.did, read: true, write: true },
+        'com.atproto.memberspace.putMembers',
+        { space, members: [{ did: member.did, read: true, write: true }] },
       )
 
       const writeNsid = 'com.atproto.space.createRecord'
@@ -202,11 +202,9 @@ describe('atproto Slack authority OAuth protocol conformance', () => {
         await generateCode(),
       )
       await expect(
-        callAsOAuth(readOnlyToken.access_token, 'com.atproto.memberspace.putMember', {
+        callAsOAuth(readOnlyToken.access_token, 'com.atproto.memberspace.putMembers', {
           space,
-          did: member.did,
-          read: false,
-          write: true,
+          members: [{ did: member.did, read: false, write: true }],
         }),
       ).rejects.toThrow(/space:/)
     } finally {

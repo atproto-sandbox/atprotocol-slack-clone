@@ -13,7 +13,7 @@ import { BROWSER_CLIENT_METADATA_PATH } from "@flock/web/browser/client-metadata
 // page, from the click to the channel's message list leaving `aria-busy`; requests are counted from the DevTools protocol,
 // the browser's CORS preflights apart.
 //
-// Run: corepack pnpm build && ATPROTO_PINNED_CHECKOUT=../atproto-spaces-phase3 node --import tsx protocol-tests/browser/sync-budget.ts [runs]
+// Run: corepack pnpm build && ATPROTO_PINNED_CHECKOUT=../atproto-spaces-r12 node --import tsx protocol-tests/browser/sync-budget.ts [runs]
 
 const RUNS = Number(process.argv[2] ?? 10);
 const WORKSPACE_NAME = "Budget";

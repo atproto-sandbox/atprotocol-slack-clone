@@ -2,10 +2,27 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { TestNetworkNoAppView } from '@atproto/dev-env'
-import { createSpaceToken, parseSpaceToken, SPACE_CREDENTIAL_MAX_AGE_SEC } from '@atproto/space'
+import { createSpaceCredential, parseSpaceToken, SPACE_CREDENTIAL_MAX_AGE_SEC } from '@atproto/space'
 import type { DidString, NsidString } from '@atproto/syntax'
 import { com } from '../../src/lexicons/index.js'
 import { SpaceClient, SpaceCredential } from '../_space.js'
+
+const { repoWrite, repoRemoved } = com.atproto.space.defs
+
+const awaitNotify = async <T>(
+  read: () => Promise<T>,
+  predicate: (value: T) => boolean,
+  opts: { attempts?: number; delayMs?: number } = {},
+): Promise<T> => {
+  const attempts = opts.attempts ?? 40
+  const delayMs = opts.delayMs ?? 50
+  let latest = await read()
+  for (let i = 1; i < attempts && !predicate(latest); i++) {
+    await new Promise((resolve) => setTimeout(resolve, delayMs))
+    latest = await read()
+  }
+  return latest
+}
 
 const previousTmpdir = process.env.TMPDIR
 const fixtureTmpdir = mkdtempSync(join(tmpdir(), 'slack-inbox-conformance-'))
@@ -35,12 +52,10 @@ describe('atproto Slack inbox protocol conformance', () => {
       const requester = await spaces.createActor(
         'carol',
         network.extraPdses[0],
-        'test2',
       )
       const ordinary = await spaces.createActor(
         'dan',
         network.extraPdses[0],
-        'test2',
       )
 
       const workspace = await spaces.createSpace(authority, {
@@ -73,10 +88,10 @@ describe('atproto Slack inbox protocol conformance', () => {
       // own PDS after the acceptance record is written.
       const discovered = await requester.client.call(
         com.atproto.space.listSpaces,
-        { spaceType: WORKSPACE_TYPE, did: authority.did },
+        { spaceType: WORKSPACE_TYPE, spaceDid: authority.did },
         { headers: requester.headers },
       )
-      expect(discovered.spaces.map((space) => space.uri)).toContain(workspace)
+      expect(discovered.spaces.map((entry) => entry.space)).toContain(workspace)
       const workspaceCredential = await spaces.credentialFor(
         requester,
         workspace,
@@ -159,11 +174,18 @@ describe('atproto Slack inbox protocol conformance', () => {
 
       const adminCredential = await spaces.credentialFor(admin, inbox)
       const adminReader = adminCredential.clientFor(authority.pds)
-      const writers = await spaces.awaitNotify(
-        () => adminReader.call(com.atproto.space.listRepos, { space: inbox }),
-        (result) => result.repos.some((repo) => repo.did === requester.did),
+      const writers = await awaitNotify(
+        () => adminReader.call(com.atproto.space.listWriters, { space: inbox }),
+        (result) =>
+          result.repos.some(
+            (entry) => repoWrite.$isTypeOf(entry) && entry.repo === requester.did,
+          ),
       )
-      expect(writers.repos.map((repo) => repo.did)).toContain(requester.did)
+      expect(
+        writers.repos
+          .filter((entry) => repoWrite.$isTypeOf(entry))
+          .map((entry) => entry.repo),
+      ).toContain(requester.did)
 
       const adminRead = await adminCredential
         .clientFor(requester.pds)
@@ -226,11 +248,11 @@ describe('atproto Slack inbox protocol conformance', () => {
       })
       await expect(
         admin.client.call(
-          com.atproto.memberspace.putMember,
-          { space: inbox, did: ordinary.did, read: true, write: true },
+          com.atproto.memberspace.putMembers,
+          { space: inbox, members: [{ did: ordinary.did, read: true, write: true }] },
           { headers: admin.headers },
         ),
-      ).rejects.toMatchObject({ error: 'NotSpaceOwner' })
+      ).rejects.toMatchObject({ error: 'NotAuthorized' })
 
     } finally {
       await network.close()
@@ -243,7 +265,7 @@ describe('atproto Slack inbox protocol conformance', () => {
       const spaces = new SpaceClient(network)
       const authority = await spaces.createActor('alice', network.pds)
       const admin = await spaces.createActor('bob', network.pds)
-      const requester = await spaces.createActor('carol', network.extraPdses[0], 'test2')
+      const requester = await spaces.createActor('carol', network.extraPdses[0])
       const inbox = await spaces.createSpace(authority, {
         spaceType: INBOX_TYPE,
         skey: 'inbox',
@@ -274,11 +296,15 @@ describe('atproto Slack inbox protocol conformance', () => {
 
       const credential = await spaces.credentialFor(admin, inbox)
       const adminReader = credential.clientFor(authority.pds)
-      const repos = await adminReader.call(com.atproto.space.listRepos, { space: inbox })
-      expect(repos.repos.map((repo) => repo.did)).not.toContain(requester.did)
+      const repos = await adminReader.call(com.atproto.space.listWriters, { space: inbox })
+      expect(
+        repos.repos
+          .filter((entry) => repoWrite.$isTypeOf(entry))
+          .map((entry) => entry.repo),
+      ).not.toContain(requester.did)
 
       // The authority owner can enumerate write members. The admin's valid
-      // read credential can fetch the request directly even though listRepos
+      // read credential can fetch the request directly even though listWriters
       // does not list its writer.
       const members = await authority.client.call(
         com.atproto.memberspace.listMembers,
@@ -307,7 +333,7 @@ describe('atproto Slack inbox protocol conformance', () => {
     try {
       const spaces = new SpaceClient(network)
       const authority = await spaces.createActor('alice', network.pds)
-      const member = await spaces.createActor('bob', network.extraPdses[0], 'test2')
+      const member = await spaces.createActor('bob', network.extraPdses[0])
       const inbox = await spaces.createSpace(authority, {
         spaceType: INBOX_TYPE,
         skey: 'inbox',
@@ -330,7 +356,23 @@ describe('atproto Slack inbox protocol conformance', () => {
       expect(payload.exp - payload.iat).toBe(600)
       expect(SPACE_CREDENTIAL_MAX_AGE_SEC).toBe(3600)
 
+      await awaitNotify(
+        () => issued.clientFor(authority.pds).call(com.atproto.space.listWriters, { space: inbox }),
+        (result) =>
+          result.repos.some(
+            (entry) => repoWrite.$isTypeOf(entry) && entry.repo === member.did,
+          ),
+      )
+
       await spaces.removeMember(authority, inbox, member)
+      const afterRemoveWriters = await issued
+        .clientFor(authority.pds)
+        .call(com.atproto.space.listWriters, { space: inbox })
+      expect(
+        afterRemoveWriters.repos.some(
+          (entry) => repoRemoved.$isTypeOf(entry) && entry.repo === member.did,
+        ),
+      ).toBe(true)
       await expect(spaces.credentialFor(member, inbox)).rejects.toMatchObject({
         error: 'SpaceNotFound',
       })
@@ -342,21 +384,21 @@ describe('atproto Slack inbox protocol conformance', () => {
       ).resolves.toBeDefined()
 
       const shortKey = issued.key
-      const shortCredential = await createSpaceToken(
-        'credential',
-        {
-          iss: authority.did,
-          sub: inbox,
-          keyId: shortKey.did() as DidString,
-          expiresInSec: 10,
-        },
-        await authority.pds.ctx.actorStore.keypair(authority.did),
-      )
-      await expect(createSpaceToken(
-        'credential',
-        { iss: authority.did, sub: inbox, keyId: shortKey.did() as DidString, expiresInSec: SPACE_CREDENTIAL_MAX_AGE_SEC + 1 },
-        await authority.pds.ctx.actorStore.keypair(authority.did),
-      )).rejects.toThrow(/lifetime/)
+      const authorityKeypair = await authority.pds.ctx.actorStore.keypair(authority.did)
+      const shortCredential = await createSpaceCredential({
+        iss: authority.did,
+        sub: inbox,
+        keyId: shortKey.did() as DidString,
+        keypair: authorityKeypair,
+        expiresInSec: 10,
+      })
+      await expect(createSpaceCredential({
+        iss: authority.did,
+        sub: inbox,
+        keyId: shortKey.did() as DidString,
+        keypair: authorityKeypair,
+        expiresInSec: SPACE_CREDENTIAL_MAX_AGE_SEC + 1,
+      })).rejects.toThrow(/lifetime/)
       const shortPayload = parseSpaceToken('credential', shortCredential).payload
       const shortLived = new SpaceCredential(shortCredential, shortKey, spaces.idResolver)
       for (const [pds, repo, collection] of [

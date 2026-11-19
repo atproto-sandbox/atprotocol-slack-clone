@@ -22,7 +22,7 @@ import {
   verifyDmNotifyCredentialAndProof,
   type DmCredentialProof,
 } from "./security";
-import { authenticateSpaceWebhook, deriveDmNotifyToken } from "./space-notification";
+import { authenticateSpaceWebhook, deriveDmNotifyToken, operatorNotifyEndpoint } from "./space-notification";
 import { listStalledWork } from "./stalled";
 import { assertOperatorWorkspaceWithinEnvelope } from "./workspace-envelope";
 
@@ -197,7 +197,7 @@ export const OPERATOR_METHODS: Readonly<Record<string, OperatorMethodDefinition>
         proof,
       });
       return {
-        endpoint: getConfig().operatorUrl.origin,
+        endpoint: operatorNotifyEndpoint(getConfig().operatorUrl),
         token: deriveDmNotifyToken(body.space, callerDid),
       };
     },

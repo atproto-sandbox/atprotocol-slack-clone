@@ -143,7 +143,7 @@ test("registerSpace stages placeholder token before authorizeSpaceSync, persists
   assert.equal(first.renew_at, clock.now + TEN_MIN - computeRenewWithinMs(TEN_MIN));
   assert.equal(first.renew_at, clock.now + 7 * 60_000, "10-minute TTL renews 3 minutes before expiry");
   assert.ok(first.token.length >= 43, "32-byte base64url random token");
-  assert.equal(notifyCalls[0]?.notify.endpoint, "http://127.0.0.1:3001");
+  assert.equal(notifyCalls[0]?.notify.endpoint, "http://localhost:3001");
 
   // Short TTL (60s) caps renew margin at 30% (18s)
   const shortAuth = authority(clock.now + 8 * 60_000, 60_000);

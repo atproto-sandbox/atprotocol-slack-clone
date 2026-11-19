@@ -112,8 +112,8 @@ function trackedTransport(
 }
 
 /**
- * Polls the space authority's `listRepos` until every writer with a committed rev on its own host
- * is listed at >= that rev, eliminating asynchronous `notifyWrite` lag before parity/incremental assertions.
+ * Polls the space authority's `listWriters` until every writer with a committed rev on its own host
+ * is listed at >= that rev, eliminating asynchronous `notifyRepoUpdate` lag before parity/incremental assertions.
  */
 async function settled(
   pds: PdsNetwork,
@@ -126,8 +126,8 @@ async function settled(
   const authorityDid = space.slice("at://".length).split("/")[0]!;
   const authority = credential.client(await transport.resolvePds(authorityDid));
   for (let attempt = 0; attempt < 240; attempt += 1) {
-    const listed = await authority.query<{ repos: Array<{ did: string; repoRev: string }> }>(
-      "com.atproto.space.listRepos",
+    const listed = await authority.query<{ repos: Array<{ $type?: string; repo: string; repoRev?: string }> }>(
+      "com.atproto.space.listWriters",
       { space, limit: 500 },
     );
     let current = true;
@@ -137,7 +137,7 @@ async function settled(
         .query<{ commit: { rev: string } }>("com.atproto.space.getLatestCommit", { space, repo: writer.did })
         .then((res) => res.commit.rev, () => null);
       if (rev === null) continue;
-      const reported = listed.repos.find((repo) => repo.did === writer.did)?.repoRev ?? null;
+      const reported = listed.repos.find((entry) => entry.$type === "com.atproto.space.defs#repoWrite" && entry.repo === writer.did)?.repoRev ?? null;
       if (reported === null || reported < rev) {
         current = false;
         break;
@@ -146,7 +146,7 @@ async function settled(
     if (current) return;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  throw new Error(`Authority never settled listRepos for ${space}.`);
+  throw new Error(`Authority never settled listWriters for ${space}.`);
 }
 
 test("Tasks real-PDS acceptance & cold reader parity across two PDS hosts (R11f)", { timeout: 10 * 60_000 }, async (t) => {
@@ -606,10 +606,10 @@ test("Tasks real-PDS acceptance & cold reader parity across two PDS hosts (R11f)
       assert.ok((coldRun.spaceByMethod["com.atproto.space.getRepo"] ?? 0) >= 3);
       assert.equal(coldRun.spaceByMethod["com.atproto.space.getRecord"], undefined);
 
-      // Warm fresh-Engine reopen within truthIntervalMs -> exact 2 listRepos on Tasks space, 0 writer calls!
+      // Warm fresh-Engine reopen within truthIntervalMs -> exact 1 listWriters on Tasks space, 0 writer calls!
       const warm1 = makeTracked();
       const warmRun = await warm1.harness.measure(tasksSpace, () => warm1.engine.tasks.readSpace(workspace));
-      assert.equal(warmRun.spaceByMethod["com.atproto.space.listRepos"], 2);
+      assert.equal(warmRun.spaceByMethod["com.atproto.space.listWriters"], 1);
       assert.equal(warmRun.spaceByMethod["com.atproto.space.getRepo"], undefined);
       assert.equal(warmRun.spaceByMethod["com.atproto.space.listRepoOps"], undefined);
       assert.equal(warmRun.spaceByMethod["com.atproto.space.getLatestCommit"], undefined);
@@ -645,7 +645,7 @@ test("Tasks real-PDS acceptance & cold reader parity across two PDS hosts (R11f)
       // Reset Bob's Tasks repo via com.atproto.space.importRepo (replaces records & clears oplog).
       const importRes = await bearerSession(bob).fetchHandler("/xrpc/com.atproto.space.importRepo", {
         method: "POST",
-        headers: { "content-type": "application/octet-stream" },
+        headers: { "content-type": "application/vnd.dasl.star" },
         body: savedBobStar,
       });
       assert.equal(importRes.status, 200, `importRepo answered ${importRes.status}: ${await importRes.text()}`);

@@ -72,7 +72,7 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
 
     try {
       await publishAppLexicons(fixture);
-      const [{ createWorkspace }, { ensureMemberListSpace, listSpaceMembers, putAuthorityRecord, putSpaceMember }, { executeOperatorOperation, listInboxWriters }, { mintSpaceCredential, sessionCredentialDeps }, { readIndependentChannelPage }, { inboxUri, reactionRecordKey, requestRecordKey, spaceRecordUri, subjectKey, tidNow }, { parseWorkspaceRef }, { getRawDb }, { resolvePds }, { createEngine }] = await Promise.all([
+      const [{ createWorkspace }, { ensureMemberListSpace, listSpaceMembers, putAuthorityRecord, putSpaceMember, putSpaceMembers }, { executeOperatorOperation, listInboxWriters }, { mintSpaceCredential, sessionCredentialDeps }, { readIndependentChannelPage }, { inboxUri, reactionRecordKey, requestRecordKey, spaceRecordUri, subjectKey, tidNow }, { parseWorkspaceRef }, { getRawDb }, { resolvePds }, { createEngine }] = await Promise.all([
         import("@flock/operator/operator/kinds/create-workspace"), import("@flock/operator/atproto/space-ops"), import("@flock/operator/operator/operations"), import("@flock/operator/atproto/space-credential"), import("@flock/reader/independent"), import("@flock/protocol/keys"), import("@flock/operator/operator/actor"), import("@flock/operator/lib/db"), import("@flock/operator/atproto/identity"),
         import("@flock/client/engine"),
       ]);
@@ -80,9 +80,12 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
       const ownerSession = sessionFor(owner);
       const bootstrap = await createWorkspace(ownerSession as never, { creator: owner.did, name: "Scale Workspace", operationId: tidNow() });
       assert.equal(bootstrap.state, "completed");
-      const registration = getRawDb().prepare("INSERT INTO notification_registration (service_ref,space_uri,expires_at) VALUES (?,?,?)");
+      const nowMs = Date.now();
+      const registration = getRawDb().prepare(
+        "INSERT OR REPLACE INTO notification_registration (service_ref,space_uri,expires_at,token,renew_at) VALUES (?,?,?,?,?)",
+      );
       for (const space of [bootstrap.workspace, bootstrap.channel]) {
-        registration.run(process.env.OPERATOR_SERVICE_REF!, space, Date.now() + 2 * 60 * 60 * 1000);
+        registration.run(process.env.OPERATOR_SERVICE_REF!, space, nowMs + 2 * 60 * 60 * 1000, `scale-token-${space}`, nowMs + 50 * 60 * 1000);
       }
       const workspaceSkey = bootstrap.workspace.split("/").at(-1)!;
       const inbox = inboxUri(owner.did, workspaceSkey);
@@ -107,16 +110,18 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
       const privateChannel = channels.at(-1)!;
       const seededMembers = members.slice(0, -1);
       const inviteTarget = members.at(-1)!;
-      const memberTasks: Array<() => Promise<void>> = [];
-      for (const member of seededMembers) {
-        memberTasks.push(() => putSpaceMember(ownerSession as never, bootstrap.workspace, member.did, true, true));
-        memberTasks.push(() => putSpaceMember(ownerSession as never, inbox, member.did, false, true));
-        for (const channel of channels.filter((uri) => uri !== privateChannel)) memberTasks.push(() => putSpaceMember(ownerSession as never, channel, member.did, true, true));
-      }
-      for (const member of seededMembers.slice(0, MEMBERS - 2)) {
-        memberTasks.push(() => putSpaceMember(ownerSession as never, privateChannel, member.did, true, true));
-      }
-      await mapLimited(memberTasks, 8, (task) => task());
+      const seededReadWrite = seededMembers.map((member) => ({ did: member.did, read: true, write: true }));
+      const seededInboxWrite = seededMembers.map((member) => ({ did: member.did, read: false, write: true }));
+      const privateReadWrite = seededMembers.slice(0, MEMBERS - 2).map((member) => ({ did: member.did, read: true, write: true }));
+      const spaceBatchTasks: Array<() => Promise<void>> = [
+        () => putSpaceMembers(ownerSession as never, bootstrap.workspace, seededReadWrite),
+        () => putSpaceMembers(ownerSession as never, inbox, seededInboxWrite),
+        () => putSpaceMembers(ownerSession as never, privateChannel, privateReadWrite),
+        ...channels
+          .filter((uri) => uri !== privateChannel)
+          .map((channel) => () => putSpaceMembers(ownerSession as never, channel, seededReadWrite)),
+      ];
+      await mapLimited(spaceBatchTasks, 8, (task) => task());
       await mapLimited(seededMembers, 8, (member) => putAuthorityRecord(ownerSession as never, bootstrap.workspace, "new.flock.workspace.roster", subjectKey(member.did), {
         subject: member.did, active: true, updatedAt: new Date().toISOString(),
       }).then(() => undefined));
@@ -261,8 +266,12 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
 
       assert.equal((await listSpaceMembers(ownerSession as never, bootstrap.channel)).length, MEMBERS - 1, "the target public channel has all 199 non-authority members");
       const authorityCredential = await mintSpaceCredential(ownerSession as never, bootstrap.channel);
-      const listedWriters = await authorityCredential.client(network.pds.url).query<{ repos: Array<{ did: string }> }>("com.atproto.space.listRepos", { space: bootstrap.channel, limit: 500 });
-      assert.equal(listedWriters.repos.length, MEMBERS - 1, "each target-channel member wrote at least one message");
+      const listedWriters = await authorityCredential.client(network.pds.url).query<{ repos: Array<{ $type?: string; repo: string }> }>(
+        "com.atproto.space.listWriters",
+        { space: bootstrap.channel, limit: 500 },
+      );
+      const activeWriters = listedWriters.repos.filter((entry) => entry.$type === "com.atproto.space.defs#repoWrite");
+      assert.equal(activeWriters.length, MEMBERS - 1, "each target-channel member wrote at least one message");
       const independentStartedAt = performance.now();
       const independentPage = await readIndependentChannelPage(sessionCredentialDeps(ownerSession as never), bootstrap.workspace, `${workspaceSkey}-general`);
       const independentReadMs = elapsed(independentStartedAt);
@@ -363,7 +372,7 @@ test("supported-size workload: 200 members, 100 channels, 20,000 messages and re
         totalMessages: CHANNELS * MESSAGES,
         reactionsPerChannel: REACTIONS,
         totalReactions: CHANNELS * REACTIONS,
-        explicitWriterRepos: listedWriters.repos.length,
+        explicitWriterRepos: activeWriters.length,
         latestPage: 100,
         accountProvisioningMs: accountMs,
         directMembershipSetupMs: membershipSetupMs,

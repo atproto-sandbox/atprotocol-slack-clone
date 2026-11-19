@@ -73,8 +73,13 @@ test("apps at the pinned PDS: installed after reauthorizing, reading only what i
       // given the app a listed writer of #general (its write above), and then its grant there made read only
       const writers = async (space: string) => {
         const credential = await mintSpaceCredential(await restoreAuthorityGrant(owner.did), space);
-        const listed = await credential.client(owner.pds.url).query<{ repos: Array<{ did: string }> }>("com.atproto.space.listRepos", { space, limit: 100 });
-        return listed.repos.map((repo) => repo.did);
+        const listed = await credential.client(owner.pds.url).query<{ repos: Array<{ $type?: string; repo: string }> }>(
+          "com.atproto.space.listWriters",
+          { space, limit: 100 },
+        );
+        return listed.repos
+          .filter((entry) => entry.$type === "com.atproto.space.defs#repoWrite")
+          .map((entry) => entry.repo);
       };
       // The authority lists a writer once the writer's host has delivered the write notice, which is asynchronous.
       for (let attempt = 0; !(await writers(created.channel)).includes(app.did); attempt += 1) {
@@ -123,7 +128,7 @@ test("apps at the pinned PDS: installed after reauthorizing, reading only what i
       // and the credential it already held is measured: whether it still reads, and how long it has left
       // and the credential it already held still reads until it expires, ten minutes after it was issued, which is what
       // docs/operations.md tells an operator about an uninstalled app
-      const residual = await outcome(() => held.client(owner.pds.url).query("com.atproto.space.listRepos", { space: created.channel, limit: 1 }));
+      const residual = await outcome(() => held.client(owner.pds.url).query("com.atproto.space.listWriters", { space: created.channel, limit: 1 }));
       const { exp, iat } = JSON.parse(Buffer.from(held.token.split(".")[1]!, "base64url").toString("utf8")) as { exp: number; iat: number };
       st.diagnostic(`a credential held before the uninstall ${residual.ok ? "still reads" : `is refused (${residual.error})`}; issued for ${exp - iat} s, it has ${Math.round(exp - Date.now() / 1000)} s left after the uninstall`);
       assert.equal(residual.ok, true, "a held credential outlives the uninstall");
@@ -139,7 +144,7 @@ test("apps at the pinned PDS: installed after reauthorizing, reading only what i
 test("an app installs at exactly 200 people, and a reconcile then finds every list as the membership model expects (R9)", { timeout: 15 * 60 * 1000 }, async () => {
   const pds = await startPdsNetwork("apps-envelope");
   try {
-    const [{ restoreAuthorityGrant }, { createWorkspace }, { executeOperatorOperation }, { parseWorkspaceRef }, { listSpaceMembers, putAuthorityRecord, putSpaceMember }, keys, { mapLimited }] = await Promise.all([
+    const [{ restoreAuthorityGrant }, { createWorkspace }, { executeOperatorOperation }, { parseWorkspaceRef }, { listSpaceMembers, putAuthorityRecord, putSpaceMembers }, keys, { mapLimited }] = await Promise.all([
       import("@flock/operator/operator/authority-grant"), import("@flock/operator/operator/kinds/create-workspace"), import("@flock/operator/operator/operations"),
       import("@flock/operator/operator/actor"), import("@flock/operator/atproto/space-ops"), import("@flock/protocol/keys"), import("@flock/protocol/map-limited"),
     ]);
@@ -152,12 +157,11 @@ test("an app installs at exactly 200 people, and a reconcile then finds every li
     const workspace = parseWorkspaceRef(created.workspace);
     const inbox = keys.inboxUri(owner.did, workspace.skey);
     const people = await mapLimited(Array.from({ length: 199 }, (_, index) => index), 8, (index) => pds.createActor(`r9p${String(index).padStart(3, "0")}`, index % 2 === 0 ? 0 : 1));
-    await mapLimited(people.flatMap((person) => [
-      () => putSpaceMember(grant, created.workspace, person.did, true, true),
-      () => putSpaceMember(grant, inbox, person.did, false, true),
-      () => putSpaceMember(grant, created.channel, person.did, true, true),
-      () => putAuthorityRecord(grant, created.workspace, "new.flock.workspace.roster", keys.subjectKey(person.did), { subject: person.did, active: true, updatedAt: new Date().toISOString() }).then(() => undefined),
-    ]), 8, (task) => task());
+    await putSpaceMembers(grant, created.workspace, people.map((person) => ({ did: person.did, read: true, write: true })));
+    await putSpaceMembers(grant, inbox, people.map((person) => ({ did: person.did, read: false, write: true })));
+    await putSpaceMembers(grant, created.channel, people.map((person) => ({ did: person.did, read: true, write: true })));
+    await mapLimited(people, 8, (person) =>
+      putAuthorityRecord(grant, created.workspace, "new.flock.workspace.roster", keys.subjectKey(person.did), { subject: person.did, active: true, updatedAt: new Date().toISOString() }).then(() => undefined));
     const app = await pds.createActor("r9envapp", 1);
     const admin = { did: owner.did, session: grant, workspace, canRecoverOperations: true };
 

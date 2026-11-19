@@ -19,6 +19,7 @@ import type { OperationView } from "./journal";
 import { listJournaledWorkspaces } from "./journal";
 import type { OperationKind, OperatorRequest } from "./kinds/kind";
 import { purgeSpaceNotifications, recordSpaceWake } from "./notices";
+import { operatorNotifyEndpoint } from "./space-notification";
 import { directoryRecords } from "./workspace-state";
 
 // The operator's inline webhook registrations (`authorizeSpaceSync` with stable 1-token-per-space `notify`):
@@ -160,7 +161,7 @@ export async function registerSpace(
         .run(operatorServiceRef, space, effectiveWorkspace, token);
     }
 
-    const notify: SpaceNotifyTarget = { endpoint: operatorUrl.origin, token };
+    const notify: SpaceNotifyTarget = { endpoint: operatorNotifyEndpoint(operatorUrl), token };
     let rawOutcome: RegistrationOutcome | number;
     try {
       rawOutcome = await deps.register(session, space, notify);

@@ -49,17 +49,33 @@ test("the echo bot answers a person within one poll, and once uninstalled is den
     assert.equal(validateAppDeclaration(declared.value).valid, true, "the bot's declaration is published and valid");
     const feed = engine.operator!;
     let polls = 0;
+    let pollAtAnswer: number | undefined;
     const errors: unknown[] = [];
     running = startEchoBot({
-      engine: { ...engine, operator: { getChanges: (follow, signal) => { if (follow.some((entry) => entry.space === created.channel)) polls += 1; return feed.getChanges(follow, signal); } } },
+      engine: {
+        ...engine,
+        channels: {
+          ...engine.channels,
+          send: (...args) => {
+            pollAtAnswer ??= polls;
+            return engine.channels.send(...args);
+          },
+        },
+        operator: {
+          getChanges: (follow, signal) => {
+            if (follow.some((entry) => entry.space === created.channel)) polls += 1;
+            return feed.getChanges(follow, signal);
+          },
+        },
+      },
       did: bot.did, workspaces: [created.workspace], signal: stop.signal, onError: (error) => errors.push(error),
     });
     for (const started = Date.now(); polls === 0; await new Promise((resolve) => setTimeout(resolve, 100))) assert.ok(Date.now() - started < 30_000, `the bot follows #general: ${errors.map(String).join("; ")}`);
 
     // when the person writes in #general
     const people = createEngine(actorTransport(pds, person));
-    const sent = await people.channels.send(ref, "hello bot");
     const pollAtSend = polls;
+    const sent = await people.channels.send(ref, "hello bot");
 
     // then the bot answers in that message's thread, within the poll the change arrived in
     let reply: { value: Record<string, unknown> } | undefined;
@@ -68,7 +84,7 @@ test("the echo bot answers a person within one poll, and once uninstalled is den
       reply = (await people.channels.readPage(ref)).messages.find((message) => message.repo === bot.did);
     }
     assert.deepEqual({ text: reply.value.text, parent: reply.value.parent }, { text: "echo: hello bot", parent: sent.uri });
-    assert.ok(polls - pollAtSend <= 1, `answered within one poll of the feed (${polls - pollAtSend} more began)`);
+    assert.ok(pollAtAnswer !== undefined && pollAtAnswer - pollAtSend <= 1, `answered within one poll of the feed (${(pollAtAnswer ?? polls) - pollAtSend} more began before answering)`);
     assert.deepEqual(errors, [], "the bot ran without a failure");
 
     // when the admin uninstalls it, through the operator's own process as the admin's app does (that process serves the feed,

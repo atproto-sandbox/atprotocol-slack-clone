@@ -113,8 +113,13 @@ test("app inboxes on the pinned PDS: member command writes, app-only reads, remo
 
     const inboxWriters = async (inbox: string) => {
       const cred = await mintSpaceCredential(appOneSession, inbox);
-      const listed = await cred.client(authority.pds.url).query<{ repos: Array<{ did: string }> }>("com.atproto.space.listRepos", { space: inbox, limit: 100 });
-      return listed.repos.map((repo) => repo.did);
+      const listed = await cred.client(authority.pds.url).query<{ repos: Array<{ $type?: string; repo: string }> }>(
+        "com.atproto.space.listWriters",
+        { space: inbox, limit: 100 },
+      );
+      return listed.repos
+        .filter((entry) => entry.$type === "com.atproto.space.defs#repoWrite")
+        .map((entry) => entry.repo);
     };
 
     await t.test("after an install, a member's command in the inbox is read by the app, and a second member and a non-authority admin are refused it", async () => {
@@ -268,8 +273,11 @@ test("app inboxes on the pinned PDS: member command writes, app-only reads, remo
       });
       for (let attempt = 0; attempt < 40; attempt += 1) {
         const cred = await mintSpaceCredential(appTwoSession, appTwoInbox);
-        const listed = await cred.client(authority.pds.url).query<{ repos: Array<{ did: string }> }>("com.atproto.space.listRepos", { space: appTwoInbox, limit: 100 });
-        if (listed.repos.some((r) => r.did === memberTwo.did)) break;
+        const listed = await cred.client(authority.pds.url).query<{ repos: Array<{ $type?: string; repo: string }> }>(
+          "com.atproto.space.listWriters",
+          { space: appTwoInbox, limit: 100 },
+        );
+        if (listed.repos.some((r) => r.$type === "com.atproto.space.defs#repoWrite" && r.repo === memberTwo.did)) break;
         await new Promise((resolve) => setTimeout(resolve, 250));
       }
       const appTwoCred = await mintSpaceCredential(appTwoSession, appTwoInbox);
@@ -302,7 +310,7 @@ test("envelope: 20 active installs at a 200-person roster finish reconcileWorksp
       { executeOperatorOperation },
       { registrationDeps },
       { parseWorkspaceRef },
-      { listSpaceMembers, putAuthorityRecord, putSpaceMember },
+      { listSpaceMembers, putAuthorityRecord, putSpaceMembers },
       { mapLimited },
       keys,
     ] = await Promise.all([
@@ -329,24 +337,22 @@ test("envelope: 20 active installs at a 200-person roster finish reconcileWorksp
     // 199 non-owner members (+ owner = 200 roster members) and 20 pre-R10 installs (missing inboxes = 20 drifted inboxes).
     const people = await mapLimited(Array.from({ length: 199 }, (_, idx) => idx), 8, (idx) =>
       pds.createActor(`r10p${String(idx).padStart(3, "0")}`, idx % 2 === 0 ? 0 : 1));
-    await mapLimited(people.flatMap((person) => [
-      () => putSpaceMember(grant, created.workspace, person.did, true, true),
-      () => putSpaceMember(grant, inbox, person.did, false, true),
-      () => putSpaceMember(grant, created.channel, person.did, true, true),
-      () => putAuthorityRecord(grant, created.workspace, "new.flock.workspace.roster", keys.subjectKey(person.did), {
+    await putSpaceMembers(grant, created.workspace, people.map((person) => ({ did: person.did, read: true, write: true })));
+    await putSpaceMembers(grant, inbox, people.map((person) => ({ did: person.did, read: false, write: true })));
+    await putSpaceMembers(grant, created.channel, people.map((person) => ({ did: person.did, read: true, write: true })));
+    await mapLimited(people, 8, (person) =>
+      putAuthorityRecord(grant, created.workspace, "new.flock.workspace.roster", keys.subjectKey(person.did), {
         subject: person.did, active: true, updatedAt: nowIso,
-      }).then(() => undefined),
-    ]), 8, (task) => task());
+      }).then(() => undefined));
 
     const apps = await mapLimited(Array.from({ length: 20 }, (_, idx) => idx), 8, (idx) =>
       pds.createActor(`r10bot${String(idx).padStart(2, "0")}`, idx % 2 === 0 ? 0 : 1));
-    await mapLimited(apps.flatMap((app) => [
-      () => putSpaceMember(grant, created.workspace, app.did, true, false),
-      () => putSpaceMember(grant, created.channel, app.did, true, true),
-      () => putAuthorityRecord(grant, created.workspace, "new.flock.app.install", keys.subjectKey(app.did), {
+    await putSpaceMembers(grant, created.workspace, apps.map((app) => ({ did: app.did, read: true, write: false })));
+    await putSpaceMembers(grant, created.channel, apps.map((app) => ({ did: app.did, read: true, write: true })));
+    await mapLimited(apps, 8, (app) =>
+      putAuthorityRecord(grant, created.workspace, "new.flock.app.install", keys.subjectKey(app.did), {
         subject: app.did, active: true, channels: [{ skey: generalSkey, write: true }], installedBy: owner.did, installedAt: nowIso, updatedAt: nowIso,
-      }).then(() => undefined),
-    ]), 8, (task) => task());
+      }).then(() => undefined));
 
     const admin = { did: owner.did, session: grant, workspace, canRecoverOperations: true };
     const LIMIT_MS = 3 * 60_000;

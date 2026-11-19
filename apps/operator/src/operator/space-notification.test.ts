@@ -6,7 +6,7 @@ import test, { after, beforeEach } from "node:test";
 import { closeDb, getRawDb } from "../lib/db";
 import { dmConversationUri, dmInboxUri } from "@flock/protocol/keys";
 import { WebhookAuthError } from "./errors";
-import { authenticateSpaceWebhook, deriveDmNotifyToken } from "./space-notification";
+import { authenticateSpaceWebhook, deriveDmNotifyToken, operatorNotifyEndpoint } from "./space-notification";
 
 const DIRECTORY = mkdtempSync(join(tmpdir(), "slack-space-notification-test-"));
 const SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
@@ -111,4 +111,10 @@ test("authenticateSpaceWebhook rejects cross-space, tampered, non-dm1, wrong-key
   // Derived with a different operator encryption key
   const wrongKeyToken = deriveDmNotifyToken(convA, ALICE, Buffer.from("99".repeat(32), "hex"));
   assert.throws(() => authenticateSpaceWebhook(convA, wrongKeyToken), isWebhookRefusal);
+});
+
+test("operatorNotifyEndpoint maps loopback IP literals to localhost for PDS safeFetch compatibility while preserving non-loopback origins", () => {
+  assert.equal(operatorNotifyEndpoint(new URL("http://127.0.0.1:3001")), "http://localhost:3001");
+  assert.equal(operatorNotifyEndpoint(new URL("http://[::1]:4123")), "http://localhost:4123");
+  assert.equal(operatorNotifyEndpoint(new URL("https://operator.spaces.example.com")), "https://operator.spaces.example.com");
 });

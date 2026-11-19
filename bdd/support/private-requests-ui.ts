@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import Database from "better-sqlite3";
 import { generateSpaceKey } from "@flock/protocol/atproto/space-key";
 import type { Locator } from "@playwright/test";
 import { inviteLinkFor } from "@flock/web/app/ui/client-api";
+import { listBoundedWriters } from "@flock/protocol/atproto/record-pages";
 import { mintSpaceCredentialWith, SpaceCredentialError, type SpaceCredential } from "@flock/protocol/atproto/space-credential-core";
 import { AtprotoClient } from "@flock/protocol/atproto/xrpc";
 import { channelUri, decisionRecordKey, inboxUri, parseSpaceUri, requestRecordKey, spaceRecordUri, tidNow } from "@flock/protocol/keys";
@@ -111,8 +113,8 @@ export async function requestsReadWithCredential(credential: SpaceCredential, re
 }
 
 export async function writerSetOf(credential: SpaceCredential, authority: Actor): Promise<string[]> {
-  const page = await credential.client(authority.pdsUrl).query<{ repos: Array<{ did: string }> }>("com.atproto.space.listRepos", { space: credential.space });
-  return page.repos.map(({ did }) => did);
+  const scan = await listBoundedWriters(credential.client(authority.pdsUrl), { space: credential.space, maxRepos: 1_000 });
+  return scan.writers.map(({ repo }) => repo);
 }
 
 export async function decisionFor(world: AppWorld, authority: Actor, inbox: string, requestUri: string): Promise<JoinDecision | undefined> {
@@ -175,19 +177,27 @@ export async function writeRequestDirectly(world: AppWorld, requester: Actor, ch
   return { id, uri: requestUriOf(world, channel, requester) };
 }
 
-export async function unregisterAppNotifications(world: AppWorld, authority: Actor): Promise<void> {
+export function unregisterAppNotifications(world: AppWorld): void {
   const inbox = inboxOf(world);
-  const credential = await mintCredential(world, authority, inbox);
-  await credential.client(authority.pdsUrl).procedure("com.atproto.space.unregisterNotify", { space: inbox, service: world.operatorServiceRef });
+  const db = new Database(world.fixture.databasePath, { fileMustExist: true });
+  try {
+    db.pragma("busy_timeout = 5000");
+    const updated = db
+      .prepare("UPDATE notification_registration SET token = 'dropped-notification-token' WHERE service_ref = ? AND space_uri = ?")
+      .run(world.operatorServiceRef, inbox);
+    assert.equal(updated.changes, 1, `expected an active notification_registration row for ${inbox}`);
+  } finally {
+    db.close();
+  }
 }
 
 /**
  * Takes the account off the inbox member list on the authority's PDS, the way an outage or a stale member list leaves it. The PDS
- * drops the account from the writer set listRepos returns when it is removed, so afterwards the account is neither a member nor a
+ * drops the account from the writer set listWriters returns when it is removed, so afterwards the account is neither a member nor a
  * listed writer until it writes again while authorized.
  */
 export async function removeFromInboxMembers(world: AppWorld, authority: Actor, account: Actor): Promise<void> {
-  const removed = await world.pdsPost(authority, "com.atproto.memberspace.removeMember", { space: inboxOf(world), did: account.did });
+  const removed = await world.pdsPost(authority, "com.atproto.memberspace.removeMembers", { space: inboxOf(world), dids: [account.did] });
   assert.equal(removed.status, 200, `removing ${account.role} from the inbox member list: ${JSON.stringify(removed.body)}`);
 }
 
@@ -212,10 +222,10 @@ export async function writeRequestAsUnlistedWriter(world: AppWorld, authority: A
 }
 
 /** The inbox writers each discovery path can name right now: the operator's current member list and the PDS writer set. */
-export async function inboxWriterSources(world: AppWorld, authority: Actor): Promise<{ operator: string[]; listRepos: string[] }> {
+export async function inboxWriterSources(world: AppWorld, authority: Actor): Promise<{ operator: string[]; listWriters: string[] }> {
   const operator = await callOperator(world, authority, "new.flock.operator.listInboxWriters", { workspace: world.workspaceUri });
   assert.equal(operator.status, 200, operator.text);
-  return { operator: (JSON.parse(operator.text) as { writers: string[] }).writers, listRepos: await writerSetOf(await mintCredential(world, authority, inboxOf(world)), authority) };
+  return { operator: (JSON.parse(operator.text) as { writers: string[] }).writers, listWriters: await writerSetOf(await mintCredential(world, authority, inboxOf(world)), authority) };
 }
 
 /** Calls the operator's own XRPC endpoint with a service-auth token minted by the caller's PDS, not through the app's UI routes. */

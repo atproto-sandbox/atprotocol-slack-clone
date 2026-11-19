@@ -115,7 +115,7 @@ export async function signIn(input: string, config: BrowserSessionConfig): Promi
 /**
  * The signed-in session, or null when its grant lacks a required scope: a session granted before a required scope was added
  * goes back through consent so the new grant replaces it. Pre-R12 sessions lacking only the optional
- * `new.flock.operator.getDmNotifyTarget` operator RPC method remain admitted (`needsNotifyScopeUpgrade: true`) so existing
+ * `OPERATOR_METHOD.getDmNotifyTarget` operator RPC method remain admitted (`needsNotifyScopeUpgrade: true`) so existing
  * users stay signed in and fall back to polling until they reconnect (`D12.3b.1`).
  */
 export async function restoreSession(
@@ -278,7 +278,7 @@ function coversLegacyPreR12RpcScope(granted: ReducedRpcScope, requested: Reduced
 
 /**
  * Assesses whether `granted` covers every token in `required` for `accountDid`, tolerating legacy pre-R12 `rpc` grants whose
- * only missing method is `new.flock.operator.getDmNotifyTarget` unless `options?.strict` is set (`D12.3b.1`).
+ * only missing method is `OPERATOR_METHOD.getDmNotifyTarget` unless `options?.strict` is set (`D12.3b.1`).
  */
 export function assessSessionScopes(
   granted: string,

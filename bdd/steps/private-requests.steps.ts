@@ -156,7 +156,7 @@ Given("a request write reached the authority PDS writer set", LONG_SETUP, async 
   const registered = this.withAppDatabase((db) => db.prepare("SELECT 1 AS found FROM notification_registration WHERE service_ref = ? AND space_uri = ?")
     .get(this.operatorServiceRef, inboxOf(this)));
   assert.ok(registered, "the app registered for inbox notifications when the admin first opened the inbox");
-  await unregisterAppNotifications(this, owner);
+  unregisterAppNotifications(this);
   const state = stateOf(this);
   state.channel = channel;
   state.sweepsBefore = owner.xrpc.length;
@@ -180,7 +180,7 @@ Given("a request write reached the requester's PDS", LONG_SETUP, async function 
   assert.deepEqual(own.map(({ requestId }) => requestId), [state.request.id], "the request is stored in the requester's own repo");
 });
 
-Given("the PDS-to-authority notifyWrite was dropped", LONG_SETUP, async function (this: AppWorld) {
+Given("the PDS-to-authority notifyRepoUpdate was dropped", LONG_SETUP, async function (this: AppWorld) {
   const owner = actorNamed(this, "owner");
   const requester = actorNamed(this, "requester");
   // The authority refuses to hear about a write from a DID that is not yet on its inbox member list,
@@ -196,7 +196,7 @@ When("the admin inbox performs its next 60 second reconciliation", async functio
   await waitForNextSweep(this);
 });
 
-Then("it finds the request writer through listRepos", async function (this: AppWorld) {
+Then("it finds the request writer through listWriters", async function (this: AppWorld) {
   const owner = actorNamed(this, "owner");
   const requester = actorNamed(this, "requester");
   const found = await sweepFinding(this, requester);
@@ -205,7 +205,7 @@ Then("it finds the request writer through listRepos", async function (this: AppW
   assert.equal(notificationsFor(this, requester), 0, "the request was found by the sweep, not by a notification");
   const sources = await inboxWriterSources(this, owner);
   assert.equal(sources.operator.includes(requester.did), false, "the operator's member list does not name the requester, so it cannot be how the sweep found them");
-  assert.ok(sources.listRepos.includes(requester.did), "the authority PDS writer set lists the requester");
+  assert.ok(sources.listWriters.includes(requester.did), "the authority PDS writer set lists the requester");
   const credential = await mintCredential(this, owner, inboxOf(this));
   const stored = await requestsReadWithCredential(credential, requester);
   assert.deepEqual(stored.map(({ requestId }) => requestId), [requestOf(this).id], "reading the listed writer's repo yields the request");
@@ -226,7 +226,7 @@ Then("the operator returns the current inbox write-member DID", async function (
   await inboxRow(owner, requester, channelOf(this)).waitFor({ state: "visible", timeout: 60_000 });
   assert.equal(notificationsFor(this, requester), 0);
   const writers = await writerSetOf(await mintCredential(this, owner, inboxOf(this)), owner);
-  assert.equal(writers.includes(requester.did), false, "listRepos could not have found it; only the operator's member list did");
+  assert.equal(writers.includes(requester.did), false, "listWriters could not have found it; only the operator's member list did");
 });
 
 Then("the admin reads that repo with their inbox credential", async function (this: AppWorld) {
