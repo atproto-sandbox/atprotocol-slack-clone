@@ -274,28 +274,41 @@ function assertWriterPage(
   return { updates, ...(candidate.cursor ? { cursor: candidate.cursor } : {}) };
 }
 
+const WRITER_PAGE_LIMIT = 100;
+const MIN_WRITER_RAW_ENTRIES = 2_000;
+const WRITER_RAW_ENTRY_MULTIPLIER = 20;
+
 /**
- * Pages `com.atproto.space.listWriters` across the space's writer set. Entries are ordered by `spaceRev`, so a writer
- * updated or removed while paging reappears at a later `spaceRev`. Latest entry wins per `repo`: a `#repoRemoved` entry
- * removes the repo from the active writer set and does NOT count toward `maxRepos` or `truncated`. Stops immediately when
- * `page.repos.length < limit` because `listWriters` emits `cursor` on every non-empty page.
+ * Pages `com.atproto.space.listWriters` across the space's writer set. Entries are ordered ascending by `spaceRev`, so a
+ * writer updated or removed while paging reappears at a later `spaceRev`. Latest entry wins per `repo`: a `#repoRemoved`
+ * entry deletes the repo from the active writer set, so an earlier provisional overflow `#repoWrite` followed by a later
+ * `#repoRemoved` resolves without truncation when the terminal active set fits within `maxRepos`. Stops immediately when
+ * `page.repos.length < limit` because `listWriters` emits `cursor` on every non-empty page, and enforces a raw-entry
+ * safety ceiling (`maxRawEntries`) against unbounded churn streams.
  */
 export async function listBoundedWriters(
   client: AtprotoClient,
-  input: { space: string; maxRepos: number },
+  input: { space: string; maxRepos: number; maxRawEntries?: number },
 ): Promise<BoundedWriters> {
   if (!Number.isSafeInteger(input.maxRepos) || input.maxRepos < 1) {
     throw new RangeError("Writer scan limit must be a positive safe integer.");
   }
+  if (input.maxRawEntries !== undefined && (!Number.isSafeInteger(input.maxRawEntries) || input.maxRawEntries < 1)) {
+    throw new RangeError("Writer raw entry limit must be a positive safe integer.");
+  }
+  const limit = Math.min(WRITER_PAGE_LIMIT, input.maxRepos);
+  const maxRawEntries = input.maxRawEntries ?? Math.max(MIN_WRITER_RAW_ENTRIES, input.maxRepos * WRITER_RAW_ENTRY_MULTIPLIER);
+  const maxPages = Math.max(
+    MAX_REPO_SCAN_PAGES,
+    Math.ceil((input.maxRepos * WRITER_RAW_ENTRY_MULTIPLIER) / WRITER_PAGE_LIMIT) + 1,
+  );
   const active = new Map<string, WriterWrite>();
   const seenCursors = new Set<string>();
+  let rawEntries = 0;
   let spaceRev: string | null = null;
   let cursor: string | undefined;
-  let truncated = false;
   for (let pages = 0; ; pages += 1) {
-    if (pages >= MAX_REPO_SCAN_PAGES) throw new Error("PDS writer pagination exceeded the bounded page limit.");
-    const room = input.maxRepos - active.size;
-    const limit = room > 0 ? Math.min(500, room) : 1;
+    if (pages >= maxPages) throw new Error("PDS writer pagination exceeded the bounded page limit.");
     const requested = cursor;
     const page = await client.query<ListWriters.OutputSchema>("com.atproto.space.listWriters", {
       space: input.space,
@@ -303,26 +316,35 @@ export async function listBoundedWriters(
       ...(cursor ? { cursor } : {}),
     });
     const parsed = assertWriterPage(page, limit, requested, seenCursors);
+    rawEntries += parsed.updates.length;
     for (const entry of parsed.updates) {
       if (entry.kind === "removed") {
         active.delete(entry.repo);
-        if (spaceRev === null || entry.spaceRev > spaceRev) spaceRev = entry.spaceRev;
-      } else if (active.has(entry.repo)) {
-        active.set(entry.repo, entry);
-        if (spaceRev === null || entry.spaceRev > spaceRev) spaceRev = entry.spaceRev;
-      } else if (active.size < input.maxRepos) {
-        active.set(entry.repo, entry);
-        if (spaceRev === null || entry.spaceRev > spaceRev) spaceRev = entry.spaceRev;
       } else {
-        truncated = true;
-        break;
+        active.set(entry.repo, entry);
+      }
+      if (spaceRev === null || entry.spaceRev > spaceRev) {
+        spaceRev = entry.spaceRev;
       }
     }
-    if (truncated || !parsed.cursor || parsed.updates.length < limit) break;
+    if (!parsed.cursor || parsed.updates.length < limit) break;
+    if (rawEntries >= maxRawEntries) {
+      return {
+        writers: [...active.values()].slice(0, input.maxRepos),
+        spaceRev,
+        truncated: true,
+      };
+    }
     seenCursors.add(parsed.cursor);
     cursor = parsed.cursor;
   }
-  return { writers: [...active.values()], spaceRev, truncated };
+  const allActive = [...active.values()];
+  const truncated = allActive.length > input.maxRepos;
+  return {
+    writers: truncated ? allActive.slice(0, input.maxRepos) : allActive,
+    spaceRev,
+    truncated,
+  };
 }
 
 function isWriterCursorStale(input: {
@@ -352,8 +374,9 @@ function isWriterCursorStale(input: {
 /**
  * Reads `com.atproto.space.listWriters` updates since a `spaceRev` cursor, returning deduplicated latest-wins
  * `#repoWrite` and `#repoRemoved` updates. A page shorter than `limit` ends the scan. When the checkpoint is older than
- * 72 hours or the host rejects it with `InvalidCursor`, falls back to full `listBoundedWriters` reconciliation so GC'd
- * writer removals are never missed.
+ * 72 hours, the host rejects it with `InvalidCursor`, or incremental churn/tombstones exceed `maxRepos` or raw entry/page
+ * bounds, falls back cleanly to full `listBoundedWriters` reconciliation so GC'd or interleaved writer removals are
+ * resolved without false errors.
  */
 export async function listWritersSince(
   client: AtprotoClient,
@@ -361,6 +384,7 @@ export async function listWritersSince(
     space: string;
     since: string | null;
     maxRepos: number;
+    maxRawEntries?: number;
     sinceListedAt?: number | null;
     now?: number;
     maxCursorAgeMs?: number;
@@ -370,20 +394,26 @@ export async function listWritersSince(
     throw new RangeError("Writer scan limit must be a positive safe integer.");
   }
   const fullReconciliation = async (): Promise<WritersSince> => {
-    const scan = await listBoundedWriters(client, { space: input.space, maxRepos: input.maxRepos });
+    const scan = await listBoundedWriters(client, {
+      space: input.space,
+      maxRepos: input.maxRepos,
+      ...(input.maxRawEntries !== undefined ? { maxRawEntries: input.maxRawEntries } : {}),
+    });
     if (scan.truncated) throw new Error(`The space's changed writers exceed the ${input.maxRepos}-repo scan limit.`);
     return { updates: scan.writers, spaceRev: scan.spaceRev, fullReconcile: true, writers: scan.writers };
   };
 
   if (isWriterCursorStale(input)) return fullReconciliation();
 
-  const limit = 100;
+  const limit = WRITER_PAGE_LIMIT;
+  const maxRawEntries = input.maxRawEntries ?? Math.max(MIN_WRITER_RAW_ENTRIES, input.maxRepos * WRITER_RAW_ENTRY_MULTIPLIER);
   const updates = new Map<string, WriterUpdate>();
   const seenCursors = new Set<string>();
+  let rawEntries = 0;
   let cursor = input.since ?? undefined;
   let spaceRev = input.since;
   for (let pages = 0; ; pages += 1) {
-    if (pages >= MAX_REPO_SCAN_PAGES) throw new Error("PDS writer pagination exceeded the bounded page limit.");
+    if (pages >= MAX_REPO_SCAN_PAGES) return fullReconciliation();
     const requested = cursor;
     let page: ListWriters.OutputSchema;
     try {
@@ -401,15 +431,19 @@ export async function listWritersSince(
       return { updates: [...updates.values()], spaceRev, fullReconcile: false };
     }
     const parsed = assertWriterPage(page, limit, requested, seenCursors);
+    rawEntries += parsed.updates.length;
     for (const entry of parsed.updates) {
       updates.set(entry.repo, entry);
       if (spaceRev === null || entry.spaceRev > spaceRev) spaceRev = entry.spaceRev;
     }
     if (updates.size > input.maxRepos) {
-      throw new Error(`The space's changed writers exceed the ${input.maxRepos}-repo scan limit.`);
+      return fullReconciliation();
     }
     if (!parsed.cursor || parsed.updates.length < limit) {
       return { updates: [...updates.values()], spaceRev, fullReconcile: false };
+    }
+    if (rawEntries >= maxRawEntries) {
+      return fullReconciliation();
     }
     seenCursors.add(parsed.cursor);
     cursor = parsed.cursor;

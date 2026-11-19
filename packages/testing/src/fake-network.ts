@@ -43,9 +43,9 @@ import { isDid, isSkey, isTid, parseSpaceUri } from "@flock/protocol/keys";
  * - `authorizeSpaceSync` has no OAuth session auth verifier (body `delegationToken`,
  *   `credentialKey`, optional `clientAttestation` and `notify` only), issues a 10-min
  *   `exp`-bound `atproto-space-credential+jwt`, returns `{ credential, spaceRev? }`,
- *   synchronously confirms new or lapsed `(space, endpoint, token)` registrations via
- *   `confirmRegistration`, renews unexpired ones without re-confirming, and withdraws a
- *   matching registration on authorization refusals.
+ *   synchronously confirms unseen `(space, endpoint, token)` registrations via
+ *   `confirmRegistration`, renews retained registrations (including lapsed ones) silently
+ *   without re-confirming, and withdraws a matching registration on authorization refusals.
  * - `listWriters` requires `spaceCredentialAuth` only, returning `#repoWrite` and
  *   `#repoRemoved` entries ordered ascending by `spaceRev`, enforcing host availability.
  * - Repo reads (`getRecord`, `getLatestCommit`, `getRepo`, `listRepoOps`, `listRecords`)
@@ -650,6 +650,10 @@ export class FakeNetwork {
       case "com.atproto.space.getRecord": return this.getRecord(params, auth, requestHeaders);
       case "com.atproto.space.getLatestCommit": return this.getLatestCommit(params, auth, requestHeaders);
       case "com.atproto.space.getRepo": return this.getRepo(params, auth, requestHeaders);
+      case "com.atproto.space.getBlob": return this.getBlob(params, auth);
+      case "com.atproto.space.listBlobs": return this.listBlobs(params, auth);
+      case "com.atproto.space.exportSpaceMeta": return this.exportSpaceMeta(params, auth);
+      case "com.atproto.space.importSpaceMeta": return this.importSpaceMeta(auth);
       case "com.atproto.space.listRecords": return this.listRecords(params, auth);
       case "com.atproto.space.listRepoOps": return this.listRepoOps(params, auth, requestHeaders);
       default: throw new FakeXrpcError(501, "MethodNotImplemented", `fake-pds does not implement ${method}`);
@@ -702,15 +706,16 @@ export class FakeNetwork {
     return parsed;
   }
 
+  private requireSpaceAuthority(uri: unknown, did: string): void {
+    const ref = this.requireSpaceRef(uri);
+    if (ref.authorityDid !== did) throw new FakeXrpcError(400, "NotAuthorized", "Not the space authority");
+  }
+
   private requireActiveSpace(uri: unknown): FakeSpace {
     if (typeof uri !== "string") throw new FakeXrpcError(400, "SpaceNotFound", "Space not found");
     const space = this.spaces.get(uri);
     if (!space || space.deleted) throw new FakeXrpcError(400, "SpaceNotFound", "Space not found");
     return space;
-  }
-
-  private requireAuthority(space: FakeSpace, did: string): void {
-    if (space.ownerDid !== did) throw new FakeXrpcError(400, "NotAuthorized", "Not the space authority");
   }
 
   private requireMemberspace(space: FakeSpace): void {
@@ -855,7 +860,7 @@ export class FakeNetwork {
     if (notify) {
       const regKey = notifyKey(notify.endpoint, notify.token);
       const existingReg = space.notifyRegistrations.get(regKey);
-      if (!existingReg || existingReg.expiresAtMs <= this.now()) {
+      if (!existingReg) {
         await this.confirmRegistration(spaceUriStr, notify);
         if (space.deleted) {
           throw new FakeXrpcError(400, "SpaceDeleted", "Space has been deleted");
@@ -1061,8 +1066,8 @@ export class FakeNetwork {
   /** Replaces the whole policy. A different `$type` migrates the space and discards the member list; the writer set is not re-evaluated. */
   private updateSpace(params: Record<string, unknown>, auth: FakeAuth): Record<string, never> {
     const did = this.requireSelf(auth, { scopes: "full", checkTakedown: true, checkDeactivated: true });
+    this.requireSpaceAuthority(params.space, did);
     const space = this.requireActiveSpace(params.space);
-    this.requireAuthority(space, did);
     const next = toStoredPolicy(params.policy);
     if (next.$type !== space.policy.$type) space.members.clear();
     space.policy = next;
@@ -1071,15 +1076,15 @@ export class FakeNetwork {
 
   private getSpace(params: Record<string, unknown>, auth: FakeAuth) {
     const did = this.requireSelf(auth, { scopes: "full" });
+    this.requireSpaceAuthority(params.space, did);
     const space = this.requireActiveSpace(params.space);
-    this.requireAuthority(space, did);
     return { space: spaceUri(space), policy: toPublicPolicy(space.policy) };
   }
 
   private putMembers(params: Record<string, unknown>, auth: FakeAuth, deliveries: Promise<void>[]): Record<string, never> {
     const did = this.requireSelf(auth, { scopes: "full", checkTakedown: true, checkDeactivated: true });
+    this.requireSpaceAuthority(params.space, did);
     const space = this.requireActiveSpace(params.space);
-    this.requireAuthority(space, did);
     this.requireMemberspace(space);
     if (!Array.isArray(params.members) || params.members.length > 100) {
       throw new FakeXrpcError(400, "InvalidRequest", "members must be an array of at most 100 entries");
@@ -1107,8 +1112,8 @@ export class FakeNetwork {
 
   private removeMembers(params: Record<string, unknown>, auth: FakeAuth, deliveries: Promise<void>[]): Record<string, never> {
     const did = this.requireSelf(auth, { scopes: "full", checkTakedown: true, checkDeactivated: true });
+    this.requireSpaceAuthority(params.space, did);
     const space = this.requireActiveSpace(params.space);
-    this.requireAuthority(space, did);
     this.requireMemberspace(space);
     if (!Array.isArray(params.dids) || params.dids.length > 100) {
       throw new FakeXrpcError(400, "InvalidRequest", "dids must be an array of at most 100 DIDs");
@@ -1125,8 +1130,8 @@ export class FakeNetwork {
 
   private removeWriter(params: Record<string, unknown>, auth: FakeAuth, deliveries: Promise<void>[]): Record<string, never> {
     const did = this.requireSelf(auth, { scopes: "full", checkTakedown: true, checkDeactivated: true });
+    this.requireSpaceAuthority(params.space, did);
     const space = this.requireActiveSpace(params.space);
-    this.requireAuthority(space, did);
     if (!isDid(params.repo)) throw new FakeXrpcError(400, "InvalidRequest", "repo must be a DID");
     const removed = this.removeWriterEntry(space, params.repo);
     if (removed) deliveries.push(this.deliverSpaceUpdate(space, removed));
@@ -1135,10 +1140,10 @@ export class FakeNetwork {
 
   private deleteSpace(params: Record<string, unknown>, auth: FakeAuth, deliveries: Promise<void>[]): Record<string, never> {
     const did = this.requireSelf(auth, { scopes: "full", checkTakedown: true, checkDeactivated: true });
+    this.requireSpaceAuthority(params.space, did);
     const uri = String(params.space ?? "");
     const space = this.spaces.get(uri);
     if (!space) throw new FakeXrpcError(400, "SpaceNotFound", "Space not found");
-    this.requireAuthority(space, did);
     if (space.deleted) return {};
 
     const registrations = [...space.notifyRegistrations.values()];
@@ -1158,8 +1163,8 @@ export class FakeNetwork {
 
   private listMembers(params: Record<string, unknown>, auth: FakeAuth) {
     const did = this.requireSelf(auth, { scopes: "full" });
+    this.requireSpaceAuthority(params.space, did);
     const space = this.requireActiveSpace(params.space);
-    this.requireAuthority(space, did);
     this.requireMemberspace(space);
     const cursor = typeof params.cursor === "string" ? params.cursor : undefined;
     if (cursor !== undefined && !isDid(cursor)) {
@@ -1878,6 +1883,35 @@ export class FakeNetwork {
       ? macHeaders(COMMIT_MAC_PROFILE, createCommitMacHeaders(commit, mac).headers)
       : { vary: "Accept-Signature" };
     return new BinaryResponse(stream, headers, STAR_MEDIA_TYPE);
+  }
+
+  private async getBlob(params: Record<string, unknown>, auth: FakeAuth): Promise<never> {
+    if (auth.kind === "credential-candidate") {
+      await this.authorizeSpaceRead(params, auth);
+    } else {
+      this.requireSelf(auth, { scopes: "full" });
+    }
+    throw new FakeXrpcError(501, "NotImplemented", "fake-pds does not implement com.atproto.space.getBlob");
+  }
+
+  private async listBlobs(params: Record<string, unknown>, auth: FakeAuth): Promise<never> {
+    if (auth.kind === "credential-candidate") {
+      await this.authorizeSpaceRead(params, auth);
+    } else {
+      this.requireSelf(auth, { scopes: "full" });
+    }
+    throw new FakeXrpcError(501, "NotImplemented", "fake-pds does not implement com.atproto.space.listBlobs");
+  }
+
+  private exportSpaceMeta(params: Record<string, unknown>, auth: FakeAuth): never {
+    const did = this.requireSelf(auth, { scopes: "full" });
+    this.requireSpaceAuthority(params.space, did);
+    throw new FakeXrpcError(501, "NotImplemented", "fake-pds does not implement com.atproto.space.exportSpaceMeta");
+  }
+
+  private importSpaceMeta(auth: FakeAuth): never {
+    this.requireSelf(auth, { scopes: "full", checkTakedown: true });
+    throw new FakeXrpcError(501, "NotImplemented", "fake-pds does not implement com.atproto.space.importSpaceMeta");
   }
 
   private commitForRepo(spaceUriStr: string, repo: string): SpaceCommit {

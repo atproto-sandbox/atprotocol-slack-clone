@@ -1951,6 +1951,24 @@ test("R12 D12.4: listWriters incremental #repoRemoved evicts writer rows and fol
     const { core, store } = syncFor(network, READER, { options: { truthIntervalMs: hugeTruthInterval } });
     await core.syncVerifiedSpace({ space, collections: [COLLECTION.message], truthIntervalMs: hugeTruthInterval });
 
+    // Clean incremental listWritersSince refreshes writersListedAt, so steady <72h incremental polls across >72h total
+    // wall-clock time never trigger a needless >72h writersListedAt full-scan fallback (Opus L3).
+    const incrementalCursors: Array<string | undefined> = [];
+    network.interceptResponse = ({ method, params, response }) => {
+      if (method === "com.atproto.space.listWriters" && params.space === space) {
+        incrementalCursors.push(typeof params.cursor === "string" ? params.cursor : undefined);
+      }
+      return response;
+    };
+    network.advanceClock(Math.floor(WRITER_CURSOR_MAX_AGE_MS * 0.6));
+    await core.syncVerifiedSpace({ space, collections: [COLLECTION.message], truthIntervalMs: hugeTruthInterval });
+    assert.equal((await store.getSpace(space))?.writersListedAt, network.now(), "incremental catch-up refreshed writersListedAt");
+    network.advanceClock(Math.floor(WRITER_CURSOR_MAX_AGE_MS * 0.6));
+    await core.syncVerifiedSpace({ space, collections: [COLLECTION.message], truthIntervalMs: hugeTruthInterval });
+    network.interceptResponse = undefined;
+    assert.equal(incrementalCursors.length, 2);
+    assert.ok(incrementalCursors.every((c) => c !== undefined), "refreshed writersListedAt kept incremental cursor across 1.2x 72h span");
+
     // Simulate a GC'd removal when writersListedAt is >72h old: intercept incremental cursor call if it were attempted (it must NOT be!).
     const cursorsSeen: Array<string | undefined> = [];
     network.interceptResponse = ({ method, params, response }) => {

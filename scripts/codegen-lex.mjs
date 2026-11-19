@@ -8,7 +8,7 @@ const expectedCommit = "6747610566eee1b6d743617bd8eb1136adccb362";
 
 if (!checkout) {
   throw new Error(
-    "Set ATPROTO_PIN_CHECKOUT to the atproto checkout at the protocol pin before regenerating Lexicon clients.",
+    "Set ATPROTO_PIN_CHECKOUT (or ATPROTO_PINNED_CHECKOUT) to the atproto checkout at the protocol pin before regenerating Lexicon clients.",
   );
 }
 

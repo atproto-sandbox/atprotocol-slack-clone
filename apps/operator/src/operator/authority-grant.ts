@@ -11,7 +11,7 @@ import {
   type NodeSavedState,
   type OAuthSession,
 } from "@atproto/oauth-client-node";
-import { fetchValidatedEndpoint } from "../atproto/identity";
+import { fetchValidatedEndpoint, resolvePds } from "../atproto/identity";
 import { oauthSqliteStore, oauthSqliteView, UnreadableStoredValueError } from "../auth/encrypted-store";
 import {
   assertOAuthFlowAppState,
@@ -23,14 +23,23 @@ import {
   type AuthorityFlowPurpose,
   type OAuthFlowClient,
 } from "../auth/oauth-flow";
-import { oauthSqliteRequestLock } from "../auth/oauth-request-lock";
+import { isTransientOAuthInfrastructureError, oauthSqliteRequestLock } from "../auth/oauth-request-lock";
 import { grantCreationAuthorization } from "./creation-authorization";
 import { canonicalOAuthScope } from "../auth/oauth-scope";
+import { generateSpaceKey } from "@flock/protocol/atproto/space-key";
+import { XrpcError } from "@flock/protocol/atproto/xrpc";
+import { readUpstreamJson } from "@flock/protocol/bounded-json";
 import { workspaceAuthorityScopes } from "@flock/protocol/scopes";
 import { getConfig } from "@flock/deployment/config";
 import { getAuthorityClientKeys, getOperatorConfig, type AuthorityClientKey } from "../config";
 import { getRawDb } from "../lib/db";
-import { canonicalJson, isDid } from "@flock/protocol/keys";
+import { canonicalJson, isDid, workspaceUri } from "@flock/protocol/keys";
+import {
+  AuthoritySuspensionUnavailableError,
+  getAuthoritySuspensionError,
+  markAuthorityHealthy,
+  tripAuthoritySuspension,
+} from "./authority-suspension";
 
 // The workspace authority grant: the one OAuth session the operator administers a workspace with, held per authority DID.
 // It is separate from any person's sign-in: a sign-in never writes it and a sign-out never revokes it. It is created only
@@ -232,34 +241,77 @@ export async function completeAuthorityFlow(
   return { authorityDid: session.did, initiatorDid: binding.initiatorDid, purpose: binding.purpose };
 }
 
+export type RestoreAuthorityGrantDeps = {
+  resolvePds?: (did: string) => Promise<string>;
+  fetchEndpoint?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+  now?: () => number;
+};
+
 /**
- * The authority's grant as a live session. A missing grant, one the PDS no longer honors, one that cannot be decrypted, or
- * one approved with a client key that is no longer configured needs a new approval. A grant's refreshes stay signed with
- * the key it was approved with, so that last case is checked before the OAuth client would delete the grant for it: putting
- * the key back restores the grant.
+ * The authority's grant as a live session. A missing grant, one that cannot be decrypted, or one approved with a client key
+ * that is no longer configured needs a new approval.
  *
- * The session sees only the approval it was restored from (`approvalView`). The OAuth client reads a session's tokens from
- * the store on every request but keeps the DPoP key it was restored with, so a session still in use after the authority
- * approves again would otherwise sign the new approval's tokens with the old key; the host refuses that, and the client
- * answers by deleting the stored grant, the new one. Pinned, such a session finds no grant and fails, and the new grant stays.
+ * `approvalView` gives `NodeOAuthClient` a quarantined session store whose `del` NEVER removes canonical `authority_grant`
+ * rows (only explicit `revokeAuthorityGrant` or overwrite by a new approval does), while `set` persists refreshed tokens
+ * using same-approval CAS. When token refresh fails (`invalid_grant` / `TokenRefreshError`), an out-of-band account-status
+ * probe classifies temporary suspension/deactivation or transient PDS outages (`503 UpstreamUnavailable`, tripping the
+ * authority circuit breaker and preserving `authority_grant`) vs an active account whose server-side refresh grant is gone
+ * (`502 AuthoritySessionUnavailable`).
  */
-export function restoreAuthorityGrant(did: string): Promise<OAuthSession> {
-  return restoreApproval(did, true);
+export function restoreAuthorityGrant(did: string, deps?: RestoreAuthorityGrantDeps): Promise<OAuthSession> {
+  return restoreApproval(did, true, deps);
 }
 
-async function restoreApproval(did: string, againIfReplaced: boolean): Promise<OAuthSession> {
+async function restoreApproval(did: string, againIfReplaced: boolean, deps?: RestoreAuthorityGrantDeps): Promise<OAuthSession> {
+  const nowFn = deps?.now ?? Date.now;
   const stored = await readable(grantStore().get(did));
   if (!stored || !clientKeyAvailable(stored)) throw new AuthorityReauthorizationRequiredError(did);
+
+  const activeSuspension = getAuthoritySuspensionError(did, nowFn());
+  if (activeSuspension) throw activeSuspension;
+
+  const view = approvalView(stored);
   try {
-    const session = await (await createAuthorityClient(approvalView(stored))).restore(did);
+    const session = await (await createAuthorityClient(view.store, deps?.fetchEndpoint)).restore(did);
     if (session.did !== did) throw new AuthorityReauthorizationRequiredError(did);
+    if (view.didPersistRefresh()) {
+      markAuthorityHealthy(did, nowFn());
+    }
     return session;
   } catch (error) {
     // The authority approved again between the read above and the restore, which then found no grant of its approval: the
     // new approval is restored instead, once.
-    if (againIfReplaced && error instanceof TokenRefreshError && await approvedAgainSince(did, stored)) return restoreApproval(did, false);
-    // Refused at refresh, or revoked or deleted meanwhile: only a new approval gives the operator a usable grant.
-    if (error instanceof TokenRefreshError || error instanceof TokenRevokedError || error instanceof TokenInvalidError || error instanceof UnreadableStoredValueError) {
+    if (againIfReplaced && error instanceof TokenRefreshError && await approvedAgainSince(did, stored)) {
+      return restoreApproval(did, false, deps);
+    }
+    if (error instanceof UnreadableStoredValueError) {
+      throw new AuthorityReauthorizationRequiredError(did, { cause: error });
+    }
+    if (error instanceof TokenRefreshError || error instanceof TokenRevokedError || error instanceof TokenInvalidError) {
+      if (!hasAuthorityGrant(did)) {
+        throw new AuthorityReauthorizationRequiredError(did, { cause: error });
+      }
+      const concurrentSuspension = getAuthoritySuspensionError(did, nowFn());
+      if (concurrentSuspension) throw concurrentSuspension;
+
+      const probe = await probeAuthorityAccountStatus(did, stored, deps);
+      if (probe.state === "suspended") {
+        throw tripAuthoritySuspension(
+          did,
+          new XrpcError(401, "The workspace authority account is currently suspended or deactivated.", probe.code),
+          nowFn(),
+        );
+      }
+      if (probe.state === "unavailable") {
+        throw tripAuthoritySuspension(
+          did,
+          new AuthoritySuspensionUnavailableError(
+            "Could not verify workspace authority account status during token refresh.",
+            { cause: probe.cause },
+          ),
+          nowFn(),
+        );
+      }
       throw new AuthorityReauthorizationRequiredError(did, { cause: error });
     }
     throw error;
@@ -311,9 +363,159 @@ export async function persistAuthorityGrant(did: string, saved: NodeSavedSession
   });
 }
 
-/** The grant table as one approval's session sees it: that approval through its refreshes, and nothing that replaced it. */
-function approvalView(approved: NodeSavedSession): Store<NodeSavedSession> {
-  return oauthSqliteView<NodeSavedSession>("authority_grant", (value) => sameApproval(value, approved));
+/**
+ * Quarantined per-approval session store view: persists refreshed tokens via same-approval CAS (`set`), while `del`
+ * quarantines only in memory for this client attempt and NEVER deletes canonical `authority_grant` storage.
+ */
+function approvalView(approved: NodeSavedSession): { store: Store<NodeSavedSession>; didPersistRefresh(): boolean } {
+  const base = oauthSqliteView<NodeSavedSession>("authority_grant", (value) => sameApproval(value, approved));
+  const quarantined = new Set<string>();
+  let persistedRefresh = false;
+  return {
+    didPersistRefresh: () => persistedRefresh,
+    store: {
+      async get(key) {
+        if (quarantined.has(key)) return undefined;
+        return base.get(key);
+      },
+      async set(key, value) {
+        quarantined.delete(key);
+        await base.set(key, value);
+        persistedRefresh = true;
+      },
+      async del(key) {
+        quarantined.add(key);
+      },
+    },
+  };
+}
+
+const PROBE_RESPONSE_LIMIT_BYTES = 64 * 1024;
+const PROBE_TIMEOUT_MS = 10_000;
+let cachedProbeKeyPromise: Promise<string> | undefined;
+
+function getProbeCredentialKey(): Promise<string> {
+  cachedProbeKeyPromise ??= generateSpaceKey().then((key) => key.did());
+  return cachedProbeKeyPromise;
+}
+
+type AuthorityProbeOutcome =
+  | { state: "active" }
+  | { state: "suspended"; code: "AccountTakedown" | "AccountDeactivated" }
+  | { state: "unavailable"; cause: unknown };
+
+function classifyProbeErrorCode(code: unknown): "AccountTakedown" | "AccountDeactivated" | null {
+  if (code === "RepoDeactivated" || code === "AccountDeactivated") return "AccountDeactivated";
+  if (code === "RepoTakendown" || code === "RepoSuspended" || code === "AccountTakedown") return "AccountTakedown";
+  return null;
+}
+
+function isTransientProbeStatus(status: number): boolean {
+  return status === 408 || status === 425 || status === 429 || (status >= 500 && status !== 501);
+}
+
+async function probeAuthorityAccountStatus(
+  did: string,
+  stored: NodeSavedSession,
+  deps?: RestoreAuthorityGrantDeps,
+): Promise<AuthorityProbeOutcome> {
+  let pdsOrigin: string;
+  try {
+    pdsOrigin = await (deps?.resolvePds ?? resolvePds)(did);
+  } catch (resolveError) {
+    if (isTransientOAuthInfrastructureError(resolveError)) {
+      return { state: "unavailable", cause: resolveError };
+    }
+    const fallbackIss = typeof stored.tokenSet?.iss === "string" ? stored.tokenSet.iss : undefined;
+    if (!fallbackIss) {
+      return { state: "active" };
+    }
+    pdsOrigin = fallbackIss;
+  }
+
+  const fetchFn = deps?.fetchEndpoint ?? fetchValidatedEndpoint;
+
+  // 1. Primary unauthenticated probe: com.atproto.sync.getRepoStatus?did=<did>
+  try {
+    const repoStatusUrl = new URL("/xrpc/com.atproto.sync.getRepoStatus", pdsOrigin);
+    repoStatusUrl.searchParams.set("did", did);
+    const res = await fetchFn(repoStatusUrl, { method: "GET", signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
+    if (isTransientProbeStatus(res.status)) {
+      await res.body?.cancel().catch(() => undefined);
+      return { state: "unavailable", cause: new Error(`getRepoStatus returned HTTP ${res.status}`) };
+    }
+    const body = await readUpstreamJson(res, PROBE_RESPONSE_LIMIT_BYTES);
+    if (res.status === 200 && body && typeof body === "object" && !Array.isArray(body)) {
+      const record = body as { active?: unknown; status?: unknown };
+      if (record.active === false) {
+        return {
+          state: "suspended",
+          code: record.status === "deactivated" ? "AccountDeactivated" : "AccountTakedown",
+        };
+      }
+      if (record.active === true) {
+        return { state: "active" };
+      }
+    }
+    if (body && typeof body === "object" && !Array.isArray(body)) {
+      const errCode = (body as { error?: unknown }).error;
+      const suspended = classifyProbeErrorCode(errCode);
+      if (suspended) return { state: "suspended", code: suspended };
+      if (errCode === "RepoNotFound") return { state: "active" };
+    }
+  } catch (error) {
+    return { state: "unavailable", cause: error };
+  }
+
+  // 2. Fallback check: com.atproto.space.listSpaces?spaceDid=<did>&limit=1
+  try {
+    const listSpacesUrl = new URL("/xrpc/com.atproto.space.listSpaces", pdsOrigin);
+    listSpacesUrl.searchParams.set("spaceDid", did);
+    listSpacesUrl.searchParams.set("limit", "1");
+    const res = await fetchFn(listSpacesUrl, { method: "GET", signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
+    if (isTransientProbeStatus(res.status)) {
+      await res.body?.cancel().catch(() => undefined);
+      return { state: "unavailable", cause: new Error(`listSpaces probe returned HTTP ${res.status}`) };
+    }
+    if (res.status === 200) {
+      await res.body?.cancel().catch(() => undefined);
+      return { state: "active" };
+    }
+    const body = await readUpstreamJson(res, PROBE_RESPONSE_LIMIT_BYTES);
+    if (body && typeof body === "object" && !Array.isArray(body)) {
+      const suspended = classifyProbeErrorCode((body as { error?: unknown }).error);
+      if (suspended) return { state: "suspended", code: suspended };
+    }
+  } catch (error) {
+    return { state: "unavailable", cause: error };
+  }
+
+  // 3. Unauthenticated FakeNetwork fallback: authorizeSpaceSync checks assertActiveSpaceHost before SpaceNotFound.
+  try {
+    const authSyncUrl = new URL("/xrpc/com.atproto.space.authorizeSpaceSync", pdsOrigin);
+    const credentialKey = await getProbeCredentialKey();
+    const res = await fetchFn(authSyncUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify({ space: workspaceUri(did, "probe"), credentialKey }),
+      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+    });
+    if (res.status === 408 || res.status === 425 || res.status === 429 || res.status >= 500) {
+      await res.body?.cancel().catch(() => undefined);
+      return { state: "unavailable", cause: new Error(`authorizeSpaceSync probe returned HTTP ${res.status}`) };
+    }
+    const body = await readUpstreamJson(res, PROBE_RESPONSE_LIMIT_BYTES);
+    if (body && typeof body === "object" && !Array.isArray(body)) {
+      const suspended = classifyProbeErrorCode((body as { error?: unknown }).error);
+      if (suspended) return { state: "suspended", code: suspended };
+    }
+    if (res.status === 200 || res.status === 400 || res.status === 401 || res.status === 403) {
+      return { state: "active" };
+    }
+    return { state: "unavailable", cause: new Error(`Unexpected probe status ${res.status}`) };
+  } catch (error) {
+    return { state: "unavailable", cause: error };
+  }
 }
 
 async function approvedAgainSince(did: string, approved: NodeSavedSession): Promise<boolean> {
@@ -409,12 +611,15 @@ export async function authorityOAuthFetch(
   return response;
 }
 
-async function createAuthorityClient(sessionStore: Store<NodeSavedSession>): Promise<NodeOAuthClient> {
+async function createAuthorityClient(
+  sessionStore: Store<NodeSavedSession>,
+  upstreamFetch?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>,
+): Promise<NodeOAuthClient> {
   const config = authorityClientConfig();
   return new NodeOAuthClient({
     clientMetadata: authorityClientMetadata(config),
     keyset: await Promise.all(config.authorityClientKeys.map((key) => JoseKey.fromImportable(key, key.kid))),
-    fetch: authorityOAuthFetch,
+    fetch: upstreamFetch ? (input, init) => authorityOAuthFetch(input, init, upstreamFetch) : authorityOAuthFetch,
     requestLock: oauthSqliteRequestLock,
     allowHttp: config.operatorUrl.protocol === "http:",
     plcDirectoryUrl: getConfig().plcDirectoryUrl,

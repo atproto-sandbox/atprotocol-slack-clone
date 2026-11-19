@@ -7,6 +7,11 @@ import { parseSpaceUri } from "@flock/protocol/keys";
 
 export type FakeMember = { did: string; read: boolean; write: boolean };
 
+export type FakeAuthorityAccountStatus = {
+  active: boolean;
+  status?: "takendown" | "deactivated" | "suspended";
+};
+
 export type FakeAuthorityPds = {
   session: OAuthSession;
   /** Every write, in order, as `createSpace <uri>`, `putRecord <space> <collection>/<rkey>`, `putMembers <space> <did>` or `removeMembers <space> <did>`. */
@@ -17,6 +22,8 @@ export type FakeAuthorityPds = {
   recordsOf(space: string, collection: string): Map<string, Record<string, unknown>>;
   /** A space's member list; a test that reaches for it makes the space exist, as if it was created. */
   membersOf(space: string): Map<string, FakeMember>;
+  /** Updates the authority's account status reported by `getRepoStatus` and `listSpaces`. */
+  setAccountStatus(status: FakeAuthorityAccountStatus): void;
 };
 
 type RequestBody = {
@@ -32,6 +39,8 @@ type RequestBody = {
 
 export type FakeAuthorityPdsOptions = {
   onWrite?: () => void;
+  /** Initial account status reported by `com.atproto.sync.getRepoStatus` and `com.atproto.space.listSpaces`. */
+  accountStatus?: FakeAuthorityAccountStatus;
   /** Answers a request in place of the fake (a refusal, an outage), or returns undefined to let the fake answer it. */
   intercept?: (method: string, target: { space?: string; collection?: string; spaceType?: string }) => Response | undefined;
 };
@@ -43,6 +52,7 @@ export function fakeAuthorityPds(did: string, options: FakeAuthorityPdsOptions =
   const members = new Map<string, Map<string, FakeMember>>();
   const writes: string[] = [];
   const calls: string[] = [];
+  let accountStatus: FakeAuthorityAccountStatus = options.accountStatus ?? { active: true };
   const recordMap = (space: string, collection: string) => {
     const key = `${space} ${collection}`;
     if (!records.has(key)) records.set(key, new Map());
@@ -103,6 +113,40 @@ export function fakeAuthorityPds(did: string, options: FakeAuthorityPdsOptions =
           return spaces.has(params.get("space")!)
             ? Response.json({ space: params.get("space"), policy: memberspacePolicy() })
             : Response.json({ error: "SpaceNotFound", message: "Space not found" }, { status: 400 });
+        case "com.atproto.sync.getRepoStatus": {
+          const targetDid = params.get("did") ?? did;
+          if (targetDid !== did) {
+            return Response.json({ error: "RepoNotFound", message: "Repo not found" }, { status: 400 });
+          }
+          if (!accountStatus.active) {
+            return Response.json({ did, active: false, status: accountStatus.status ?? "takendown" });
+          }
+          return Response.json({ did, active: true, rev: "3kabcdefghij2" });
+        }
+        case "com.atproto.space.listSpaces": {
+          if (!accountStatus.active) {
+            const code = accountStatus.status === "deactivated" ? "RepoDeactivated" : "RepoTakendown";
+            return Response.json({ error: code, message: "Repo is not active" }, { status: 400 });
+          }
+          const spaceDidFilter = params.get("spaceDid");
+          const spaceTypeFilter = params.get("spaceType");
+          const rawLimit = params.get("limit");
+          const limit = rawLimit ? Number(rawLimit) : 50;
+          const matching = [...spaces]
+            .filter((uri) => {
+              const parsed = parseSpaceUri(uri);
+              if (!parsed) return false;
+              if (spaceDidFilter && parsed.authorityDid !== spaceDidFilter) return false;
+              if (spaceTypeFilter && parsed.type !== spaceTypeFilter) return false;
+              return true;
+            })
+            .sort();
+          const slice = matching.slice(0, limit);
+          return Response.json({
+            spaces: slice.map((spaceUri) => ({ space: spaceUri })),
+            ...(slice.length < matching.length ? { cursor: slice.at(-1) } : {}),
+          });
+        }
         case "com.atproto.space.listRecords": {
           const collection = params.get("collection")!;
           return Response.json({ records: [...recordMap(params.get("space")!, collection)].map(([rkey, value]) => ({ collection, rkey, value })) });
@@ -151,5 +195,14 @@ export function fakeAuthorityPds(did: string, options: FakeAuthorityPdsOptions =
       }
     },
   } as unknown as OAuthSession;
-  return { session, writes, calls, recordsOf, membersOf };
+  return {
+    session,
+    writes,
+    calls,
+    recordsOf,
+    membersOf,
+    setAccountStatus(status) {
+      accountStatus = status;
+    },
+  };
 }

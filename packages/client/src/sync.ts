@@ -411,6 +411,7 @@ export class SyncCore {
           }
         }
         state.writers = [...byDid.values()];
+        state.writersListedAt = now;
         state.spaceRev = maxOf(state.spaceRev, moved.spaceRev === null ? [] : [moved.spaceRev]);
         reported = writes;
       }

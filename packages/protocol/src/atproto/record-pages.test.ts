@@ -58,7 +58,7 @@ test("bounded writer lookahead distinguishes an exact limit from actual overflow
   assert.equal(exactResult.truncated, false);
   assert.deepEqual(exact.calls.map(({ limit, cursor }) => ({ limit, cursor })), [
     { limit: 2, cursor: undefined },
-    { limit: 1, cursor: "page-two" },
+    { limit: 2, cursor: "page-two" },
   ]);
 
   const overflow = fakeClient([
@@ -67,7 +67,7 @@ test("bounded writer lookahead distinguishes an exact limit from actual overflow
   ]);
   const overflowResult = await listBoundedWriters(overflow.client, { space: "space", maxRepos: 2 });
   assert.equal(overflowResult.writers.length, 2);
-  assert.equal(overflowResult.spaceRev, "3");
+  assert.equal(overflowResult.spaceRev, "4");
   assert.equal(overflowResult.truncated, true);
 });
 
@@ -114,8 +114,7 @@ test("bounded writer scan rejects oversized pages and malformed entries", async 
 test("a writer updated or removed while paginating uses latest-wins cross-page dedup", async () => {
   const reappearing = fakeClient([
     { repos: [writerWrite("a", "2"), writerWrite("b", "3")], cursor: "3" },
-    { repos: [writerRemoved("a", "4")], cursor: "4" },
-    { repos: [writerWrite("c", "5")], cursor: "5" },
+    { repos: [writerRemoved("a", "4"), writerWrite("c", "5")], cursor: "5" },
     { repos: [writerWrite("b", "6")] },
   ]);
   const result = await listBoundedWriters(reappearing.client, { space: "space", maxRepos: 2 });
@@ -125,7 +124,52 @@ test("a writer updated or removed while paginating uses latest-wins cross-page d
   );
   assert.equal(result.spaceRev, "6");
   assert.equal(result.truncated, false);
-  assert.deepEqual(reappearing.calls.map(({ cursor }) => cursor), [undefined, "3", "4", "5"]);
+  assert.deepEqual(reappearing.calls.map(({ cursor }) => cursor), [undefined, "3", "5"]);
+});
+
+test("interleaved write past maxRepos followed by later #repoRemoved fits the bound without false truncation", async () => {
+  // Exact Codex M2 case: maxRepos = 2, page 1 returns A@2, B@3; page 2 returns C@4, B#removed@5 -> {A@2, C@4}, truncated: false
+  const interleaved = fakeClient([
+    { repos: [writerWrite("a", "2"), writerWrite("b", "3")], cursor: "3" },
+    { repos: [writerWrite("c", "4"), writerRemoved("b", "5")], cursor: "5" },
+    { repos: [] },
+  ]);
+  const result = await listBoundedWriters(interleaved.client, { space: "space", maxRepos: 2 });
+  assert.deepEqual(
+    result.writers.map(({ repo, spaceRev }) => [repo, spaceRev]),
+    [["did:plc:a", "2"], ["did:plc:c", "4"]],
+  );
+  assert.equal(result.spaceRev, "5");
+  assert.equal(result.truncated, false);
+
+  // Cross-page removal on page 3 after provisional overflow on page 2 also resolves to truncated: false
+  const crossPageRemoval = fakeClient([
+    { repos: [writerWrite("a", "2"), writerWrite("b", "3")], cursor: "3" },
+    { repos: [writerWrite("c", "4"), writerWrite("d", "5")], cursor: "5" },
+    { repos: [writerRemoved("b", "6"), writerRemoved("d", "7")] },
+  ]);
+  const crossPageResult = await listBoundedWriters(crossPageRemoval.client, { space: "space", maxRepos: 2 });
+  assert.deepEqual(
+    crossPageResult.writers.map(({ repo, spaceRev }) => [repo, spaceRev]),
+    [["did:plc:a", "2"], ["did:plc:c", "4"]],
+  );
+  assert.equal(crossPageResult.spaceRev, "7");
+  assert.equal(crossPageResult.truncated, false);
+
+  // Raw-entry ceiling stops an infinite churn stream and flags truncated: true
+  const churnPages = Array.from({ length: 10 }, (_, idx) => ({
+    repos: [
+      writerWrite("a", String(idx * 2 + 1).padStart(4, "0")),
+      writerRemoved("b", String(idx * 2 + 2).padStart(4, "0")),
+    ],
+    cursor: `c${idx}`,
+  }));
+  const churnClient = fakeClient(churnPages);
+  const capped = await listBoundedWriters(churnClient.client, { space: "space", maxRepos: 2, maxRawEntries: 6 });
+  assert.equal(capped.truncated, true);
+  assert.equal(capped.writers.length, 1);
+  assert.equal(capped.writers[0]?.repo, "did:plc:a");
+  assert.equal(churnClient.calls.length, 3);
 });
 
 test("remove-then-write across pages re-adds the writer at the newer entry", async () => {
@@ -145,25 +189,22 @@ test("remove-then-write across pages re-adds the writer at the newer entry", asy
 test("removals do not consume maxRepos and do not trigger false truncation", async () => {
   const onlyRemovalsLookahead = fakeClient([
     { repos: [writerWrite("a", "2"), writerWrite("b", "3")], cursor: "3" },
-    { repos: [writerRemoved("c", "4")], cursor: "4" },
-    { repos: [writerRemoved("b", "5")], cursor: "5" },
-    { repos: [writerWrite("d", "6")], cursor: "6" },
-    { repos: [writerWrite("e", "7")] },
+    { repos: [writerRemoved("c", "4"), writerRemoved("b", "5")], cursor: "5" },
+    { repos: [writerWrite("d", "6"), writerWrite("e", "7")] },
   ]);
   const result = await listBoundedWriters(onlyRemovalsLookahead.client, { space: "space", maxRepos: 2 });
   assert.deepEqual(
     result.writers.map(({ repo, spaceRev }) => [repo, spaceRev]),
     [["did:plc:a", "2"], ["did:plc:d", "6"]],
   );
-  assert.equal(result.spaceRev, "6");
+  assert.equal(result.spaceRev, "7");
   assert.equal(result.truncated, true);
 });
 
 test("reappearing writers count once toward the bound and do not cause false truncation", async () => {
   const noisy = fakeClient([
     { repos: [writerWrite("a", "2"), writerWrite("b", "3")], cursor: "3" },
-    { repos: [writerWrite("a", "4")], cursor: "4" },
-    { repos: [writerWrite("b", "5")], cursor: "5" },
+    { repos: [writerWrite("a", "4"), writerWrite("b", "5")], cursor: "5" },
     { repos: [writerWrite("a", "6")] },
   ]);
   const result = await listBoundedWriters(noisy.client, { space: "space", maxRepos: 2 });
@@ -174,11 +215,11 @@ test("reappearing writers count once toward the bound and do not cause false tru
 test("a lookahead entry for an already collected writer does not truncate, a later new writer does", async () => {
   const lookahead = fakeClient([
     { repos: [writerWrite("a", "2"), writerWrite("b", "3")], cursor: "3" },
-    { repos: [writerWrite("a", "4")], cursor: "4" },
-    { repos: [writerWrite("c", "5")] },
+    { repos: [writerWrite("a", "4"), writerWrite("c", "5")] },
   ]);
   const result = await listBoundedWriters(lookahead.client, { space: "space", maxRepos: 2 });
   assert.deepEqual(result.writers.map(({ repo, spaceRev }) => [repo, spaceRev]), [["did:plc:a", "4"], ["did:plc:b", "3"]]);
+  assert.equal(result.spaceRev, "5");
   assert.equal(result.truncated, true);
 });
 
@@ -521,6 +562,49 @@ test("listWritersSince handles removals and falls back to full reconcile on Inva
   assert.equal(attempts, 2);
   assert.equal(recovered.fullReconcile, true);
   assert.equal(recovered.writers?.length, 1);
+
+  // Incremental updates exceeding maxRepos due to churn + #repoRemoved tombstones fall back cleanly to fullReconciliation
+  const churnQueries: Array<{ cursor?: string; limit?: number }> = [];
+  const churnClient = {
+    query: async (_method: string, params: { cursor?: string; limit?: number }) => {
+      churnQueries.push(params);
+      if (params.cursor === recentTid) {
+        return {
+          repos: [
+            writerWrite("a", tidAtMs(now - 40_000)),
+            writerRemoved("b", tidAtMs(now - 30_000)),
+            writerWrite("c", tidAtMs(now - 20_000)),
+          ],
+          cursor: tidAtMs(now - 20_000),
+        };
+      }
+      // Un-cursored fullBoundedWriters scan sees A@1, B@2, C@4, B#removed@5 -> active {A, C} <= maxRepos = 2
+      if (!params.cursor) {
+        return {
+          repos: [
+            writerWrite("a", tidAtMs(now - 40_000)),
+            writerWrite("b", tidAtMs(now - 35_000)),
+          ],
+          cursor: tidAtMs(now - 35_000),
+        };
+      }
+      return {
+        repos: [
+          writerWrite("c", tidAtMs(now - 20_000)),
+          writerRemoved("b", tidAtMs(now - 10_000)),
+        ],
+      };
+    },
+  } as unknown as AtprotoClient;
+  const churnReconciled = await listWritersSince(churnClient, { space, since: recentTid, now, maxRepos: 2 });
+  assert.equal(churnReconciled.fullReconcile, true);
+  assert.deepEqual(
+    churnReconciled.writers?.map((w) => w.repo),
+    ["did:plc:a", "did:plc:c"],
+  );
+  assert.equal(churnReconciled.spaceRev, tidAtMs(now - 10_000));
+  assert.equal(churnQueries[0]?.cursor, recentTid);
+  assert.equal(churnQueries[1]?.cursor, undefined);
 });
 
 test("fetchRepoOpsPages verifies commit presence on every page, passes RepoNotFound through, and strips/bounds fields", async () => {

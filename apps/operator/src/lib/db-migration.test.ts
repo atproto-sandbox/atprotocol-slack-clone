@@ -56,24 +56,25 @@ test("legacy notice and registration tables migrate cleanly, resetting tokenless
 
   assert.deepEqual(
     columns("notification_registration"),
-    ["service_ref", "space_uri", "expires_at", "workspace_uri", "token", "renew_at", "last_space_rev"],
+    ["service_ref", "space_uri", "expires_at", "workspace_uri", "token", "renew_at", "last_space_rev", "generation"],
   );
   const migratedRow = db
-    .prepare("SELECT expires_at, token, renew_at, last_space_rev FROM notification_registration WHERE space_uri = ?")
-    .get(channelA) as { expires_at: number; token: string; renew_at: number; last_space_rev: string | null };
+    .prepare("SELECT expires_at, token, renew_at, last_space_rev, generation FROM notification_registration WHERE space_uri = ?")
+    .get(channelA) as { expires_at: number; token: string; renew_at: number; last_space_rev: string | null; generation: number };
   assert.deepEqual(migratedRow, {
     expires_at: 0,
     token: "",
     renew_at: 0,
     last_space_rev: null,
-  }, "legacy registerNotify row is reset to expires_at=0, renew_at=0 so startup renews it immediately");
+    generation: 1,
+  }, "legacy registerNotify row is reset to expires_at=0, renew_at=0, generation=1 so startup renews it immediately");
 
   // Seed an active R12 row with a non-empty token, close and re-open DB: R12 columns must stay intact.
   const r12ExpiresAt = Date.now() + 600_000;
   const r12RenewAt = r12ExpiresAt - 180_000;
-  db.prepare(`INSERT INTO notification_registration (service_ref, space_uri, expires_at, workspace_uri, token, renew_at, last_space_rev)
-    VALUES (?, ?, ?, ?, ?, ?, ?)`)
-    .run(SERVICE_REF, channelB, r12ExpiresAt, "at://did:plc:a/space/new.flock.workspace/w", "stable-token-b", r12RenewAt, "3kabcdefghij2");
+  db.prepare(`INSERT INTO notification_registration (service_ref, space_uri, expires_at, workspace_uri, token, renew_at, last_space_rev, generation)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(SERVICE_REF, channelB, r12ExpiresAt, "at://did:plc:a/space/new.flock.workspace/w", "stable-token-b", r12RenewAt, "3kabcdefghij2", 3);
 
   const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map((row) => row.name);
   assert.equal(tables.some((name) => name.includes("dm")), false, "operator SQLite schema holds zero DM tables");
@@ -81,12 +82,54 @@ test("legacy notice and registration tables migrate cleanly, resetting tokenless
   closeDb();
   const reopened = getRawDb();
   const preserved = reopened
-    .prepare("SELECT expires_at, token, renew_at, last_space_rev FROM notification_registration WHERE space_uri = ?")
-    .get(channelB) as { expires_at: number; token: string; renew_at: number; last_space_rev: string | null };
+    .prepare("SELECT expires_at, token, renew_at, last_space_rev, generation FROM notification_registration WHERE space_uri = ?")
+    .get(channelB) as { expires_at: number; token: string; renew_at: number; last_space_rev: string | null; generation: number };
   assert.deepEqual(preserved, {
     expires_at: r12ExpiresAt,
     token: "stable-token-b",
     renew_at: r12RenewAt,
     last_space_rev: "3kabcdefghij2",
+    generation: 3,
   });
+});
+
+test("startup migration purges historical pre-R12 new.flock.dm.* rows from space_notification and floor tables while keeping workspace/channel rows", () => {
+  closeDb();
+
+  const preR12 = new BetterSqlite3(PATH);
+  preR12.prepare("DELETE FROM space_notification").run();
+  preR12.prepare("DELETE FROM space_notification_type_floor").run();
+  preR12.prepare("DELETE FROM space_notification_space_floor").run();
+  preR12.prepare("INSERT INTO space_notification (space_uri, space_type, type_seq, repo_did, rev, notified_at) VALUES (?, ?, ?, ?, ?, ?)")
+    .run("at://did:plc:a/space/new.flock.channel/general", "new.flock.channel", 1, "did:plc:w", "3kabcdefghij2", 100);
+  preR12.prepare("INSERT INTO space_notification (space_uri, space_type, type_seq, repo_did, rev, notified_at) VALUES (?, ?, ?, ?, ?, ?)")
+    .run("at://did:plc:a/space/new.flock.dm.inbox/self", "new.flock.dm.inbox", 1, "did:plc:w", "3kabcdefghij3", 101);
+  preR12.prepare("INSERT INTO space_notification (space_uri, space_type, type_seq, repo_did, rev, notified_at) VALUES (?, ?, ?, ?, ?, ?)")
+    .run("at://did:plc:a/space/new.flock.dm.conversation/3kabcdefghij4", "new.flock.dm.conversation", 1, "did:plc:w", "3kabcdefghij5", 102);
+
+  preR12.prepare("INSERT INTO space_notification_type_floor VALUES (?, ?)").run("new.flock.channel", 10);
+  preR12.prepare("INSERT INTO space_notification_type_floor VALUES (?, ?)").run("new.flock.dm.inbox", 20);
+  preR12.prepare("INSERT INTO space_notification_type_floor VALUES (?, ?)").run("new.flock.dm.conversation", 30);
+
+  preR12.prepare("INSERT INTO space_notification_space_floor VALUES (?, ?, ?)")
+    .run("at://did:plc:a/space/new.flock.channel/general", "new.flock.channel", 15);
+  preR12.prepare("INSERT INTO space_notification_space_floor VALUES (?, ?, ?)")
+    .run("at://did:plc:a/space/new.flock.dm.inbox/self", "new.flock.dm.inbox", 25);
+  preR12.prepare("INSERT INTO space_notification_space_floor VALUES (?, ?, ?)")
+    .run("at://did:plc:a/space/new.flock.dm.conversation/3kabcdefghij4", "new.flock.dm.conversation", 35);
+  preR12.close();
+
+  const db = getRawDb();
+  assert.deepEqual(
+    db.prepare("SELECT space_type FROM space_notification").all(),
+    [{ space_type: "new.flock.channel" }],
+  );
+  assert.deepEqual(
+    db.prepare("SELECT space_type FROM space_notification_type_floor").all(),
+    [{ space_type: "new.flock.channel" }],
+  );
+  assert.deepEqual(
+    db.prepare("SELECT space_type FROM space_notification_space_floor").all(),
+    [{ space_type: "new.flock.channel" }],
+  );
 });

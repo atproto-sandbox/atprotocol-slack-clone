@@ -220,6 +220,36 @@ test("space CRUD, field renames (space, spaceDid, repo), listSpaces metadata, an
     "NotAuthorized",
   );
 
+  // Non-authority calls on a nonexistent space fail with NotAuthorized BEFORE SpaceNotFound
+  const missingSpace = `at://${ALICE}/space/${TEST_SPACE_TYPE}/does-not-exist`;
+  await assertXrpcError(bob.query("com.atproto.space.getSpace", { space: missingSpace }), 400, "NotAuthorized");
+  await assertXrpcError(bob.query("com.atproto.memberspace.listMembers", { space: missingSpace }), 400, "NotAuthorized");
+  await assertXrpcError(
+    bob.procedure("com.atproto.space.updateSpace", { space: missingSpace, policy: PERSONAL_POLICY }),
+    400,
+    "NotAuthorized",
+  );
+  await assertXrpcError(
+    bob.procedure("com.atproto.memberspace.putMembers", { space: missingSpace, members: [] }),
+    400,
+    "NotAuthorized",
+  );
+  await assertXrpcError(
+    bob.procedure("com.atproto.memberspace.removeMembers", { space: missingSpace, dids: [] }),
+    400,
+    "NotAuthorized",
+  );
+  await assertXrpcError(
+    bob.procedure("com.atproto.space.removeWriter", { space: missingSpace, repo: BOB }),
+    400,
+    "NotAuthorized",
+  );
+  await assertXrpcError(
+    bob.procedure("com.atproto.space.deleteSpace", { space: missingSpace }),
+    400,
+    "NotAuthorized",
+  );
+
   // putMembers + write populates listSpaces with repoRev/data and authority spaceRev
   await alice.procedure("com.atproto.memberspace.putMembers", {
     space,
@@ -707,7 +737,7 @@ test("inline notify registration, confirmation reuse, refusal withdrawal, and no
   });
   assert.equal(notifications.length, 4);
 
-  // Re-register after lapse triggers fresh confirmRegistration; retryable 503 preserves until #spaceDeleted
+  // Re-register after 400-abandoned lapse triggers fresh confirmRegistration
   const t6 = await carol.query<{ token: string }>("com.atproto.space.getDelegationToken", { space });
   const reRegB = await authorizeSync(network, ALICE, {
     space,
@@ -717,6 +747,19 @@ test("inline notify registration, confirmation reuse, refusal withdrawal, and no
   assert.equal(reRegB.status, 200);
   assert.equal(confirmations.length, 3);
 
+  // Retained-lapsed silent renewal: advance clock past 10m without #registrationExpired 400 abandonment,
+  // then re-authorize same (space, endpoint, token) -> confirmRegistration count stays unchanged!
+  network.advanceClock(600_001);
+  const t6Silent = await carol.query<{ token: string }>("com.atproto.space.getDelegationToken", { space });
+  const silentRenewB = await authorizeSync(network, ALICE, {
+    space,
+    delegationToken: t6Silent.token,
+    notify: { endpoint: watcherUrl, token: "tok-b" },
+  });
+  assert.equal(silentRenewB.status, 200);
+  assert.equal(confirmations.length, 3, "retained lapsed registration renews silently with 0 extra confirmRegistration calls");
+
+  // And after retryable 503 on #registrationExpired, the retained row also renews silently and stays until #spaceDeleted
   network.advanceClock(600_000);
   expiredStatus = 503;
   await alice.procedure("com.atproto.space.putRecord", {
@@ -731,6 +774,15 @@ test("inline notify registration, confirmation reuse, refusal withdrawal, and no
     notifications[4]!.update.$type,
     "com.atproto.space.notifySpaceUpdate#registrationExpired",
   );
+
+  const t7Silent = await carol.query<{ token: string }>("com.atproto.space.getDelegationToken", { space });
+  const silentRenewAfter503 = await authorizeSync(network, ALICE, {
+    space,
+    delegationToken: t7Silent.token,
+    notify: { endpoint: watcherUrl, token: "tok-b" },
+  });
+  assert.equal(silentRenewAfter503.status, 200);
+  assert.equal(confirmations.length, 3);
 
   await alice.procedure("com.atproto.space.deleteSpace", { space });
   await network.flushNotifications();
@@ -1704,6 +1756,7 @@ test("ACCESS_FULL app-password refusal strictly on account-authenticated space/m
     ["com.atproto.space.deleteRecord", { repo: ALICE, space, collection: TEST_COLLECTION, rkey: "k1" }],
     ["com.atproto.space.applyWrites", { repo: ALICE, space, writes: [] }],
     ["com.atproto.space.clearRecords", { repo: ALICE, space }],
+    ["com.atproto.space.importSpaceMeta", {}],
     ["com.atproto.memberspace.putMembers", { space, members: [] }],
     ["com.atproto.memberspace.removeMembers", { space, dids: [] }],
   ];
@@ -1719,6 +1772,9 @@ test("ACCESS_FULL app-password refusal strictly on account-authenticated space/m
     ["com.atproto.space.getLatestCommit", { repo: ALICE, space }],
     ["com.atproto.space.listRepoOps", { repo: ALICE, space }],
     ["com.atproto.space.getRepo", { repo: ALICE, space }],
+    ["com.atproto.space.getBlob", { repo: ALICE, space, cid: "bafyreiaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }],
+    ["com.atproto.space.listBlobs", { repo: ALICE, space }],
+    ["com.atproto.space.exportSpaceMeta", { space }],
     ["com.atproto.space.getRecord", { repo: ALICE, space, collection: TEST_COLLECTION, rkey: "k1" }],
     ["com.atproto.space.listRecords", { repo: ALICE, space, collection: TEST_COLLECTION }],
     ["com.atproto.memberspace.listMembers", { space }],
@@ -1748,22 +1804,24 @@ test("ACCESS_FULL app-password refusal strictly on account-authenticated space/m
   assert.equal(httpBlocked.json.error, "InvalidToken");
   assert.equal(httpBlocked.json.message, "Bad token scope");
 
-  // importRepo also fails with Bad token scope
-  const importBlocked = await fetchJson(
-    network,
-    `${pds}/xrpc/com.atproto.space.importRepo`,
-    {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${session.accessJwt}`,
-        "content-type": STAR_MEDIA_TYPE,
+  // importRepo and importSpaceMeta over binary STAR POST also fail with Bad token scope
+  for (const method of ["com.atproto.space.importRepo", "com.atproto.space.importSpaceMeta"]) {
+    const importBlocked = await fetchJson(
+      network,
+      `${pds}/xrpc/${method}`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${session.accessJwt}`,
+          "content-type": STAR_MEDIA_TYPE,
+        },
+        body: new Uint8Array(),
       },
-      body: new Uint8Array(),
-    },
-  );
-  assert.equal(importBlocked.status, 400);
-  assert.equal(importBlocked.json.error, "InvalidToken");
-  assert.equal(importBlocked.json.message, "Bad token scope");
+    );
+    assert.equal(importBlocked.status, 400);
+    assert.equal(importBlocked.json.error, "InvalidToken");
+    assert.equal(importBlocked.json.message, "Bad token scope");
+  }
 
   // authorizeSpaceSync is NOT account-authenticated -> succeeds even if app-password Bearer is sent!
   const authSyncWithAppPass = await authorizeSync(network, ALICE, {

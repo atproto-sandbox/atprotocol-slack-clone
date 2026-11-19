@@ -6,7 +6,7 @@ import test, { after, beforeEach } from "node:test";
 import { closeDb, getRawDb } from "../lib/db";
 import { dmConversationUri, dmInboxUri } from "@flock/protocol/keys";
 import { WebhookAuthError } from "./errors";
-import { authenticateSpaceWebhook, deriveDmNotifyToken, operatorNotifyEndpoint } from "./space-notification";
+import { authenticateSpaceNotification, authenticateSpaceWebhook, deriveDmNotifyToken, DM_TOKEN_EPOCH_MS, operatorNotifyEndpoint } from "./space-notification";
 
 const DIRECTORY = mkdtempSync(join(tmpdir(), "slack-space-notification-test-"));
 const SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
@@ -66,27 +66,36 @@ test("authenticateSpaceWebhook rejects missing, empty, mismatched, unregistered,
   assert.throws(() => authenticateSpaceWebhook(CHANNEL, "other-service-token"), isWebhookRefusal);
 });
 
-test("deriveDmNotifyToken is deterministic per (space, callerDid), isolates callers, and verifies without touching SQLite", () => {
+test("deriveDmNotifyToken is deterministic within a 30m epoch per (space, callerDid), accepts [epoch, epoch - 1], rejects expired/future epochs with 400, and touches zero SQLite rows", () => {
   const dmConv = dmConversationUri(ALICE, "3kabcdefghij2");
   const dmInbox = dmInboxUri(ALICE);
+  const baseMs = 100 * DM_TOKEN_EPOCH_MS + 5_000;
+  const key = Buffer.from(KEY_HEX, "hex");
 
-  const aliceToken1 = deriveDmNotifyToken(dmConv, ALICE);
-  const aliceToken2 = deriveDmNotifyToken(dmConv, ALICE);
-  const bobToken = deriveDmNotifyToken(dmConv, BOB);
-  assert.equal(aliceToken1, aliceToken2, "same caller and DM space yields stable token across renewals");
+  const aliceToken1 = deriveDmNotifyToken(dmConv, ALICE, key, baseMs);
+  const aliceToken2 = deriveDmNotifyToken(dmConv, ALICE, key, baseMs + 10 * 60_000);
+  const bobToken = deriveDmNotifyToken(dmConv, BOB, key, baseMs);
+  assert.equal(aliceToken1, aliceToken2, "same caller, DM space, and 30m epoch yields stable token across renewals");
   assert.notEqual(aliceToken1, bobToken, "cross-caller isolation prevents registration withdrawal DoS");
-  assert.ok(aliceToken1.startsWith("dm1."), "uses versioned dm1 prefix");
+  assert.equal(aliceToken1.split(".").length, 4, "dm1.<epochHex>.<caller>.<mac>");
+  assert.ok(aliceToken1.startsWith("dm1.64."), "encodes lowercase hex epoch 100 -> 0x64");
 
-  assert.deepEqual(authenticateSpaceWebhook(dmConv, aliceToken1), { kind: "dm", callerDid: ALICE });
-  assert.deepEqual(authenticateSpaceWebhook(dmConv, bobToken), { kind: "dm", callerDid: BOB });
-  assert.deepEqual(authenticateSpaceWebhook(dmInbox, deriveDmNotifyToken(dmInbox, ALICE)), { kind: "dm", callerDid: ALICE });
+  // Accepted in current epoch (100) and immediate next epoch (101, where token is currentEpoch - 1)
+  assert.deepEqual(authenticateSpaceNotification(dmConv, aliceToken1, key, baseMs), { kind: "dm", callerDid: ALICE });
+  assert.deepEqual(authenticateSpaceNotification(dmConv, aliceToken1, key, baseMs + DM_TOKEN_EPOCH_MS), { kind: "dm", callerDid: ALICE });
+  assert.deepEqual(authenticateSpaceWebhook(dmConv, bobToken, key, baseMs), { kind: "dm", callerDid: BOB });
+  assert.deepEqual(authenticateSpaceWebhook(dmInbox, deriveDmNotifyToken(dmInbox, ALICE, key, baseMs), key, baseMs), { kind: "dm", callerDid: ALICE });
+
+  // Rejected once [epoch, epoch - 1] rolls past (epoch 102+) and rejected if presented in a past clock (future token epoch)
+  assert.throws(() => authenticateSpaceNotification(dmConv, aliceToken1, key, baseMs + 2 * DM_TOKEN_EPOCH_MS), isWebhookRefusal);
+  assert.throws(() => authenticateSpaceNotification(dmConv, aliceToken1, key, baseMs - DM_TOKEN_EPOCH_MS), isWebhookRefusal);
 
   // Zero SQLite rows exist in notification_registration
   const count = (getRawDb().prepare("SELECT count(*) AS count FROM notification_registration").get() as { count: number }).count;
   assert.equal(count, 0);
 });
 
-test("authenticateSpaceWebhook rejects cross-space, tampered, non-dm1, wrong-key, and non-DM-target dm1 tokens with 400", () => {
+test("authenticateSpaceWebhook rejects cross-space, tampered, legacy 3-part, non-canonical hex, non-dm1, wrong-key, and non-DM-target dm1 tokens with 400", () => {
   const convA = dmConversationUri(ALICE, "3kabcdefghij2");
   const convB = dmConversationUri(ALICE, "3kabcdefghij3");
   const validA = deriveDmNotifyToken(convA, ALICE);
@@ -99,14 +108,17 @@ test("authenticateSpaceWebhook rejects cross-space, tampered, non-dm1, wrong-key
   assert.throws(() => deriveDmNotifyToken(CHANNEL, ALICE), /DM spaces/);
 
   // Tampered MAC
-  const [ver, callerPart, macPart] = validA.split(".");
+  const [ver, epochHex, callerPart, macPart] = validA.split(".");
   const flipped = `${macPart!.slice(0, -1)}${macPart!.endsWith("A") ? "B" : "A"}`;
-  assert.throws(() => authenticateSpaceWebhook(convA, `${ver}.${callerPart}.${flipped}`), isWebhookRefusal);
+  assert.throws(() => authenticateSpaceWebhook(convA, `${ver}.${epochHex}.${callerPart}.${flipped}`), isWebhookRefusal);
 
-  // Non-dm1 version prefix or random string on DM space
-  assert.throws(() => authenticateSpaceWebhook(convA, `dm2.${callerPart}.${macPart}`), isWebhookRefusal);
+  // Legacy 3-part timeless dm1 token, non-canonical hex epoch, non-dm1 version prefix, or invalid DID
+  assert.throws(() => authenticateSpaceWebhook(convA, `dm1.${callerPart}.${macPart}`), isWebhookRefusal);
+  assert.throws(() => authenticateSpaceWebhook(convA, `dm1.0${epochHex}.${callerPart}.${macPart}`), isWebhookRefusal);
+  assert.throws(() => authenticateSpaceWebhook(convA, `dm1.${epochHex!.toUpperCase()}.${callerPart}.${macPart}`), isWebhookRefusal);
+  assert.throws(() => authenticateSpaceWebhook(convA, `dm2.${epochHex}.${callerPart}.${macPart}`), isWebhookRefusal);
   assert.throws(() => authenticateSpaceWebhook(convA, "plain-random-token"), isWebhookRefusal);
-  assert.throws(() => authenticateSpaceWebhook(convA, `dm1.not_a_did.${macPart}`), isWebhookRefusal);
+  assert.throws(() => authenticateSpaceWebhook(convA, `dm1.${epochHex}.not_a_did.${macPart}`), isWebhookRefusal);
 
   // Derived with a different operator encryption key
   const wrongKeyToken = deriveDmNotifyToken(convA, ALICE, Buffer.from("99".repeat(32), "hex"));

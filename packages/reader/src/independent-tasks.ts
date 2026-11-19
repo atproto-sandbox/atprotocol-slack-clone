@@ -166,7 +166,11 @@ export async function readIndependentTasksSpace(
     maxRecords,
   });
 
-  const allSetAside = [...snapshot.setAside, ...writerSetAside].sort((left, right) => left.did.localeCompare(right.did));
+  const writerSetAsideDids = new Set(writerSetAside.map((entry) => entry.did));
+  const allSetAside = [
+    ...snapshot.setAside.filter((entry) => !writerSetAsideDids.has(entry.did)),
+    ...writerSetAside,
+  ].sort((left, right) => left.did.localeCompare(right.did));
   const validated = collectValidatedTasksRecords(snapshot.authorityDid, tasksSpace, writerUniverse, perWriterRecords);
 
   const complete = snapshot.workspaceSnapshotComplete && allSetAside.length === 0;
@@ -280,12 +284,12 @@ export async function readIndependentTasksWorkspaceSnapshot(
   });
 }
 
-function buildHostSuspendedTasksResult(
+export function buildHostSuspendedTasksResult(
   snapshot: IndependentTasksWorkspaceSnapshot,
   reason: string,
 ): IndependentTasksReadResult {
   const setAside: IndependentTasksSetAside[] = [
-    ...snapshot.setAside,
+    ...snapshot.setAside.filter((entry) => entry.did !== snapshot.authorityDid),
     { did: snapshot.authorityDid, reason, permanent: false },
   ].sort((left, right) => left.did.localeCompare(right.did));
   const degradedReasons = [

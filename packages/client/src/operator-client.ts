@@ -11,6 +11,55 @@ const MAX_OPERATOR_RESPONSE_BYTES = 1024 * 1024;
  */
 const CHANGES_TOKEN_SECONDS = 14 * 60;
 const TOKEN_RENEW_BEFORE_SECONDS = 60;
+export const DEFAULT_DM_NOTIFY_TIMEOUT_MS = 10_000;
+
+export function createTimeoutSignal(
+  timeoutMs: number,
+  parentSignal?: AbortSignal | null,
+): { signal: AbortSignal; cleanup: () => void } {
+  const controller = new AbortController();
+  if (parentSignal?.aborted) {
+    controller.abort(parentSignal.reason ?? new DOMException("The operation was aborted.", "AbortError"));
+    return { signal: controller.signal, cleanup: () => {} };
+  }
+  const onParentAbort = () => {
+    controller.abort(parentSignal?.reason ?? new DOMException("The operation was aborted.", "AbortError"));
+  };
+  parentSignal?.addEventListener("abort", onParentAbort, { once: true });
+  const timer = setTimeout(() => {
+    controller.abort(new DOMException(`Operation timed out after ${timeoutMs}ms.`, "TimeoutError"));
+  }, timeoutMs);
+  const cleanup = () => {
+    clearTimeout(timer);
+    parentSignal?.removeEventListener("abort", onParentAbort);
+  };
+  controller.signal.addEventListener("abort", cleanup, { once: true });
+  return { signal: controller.signal, cleanup };
+}
+
+export function raceWithSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) {
+    void promise.catch(() => undefined);
+    return Promise.reject(signal.reason ?? new DOMException("The operation was aborted.", "AbortError"));
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      reject(signal.reason ?? new DOMException("The operation was aborted.", "AbortError"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
 
 export type ChangesAnswer = { head: string; changed: Array<{ space: string; cursor: string }>; denied: string[]; reset: string[] };
 
@@ -99,7 +148,10 @@ export class OperatorClient {
   constructor(
     private readonly transport: ClientTransport,
     private readonly service: OperatorService,
-    private readonly options: { onWorkspaceMutated?: (workspaceUri: string) => Promise<void> | void } = {},
+    private readonly options: {
+      onWorkspaceMutated?: (workspaceUri: string) => Promise<void> | void;
+      notifyTimeoutMs?: number;
+    } = {},
   ) {}
 
   get serviceRef(): string {
@@ -116,8 +168,14 @@ export class OperatorClient {
   }
 
   /** Requests a stateless per-caller PDS webhook notification target for a DM space after proving credential possession. */
-  getDmNotifyTarget(input: DmNotifyTargetInput, signal?: AbortSignal): Promise<DmNotifyTarget> {
-    return this.call(OPERATOR_METHOD.getDmNotifyTarget, { input }, signal);
+  async getDmNotifyTarget(input: DmNotifyTargetInput, signal?: AbortSignal): Promise<DmNotifyTarget> {
+    const timeoutMs = this.options.notifyTimeoutMs ?? DEFAULT_DM_NOTIFY_TIMEOUT_MS;
+    const { signal: composedSignal, cleanup } = createTimeoutSignal(timeoutMs, signal);
+    try {
+      return await this.call(OPERATOR_METHOD.getDmNotifyTarget, { input }, composedSignal);
+    } finally {
+      cleanup();
+    }
   }
 
   /** Creates the workspace `name` for the caller, under `authority` (a dedicated workspace account's DID) or their own account. */
@@ -160,23 +218,29 @@ export class OperatorClient {
   }
 
   private async call<T>(method: OperatorMethod, input: { input?: unknown; params?: Record<string, string> }, signal?: AbortSignal): Promise<T> {
-    const token = await this.token(method);
+    const token = await this.token(method, signal);
     const base = new URL(this.service.endpoint);
     base.pathname = `${base.pathname.replace(/\/$/, "")}/`;
     const url = new URL(`xrpc/${method}`, base);
     for (const [name, value] of Object.entries(input.params ?? {})) url.searchParams.set(name, value);
-    const response = await this.transport.fetchEndpoint(new Request(url, {
-      method: input.input === undefined ? "GET" : "POST",
-      redirect: "error",
-      ...(signal ? { signal } : {}),
-      headers: {
-        accept: "application/json",
-        authorization: `Bearer ${token}`,
-        ...(input.input === undefined ? {} : { "content-type": "application/json" }),
-      },
-      ...(input.input === undefined ? {} : { body: JSON.stringify(input.input) }),
-    }));
-    const body = await readUpstreamJson<T & { error?: string; message?: string }>(response, MAX_OPERATOR_RESPONSE_BYTES);
+    const response = await raceWithSignal(
+      this.transport.fetchEndpoint(new Request(url, {
+        method: input.input === undefined ? "GET" : "POST",
+        redirect: "error",
+        ...(signal ? { signal } : {}),
+        headers: {
+          accept: "application/json",
+          authorization: `Bearer ${token}`,
+          ...(input.input === undefined ? {} : { "content-type": "application/json" }),
+        },
+        ...(input.input === undefined ? {} : { body: JSON.stringify(input.input) }),
+      })),
+      signal,
+    );
+    const body = await raceWithSignal(
+      readUpstreamJson<T & { error?: string; message?: string }>(response, MAX_OPERATOR_RESPONSE_BYTES),
+      signal,
+    );
     const failure = operatorResponseFailure(response.status, response.ok, body);
     if (failure) {
       // A refused token is not reused.
@@ -187,20 +251,26 @@ export class OperatorClient {
   }
 
   /** A service token for one method: a fresh one per call, except the long poll's, which lasts fifteen minutes and is reused. */
-  private async token(method: OperatorMethod): Promise<string> {
+  private async token(method: OperatorMethod, signal?: AbortSignal): Promise<string> {
     const nowSeconds = Math.floor(transportNow(this.transport) / 1000);
-    if (method !== OPERATOR_METHOD.getChanges) return this.serviceAuth(method);
+    if (method !== OPERATOR_METHOD.getChanges) return this.serviceAuth(method, undefined, signal);
     if (this.changesToken && this.changesToken.expiresAt - nowSeconds > TOKEN_RENEW_BEFORE_SECONDS) return this.changesToken.token;
     const expiresAt = nowSeconds + CHANGES_TOKEN_SECONDS;
-    const token = await this.serviceAuth(method, expiresAt);
+    const token = await this.serviceAuth(method, expiresAt, signal);
     this.changesToken = { token, expiresAt };
     return token;
   }
 
-  private async serviceAuth(method: OperatorMethod, exp?: number): Promise<string> {
-    const { token } = await this.transport.memberClient.query<{ token: string }>("com.atproto.server.getServiceAuth", {
-      aud: this.service.serviceRef, lxm: method, ...(exp === undefined ? {} : { exp: String(exp) }),
-    });
+  private async serviceAuth(method: OperatorMethod, exp?: number, signal?: AbortSignal): Promise<string> {
+    if (signal?.aborted) {
+      throw signal.reason ?? new DOMException("The operation was aborted.", "AbortError");
+    }
+    const { token } = await raceWithSignal(
+      this.transport.memberClient.query<{ token: string }>("com.atproto.server.getServiceAuth", {
+        aud: this.service.serviceRef, lxm: method, ...(exp === undefined ? {} : { exp: String(exp) }),
+      }),
+      signal,
+    );
     return token;
   }
 }

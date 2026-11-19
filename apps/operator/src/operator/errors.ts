@@ -1,8 +1,9 @@
 import { isTransientOAuthInfrastructureError } from "../auth/oauth-request-lock";
-import { isAccountSuspendedError, isScopeMissingError, XrpcError } from "@flock/protocol/atproto/xrpc";
+import { isScopeMissingError, XrpcError } from "@flock/protocol/atproto/xrpc";
 import { UpstreamResponseTooLargeError } from "@flock/protocol/bounded-json";
 import { TokenRefreshError } from "@atproto/oauth-client-node";
 import { AuthorityReauthorizationRequiredError } from "./authority-grant";
+import { AuthoritySuspensionUnavailableError, isSuspensionError } from "./authority-suspension";
 import { isTransientOperationError } from "./journal";
 
 export class OperatorAuthError extends Error {
@@ -29,6 +30,7 @@ export class OperatorInfrastructureError extends Error {
 
 export function isTransientOperatorInfrastructureError(error: unknown): boolean {
   return error instanceof OperatorInfrastructureError ||
+    error instanceof AuthoritySuspensionUnavailableError ||
     isTransientOperationError(error) ||
     isTransientOAuthInfrastructureError(error);
 }
@@ -52,7 +54,7 @@ export function operatorHttpFailure(error: unknown): { status: 502 | 503; name: 
       message: "An upstream service returned a response larger than the configured limit.",
     };
   }
-  if (isAccountSuspendedError(error) || (error instanceof XrpcError && (error.code === "RepoTakendown" || error.code === "RepoDeactivated"))) {
+  if (isSuspensionError(error) && !(error instanceof AuthoritySuspensionUnavailableError)) {
     return {
       status: 503,
       name: "UpstreamUnavailable",

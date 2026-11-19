@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { P256Keypair } from "@atproto/crypto";
+import { P256Keypair, Secp256k1Keypair } from "@atproto/crypto";
 import {
   COMMIT_MAC_PROFILE,
   MAC_COVERED_HEADER,
@@ -9,6 +9,7 @@ import {
   SpaceKemError,
   SpaceMacError,
   SpaceRepoVerificationError,
+  SpaceSignatureError,
   createCommitMacHeaders,
   createRecordMacHeaders,
   decapsulate,
@@ -34,6 +35,7 @@ import {
   SPACE_CREDENTIAL_RENEW_BEFORE_MS,
   SpaceCredentialError,
   computeStarArchiveBytes,
+  createTimestampedSpaceSigHeaders,
   credentialLifetimeMs,
   exchangeSpaceCredential,
   isAccessLost,
@@ -343,7 +345,72 @@ test("RFC 9421 MAC helpers and KEM encapsulation validate valid inputs and throw
   );
 });
 
-test("a malformed #atproto_kem key throws SpaceKemError during credentialed reads", async () => {
+test("createTimestampedSpaceSigHeaders produces RFC 9421 headers with signed created parameter verified by verifyCredentialSig", async () => {
+  const network = new FakeNetwork();
+  const webCryptoKey = await network.generateKey();
+  const cryptoKeypair = await P256Keypair.create();
+  const authorization = "Atproto-Space-Credential eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJzcGFjZSJ9.c2ln";
+  const createdSec = 1_760_000_123;
+
+  for (const [keypair, audience] of [
+    [webCryptoKey, "did:web:operator.example#flock_operator"],
+    [cryptoKeypair, OWNER],
+  ] as const) {
+    const { headers } = await createTimestampedSpaceSigHeaders({
+      authorization,
+      audience,
+      keypair,
+      createdSec,
+    });
+    assert.equal(headers.authorization, authorization);
+    assert.equal(headers["atproto-space-audience"], audience);
+    assert.equal(
+      headers["signature-input"],
+      `sig=("authorization" "atproto-space-audience");created=${createdSec};tag="atproto-space-credential"`,
+    );
+    assert.match(headers.signature!, /^sig=:[A-Za-z0-9+/]+={0,2}:$/);
+
+    await verifyCredentialSig(headers, keypair.did() as Parameters<typeof verifyCredentialSig>[1]);
+
+    // Tampering with created in signature-input invalidates the ES256 signature.
+    await assert.rejects(
+      verifyCredentialSig(
+        {
+          ...headers,
+          "signature-input": `sig=("authorization" "atproto-space-audience");created=${createdSec + 1};tag="atproto-space-credential"`,
+        },
+        keypair.did() as Parameters<typeof verifyCredentialSig>[1],
+      ),
+      SpaceSignatureError,
+    );
+
+    // Tampering with audience invalidates the ES256 signature.
+    await assert.rejects(
+      verifyCredentialSig(
+        {
+          ...headers,
+          "atproto-space-audience": READER,
+        },
+        keypair.did() as Parameters<typeof verifyCredentialSig>[1],
+      ),
+      SpaceSignatureError,
+    );
+  }
+
+  for (const badCreated of [0, -5, 1.5, Number.NaN]) {
+    await assert.rejects(
+      createTimestampedSpaceSigHeaders({ authorization, audience: OWNER, keypair: webCryptoKey, createdSec: badCreated }),
+      RangeError,
+    );
+  }
+  const secp = await Secp256k1Keypair.create();
+  await assert.rejects(
+    createTimestampedSpaceSigHeaders({ authorization, audience: OWNER, keypair: secp, createdSec }),
+    SpaceSignatureError,
+  );
+});
+
+test("a malformed #atproto_kem key retries once with forceRefresh=true on SpaceKemError before failing", async () => {
   const network = new FakeNetwork();
   network.createAccount(OWNER, "pds1");
   network.createAccount(READER, "pds2");
@@ -351,15 +418,59 @@ test("a malformed #atproto_kem key throws SpaceKemError during credentialed read
     spaceType: "new.flock.dm.inbox", skey: "self",
     policy: { $type: MEMBERSPACE_POLICY, publicRead: true, publicWrite: true },
   });
+  await writeRequest(network, "a", "hello");
+
+  // 1. Stale/corrupt cached KEM key on forceRefresh=false recovers via forceRefresh=true on both fetchWithVerifiedMac and fetchVerifiedRepoStar.
+  const refreshCalls: boolean[] = [];
+  const recoveringCredential = await mintSpaceCredentialWith({
+    memberClient: network.clientFor(READER),
+    resolvePds: network.resolvePds,
+    resolveKemKey: async (did, forceRefresh) => {
+      refreshCalls.push(forceRefresh);
+      if (!forceRefresh) return "not-a-kem-did-key";
+      return network.resolveKemKey(did, true);
+    },
+    fetchEndpoint: network.fetchEndpoint,
+    generateKey: network.generateKey,
+    now: network.now,
+  }, SPACE);
+
+  const commitRes = await getCommit(recoveringCredential);
+  assert.ok(commitRes.commit.rev);
+  assert.deepEqual(refreshCalls, [false, true]);
+
+  refreshCalls.length = 0;
+  const starRes = await recoveringCredential.fetchVerifiedRepoStar(PDS1, {
+    space: SPACE,
+    repo: OWNER,
+    maxBytes: 1024 * 1024,
+    maxRecords: 100,
+  });
+  assert.equal(starRes.records.length, 1);
+  assert.deepEqual(refreshCalls, [false, true]);
+
+  // 2. Persistently malformed #atproto_kem key throws SpaceKemError after forceRefresh=true on both paths.
+  const brokenCalls: boolean[] = [];
   const credential = await mintSpaceCredentialWith({
     memberClient: network.clientFor(READER),
     resolvePds: network.resolvePds,
-    resolveKemKey: async () => "not-a-kem-did-key",
+    resolveKemKey: async (_did, forceRefresh) => {
+      brokenCalls.push(forceRefresh);
+      return "not-a-kem-did-key";
+    },
     fetchEndpoint: network.fetchEndpoint,
     generateKey: network.generateKey,
     now: network.now,
   }, SPACE);
   await assert.rejects(getCommit(credential), SpaceKemError);
+  assert.deepEqual(brokenCalls, [false, true]);
+
+  brokenCalls.length = 0;
+  await assert.rejects(
+    credential.fetchVerifiedRepoStar(PDS1, { space: SPACE, repo: OWNER, maxBytes: 1024 * 1024, maxRecords: 100 }),
+    SpaceKemError,
+  );
+  assert.deepEqual(brokenCalls, [false, true]);
 });
 
 // --- Telling a lost grant from a missing record ---------------------------------------------------------------

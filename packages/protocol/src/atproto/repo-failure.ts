@@ -36,7 +36,11 @@ const ACCOUNT_STATE: Readonly<Record<string, string>> = {
   RepoNotFound: "its host has no repo for it",
 };
 
-const AUTHORITY_SUSPENSION_CODES: ReadonlySet<string> = new Set(["RepoTakendown", "RepoDeactivated"]);
+const AUTHORITY_SUSPENSION_CODES: ReadonlySet<string> = new Set([
+  "RepoTakendown",
+  "RepoDeactivated",
+  "RepoSuspended",
+]);
 
 /** Whether an error from a space authority endpoint (`authorizeSpaceSync`, `listWriters`) or authority repo indicates temporary suspension. */
 export function isAuthoritySuspendedError(error: unknown): boolean {
@@ -55,9 +59,9 @@ function isAuthorityRepoContext(context?: RepoFailureContext): boolean {
  * `RepoTakendown` even though the space authority still issues credentials for it, and a member-run host can be down, slow,
  * oversized or malformed.
  *
- * When `context` identifies the space authority's own repo (`repo === authorityDid`, `D12.6` N3), `RepoTakendown` and
- * `RepoDeactivated` classify as transient suspension (`permanent: false`) so local authority records remain intact until
- * recovery; non-authority writers ALWAYS remain `permanent: true`.
+ * When `context` identifies the space authority's own repo (`repo === authorityDid`, `D12.6` N3), `RepoTakendown`,
+ * `RepoDeactivated`, and `RepoSuspended` classify as transient suspension (`permanent: false`) so local authority records
+ * remain intact until recovery; non-authority writers ALWAYS remain `permanent: true`.
  *
  * Returns `null` for a failure that is this app's own and must not be hidden behind a writer: a store (SQLite) error. A
  * credential refusal while reading a writer's repo is that host's answer about that repo; whether the *reader* lost access to
@@ -105,8 +109,8 @@ export function classifyVerifiedRepoFailure(error: unknown, context?: RepoFailur
 }
 
 /**
- * Classifies a failure on a space-authority endpoint (`authorizeSpaceSync`, `listWriters`). Authority `RepoTakendown` /
- * `RepoDeactivated` (`assertActiveSpaceHost`) is always a transient suspension (`permanent: false`), keeping local data intact.
+ * Classifies a failure on a space-authority endpoint (`authorizeSpaceSync`, `listWriters`). Authority `RepoTakendown`,
+ * `RepoDeactivated`, and `RepoSuspended` (`assertActiveSpaceHost`) are always transient suspensions (`permanent: false`), keeping local data intact.
  */
 export function classifySpaceHostFailure(error: unknown): RepoFailure | null {
   if (isStoreFailure(error)) return null;

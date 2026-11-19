@@ -12,6 +12,13 @@ import { getRawDb } from "../lib/db";
 import { appInboxUri, channelUri, inboxUri, parseAppInboxUri, requireSpaceAuthority } from "@flock/protocol/keys";
 import { parseWorkspaceRef, type OperatorActor } from "./actor";
 import { restoreAuthorityGrant } from "./authority-grant";
+import {
+  AUTHORITY_SUSPENDED_BACKOFF_MS,
+  getAuthoritySuspensionError,
+  isSuspensionError,
+  markAuthorityHealthy,
+  tripAuthoritySuspension,
+} from "./authority-suspension";
 import { dropMemberList, isRegisteredSpace } from "./member-access";
 import { activeExtInstalls, activeInstalls, allExtInstalls, allInstalls } from "./membership";
 import { adminMutationsPaused } from "./mutations-paused";
@@ -123,86 +130,260 @@ export async function afterOperation(
   }
 }
 
+export type RegisterSpaceOptions = {
+  expectedGeneration?: number;
+  expectedToken?: string;
+  renewalOnly?: boolean;
+};
+
+type DueRegistrationRow = {
+  space_uri: string;
+  workspace_uri: string | null;
+  token: string;
+  generation: number;
+};
+
+function recordFailureIfExtant(
+  serviceRef: string,
+  space: string,
+  expectedToken: string,
+  expectedGeneration: number,
+  effectiveWorkspace: string | null,
+  nowMs: number,
+  error: unknown,
+): boolean {
+  const db = getRawDb();
+  let written = false;
+  db.transaction(() => {
+    const extant = db
+      .prepare("SELECT workspace_uri FROM notification_registration WHERE service_ref = ? AND space_uri = ? AND token = ? AND generation = ?")
+      .get(serviceRef, space, expectedToken, expectedGeneration) as { workspace_uri: string | null } | undefined;
+    if (!extant) return;
+    const prior = db.prepare("SELECT failures, workspace_uri FROM notification_registration_failure WHERE space_uri = ?")
+      .get(space) as { failures: number; workspace_uri: string } | undefined;
+    const failures = (prior?.failures ?? 0) + 1;
+    const retryIn = Math.min(FIRST_RETRY_MS * 2 ** (failures - 1), LONGEST_RETRY_MS);
+    const failureWorkspace = effectiveWorkspace ?? extant.workspace_uri ?? prior?.workspace_uri ?? space;
+    db.prepare(`INSERT INTO notification_registration_failure (space_uri, workspace_uri, failures, next_attempt_at, last_error)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(space_uri) DO UPDATE SET
+        workspace_uri = excluded.workspace_uri,
+        failures = excluded.failures,
+        next_attempt_at = excluded.next_attempt_at,
+        last_error = excluded.last_error`)
+      .run(space, failureWorkspace, failures, nowMs + retryIn, describeRepoFailure(error));
+    written = true;
+  }).immediate();
+  return written;
+}
+
+function bulkBackoffAuthorityRows(
+  rows: readonly DueRegistrationRow[],
+  nowMs: number,
+  error: unknown,
+): number {
+  if (rows.length === 0) return 0;
+  const db = getRawDb();
+  const serviceRef = getConfig().operatorServiceRef;
+  const errorText = describeRepoFailure(error);
+  let backedOff = 0;
+  db.transaction(() => {
+    const checkStmt = db.prepare(
+      "SELECT token, workspace_uri FROM notification_registration WHERE service_ref = ? AND space_uri = ? AND generation = ?",
+    );
+    const priorStmt = db.prepare(
+      "SELECT failures, workspace_uri FROM notification_registration_failure WHERE space_uri = ?",
+    );
+    const upsertStmt = db.prepare(`INSERT INTO notification_registration_failure (space_uri, workspace_uri, failures, next_attempt_at, last_error)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(space_uri) DO UPDATE SET
+        workspace_uri = excluded.workspace_uri,
+        failures = excluded.failures,
+        next_attempt_at = excluded.next_attempt_at,
+        last_error = excluded.last_error`);
+
+    for (const row of rows) {
+      const extant = checkStmt.get(serviceRef, row.space_uri, row.generation) as { token: string; workspace_uri: string | null } | undefined;
+      if (!extant) continue;
+      if (row.token !== "" && extant.token !== row.token) continue;
+      const prior = priorStmt.get(row.space_uri) as { failures: number; workspace_uri: string } | undefined;
+      const failures = (prior?.failures ?? 0) + 1;
+      const retryIn = Math.max(
+        AUTHORITY_SUSPENDED_BACKOFF_MS,
+        Math.min(FIRST_RETRY_MS * 2 ** (failures - 1), LONGEST_RETRY_MS),
+      );
+      const failureWorkspace = row.workspace_uri ?? extant.workspace_uri ?? prior?.workspace_uri ?? row.space_uri;
+      upsertStmt.run(row.space_uri, failureWorkspace, failures, nowMs + retryIn, errorText);
+      backedOff += 1;
+    }
+  }).immediate();
+  return backedOff;
+}
+
 /**
  * Registers or renews one space of `workspace` using a stable 1-token-per-space webhook secret.
- * Persists a placeholder `(expires_at = 0, renew_at = 0, token)` before calling `authorizeSpaceSync` when `token` is empty
- * so the PDS's synchronous `confirmRegistration` succeeds inside `authorizeSpaceSync`, and reuses that exact `token` on
- * every subsequent renewal without rotation.
+ * Claims the initial `(token, generation)` inside `BEGIN IMMEDIATE` using `INSERT ... ON CONFLICT DO NOTHING` so concurrent
+ * operator processes always observe and confirm the exact same winning `token`, and conditions every post-await write on
+ * `(token, generation)` so an archive (`unregisterSpace`) during an in-flight PDS call never recreates the purged row.
  */
 export async function registerSpace(
   session: OAuthSession,
   workspace: string | null,
   space: string,
   deps: RegistrationDeps = registrationDeps,
+  options: RegisterSpaceOptions = {},
 ): Promise<boolean> {
   return withSpaceRegistrationLock(space, async () => {
     const db = getRawDb();
     const { operatorServiceRef, operatorUrl } = getConfig();
-    const existing = db
-      .prepare("SELECT token, renew_at, last_space_rev, expires_at, workspace_uri FROM notification_registration WHERE service_ref = ? AND space_uri = ?")
-      .get(operatorServiceRef, space) as {
-        token: string;
-        renew_at: number;
-        last_space_rev: string | null;
-        expires_at: number;
-        workspace_uri: string | null;
-      } | undefined;
+    const authorityDid = requireSpaceAuthority(space);
+    const isRenewalMode = options.renewalOnly === true || options.expectedGeneration !== undefined;
 
-    const effectiveWorkspace = workspace ?? existing?.workspace_uri ?? null;
-    const newlyStaged = existing === undefined;
-    const token = existing && existing.token.length > 0 ? existing.token : randomBytes(32).toString("base64url");
+    type ClaimedRegistration = {
+      token: string;
+      generation: number;
+      newlyStaged: boolean;
+      effectiveWorkspace: string | null;
+    };
 
-    if (!existing || existing.token.length === 0) {
-      db.prepare(`INSERT INTO notification_registration (service_ref, space_uri, expires_at, workspace_uri, token, renew_at, last_space_rev)
-        VALUES (?, ?, 0, ?, ?, 0, NULL)
-        ON CONFLICT(service_ref, space_uri) DO UPDATE SET
-          token = excluded.token,
-          workspace_uri = COALESCE(excluded.workspace_uri, notification_registration.workspace_uri)`)
-        .run(operatorServiceRef, space, effectiveWorkspace, token);
-    }
+    const claimed: ClaimedRegistration | null = isRenewalMode
+      ? db.transaction((): ClaimedRegistration | null => {
+        const current = db
+          .prepare("SELECT token, expires_at, last_space_rev, generation, workspace_uri FROM notification_registration WHERE service_ref = ? AND space_uri = ?")
+          .get(operatorServiceRef, space) as {
+            token: string;
+            expires_at: number;
+            last_space_rev: string | null;
+            generation: number;
+            workspace_uri: string | null;
+          } | undefined;
+        if (!current) return null;
+        if (options.expectedGeneration !== undefined && current.generation !== options.expectedGeneration) {
+          return null;
+        }
+        if (options.expectedToken !== undefined && options.expectedToken !== "" && current.token !== options.expectedToken) {
+          return null;
+        }
+        if (current.token === "") {
+          const candidateToken = randomBytes(32).toString("base64url");
+          db.prepare(`UPDATE notification_registration
+            SET token = ?, workspace_uri = COALESCE(?, workspace_uri)
+            WHERE service_ref = ? AND space_uri = ? AND token = '' AND generation = ?`)
+            .run(candidateToken, workspace, operatorServiceRef, space, current.generation);
+          const refreshed = db
+            .prepare("SELECT token, expires_at, last_space_rev, generation, workspace_uri FROM notification_registration WHERE service_ref = ? AND space_uri = ?")
+            .get(operatorServiceRef, space) as {
+              token: string;
+              expires_at: number;
+              last_space_rev: string | null;
+              generation: number;
+              workspace_uri: string | null;
+            } | undefined;
+          if (!refreshed || refreshed.generation !== current.generation || refreshed.token === "") return null;
+          return {
+            token: refreshed.token,
+            generation: refreshed.generation,
+            newlyStaged: false,
+            effectiveWorkspace: workspace ?? refreshed.workspace_uri ?? null,
+          };
+        }
+        return {
+          token: current.token,
+          generation: current.generation,
+          newlyStaged: false,
+          effectiveWorkspace: workspace ?? current.workspace_uri ?? null,
+        };
+      }).immediate()
+      : db.transaction((): ClaimedRegistration => {
+        const prior = db
+          .prepare("SELECT token, generation FROM notification_registration WHERE service_ref = ? AND space_uri = ?")
+          .get(operatorServiceRef, space) as { token: string; generation: number } | undefined;
+        const candidateToken = randomBytes(32).toString("base64url");
+        db.prepare(`INSERT INTO notification_registration
+          (service_ref, space_uri, expires_at, workspace_uri, token, renew_at, last_space_rev, generation)
+          VALUES (?, ?, 0, ?, ?, 0, NULL, 1)
+          ON CONFLICT(service_ref, space_uri) DO NOTHING`)
+          .run(operatorServiceRef, space, workspace, candidateToken);
+        db.prepare(`UPDATE notification_registration
+          SET token = ?, workspace_uri = COALESCE(?, workspace_uri)
+          WHERE service_ref = ? AND space_uri = ? AND token = ''`)
+          .run(candidateToken, workspace, operatorServiceRef, space);
+        if (workspace !== null && prior !== undefined) {
+          db.prepare(`UPDATE notification_registration
+            SET workspace_uri = COALESCE(workspace_uri, ?)
+            WHERE service_ref = ? AND space_uri = ?`)
+            .run(workspace, operatorServiceRef, space);
+        }
+        const row = db
+          .prepare("SELECT token, expires_at, last_space_rev, generation, workspace_uri FROM notification_registration WHERE service_ref = ? AND space_uri = ?")
+          .get(operatorServiceRef, space) as {
+            token: string;
+            expires_at: number;
+            last_space_rev: string | null;
+            generation: number;
+            workspace_uri: string | null;
+          };
+        return {
+          token: row.token,
+          generation: row.generation,
+          newlyStaged: prior === undefined,
+          effectiveWorkspace: workspace ?? row.workspace_uri ?? null,
+        };
+      }).immediate();
 
-    const notify: SpaceNotifyTarget = { endpoint: operatorNotifyEndpoint(operatorUrl), token };
+    if (!claimed) return false;
+
+    const notify: SpaceNotifyTarget = { endpoint: operatorNotifyEndpoint(operatorUrl), token: claimed.token };
     let rawOutcome: RegistrationOutcome | number;
     try {
       rawOutcome = await deps.register(session, space, notify);
     } catch (error) {
+      if (isSuspensionError(error)) {
+        tripAuthoritySuspension(authorityDid, error, deps.now());
+      }
       if (isSpaceDeleted(error) || (error instanceof XrpcError && error.code === "SpaceDeleted")) {
-        if (newlyStaged) {
-          db.prepare("DELETE FROM notification_registration WHERE service_ref = ? AND space_uri = ?").run(operatorServiceRef, space);
-          db.prepare("DELETE FROM notification_registration_failure WHERE space_uri = ?").run(space);
-        } else {
-          purgeSpaceNotifications(space);
-          dropMemberList(space);
-        }
+        db.transaction(() => {
+          const extant = db
+            .prepare("SELECT 1 FROM notification_registration WHERE service_ref = ? AND space_uri = ? AND token = ? AND generation = ?")
+            .get(operatorServiceRef, space, claimed.token, claimed.generation);
+          if (!extant) return;
+          if (claimed.newlyStaged) {
+            db.prepare("DELETE FROM notification_registration WHERE service_ref = ? AND space_uri = ? AND token = ? AND generation = ?")
+              .run(operatorServiceRef, space, claimed.token, claimed.generation);
+            db.prepare("DELETE FROM notification_registration_failure WHERE space_uri = ?").run(space);
+          } else {
+            purgeSpaceNotifications(space);
+            dropMemberList(space);
+          }
+        }).immediate();
         return false;
       }
-      const prior = db.prepare("SELECT failures, workspace_uri FROM notification_registration_failure WHERE space_uri = ?")
-        .get(space) as { failures: number; workspace_uri: string } | undefined;
-      const failures = (prior?.failures ?? 0) + 1;
-      const retryIn = Math.min(FIRST_RETRY_MS * 2 ** (failures - 1), LONGEST_RETRY_MS);
-      const failureWorkspace = effectiveWorkspace ?? prior?.workspace_uri ?? space;
-      db.prepare(`INSERT INTO notification_registration_failure (space_uri, workspace_uri, failures, next_attempt_at, last_error)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(space_uri) DO UPDATE SET
-          workspace_uri = excluded.workspace_uri,
-          failures = excluded.failures,
-          next_attempt_at = excluded.next_attempt_at,
-          last_error = excluded.last_error`)
-        .run(space, failureWorkspace, failures, deps.now() + retryIn, describeRepoFailure(error));
+      recordFailureIfExtant(
+        operatorServiceRef,
+        space,
+        claimed.token,
+        claimed.generation,
+        claimed.effectiveWorkspace,
+        deps.now(),
+        error,
+      );
       return false;
     }
 
     const now = deps.now();
+    markAuthorityHealthy(authorityDid, now);
     const outcome: RegistrationOutcome = typeof rawOutcome === "number" ? { expiresAt: rawOutcome } : rawOutcome;
     const ttlMs = outcome.ttlMs ?? Math.max(0, outcome.expiresAt - now);
     const renewAt = outcome.expiresAt - computeRenewWithinMs(ttlMs);
 
+    let committed = false;
     let shouldWake = false;
     db.transaction(() => {
       const current = db
-        .prepare("SELECT last_space_rev, workspace_uri FROM notification_registration WHERE service_ref = ? AND space_uri = ?")
-        .get(operatorServiceRef, space) as { last_space_rev: string | null; workspace_uri: string | null } | undefined;
-      const currentRev = current?.last_space_rev ?? null;
+        .prepare("SELECT last_space_rev, workspace_uri FROM notification_registration WHERE service_ref = ? AND space_uri = ? AND token = ? AND generation = ?")
+        .get(operatorServiceRef, space, claimed.token, claimed.generation) as { last_space_rev: string | null; workspace_uri: string | null } | undefined;
+      if (!current) return;
+      const currentRev = current.last_space_rev ?? null;
       let nextRev = currentRev;
       if (outcome.spaceRev !== undefined) {
         if (currentRev === null || outcome.spaceRev > currentRev) {
@@ -210,19 +391,20 @@ export async function registerSpace(
           nextRev = outcome.spaceRev;
         }
       }
-      const storedWorkspace = effectiveWorkspace ?? current?.workspace_uri ?? null;
-      db.prepare(`INSERT INTO notification_registration (service_ref, space_uri, expires_at, workspace_uri, token, renew_at, last_space_rev)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(service_ref, space_uri) DO UPDATE SET
-          expires_at = excluded.expires_at,
-          workspace_uri = excluded.workspace_uri,
-          token = excluded.token,
-          renew_at = excluded.renew_at,
-          last_space_rev = excluded.last_space_rev`)
-        .run(operatorServiceRef, space, outcome.expiresAt, storedWorkspace, token, renewAt, nextRev);
+      const storedWorkspace = claimed.effectiveWorkspace ?? current.workspace_uri ?? null;
+      const res = db.prepare(`UPDATE notification_registration
+        SET expires_at = ?, workspace_uri = ?, renew_at = ?, last_space_rev = ?
+        WHERE service_ref = ? AND space_uri = ? AND token = ? AND generation = ?`)
+        .run(outcome.expiresAt, storedWorkspace, renewAt, nextRev, operatorServiceRef, space, claimed.token, claimed.generation);
+      if (res.changes === 0) {
+        shouldWake = false;
+        return;
+      }
       db.prepare("DELETE FROM notification_registration_failure WHERE space_uri = ?").run(space);
+      committed = true;
     }).immediate();
 
+    if (!committed) return false;
     if (shouldWake && outcome.spaceRev !== undefined) {
       recordSpaceWake(space, "", outcome.spaceRev, Math.floor(now / 1000));
     }
@@ -247,28 +429,38 @@ export async function renewSpaceRegistration(space: string, deps: SweepDeps = re
   if (adminMutationsPaused()) return false;
   const db = getRawDb();
   const row = db
-    .prepare("SELECT workspace_uri FROM notification_registration WHERE service_ref = ? AND space_uri = ?")
-    .get(getConfig().operatorServiceRef, space) as { workspace_uri: string | null } | undefined;
+    .prepare("SELECT workspace_uri, token, generation FROM notification_registration WHERE service_ref = ? AND space_uri = ?")
+    .get(getConfig().operatorServiceRef, space) as { workspace_uri: string | null; token: string; generation: number } | undefined;
   if (!row) return false;
-  let session: OAuthSession;
-  try {
-    session = await deps.grant(requireSpaceAuthority(space));
-  } catch (error) {
-    const prior = db.prepare("SELECT failures, workspace_uri FROM notification_registration_failure WHERE space_uri = ?")
-      .get(space) as { failures: number; workspace_uri: string } | undefined;
-    const failures = (prior?.failures ?? 0) + 1;
-    const retryIn = Math.min(FIRST_RETRY_MS * 2 ** (failures - 1), LONGEST_RETRY_MS);
-    db.prepare(`INSERT INTO notification_registration_failure (space_uri, workspace_uri, failures, next_attempt_at, last_error)
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(space_uri) DO UPDATE SET
-        workspace_uri = excluded.workspace_uri,
-        failures = excluded.failures,
-        next_attempt_at = excluded.next_attempt_at,
-        last_error = excluded.last_error`)
-      .run(space, row.workspace_uri ?? prior?.workspace_uri ?? space, failures, deps.now() + retryIn, describeRepoFailure(error));
+
+  const authorityDid = requireSpaceAuthority(space);
+  const dueRow: DueRegistrationRow = {
+    space_uri: space,
+    workspace_uri: row.workspace_uri,
+    token: row.token,
+    generation: row.generation,
+  };
+  const preSuspended = getAuthoritySuspensionError(authorityDid, deps.now());
+  if (preSuspended) {
+    bulkBackoffAuthorityRows([dueRow], deps.now(), preSuspended);
     return false;
   }
-  return registerSpace(session, row.workspace_uri, space, deps);
+
+  let session: OAuthSession;
+  try {
+    session = await deps.grant(authorityDid);
+  } catch (error) {
+    if (isSuspensionError(error)) {
+      tripAuthoritySuspension(authorityDid, error, deps.now());
+    }
+    bulkBackoffAuthorityRows([dueRow], deps.now(), error);
+    return false;
+  }
+  return registerSpace(session, row.workspace_uri, space, deps, {
+    expectedGeneration: row.generation,
+    expectedToken: row.token,
+    renewalOnly: true,
+  });
 }
 
 /**
@@ -333,14 +525,14 @@ export async function sweepDueRegistrations(deps: SweepDeps = registrationDeps):
   const serviceRef = getConfig().operatorServiceRef;
   const queryDueRows = (nowMs: number) =>
     getRawDb()
-      .prepare(`SELECT r.space_uri, r.workspace_uri
+      .prepare(`SELECT r.space_uri, r.workspace_uri, r.token, r.generation
         FROM notification_registration r
         LEFT JOIN notification_registration_failure f ON f.space_uri = r.space_uri
         WHERE r.service_ref = ?
           AND (r.token = '' OR r.renew_at <= ?)
           AND COALESCE(f.next_attempt_at, 0) <= ?
         ORDER BY r.space_uri`)
-      .all(serviceRef, nowMs, nowMs) as Array<{ space_uri: string; workspace_uri: string | null }>;
+      .all(serviceRef, nowMs, nowMs) as DueRegistrationRow[];
 
   const initialDue = queryDueRows(deps.now());
   if (initialDue.length === 0) {
@@ -372,7 +564,7 @@ export async function sweepDueRegistrations(deps: SweepDeps = registrationDeps):
     const report: SweepReport = { registered: 0, failed: 0, skipped: [] };
     if (dueRows.length === 0) return report;
 
-    const byAuthority = new Map<string, Array<{ space_uri: string; workspace_uri: string | null }>>();
+    const byAuthority = new Map<string, DueRegistrationRow[]>();
     for (const row of dueRows) {
       const authorityDid = requireSpaceAuthority(row.space_uri);
       let group = byAuthority.get(authorityDid);
@@ -382,21 +574,64 @@ export async function sweepDueRegistrations(deps: SweepDeps = registrationDeps):
 
     for (const [authorityDid, rows] of byAuthority) {
       refreshRenewLease();
+      const preSuspended = getAuthoritySuspensionError(authorityDid, deps.now());
+      if (preSuspended) {
+        report.failed += bulkBackoffAuthorityRows(rows, deps.now(), preSuspended);
+        continue;
+      }
+
       let session: OAuthSession;
       try {
         session = await deps.grant(authorityDid);
       } catch (error) {
+        if (isSuspensionError(error)) {
+          const tripped = tripAuthoritySuspension(authorityDid, error, deps.now());
+          report.failed += bulkBackoffAuthorityRows(rows, deps.now(), tripped);
+          continue;
+        }
         const reason = describeRepoFailure(error);
         const workspaces = new Set(rows.map((row) => row.workspace_uri ?? row.space_uri));
         for (const ws of workspaces) report.skipped.push({ workspace: ws, reason });
         continue;
       }
-      const outcomes = await mapLimited(rows, RENEW_CONCURRENCY, async (row) => {
-        refreshRenewLease();
-        return registerSpace(session, row.workspace_uri, row.space_uri, deps);
+
+      const [firstRow, ...restRows] = rows;
+      if (!firstRow) continue;
+
+      const firstOk = await registerSpace(session, firstRow.workspace_uri, firstRow.space_uri, deps, {
+        expectedGeneration: firstRow.generation,
+        expectedToken: firstRow.token,
+        renewalOnly: true,
       });
-      for (const ok of outcomes) {
-        if (ok) report.registered += 1;
+      if (firstOk) report.registered += 1;
+      else report.failed += 1;
+
+      const firstSusp = getAuthoritySuspensionError(authorityDid, deps.now());
+      if (firstSusp) {
+        report.failed += bulkBackoffAuthorityRows(restRows, deps.now(), firstSusp);
+        continue;
+      }
+
+      const deferredForBulkBackoff: DueRegistrationRow[] = [];
+      const outcomes = await mapLimited(restRows, RENEW_CONCURRENCY, async (row) => {
+        refreshRenewLease();
+        if (getAuthoritySuspensionError(authorityDid, deps.now())) {
+          deferredForBulkBackoff.push(row);
+          return "suspended" as const;
+        }
+        return registerSpace(session, row.workspace_uri, row.space_uri, deps, {
+          expectedGeneration: row.generation,
+          expectedToken: row.token,
+          renewalOnly: true,
+        });
+      });
+      const afterRestSusp = getAuthoritySuspensionError(authorityDid, deps.now());
+      if (deferredForBulkBackoff.length > 0 && afterRestSusp) {
+        report.failed += bulkBackoffAuthorityRows(deferredForBulkBackoff, deps.now(), afterRestSusp);
+      }
+      for (const outcome of outcomes) {
+        if (outcome === "suspended") continue;
+        if (outcome) report.registered += 1;
         else report.failed += 1;
       }
     }
@@ -421,8 +656,22 @@ export async function sweepDueRegistrations(deps: SweepDeps = registrationDeps):
 export async function sweepRegistrations(deps: SweepDeps = registrationDeps): Promise<SweepReport | null> {
   if (adminMutationsPaused()) return null;
   if (!claimLease(SWEEP_LEASE, randomUUID(), SWEEP_INTERVAL_SECONDS, Math.floor(deps.now() / 1000))) return null;
+  const serviceRef = getConfig().operatorServiceRef;
+  const dueWorkspaceRows = (workspaceUri: string): DueRegistrationRow[] =>
+    getRawDb()
+      .prepare(`SELECT space_uri, workspace_uri, token, generation
+        FROM notification_registration
+        WHERE service_ref = ? AND workspace_uri = ?`)
+      .all(serviceRef, workspaceUri) as DueRegistrationRow[];
+
   const report: SweepReport = { registered: 0, failed: 0, skipped: [] };
   for (const { authorityDid, uri } of deps.workspaces()) {
+    const preSuspended = getAuthoritySuspensionError(authorityDid, deps.now());
+    if (preSuspended) {
+      bulkBackoffAuthorityRows(dueWorkspaceRows(uri), deps.now(), preSuspended);
+      report.skipped.push({ workspace: uri, reason: describeRepoFailure(preSuspended) });
+      continue;
+    }
     // What is held is read before the directory: a space's directory record is written before it is registered, so one held
     // here and missing from the directory read after is gone, while one registered meanwhile is not in this list.
     const held = heldSpaces(uri);
@@ -432,14 +681,54 @@ export async function sweepRegistrations(deps: SweepDeps = registrationDeps): Pr
       session = await deps.grant(authorityDid);
       spaces = await deps.activeSpaces(session, uri);
     } catch (error) {
+      if (isSuspensionError(error)) {
+        const tripped = tripAuthoritySuspension(authorityDid, error, deps.now());
+        bulkBackoffAuthorityRows(dueWorkspaceRows(uri), deps.now(), tripped);
+      }
       report.skipped.push({ workspace: uri, reason: describeRepoFailure(error) });
       continue;
     }
     const dueSpaces = spaces.filter((space) => isDue(space, deps.now()));
-    const outcomes = await mapLimited(dueSpaces, RENEW_CONCURRENCY, (space) => registerSpace(session, uri, space, deps));
-    for (const ok of outcomes) {
-      if (ok) report.registered += 1;
+    const [firstDue, ...restDue] = dueSpaces;
+    if (firstDue) {
+      const firstOk = await registerSpace(session, uri, firstDue, deps);
+      if (firstOk) report.registered += 1;
       else report.failed += 1;
+
+      const firstSusp = getAuthoritySuspensionError(authorityDid, deps.now());
+      if (firstSusp) {
+        const restSet = new Set(restDue);
+        report.failed += bulkBackoffAuthorityRows(
+          dueWorkspaceRows(uri).filter((row) => restSet.has(row.space_uri)),
+          deps.now(),
+          firstSusp,
+        );
+        continue;
+      }
+
+      const deferredSpaces: string[] = [];
+      const outcomes = await mapLimited(restDue, RENEW_CONCURRENCY, async (space) => {
+        if (getAuthoritySuspensionError(authorityDid, deps.now())) {
+          deferredSpaces.push(space);
+          return "suspended" as const;
+        }
+        return registerSpace(session, uri, space, deps);
+      });
+      const afterSusp = getAuthoritySuspensionError(authorityDid, deps.now());
+      if (deferredSpaces.length > 0 && afterSusp) {
+        const deferredSet = new Set(deferredSpaces);
+        report.failed += bulkBackoffAuthorityRows(
+          dueWorkspaceRows(uri).filter((row) => deferredSet.has(row.space_uri)),
+          deps.now(),
+          afterSusp,
+        );
+        continue;
+      }
+      for (const ok of outcomes) {
+        if (ok === "suspended") continue;
+        if (ok) report.registered += 1;
+        else report.failed += 1;
+      }
     }
     for (const space of held.filter((space) => !spaces.includes(space))) await unregisterSpace(session, space);
   }

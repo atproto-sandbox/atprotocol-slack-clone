@@ -1183,6 +1183,7 @@ test("R12 D12.3b.3 (H5): DmClient.watch proves SpaceCredential possession via RF
         };
         assert.equal(payload.sub, body.space);
         assert.equal(body.proof.authorization, `Atproto-Space-Credential ${body.credential}`);
+        assert.match(body.proof.signatureInput, /;created=\d+;/, "RFC 9421 PoP proof carries signed ;created= timestamp");
         await verifyCredentialSig(
           {
             authorization: body.proof.authorization,
@@ -1250,6 +1251,7 @@ test("R12 D12.3b.3 (H5): DmClient.watch proves SpaceCredential possession via RF
     const inbox = dmInboxUri("did:plc:alice");
     const abortController = new AbortController();
     await alice.watch([inbox], { signal: abortController.signal });
+    await alice.flushWatchNotifications();
 
     assert.equal(dmTargetCalls, 1, "fetched DM notify target once");
     assert.equal(verifiedProofs.length, 1, "RFC 9421 PoP proof verified against credential cnf.kid and operator serviceRef");
@@ -1260,20 +1262,13 @@ test("R12 D12.3b.3 (H5): DmClient.watch proves SpaceCredential possession via RF
     await network.flushNotifications();
     assert.deepEqual(deliveredSpaces, [inbox]);
 
-    const waitForPendingTimer = async (timers: Iterable<{ cleared: boolean; fired?: boolean }>) => {
-      for (let i = 0; i < 100; i += 1) {
-        if ([...timers].some((t) => !t.cleared && !t.fired)) return;
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-    };
-
     // Periodic renewal timer fires before 10m expiry: renews authorizeSpaceSync reusing cached { endpoint, token } WITHOUT calling getDmNotifyTarget or confirmRegistration again!
     const activeTimers = [...realTimers.values()].filter((t) => !t.cleared && !t.fired);
     assert.equal(activeTimers.length, 1, "scheduled one renewal timer");
     assert.ok(activeTimers[0]!.delayMs >= 6 * 60_000 && activeTimers[0]!.delayMs <= 8 * 60_000);
     network.advanceClock(activeTimers[0]!.delayMs);
     activeTimers[0]!.fn();
-    await waitForPendingTimer(realTimers.values());
+    await alice.flushWatchNotifications();
     assert.equal(dmTargetCalls, 1, "renewal reused cached { endpoint, token } without calling getDmNotifyTarget");
     assert.equal(confirmCalls, 1, "active registration renewed before exp without re-running confirmRegistration");
 
@@ -1373,11 +1368,13 @@ test("R12 D12.3b.3 (H5): DmClient.watch proves SpaceCredential possession via RF
 
     // (a) Operator returns 502 -> watch does NOT throw, listRequests & readConversation still succeed!
     await alice.watch([inbox]);
+    await alice.flushWatchNotifications();
     assert.equal((await alice.listRequests()).length, 1, "listRequests succeeds while operator is offline");
     await alice.accept((await alice.listRequests())[0]!);
     await bob.send(started.convKey, "works without operator");
     const bobHalf = dmConversationUri("did:plc:bob", started.convKey);
     await alice.watch([inbox, bobHalf]);
+    await alice.flushWatchNotifications();
     const pageWhileDown = await alice.readConversation(started.convKey, started.participants);
     assert.deepEqual(pageWhileDown.messages.map((m) => m.text), ["works without operator"]);
 
@@ -1386,6 +1383,7 @@ test("R12 D12.3b.3 (H5): DmClient.watch proves SpaceCredential possession via RF
     const pendingRetry1 = scheduledRetries.filter((t) => !t.cleared && !t.fired);
     assert.ok(pendingRetry1.length >= 1, "transient operator failure scheduled background backoff retry");
     pendingRetry1[0]!.fn();
+    await alice.flushWatchNotifications();
     await waitForRetryCount(2);
     assert.equal(confirmed, false);
     assert.equal((await alice.readConversation(started.convKey, started.participants)).messages.length, 1, "reads stay healthy after RegistrationNotConfirmed");
@@ -1394,9 +1392,7 @@ test("R12 D12.3b.3 (H5): DmClient.watch proves SpaceCredential possession via RF
     operatorMode = "ok";
     const pendingRetry2 = scheduledRetries.filter((t) => !t.cleared && !t.fired);
     for (const timer of pendingRetry2) timer.fn();
-    for (let i = 0; i < 100 && !confirmed; i += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
+    await alice.flushWatchNotifications();
     assert.equal(confirmed, true, "background retry recovered notify registration once operator & webhook came online");
     alice.close();
 
@@ -1406,14 +1402,354 @@ test("R12 D12.3b.3 (H5): DmClient.watch proves SpaceCredential possession via RF
     const callsBeforeLegacy = targetCalls;
     const legacyAlice = makeAlice();
     await legacyAlice.watch([inbox, bobHalf]);
+    await legacyAlice.flushWatchNotifications();
     assert.equal(legacyAlice.isNotifyScopeMissing(), true);
     const callsAfterFirstLegacyWatch = targetCalls;
     assert.ok(callsAfterFirstLegacyWatch - callsBeforeLegacy >= 1 && callsAfterFirstLegacyWatch - callsBeforeLegacy <= 2);
     assert.equal(scheduledRetries.filter((t) => !t.cleared && !t.fired).length, 0, "no retry timer scheduled on ScopeMissingError");
     await legacyAlice.watch([inbox, bobHalf]);
+    await legacyAlice.flushWatchNotifications();
     assert.equal(targetCalls, callsAfterFirstLegacyWatch, "subsequent watch calls make zero getDmNotifyTarget requests once scope is known missing");
     assert.equal((await legacyAlice.readConversation(started.convKey, started.participants)).messages.length, 1);
     legacyAlice.close();
     assert.ok(XrpcError);
+  }
+});
+
+test("R12 Round 1 fixes: watch() resolves in <50ms on blackholed operator/getServiceAuth, side-car notify never blocks reads during hung confirmRegistration, single-use jti rotates at 20m & invalidates stale targets, and unwatch/coalesce stay leak-free", async () => {
+  const OPERATOR: OperatorService = {
+    serviceRef: "did:web:operator.test#atproto_flock_operator",
+    endpoint: "https://operator.test",
+  };
+
+  // 1. Codex M5 + Opus M1: watch() resolves immediately (<50ms) when operator fetch OR getServiceAuth NEVER resolves,
+  //    and composed notifyTimeoutMs aborts both into un-notified fallback + 15s retry!
+  for (const stallPhase of ["operator-fetch", "service-auth"] as const) {
+    const network = new FakeNetwork();
+    network.createAccount("did:plc:alice", "pds1");
+    const inbox = dmInboxUri("did:plc:alice");
+    await network.clientFor("did:plc:alice").procedure("com.atproto.space.createSpace", {
+      spaceType: "new.flock.dm.inbox",
+      skey: "self",
+      policy: { $type: "com.atproto.memberspace.policy", publicWrite: true },
+    });
+
+    const realMemberClient = network.clientFor("did:plc:alice");
+    const stalledMemberClient = Object.create(realMemberClient, {
+      query: {
+        value: (method: string, params?: Record<string, unknown>) => {
+          if (stallPhase === "service-auth" && method === "com.atproto.server.getServiceAuth") {
+            return new Promise<never>(() => {});
+          }
+          return realMemberClient.query(method, params as never);
+        },
+      },
+    });
+
+    let sawOperatorAbortSignal = false;
+    const scheduledRetries: Array<{ delayMs: number; cleared: boolean }> = [];
+    const alice = new DmClient({
+      did: "did:plc:alice",
+      memberClient: stalledMemberClient,
+      resolvePds: network.resolvePds,
+      resolveKemKey: network.resolveKemKey,
+      fetchEndpoint: (request) => {
+        const url = new URL(request.url);
+        if (url.origin === OPERATOR.endpoint) {
+          sawOperatorAbortSignal = Boolean(request.signal);
+          return new Promise<Response>(() => {});
+        }
+        return network.fetchEndpoint(request);
+      },
+      generateKey: network.generateKey,
+      store: createStore(),
+      now: network.now,
+      operator: OPERATOR,
+      notifyTimeoutMs: 35,
+      timers: {
+        setTimeout: (_fn, delayMs) => {
+          const entry = { delayMs, cleared: false };
+          scheduledRetries.push(entry);
+          return entry;
+        },
+        clearTimeout: (handle) => {
+          (handle as { cleared: boolean }).cleared = true;
+        },
+      },
+    });
+
+    const t0 = performance.now();
+    const expiries = await alice.watch([inbox]);
+    const watchElapsedMs = performance.now() - t0;
+    assert.ok(watchElapsedMs < 50, `watch() resolved in ${watchElapsedMs.toFixed(1)}ms (<50ms) despite ${stallPhase} hang`);
+    assert.ok(expiries[inbox], "returned un-notified SpaceCredential expiry immediately");
+
+    // Background registration hits the 35ms composed deadline, enters un-notified fallback, and schedules 15s retry!
+    await alice.flushWatchNotifications();
+    if (stallPhase === "operator-fetch") {
+      assert.equal(sawOperatorAbortSignal, true, "Request to getDmNotifyTarget carries composed AbortSignal");
+    }
+    const activeRetries = scheduledRetries.filter((t) => !t.cleared);
+    assert.equal(activeRetries.length, 1, `stalled ${stallPhase} timed out cleanly and scheduled one retry timer`);
+    assert.equal(activeRetries[0]!.delayMs, 15_000, "initial backoff retry is 15s");
+    assert.deepEqual(await alice.listRequests(), [], "DM reads remain fast and unblocked");
+    alice.close();
+  }
+
+  // 2. Opus M1: Hung confirmRegistration NEVER blocks concurrent DM reads (CredentialCache side-car notify minting)!
+  {
+    const network = new FakeNetwork();
+    network.createAccount("did:plc:alice", "pds1");
+    network.createAccount("did:plc:bob", "pds2");
+
+    let confirmReleased = false;
+    let releaseConfirm!: () => void;
+    let confirmEntered!: () => void;
+    const confirmEnteredPromise = new Promise<void>((resolve) => { confirmEntered = resolve; });
+    const confirmGate = new Promise<void>((resolve) => {
+      releaseConfirm = () => {
+        confirmReleased = true;
+        resolve();
+      };
+    });
+
+    network.registerEndpoint(OPERATOR.endpoint, async (req) => {
+      const url = new URL(req.url);
+      if (url.pathname === "/xrpc/com.atproto.space.confirmRegistration") {
+        confirmEntered();
+        await confirmGate;
+        return Response.json({ error: "TimedOut" }, { status: 504 });
+      }
+      return Response.json({});
+    });
+
+    const alice = new DmClient({
+      did: "did:plc:alice",
+      memberClient: network.clientFor("did:plc:alice"),
+      resolvePds: network.resolvePds,
+      resolveKemKey: network.resolveKemKey,
+      fetchEndpoint: async (request) => {
+        const url = new URL(request.url);
+        if (url.origin === OPERATOR.endpoint) {
+          return Response.json({ endpoint: OPERATOR.endpoint, token: "dm1.hang" });
+        }
+        return network.fetchEndpoint(request);
+      },
+      generateKey: network.generateKey,
+      store: createStore(),
+      now: network.now,
+      operator: OPERATOR,
+    });
+    const bob = new DmClient({
+      did: "did:plc:bob",
+      memberClient: network.clientFor("did:plc:bob"),
+      resolvePds: network.resolvePds,
+      resolveKemKey: network.resolveKemKey,
+      fetchEndpoint: network.fetchEndpoint,
+      generateKey: network.generateKey,
+      store: createStore(),
+      now: network.now,
+    });
+
+    await alice.enableDms("everyone");
+    await bob.enableDms("everyone");
+    const started = await bob.startConversation(["did:plc:alice"]);
+    await alice.accept((await alice.listRequests())[0]!);
+    await bob.send(started.convKey, "instant read while confirm hangs");
+
+    const inbox = dmInboxUri("did:plc:alice");
+    const bobHalf = dmConversationUri("did:plc:bob", started.convKey);
+
+    // Kick off watch -> background { notify } mint enters hung confirmRegistration!
+    await alice.watch([inbox, bobHalf]);
+    await confirmEnteredPromise;
+
+    const readStart = performance.now();
+    const [requests, page] = await Promise.all([
+      alice.listRequests(),
+      alice.readConversation(started.convKey, started.participants),
+    ]);
+    const readElapsedMs = performance.now() - readStart;
+    assert.equal(confirmReleased, false, "concurrent DM reads completed while confirmRegistration was still hung");
+    assert.ok(readElapsedMs < 500, `concurrent DM reads finished in ${readElapsedMs.toFixed(1)}ms (<500ms) while confirmRegistration hung`);
+    assert.deepEqual(requests, []);
+    assert.deepEqual(page.messages.map((m) => m.text), ["instant read while confirm hangs"]);
+
+    releaseConfirm();
+    await alice.flushWatchNotifications();
+    alice.close();
+  }
+
+  // 3. Codex M1 + Codex M4 + Opus M1 + Opus L4 + Opus L5:
+  //    - Concurrent watch() coalesces to 1 PoP proof (never trips replay cache)
+  //    - Single-use jti + ;created= timestamp on every getDmNotifyTarget call
+  //    - 20-min epoch rotation fetches fresh target with brand-new jti + createdSec
+  //    - RegistrationNotConfirmed invalidates stale target so next retry fetches rotated token with fresh jti
+  //    - unwatch() clears notifyTargets so later credential renewals stop sending { notify }, and partial watch failure leaks no state!
+  {
+    const network = new FakeNetwork();
+    network.createAccount("did:plc:alice", "pds1");
+    const inbox = dmInboxUri("did:plc:alice");
+    await network.clientFor("did:plc:alice").procedure("com.atproto.space.createSpace", {
+      spaceType: "new.flock.dm.inbox",
+      skey: "self",
+      policy: { $type: "com.atproto.memberspace.policy", publicWrite: true },
+    });
+
+    let activeWebhookSecretEpoch = 1;
+    const seenJtis = new Set<string>();
+    const seenCreatedSecs: number[] = [];
+    const authorizeNotifyPayloads: Array<unknown> = [];
+
+    network.registerEndpoint(OPERATOR.endpoint, async (req) => {
+      const url = new URL(req.url);
+      if (url.pathname === "/xrpc/com.atproto.space.confirmRegistration") {
+        const body = (await req.json()) as { token: string; challenge: string };
+        // Reject tokens from rotated-out operator secret epochs!
+        if (body.token !== `dm1-epoch-${activeWebhookSecretEpoch}`) {
+          return Response.json({ error: "InvalidWebhookToken" }, { status: 400 });
+        }
+        return Response.json({ challenge: body.challenge });
+      }
+      return Response.json({});
+    });
+
+    const timers: Array<{ fn: () => void; delayMs: number; cleared: boolean; fired: boolean }> = [];
+    const alice = new DmClient({
+      did: "did:plc:alice",
+      memberClient: network.clientFor("did:plc:alice"),
+      resolvePds: network.resolvePds,
+      resolveKemKey: network.resolveKemKey,
+      fetchEndpoint: async (request) => {
+        const url = new URL(request.url);
+        if (url.origin === OPERATOR.endpoint) {
+          const body = (await request.json()) as {
+            space: string;
+            credential: string;
+            proof: { authorization: string; signatureInput: string; signature: string };
+          };
+          const payload = JSON.parse(Buffer.from(body.credential.split(".")[1]!, "base64url").toString("utf8")) as {
+            jti: string;
+            cnf: { kid: `did:key:${string}` };
+          };
+          // Enforce strict single-use jti replay guard + ;created= requirement (Codex M1)!
+          assert.equal(seenJtis.has(payload.jti), false, "every getDmNotifyTarget call MUST present a fresh single-use jti");
+          seenJtis.add(payload.jti);
+          const createdMatch = /;created=(\d+);/.exec(body.proof.signatureInput);
+          assert.ok(createdMatch, "proof.signatureInput must carry signed ;created= timestamp");
+          seenCreatedSecs.push(Number(createdMatch[1]));
+          await verifyCredentialSig(
+            {
+              authorization: body.proof.authorization,
+              "atproto-space-audience": OPERATOR.serviceRef,
+              "signature-input": body.proof.signatureInput,
+              signature: body.proof.signature,
+            },
+            payload.cnf.kid,
+          );
+          return Response.json({ endpoint: OPERATOR.endpoint, token: `dm1-epoch-${activeWebhookSecretEpoch}` });
+        }
+        if (request.url.includes("com.atproto.space.authorizeSpaceSync") && request.method === "POST") {
+          const parsed = (await request.clone().json()) as { notify?: unknown };
+          authorizeNotifyPayloads.push(parsed.notify ?? null);
+        }
+        return network.fetchEndpoint(request);
+      },
+      generateKey: network.generateKey,
+      store: createStore(),
+      now: network.now,
+      operator: OPERATOR,
+      timers: {
+        setTimeout: (fn, delayMs) => {
+          const entry = {
+            fn: () => {
+              entry.fired = true;
+              fn();
+            },
+            delayMs,
+            cleared: false,
+            fired: false,
+          };
+          timers.push(entry);
+          return entry;
+        },
+        clearTimeout: (handle) => {
+          (handle as { cleared: boolean }).cleared = true;
+        },
+      },
+    });
+
+    // (a) Opus L5: Concurrent watch([inbox]) from DmProvider + DmConversation coalesces to 1 PoP proof!
+    const sig1 = new AbortController();
+    const sig2 = new AbortController();
+    await Promise.all([
+      alice.watch([inbox], { signal: sig1.signal }),
+      alice.watch([inbox], { signal: sig2.signal }),
+    ]);
+    await alice.flushWatchNotifications();
+    assert.equal(seenJtis.size, 1, "concurrent watch() calls coalesced into 1 PoP proof");
+    assert.deepEqual(authorizeNotifyPayloads, [null, { endpoint: OPERATOR.endpoint, token: "dm1-epoch-1" }]);
+
+    // (b) Codex M4: Advancing clock 20 minutes triggers target rotation with a brand-new jti + updated createdSec!
+    for (let step = 0; step < 3; step += 1) {
+      const due = timers.find((t) => !t.cleared && !t.fired)!;
+      assert.ok(due, `expected active timer at step ${step}`);
+      network.advanceClock(due.delayMs);
+      due.fn();
+      await alice.flushWatchNotifications();
+    }
+    assert.equal(seenJtis.size, 2, "20-minute epoch boundary fetched fresh dm1 target with a brand-new jti");
+    assert.ok(seenCreatedSecs[1]! > seenCreatedSecs[0]!, "rotated PoP proof carries updated createdSec");
+
+    // (c) Opus M1: Operator rotates secret (epoch 2 -> 3); RegistrationNotConfirmed invalidates cached target
+    //     so next 15s retry fetches dm1-epoch-3 with a fresh jti!
+    activeWebhookSecretEpoch = 2;
+    network.createAccount("did:plc:bob", "pds2");
+    const convStarted = await alice.startConversation(["did:plc:bob"]);
+    const ownHalf = dmConversationUri("did:plc:alice", convStarted.convKey);
+    let rejectConfirmOnce = true;
+    network.registerEndpoint(OPERATOR.endpoint, async (req) => {
+      const url = new URL(req.url);
+      if (url.pathname === "/xrpc/com.atproto.space.confirmRegistration") {
+        const body = (await req.json()) as { token: string; challenge: string };
+        if (rejectConfirmOnce) {
+          rejectConfirmOnce = false;
+          activeWebhookSecretEpoch = 3;
+          return Response.json({ error: "InvalidWebhookToken" }, { status: 400 });
+        }
+        assert.equal(body.token, "dm1-epoch-3", "retry after RegistrationNotConfirmed fetched fresh epoch-3 token");
+        return Response.json({ challenge: body.challenge });
+      }
+      return Response.json({});
+    });
+
+    await alice.watch([ownHalf]);
+    await alice.flushWatchNotifications();
+    assert.equal(seenJtis.size, 3, "initial watch on ownHalf used 1 fresh jti");
+    const retryTimer = timers.filter((t) => !t.cleared && !t.fired).find((t) => t.delayMs === 15_000);
+    assert.ok(retryTimer, "RegistrationNotConfirmed scheduled 15s backoff retry");
+    network.advanceClock(15_000);
+    retryTimer.fn();
+    await alice.flushWatchNotifications();
+    assert.equal(seenJtis.size, 4, "retry after RegistrationNotConfirmed invalidated stale target and minted a fresh single-use jti");
+
+    // (d) Opus L4: Partial watch() failure cleans up failing space state, and unwatch() stops future notify renewals without dropping read credentials!
+    const missingHalf = dmConversationUri("did:plc:bob", "3kmissinghalf");
+    const failAbort = new AbortController();
+    await assert.rejects(alice.watch([missingHalf], { signal: failAbort.signal }));
+
+    alice.unwatch([inbox, ownHalf]);
+    assert.equal(timers.filter((t) => !t.cleared && !t.fired).length, 0, "unwatch cleared all watch timers");
+    const payloadsBeforeRead = authorizeNotifyPayloads.length;
+    // Cached credential is still valid for immediate reads without re-minting:
+    await alice.listRequests();
+    assert.equal(authorizeNotifyPayloads.length, payloadsBeforeRead, "unwatch kept valid read credential cached");
+    // Once read credential expires, renewal mints WITHOUT notify (no zombie webhook re-registration!):
+    network.advanceClock(SPACE_CREDENTIAL_LIFETIME_MS + 1_000);
+    await alice.listRequests();
+    assert.equal(authorizeNotifyPayloads.at(-1), null, "post-unwatch credential renewal does not re-register notify");
+    sig1.abort();
+    sig2.abort();
+    alice.close();
   }
 });

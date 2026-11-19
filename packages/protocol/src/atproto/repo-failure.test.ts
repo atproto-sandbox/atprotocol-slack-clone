@@ -102,6 +102,7 @@ test("authority suspension on authority repo reads and authority endpoints is tr
   for (const [code, reason] of [
     ["RepoTakendown", "its account was taken down"],
     ["RepoDeactivated", "its account is deactivated"],
+    ["RepoSuspended", "its account is suspended"],
   ] as const) {
     const err = new XrpcError(400, `${code}: ${authority}`, code);
     assert.equal(isAuthoritySuspendedError(err), true);

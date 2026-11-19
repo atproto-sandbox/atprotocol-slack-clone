@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { dmInboxUri } from "@flock/protocol/keys";
 import type { BrowserSessionConfig } from "../../browser/session";
 import type { DmClient, DmConversationSummary, DmInboxState, DmRequest } from "@flock/client/dm/dm-client";
@@ -180,7 +180,16 @@ export function DmProvider({ did, dmConfig, workspaces, activeWorkspace, view, o
     };
   }, [conversations, requests, labels, did, dmConfig.plcUrl, dmConfig.loopback]);
 
-  const needsNotifyScopeUpgrade = session.needsNotifyScopeUpgrade || Boolean(client?.isNotifyScopeMissing());
+  const subscribeScopeMissing = useCallback(
+    (onStoreChange: () => void) => (client ? client.onNotifyScopeMissing(onStoreChange) : () => {}),
+    [client],
+  );
+  const runtimeScopeMissing = useSyncExternalStore(
+    subscribeScopeMissing,
+    () => Boolean(client?.isNotifyScopeMissing()),
+    () => false,
+  );
+  const needsNotifyScopeUpgrade = session.needsNotifyScopeUpgrade || runtimeScopeMissing;
 
   const value = useMemo<DmContextValue>(() => ({
     did,

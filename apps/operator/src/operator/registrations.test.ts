@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test, { after, beforeEach } from "node:test";
 import { SpaceCredentialError } from "@flock/protocol/atproto/space-credential-core";
 import { XrpcError } from "@flock/protocol/atproto/xrpc";
@@ -10,6 +12,7 @@ import { COLLECTION } from "@flock/protocol/nsids";
 import { closeDb, getRawDb } from "../lib/db";
 import type { SpaceNotifyTarget } from "../atproto/space-credential";
 import { parseWorkspaceRef, type OperatorActor } from "./actor";
+import { AUTHORITY_SUSPENDED_BACKOFF_MS, resetAuthoritySuspensionForTests } from "./authority-suspension";
 import { isRegisteredSpace, mayFollow, type MemberAccessDeps } from "./member-access";
 import { purgeSpaceNotifications, readNotices, recordWriteNotification } from "./notices";
 import {
@@ -23,9 +26,11 @@ import {
   registrationDeps,
   registrationProblems,
   registerSpace,
+  renewSpaceRegistration,
   RENEW_WITHIN_MS,
   sweepDueRegistrations,
   sweepRegistrations,
+  unregisterSpace,
   type RegistrationOutcome,
   type SweepDeps,
 } from "./registrations";
@@ -51,6 +56,7 @@ after(() => {
   rmSync(DIRECTORY, { recursive: true, force: true });
 });
 beforeEach(() => {
+  resetAuthoritySuspensionForTests();
   for (const table of ["notification_registration", "notification_registration_failure", "space_notification", "oauth_request_lock", "workspace_lock"]) {
     getRawDb().prepare(`DELETE FROM ${table}`).run();
   }
@@ -606,4 +612,217 @@ test("reconcileWorkspace and sweep manage extension space registrations and tole
   });
   await afterOperation(wsActor, {}, { kind: "reconcileWorkspace" }, { state: "completed" }, deps);
   assert.equal(isRegisteredSpace(tasksSpace), false);
+});
+
+test("sweepDueRegistrations stops after 1 suspended request for an authority, bulk-backs off all due rows in one transaction, and recovers after backoff", async () => {
+  const { deps, clock, notifyCalls } = authority();
+  const spaces = Array.from({ length: 12 }, (_, idx) => channelUri(OWNER, `susp-ch-${idx}`)).sort();
+  for (const sp of spaces) {
+    assert.equal(await registerSpace(session, WORKSPACE, sp, deps), true);
+  }
+  notifyCalls.length = 0;
+  resetAuthoritySuspensionForTests();
+
+  // Advance until all 12 spaces are due for renewal, and mark authority suspended
+  clock.now += TEN_MIN - RENEW_WITHIN_MS + 1_000;
+  let suspended = true;
+  const origRegister = deps.register;
+  deps.register = async (sess, sp, notify) => {
+    if (suspended) {
+      notifyCalls.push({ space: sp, notify });
+      throw new XrpcError(401, "Account is takendown", "AccountTakedown");
+    }
+    return origRegister(sess, sp, notify);
+  };
+
+  // 1. First sweep probes spaces[0], sees AccountTakedown, stops immediately, and bulk-backs off all 12 due rows!
+  const firstReport = await sweepDueRegistrations(deps);
+  assert.deepEqual(firstReport, { registered: 0, failed: 12, skipped: [] });
+  assert.equal(notifyCalls.length, 1, `expected strictly 1 PDS call across 12 due spaces, saw ${notifyCalls.length}`);
+
+  const failureRows = getRawDb()
+    .prepare("SELECT space_uri, failures, next_attempt_at FROM notification_registration_failure ORDER BY space_uri")
+    .all() as Array<{ space_uri: string; failures: number; next_attempt_at: number }>;
+  assert.equal(failureRows.length, 12, "all 12 due rows of the authority are bulk-backed-off");
+  for (const row of failureRows) {
+    assert.equal(row.failures, 1);
+    assert.equal(row.next_attempt_at, clock.now + FIRST_RETRY_MS);
+  }
+
+  // 2. Within backoff window, sweepDueRegistrations selects 0 due rows (0 grant restores, 0 PDS calls)
+  clock.now += 5_000;
+  assert.deepEqual(await sweepDueRegistrations(deps), { registered: 0, failed: 0, skipped: [] });
+  assert.equal(notifyCalls.length, 1);
+
+  // 3. After 15s while STILL suspended, single-flight probe makes 1 PDS call and bulk-backs off to +30s
+  clock.now += AUTHORITY_SUSPENDED_BACKOFF_MS;
+  assert.deepEqual(await sweepDueRegistrations(deps), { registered: 0, failed: 12, skipped: [] });
+  assert.equal(notifyCalls.length, 2, "still-suspended release makes only 1 probe call");
+
+  // 4. Once authority recovers after 30s backoff, all 12 spaces renew cleanly and clear failures
+  suspended = false;
+  clock.now += 30_000;
+  const recoveredReport = await sweepDueRegistrations(deps);
+  assert.deepEqual(recoveredReport, { registered: 12, failed: 0, skipped: [] });
+  assert.deepEqual(registrationProblems(WORKSPACE, clock.now), []);
+});
+
+test("two operator processes racing initial registerSpace claim and confirm the exact same winning token", async () => {
+  const raceSpace = channelUri(OWNER, "cross-process-race");
+  const registrationsPath = fileURLToPath(new URL("./registrations.ts", import.meta.url));
+  const pdsPath = fileURLToPath(new URL("./testing/fake-authority-pds.ts", import.meta.url));
+
+  let releaseParent!: () => void;
+  const parentGate = new Promise<void>((resolve) => {
+    releaseParent = resolve;
+  });
+  let markParentClaimed!: () => void;
+  const parentClaimed = new Promise<void>((resolve) => {
+    markParentClaimed = resolve;
+  });
+
+  const parentSeenTokens: string[] = [];
+  const parentDeps = authority().deps;
+  const baseRegister = parentDeps.register;
+  parentDeps.register = async (sess, sp, notify) => {
+    parentSeenTokens.push(notify.token);
+    markParentClaimed();
+    await parentGate;
+    return baseRegister(sess, sp, notify);
+  };
+
+  const parentPromise = registerSpace(session, WORKSPACE, raceSpace, parentDeps);
+  await parentClaimed;
+
+  // Spawn a second Node process sharing DATABASE_PATH that races initial registerSpace while parent's authorizeSpaceSync is in flight
+  const childToken = await new Promise<string>((resolve, reject) => {
+    const script = `
+      import { registerSpace } from ${JSON.stringify(registrationsPath)};
+      import { fakeAuthorityPds } from ${JSON.stringify(pdsPath)};
+      import { closeDb } from ${JSON.stringify(fileURLToPath(new URL("../lib/db.ts", import.meta.url)))};
+      const { session } = fakeAuthorityPds(${JSON.stringify(OWNER)});
+      let observed = "";
+      const ok = await registerSpace(session, ${JSON.stringify(WORKSPACE)}, ${JSON.stringify(raceSpace)}, {
+        now: () => Date.now(),
+        register: async (_s, _sp, notify) => {
+          observed = notify.token;
+          return { expiresAt: Date.now() + 600_000, ttlMs: 600_000 };
+        },
+      });
+      closeDb();
+      if (!ok) process.exit(2);
+      process.stdout.write(observed);
+    `;
+    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+      cwd: process.cwd(),
+      env: { ...process.env },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; });
+    child.stderr.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
+    child.once("error", reject);
+    child.once("close", (code) => {
+      if (code === 0) resolve(stdout.trim());
+      else reject(new Error(`Child registerSpace exited ${code}: ${stderr}`));
+    });
+  });
+
+  releaseParent();
+  assert.equal(await parentPromise, true);
+
+  const stored = registrationRow(raceSpace);
+  assert.ok(stored && stored.token.length >= 43);
+  assert.equal(parentSeenTokens[0], childToken, "both racing processes observe and confirm the exact same winning token");
+  assert.equal(stored.token, parentSeenTokens[0]);
+});
+
+test("in-flight renewal awaiting a deferred grant or PDS authorizeSpaceSync while unregisterSpace archives does NOT recreate the purged row or failure state", async () => {
+  // Case 1: Renewal awaits deferred deps.grant() while unregisterSpace runs (both grant resolution and grant failure)
+  for (const grantOutcome of ["resolve", "reject"] as const) {
+    const { deps } = authority();
+    const targetSpace = channelUri(OWNER, `archive-race-grant-${grantOutcome}`);
+    assert.equal(await registerSpace(session, WORKSPACE, targetSpace, deps), true);
+    assert.ok(registrationRow(targetSpace));
+
+    let finishGrant!: () => void;
+    const grantGate = new Promise<void>((resolve) => {
+      finishGrant = resolve;
+    });
+    let grantEntered!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      grantEntered = resolve;
+    });
+
+    deps.grant = async () => {
+      grantEntered();
+      await grantGate;
+      if (grantOutcome === "reject") {
+        throw new XrpcError(503, "Service unavailable", "ServiceUnavailable");
+      }
+      return session;
+    };
+
+    const renewing = renewSpaceRegistration(targetSpace, deps);
+    await entered;
+
+    // Archive runs while renewal is paused inside deps.grant()
+    await unregisterSpace(session, targetSpace);
+    assert.equal(registrationRow(targetSpace), undefined);
+
+    finishGrant();
+    assert.equal(await renewing, false, `cancelled renewal (${grantOutcome}) returns false`);
+    assert.equal(registrationRow(targetSpace), undefined, `purged registration row NOT recreated (${grantOutcome})`);
+    assert.equal(
+      getRawDb().prepare("SELECT 1 FROM notification_registration_failure WHERE space_uri = ?").get(targetSpace),
+      undefined,
+      `purged failure row NOT recreated (${grantOutcome})`,
+    );
+  }
+
+  // Case 2: Renewal awaits deferred PDS deps.register() across a separate connection/archive purge (both success and failure)
+  for (const pdsOutcome of ["resolve", "reject"] as const) {
+    const { deps } = authority();
+    const targetSpace = channelUri(OWNER, `archive-race-pds-${pdsOutcome}`);
+    assert.equal(await registerSpace(session, WORKSPACE, targetSpace, deps), true);
+    const beforeHead = readNotices([]).head;
+
+    let finishPds!: () => void;
+    const pdsGate = new Promise<void>((resolve) => {
+      finishPds = resolve;
+    });
+    let pdsEntered!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      pdsEntered = resolve;
+    });
+
+    const baseRegister = deps.register;
+    deps.register = async (sess, sp, notify) => {
+      pdsEntered();
+      await pdsGate;
+      if (pdsOutcome === "reject") {
+        throw new XrpcError(503, "PDS error", "ServiceUnavailable");
+      }
+      const res = await baseRegister(sess, sp, notify);
+      return typeof res === "number" ? { expiresAt: res, spaceRev: "3kzzzzzzzzzz7" } : { ...res, spaceRev: "3kzzzzzzzzzz7" };
+    };
+
+    const renewing = renewSpaceRegistration(targetSpace, deps);
+    await entered;
+
+    // Simulate cross-process archive purging SQLite rows while authorizeSpaceSync HTTP call is in flight
+    purgeSpaceNotifications(targetSpace);
+    assert.equal(registrationRow(targetSpace), undefined);
+
+    finishPds();
+    assert.equal(await renewing, false, `post-await CAS detects archive cancellation (${pdsOutcome})`);
+    assert.equal(registrationRow(targetSpace), undefined, `purged row NOT recreated (${pdsOutcome})`);
+    assert.equal(
+      getRawDb().prepare("SELECT 1 FROM notification_registration_failure WHERE space_uri = ?").get(targetSpace),
+      undefined,
+      `failure row NOT written for archived space (${pdsOutcome})`,
+    );
+    assert.equal(readNotices([]).head, beforeHead, "cancelled renewal emits zero wake notices");
+  }
 });

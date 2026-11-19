@@ -1,7 +1,7 @@
 import { listBoundedMembers, listBoundedRecords, listBoundedSpaces, listBoundedWriters } from "@flock/protocol/atproto/record-pages";
 import {
-  createSpaceSigHeaders,
-   credentialLifetimeMs,
+  createTimestampedSpaceSigHeaders,
+  credentialLifetimeMs,
   isCredentialRefused,
   SPACE_CREDENTIAL_LIFETIME_MS,
   SpaceCredential,
@@ -13,7 +13,15 @@ import { CredentialCache } from "../credentials";
 import { withIdentityCache } from "../identity";
 import { MemoryStore } from "../memory-store";
 import { decodeCursor, encodeCursor } from "../merge";
-import { OperatorClient, OperatorRemoteError, type DmNotifyTargetInput, type OperatorService } from "../operator-client";
+import {
+  createTimeoutSignal,
+  DEFAULT_DM_NOTIFY_TIMEOUT_MS,
+  OperatorClient,
+  OperatorRemoteError,
+  raceWithSignal,
+  type DmNotifyTargetInput,
+  type OperatorService,
+} from "../operator-client";
 import type { SyncStore } from "../store";
 import { SyncCore } from "../sync";
 import type { ClientTransport } from "../transport";
@@ -53,6 +61,8 @@ const MAX_OWN_CONVERSATIONS = 10_000;
 const FIRST_NOTIFY_RETRY_MS = 15_000;
 const MAX_NOTIFY_RETRY_MS = 120_000;
 const MAX_RENEW_WITHIN_MS = 3 * 60_000;
+const NOTIFY_TARGET_MAX_AGE_MS = 20 * 60_000;
+const MAX_USED_POP_TOKENS = 2_048;
 
 export type DmStore = {
   get(key: string): Promise<string | null>;
@@ -69,6 +79,8 @@ export type DmNotifyOperator = {
 export type DmWatchTiming = {
   initialRetryMs?: number;
   maxRetryMs?: number;
+  notifyTimeoutMs?: number;
+  targetMaxAgeMs?: number;
   renewWithinMs?: (ttlMs: number) => number;
 };
 
@@ -92,10 +104,14 @@ export type DmDeps = ClientTransport & {
   operator?: DmNotifyOperator | OperatorService;
   /** Explicit operator service ref (`did:web:...#atproto_flock_operator`) if not carried by `operator`. */
   operatorServiceRef?: string;
+  /** Bounded deadline in ms for `getDmNotifyTarget` (including `getServiceAuth`), defaulting to `10_000`. */
+  notifyTimeoutMs?: number;
   limits?: { maxInboxScan?: number; maxRequestsPerWriter?: number; maxRecordsPerHalf?: number };
   watchTiming?: DmWatchTiming;
   timers?: DmWatchTimers;
 };
+
+export type DmClientDeps = DmDeps;
 
 export type DmInboxState = { exists: boolean; mode: DmRequestMode; allowlist: string[] };
 
@@ -130,9 +146,14 @@ export type DmConversationPage = {
 
 type TimerHandle = unknown;
 
+type CachedNotifyTarget = SpaceNotifyTarget & {
+  fetchedAt: number;
+};
+
 type DmWatchState = {
   watchers: Set<AbortSignal | null>;
   abortCleanup: Map<AbortSignal, () => void>;
+  watchAbort: AbortController;
   timer: TimerHandle | undefined;
   failures: number;
   operator: DmNotifyOperator | undefined;
@@ -151,9 +172,12 @@ export class DmClient {
   private readonly sync: SyncCore;
   /** Active allowlist members the last scan found nothing to read from, and until when that answer is trusted. */
   private readonly emptySenders = new Map<string, number>();
-  /** Stable `{ endpoint, token }` per space fetched from `getDmNotifyTarget`, reused across renewals without re-querying. */
-  private readonly notifyTargets = new Map<string, SpaceNotifyTarget>();
+  /** Bounded `{ endpoint, token, fetchedAt }` per space fetched from `getDmNotifyTarget`, rotated before epoch expiry. */
+  private readonly notifyTargets = new Map<string, CachedNotifyTarget>();
   private readonly watches = new Map<string, DmWatchState>();
+  private readonly inFlightWatchNotify = new Map<string, Promise<void>>();
+  private readonly usedPoPTokens = new Set<string>();
+  private readonly scopeMissingListeners = new Set<() => void>();
   private readonly operator: DmNotifyOperator | undefined;
   private notifyScopeMissing = false;
   private closed = false;
@@ -623,18 +647,65 @@ export class DmClient {
     if (this.closed || options.signal?.aborted) return {};
 
     const uniqueSpaces = [...new Set(spaces)];
-    const entries = await mapLimited(uniqueSpaces, FANOUT, async (space): Promise<readonly [string, string]> => {
-      const operator = options.operator ?? this.operator;
-      const serviceRef =
-        options.serviceRef
-        ?? operator?.operatorServiceRef
-        ?? operator?.serviceRef
-        ?? this.deps.operatorServiceRef;
-      const watchState = this.registerWatcher(space, options.signal ?? null, operator, serviceRef);
-      const cred = await this.authorizeWatchedSpace(space, watchState, false, options.signal);
-      return [space, new Date(cred.expiresAt).toISOString()];
+    const operator = options.operator ?? this.operator;
+    const serviceRef =
+      options.serviceRef
+      ?? operator?.operatorServiceRef
+      ?? operator?.serviceRef
+      ?? this.deps.operatorServiceRef;
+
+    type InitialWatchResult =
+      | { ok: true; space: string; cred: SpaceCredential }
+      | { ok: false; space: string; error: unknown };
+
+    const settled = await mapLimited(uniqueSpaces, FANOUT, async (space): Promise<InitialWatchResult> => {
+      try {
+        const cred = await this.credentials.get(space);
+        return { ok: true, space, cred };
+      } catch (error) {
+        return { ok: false, space, error };
+      }
     });
+
+    let firstError: unknown;
+    let hasError = false;
+    for (const item of settled) {
+      if (!item.ok) {
+        if (!hasError) {
+          hasError = true;
+          firstError = item.error;
+        }
+        const existingState = this.watches.get(item.space);
+        if (existingState) {
+          this.clearWatchState(item.space, existingState);
+        }
+      }
+    }
+    if (hasError) {
+      throw firstError;
+    }
+    if (this.closed || options.signal?.aborted) return {};
+
+    const entries: Array<readonly [string, string]> = [];
+    for (const item of settled) {
+      if (!item.ok) continue;
+      const { state: watchState, configChanged } = this.registerWatcher(
+        item.space,
+        options.signal ?? null,
+        operator,
+        serviceRef,
+      );
+      this.ensureWatchNotify(item.space, watchState, item.cred, configChanged);
+      entries.push([item.space, new Date(item.cred.expiresAt).toISOString()]);
+    }
     return Object.fromEntries(entries);
+  }
+
+  /** Awaits all currently in-flight background DM watch notification registration or renewal tasks. */
+  async flushWatchNotifications(): Promise<void> {
+    while (this.inFlightWatchNotify.size > 0) {
+      await Promise.allSettled([...this.inFlightWatchNotify.values()]);
+    }
   }
 
   unwatch(spaces?: readonly string[]): void {
@@ -649,6 +720,7 @@ export class DmClient {
   close(): void {
     this.closed = true;
     this.unwatch();
+    this.scopeMissingListeners.clear();
   }
 
   /** Whether the operator rejected `getDmNotifyTarget` with `ScopeMissingError` (pre-R12 session lacking push-notify scope). */
@@ -656,17 +728,27 @@ export class DmClient {
     return this.notifyScopeMissing;
   }
 
+  /** Subscribes to asynchronous `ScopeMissingError` detection from background `getDmNotifyTarget` registration. */
+  onNotifyScopeMissing(listener: () => void): () => void {
+    this.scopeMissingListeners.add(listener);
+    return () => {
+      this.scopeMissingListeners.delete(listener);
+    };
+  }
+
   private registerWatcher(
     space: string,
     signal: AbortSignal | null,
     operator: DmNotifyOperator | undefined,
     serviceRef: string | undefined,
-  ): DmWatchState {
+  ): { state: DmWatchState; configChanged: boolean } {
     let state = this.watches.get(space);
+    let configChanged = false;
     if (!state) {
       state = {
         watchers: new Set(),
         abortCleanup: new Map(),
+        watchAbort: new AbortController(),
         timer: undefined,
         failures: 0,
         operator,
@@ -674,8 +756,14 @@ export class DmClient {
       };
       this.watches.set(space, state);
     } else {
-      if (operator) state.operator = operator;
-      if (serviceRef) state.serviceRef = serviceRef;
+      if (operator && state.operator !== operator) {
+        state.operator = operator;
+        configChanged = true;
+      }
+      if (serviceRef && state.serviceRef !== serviceRef) {
+        state.serviceRef = serviceRef;
+        configChanged = true;
+      }
     }
 
     state.watchers.add(signal);
@@ -696,10 +784,11 @@ export class DmClient {
         signal.addEventListener("abort", onAbort, { once: true });
       }
     }
-    return state;
+    return { state, configChanged };
   }
 
   private clearWatchState(space: string, state: DmWatchState): void {
+    state.watchAbort.abort();
     if (state.timer !== undefined) {
       this.clearWatchTimer(state.timer);
       state.timer = undefined;
@@ -708,71 +797,219 @@ export class DmClient {
     state.abortCleanup.clear();
     state.watchers.clear();
     this.watches.delete(space);
+    this.notifyTargets.delete(space);
+    this.credentials.clearNotify(space);
   }
 
-  private async authorizeWatchedSpace(
+  private isNotifyTargetStale(target: CachedNotifyTarget): boolean {
+    const maxAgeMs = this.deps.watchTiming?.targetMaxAgeMs ?? NOTIFY_TARGET_MAX_AGE_MS;
+    const age = this.now() - target.fetchedAt;
+    return age < 0 || age >= maxAgeMs;
+  }
+
+  private ensureWatchNotify(
+    space: string,
+    state: DmWatchState,
+    cred: SpaceCredential,
+    configChanged: boolean,
+  ): void {
+    if (this.closed || this.watches.get(space) !== state || state.watchers.size === 0 || state.watchAbort.signal.aborted) {
+      return;
+    }
+    if (!state.operator || !state.serviceRef || this.notifyScopeMissing) {
+      return;
+    }
+    if (this.inFlightWatchNotify.has(space)) {
+      return;
+    }
+    if (configChanged && state.timer !== undefined) {
+      this.clearWatchTimer(state.timer);
+      state.timer = undefined;
+      state.failures = 0;
+    }
+
+    const cachedTarget = this.notifyTargets.get(space);
+    const targetFresh = cachedTarget !== undefined && !this.isNotifyTargetStale(cachedTarget);
+    const renewWithinMs = this.computeRenewWithinMs(cred);
+    const credNotifyActive =
+      targetFresh
+      && cred.notify !== undefined
+      && cred.notify.endpoint === cachedTarget.endpoint
+      && cred.notify.token === cachedTarget.token
+      && cred.expiresAt - this.now() > renewWithinMs;
+
+    if (credNotifyActive) {
+      if (state.timer === undefined) {
+        this.scheduleWatchTimer(space, state, cred);
+      }
+      return;
+    }
+
+    if (!configChanged && state.failures > 0 && state.timer !== undefined) {
+      // Respect active exponential retry backoff timer across repeated UI poll cycles.
+      return;
+    }
+
+    const forceFresh = targetFresh && cred.notify !== undefined;
+    void this.startBackgroundNotify(space, state, forceFresh);
+  }
+
+  private startBackgroundNotify(space: string, state: DmWatchState, forceFresh: boolean): Promise<void> {
+    const existing = this.inFlightWatchNotify.get(space);
+    if (existing) return existing;
+
+    const run = this.performNotifyRegistration(space, state, forceFresh).finally(() => {
+      if (this.inFlightWatchNotify.get(space) === run) {
+        this.inFlightWatchNotify.delete(space);
+      }
+    });
+    this.inFlightWatchNotify.set(space, run);
+    return run;
+  }
+
+  private recordUsedPoPToken(token: string): void {
+    if (this.usedPoPTokens.has(token)) return;
+    this.usedPoPTokens.add(token);
+    while (this.usedPoPTokens.size > MAX_USED_POP_TOKENS) {
+      const oldest = this.usedPoPTokens.values().next().value;
+      if (oldest === undefined) break;
+      this.usedPoPTokens.delete(oldest);
+    }
+  }
+
+  private notifyTimeoutMs(): number {
+    return this.deps.notifyTimeoutMs ?? this.deps.watchTiming?.notifyTimeoutMs ?? DEFAULT_DM_NOTIFY_TIMEOUT_MS;
+  }
+
+  private async performNotifyRegistration(
     space: string,
     state: DmWatchState,
     forceFresh: boolean,
-    signal?: AbortSignal,
-  ): Promise<SpaceCredential> {
+  ): Promise<void> {
+    if (this.closed || this.watches.get(space) !== state || state.watchers.size === 0 || state.watchAbort.signal.aborted) {
+      return;
+    }
     const operator = state.operator;
     const serviceRef = state.serviceRef;
-    const cachedTarget = this.notifyTargets.get(space);
+    if (!operator || !serviceRef || this.notifyScopeMissing) {
+      return;
+    }
 
-    if (cachedTarget && !this.notifyScopeMissing) {
-      let cred = forceFresh
-        ? await this.credentials.fresh(space, { notify: cachedTarget })
-        : await this.credentials.get(space, { notify: cachedTarget });
-      if (!forceFresh && cred.notify) {
-        const renewWithinMs = this.computeRenewWithinMs(cred);
-        if (cred.expiresAt - this.now() <= renewWithinMs) {
-          cred = await this.credentials.fresh(space, { notify: cachedTarget });
+    try {
+      let cachedTarget = this.notifyTargets.get(space);
+      if (cachedTarget && this.isNotifyTargetStale(cachedTarget)) {
+        this.notifyTargets.delete(space);
+        this.credentials.clearNotify(space);
+        cachedTarget = undefined;
+      }
+
+      if (cachedTarget) {
+        const target: SpaceNotifyTarget = { endpoint: cachedTarget.endpoint, token: cachedTarget.token };
+        let cred = forceFresh
+          ? await this.credentials.fresh(space, { notify: target })
+          : await this.credentials.get(space, { notify: target });
+        if (this.closed || this.watches.get(space) !== state || state.watchAbort.signal.aborted) {
+          this.notifyTargets.delete(space);
+          this.credentials.clearNotify(space);
+          return;
         }
+        if (!forceFresh && cred.notify) {
+          const renewWithinMs = this.computeRenewWithinMs(cred);
+          if (cred.expiresAt - this.now() <= renewWithinMs) {
+            cred = await this.credentials.fresh(space, { notify: target });
+          }
+        }
+        if (this.closed || this.watches.get(space) !== state || state.watchAbort.signal.aborted) {
+          this.notifyTargets.delete(space);
+          this.credentials.clearNotify(space);
+          return;
+        }
+        if (!cred.notify) {
+          this.notifyTargets.delete(space);
+          this.credentials.clearNotify(space);
+        }
+        this.scheduleWatchTimer(space, state, cred);
+        return;
+      }
+
+      let popCred = await this.credentials.get(space);
+      if (this.usedPoPTokens.has(popCred.token)) {
+        popCred = await this.credentials.mintFreshUnnotified(space);
+      }
+      if (this.closed || this.watches.get(space) !== state || state.watchAbort.signal.aborted) {
+        return;
+      }
+      this.recordUsedPoPToken(popCred.token);
+
+      const createdSec = Math.max(1, Math.floor(this.now() / 1000));
+      const { headers } = await createTimestampedSpaceSigHeaders({
+        authorization: `Atproto-Space-Credential ${popCred.token}`,
+        audience: serviceRef,
+        keypair: popCred.keypair,
+        createdSec,
+      });
+
+      const timeoutMs = this.notifyTimeoutMs();
+      const { signal: deadlineSignal, cleanup: cleanupDeadline } = createTimeoutSignal(timeoutMs, state.watchAbort.signal);
+      let target: SpaceNotifyTarget;
+      try {
+        target = await raceWithSignal(
+          operator.getDmNotifyTarget(
+            {
+              space,
+              credential: popCred.token,
+              proof: {
+                authorization: headers.authorization!,
+                signatureInput: headers["signature-input"]!,
+                signature: headers.signature!,
+              },
+            },
+            deadlineSignal,
+          ),
+          deadlineSignal,
+        );
+      } finally {
+        cleanupDeadline();
+      }
+
+      if (this.closed || this.watches.get(space) !== state || state.watchAbort.signal.aborted) {
+        return;
+      }
+
+      const fetchedAt = this.now();
+      this.notifyTargets.set(space, { endpoint: target.endpoint, token: target.token, fetchedAt });
+      const cred = await this.credentials.get(space, { notify: target });
+      if (this.closed || this.watches.get(space) !== state || state.watchAbort.signal.aborted) {
+        this.notifyTargets.delete(space);
+        this.credentials.clearNotify(space);
+        return;
+      }
+      if (!cred.notify) {
+        this.notifyTargets.delete(space);
+        this.credentials.clearNotify(space);
       }
       this.scheduleWatchTimer(space, state, cred);
-      return cred;
-    }
-
-    let cred = forceFresh
-      ? await this.credentials.fresh(space)
-      : await this.credentials.get(space);
-
-    if (operator && serviceRef && !this.notifyScopeMissing && !signal?.aborted && !this.closed) {
-      try {
-        const { headers } = await createSpaceSigHeaders({
-          authorization: `Atproto-Space-Credential ${cred.token}`,
-          audience: serviceRef as Parameters<typeof createSpaceSigHeaders>[0]["audience"],
-          keypair: cred.keypair,
-        });
-        const target = await operator.getDmNotifyTarget(
-          {
-            space,
-            credential: cred.token,
-            proof: {
-              authorization: headers.authorization!,
-              signatureInput: headers["signature-input"]!,
-              signature: headers.signature!,
-            },
-          },
-          signal,
-        );
-        this.notifyTargets.set(space, target);
-        cred = await this.credentials.get(space, { notify: target });
-      } catch (error) {
-        if (isMissingNotifyScope(error)) {
-          this.notifyScopeMissing = true;
-        } else if (error instanceof SpaceCredentialError) {
-          throw error;
-        } else {
-          // Ensure CredentialCache retains a valid un-notified credential if re-minting with notify failed transiently.
-          cred = await this.credentials.get(space);
-        }
+    } catch (error) {
+      if (this.closed || this.watches.get(space) !== state || state.watchAbort.signal.aborted) {
+        return;
       }
+      if (isMissingNotifyScope(error)) {
+        this.notifyScopeMissing = true;
+        if (state.timer !== undefined) {
+          this.clearWatchTimer(state.timer);
+          state.timer = undefined;
+        }
+        for (const listener of this.scopeMissingListeners) {
+          listener();
+        }
+        return;
+      }
+      if (error instanceof SpaceCredentialError) {
+        this.clearWatchState(space, state);
+        return;
+      }
+      this.scheduleWatchTimer(space, state, null);
     }
-
-    this.scheduleWatchTimer(space, state, cred);
-    return cred;
   }
 
   private computeRenewWithinMs(cred: SpaceCredential): number {
@@ -795,7 +1032,11 @@ export class DmClient {
     if (cred?.notify) {
       state.failures = 0;
       const renewWithinMs = this.computeRenewWithinMs(cred);
-      delayMs = Math.max(50, cred.expiresAt - renewWithinMs - this.now());
+      const credDelayMs = cred.expiresAt - renewWithinMs - this.now();
+      const cached = this.notifyTargets.get(space);
+      const maxAgeMs = this.deps.watchTiming?.targetMaxAgeMs ?? NOTIFY_TARGET_MAX_AGE_MS;
+      const targetDelayMs = cached ? cached.fetchedAt + maxAgeMs - this.now() : credDelayMs;
+      delayMs = Math.max(50, Math.min(credDelayMs, targetDelayMs));
     } else {
       state.failures += 1;
       const initialRetryMs = this.deps.watchTiming?.initialRetryMs ?? FIRST_NOTIFY_RETRY_MS;
@@ -822,15 +1063,9 @@ export class DmClient {
 
   private async runWatchTick(space: string, state: DmWatchState): Promise<void> {
     if (this.closed || this.watches.get(space) !== state || state.watchers.size === 0) return;
-    try {
-      await this.authorizeWatchedSpace(space, state, Boolean(this.notifyTargets.get(space)));
-    } catch (error) {
-      if (error instanceof SpaceCredentialError) {
-        this.clearWatchState(space, state);
-        return;
-      }
-      this.scheduleWatchTimer(space, state, null);
-    }
+    const cached = this.notifyTargets.get(space);
+    const hasFreshTarget = cached !== undefined && !this.isNotifyTargetStale(cached);
+    await this.startBackgroundNotify(space, state, hasFreshTarget);
   }
 
   // --- Internals ---
@@ -1091,7 +1326,10 @@ function resolveDmOperator(deps: DmDeps): DmNotifyOperator | undefined {
   if ("getDmNotifyTarget" in deps.operator && typeof deps.operator.getDmNotifyTarget === "function") {
     return deps.operator;
   }
-  return new OperatorClient(deps, deps.operator as OperatorService);
+  const notifyTimeoutMs = deps.notifyTimeoutMs ?? deps.watchTiming?.notifyTimeoutMs;
+  return new OperatorClient(deps, deps.operator as OperatorService, {
+    ...(notifyTimeoutMs !== undefined ? { notifyTimeoutMs } : {}),
+  });
 }
 
 function isMissingNotifyScope(error: unknown): boolean {

@@ -1,3 +1,4 @@
+import type { Keypair } from "@atproto/crypto";
 import {
   COMMIT_MAC_PROFILE,
   MAC_COVERED_HEADER,
@@ -13,6 +14,7 @@ import {
   createSpaceSigHeaders,
   encapsulate,
   formatMacRequest,
+  isP256DidKey,
   parseMacRequest,
   serializeRecord,
   verifyCommit,
@@ -28,7 +30,7 @@ import {
   type VerifyMacParams,
 } from "@atproto/space";
 import { StarParseError } from "@atproto/star";
-import { fromBase64, parseCid, parseCidSafe, validateCidString, type Cid } from "@atproto/lex-data";
+import { fromBase64, parseCid, parseCidSafe, toBase64, validateCidString, type Cid } from "@atproto/lex-data";
 import { jsonToLex, lexToJson } from "@atproto/lexicon";
 import type * as GetDelegationToken from "../lexicons/api/types/com/atproto/space/getDelegationToken";
 import type * as ListRecords from "../lexicons/api/types/com/atproto/space/listRecords";
@@ -89,6 +91,56 @@ export type SpaceCredentialExchangeResult = {
   credential: string;
   spaceRev?: string;
 };
+
+export type TimestampedSpaceSignatureOptions = {
+  authorization: string;
+  audience: string;
+  keypair: SpaceKey | Keypair;
+  createdSec: number;
+};
+
+function paddedBase64(bytes: Uint8Array): string {
+  const base64 = toBase64(bytes);
+  return base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
+}
+
+/**
+ * Signs an RFC 9421 proof-of-possession header set covering `("authorization" "atproto-space-audience")`
+ * with a signed `;created=<unixSec>` freshness parameter and `tag="atproto-space-credential"`, compatible
+ * with `@atproto/space`'s `verifyCredentialSig`.
+ */
+export async function createTimestampedSpaceSigHeaders(opts: TimestampedSpaceSignatureOptions): Promise<{
+  headers: Record<string, string>;
+}> {
+  if (!Number.isSafeInteger(opts.createdSec) || opts.createdSec <= 0) {
+    throw new RangeError("createdSec must be a positive safe integer.");
+  }
+  if (!isP256DidKey(opts.keypair.did())) {
+    throw new SpaceSignatureError("signature key must be a P-256 did:key");
+  }
+  if (typeof opts.authorization !== "string" || !opts.authorization.trim() || /[\r\n]/.test(opts.authorization)) {
+    throw new SpaceSignatureError('missing or malformed "authorization" field');
+  }
+  if (typeof opts.audience !== "string" || !opts.audience.trim() || /[\r\n]/.test(opts.audience)) {
+    throw new SpaceSignatureError('missing or malformed "atproto-space-audience" field');
+  }
+
+  const signatureParams =
+    `("authorization" "atproto-space-audience");created=${opts.createdSec};tag="atproto-space-credential"`;
+  const base =
+    `"authorization": ${opts.authorization.trim()}\n` +
+    `"atproto-space-audience": ${opts.audience.trim()}\n` +
+    `"@signature-params": ${signatureParams}`;
+  const sigBytes = await opts.keypair.sign(starPathEncoder.encode(base));
+  return {
+    headers: {
+      authorization: opts.authorization,
+      "atproto-space-audience": opts.audience,
+      "signature-input": `sig=${signatureParams}`,
+      signature: `sig=:${paddedBase64(sigBytes)}:`,
+    },
+  };
+}
 
 /**
  * The reads this app makes that a repo host only serves to a space credential together with a MAC request, and the
@@ -267,7 +319,14 @@ export class SpaceCredential {
 
     for (const forceRefresh of [false, true]) {
       const kemKey = await this.resolveKemKey(input.repo, forceRefresh);
-      const { keyShare, sharedSecret } = await encapsulate(kemKey as Parameters<typeof encapsulate>[0]);
+      let encapsulated: Awaited<ReturnType<typeof encapsulate>>;
+      try {
+        encapsulated = await encapsulate(kemKey as Parameters<typeof encapsulate>[0]);
+      } catch (error) {
+        if (error instanceof SpaceKemError && !forceRefresh) continue;
+        throw error;
+      }
+      const { keyShare, sharedSecret } = encapsulated;
       const attemptController = new AbortController();
       const onAbort = () => attemptController.abort(input.signal?.reason);
       if (input.signal) {
@@ -360,7 +419,14 @@ export class SpaceCredential {
   private async fetchWithVerifiedMac(request: Request, profile: MacProfile, repo: string): Promise<Response> {
     for (const forceRefresh of [false, true]) {
       const kemKey = await this.resolveKemKey(repo, forceRefresh);
-      const { keyShare, sharedSecret } = await encapsulate(kemKey as Parameters<typeof encapsulate>[0]);
+      let encapsulated: Awaited<ReturnType<typeof encapsulate>>;
+      try {
+        encapsulated = await encapsulate(kemKey as Parameters<typeof encapsulate>[0]);
+      } catch (error) {
+        if (error instanceof SpaceKemError && !forceRefresh) continue;
+        throw error;
+      }
+      const { keyShare, sharedSecret } = encapsulated;
       const attempt = request.clone();
       attempt.headers.set("accept-signature", formatMacRequest(profile, keyShare));
       const response = await this.fetchEndpoint(attempt);

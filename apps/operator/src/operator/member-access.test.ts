@@ -1,8 +1,17 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { after } from "node:test";
 import { XrpcError } from "@flock/protocol/atproto/xrpc";
 import { appInboxUri, channelUri, dmConversationUri, dmInboxUri, inboxUri, tasksSpaceUri, workspaceUri } from "@flock/protocol/keys";
+import { closeDb } from "../lib/db";
+import { resetAuthoritySuspensionForTests } from "./authority-suspension";
+import { getChanges, MAX_FOLLOWED_SPACES } from "./feed";
 import { dropMemberList, MEMBER_LIST_SUSPENDED_BACKOFF_MS, MEMBER_LIST_TTL_MS, mayFollow, type MemberAccessDeps } from "./member-access";
+
+process.env.DATABASE_PATH = ":memory:";
+process.env.AUTH_ENCRYPTION_KEY = "51".repeat(32);
+process.env.APP_URL = "http://127.0.0.1:3000";
+process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
+after(() => closeDb());
 
 // Who may follow a space's changes: the feed authorization rows of the plan's R5 tests, against an injected member list.
 
@@ -154,4 +163,59 @@ test("401 AccountTakedown and AccountDeactivated deny mayFollow cleanly with a 1
   clock.now += MEMBER_LIST_SUSPENDED_BACKOFF_MS;
   assert.equal(await mayFollow(suspendedChannel, MEMBER, access), true);
   assert.equal(reads.length, 2);
+});
+
+test("authority-keyed suspension breaker stops a 200-space getChanges call after 1 PDS request and releases via a single-flight probe", async () => {
+  resetAuthoritySuspensionForTests();
+  const suspendedAuthority = "did:plc:suspended-bulk-owner";
+  const twoHundredSpaces = Array.from({ length: MAX_FOLLOWED_SPACES }, (_, idx) =>
+    channelUri(suspendedAuthority, `bulk-ch-${idx}`),
+  );
+  let mode: "takendown" | "deactivated" | "active" = "takendown";
+  const clock = { now: 5_000_000 };
+  let pdsCalls = 0;
+
+  const access: MemberAccessDeps = {
+    isRegistered: () => true,
+    readMembers: async () => {
+      pdsCalls += 1;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      if (mode === "takendown") {
+        throw new XrpcError(401, "Account is takendown", "AccountTakedown");
+      }
+      if (mode === "deactivated") {
+        throw new XrpcError(400, "Repo is deactivated", "RepoDeactivated");
+      }
+      return [{ did: MEMBER, read: true, write: true }];
+    },
+    now: () => clock.now,
+  };
+
+  const follow = twoHundredSpaces.map((space) => ({ space, after: 0 }));
+  const feedDeps = { mayFollow: (space: string, did: string) => mayFollow(space, did, access), holdMs: 50 };
+
+  // 1. First 200-space getChanges under suspended authority makes strictly 1 PDS request instead of 200!
+  const firstAnswer = await getChanges(MEMBER, follow, undefined, feedDeps);
+  assert.equal(pdsCalls, 1, `expected strictly 1 PDS request across 200 spaces, saw ${pdsCalls}`);
+  assert.equal(firstAnswer.denied.length, MAX_FOLLOWED_SPACES);
+
+  // 2. Within 15s backoff window, another 200-space getChanges makes 0 PDS requests!
+  clock.now += 5_000;
+  const cachedAnswer = await getChanges(MEMBER, follow, undefined, feedDeps);
+  assert.equal(pdsCalls, 1, "breaker blocks all 200 spaces during 15s backoff window");
+  assert.equal(cachedAnswer.denied.length, MAX_FOLLOWED_SPACES);
+
+  // 3. After 15s backoff while STILL suspended (RepoDeactivated), single-flight release probe makes strictly 1 call!
+  mode = "deactivated";
+  clock.now += MEMBER_LIST_SUSPENDED_BACKOFF_MS;
+  const stillSuspended = await getChanges(MEMBER, follow, undefined, feedDeps);
+  assert.equal(pdsCalls, 2, `expected single-flight release probe (total 2 calls), saw ${pdsCalls}`);
+  assert.equal(stillSuspended.denied.length, MAX_FOLLOWED_SPACES);
+
+  // 4. After backoff once authority recovers, single-flight probe succeeds and releases all 200 spaces!
+  mode = "active";
+  clock.now += MEMBER_LIST_SUSPENDED_BACKOFF_MS;
+  const recovered = await getChanges(MEMBER, follow, undefined, { ...feedDeps, holdMs: 10 });
+  assert.deepEqual(recovered.denied, []);
+  assert.equal(pdsCalls, 2 + MAX_FOLLOWED_SPACES);
 });

@@ -5,7 +5,13 @@ import { join } from "node:path";
 import test, { after } from "node:test";
 import { dmConversationUri, dmInboxUri } from "@flock/protocol/keys";
 import { closeDb, getRawDb } from "../lib/db";
-import { currentDmWakeHead, recordDmSpaceWake, resetDmFeedWakesForTests } from "./dm-feed-wakes";
+import {
+  currentDmWakeHead,
+  DM_WAKE_RATE_LIMIT_MAX,
+  DmRateLimitError,
+  recordDmWake,
+  resetDmFeedWakesForTests,
+} from "./dm-feed-wakes";
 import {
   FeedRequestError,
   formatFeedCursor,
@@ -36,8 +42,8 @@ const GENERAL = "at://did:plc:owner/space/new.flock.channel/feed-general";
 const SECRET = "at://did:plc:owner/space/new.flock.channel/feed-secret";
 const notice = (space: string) => recordWriteNotification({ space, repo: "did:plc:writer", repoRev: "rev" });
 const dbHead = () => readNotices([]).head;
-const combinedHead = () => {
-  const dm = currentDmWakeHead();
+const combinedHead = (did = MEMBER) => {
+  const dm = currentDmWakeHead(did);
   return formatFeedCursor(dm.epoch, dbHead(), dm.head);
 };
 const followAt = (space: string, cursorStr: string): Follow => {
@@ -103,8 +109,8 @@ test("ephemeral DM wakes wake held long-polls with zero SQLite rows, and an oper
   // Initial head read before syncing spaces (as ChangeFollower.follow does)
   const initialHead = (await getChanges(MEMBER, [], undefined, deps(allowed))).head;
 
-  // Held poll wakes as soon as a DM wake arrives in memory
-  setTimeout(() => recordDmSpaceWake(dmConv), 60);
+  // Held poll wakes as soon as a DM wake arrives in memory for that caller
+  setTimeout(() => { void recordDmWake(MEMBER, dmConv); }, 60);
   const started = Date.now();
   const wakeAnswer = await getChanges(
     MEMBER,
@@ -148,6 +154,49 @@ test("ephemeral DM wakes wake held long-polls with zero SQLite rows, and an oper
   );
   assert.deepEqual(fromLegacy.reset, [dmInbox]);
   assert.deepEqual(fromLegacy.changed, []);
+  assertZeroDmRowsInSqlite();
+});
+
+test("caller-scoped DM wakes isolate participants and enforce per-(callerDid, space) rate limits: Alice's wakes never wake, advance, or reset Bob's feed", async () => {
+  resetDmFeedWakesForTests();
+  const alice = "did:plc:alice";
+  const bob = "did:plc:bob";
+  const sharedConv = dmConversationUri(alice, "3kabcdefghij5");
+  const allowed = new Set([sharedConv]);
+
+  const bobInitialHead = (await getChanges(bob, [], undefined, deps(allowed))).head;
+  const aliceInitialHead = (await getChanges(alice, [], undefined, deps(allowed))).head;
+
+  // Start Bob's long-poll (250ms hold) while Alice receives 120 wakes (up to her rate limit) and hits 429 on the 121st
+  const bobPolling = getChanges(bob, [followAt(sharedConv, bobInitialHead)], undefined, deps(allowed, 250));
+  const fixedNow = 10_000_000;
+  for (let i = 0; i < DM_WAKE_RATE_LIMIT_MAX; i += 1) {
+    await recordDmWake(alice, sharedConv, fixedNow + i);
+  }
+  await assert.rejects(
+    recordDmWake(alice, sharedConv, fixedNow + DM_WAKE_RATE_LIMIT_MAX),
+    (err: unknown) => err instanceof DmRateLimitError && err.status === 429,
+  );
+
+  // Bob's held poll finishes its full hold untouched: zero changed, zero reset, and Bob's head did NOT advance!
+  const bobAfterAliceFlood = await bobPolling;
+  assert.deepEqual(bobAfterAliceFlood, {
+    head: bobInitialHead,
+    changed: [],
+    denied: [],
+    reset: [],
+  });
+
+  // Meanwhile Alice's own feed DOES see the wake
+  const aliceAfter = await getChanges(alice, [followAt(sharedConv, aliceInitialHead)], undefined, deps(allowed, 50));
+  assert.deepEqual(aliceAfter.changed.map((c) => c.space), [sharedConv]);
+  assert.deepEqual(aliceAfter.reset, []);
+
+  // Bob's own rate-limit bucket is completely independent of Alice's flood, and wakes Bob immediately
+  await recordDmWake(bob, sharedConv, fixedNow);
+  const bobOwnWake = await getChanges(bob, [followAt(sharedConv, bobInitialHead)], undefined, deps(allowed, 50));
+  assert.deepEqual(bobOwnWake.changed.map((c) => c.space), [sharedConv]);
+  assert.deepEqual(bobOwnWake.reset, []);
   assertZeroDmRowsInSqlite();
 });
 

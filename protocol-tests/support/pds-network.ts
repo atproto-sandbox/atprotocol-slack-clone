@@ -401,32 +401,30 @@ function sharedPlcProxy(targetOrigin: string): Promise<string> {
 }
 
 /**
- * The operator's app served in this process on the configured `OPERATOR_URL` port (when free, else any free port), so both
- * browser-shaped XRPC calls and PDS synchronous `confirmRegistration` / `notifySpaceUpdate` webhooks reach it in-process.
- * Started once, after the network has set that environment; it does not keep the process alive.
+ * The operator's app served in this process on the configured `OPERATOR_URL` port (when set, else an ephemeral loopback port),
+ * so both browser-shaped XRPC calls and PDS synchronous `confirmRegistration` / `notifySpaceUpdate` webhooks reach it in-process.
+ * Started once, after the network has set that environment; fails fast if `OPERATOR_URL`'s port is already in use rather than
+ * silently binding another port, and does not keep the process alive.
  */
 export function inProcessOperator(): Promise<string> {
   operatorServed ??= (async () => {
     const { createOperatorApp } = await import("@flock/operator/operator/server");
     const app = createOperatorApp();
     const preferredPort = process.env.OPERATOR_URL ? Number(new URL(process.env.OPERATOR_URL).port) : 0;
-    for (const candidatePort of preferredPort > 0 ? [preferredPort, 0] : [0]) {
-      const server = createHttpServer(app);
-      const started = await new Promise<boolean>((resolveListen, rejectListen) => {
-        server.once("error", (err: NodeJS.ErrnoException) => {
-          if (err.code === "EADDRINUSE" && candidatePort !== 0) resolveListen(false);
-          else rejectListen(err);
-        });
-        server.listen(candidatePort, "127.0.0.1", () => resolveListen(true));
-      });
-      if (!started) continue;
-      server.unref();
-      const address = server.address();
-      assert.ok(address && typeof address === "object");
-      return `http://127.0.0.1:${address.port}`;
-    }
-    throw new Error("Could not bind in-process operator server.");
-  })();
+    const listenPort = preferredPort > 0 ? preferredPort : 0;
+    const server = createHttpServer(app);
+    await new Promise<void>((resolveListen, rejectListen) => {
+      server.once("error", rejectListen);
+      server.listen(listenPort, "127.0.0.1", () => resolveListen());
+    });
+    server.unref();
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    return `http://127.0.0.1:${address.port}`;
+  })().catch((error) => {
+    operatorServed = undefined;
+    throw error;
+  });
   return operatorServed;
 }
 

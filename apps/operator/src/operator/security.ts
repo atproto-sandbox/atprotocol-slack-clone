@@ -1,3 +1,4 @@
+import { createHmac, hkdfSync } from "node:crypto";
 import { cryptoVerifySignatureWithKey, verifyJwt } from "@atproto/xrpc-server";
 import type { OAuthSession } from "@atproto/oauth-client-node";
 import { getIdResolver, resolveSigningKey as cachedResolveSigningKey } from "../atproto/identity";
@@ -8,6 +9,8 @@ import { listSpaceMembers } from "../atproto/space-ops";
 import { getConfig } from "@flock/deployment/config";
 import { inboxUri, isDid, parseDmSpaceUri, parseSpaceUri, requireSpaceAuthority, subjectKey } from "@flock/protocol/keys";
 import { WorkspaceEnvelopeError } from "@flock/protocol/workspace-summary";
+import { getOperatorConfig } from "../config";
+import { getRawDb } from "../lib/db";
 import { authorizeDmSubscription } from "../lib/dm-subscription";
 import { restoreAuthorityGrant } from "./authority-grant";
 import { OperatorAuthError, OperatorInfrastructureError, isTransientOperatorInfrastructureError } from "./errors";
@@ -23,12 +26,19 @@ const SPACE_CREDENTIAL_TYP = "atproto-space-credential+jwt";
 const SPACE_CREDENTIAL_MAX_AGE_SECONDS = 3_600;
 const CREDENTIAL_IAT_CLOCK_SKEW_SECONDS = 5;
 const PROOF_CREATED_WINDOW_SECONDS = 60;
-const MAX_DM_PROOF_REPLAY_ENTRIES = 16_384;
+const DM_REPLAY_KEY_INFO = "flock-dm-pop-replay-v1";
+const CREDENTIAL_SIGNATURE_TAG = "atproto-space-credential";
 
-const dmProofReplayCache = new Map<string, number>();
+function deriveDmReplayKey(): Buffer {
+  return Buffer.from(hkdfSync("sha256", getOperatorConfig().encryptionKey, "", DM_REPLAY_KEY_INFO, 32));
+}
 
 export function resetDmProofReplayCacheForTests(): void {
-  dmProofReplayCache.clear();
+  try {
+    getRawDb().prepare("DELETE FROM oauth_request_lock WHERE name LIKE 'pop:%'").run();
+  } catch {
+    // Database may not be initialized yet.
+  }
 }
 
 /** The bearer token an `authorization` header value carries. */
@@ -179,8 +189,8 @@ export async function verifyDmNotifyCredentialAndProof(
     throw new OperatorAuthError("Invalid space credential possession proof.");
   }
 
-  assertProofSignatureTimestamps(input.proof.signatureInput, nowSec);
-  recordAndCheckProofReplay(parsed.jti, input.proof.signatureInput, input.proof.signature, parsed.exp * 1000, nowMs);
+  const created = extractAndAssertProofCreated(input.proof.signatureInput, nowSec, parsed.exp);
+  consumeProofReplayLock(parsed.iss, parsed.jti, created, parsed.exp, nowMs);
 }
 
 function parseCredentialJwt(
@@ -190,6 +200,7 @@ function parseCredentialJwt(
   nowSec: number,
 ): {
   alg: string;
+  iss: string;
   cnfKid: `did:key:${string}`;
   jti: string;
   exp: number;
@@ -250,6 +261,7 @@ function parseCredentialJwt(
   }
   return {
     alg: header.alg,
+    iss: payload.iss,
     cnfKid: cnf.kid as `did:key:${string}`,
     jti: payload.jti,
     exp: payload.exp,
@@ -258,52 +270,240 @@ function parseCredentialJwt(
   };
 }
 
-function assertProofSignatureTimestamps(signatureInput: string, nowSec: number): void {
-  // Inspect parameters on the tagged credential signature entry (verified by verifyCredentialSig).
-  for (const member of signatureInput.split(",")) {
-    if (!member.includes('tag="atproto-space-credential"')) continue;
-    const closeParen = member.indexOf(")");
-    const paramTail = closeParen >= 0 ? member.slice(closeParen + 1) : member;
-    const createdMatch = /;created=([^;,\s]+)/.exec(paramTail);
-    if (createdMatch) {
-      const raw = createdMatch[1]!;
-      if (!/^(0|[1-9][0-9]*)$/.test(raw)) {
-        throw new OperatorAuthError("Malformed created parameter in credential proof.");
-      }
-      const created = Number(raw);
-      if (!Number.isSafeInteger(created) || Math.abs(nowSec - created) > PROOF_CREATED_WINDOW_SECONDS) {
-        throw new OperatorAuthError("Credential proof timestamp is outside the accepted window.");
-      }
+type SfBareItem =
+  | { kind: "integer"; value: number }
+  | { kind: "decimal"; value: number }
+  | { kind: "string"; value: string }
+  | { kind: "token"; value: string }
+  | { kind: "bytes"; value: string }
+  | { kind: "boolean"; value: boolean };
+
+type SfParameters = Map<string, SfBareItem>;
+type SfItem = { kind: "item"; bare: SfBareItem; parameters: SfParameters };
+type SfInnerList = { kind: "innerList"; items: SfItem[]; parameters: SfParameters };
+
+/**
+ * Parses an RFC 8941 Structured Field Dictionary matching `structured-headers` `parseDictionary`,
+ * while preserving exact `integer` vs `decimal` bare-item types so `1700000000.0` is never accepted as an integer.
+ */
+function parseStructuredDictionary(input: string): Map<string, SfItem | SfInnerList> {
+  let pos = 0;
+  const eof = () => pos >= input.length;
+  const look = () => input[pos];
+  const next = () => input[pos++]!;
+  const skipWs = () => {
+    while (look() === " ") pos += 1;
+  };
+  const skipOws = () => {
+    while (look() === " " || look() === "\t") pos += 1;
+  };
+  const parseKey = (): string => {
+    const first = look();
+    if (!first || !/^[a-z*]$/.test(first)) throw new Error("Invalid dictionary/parameter key.");
+    let key = "";
+    while (!eof()) {
+      const ch = look();
+      if (!ch || !/^[a-z0-9_\-.*]$/.test(ch)) break;
+      key += next();
     }
-    const expiresMatch = /;expires=([^;,\s]+)/.exec(paramTail);
-    if (expiresMatch) {
-      const raw = expiresMatch[1]!;
-      if (!/^(0|[1-9][0-9]*)$/.test(raw) || Number(raw) <= nowSec) {
-        throw new OperatorAuthError("Credential proof has expired.");
+    return key;
+  };
+  const parseBareItem = (): SfBareItem => {
+    const ch = look();
+    if (ch === undefined) throw new Error("Unexpected EOF.");
+    if (/^[-0-9]$/.test(ch)) {
+      let sign = 1;
+      if (look() === "-") {
+        sign = -1;
+        pos += 1;
       }
+      if (!/^[0-9]$/.test(look() ?? "")) throw new Error("Expected digit.");
+      let digits = "";
+      let isDecimal = false;
+      while (!eof()) {
+        const c = next();
+        if (/^[0-9]$/.test(c)) {
+          digits += c;
+        } else if (!isDecimal && c === ".") {
+          if (digits.length > 12) throw new Error("Decimal too long.");
+          digits += ".";
+          isDecimal = true;
+        } else {
+          pos -= 1;
+          break;
+        }
+        if (!isDecimal && digits.length > 15) throw new Error("Integer too long.");
+        if (isDecimal && digits.length > 16) throw new Error("Decimal too long.");
+      }
+      if (!isDecimal) {
+        return { kind: "integer", value: Number.parseInt(digits, 10) * sign };
+      }
+      if (digits.endsWith(".") || (digits.split(".")[1]?.length ?? 0) > 3) {
+        throw new Error("Invalid decimal.");
+      }
+      return { kind: "decimal", value: Number.parseFloat(digits) * sign };
     }
+    if (ch === '"') {
+      pos += 1;
+      let out = "";
+      while (!eof()) {
+        const c = next();
+        if (c === "\\") {
+          if (eof()) throw new Error("Unterminated escape.");
+          const esc = next();
+          if (esc !== "\\" && esc !== '"') throw new Error("Invalid escape.");
+          out += esc;
+        } else if (c === '"') {
+          return { kind: "string", value: out };
+        } else {
+          const code = c.charCodeAt(0);
+          if (code < 0x20 || code > 0x7e) throw new Error("Non-ASCII string character.");
+          out += c;
+        }
+      }
+      throw new Error("Unterminated string.");
+    }
+    if (/^[A-Za-z*]$/.test(ch)) {
+      let tok = "";
+      while (!eof()) {
+        const c = look();
+        if (!c || !/^[:/!#$%&'*+\-.^_`|~A-Za-z0-9]$/.test(c)) break;
+        tok += next();
+      }
+      return { kind: "token", value: tok };
+    }
+    if (ch === ":") {
+      pos += 1;
+      const end = input.indexOf(":", pos);
+      if (end === -1) throw new Error("Unterminated byte sequence.");
+      const b64 = input.slice(pos, end);
+      pos = end + 1;
+      if (!/^[A-Za-z0-9+/=]*$/.test(b64)) throw new Error("Invalid byte sequence.");
+      return { kind: "bytes", value: b64 };
+    }
+    if (ch === "?") {
+      pos += 1;
+      const b = next();
+      if (b === "1") return { kind: "boolean", value: true };
+      if (b === "0") return { kind: "boolean", value: false };
+      throw new Error("Invalid boolean.");
+    }
+    throw new Error("Unexpected bare item.");
+  };
+  const parseParameters = (): SfParameters => {
+    const params: SfParameters = new Map();
+    while (!eof() && look() === ";") {
+      pos += 1;
+      skipWs();
+      const k = parseKey();
+      let val: SfBareItem = { kind: "boolean", value: true };
+      if (look() === "=") {
+        pos += 1;
+        val = parseBareItem();
+      }
+      params.set(k, val);
+    }
+    return params;
+  };
+  const parseItem = (): SfItem => ({
+    kind: "item",
+    bare: parseBareItem(),
+    parameters: parseParameters(),
+  });
+  const parseInnerList = (): SfInnerList => {
+    if (next() !== "(") throw new Error("Expected '('.");
+    const items: SfItem[] = [];
+    while (!eof()) {
+      skipWs();
+      if (look() === ")") {
+        pos += 1;
+        return { kind: "innerList", items, parameters: parseParameters() };
+      }
+      items.push(parseItem());
+      const after = look();
+      if (after !== " " && after !== ")") throw new Error("Expected space or ')' in inner list.");
+    }
+    throw new Error("Unterminated inner list.");
+  };
+
+  skipWs();
+  const dict = new Map<string, SfItem | SfInnerList>();
+  while (!eof()) {
+    const key = parseKey();
+    let member: SfItem | SfInnerList;
+    if (look() === "=") {
+      pos += 1;
+      member = look() === "(" ? parseInnerList() : parseItem();
+    } else {
+      member = { kind: "item", bare: { kind: "boolean", value: true }, parameters: parseParameters() };
+    }
+    dict.set(key, member);
+    skipOws();
+    if (eof()) return dict;
+    if (next() !== ",") throw new Error("Expected ','.");
+    skipOws();
+    if (eof()) throw new Error("Trailing comma in dictionary.");
   }
+  return dict;
 }
 
-function recordAndCheckProofReplay(
+function extractAndAssertProofCreated(signatureInput: string, nowSec: number, credentialExp: number): number {
+  let dict: Map<string, SfItem | SfInnerList>;
+  try {
+    dict = parseStructuredDictionary(signatureInput);
+  } catch {
+    throw new OperatorAuthError("Malformed Signature-Input in credential proof.");
+  }
+  const tagged: SfInnerList[] = [];
+  for (const member of dict.values()) {
+    const tagParam = member.parameters.get("tag");
+    if (member.kind === "innerList" && tagParam?.kind === "string" && tagParam.value === CREDENTIAL_SIGNATURE_TAG) {
+      tagged.push(member);
+    }
+  }
+  if (tagged.length !== 1) {
+    throw new OperatorAuthError("Invalid space credential possession proof.");
+  }
+  const parameters = tagged[0]!.parameters;
+  const createdParam = parameters.get("created");
+  if (!createdParam) {
+    throw new OperatorAuthError("Credential proof requires a signed created timestamp.");
+  }
+  if (createdParam.kind !== "integer" || !Number.isSafeInteger(createdParam.value) || createdParam.value <= 0) {
+    throw new OperatorAuthError("Malformed created parameter in credential proof.");
+  }
+  const created = createdParam.value;
+  if (Math.abs(nowSec - created) > PROOF_CREATED_WINDOW_SECONDS || created > credentialExp) {
+    throw new OperatorAuthError("Credential proof timestamp is outside the accepted window.");
+  }
+  const expiresParam = parameters.get("expires");
+  if (expiresParam !== undefined) {
+    if (expiresParam.kind !== "integer" || !Number.isSafeInteger(expiresParam.value) || expiresParam.value <= nowSec) {
+      throw new OperatorAuthError("Credential proof has expired.");
+    }
+  }
+  return created;
+}
+
+function consumeProofReplayLock(
+  iss: string,
   jti: string,
-  signatureInput: string,
-  signature: string,
-  expiresAtMs: number,
+  created: number,
+  credentialExp: number,
   nowMs: number,
 ): void {
-  for (const [key, exp] of dmProofReplayCache) {
-    if (exp <= nowMs) dmProofReplayCache.delete(key);
-  }
-  const replayKey = `${jti}\u0000${signatureInput}\u0000${signature}`;
-  if (dmProofReplayCache.has(replayKey)) {
+  const replayName = `pop:${createHmac("sha256", deriveDmReplayKey()).update(`${iss}\0${jti}`, "utf8").digest("hex")}`;
+  const expiresAt = Math.max((created + 65) * 1000, credentialExp * 1000 + 5_000);
+  const db = getRawDb();
+  const consumed = db.transaction(() => {
+    db.prepare("DELETE FROM oauth_request_lock WHERE name LIKE 'pop:%' AND expires_at <= ?").run(nowMs);
+    const res = db
+      .prepare("INSERT INTO oauth_request_lock (name, token, expires_at) VALUES (?, '1', ?) ON CONFLICT(name) DO NOTHING")
+      .run(replayName, expiresAt);
+    return res.changes === 1;
+  }).immediate();
+  if (!consumed) {
     throw new OperatorAuthError("Credential proof has already been used.");
-  }
-  dmProofReplayCache.set(replayKey, expiresAtMs);
-  while (dmProofReplayCache.size > MAX_DM_PROOF_REPLAY_ENTRIES) {
-    const oldest = dmProofReplayCache.keys().next();
-    if (oldest.done) break;
-    dmProofReplayCache.delete(oldest.value);
   }
 }
 

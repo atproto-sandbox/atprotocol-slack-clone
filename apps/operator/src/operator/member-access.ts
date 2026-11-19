@@ -1,5 +1,4 @@
 import type * as MemberspaceDefs from "@flock/protocol/lexicons/api/types/com/atproto/memberspace/defs";
-import { isAccountSuspendedError } from "@flock/protocol/atproto/xrpc";
 import { listSpaceMembers } from "../atproto/space-ops";
 import { getConfig } from "@flock/deployment/config";
 import { getRawDb } from "../lib/db";
@@ -7,11 +6,17 @@ import { authorizeDmSubscription } from "../lib/dm-subscription";
 import { parseDmSpaceUri, parseSpaceUri } from "@flock/protocol/keys";
 import { SPACE_TYPE } from "@flock/protocol/nsids";
 import { restoreAuthorityGrant } from "./authority-grant";
+import {
+  AUTHORITY_SUSPENDED_BACKOFF_MS,
+  invalidateAuthorityHealth,
+  isAuthoritySuspended,
+  runThroughAuthorityBreaker,
+} from "./authority-suspension";
 
 /** How long a space's member list answers who may follow it before it is read again (D12). */
 export const MEMBER_LIST_TTL_MS = 60_000;
 /** Short negative backoff when an authority account is suspended (`AccountTakedown` / `AccountDeactivated`), avoiding PDS retry storms. */
-export const MEMBER_LIST_SUSPENDED_BACKOFF_MS = 15_000;
+export const MEMBER_LIST_SUSPENDED_BACKOFF_MS = AUTHORITY_SUSPENDED_BACKOFF_MS;
 
 const FOLLOWED_BY_MEMBER_LIST: ReadonlySet<string> = new Set([
   SPACE_TYPE.workspace,
@@ -66,27 +71,37 @@ export async function mayFollow(space: string, did: string, deps: MemberAccessDe
 /** Forgets a space's member list: the operator changed it, or the space was deleted. */
 export function dropMemberList(space: string): void {
   lists.delete(space);
+  const parsed = parseSpaceUri(space);
+  if (parsed) invalidateAuthorityHealth(parsed.authorityDid);
 }
 
 function memberList(space: string, authorityDid: string, deps: MemberAccessDeps): Promise<MemberspaceDefs.Member[]> {
   const now = deps.now();
+  if (isAuthoritySuspended(authorityDid, now)) {
+    return Promise.reject(new Error("AuthoritySuspended"));
+  }
   const held = lists.get(space);
   if (held && now < held.expiresAt && held.expiresAt - now <= MEMBER_LIST_TTL_MS) return held.members;
   // Lists past their minute are dropped at most once a minute, so a call with many uncached spaces walks the cache once.
   if (now - prunedAt >= MEMBER_LIST_TTL_MS || now < prunedAt) {
     prunedAt = now;
-    for (const [cached, { expiresAt }] of lists) if (now >= expiresAt || expiresAt - now > MEMBER_LIST_TTL_MS) lists.delete(cached);
-  }
-  const entry = { expiresAt: now + MEMBER_LIST_TTL_MS, members: deps.readMembers(space, authorityDid) };
-  lists.set(space, entry);
-  // A failed read is not kept (unless the authority account is suspended, which backs off briefly to avoid storming the PDS).
-  entry.members.catch((error: unknown) => {
-    if (lists.get(space) !== entry) return;
-    if (isAccountSuspendedError(error)) {
-      entry.expiresAt = deps.now() + MEMBER_LIST_SUSPENDED_BACKOFF_MS;
-    } else {
-      lists.delete(space);
+    for (const [cached, { expiresAt }] of lists) {
+      if (now >= expiresAt || expiresAt - now > MEMBER_LIST_TTL_MS) {
+        lists.delete(cached);
+        const parsedCached = parseSpaceUri(cached);
+        if (parsedCached) invalidateAuthorityHealth(parsedCached.authorityDid);
+      }
     }
+  }
+  const membersPromise = runThroughAuthorityBreaker(
+    authorityDid,
+    () => deps.now(),
+    () => deps.readMembers(space, authorityDid),
+  );
+  const entry = { expiresAt: now + MEMBER_LIST_TTL_MS, members: membersPromise };
+  lists.set(space, entry);
+  entry.members.catch(() => {
+    if (lists.get(space) === entry) lists.delete(space);
   });
   return entry.members;
 }

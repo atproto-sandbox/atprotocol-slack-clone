@@ -11,13 +11,13 @@ import { closeDb, getRawDb } from "../lib/db";
 import { dmConversationUri } from "@flock/protocol/keys";
 import { NOTICE_METHOD, OPERATOR_METHOD } from "@flock/protocol/nsids";
 import { AUTHORITY_FLOW_PATHS } from "./authority-grant";
-import { currentDmWakeHead, resetDmFeedWakesForTests } from "./dm-feed-wakes";
+import { currentDmWakeHead, DM_WAKE_RATE_LIMIT_MAX, resetDmFeedWakesForTests } from "./dm-feed-wakes";
 import { OperatorAuthError } from "./errors";
 import type { OperatorMethodDefinition } from "./methods";
 import { readNotices } from "./notices";
 import { flushPendingRenewals } from "./registrations";
 import { createOperatorApp } from "./server";
-import { deriveDmNotifyToken } from "./space-notification";
+import { deriveDmNotifyToken, DM_TOKEN_EPOCH_MS } from "./space-notification";
 
 // The operator's HTTP surface as a browser and a caller's host meet it: its did:web document, CORS for any origin on the methods and none on the authority flow,
 // its security headers, the lexicon checks in front of its methods, and the authority flow's navigations.
@@ -326,9 +326,12 @@ test("confirmRegistration and notifySpaceUpdate authenticate via inline token wi
   const revAfter = (db.prepare("SELECT last_space_rev FROM notification_registration WHERE space_uri = ?").get(operatorSpace) as { last_space_rev: string }).last_space_rev;
   assert.equal(revAfter, "3kabcdefghij5");
 
-  // 3. DM space webhooks with dm1.* token: confirmRegistration + #repoWrite + #spaceDeleted succeed in memory; #registrationExpired returns 400!
-  const dmSpace = dmConversationUri("did:plc:alice", "3kabcdefghij2");
-  const dmToken = deriveDmNotifyToken(dmSpace, "did:plc:alice");
+  // 3. DM space webhooks with epoch-bounded dm1.* token: caller-isolated wakes, 429 flood cap, 400 expired epoch, and 400 #registrationExpired!
+  const aliceDid = "did:plc:alice";
+  const bobDid = "did:plc:bob";
+  const dmSpace = dmConversationUri(aliceDid, "3kabcdefghij2");
+  const dmToken = deriveDmNotifyToken(dmSpace, aliceDid);
+  const bobDmToken = deriveDmNotifyToken(dmSpace, bobDid);
 
   const dmConfirm = await postWebhook(NOTICE_METHOD.confirmRegistration, {
     space: dmSpace,
@@ -338,20 +341,22 @@ test("confirmRegistration and notifySpaceUpdate authenticate via inline token wi
   assert.equal(dmConfirm.status, 200);
   assert.deepEqual(await dmConfirm.json(), { challenge: "dm-challenge-1" });
 
-  const dmHeadBefore = currentDmWakeHead().head;
+  const aliceDmHeadBefore = currentDmWakeHead(aliceDid).head;
+  const bobDmHeadBefore = currentDmWakeHead(bobDid).head;
   const dmWrite = await postWebhook(NOTICE_METHOD.notifySpaceUpdate, {
     space: dmSpace,
     token: dmToken,
     update: {
       $type: "com.atproto.space.defs#repoWrite",
-      repo: "did:plc:bob",
+      repo: bobDid,
       repoRev: "3kabcdefghij2",
       spaceRev: "3kabcdefghij3",
       data: { $bytes: digestB64 },
     },
   });
   assert.equal(dmWrite.status, 200);
-  assert.equal(currentDmWakeHead().head, dmHeadBefore + 1);
+  assert.equal(currentDmWakeHead(aliceDid).head, aliceDmHeadBefore + 1);
+  assert.equal(currentDmWakeHead(bobDid).head, bobDmHeadBefore, "Alice's dm1 token NEVER advances Bob's DM wake head");
 
   const dmDeleted = await postWebhook(NOTICE_METHOD.notifySpaceUpdate, {
     space: dmSpace,
@@ -359,7 +364,42 @@ test("confirmRegistration and notifySpaceUpdate authenticate via inline token wi
     update: { $type: "com.atproto.space.notifySpaceUpdate#spaceDeleted" },
   });
   assert.equal(dmDeleted.status, 200);
-  assert.equal(currentDmWakeHead().head, dmHeadBefore + 2);
+  assert.equal(currentDmWakeHead(aliceDid).head, aliceDmHeadBefore + 2);
+  assert.equal(currentDmWakeHead(bobDid).head, bobDmHeadBefore, "Alice's #spaceDeleted dm1 webhook NEVER affects Bob's DM state");
+
+  // Rate limit per (callerDid, space): exhausting Alice's 120/60s budget returns 429 while Bob's token still succeeds (200)
+  for (let i = 2; i < DM_WAKE_RATE_LIMIT_MAX; i += 1) {
+    const ok = await postWebhook(NOTICE_METHOD.notifySpaceUpdate, {
+      space: dmSpace,
+      token: dmToken,
+      update: { $type: "com.atproto.space.notifySpaceUpdate#spaceDeleted" },
+    });
+    assert.equal(ok.status, 200);
+  }
+  const aliceFlood = await postWebhook(NOTICE_METHOD.notifySpaceUpdate, {
+    space: dmSpace,
+    token: dmToken,
+    update: { $type: "com.atproto.space.notifySpaceUpdate#spaceDeleted" },
+  });
+  assert.equal(aliceFlood.status, 429);
+  assert.equal((await aliceFlood.json() as { error: string }).error, "RateLimitExceeded");
+
+  const bobWriteDuringAliceFlood = await postWebhook(NOTICE_METHOD.notifySpaceUpdate, {
+    space: dmSpace,
+    token: bobDmToken,
+    update: { $type: "com.atproto.space.notifySpaceUpdate#spaceDeleted" },
+  });
+  assert.equal(bobWriteDuringAliceFlood.status, 200);
+  assert.equal(currentDmWakeHead(bobDid).head, bobDmHeadBefore + 1);
+
+  // Expired epoch token (2 epochs old, past [epoch, epoch - 1]) is rejected with HTTP 400!
+  const staleEpochToken = deriveDmNotifyToken(dmSpace, aliceDid, undefined, Date.now() - 2 * DM_TOKEN_EPOCH_MS);
+  const staleRes = await postWebhook(NOTICE_METHOD.notifySpaceUpdate, {
+    space: dmSpace,
+    token: staleEpochToken,
+    update: { $type: "com.atproto.space.notifySpaceUpdate#spaceDeleted" },
+  });
+  assert.equal(staleRes.status, 400, "dm1 token past [epoch, epoch - 1] is rejected with 400");
 
   const dmExpired = await postWebhook(NOTICE_METHOD.notifySpaceUpdate, {
     space: dmSpace,

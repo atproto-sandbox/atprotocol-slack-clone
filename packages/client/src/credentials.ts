@@ -28,6 +28,7 @@ function sameNotify(left: SpaceNotifyTarget | undefined, right: SpaceNotifyTarge
 export class CredentialCache {
   private readonly credentials = new Map<string, Promise<SpaceCredential>>();
   private readonly notifyTargets = new Map<string, SpaceNotifyTarget>();
+  private readonly pendingNotifyMints = new Map<string, Promise<SpaceCredential>>();
 
   constructor(
     private readonly transport: ClientTransport,
@@ -35,24 +36,34 @@ export class CredentialCache {
   ) {}
 
   async get(space: string, opts?: { notify?: SpaceNotifyTarget }): Promise<SpaceCredential> {
+    if (opts?.notify !== undefined) {
+      const pending = this.credentials.get(space);
+      if (pending) {
+        const existing = await pending.catch(() => undefined);
+        if (existing && this.isUsable(existing) && sameNotify(existing.notify, opts.notify)) {
+          this.notifyTargets.set(space, opts.notify);
+          return existing;
+        }
+      }
+      return this.mintSidecarNotify(space, opts.notify);
+    }
+
     const pending = this.credentials.get(space);
     if (pending) {
       const credential = await pending;
-      const needsNotifyUpdate = opts?.notify !== undefined && !sameNotify(credential.notify, opts.notify);
-      if (!needsNotifyUpdate && credential.expiresAt - transportNow(this.transport) > credential.renewBeforeMs) {
+      if (this.isUsable(credential)) {
         return credential;
       }
       const current = this.credentials.get(space);
       if (current && current !== pending) {
         const next = await current;
-        const currentNeedsUpdate = opts?.notify !== undefined && !sameNotify(next.notify, opts.notify);
-        if (!currentNeedsUpdate && next.expiresAt - transportNow(this.transport) > next.renewBeforeMs) {
+        if (this.isUsable(next)) {
           return next;
         }
       }
       this.credentials.delete(space);
     }
-    const effectiveNotify = opts?.notify ?? this.notifyTargets.get(space);
+    const effectiveNotify = this.notifyTargets.get(space);
     const minted = this.mint(space, effectiveNotify);
     this.credentials.set(space, minted);
     try {
@@ -69,8 +80,32 @@ export class CredentialCache {
 
   /** A credential minted now, for a write that must not rely on membership checked up to ten minutes ago. */
   async fresh(space: string, opts?: { notify?: SpaceNotifyTarget }): Promise<SpaceCredential> {
+    if (opts?.notify !== undefined) {
+      return this.mintSidecarNotify(space, opts.notify);
+    }
     this.credentials.delete(space);
-    return this.get(space, opts);
+    return this.get(space);
+  }
+
+  /**
+   * Mints a brand-new un-notified credential (fresh `jti`) for single-use proof-of-possession without
+   * triggering `{ notify }` confirmation or clobbering an active notified credential in the cache.
+   */
+  async mintFreshUnnotified(space: string): Promise<SpaceCredential> {
+    try {
+      const credential = await mintSpaceCredentialWith(this.transport, space);
+      if (!this.credentials.has(space) && !this.notifyTargets.has(space)) {
+        this.credentials.set(space, Promise.resolve(credential));
+      }
+      return credential;
+    } catch (error) {
+      if (error instanceof SpaceCredentialError) {
+        this.credentials.delete(space);
+        this.notifyTargets.delete(space);
+        await this.onAccessLost?.(space, error);
+      }
+      throw error;
+    }
   }
 
   /** A client for `did`'s host (a writer, or the space's authority), signed with the space's credential. */
@@ -79,9 +114,70 @@ export class CredentialCache {
     return credential.client(await this.transport.resolvePds(did));
   }
 
+  /** Stops re-registering `notify` on future renewals for `space` without dropping valid cached read credentials. */
+  clearNotify(space: string): void {
+    this.notifyTargets.delete(space);
+  }
+
   drop(space: string, opts?: { clearNotify?: boolean }): void {
     this.credentials.delete(space);
     if (opts?.clearNotify) this.notifyTargets.delete(space);
+  }
+
+  private isUsable(credential: SpaceCredential): boolean {
+    return credential.expiresAt - transportNow(this.transport) > credential.renewBeforeMs;
+  }
+
+  private mintSidecarNotify(space: string, notify: SpaceNotifyTarget): Promise<SpaceCredential> {
+    const mintKey = `${space}\0${notify.endpoint}\0${notify.token}`;
+    const inFlight = this.pendingNotifyMints.get(mintKey);
+    if (inFlight) return inFlight;
+
+    const run: Promise<SpaceCredential> = this.runSidecarNotifyMint(space, notify).finally(() => {
+      if (this.pendingNotifyMints.get(mintKey) === run) {
+        this.pendingNotifyMints.delete(mintKey);
+      }
+    });
+
+    this.pendingNotifyMints.set(mintKey, run);
+    return run;
+  }
+
+  private async runSidecarNotifyMint(space: string, notify: SpaceNotifyTarget): Promise<SpaceCredential> {
+    try {
+      const credential = await mintSpaceCredentialWith(this.transport, space, { notify });
+      this.notifyTargets.set(space, notify);
+      this.credentials.set(space, Promise.resolve(credential));
+      return credential;
+    } catch (error) {
+      this.notifyTargets.delete(space);
+      if (error instanceof SpaceCredentialError) {
+        this.credentials.delete(space);
+        await this.onAccessLost?.(space, error);
+        throw error;
+      }
+      if (!isRegistrationNotConfirmed(error)) {
+        throw error;
+      }
+      const current = this.credentials.get(space);
+      if (current) {
+        const existing = await current.catch(() => undefined);
+        if (existing && existing.notify === undefined && this.isUsable(existing)) {
+          return existing;
+        }
+      }
+      try {
+        const fallback = await mintSpaceCredentialWith(this.transport, space);
+        this.credentials.set(space, Promise.resolve(fallback));
+        return fallback;
+      } catch (fallbackError) {
+        if (fallbackError instanceof SpaceCredentialError) {
+          this.credentials.delete(space);
+          await this.onAccessLost?.(space, fallbackError);
+        }
+        throw fallbackError;
+      }
+    }
   }
 
   private async mint(space: string, notify?: SpaceNotifyTarget): Promise<SpaceCredential> {

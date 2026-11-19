@@ -16,7 +16,7 @@ import { spaceRecordUri, subjectKey, tasksSpaceUri } from "@flock/protocol/keys"
 import { COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
 import { WORKSPACE_ENVELOPE } from "@flock/protocol/workspace-summary";
 import { FakeNetwork } from "@flock/testing/fake-network";
-import { readIndependentTasksSpace, type IndependentDeps } from "./independent-tasks";
+import { buildHostSuspendedTasksResult, readIndependentTasksSpace, type IndependentDeps } from "./independent-tasks";
 
 const AUTHORITY = "did:plc:authority";
 const ALICE = "did:plc:alice";
@@ -1455,6 +1455,51 @@ test("host-level RepoTakendown/RepoDeactivated on authorizeSpaceSync/listWriters
       assert.equal(res.workspaceSnapshotComplete, false);
       assert.deepEqual(res.setAside, [{ did: AUTHORITY, reason: expectedReason, permanent: false }]);
     }
+  }
+
+  // RepoSuspended on authority host/repo is also transient, and buildHostSuspendedTasksResult deduplicates authorityDid in setAside.
+  {
+    const network = new FakeNetwork();
+    const { workspace, tasksSpace } = await createTasksWorkspaceFixture(network, { members: [ALICE] });
+    network.interceptResponse = ({ method, params, response }) => {
+      if (method === "com.atproto.space.listWriters" && params.space === tasksSpace) {
+        return new Response(JSON.stringify({ error: "RepoSuspended", message: `RepoSuspended: ${AUTHORITY}` }), {
+          status: 400,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return response;
+    };
+    const res = await readIndependentTasksSpace(depsFor(network, ALICE), workspace);
+    assert.equal(res.complete, false);
+    assert.equal(res.degraded, true);
+    assert.deepEqual(res.setAside, [{ did: AUTHORITY, reason: "its account is suspended", permanent: false }]);
+
+    const deduped = buildHostSuspendedTasksResult(
+      {
+        workspaceUri: workspace,
+        authorityDid: AUTHORITY,
+        workspaceSkey: "ws1",
+        tasksSpaceUri: tasksSpace,
+        enabled: true,
+        extInstall: res.extInstall,
+        rosterMembers: [ALICE],
+        workspaceSnapshotComplete: false,
+        degradedReasons: ["prior warning"],
+        setAside: [
+          { did: AUTHORITY, reason: "stale authority entry", permanent: false },
+          { did: BOB, reason: "its account is deactivated", permanent: true },
+        ],
+      },
+      "its account is suspended",
+    );
+    assert.deepEqual(
+      deduped.setAside,
+      [
+        { did: AUTHORITY, reason: "its account is suspended", permanent: false },
+        { did: BOB, reason: "its account is deactivated", permanent: true },
+      ].sort((a, b) => a.did.localeCompare(b.did)),
+    );
   }
 });
 

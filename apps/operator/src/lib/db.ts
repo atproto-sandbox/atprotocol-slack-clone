@@ -2,6 +2,7 @@ import BetterSqlite3 from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { Kysely, SqliteDialect } from "kysely";
+import { NAMESPACE } from "@flock/protocol/nsids";
 import { getOperatorConfig } from "../config";
 
 type OperationState = "queued" | "running" | "pending" | "completed" | "failed" | "paused";
@@ -42,6 +43,7 @@ export interface SlackDb {
     token: string;
     renew_at: number;
     last_space_rev: string | null;
+    generation: number;
   };
   notification_registration_failure: { space_uri: string; workspace_uri: string; failures: number; next_attempt_at: number; last_error: string };
   space_notification: { id: number; space_uri: string; space_type: string; type_seq: number; repo_did: string; rev: string; notified_at: number };
@@ -49,6 +51,14 @@ export interface SlackDb {
 
 let database: Kysely<SlackDb> | undefined;
 let rawDatabase: BetterSqlite3.Database | undefined;
+const dbCloseListeners = new Set<() => void>();
+
+export function onDbClose(listener: () => void): () => void {
+  dbCloseListeners.add(listener);
+  return () => {
+    dbCloseListeners.delete(listener);
+  };
+}
 
 /**
  * Content-free write notices, with what the change feed needs to answer a cursor: each notice's space type and its place
@@ -95,10 +105,15 @@ function replaceNoticeTableFromBeforeTypeCaps(database: BetterSqlite3.Database):
 export function getDb(): Kysely<SlackDb> {
   if (database) return database;
   const config = getOperatorConfig();
-  const file = resolve(config.databasePath);
-  mkdirSync(dirname(file), { recursive: true });
+  const isMemoryDb = config.databasePath === ":memory:";
+  const file = isMemoryDb ? ":memory:" : resolve(config.databasePath);
+  if (!isMemoryDb) {
+    mkdirSync(dirname(file), { recursive: true });
+  }
   rawDatabase = new BetterSqlite3(file);
-  rawDatabase.pragma("journal_mode = WAL");
+  if (!isMemoryDb) {
+    rawDatabase.pragma("journal_mode = WAL");
+  }
   rawDatabase.pragma("foreign_keys = ON");
   rawDatabase.pragma("busy_timeout = 5000");
   replaceNoticeTableFromBeforeTypeCaps(rawDatabase);
@@ -180,6 +195,7 @@ export function getDb(): Kysely<SlackDb> {
       token TEXT NOT NULL DEFAULT '',
       renew_at INTEGER NOT NULL DEFAULT 0,
       last_space_rev TEXT,
+      generation INTEGER NOT NULL DEFAULT 1,
       PRIMARY KEY (service_ref, space_uri)
     );
     CREATE TABLE IF NOT EXISTS notification_registration_failure (
@@ -207,8 +223,16 @@ export function getDb(): Kysely<SlackDb> {
     if (!registrationColumns.some(({ name }) => name === "last_space_rev")) {
       rawDatabase.exec("ALTER TABLE notification_registration ADD COLUMN last_space_rev TEXT");
     }
+    if (!registrationColumns.some(({ name }) => name === "generation")) {
+      rawDatabase.exec("ALTER TABLE notification_registration ADD COLUMN generation INTEGER NOT NULL DEFAULT 1");
+    }
     // Legacy registerNotify-era rows have no inline webhook token (and could have ~24h expires_at); reset so startup renews immediately.
     rawDatabase.exec("UPDATE notification_registration SET expires_at = 0, renew_at = 0 WHERE token = ''");
+    // Purge any historical pre-R12 DM rows left in notice and floor tables on upgraded databases.
+    const dmSpaceTypePattern = `${NAMESPACE}.dm.%`;
+    rawDatabase.prepare("DELETE FROM space_notification WHERE space_type LIKE ?").run(dmSpaceTypePattern);
+    rawDatabase.prepare("DELETE FROM space_notification_space_floor WHERE space_type LIKE ?").run(dmSpaceTypePattern);
+    rawDatabase.prepare("DELETE FROM space_notification_type_floor WHERE space_type LIKE ?").run(dmSpaceTypePattern);
     rawDatabase.exec("CREATE INDEX IF NOT EXISTS notification_registration_workspace ON notification_registration(workspace_uri, expires_at)");
     rawDatabase.exec("CREATE INDEX IF NOT EXISTS notification_registration_due ON notification_registration(service_ref, renew_at)");
     const operationColumns = rawDatabase.prepare("PRAGMA table_info(operation)").all() as Array<{ name: string }>;
@@ -284,6 +308,13 @@ export function getRawDb(): BetterSqlite3.Database {
 }
 
 export function closeDb(): void {
+  for (const listener of [...dbCloseListeners]) {
+    try {
+      listener();
+    } catch {
+      // Best-effort listener teardown.
+    }
+  }
   const raw = rawDatabase;
   database = undefined;
   rawDatabase = undefined;

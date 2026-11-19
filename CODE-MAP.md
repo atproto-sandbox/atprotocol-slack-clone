@@ -255,12 +255,13 @@ apps/
                               methods, plus `auth: undefined` inbound `confirmRegistration` and `notifySpaceUpdate`), CORS for any
                               origin on the methods, the authority flow, did:web; main.ts runs the 60s SQL-first renewal loop
                               (`.unref()`, heartbeated DB lease) + 30-min discovery sweep; methods.ts holds transport-free handlers.
-    src/operator/authority-grant.ts
+    src/operator/authority-grant.ts, authority-suspension.ts
                              The one owner of the workspace authority grant: its own OAuth client (confidential
                               private_key_jwt outside loopback), the ticket -> /authority/start -> PDS consent ->
                               /authority/callback flow (started by the account itself, or by someone creating a workspace
-                              under it, R8), and the `authority_grant` table. Each restore is a client over a view of one
-                              approval, so a session still in use after a new approval can neither use nor delete it.
+                              under it, R8), and the `authority_grant` table over a quarantined `sessionStore` (`del` never
+                              deletes canonical storage; only `revokeAuthorityGrant` deletes it) + out-of-band account-status
+                              probe (`getRepoStatus`/`listSpaces`) and shared `authority-suspension.ts` `15s` circuit breaker.
     src/operator/creation-authorization.ts
                              The one owner of the approval to create a workspace under an account other than one's own: a
                               completed flow's single-use, 15-minute approval of one name for one person, consumed as the
@@ -291,18 +292,22 @@ apps/
     src/operator/operations.ts, actor.ts, security.ts
                              Request validation and execution; who an operation runs for; service-auth verification with
                               each method's token lifetime, `authorizeOperationActor`, and `getDmNotifyTarget` cryptographic
-                              `SpaceCredential` + RFC 9421 `verifyCredentialSig` PoP + replay guard + deterministic `dm1` HMAC.
+                              `SpaceCredential` + RFC 9421 `verifyCredentialSig` PoP (mandatory signed `created` + canonical
+                              `pop:<hmac>` SQLite TTL replay lock) + epoch-bounded `dm1` HMAC.
     src/operator/dm-feed-wakes.ts
-                             Ephemeral process-local in-memory DM wake ring/cursor (`apps/operator/src/operator/dm-feed-wakes.ts`)
+                             Caller-scoped `(callerDid, space)` ephemeral DM wake ring/cursor + `120/60s` rate limit, shared
+                              across local operator processes via an HMAC-authenticated `0o600` Unix domain socket hub and
                               merged into `feed.ts` with restart `reset` — guaranteeing zero DM rows in any SQLite table.
     src/operator/feed.ts, member-access.ts, members.ts, notices.ts, registrations.ts, space-notification.ts
-                             getChanges and who may follow a space (`members.ts` is the only way the operator changes a member
-                              list via batched `putMembers`/`removeMembers` `<= 100`, lint-enforced); `notices.ts` and
+                             getChanges and who may follow a space (`member-access.ts` checks `authority-suspension.ts` so
+                              200-space polls stop after 1 suspended request; `members.ts` is the only way the operator changes
+                              a member list via batched `putMembers`/`removeMembers` `<= 100`, lint-enforced); `notices.ts` and
                               `space-notification.ts` handle constant-time token-authenticated `confirmRegistration` and
-                              `notifySpaceUpdate` (`#repoWrite`, `#repoRemoved`, `#registrationExpired` returning `400` on `dm1`
-                              tokens to trigger `abandonSyncerNotice`, and `#spaceDeleted` confirmed via authority `authorizeSpaceSync`);
-                              `registrations.ts` owns stable 1-token-per-space `authorizeSpaceSync` registration, `spaceRev` gap
-                              catch-up, `15s -> 2m` backoff, 60s SQL-first renewal, and 30m discovery sweep.
+                              `notifySpaceUpdate` (epoch-bounded `dm1` `[epoch, epoch - 1]`, `#repoWrite`, `#repoRemoved`,
+                              `#registrationExpired` returning `400` on `dm1` tokens to trigger `abandonSyncerNotice`, and
+                              `#spaceDeleted` confirmed via authority `authorizeSpaceSync`); `registrations.ts` owns cross-process
+                              `BEGIN IMMEDIATE` 1-token-per-space claim + `(token, generation)` archive CAS, `spaceRev` gap
+                              catch-up, `15s -> 2m` bulk suspension backoff, 60s SQL-first renewal, and 30m discovery sweep.
     src/operator/workspace-state.ts, workspace-envelope.ts, stalled.ts, testing/fake-authority-pds.ts
     src/auth/                OAuth plumbing for the authority grant: the flow binding (oauth-flow.ts), the encrypted SQLite
                               stores (encrypted-store.ts, with a view that sees only the values it accepts), the
@@ -311,8 +316,9 @@ apps/
                               server adapter over the core exposing `spaceRev` and `notify`), space-ops.ts (`putMembers`/`removeMembers`,
                               `.space`, `spaceDid`, `removeWriter`), write-notification.ts, client.ts.
     src/lib/db.ts, dm-subscription.ts
-                             The SQLite database and its migrations (`notification_registration.{token, renew_at, last_space_rev}`,
-                              legacy `token = ''` reset to `expires_at = 0, renew_at = 0`, zero DM rows across all tables);
+                             The SQLite database and its migrations (`notification_registration.{token, renew_at, last_space_rev, generation}`,
+                              legacy `token = ''` reset to `expires_at = 0, renew_at = 0`, startup cleanup of historical pre-R12
+                              `new.flock.dm.*` notice rows, zero DM rows across all tables);
                               `authorizeDmSubscription` gating DM inbox `getChanges` follows to the inbox owner.
     scripts/                 reconcile-workspaces.ts (`pnpm reconcile`), authority-grant.ts (`pnpm authority`).
 

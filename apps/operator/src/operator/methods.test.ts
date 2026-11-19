@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { NOTICE_METHOD, OPERATOR_METHOD } from "@flock/protocol/nsids";
 import { describeFailure, MethodError, OPERATOR_METHODS } from "./methods";
+import { DmRateLimitError } from "./dm-feed-wakes";
 import { OperatorAuthError, WebhookAuthError } from "./errors";
 import { OperationBusyError, OperationConflictError } from "./journal";
 
@@ -22,6 +23,11 @@ test("a failure answers with its own status and name, including named 400 Webhoo
     status: 400,
     error: "InvalidRequest",
     message: "Invalid notification token.",
+  });
+  assert.deepEqual(describeFailure(new DmRateLimitError(), "InternalServerError"), {
+    status: 429,
+    error: "RateLimitExceeded",
+    message: "Too many DM notifications for this caller and space.",
   });
   assert.equal(describeFailure(new OperationConflictError(), "InvalidRequest").status, 409);
   assert.equal(describeFailure(new OperationBusyError(), "InvalidRequest").error, "Busy");

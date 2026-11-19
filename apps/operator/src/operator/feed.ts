@@ -1,6 +1,6 @@
 import { parseDmSpaceUri } from "@flock/protocol/keys";
 import { mapLimited } from "@flock/protocol/map-limited";
-import { currentDmWakeHead, onDmWake, readDmWakes, type DmCursor } from "./dm-feed-wakes";
+import { currentDmWakeHead, ensureDmWakeReady, onDmWake, readDmWakes, type DmCursor } from "./dm-feed-wakes";
 import { mayFollow } from "./member-access";
 import { onSpaceNotice, readNotices } from "./notices";
 
@@ -96,7 +96,7 @@ type EvaluatedFeed = {
   reset: string[];
 };
 
-function evaluateFeed(allowed: readonly Follow[]): EvaluatedFeed {
+function evaluateFeed(did: string, allowed: readonly Follow[]): EvaluatedFeed {
   const nonDm: Array<{ space: string; after: number }> = [];
   const dm: Array<{ space: string; cursor: DmCursor | null }> = [];
   for (const entry of allowed) {
@@ -107,7 +107,7 @@ function evaluateFeed(allowed: readonly Follow[]): EvaluatedFeed {
     }
   }
   const notices = readNotices(nonDm);
-  const dmWakes = readDmWakes(dm);
+  const dmWakes = readDmWakes(did, dm);
   const head = formatFeedCursor(dmWakes.epoch, notices.head, dmWakes.head);
 
   const changedBySpace = new Map<string, string>();
@@ -131,9 +131,9 @@ function evaluateFeed(allowed: readonly Follow[]): EvaluatedFeed {
   return { head, changed, reset };
 }
 
-function currentCombinedHead(): string {
+function currentCombinedHead(did: string): string {
   const dbHead = readNotices([]).head;
-  const dm = currentDmWakeHead();
+  const dm = currentDmWakeHead(did);
   return formatFeedCursor(dm.epoch, dbHead, dm.head);
 }
 
@@ -143,16 +143,17 @@ function currentCombinedHead(): string {
  * waited is denied, not told the space changed.
  */
 export async function getChanges(did: string, follow: readonly Follow[], signal?: AbortSignal, deps: FeedDeps = defaultDeps): Promise<ChangesAnswer> {
-  if (follow.length === 0) return { head: currentCombinedHead(), changed: [], denied: [], reset: [] };
+  await ensureDmWakeReady();
+  if (follow.length === 0) return { head: currentCombinedHead(did), changed: [], denied: [], reset: [] };
   const denied = new Set(await deniedSpaces(did, follow.map((entry) => entry.space), deps));
   const allowed = follow.filter((entry) => !denied.has(entry.space));
   // With nothing left to follow there is nothing to wait for.
-  if (allowed.length === 0) return { head: currentCombinedHead(), changed: [], denied: [...denied], reset: [] };
+  if (allowed.length === 0) return { head: currentCombinedHead(did), changed: [], denied: [...denied], reset: [] };
   const deadline = Date.now() + deps.holdMs;
-  let evaluated = evaluateFeed(allowed);
+  let evaluated = evaluateFeed(did, allowed);
   while (evaluated.changed.length === 0 && evaluated.reset.length === 0 && Date.now() < deadline && !signal?.aborted) {
-    await poller.nextChange(evaluated.head, deadline - Date.now(), signal);
-    evaluated = evaluateFeed(allowed);
+    await poller.nextChange(did, evaluated.head, deadline - Date.now(), signal);
+    evaluated = evaluateFeed(did, allowed);
   }
   const answered = [...evaluated.changed.map((change) => change.space), ...evaluated.reset];
   for (const space of await deniedSpaces(did, answered, deps)) denied.add(space);
@@ -171,17 +172,18 @@ async function deniedSpaces(did: string, spaces: readonly string[], deps: FeedDe
 }
 
 /**
- * One poller per process for every waiting call: wakes immediately on in-process workspace or DM wakes and also polls
- * SQLite once a second while anyone waits so notices written by another process still wake waiters promptly.
+ * One poller per process for every waiting call: wakes immediately on in-process workspace or host-local IPC DM wakes
+ * (scoped to `did` for DM wakes) and also polls SQLite once a second while anyone waits so workspace notices written by
+ * another process still wake waiters promptly.
  */
 class NoticePoller {
-  private readonly waiting = new Map<() => void, string>();
+  private readonly waiting = new Map<() => void, { did: string; seenHead: string }>();
   private timer: ReturnType<typeof setInterval> | undefined;
   private unsubSpace: (() => void) | undefined;
   private unsubDm: (() => void) | undefined;
 
-  /** Resolves once the combined head is no longer `seenHead`, after `withinMs`, or when `signal` aborts. */
-  nextChange(seenHead: string, withinMs: number, signal?: AbortSignal): Promise<void> {
+  /** Resolves once the caller's combined head is no longer `seenHead`, after `withinMs`, or when `signal` aborts. */
+  nextChange(did: string, seenHead: string, withinMs: number, signal?: AbortSignal): Promise<void> {
     return new Promise((resolve) => {
       const done = () => {
         clearTimeout(timeout);
@@ -192,28 +194,31 @@ class NoticePoller {
       };
       const timeout = setTimeout(done, Math.max(0, withinMs));
       signal?.addEventListener("abort", done, { once: true });
-      this.waiting.set(done, seenHead);
+      this.waiting.set(done, { did, seenHead });
       if (!this.timer) {
         this.timer = setInterval(() => this.wake(), POLL_MS);
         this.timer.unref?.();
         this.unsubSpace = onSpaceNotice(() => this.wake());
-        this.unsubDm = onDmWake(() => this.wake());
+        this.unsubDm = onDmWake((changedDid) => this.wake(changedDid));
       }
       // A notice that landed after the waiter read its spaces, and before it was registered here, still wakes it.
-      this.wake();
+      this.wake(did);
     });
   }
 
-  private wake(): void {
-    let head: string;
-    try {
-      head = currentCombinedHead();
-    } catch {
-      // The notices cannot be read (the database is closing): every waiter reads them itself and meets the error there.
-      for (const done of [...this.waiting.keys()]) done();
-      return;
+  private wake(changedDid?: string): void {
+    for (const [done, waiter] of [...this.waiting]) {
+      if (changedDid !== undefined && waiter.did !== changedDid) continue;
+      let head: string;
+      try {
+        head = currentCombinedHead(waiter.did);
+      } catch {
+        // The notices cannot be read (the database is closing): every waiter reads them itself and meets the error there.
+        for (const allDone of [...this.waiting.keys()]) allDone();
+        return;
+      }
+      if (head !== waiter.seenHead) done();
     }
-    for (const [done, seenHead] of [...this.waiting]) if (head !== seenHead) done();
   }
 
   private stop(): void {

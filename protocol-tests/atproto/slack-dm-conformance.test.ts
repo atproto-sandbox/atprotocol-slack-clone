@@ -312,10 +312,24 @@ describe('atproto Slack direct-message protocol conformance', () => {
         { space: inbox, policy: PUBLIC_WRITE_POLICY },
         { headers: bob.headers },
       )
+      await spaces.put(grace, inbox, { collection: REQUEST, rkey: '3kdmgrace2222', record: request('3kdmgrace2222') })
       await spaces.put(dave, inbox, { collection: REQUEST, rkey: '3kdmdave22222', record: request('3kdmdave22222') })
       await spaces.put(frank, inbox, { collection: REQUEST, rkey: '3kdmfrank2224', record: request('3kdmfrank2224') })
-      await spaces.put(grace, inbox, { collection: REQUEST, rkey: '3kdmgrace2222', record: request('3kdmgrace2222') })
-      const everyoneWriters = await settledWriters(spaces, await spaces.credentialFor(bob, inbox), pds1, inbox, (dids) => dids.includes(dave.did) && dids.includes(frank.did))
+      const everyoneCred = await spaces.credentialFor(bob, inbox)
+      const [daveHead, frankHead] = await Promise.all([
+        everyoneCred.clientFor(dave.pds).call(com.atproto.space.getLatestCommit, { space: inbox, repo: dave.did }),
+        everyoneCred.clientFor(frank.pds).call(com.atproto.space.getLatestCommit, { space: inbox, repo: frank.did }),
+      ])
+      const everyoneListing = await awaitNotify(
+        () => everyoneCred.clientFor(pds1).call(com.atproto.space.listWriters, { space: inbox }),
+        (res) =>
+          res.repos.some((entry) => repoWrite.$isTypeOf(entry) && entry.repo === dave.did && entry.repoRev >= daveHead.commit.rev) &&
+          res.repos.some((entry) => repoWrite.$isTypeOf(entry) && entry.repo === frank.did && entry.repoRev >= frankHead.commit.rev),
+        { attempts: 30, delayMs: 50 },
+      )
+      const everyoneWriters = everyoneListing.repos
+        .filter((entry) => repoWrite.$isTypeOf(entry))
+        .map((entry) => entry.repo)
       expect(everyoneWriters).toContain(dave.did)
       expect(everyoneWriters).toContain(frank.did)
       expect(everyoneWriters).not.toContain(grace.did)
