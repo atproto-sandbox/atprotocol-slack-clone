@@ -141,8 +141,11 @@ test("a fresh client and a long-lived one agree after a member is removed and an
   const longLived = syncFor(network, READER).core;
   await readChannel(longLived, space);
   const owner = network.clientFor(AUTHORITY);
-  await owner.procedure("com.atproto.memberspace.removeMember", { space, did: ALICE });
-  await owner.procedure("com.atproto.memberspace.putMember", { space, did: BOB, read: true, write: false });
+  await owner.procedure("com.atproto.memberspace.removeMembers", { space, dids: [ALICE] });
+  await owner.procedure("com.atproto.memberspace.putMembers", {
+    space,
+    members: [{ did: BOB, read: true, write: false }],
+  });
   // An app uninstalled leaves the member list the same way a removed member does.
   network.advanceClock(longLived.options.truthIntervalMs);
   const fresh = await readChannel(syncFor(network, READER).core, space);

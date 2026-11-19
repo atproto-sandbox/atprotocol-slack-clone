@@ -105,7 +105,8 @@ export async function runDmCycle(input: {
   refresh: () => Promise<{ exists: boolean } | null>;
   client: Pick<DmClient, "renotifyPending" | "watch" | "ensureDeclaration">;
   inboxUri: string;
-  serviceRef: string;
+  serviceRef?: string;
+  signal?: AbortSignal;
   declarationChecked: { current: boolean };
   report: (error: unknown) => void;
 }): Promise<void> {
@@ -125,7 +126,12 @@ export async function runDmCycle(input: {
   };
   await step(() => input.client.renotifyPending());
   if (!inbox?.exists) return;
-  await step(() => input.client.watch([input.inboxUri], input.serviceRef));
+  await step(() =>
+    input.client.watch([input.inboxUri], {
+      ...(input.serviceRef ? { serviceRef: input.serviceRef } : {}),
+      ...(input.signal ? { signal: input.signal } : {}),
+    }),
+  );
   if (!input.declarationChecked.current) {
     await step(async () => {
       await input.client.ensureDeclaration();

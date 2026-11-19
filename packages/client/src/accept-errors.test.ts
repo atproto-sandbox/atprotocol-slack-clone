@@ -5,9 +5,11 @@ import { XrpcError } from "@flock/protocol/atproto/xrpc";
 import { acceptFailure } from "./accept-errors";
 
 test("a refusal to issue a workspace credential becomes a specific, actionable answer", () => {
-  assert.deepEqual(acceptFailure(new SpaceCredentialError("denied", 403, "UserNotAuthorized")), {
-    status: 403, code: "not_a_member", error: "You haven't been added to this workspace yet. Ask an admin to invite your account, then open the invite link again.",
-  });
+  for (const errorCode of ["AccountNotAuthorized", "NotAuthorized"]) {
+    assert.deepEqual(acceptFailure(new SpaceCredentialError("denied", 403, errorCode)), {
+      status: 403, code: "not_a_member", error: "You haven't been added to this workspace yet. Ask an admin to invite your account, then open the invite link again.",
+    });
+  }
   const notFound = acceptFailure(new SpaceCredentialError("not found", 403, "SpaceNotFound"));
   assert.equal(notFound?.status, 404);
   assert.equal(notFound?.code, "workspace_unavailable");

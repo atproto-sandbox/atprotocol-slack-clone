@@ -57,12 +57,15 @@ test("a channel page matches the independent reader through writes, replies, rea
   await compare("a deactivated writer set aside");
   network.setAccountState(BOB, "active");
 
-  await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMember", { space, did: CAROL });
+  await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMembers", { space, dids: [CAROL] });
   network.advanceClock(engine.sync.options.truthIntervalMs);
   await compare("a removed member, after the truth interval");
 
   const dave = "did:plc:dave";
-  await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.putMember", { space, did: dave, read: true, write: true });
+  await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.putMembers", {
+    space,
+    members: [{ did: dave, read: true, write: true }],
+  });
   network.createAccount(dave, "pds1");
   await writeMessage(network, dave, space, 50);
   await compare("a new writer");

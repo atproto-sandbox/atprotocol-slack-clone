@@ -394,3 +394,41 @@ test("discarding an empty operation keeps the catalog entry another operation ne
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("401 AccountTakedown and AccountDeactivated fail empty operations without retry loops or authorizationRequired, and keep partial progress pending", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "slack-suspended-journal-test-"));
+  process.env.DATABASE_PATH = join(directory, "suspended.db");
+  process.env.AUTH_ENCRYPTION_KEY = "66".repeat(32);
+  process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
+  process.env.APP_URL = "http://127.0.0.1:3000";
+  const actor = {
+    did: "did:plc:admin",
+    session: {} as OperatorActor["session"],
+    workspace: { uri: "at://did:plc:owner/space/new.flock.workspace/suspended", authorityDid: "did:plc:owner", skey: "suspended" },
+    canRecoverOperations: true,
+  } satisfies OperatorActor;
+  try {
+    let attempts = 0;
+    const emptySuspended = await runJournaledOperation(actor, "2222222222281", { kind: "createChannel" }, ["channel-space"], async (context) => {
+      await context.step("channel-space", async () => {
+        attempts += 1;
+        throw new XrpcError(401, "Account has been takendown", "AccountTakedown");
+      });
+    });
+    assert.equal(attempts, 1, "AccountTakedown is not retried");
+    assert.equal(emptySuspended.state, "failed");
+    assert.equal(emptySuspended.authorizationRequired, undefined);
+
+    const partialSuspended = await runJournaledOperation(actor, "2222222222282", { kind: "createChannel" }, ["channel-space", "channel-directory"], async (context) => {
+      await context.step("channel-space", async () => undefined);
+      await context.step("channel-directory", async () => {
+        throw new XrpcError(401, "Account is deactivated", "AccountDeactivated");
+      });
+    });
+    assert.equal(partialSuspended.state, "pending", "partial progress stays pending for recovery once unsuspended");
+    assert.equal(partialSuspended.authorizationRequired, undefined);
+  } finally {
+    closeDb();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

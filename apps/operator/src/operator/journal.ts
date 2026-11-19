@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { isScopeMissingError } from "@flock/protocol/atproto/xrpc";
+import { isAccountSuspendedError, isScopeMissingError } from "@flock/protocol/atproto/xrpc";
 import { getRawDb } from "../lib/db";
 import { requestDigest, canonicalJson } from "@flock/protocol/keys";
 import type { OperatorActor } from "./actor";
@@ -134,7 +134,7 @@ export async function runJournaledOperation(
       }
       lock.refresh();
       const message = safeOperationError(error);
-      const failed = error instanceof OperationRejectedError;
+      const failed = error instanceof OperationRejectedError || (isAccountSuspendedError(error) && completedSteps.length === 0);
       const timestamp = unixNow();
       const authorizationRequired = isScopeMissingError(error) ? { authorizationRequired: true as const } : {};
       const restore = options.admission?.restore;
@@ -231,6 +231,7 @@ async function retryTransient<T>(action: () => Promise<T>): Promise<T> {
 
 export function isTransientOperationError(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;
+  if (isAccountSuspendedError(error)) return false;
   if ("status" in error && typeof error.status === "number" &&
       (TRANSIENT_HTTP_STATUSES.has(error.status) || (error.status >= 500 && error.status <= 599))) return true;
   const code = "code" in error && typeof error.code === "string" ? error.code : undefined;

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test, { after } from "node:test";
 import { closeDb, getRawDb } from "../lib/db";
 import { dmConversationUri, dmInboxUri } from "@flock/protocol/keys";
-import { isNotificationAccepted, pruneNotices, purgeSpaceNotifications, readNotices, recordWriteNotification } from "./notices";
+import { advanceSpaceRev, pruneNotices, purgeSpaceNotifications, readNotices, recordSpaceWake, recordWriteNotification } from "./notices";
 
 const DIRECTORY = mkdtempSync(join(tmpdir(), "slack-notifications-test-"));
 const SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
@@ -28,29 +28,29 @@ function reset(): void {
   }
 }
 
-test("a notice is accepted for a space the app registered and refused for one it did not", () => {
-  // #given the app registered one channel
+test("DM spaces are forbidden from ever writing rows into SQLite space_notification", () => {
   reset();
-  getRawDb().prepare("INSERT INTO notification_registration (service_ref,space_uri,expires_at) VALUES (?,?,?)").run(SERVICE_REF, CHANNEL, Date.now() + 3_600_000);
-
-  // #then only that channel is accepted
-  assert.equal(isNotificationAccepted(CHANNEL), true);
-  assert.equal(isNotificationAccepted("at://did:plc:owner/space/new.flock.channel/other"), false);
-  assert.equal(isNotificationAccepted("at://did:plc:stranger/space/new.flock.workspace/team"), false);
+  assert.throws(() => recordWriteNotification(notice(dmInboxUri("did:plc:alice"), 1)), /DM notifications must never be persisted/);
+  assert.throws(() => recordWriteNotification(notice(dmConversationUri("did:plc:alice", "3kabcdefghij2"), 1)), /DM notifications must never be persisted/);
+  assert.throws(() => recordSpaceWake(dmInboxUri("did:plc:alice")), /DM notifications must never be persisted/);
+  assert.equal(rowCount(), 0);
 });
 
-test("a registration that ran out is honored for five minutes and then refused", () => {
+test("advanceSpaceRev advances last_space_rev monotonically on notification_registration", () => {
   reset();
-  const now = Date.now();
-  getRawDb().prepare("INSERT INTO notification_registration (service_ref,space_uri,expires_at) VALUES (?,?,?)").run(SERVICE_REF, CHANNEL, now - 60_000);
-  assert.equal(isNotificationAccepted(CHANNEL, now), true, "just expired: a late notice still counts");
-  assert.equal(isNotificationAccepted(CHANNEL, now + 10 * 60_000), false, "long expired");
-});
+  getRawDb()
+    .prepare("INSERT INTO notification_registration (service_ref, space_uri, expires_at, token, renew_at) VALUES (?, ?, ?, ?, 0)")
+    .run(SERVICE_REF, CHANNEL, Date.now() + 600_000, "tok-1");
+  const readRev = () =>
+    (getRawDb().prepare("SELECT last_space_rev FROM notification_registration WHERE space_uri = ?").get(CHANNEL) as { last_space_rev: string | null }).last_space_rev;
 
-test("a DM space is accepted without a server-side registration, because the member's browser registers it", () => {
-  reset();
-  assert.equal(isNotificationAccepted(dmInboxUri("did:plc:alice")), true);
-  assert.equal(isNotificationAccepted(dmConversationUri("did:plc:alice", "3kabcdefghij2")), true);
+  assert.equal(readRev(), null);
+  advanceSpaceRev(CHANNEL, "3kabcdefghij3");
+  assert.equal(readRev(), "3kabcdefghij3");
+  advanceSpaceRev(CHANNEL, "3kabcdefghij2");
+  assert.equal(readRev(), "3kabcdefghij3", "older revision never regresses last_space_rev");
+  advanceSpaceRev(CHANNEL, "3kabcdefghij4");
+  assert.equal(readRev(), "3kabcdefghij4");
 });
 
 test("a space keeps only its newest 1,000 notices", () => {
@@ -82,47 +82,50 @@ test("notices older than a week are dropped when a new one arrives", () => {
   assert.equal(rowCount("space_uri=?", CHANNEL), 1);
 });
 
-test("the periodic prune drops week-old notices on a quiet instance, and registrations that ran out a month ago", () => {
-  // #given a notice a week and a day old, a fresh one, a registration that ran out 31 days ago and one that ran out yesterday
+test("the periodic prune drops week-old notices and >30-day expired registrations, while keeping staged/migrated expires_at=0 rows", () => {
   reset();
   const now = Date.now();
   const seconds = Math.floor(now / 1000);
-  // (the old notice is written straight to the table: a notice arriving would itself prune it, which is not what is tested)
-  recordWriteNotification(notice("at://did:plc:owner/space/new.flock.channel/beta", 2), seconds);
+  const beta = "at://did:plc:owner/space/new.flock.channel/beta";
+  const staged = "at://did:plc:owner/space/new.flock.channel/staged";
+  recordWriteNotification(notice(beta, 2), seconds);
   getRawDb().prepare("INSERT INTO space_notification (space_uri,space_type,type_seq,repo_did,rev,notified_at) VALUES (?,?,?,?,?,?)")
     .run(CHANNEL, "new.flock.channel", 999_999, "did:plc:writer", "rev-old", seconds - 8 * 86_400);
-  const register = getRawDb().prepare("INSERT INTO notification_registration (service_ref,space_uri,expires_at) VALUES (?,?,?)");
-  register.run(SERVICE_REF, CHANNEL, now - 31 * 86_400_000);
-  register.run(SERVICE_REF, "at://did:plc:owner/space/new.flock.channel/beta", now - 86_400_000);
+  const register = getRawDb().prepare("INSERT INTO notification_registration (service_ref,space_uri,expires_at,token,renew_at) VALUES (?,?,?,?,0)");
+  register.run(SERVICE_REF, CHANNEL, now - 31 * 86_400_000, "tok-old");
+  register.run(SERVICE_REF, beta, now - 86_400_000, "tok-yesterday");
+  register.run(SERVICE_REF, staged, 0, "tok-staged");
 
-  // #when the reconcile job prunes, with no new notice arriving
   pruneNotices(now);
 
-  // #then only the fresh notice and the recently lapsed registration remain
   assert.equal(rowCount("space_uri=?", CHANNEL), 0);
   assert.equal(rowCount(), 1);
-  assert.deepEqual((getRawDb().prepare("SELECT space_uri FROM notification_registration").all() as Array<{ space_uri: string }>).map((row) => row.space_uri),
-    ["at://did:plc:owner/space/new.flock.channel/beta"]);
+  assert.deepEqual(
+    (getRawDb().prepare("SELECT space_uri FROM notification_registration ORDER BY space_uri").all() as Array<{ space_uri: string }>).map((row) => row.space_uri),
+    [beta, staged],
+    "staged/migrated expires_at=0 rows and recently lapsed registrations stay",
+  );
 });
 
 test("a space type keeps only its newest 50,000 notices, however many authorities file them, and another type keeps its own", () => {
-  // #given 50,010 notices from 50,010 different DM-space authorities, and one channel notice among the oldest
+  // #given 50,010 notices from 50,010 different app-inbox authorities, and one channel notice among the oldest
   reset();
   recordWriteNotification(notice(CHANNEL, 0));
-  const insert = getRawDb().prepare("INSERT INTO space_notification (space_uri,space_type,type_seq,repo_did,rev,notified_at) VALUES (?,'new.flock.dm.inbox',?,?,?,?)");
+  const insert = getRawDb().prepare("INSERT INTO space_notification (space_uri,space_type,type_seq,repo_did,rev,notified_at) VALUES (?,'new.flock.app.inbox',?,?,?,?)");
   const now = Math.floor(Date.now() / 1000);
   getRawDb().transaction(() => {
-    for (let index = 0; index < 50_009; index += 1) insert.run(`at://did:plc:a${index}/space/new.flock.dm.inbox/self`, index + 1, "did:plc:writer", `rev-${index}`, now);
+    for (let index = 0; index < 50_009; index += 1) {
+      insert.run(`at://did:plc:a${index}/space/new.flock.app.inbox/i-bot`, index + 1, "did:plc:writer", `rev-${index}`, now);
+    }
   })();
-  recordWriteNotification(notice("at://did:plc:a50009/space/new.flock.dm.inbox/self", 50_009));
+  recordWriteNotification(notice("at://did:plc:a50009/space/new.flock.app.inbox/i-bot", 50_009));
 
-  // #then the DM inbox type is at its cap, and the channel notice, older than all of them, is still there
-  assert.equal(rowCount("space_type=?", "new.flock.dm.inbox"), 50_000);
+  // #then the app.inbox type is at its cap, and the channel notice, older than all of them, is still there
+  assert.equal(rowCount("space_type=?", "new.flock.app.inbox"), 50_000);
   assert.equal(rowCount("space_uri=?", CHANNEL), 1);
 });
 
 test("an authority's cap counts exactly its own notices, not those of an authority whose DID starts the same", () => {
-  // #given 5,400 notices for did:plc:ab spread over six spaces (each under the per-space cap), and ten for did:plc:abc
   reset();
   const insert = getRawDb().prepare("INSERT INTO space_notification (space_uri,space_type,type_seq,repo_did,rev,notified_at) VALUES (?,'new.flock.channel',?,?,?,?)");
   const now = Math.floor(Date.now() / 1000);
@@ -133,10 +136,8 @@ test("an authority's cap counts exactly its own notices, not those of an authori
     for (let index = 0; index < 10; index += 1) insert.run("at://did:plc:ab0/space/new.flock.channel/x", ++seq, "did:plc:writer", `rev-${index}`, now);
   })();
 
-  // #when one more notice arrives for did:plc:ab
   recordWriteNotification(notice("at://did:plc:ab/space/new.flock.channel/c0", 5_400));
 
-  // #then did:plc:ab is trimmed to exactly its authority cap and did:plc:abc is untouched
   assert.equal(rowCount("space_uri LIKE ?", "at://did:plc:ab/%"), 5_000);
   assert.equal(rowCount("space_uri LIKE ?", "at://did:plc:abc/%"), 10);
   assert.equal(rowCount("space_uri LIKE ?", "at://did:plc:ab0/%"), 10, "the DID whose first differing character is the range's end character is untouched too");
@@ -168,7 +169,6 @@ test("a space added after the last notice is not missed when followed from head"
 });
 
 test("a cursor below what was pruned for its space is reset; one above it, or another space's, is not", () => {
-  // #given a cursor taken before a space ran past its own cap
   reset();
   recordWriteNotification(notice(OTHER_CHANNEL, 0));
   const before = readNotices([]).head;

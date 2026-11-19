@@ -37,7 +37,7 @@ async function setupTasksWorkspace(
   if (!network.hasAccount(AUTHORITY)) network.createAccount(AUTHORITY, "pds1");
   const owner = network.clientFor(AUTHORITY);
 
-  const { uri: workspace } = await owner.procedure<unknown, { uri: string }>("com.atproto.space.createSpace", {
+  const { space: workspace } = await owner.procedure<unknown, { space: string }>("com.atproto.space.createSpace", {
     spaceType: SPACE_TYPE.workspace,
     skey,
     policy: memberspacePolicy(),
@@ -78,9 +78,15 @@ async function setupTasksWorkspace(
       updatedAt: TIMESTAMP,
     });
     if (did === AUTHORITY) continue;
-    await owner.procedure("com.atproto.memberspace.putMember", { space: workspace, did, read: true, write: true });
+    await owner.procedure("com.atproto.memberspace.putMembers", {
+      space: workspace,
+      members: [{ did, read: true, write: true }],
+    });
     if (enableTasks) {
-      await owner.procedure("com.atproto.memberspace.putMember", { space: tasksSpace, did, read: true, write: true });
+      await owner.procedure("com.atproto.memberspace.putMembers", {
+        space: tasksSpace,
+        members: [{ did, read: true, write: true }],
+      });
     }
   }
 
@@ -618,7 +624,7 @@ test("TasksClient handles 256/257 saturation, D14 purged inherited refs, disable
     active: false,
     updatedAt: TIMESTAMP,
   });
-  await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMember", { space: tasksSpace, did: BOB });
+  await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMembers", { space: tasksSpace, dids: [BOB] });
   network.advanceClock(alice.sync.options.truthIntervalMs);
 
   const postPurgeRead = (await alice.tasks.getTask(workspace, d14Task.uri))!;
@@ -782,9 +788,9 @@ test("workspaces.summary invalidates workspace snapshot cleanly and cross-engine
     disabledAt: TIMESTAMP,
   });
   for (const did of [ALICE, BOB]) {
-    await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMember", {
+    await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMembers", {
       space: tasksSpace,
-      did,
+      dids: [did],
     });
   }
 

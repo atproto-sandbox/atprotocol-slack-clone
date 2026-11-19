@@ -62,7 +62,7 @@ async function createTasksFixture(
   const skey = input.skey ?? "parity";
   if (!network.hasAccount(AUTHORITY)) network.createAccount(AUTHORITY, "pds1");
   const owner = network.clientFor(AUTHORITY);
-  const { uri: workspace } = await owner.procedure<unknown, { uri: string }>("com.atproto.space.createSpace", {
+  const { space: workspace } = await owner.procedure<unknown, { space: string }>("com.atproto.space.createSpace", {
     spaceType: SPACE_TYPE.workspace,
     skey,
     policy: memberspacePolicy(),
@@ -104,9 +104,15 @@ async function createTasksFixture(
       updatedAt: TIMESTAMP,
     });
     if (did === AUTHORITY) continue;
-    await owner.procedure("com.atproto.memberspace.putMember", { space: workspace, did, read: true, write: true });
+    await owner.procedure("com.atproto.memberspace.putMembers", {
+      space: workspace,
+      members: [{ did, read: true, write: true }],
+    });
     if (enableTasks) {
-      await owner.procedure("com.atproto.memberspace.putMember", { space: tasksSpace, did, read: true, write: true });
+      await owner.procedure("com.atproto.memberspace.putMembers", {
+        space: tasksSpace,
+        members: [{ did, read: true, write: true }],
+      });
     }
   }
 
@@ -254,7 +260,7 @@ test("engine.tasks matches readIndependentTasksSpace across cold STAR, listRepoO
       active: false,
       updatedAt: TIMESTAMP,
     });
-    await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMember", { space: tasksSpace, did: BOB });
+    await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMembers", { space: tasksSpace, dids: [BOB] });
     await compare("after D14 intermediate writer removal");
 
     // 6. Set-aside deactivated writer parity.
@@ -328,7 +334,7 @@ test("engine.tasks matches readIndependentTasksSpace across 255/256/257 saturati
     active: false,
     updatedAt: TIMESTAMP,
   });
-  await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMember", { space: tasksSpace, did: BOB });
+  await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMembers", { space: tasksSpace, dids: [BOB] });
   assertTasksParity(
     await alice.tasks.readSpace(workspace),
     await readIndependentTasksSpace(reader, workspace),
@@ -561,8 +567,10 @@ test("engine.tasks and readIndependentTasksSpace match on RepoStarLimitError and
       updatedAt: TIMESTAMP,
       disabledAt: TIMESTAMP,
     });
-    await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMember", { space: tasksSpace, did: ALICE });
-    await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMember", { space: tasksSpace, did: BOB });
+    await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMembers", {
+      space: tasksSpace,
+      dids: [ALICE, BOB],
+    });
 
     network.advanceClock(15 * 60_000);
     const warmBob = await bob.tasks.readSpace(workspace);

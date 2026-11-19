@@ -18,8 +18,13 @@ test("a member sends and retracts commands and actions without minting a credent
   const inboxSkey = appInboxSkey("acme", APP);
   const inbox = appInboxUri(AUTHORITY, "acme", APP);
   await owner.procedure("com.atproto.space.createSpace", { spaceType: SPACE_TYPE.appInbox, skey: inboxSkey, policy: memberspacePolicy() });
-  await owner.procedure("com.atproto.memberspace.putMember", { space: inbox, did: ALICE, read: false, write: true });
-  await owner.procedure("com.atproto.memberspace.putMember", { space: inbox, did: APP, read: true, write: false });
+  await owner.procedure("com.atproto.memberspace.putMembers", {
+    space: inbox,
+    members: [
+      { did: ALICE, read: false, write: true },
+      { did: APP, read: true, write: false },
+    ],
+  });
 
   const alice = createEngine(transportFor(network, ALICE));
   const app = createEngine(transportFor(network, APP), { applyOwnWrites: false });

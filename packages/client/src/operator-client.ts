@@ -39,6 +39,23 @@ export type OperatorService = {
   endpoint: string;
 };
 
+export type DmCredentialProof = {
+  authorization: string;
+  signatureInput: string;
+  signature: string;
+};
+
+export type DmNotifyTargetInput = {
+  space: string;
+  credential: string;
+  proof: DmCredentialProof;
+};
+
+export type DmNotifyTarget = {
+  endpoint: string;
+  token: string;
+};
+
 export class OperatorRemoteError extends Error {
   constructor(readonly status: number, readonly code: string, message: string) {
     super(message);
@@ -85,9 +102,22 @@ export class OperatorClient {
     private readonly options: { onWorkspaceMutated?: (workspaceUri: string) => Promise<void> | void } = {},
   ) {}
 
+  get serviceRef(): string {
+    return this.service.serviceRef;
+  }
+
+  get operatorServiceRef(): string {
+    return this.service.serviceRef;
+  }
+
   /** Which followed spaces changed since their cursors, waiting up to about 25 seconds; `signal` ends the wait. */
   getChanges(follow: ReadonlyArray<{ space: string; after: string }>, signal?: AbortSignal): Promise<ChangesAnswer> {
     return this.call(OPERATOR_METHOD.getChanges, { input: { follow } }, signal);
+  }
+
+  /** Requests a stateless per-caller PDS webhook notification target for a DM space after proving credential possession. */
+  getDmNotifyTarget(input: DmNotifyTargetInput, signal?: AbortSignal): Promise<DmNotifyTarget> {
+    return this.call(OPERATOR_METHOD.getDmNotifyTarget, { input }, signal);
   }
 
   /** Creates the workspace `name` for the caller, under `authority` (a dedicated workspace account's DID) or their own account. */

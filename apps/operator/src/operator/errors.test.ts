@@ -52,3 +52,19 @@ test("a scope the authority's grant lacks asks the authority to approve again, w
   });
   assert.equal(operatorHttpFailure(new XrpcError(403, "forbidden", "Forbidden"))?.name, "AuthorityAccessRejected");
 });
+
+test("401 AccountTakedown, 401 AccountDeactivated, RepoTakendown, and RepoDeactivated report 503 UpstreamUnavailable without asking to reauthorize or retry-looping", () => {
+  for (const suspended of [
+    new XrpcError(401, "Account has been takendown", "AccountTakedown"),
+    new XrpcError(401, "Account is deactivated", "AccountDeactivated"),
+    new XrpcError(400, "Repo has been takendown", "RepoTakendown"),
+    new XrpcError(400, "Repo is deactivated", "RepoDeactivated"),
+  ]) {
+    assert.deepEqual(operatorHttpFailure(suspended), {
+      status: 503,
+      name: "UpstreamUnavailable",
+      message: "The workspace authority account is currently suspended or deactivated.",
+    });
+    assert.equal(isTransientOperationError(suspended), false, `${suspended.code} must not loop under the workspace lock`);
+  }
+});

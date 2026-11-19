@@ -1,11 +1,20 @@
 import type { AtprotoDid, HandleResolver, OAuthSession } from "@atproto/oauth-client-browser";
 import { buildBrowserClientMetadata } from "./client-metadata";
 import { readUpstreamText } from "@flock/protocol/bounded-json";
-import { SPACE_TYPE, type SpaceType } from "@flock/protocol/nsids";
+import { OPERATOR_METHOD, SPACE_TYPE, type SpaceType } from "@flock/protocol/nsids";
 import { spaceCollections } from "@flock/protocol/registry";
+import { LEGACY_OPERATOR_METHODS } from "@flock/protocol/scopes";
 
 /** What the browser session is built from: the app's origin, the PLC, the one grant, and the operator (its DID and where it serves). */
 export type BrowserSessionConfig = { appUrl: string; plcUrl: string; scope: string; serviceRef: string; operatorUrl: string; loopback: boolean };
+
+/** Restored OAuth session annotated with whether optional R12 DM notify-target scope upgrade requires reconnect. */
+export type RestoredSession = OAuthSession & { readonly needsNotifyScopeUpgrade: boolean };
+
+export type SessionScopeAssessment = {
+  missing: string[];
+  needsNotifyScopeUpgrade: boolean;
+};
 
 const MAX_WELL_KNOWN_DID_BYTES = 512;
 
@@ -104,14 +113,27 @@ export async function signIn(input: string, config: BrowserSessionConfig): Promi
 }
 
 /**
- * The signed-in session, or null when its grant lacks a scope the app asks for: a session granted before a scope was added
- * cannot use what that scope is for, so the person goes back through consent and the new grant replaces it.
+ * The signed-in session, or null when its grant lacks a required scope: a session granted before a required scope was added
+ * goes back through consent so the new grant replaces it. Pre-R12 sessions lacking only the optional
+ * `new.flock.operator.getDmNotifyTarget` operator RPC method remain admitted (`needsNotifyScopeUpgrade: true`) so existing
+ * users stay signed in and fall back to polling until they reconnect (`D12.3b.1`).
  */
-export async function restoreSession(config: BrowserSessionConfig): Promise<OAuthSession | null> {
-  const session = await initialized(config);
+export async function restoreSession(
+  config: BrowserSessionConfig,
+  loadSession: (config: BrowserSessionConfig) => Promise<OAuthSession | null> = initialized,
+): Promise<RestoredSession | null> {
+  const session = await loadSession(config);
   if (!session) return null;
   const { scope } = await session.getTokenInfo(false);
-  return missingScopes(scope, config.scope, session.did).length > 0 ? null : session;
+  const assessment = assessSessionScopes(scope, config.scope, session.did);
+  if (assessment.missing.length > 0) return null;
+  Object.defineProperty(session, "needsNotifyScopeUpgrade", {
+    value: assessment.needsNotifyScopeUpgrade,
+    configurable: true,
+    enumerable: true,
+    writable: false,
+  });
+  return session as RestoredSession;
 }
 
 type ReducedSpaceScope = {
@@ -191,13 +213,79 @@ function coversSpaceScope(granted: ReducedSpaceScope, requested: ReducedSpaceSco
   return true;
 }
 
+type ReducedRpcScope = {
+  aud: string;
+  lxms: ReadonlySet<string>;
+};
+
+const RPC_PARAM_KEYS: ReadonlySet<string> = new Set(["aud", "lxm"]);
+
+function reduceRpcScope(token: string): ReducedRpcScope | null {
+  let positionalLxm: string | null = null;
+  let query = "";
+  if (token.startsWith("rpc?")) {
+    query = token.slice("rpc?".length);
+  } else if (token.startsWith("rpc:")) {
+    const body = token.slice("rpc:".length);
+    const queryIndex = body.indexOf("?");
+    if (queryIndex === -1) return null;
+    positionalLxm = body.slice(0, queryIndex);
+    query = body.slice(queryIndex + 1);
+    if (!positionalLxm) return null;
+  } else {
+    return null;
+  }
+  if (query.includes("?")) return null;
+
+  const params = new URLSearchParams(query);
+  for (const key of params.keys()) {
+    if (!RPC_PARAM_KEYS.has(key)) return null;
+  }
+  const auds = params.getAll("aud");
+  if (auds.length !== 1 || !auds[0]) return null;
+  const aud = auds[0];
+
+  const queryLxms = params.getAll("lxm");
+  if (positionalLxm !== null) {
+    if (queryLxms.length > 0) return null;
+    return { aud, lxms: new Set([positionalLxm]) };
+  }
+  if (queryLxms.length === 0 || queryLxms.some((lxm) => !lxm)) return null;
+  return { aud, lxms: new Set(queryLxms) };
+}
+
+function coversRpcScope(granted: ReducedRpcScope, requested: ReducedRpcScope): boolean {
+  if (granted.aud !== "*" && granted.aud !== requested.aud) return false;
+  if (granted.lxms.has("*")) return true;
+  for (const lxm of requested.lxms) {
+    if (!granted.lxms.has(lxm)) return false;
+  }
+  return true;
+}
+
+function coversLegacyPreR12RpcScope(granted: ReducedRpcScope, requested: ReducedRpcScope): boolean {
+  if (granted.aud !== "*" && granted.aud !== requested.aud) return false;
+  if (!requested.lxms.has(OPERATOR_METHOD.getDmNotifyTarget)) return false;
+  for (const method of LEGACY_OPERATOR_METHODS) {
+    if (!granted.lxms.has(method)) return false;
+  }
+  for (const lxm of requested.lxms) {
+    if (lxm === OPERATOR_METHOD.getDmNotifyTarget) continue;
+    if (!granted.lxms.has(lxm)) return false;
+  }
+  return true;
+}
+
 /**
- * The scope tokens in `required` that `granted` does not cover for `accountDid`. Non-`space:` tokens (`atproto`, `repo:`,
- * `rpc:`) must be present verbatim; each `space:` token is reduced to its space type, authority (`*` or the account itself for
- * `self` / `accountDid`), `skey`, actions, `manage` ops and collections (expanding collectionless tokens with
- * `spaceCollections`), and must be covered whole by at least one granted `space:` token.
+ * Assesses whether `granted` covers every token in `required` for `accountDid`, tolerating legacy pre-R12 `rpc` grants whose
+ * only missing method is `new.flock.operator.getDmNotifyTarget` unless `options?.strict` is set (`D12.3b.1`).
  */
-export function missingScopes(granted: string, required: string, accountDid: string): string[] {
+export function assessSessionScopes(
+  granted: string,
+  required: string,
+  accountDid: string,
+  options?: { strict?: boolean },
+): SessionScopeAssessment {
   const grantedTokens = granted.split(/\s+/).filter(Boolean);
   const haveExact = new Set(grantedTokens);
   const grantedSpaces = grantedTokens
@@ -206,16 +294,54 @@ export function missingScopes(granted: string, required: string, accountDid: str
       const reduced = reduceSpaceScope(token, accountDid);
       return reduced ? [reduced] : [];
     });
+  const grantedRpcs = grantedTokens
+    .filter((token) => token.startsWith("rpc?") || token.startsWith("rpc:"))
+    .flatMap((token) => {
+      const reduced = reduceRpcScope(token);
+      return reduced ? [reduced] : [];
+    });
 
-  return required
+  let needsNotifyScopeUpgrade = false;
+  const missing = required
     .split(/\s+/)
     .filter(Boolean)
     .filter((token) => {
-      if (!token.startsWith("space:")) return !haveExact.has(token);
-      const requested = reduceSpaceScope(token, accountDid);
-      if (!requested) return true;
-      return !grantedSpaces.some((candidate) => coversSpaceScope(candidate, requested));
+      if (token.startsWith("space:")) {
+        const requested = reduceSpaceScope(token, accountDid);
+        if (!requested) return true;
+        return !grantedSpaces.some((candidate) => coversSpaceScope(candidate, requested));
+      }
+      if (token.startsWith("rpc?") || token.startsWith("rpc:")) {
+        if (haveExact.has(token)) return false;
+        const requested = reduceRpcScope(token);
+        if (!requested) return true;
+        if (grantedRpcs.some((candidate) => coversRpcScope(candidate, requested))) return false;
+        if (!options?.strict && grantedRpcs.some((candidate) => coversLegacyPreR12RpcScope(candidate, requested))) {
+          needsNotifyScopeUpgrade = true;
+          return false;
+        }
+        return true;
+      }
+      return !haveExact.has(token);
     });
+
+  return { missing, needsNotifyScopeUpgrade };
+}
+
+/**
+ * The scope tokens in `required` that `granted` does not cover for `accountDid`. `atproto` and `repo:` tokens must be present
+ * verbatim; `rpc` tokens match regardless of `lxm` ordering (and tolerate pre-R12 grants lacking only `getDmNotifyTarget`
+ * unless `options?.strict` is true); each `space:` token is reduced to its space type, authority (`*` or the account itself for
+ * `self` / `accountDid`), `skey`, actions, `manage` ops and collections (expanding collectionless tokens with
+ * `spaceCollections`), and must be covered whole by at least one granted `space:` token.
+ */
+export function missingScopes(
+  granted: string,
+  required: string,
+  accountDid: string,
+  options?: { strict?: boolean },
+): string[] {
+  return assessSessionScopes(granted, required, accountDid, options).missing;
 }
 
 /** Signs the account out of this browser: its session is revoked at its host. */

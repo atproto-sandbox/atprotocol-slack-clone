@@ -3,37 +3,36 @@ import { getRawDb } from "../lib/db";
 import { parseDmSpaceUri, parseSpaceUri, requireSpaceAuthority } from "@flock/protocol/keys";
 import type { WriteNotification } from "../atproto/write-notification";
 
-/** A notice can arrive a little after the registration it belongs to ran out on the app's clock. */
-const REGISTRATION_GRACE_MS = 5 * 60 * 1000;
 const NOTIFICATION_RETENTION_SECONDS = 7 * 24 * 60 * 60;
 const MAX_NOTIFICATIONS_PER_SPACE = 1_000;
 const MAX_NOTIFICATIONS_PER_AUTHORITY = 5_000;
 const MAX_NOTIFICATIONS_PER_SPACE_TYPE = 50_000;
 
-/**
- * Whether the app asked this space's authority to notify it. The operator registers the workspace, channel and inbox spaces
- * itself (`src/operator/registrations.ts`), so a notice for any other one of those is refused before any DID is resolved for it. A DM
- * space is registered by the member's browser, which the server never sees, so those are accepted and bounded by the caps in
- * `recordWriteNotification` instead.
- */
-export function isNotificationAccepted(space: string, now = Date.now()): boolean {
-  if (parseDmSpaceUri(space)) return true;
-  return Boolean(getRawDb().prepare("SELECT 1 FROM notification_registration WHERE service_ref=? AND space_uri=? AND expires_at>?")
-    .get(getConfig().operatorServiceRef, space, now - REGISTRATION_GRACE_MS));
+const noticeListeners = new Set<() => void>();
+
+export function onSpaceNotice(listener: () => void): () => void {
+  noticeListeners.add(listener);
+  return () => {
+    noticeListeners.delete(listener);
+  };
+}
+
+function notifySpaceListeners(): void {
+  for (const listener of [...noticeListeners]) listener();
 }
 
 /**
- * Stores a content-free write notice for the change streams. Notices older than a week go, and so do those past the newest
- * 1,000 for the space, the newest 5,000 for its authority and the newest 50,000 of its space type, so neither one space host
- * nor many (a DM space needs no registration, so any DID that can sign a service token can file notices for its own) can
- * grow the table without bound, and one busy type cannot evict another's. Whatever is pruned raises a floor, per type or,
- * for a space's own cap, per space, so a cursor below it is answered with a reset instead of silently missing a change.
- * The per-space and per-authority deletes walk an index range at most as long as their cap; the per-type one is a range on
- * the type's own sequence, so a notice costs the same however large the table has been.
+ * Stores a content-free write/wake notice for operator-registered spaces. DM spaces are never persisted in SQLite
+ * (`dm-feed-wakes.ts` handles DM wakes in memory). Notices older than a week go, and so do those past the newest
+ * 1,000 for the space, the newest 5,000 for its authority and the newest 50,000 of its space type. Whatever is pruned
+ * raises a floor, per type or per space, so a cursor below it is answered with a reset instead of silently missing a change.
  */
 export function recordWriteNotification(notification: WriteNotification, now = Math.floor(Date.now() / 1000)): void {
-  const db = getRawDb();
   const space = notification.space;
+  if (parseDmSpaceUri(space)) {
+    throw new Error("DM notifications must never be persisted to SQLite.");
+  }
+  const db = getRawDb();
   const type = spaceTypeOf(space);
   // `at://<authority>/` as an index range on space_uri: every URI under it sorts from the prefix up to the same text ending in `0`, the next character after `/`.
   const authorityStart = `at://${requireSpaceAuthority(space)}/`;
@@ -50,6 +49,21 @@ export function recordWriteNotification(notification: WriteNotification, now = M
     db.prepare(`DELETE FROM space_notification_space_floor WHERE space_type=?
       AND floor <= COALESCE((SELECT floor FROM space_notification_type_floor WHERE space_type=?), 0)`).run(type, type);
   }).immediate(); // A writer from the start: it reads before it writes, and a reader upgraded after another process committed would fail, losing the notice.
+  notifySpaceListeners();
+}
+
+/** Emits a synthetic wake row for an operator space (e.g. `#repoRemoved`, `#registrationExpired`, or `spaceRev` gap catch-up). */
+export function recordSpaceWake(space: string, repo = "", rev = "", now = Math.floor(Date.now() / 1000)): void {
+  recordWriteNotification({ space, repo, repoRev: rev }, now);
+}
+
+/** Advances `last_space_rev` monotonically on `notification_registration` for this operator's registration. */
+export function advanceSpaceRev(space: string, spaceRev: string): void {
+  getRawDb()
+    .prepare(`UPDATE notification_registration
+      SET last_space_rev = ?
+      WHERE service_ref = ? AND space_uri = ? AND (last_space_rev IS NULL OR last_space_rev < ?)`)
+    .run(spaceRev, getConfig().operatorServiceRef, space, spaceRev);
 }
 
 /** Notices older than a week, for an instance that has gone quiet and so never reaches the delete inside `recordWriteNotification`. */
@@ -94,9 +108,9 @@ export function purgeSpaceNotifications(space: string): void {
   db.prepare("DELETE FROM notification_registration_failure WHERE space_uri=?").run(space);
 }
 
-/** Registrations the authority stopped honoring long ago; `before` is epoch milliseconds. */
+/** Registrations the authority stopped honoring long ago (`expires_at > 0` leaves newly staged/migrated rows intact); `before` is epoch ms. */
 export function purgeExpiredNotificationRegistrations(before: number): void {
-  getRawDb().prepare("DELETE FROM notification_registration WHERE expires_at < ?").run(before);
+  getRawDb().prepare("DELETE FROM notification_registration WHERE expires_at > 0 AND expires_at < ?").run(before);
 }
 
 /** How long a registration that ran out is kept, so the admin screen and the reconcile job keep reporting it. */

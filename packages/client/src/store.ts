@@ -61,9 +61,9 @@ export type ListedWriter = { did: string; repoRev: string };
 
 export type SpaceState = {
   space: string;
-  /** The highest space revision `listRepos` reported, the cursor for the next hint. */
+  /** The highest space revision `listWriters` reported, the cursor for the next hint. */
   spaceRev: string | null;
-  /** The writer set from the last full `listRepos`, and when it was read. */
+  /** The writer set from the last full `listWriters`, and when it was read. */
   writers: ListedWriter[];
   writersListedAt: number | null;
   /** The workspace a channel or inbox belongs to, so losing the workspace drops it too. */

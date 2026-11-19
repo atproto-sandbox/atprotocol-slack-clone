@@ -24,12 +24,22 @@ export type BrowserSessionState = {
   engine: Engine | null;
   snapshots: Snapshots | null;
   live: LiveSpaces | null;
+  needsNotifyScopeUpgrade: boolean;
   error: string;
   connect: () => void;
   signOut: () => Promise<SignOutResult>;
 };
 
-type Built = { client: DmClient; store: BrowserDmStore; engine: Engine; snapshots: Snapshots; live: LiveSpaces; syncStore: IndexedDbStore; releaseLifecycle: () => void };
+type Built = {
+  client: DmClient;
+  store: BrowserDmStore;
+  engine: Engine;
+  snapshots: Snapshots;
+  live: LiveSpaces;
+  syncStore: IndexedDbStore;
+  releaseLifecycle: () => void;
+  needsNotifyScopeUpgrade: boolean;
+};
 
 /**
  * Restores the browser-held session for the signed-in DID (one grant: the member set, the operator methods and the DM set)
@@ -69,6 +79,7 @@ export function useBrowserSession(did: string, config: BrowserSessionConfig): Br
           if (epoch.current !== run) return;
           // What was built on the closed store goes, so nothing keeps reading it.
           epoch.current += 1;
+          made?.client.close();
           made?.live.stop();
           made?.releaseLifecycle();
           if (builtRef.current === made) builtRef.current = null;
@@ -91,7 +102,13 @@ export function useBrowserSession(did: string, config: BrowserSessionConfig): Br
           return;
         }
         const releaseLifecycle = registerShellSession(engine, live);
-        made = { client: new DmClient({ ...transport, store }), store, engine, snapshots, live, syncStore, releaseLifecycle };
+        const needsNotifyScopeUpgrade = Boolean(session.needsNotifyScopeUpgrade);
+        const client = new DmClient({
+          ...transport,
+          store,
+          ...(needsNotifyScopeUpgrade ? {} : { operator: engine.operator }),
+        });
+        made = { client, store, engine, snapshots, live, syncStore, releaseLifecycle, needsNotifyScopeUpgrade };
         live.start();
         builtRef.current = made;
         setBuilt(made);
@@ -104,6 +121,7 @@ export function useBrowserSession(did: string, config: BrowserSessionConfig): Br
     })();
     return () => {
       epoch.current += 1;
+      made?.client.close();
       made?.live.stop();
       made?.releaseLifecycle();
       made?.syncStore.close();
@@ -137,6 +155,7 @@ export function useBrowserSession(did: string, config: BrowserSessionConfig): Br
     epoch.current += 1;
     const current = builtRef.current;
     builtRef.current = null;
+    current?.client.close();
     current?.live.stop();
     current?.releaseLifecycle();
     current?.syncStore.close();
@@ -149,5 +168,6 @@ export function useBrowserSession(did: string, config: BrowserSessionConfig): Br
     status, error, connect, signOut,
     client: built?.client ?? null, store: built?.store ?? null,
     engine: built?.engine ?? null, snapshots: built?.snapshots ?? null, live: built?.live ?? null,
+    needsNotifyScopeUpgrade: built?.needsNotifyScopeUpgrade ?? false,
   };
 }

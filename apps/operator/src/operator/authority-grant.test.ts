@@ -423,3 +423,38 @@ test("the authority grant scope asks for authority records only, never message c
   assert.ok(scope.split(" ").includes("atproto"));
   assert.ok(!scope.includes("channel.message") && !scope.includes("channel.reaction") && !scope.includes("new.flock.dm"));
 });
+
+test("authorityOAuthFetch strips WWW-Authenticate invalid_token on 401 AccountTakedown/AccountDeactivated so OAuthSession preserves the stored grant", async () => {
+  for (const code of ["AccountTakedown", "AccountDeactivated"]) {
+    const res = await grant.authorityOAuthFetch(
+      "https://pds.example/xrpc/com.atproto.space.getSpace",
+      undefined,
+      async () =>
+        new Response(JSON.stringify({ error: code, message: "Suspended" }), {
+          status: 401,
+          headers: {
+            "content-type": "application/json",
+            "www-authenticate": 'DPoP error="invalid_token", error_description="Account suspended"',
+          },
+        }),
+    );
+    assert.equal(res.status, 401);
+    assert.equal(res.headers.get("www-authenticate"), null, `${code} must not trigger OAuthSession invalid_token deletion`);
+    assert.deepEqual(await res.json(), { error: code, message: "Suspended" });
+  }
+
+  // Genuine InvalidToken keeps WWW-Authenticate so OAuthSession refreshes or triggers reauthorization
+  const genuine = await grant.authorityOAuthFetch(
+    "https://pds.example/xrpc/com.atproto.space.getSpace",
+    undefined,
+    async () =>
+      new Response(JSON.stringify({ error: "InvalidToken", message: "Token expired" }), {
+        status: 401,
+        headers: {
+          "content-type": "application/json",
+          "www-authenticate": 'DPoP error="invalid_token"',
+        },
+      }),
+  );
+  assert.equal(genuine.headers.get("www-authenticate"), 'DPoP error="invalid_token"');
+});

@@ -50,26 +50,35 @@ export function DmConversation({ convKey, participants }: { convKey: string; par
     if (!client) return;
     let cancelled = false;
     let stopWatching: (() => void) | undefined;
+    let watchController: AbortController | undefined;
     let subscribed = "";
     const watchAndSubscribe = async (knownHalves: Record<string, DmHalfStatus>) => {
       const spaces = [
         ...Object.entries(knownHalves).filter(([, status]) => status === "ok").map(([ownerDid]) => dmConversationUri(ownerDid, convKey)),
         dmInboxUri(did),
       ];
-      try {
-        await client.watch(spaces, dmConfig.serviceRef);
-      } catch {
-        // Registration is best-effort: the 60-second poll keeps the view correct.
-      }
-      if (cancelled || !live) return;
       const subscription = spaces.join("|");
       if (subscription === subscribed) return;
       subscribed = subscription;
+      watchController?.abort();
+      const controller = new AbortController();
+      watchController = controller;
+      try {
+        await client.watch(spaces, { serviceRef: dmConfig.serviceRef, signal: controller.signal });
+      } catch {
+        // Registration is best-effort: the 60-second poll keeps the view correct.
+      }
+      if (cancelled || controller.signal.aborted || !live) return;
       stopWatching?.();
-      // The operator's change feed says when one of the halves changed; the page is read again then.
-      const unwatch = await live.watch(`dm:conversation:${convKey}`, spaces, () => loadPage());
-      if (cancelled) unwatch();
-      else stopWatching = unwatch;
+      stopWatching = undefined;
+      try {
+        // The operator's change feed says when one of the halves changed; the page is read again then.
+        const unwatch = await live.watch(`dm:conversation:${convKey}`, spaces, () => loadPage());
+        if (cancelled || controller.signal.aborted) unwatch();
+        else stopWatching = unwatch;
+      } catch {
+        // Operator feed is optional for DMs; the 60-second poll keeps the view correct.
+      }
     };
     void (async () => {
       const page = await loadPage();
@@ -90,6 +99,7 @@ export function DmConversation({ convKey, participants }: { convKey: string; par
     return () => {
       cancelled = true;
       window.clearInterval(timer);
+      watchController?.abort();
       stopWatching?.();
     };
   }, [client, live, did, convKey, dmConfig.serviceRef, loadPage, setError]);

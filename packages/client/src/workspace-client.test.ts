@@ -43,7 +43,7 @@ test("discover lists readable workspaces, turns a refused one into an invitation
   const deleted = await createWorkspace(network, { skey: "deleted", members: [ALICE], channels: [] });
   const invalid = await createWorkspace(network, { skey: "broken", members: [ALICE], channels: [] });
   const owner = network.clientFor(AUTHORITY);
-  await owner.procedure("com.atproto.memberspace.removeMember", { space: removed.workspace, did: ALICE });
+  await owner.procedure("com.atproto.memberspace.removeMembers", { space: removed.workspace, dids: [ALICE] });
   await owner.procedure("com.atproto.space.deleteSpace", { space: deleted.workspace });
   await network.writeAs(AUTHORITY, invalid.workspace, COLLECTION.workspaceProfile, "self", { name: "", createdAt: "2026-11-10T12:00:00.000Z" });
   const alice = createEngine(transportFor(network, ALICE));
@@ -65,7 +65,7 @@ test("a workspace no longer listed after discovery is dropped with its channels,
   await alice.workspaces.discover();
   assert.deepEqual(await alice.sync.store.records(fixture.channels.old!, COLLECTION.message), [], "the archived channel went at the directory read");
   assert.equal((await alice.sync.store.records(fixture.channels.general!, COLLECTION.message)).length, 1);
-  await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMember", { space: fixture.workspace, did: ALICE });
+  await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMembers", { space: fixture.workspace, dids: [ALICE] });
   network.advanceClock(11 * 60 * 1000);
   await alice.workspaces.discover();
   assert.deepEqual(await alice.sync.store.records(fixture.channels.general!, COLLECTION.message), [], "a workspace refused at discovery takes its channels");
@@ -91,7 +91,10 @@ test("accept writes the acceptance record only while the invitation is current, 
   const alice = createEngine(transportFor(network, ALICE));
   const refused = await alice.workspaces.accept(fixture.workspace).then(() => null, (error: unknown) => error);
   assert.equal(acceptFailure(refused)?.code, "workspace_unavailable");
-  await owner.procedure("com.atproto.memberspace.putMember", { space: fixture.workspace, did: ALICE, read: true, write: true });
+  await owner.procedure("com.atproto.memberspace.putMembers", {
+    space: fixture.workspace,
+    members: [{ did: ALICE, read: true, write: true }],
+  });
   const accepted = await alice.workspaces.accept(fixture.workspace);
   assert.match(accepted.marker, new RegExp(`/${COLLECTION.acceptance}/`));
 });
@@ -253,7 +256,10 @@ test("WorkspaceClient discovers extensions, tracks completeness flags against in
   const tasksSpace = extSpaceUriFor(AUTHORITY, "acme", "tasks");
   const owner = network.clientFor(AUTHORITY);
   await owner.procedure("com.atproto.space.createSpace", { spaceType: SPACE_TYPE.tasks, skey: tasksSpace.split("/").at(-1)!, policy: memberspacePolicy() });
-  await owner.procedure("com.atproto.memberspace.putMember", { space: tasksSpace, did: ALICE, read: true, write: true });
+  await owner.procedure("com.atproto.memberspace.putMembers", {
+    space: tasksSpace,
+    members: [{ did: ALICE, read: true, write: true }],
+  });
   const nowIso = "2026-11-16T00:00:00.000Z";
   await network.writeAs(AUTHORITY, fixture.workspace, COLLECTION.extInstall, "tasks", {
     extId: "tasks", active: true, space: tasksSpace, cleanupComplete: false, enabledBy: AUTHORITY, enabledAt: nowIso, updatedAt: nowIso,
@@ -343,7 +349,7 @@ test("WorkspaceClient discovers extensions, tracks completeness flags against in
   await alice.sync.store.putSpace({
     space: tasksSpace, spaceRev: "2", writers: [], writersListedAt: 2_000, workspace: fixture.workspace, lastOpenedAt: 2_000,
   });
-  await owner.procedure("com.atproto.memberspace.removeMember", { space: fixture.workspace, did: ALICE });
+  await owner.procedure("com.atproto.memberspace.removeMembers", { space: fixture.workspace, dids: [ALICE] });
   network.advanceClock(11 * 60 * 1000);
   await alice.workspaces.discover();
   assert.equal(await alice.sync.store.getSpace(tasksSpace), undefined, "losing workspace purges dependent extension space");

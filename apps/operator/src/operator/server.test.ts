@@ -7,12 +7,17 @@ import { join } from "node:path";
 import test, { after } from "node:test";
 import type { Express } from "express";
 import { oauthFlowCookieName } from "../auth/oauth-flow";
-import { closeDb } from "../lib/db";
-import { OPERATOR_METHOD } from "@flock/protocol/nsids";
+import { closeDb, getRawDb } from "../lib/db";
+import { dmConversationUri } from "@flock/protocol/keys";
+import { NOTICE_METHOD, OPERATOR_METHOD } from "@flock/protocol/nsids";
 import { AUTHORITY_FLOW_PATHS } from "./authority-grant";
+import { currentDmWakeHead, resetDmFeedWakesForTests } from "./dm-feed-wakes";
 import { OperatorAuthError } from "./errors";
 import type { OperatorMethodDefinition } from "./methods";
+import { readNotices } from "./notices";
+import { flushPendingRenewals } from "./registrations";
 import { createOperatorApp } from "./server";
+import { deriveDmNotifyToken } from "./space-notification";
 
 // The operator's HTTP surface as a browser and a caller's host meet it: its did:web document, CORS for any origin on the methods and none on the authority flow,
 // its security headers, the lexicon checks in front of its methods, and the authority flow's navigations.
@@ -36,7 +41,8 @@ async function listen(app: Express): Promise<string> {
 
 const base = await listen(createOperatorApp());
 
-after(() => {
+after(async () => {
+  await flushPendingRenewals();
   closeDb();
   rmSync(DIRECTORY, { recursive: true, force: true });
 });
@@ -238,4 +244,141 @@ test("an operation's steps about one member are valid answers at their longest: 
   // then the answer passes its lexicon
   assert.equal(response.status, 200);
   assert.equal((await response.json() as { operation: { completedSteps: string[] } }).operation.completedSteps[0].length, longestStep.length);
+});
+
+test("confirmRegistration and notifySpaceUpdate authenticate via inline token without bearer headers, enforce DM #registrationExpired 400 abandonment, and write zero DM rows to SQLite", async () => {
+  resetDmFeedWakesForTests();
+  const db = getRawDb();
+  const operatorSpace = "at://did:plc:authority/space/new.flock.channel/general";
+  const operatorToken = "operator-inline-webhook-token-abc123";
+  const serviceRef = "did:web:localhost%3A3001#atproto_flock_operator";
+
+  // Seed staged placeholder registration (expires_at = 0)
+  db.prepare("INSERT OR REPLACE INTO notification_registration (service_ref, space_uri, expires_at, workspace_uri, token, renew_at) VALUES (?, ?, 0, ?, ?, 0)")
+    .run(serviceRef, operatorSpace, "at://did:plc:authority/space/new.flock.workspace/team", operatorToken);
+
+  const postWebhook = (nsid: string, body: unknown) =>
+    fetch(`${base}/xrpc/${nsid}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  // 1. confirmRegistration succeeds on staged expires_at=0 placeholder and fails with 400 on bad token
+  const confirmOk = await postWebhook(NOTICE_METHOD.confirmRegistration, {
+    space: operatorSpace,
+    token: operatorToken,
+    challenge: "challenge-xyz",
+  });
+  assert.equal(confirmOk.status, 200);
+  assert.deepEqual(await confirmOk.json(), { challenge: "challenge-xyz" });
+
+  const confirmBad = await postWebhook(NOTICE_METHOD.confirmRegistration, {
+    space: operatorSpace,
+    token: "wrong-token",
+    challenge: "challenge-xyz",
+  });
+  assert.equal(confirmBad.status, 400);
+  assert.equal((await confirmBad.json() as { error: string }).error, "InvalidRequest");
+
+  // 2. notifySpaceUpdate #repoWrite, #repoRemoved, and #registrationExpired (>5 min past expiry!) succeed with HTTP 200 empty body
+  const digestB64 = Buffer.alloc(32, 0xab).toString("base64");
+  const headBefore = readNotices([]).head;
+  const writeRes = await postWebhook(NOTICE_METHOD.notifySpaceUpdate, {
+    space: operatorSpace,
+    token: operatorToken,
+    update: {
+      $type: "com.atproto.space.defs#repoWrite",
+      repo: "did:plc:member",
+      repoRev: "3kabcdefghij2",
+      spaceRev: "3kabcdefghij3",
+      data: { $bytes: digestB64 },
+    },
+  });
+  assert.equal(writeRes.status, 200);
+  assert.equal(await writeRes.text(), "");
+  assert.equal(readNotices([]).head, headBefore + 1);
+
+  const removedRes = await postWebhook(NOTICE_METHOD.notifySpaceUpdate, {
+    space: operatorSpace,
+    token: operatorToken,
+    update: {
+      $type: "com.atproto.space.defs#repoRemoved",
+      repo: "did:plc:member",
+      spaceRev: "3kabcdefghij4",
+    },
+  });
+  assert.equal(removedRes.status, 200);
+  assert.equal(readNotices([]).head, headBefore + 2);
+
+  // Set expires_at 30 minutes in the past -> #registrationExpired still accepted!
+  db.prepare("UPDATE notification_registration SET expires_at = ? WHERE space_uri = ?").run(Date.now() - 30 * 60_000, operatorSpace);
+  const expiredRes = await postWebhook(NOTICE_METHOD.notifySpaceUpdate, {
+    space: operatorSpace,
+    token: operatorToken,
+    update: {
+      $type: "com.atproto.space.notifySpaceUpdate#registrationExpired",
+      spaceRev: "3kabcdefghij5",
+    },
+  });
+  assert.equal(expiredRes.status, 200);
+  await flushPendingRenewals();
+  const revAfter = (db.prepare("SELECT last_space_rev FROM notification_registration WHERE space_uri = ?").get(operatorSpace) as { last_space_rev: string }).last_space_rev;
+  assert.equal(revAfter, "3kabcdefghij5");
+
+  // 3. DM space webhooks with dm1.* token: confirmRegistration + #repoWrite + #spaceDeleted succeed in memory; #registrationExpired returns 400!
+  const dmSpace = dmConversationUri("did:plc:alice", "3kabcdefghij2");
+  const dmToken = deriveDmNotifyToken(dmSpace, "did:plc:alice");
+
+  const dmConfirm = await postWebhook(NOTICE_METHOD.confirmRegistration, {
+    space: dmSpace,
+    token: dmToken,
+    challenge: "dm-challenge-1",
+  });
+  assert.equal(dmConfirm.status, 200);
+  assert.deepEqual(await dmConfirm.json(), { challenge: "dm-challenge-1" });
+
+  const dmHeadBefore = currentDmWakeHead().head;
+  const dmWrite = await postWebhook(NOTICE_METHOD.notifySpaceUpdate, {
+    space: dmSpace,
+    token: dmToken,
+    update: {
+      $type: "com.atproto.space.defs#repoWrite",
+      repo: "did:plc:bob",
+      repoRev: "3kabcdefghij2",
+      spaceRev: "3kabcdefghij3",
+      data: { $bytes: digestB64 },
+    },
+  });
+  assert.equal(dmWrite.status, 200);
+  assert.equal(currentDmWakeHead().head, dmHeadBefore + 1);
+
+  const dmDeleted = await postWebhook(NOTICE_METHOD.notifySpaceUpdate, {
+    space: dmSpace,
+    token: dmToken,
+    update: { $type: "com.atproto.space.notifySpaceUpdate#spaceDeleted" },
+  });
+  assert.equal(dmDeleted.status, 200);
+  assert.equal(currentDmWakeHead().head, dmHeadBefore + 2);
+
+  const dmExpired = await postWebhook(NOTICE_METHOD.notifySpaceUpdate, {
+    space: dmSpace,
+    token: dmToken,
+    update: {
+      $type: "com.atproto.space.notifySpaceUpdate#registrationExpired",
+      spaceRev: "3kabcdefghij6",
+    },
+  });
+  assert.equal(dmExpired.status, 400, "DM #registrationExpired returns 400 so PDS runs abandonSyncerNotice");
+
+  // Verify zero DM rows exist across every SQLite table
+  const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all() as Array<{ name: string }>)
+    .map((r) => r.name);
+  for (const table of tables) {
+    const cols = (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name);
+    for (const col of cols) {
+      const hit = db.prepare(`SELECT 1 FROM ${table} WHERE CAST(${col} AS TEXT) LIKE '%new.flock.dm.%' LIMIT 1`).get();
+      assert.equal(hit, undefined, `unexpected DM entry in ${table}.${col}`);
+    }
+  }
 });

@@ -387,12 +387,34 @@ function authorityGrantClient(): Promise<OAuthFlowClient & NodeOAuthClient> {
   return grantClient;
 }
 
+export async function authorityOAuthFetch(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+  upstreamFetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> = fetchValidatedEndpoint,
+): Promise<Response> {
+  const response = await upstreamFetch(input, init);
+  if (response.status === 401 && response.headers.get("www-authenticate")?.includes("invalid_token")) {
+    try {
+      const body = await response.clone().json() as { error?: unknown };
+      if (body?.error === "AccountTakedown" || body?.error === "AccountDeactivated") {
+        // Account suspension is reversible; strip WWW-Authenticate invalid_token so OAuthSession never deletes the encrypted grant.
+        const headers = new Headers(response.headers);
+        headers.delete("www-authenticate");
+        return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+      }
+    } catch {
+      // Not JSON; leave untouched.
+    }
+  }
+  return response;
+}
+
 async function createAuthorityClient(sessionStore: Store<NodeSavedSession>): Promise<NodeOAuthClient> {
   const config = authorityClientConfig();
   return new NodeOAuthClient({
     clientMetadata: authorityClientMetadata(config),
     keyset: await Promise.all(config.authorityClientKeys.map((key) => JoseKey.fromImportable(key, key.kid))),
-    fetch: fetchValidatedEndpoint,
+    fetch: authorityOAuthFetch,
     requestLock: oauthSqliteRequestLock,
     allowHttp: config.operatorUrl.protocol === "http:",
     plcDirectoryUrl: getConfig().plcDirectoryUrl,

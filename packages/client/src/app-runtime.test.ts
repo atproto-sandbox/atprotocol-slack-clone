@@ -748,13 +748,22 @@ async function inboxFixture(options: {
   const inbox = appInboxUri(AUTHORITY, "acme", appDid);
   await owner.procedure("com.atproto.space.createSpace", { spaceType: SPACE_TYPE.appInbox, skey: appInboxSkey("acme", appDid), policy: memberspacePolicy() });
   for (const space of [fixture.workspace, fixture.channels.general!, fixture.channels.secret!, otherWorkspace.workspace, otherWorkspace.channels.general!]) {
-    await owner.procedure("com.atproto.memberspace.putMember", { space, did: appDid, read: true, write: true });
-    await owner.procedure("com.atproto.memberspace.putMember", { space, did: otherAppDid, read: true, write: true });
+    await owner.procedure("com.atproto.memberspace.putMembers", {
+      space,
+      members: [
+        { did: appDid, read: true, write: true },
+        { did: otherAppDid, read: true, write: true },
+      ],
+    });
   }
-  await owner.procedure("com.atproto.memberspace.putMember", { space: inbox, did: appDid, read: true, write: false });
-  for (const writer of [alice, bob]) {
-    await owner.procedure("com.atproto.memberspace.putMember", { space: inbox, did: writer, read: false, write: true });
-  }
+  await owner.procedure("com.atproto.memberspace.putMembers", {
+    space: inbox,
+    members: [
+      { did: appDid, read: true, write: false },
+      { did: alice, read: false, write: true },
+      { did: bob, read: false, write: true },
+    ],
+  });
   const { subjectKey } = await import("@flock/protocol/keys");
   const writeInstall = (did: string, active: boolean, channels: Array<{ skey: string; write: boolean }>) =>
     network.writeAs(AUTHORITY, fixture.workspace, COLLECTION.appInstall, subjectKey(did), {
@@ -1151,11 +1160,9 @@ test("AppRuntime with followRepoOps isolates failed initial writers, preserves f
       active: true,
       updatedAt: "2026-11-10T12:00:00.000Z",
     });
-    await env.network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.putMember", {
+    await env.network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.putMembers", {
       space: env.inbox,
-      did: carol,
-      read: false,
-      write: true,
+      members: [{ did: carol, read: false, write: true }],
     });
     const carolEngine = createEngine(transportFor(env.network, carol));
     await carolEngine.appInboxes.sendCommand(generalRef, env.appDid, "echo", "carol-immediate-cmd");

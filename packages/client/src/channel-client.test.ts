@@ -141,7 +141,7 @@ test("losing access to a channel drops its copy", async () => {
   const space = fixture.channels.general!;
   await writeMessage(network, BOB, space, 1);
   await alice.channels.readPage(ref());
-  await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMember", { space, did: ALICE });
+  await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMembers", { space, dids: [ALICE] });
   network.advanceClock(11 * 60 * 1000);
   await assert.rejects(alice.channels.readPage(ref()));
   assert.deepEqual(await alice.sync.store.records(space, COLLECTION.message), []);
@@ -154,7 +154,7 @@ test("after the account leaves a channel its cached credential and held copy go 
   await alice.channels.readPage(ref());
   await alice.channels.left(ref());
   assert.equal((await alice.sync.store.records(space, COLLECTION.message)).length, 1, "a channel the account can still read is kept");
-  await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMember", { space, did: ALICE });
+  await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMembers", { space, dids: [ALICE] });
   await alice.channels.left(ref());
   assert.deepEqual(await alice.sync.store.records(space, COLLECTION.message), [], "the held copy was dropped");
   await assert.rejects(alice.channels.readPage(ref()), "no cached credential reads the channel any longer");
@@ -179,7 +179,7 @@ test("paging a channel where two writers share keys at a page boundary shows eve
 test("a write is refused once the member is removed, even while a cached credential would still be accepted", async () => {
   const { network, fixture, alice, ref } = await workspace();
   await alice.channels.readPage(ref());
-  await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMember", { space: fixture.channels.general!, did: ALICE });
+  await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMembers", { space: fixture.channels.general!, dids: [ALICE] });
   await assert.rejects(alice.channels.send(ref(), "after removal"));
   assert.equal((await network.clientFor(ALICE).query<{ records: unknown[] }>("com.atproto.space.listRecords", {
     space: fixture.channels.general!, repo: ALICE, collection: COLLECTION.message,
@@ -331,8 +331,8 @@ test("getMessage gates target and parent authors against sync.writers (Carbon R2
   assert.equal((await inspectedAlice.channels.getMessage(ref(), ownSent.uri))?.value.text, "own-pending-msg");
   network.setListingLag(space, false);
 
-  // 5. Evicted writer removed from authority listRepos (D14) MUST return null on getMessage.
-  await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMember", { space, did: BOB });
+  // 5. Evicted writer removed from authority listWriters (D14) MUST return null on getMessage.
+  await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMembers", { space, dids: [BOB] });
   await inspectedAlice.sync.markSpaceStale(space);
   const evictedCalls = resolvedDids.length;
   assert.equal(await inspectedAlice.channels.getMessage(ref(), ancientUri), null);

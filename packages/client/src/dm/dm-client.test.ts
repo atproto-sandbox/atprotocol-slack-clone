@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { SPACE_CREDENTIAL_LIFETIME_MS, SPACE_CREDENTIAL_RENEW_BEFORE_MS } from "@flock/protocol/atproto/space-credential-core";
+import { SPACE_CREDENTIAL_LIFETIME_MS, SPACE_CREDENTIAL_RENEW_BEFORE_MS, verifyCredentialSig } from "@flock/protocol/atproto/space-credential-core";
+import { XrpcError } from "@flock/protocol/atproto/xrpc";
 import { dmConversationUri, dmInboxUri, spaceRecordUri } from "@flock/protocol/keys";
+import { OPERATOR_METHOD } from "@flock/protocol/nsids";
+import { CredentialCache } from "../credentials";
+import { OperatorClient, type OperatorService } from "../operator-client";
 import { DmClient, type DmDeps, type DmStore } from "./dm-client";
 import { FakeNetwork } from "@flock/testing/fake-network";
 
@@ -605,7 +609,7 @@ function countingExchanges(network: FakeNetwork): { fetchEndpoint: DmDeps["fetch
   let exchanges = 0;
   return {
     fetchEndpoint: (request) => {
-      if (request.url.includes("com.atproto.space.getSpaceCredential")) exchanges += 1;
+      if (request.url.includes("com.atproto.space.authorizeSpaceSync")) exchanges += 1;
       return network.fetchEndpoint(request);
     },
     count: () => exchanges,
@@ -657,7 +661,7 @@ test("two concurrent callers over an expired credential mint exactly one replace
   assert.equal(exchanges.count(), 2);
 });
 
-test("a half whose authority still answers UserNotAuthorized is reported revoked, not missing", async () => {
+test("a half whose authority still answers AccountNotAuthorized is reported revoked, not missing", async () => {
   // #given an authority that tells a refused reader apart from a missing half, as other PDS implementations may
   const { network, client } = harness();
   network.createAccount("did:plc:alice", "pds1");
@@ -665,9 +669,9 @@ test("a half whose authority still answers UserNotAuthorized is reported revoked
   const alice = client("did:plc:alice", "pds1", {
     fetchEndpoint: async (request) => {
       const response = await network.fetchEndpoint(request);
-      if (!request.url.includes("getSpaceCredential") || response.ok) return response;
+      if (!request.url.includes("authorizeSpaceSync") || response.ok) return response;
       const body = await response.json() as { error: string; message: string };
-      return new Response(JSON.stringify({ ...body, error: body.error === "SpaceNotFound" ? "UserNotAuthorized" : body.error }), { status: response.status });
+      return new Response(JSON.stringify({ ...body, error: body.error === "SpaceNotFound" ? "AccountNotAuthorized" : body.error }), { status: response.status });
     },
   });
   const bob = client("did:plc:bob");
@@ -952,7 +956,7 @@ test("a cached credential a participant's host refuses is dropped, so the next r
   let refuseBobHeaderOnce = false;
   const { alice, started } = await conversationWithBob({
     aliceFetch: async (request, real) => {
-      if (request.url.includes("getSpaceCredential")) mints += 1;
+      if (request.url.includes("authorizeSpaceSync")) mints += 1;
       if (refuseBobHeaderOnce && bobsRepo(request, "new.flock.dm.header")) {
         refuseBobHeaderOnce = false;
         return new Response(JSON.stringify({ error: "InvalidToken", message: "expired" }), { status: 401, headers: { "content-type": "application/json" } });
@@ -1014,4 +1018,402 @@ test("a half whose message history passes the read limit is reported, not silent
   }
   const first = await alice.readConversation(started.convKey, started.participants, { limit: 2 });
   await assert.rejects(alice.readConversation(started.convKey, started.participants, { limit: 2, before: first.nextBefore }), /read limit/);
+});
+
+test("R12 D12.8.2 (H6): switching allowlist -> nobody -> everyone reactivates dormant allowlist members so their requests are tracked, and putMembers/removeMembers chunk >100 DIDs", async () => {
+  const { network, client } = harness();
+  network.createAccount("did:plc:alice", "pds1");
+  network.createAccount("did:plc:bob", "pds2");
+  const alice = client("did:plc:alice");
+  const bob = client("did:plc:bob");
+
+  // 1. Alice enables allowlist with Bob, parks DMs in "nobody" (making Bob dormant { read:false, write:false }),
+  //    then switches to "everyone" -> Bob MUST be reactivated to { read:false, write:true } so publicWrite + explicit member allows tracking!
+  await alice.enableDms("allowlist", ["did:plc:bob"]);
+  await alice.setRequestMode("nobody");
+  assert.deepEqual(await alice.getInbox(), { exists: true, mode: "nobody", allowlist: ["did:plc:bob"] });
+
+  await alice.setRequestMode("everyone");
+  assert.deepEqual(await alice.getInbox(), { exists: true, mode: "everyone", allowlist: ["did:plc:bob"] });
+
+  // Verify Bob's request sent after nobody -> everyone is tracked in listWriters AND returned by alice.listRequests()!
+  const started = await bob.startConversation(["did:plc:alice"]);
+  assert.equal(started.delivery["did:plc:alice"]?.status, "delivered");
+  const seenInEveryone = await alice.listRequests();
+  assert.deepEqual(seenInEveryone.map((r) => r.convKey), [started.convKey], "previously-dormant contact's request is tracked in everyone mode");
+
+  // Switching back to "nobody" parks Bob dormant again without losing his allowlist membership.
+  await alice.setRequestMode("nobody");
+  assert.deepEqual(await alice.getInbox(), { exists: true, mode: "nobody", allowlist: ["did:plc:bob"] });
+  assert.deepEqual(await alice.listRequests(), []);
+
+  // 2. Allowing and disallowing >100 DIDs chunks putMembers / removeMembers into <=100 batches cleanly.
+  const bulkDids = Array.from({ length: 135 }, (_, idx) => `did:plc:bulk${String(idx).padStart(3, "0")}`);
+  await alice.setRequestMode("allowlist");
+  await alice.allow(bulkDids);
+  const afterBulkAllow = await alice.getInbox();
+  assert.equal(afterBulkAllow.allowlist.length, 136);
+  await alice.disallow(bulkDids);
+  assert.deepEqual((await alice.getInbox()).allowlist, ["did:plc:bob"]);
+});
+
+test("R12 D12.3c: CredentialCache upgrades un-notified credentials, re-mints on notify target change, retains notify on renewal, and falls back when RegistrationNotConfirmed", async () => {
+  const network = new FakeNetwork();
+  network.createAccount("did:plc:alice", "pds1");
+  const inbox = dmInboxUri("did:plc:alice");
+  await network.clientFor("did:plc:alice").procedure("com.atproto.space.createSpace", {
+    spaceType: "new.flock.dm.inbox",
+    skey: "self",
+    policy: { $type: "com.atproto.memberspace.policy", publicWrite: true },
+  });
+
+  const notifyPayloads: Array<unknown> = [];
+  let confirmShouldSucceed = true;
+  let confirmations = 0;
+  network.registerEndpoint("https://webhook.test", async (req) => {
+    const url = new URL(req.url);
+    if (url.pathname === "/xrpc/com.atproto.space.confirmRegistration") {
+      confirmations += 1;
+      if (!confirmShouldSucceed) return Response.json({ error: "ChallengeMismatch" }, { status: 400 });
+      const body = (await req.json()) as { challenge: string };
+      return Response.json({ challenge: body.challenge });
+    }
+    return Response.json({});
+  });
+
+  const cache = new CredentialCache({
+    did: "did:plc:alice",
+    memberClient: network.clientFor("did:plc:alice"),
+    resolvePds: network.resolvePds,
+    resolveKemKey: network.resolveKemKey,
+    fetchEndpoint: async (request) => {
+      if (request.url.includes("com.atproto.space.authorizeSpaceSync") && request.method === "POST") {
+        const cloned = request.clone();
+        const parsed = (await cloned.json()) as { notify?: unknown };
+        notifyPayloads.push(parsed.notify ?? null);
+      }
+      return network.fetchEndpoint(request);
+    },
+    generateKey: network.generateKey,
+    now: network.now,
+  });
+
+  // 1. Initial get without notify mints un-notified credential.
+  const c1 = await cache.get(inbox);
+  assert.deepEqual(notifyPayloads, [null]);
+
+  // 2. Passing { notify } upgrades immediately by re-minting with notify!
+  const targetA = { endpoint: "https://webhook.test", token: "tok-a" };
+  const c2 = await cache.get(inbox, { notify: targetA });
+  assert.notEqual(c2.token, c1.token);
+  assert.deepEqual(notifyPayloads.at(-1), targetA);
+  assert.equal(confirmations, 1);
+
+  // 3. Calling get(inbox) with same notify or without opts reuses c2 before renewal window, and retains targetA on renewal!
+  const c2Same = await cache.get(inbox, { notify: targetA });
+  assert.equal(c2Same.token, c2.token);
+  network.advanceClock(SPACE_CREDENTIAL_LIFETIME_MS - SPACE_CREDENTIAL_RENEW_BEFORE_MS + 1);
+  const c3Renewed = await cache.get(inbox);
+  assert.notEqual(c3Renewed.token, c2.token);
+  assert.deepEqual(notifyPayloads.at(-1), targetA, "renewal without opts retains confirmed notify target");
+  assert.equal(confirmations, 1, "active registration renewed before exp does not re-run confirmRegistration");
+
+  // 4. Changing token or endpoint re-mints immediately with new target.
+  const targetB = { endpoint: "https://webhook.test", token: "tok-b" };
+  const c4 = await cache.get(inbox, { notify: targetB });
+  assert.notEqual(c4.token, c3Renewed.token);
+  assert.deepEqual(notifyPayloads.at(-1), targetB);
+  assert.equal(confirmations, 2);
+
+  // 5. RegistrationNotConfirmed strips notify and immediately mints a working un-notified credential!
+  confirmShouldSucceed = false;
+  const targetUnconfirmed = { endpoint: "https://webhook.test", token: "tok-fail" };
+  const c5Fallback = await cache.get(inbox, { notify: targetUnconfirmed });
+  assert.ok(c5Fallback.token);
+  assert.deepEqual(notifyPayloads.slice(-2), [targetUnconfirmed, null], "retried immediately without notify after RegistrationNotConfirmed");
+});
+
+test("R12 D12.3b.3 (H5): DmClient.watch proves SpaceCredential possession via RFC 9421 PoP, renews notify registrations, never blocks DM reads on operator/webhook failures, and cleans up on abort", async () => {
+  const OPERATOR: OperatorService = {
+    serviceRef: "did:web:operator.test#atproto_flock_operator",
+    endpoint: "https://operator.test",
+  };
+
+  // 1. Happy path + PoP verification + renewal reuse without re-calling getDmNotifyTarget + AbortSignal cleanup.
+  {
+    const network = new FakeNetwork();
+    network.createAccount("did:plc:alice", "pds1");
+    network.createAccount("did:plc:bob", "pds2");
+
+    let dmTargetCalls = 0;
+    let confirmCalls = 0;
+    const deliveredSpaces: string[] = [];
+    const verifiedProofs: Array<{ space: string; audience: string | null }> = [];
+
+    network.registerEndpoint(OPERATOR.endpoint, async (req) => {
+      const url = new URL(req.url);
+      if (url.pathname === "/xrpc/com.atproto.space.confirmRegistration") {
+        confirmCalls += 1;
+        const body = (await req.json()) as { challenge: string };
+        return Response.json({ challenge: body.challenge });
+      }
+      if (url.pathname === "/xrpc/com.atproto.space.notifySpaceUpdate") {
+        const body = (await req.json()) as { space: string };
+        deliveredSpaces.push(body.space);
+        return Response.json({});
+      }
+      return Response.json({ error: "NotFound" }, { status: 404 });
+    });
+
+    const baseFetch = network.fetchEndpoint;
+    const fetchWithOperator: DmDeps["fetchEndpoint"] = async (request) => {
+      const url = new URL(request.url);
+      if (url.origin !== OPERATOR.endpoint) return baseFetch(request);
+      const method = url.pathname.replace("/xrpc/", "");
+      if (method === OPERATOR_METHOD.getDmNotifyTarget) {
+        dmTargetCalls += 1;
+        const body = (await request.json()) as {
+          space: string;
+          credential: string;
+          proof: { authorization: string; signatureInput: string; signature: string };
+        };
+        const payload = JSON.parse(Buffer.from(body.credential.split(".")[1]!, "base64url").toString("utf8")) as {
+          sub: string;
+          cnf: { kid: `did:key:${string}` };
+        };
+        assert.equal(payload.sub, body.space);
+        assert.equal(body.proof.authorization, `Atproto-Space-Credential ${body.credential}`);
+        await verifyCredentialSig(
+          {
+            authorization: body.proof.authorization,
+            "atproto-space-audience": OPERATOR.serviceRef,
+            "signature-input": body.proof.signatureInput,
+            signature: body.proof.signature,
+          },
+          payload.cnf.kid,
+        );
+        verifiedProofs.push({ space: body.space, audience: OPERATOR.serviceRef });
+        return Response.json({ endpoint: OPERATOR.endpoint, token: ` opaque-tok-${dmTargetCalls} ` });
+      }
+      return Response.json({ error: "NotFound" }, { status: 404 });
+    };
+
+    const realTimers = new Map<number, { fn: () => void; delayMs: number; cleared: boolean; fired: boolean }>();
+    let nextTimerId = 1;
+    const aliceDeps: DmDeps = {
+      did: "did:plc:alice",
+      memberClient: network.clientFor("did:plc:alice"),
+      resolvePds: network.resolvePds,
+      resolveKemKey: network.resolveKemKey,
+      fetchEndpoint: fetchWithOperator,
+      generateKey: network.generateKey,
+      store: createStore(),
+      now: network.now,
+      operator: new OperatorClient(
+        { did: "did:plc:alice", memberClient: network.clientFor("did:plc:alice"), resolvePds: network.resolvePds, resolveKemKey: network.resolveKemKey, fetchEndpoint: fetchWithOperator, generateKey: network.generateKey },
+        OPERATOR,
+      ),
+      timers: {
+        setTimeout: (fn, delayMs) => {
+          const id = nextTimerId++;
+          const entry = {
+            fn: () => {
+              entry.fired = true;
+              fn();
+            },
+            delayMs,
+            cleared: false,
+            fired: false,
+          };
+          realTimers.set(id, entry);
+          return id;
+        },
+        clearTimeout: (handle) => {
+          const entry = realTimers.get(handle as number);
+          if (entry) entry.cleared = true;
+        },
+      },
+    };
+    const alice = new DmClient(aliceDeps);
+    const bob = new DmClient({
+      did: "did:plc:bob",
+      memberClient: network.clientFor("did:plc:bob"),
+      resolvePds: network.resolvePds,
+      resolveKemKey: network.resolveKemKey,
+      fetchEndpoint: network.fetchEndpoint,
+      generateKey: network.generateKey,
+      store: createStore(),
+      now: network.now,
+    });
+
+    await alice.enableDms("everyone");
+    const inbox = dmInboxUri("did:plc:alice");
+    const abortController = new AbortController();
+    await alice.watch([inbox], { signal: abortController.signal });
+
+    assert.equal(dmTargetCalls, 1, "fetched DM notify target once");
+    assert.equal(verifiedProofs.length, 1, "RFC 9421 PoP proof verified against credential cnf.kid and operator serviceRef");
+    assert.equal(confirmCalls, 1, "PDS confirmed webhook registration once");
+
+    // Bob sends a DM request -> Alice's PDS delivers notifySpaceUpdate to operator endpoint!
+    await bob.startConversation(["did:plc:alice"]);
+    await network.flushNotifications();
+    assert.deepEqual(deliveredSpaces, [inbox]);
+
+    const waitForPendingTimer = async (timers: Iterable<{ cleared: boolean; fired?: boolean }>) => {
+      for (let i = 0; i < 100; i += 1) {
+        if ([...timers].some((t) => !t.cleared && !t.fired)) return;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    };
+
+    // Periodic renewal timer fires before 10m expiry: renews authorizeSpaceSync reusing cached { endpoint, token } WITHOUT calling getDmNotifyTarget or confirmRegistration again!
+    const activeTimers = [...realTimers.values()].filter((t) => !t.cleared && !t.fired);
+    assert.equal(activeTimers.length, 1, "scheduled one renewal timer");
+    assert.ok(activeTimers[0]!.delayMs >= 6 * 60_000 && activeTimers[0]!.delayMs <= 8 * 60_000);
+    network.advanceClock(activeTimers[0]!.delayMs);
+    activeTimers[0]!.fn();
+    await waitForPendingTimer(realTimers.values());
+    assert.equal(dmTargetCalls, 1, "renewal reused cached { endpoint, token } without calling getDmNotifyTarget");
+    assert.equal(confirmCalls, 1, "active registration renewed before exp without re-running confirmRegistration");
+
+    // AbortSignal immediately clears pending timers!
+    assert.equal([...realTimers.values()].filter((t) => !t.cleared && !t.fired).length, 1, "next renewal timer is pending before abort");
+    abortController.abort();
+    assert.equal([...realTimers.values()].filter((t) => !t.cleared && !t.fired).length, 0, "AbortSignal cleaned up all pending watch timers");
+  }
+
+  // 2. Operator offline / RegistrationNotConfirmed / ScopeMissingError NEVER break DM reads, and transient failures recover via background backoff!
+  {
+    const network = new FakeNetwork();
+    network.createAccount("did:plc:alice", "pds1");
+    network.createAccount("did:plc:bob", "pds2");
+
+    let operatorMode: "offline" | "unconfirmed" | "ok" | "missing-scope" = "offline";
+    let targetCalls = 0;
+    let confirmed = false;
+
+    network.registerEndpoint(OPERATOR.endpoint, async (req) => {
+      const url = new URL(req.url);
+      if (url.pathname === "/xrpc/com.atproto.space.confirmRegistration") {
+        if (operatorMode !== "ok") return Response.json({ error: "Down" }, { status: 502 });
+        confirmed = true;
+        const body = (await req.json()) as { challenge: string };
+        return Response.json({ challenge: body.challenge });
+      }
+      return Response.json({});
+    });
+
+    const scheduledRetries: Array<{ fn: () => void; delayMs: number; cleared: boolean; fired: boolean }> = [];
+    const waitForRetryCount = async (minActive: number) => {
+      for (let i = 0; i < 100; i += 1) {
+        if (scheduledRetries.filter((t) => !t.cleared && !t.fired).length >= minActive) return;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    };
+    const makeAlice = () =>
+      new DmClient({
+        did: "did:plc:alice",
+        memberClient: network.clientFor("did:plc:alice"),
+        resolvePds: network.resolvePds,
+        resolveKemKey: network.resolveKemKey,
+        fetchEndpoint: async (request) => {
+          const url = new URL(request.url);
+          if (url.origin !== OPERATOR.endpoint) return network.fetchEndpoint(request);
+          targetCalls += 1;
+          if (operatorMode === "offline") {
+            return Response.json({ error: "BadGateway", message: "operator offline" }, { status: 502 });
+          }
+          if (operatorMode === "missing-scope") {
+            return Response.json({ error: "ScopeMissingError", message: "Missing getDmNotifyTarget scope" }, { status: 403 });
+          }
+          return Response.json({ endpoint: OPERATOR.endpoint, token: "tok-recover" });
+        },
+        generateKey: network.generateKey,
+        store: createStore(),
+        now: network.now,
+        operator: OPERATOR,
+        watchTiming: { initialRetryMs: 50, maxRetryMs: 200 },
+        timers: {
+          setTimeout: (fn, delayMs) => {
+            const entry = {
+              fn: () => {
+                entry.fired = true;
+                fn();
+              },
+              delayMs,
+              cleared: false,
+              fired: false,
+            };
+            scheduledRetries.push(entry);
+            return entry;
+          },
+          clearTimeout: (handle) => {
+            (handle as { cleared: boolean }).cleared = true;
+          },
+        },
+      });
+
+    const alice = makeAlice();
+    const bob = new DmClient({
+      did: "did:plc:bob",
+      memberClient: network.clientFor("did:plc:bob"),
+      resolvePds: network.resolvePds,
+      resolveKemKey: network.resolveKemKey,
+      fetchEndpoint: network.fetchEndpoint,
+      generateKey: network.generateKey,
+      store: createStore(),
+      now: network.now,
+    });
+
+    await alice.enableDms("everyone");
+    await bob.enableDms("everyone");
+    const started = await bob.startConversation(["did:plc:alice"]);
+    const inbox = dmInboxUri("did:plc:alice");
+
+    // (a) Operator returns 502 -> watch does NOT throw, listRequests & readConversation still succeed!
+    await alice.watch([inbox]);
+    assert.equal((await alice.listRequests()).length, 1, "listRequests succeeds while operator is offline");
+    await alice.accept((await alice.listRequests())[0]!);
+    await bob.send(started.convKey, "works without operator");
+    const bobHalf = dmConversationUri("did:plc:bob", started.convKey);
+    await alice.watch([inbox, bobHalf]);
+    const pageWhileDown = await alice.readConversation(started.convKey, started.participants);
+    assert.deepEqual(pageWhileDown.messages.map((m) => m.text), ["works without operator"]);
+
+    // (b) Operator returns target, but webhook confirmRegistration fails -> RegistrationNotConfirmed fallback keeps DM reads working and schedules backoff retry!
+    operatorMode = "unconfirmed";
+    const pendingRetry1 = scheduledRetries.filter((t) => !t.cleared && !t.fired);
+    assert.ok(pendingRetry1.length >= 1, "transient operator failure scheduled background backoff retry");
+    pendingRetry1[0]!.fn();
+    await waitForRetryCount(2);
+    assert.equal(confirmed, false);
+    assert.equal((await alice.readConversation(started.convKey, started.participants)).messages.length, 1, "reads stay healthy after RegistrationNotConfirmed");
+
+    // (c) Webhook comes online -> next scheduled retry confirms registration!
+    operatorMode = "ok";
+    const pendingRetry2 = scheduledRetries.filter((t) => !t.cleared && !t.fired);
+    for (const timer of pendingRetry2) timer.fn();
+    for (let i = 0; i < 100 && !confirmed; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(confirmed, true, "background retry recovered notify registration once operator & webhook came online");
+    alice.close();
+
+    // (d) Legacy session missing getDmNotifyTarget scope (ScopeMissingError 403) degrades cleanly with zero retry storm!
+    scheduledRetries.length = 0;
+    operatorMode = "missing-scope";
+    const callsBeforeLegacy = targetCalls;
+    const legacyAlice = makeAlice();
+    await legacyAlice.watch([inbox, bobHalf]);
+    assert.equal(legacyAlice.isNotifyScopeMissing(), true);
+    const callsAfterFirstLegacyWatch = targetCalls;
+    assert.ok(callsAfterFirstLegacyWatch - callsBeforeLegacy >= 1 && callsAfterFirstLegacyWatch - callsBeforeLegacy <= 2);
+    assert.equal(scheduledRetries.filter((t) => !t.cleared && !t.fired).length, 0, "no retry timer scheduled on ScopeMissingError");
+    await legacyAlice.watch([inbox, bobHalf]);
+    assert.equal(targetCalls, callsAfterFirstLegacyWatch, "subsequent watch calls make zero getDmNotifyTarget requests once scope is known missing");
+    assert.equal((await legacyAlice.readConversation(started.convKey, started.participants)).messages.length, 1);
+    legacyAlice.close();
+    assert.ok(XrpcError);
+  }
 });

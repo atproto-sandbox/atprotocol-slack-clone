@@ -1,9 +1,9 @@
 import type { OAuthSession } from "@atproto/oauth-client-node";
 import type * as CreateSpace from "@flock/protocol/lexicons/api/types/com/atproto/space/createSpace";
 import type * as GetSpace from "@flock/protocol/lexicons/api/types/com/atproto/space/getSpace";
-import type * as ListMembers from "@flock/protocol/lexicons/api/types/com/atproto/memberspace/listMembers";
-import type * as PutMember from "@flock/protocol/lexicons/api/types/com/atproto/memberspace/putMember";
-import type * as RemoveMember from "@flock/protocol/lexicons/api/types/com/atproto/memberspace/removeMember";
+import type * as MemberspaceDefs from "@flock/protocol/lexicons/api/types/com/atproto/memberspace/defs";
+import type * as PutMembers from "@flock/protocol/lexicons/api/types/com/atproto/memberspace/putMembers";
+import type * as RemoveMembers from "@flock/protocol/lexicons/api/types/com/atproto/memberspace/removeMembers";
 import type * as PutRecord from "@flock/protocol/lexicons/api/types/com/atproto/space/putRecord";
 import type * as ListRecords from "@flock/protocol/lexicons/api/types/com/atproto/space/listRecords";
 import { resolvePds } from "./identity";
@@ -15,6 +15,8 @@ import { assertBoundedRecordPage, listBoundedMembers } from "@flock/protocol/atp
 import { isScopeMissingError, isSpaceAlreadyExists, XrpcError } from "@flock/protocol/atproto/xrpc";
 import { requireSpaceAuthority, spaceRecordUri, spaceUri } from "@flock/protocol/keys";
 import { WORKSPACE_ENVELOPE, WorkspaceEnvelopeError } from "@flock/protocol/workspace-summary";
+
+const MAX_MEMBER_BATCH = 100;
 
 export async function ensureMemberListSpace(
   session: OAuthSession,
@@ -28,12 +30,12 @@ export async function ensureMemberListSpace(
       "com.atproto.space.createSpace",
       { spaceType: type, skey, policy: memberspacePolicy() },
     );
-    return result.uri;
+    return result.space;
   } catch (error) {
     if (!isSpaceAlreadyExists(error)) throw error;
     const current = await client.query<GetSpace.OutputSchema>("com.atproto.space.getSpace", { space: uri });
     if (!isMemberListOnly(current.policy)) throw new Error(`Space already exists with an incompatible policy: ${uri}`);
-    return current.uri;
+    return current.space;
   }
 }
 
@@ -66,6 +68,22 @@ export async function appInboxState(session: OAuthSession, space: string): Promi
   }
 }
 
+export async function putSpaceMembers(
+  session: OAuthSession,
+  space: string,
+  members: ReadonlyArray<{ did: string; read: boolean; write: boolean }>,
+): Promise<void> {
+  if (members.length === 0) return;
+  const client = sessionClient(session);
+  for (let offset = 0; offset < members.length; offset += MAX_MEMBER_BATCH) {
+    const chunk = members.slice(offset, offset + MAX_MEMBER_BATCH).map(({ did, read, write }) => ({ did, read, write }));
+    await client.procedure<PutMembers.InputSchema, unknown>(
+      "com.atproto.memberspace.putMembers",
+      { space, members: chunk },
+    );
+  }
+}
+
 export async function putSpaceMember(
   session: OAuthSession,
   space: string,
@@ -73,34 +91,26 @@ export async function putSpaceMember(
   read: boolean,
   write: boolean,
 ): Promise<void> {
-  await sessionClient(session).procedure<PutMember.InputSchema, unknown>(
-    "com.atproto.memberspace.putMember", { space, did, read, write },
-  );
+  await putSpaceMembers(session, space, [{ did, read, write }]);
 }
 
-export async function putSpaceMembers(
-  session: OAuthSession,
-  space: string,
-  members: ReadonlyArray<{ did: string; read: boolean; write: boolean }>,
-): Promise<void> {
-  for (const member of members) {
-    await putSpaceMember(session, space, member.did, member.read, member.write);
+export async function removeSpaceMembers(session: OAuthSession, space: string, dids: readonly string[]): Promise<void> {
+  if (dids.length === 0) return;
+  const client = sessionClient(session);
+  for (let offset = 0; offset < dids.length; offset += MAX_MEMBER_BATCH) {
+    const chunk = dids.slice(offset, offset + MAX_MEMBER_BATCH);
+    await client.procedure<RemoveMembers.InputSchema, unknown>(
+      "com.atproto.memberspace.removeMembers",
+      { space, dids: chunk },
+    );
   }
 }
 
 export async function removeSpaceMember(session: OAuthSession, space: string, did: string): Promise<void> {
-  await sessionClient(session).procedure<RemoveMember.InputSchema, unknown>(
-    "com.atproto.memberspace.removeMember", { space, did },
-  );
+  await removeSpaceMembers(session, space, [did]);
 }
 
-export async function removeSpaceMembers(session: OAuthSession, space: string, dids: readonly string[]): Promise<void> {
-  for (const did of dids) {
-    await removeSpaceMember(session, space, did);
-  }
-}
-
-export async function listSpaceMembers(session: OAuthSession, space: string): Promise<ListMembers.Member[]> {
+export async function listSpaceMembers(session: OAuthSession, space: string): Promise<MemberspaceDefs.Member[]> {
   const result = await listBoundedMembers(sessionClient(session), { space, maxMembers: WORKSPACE_ENVELOPE.memberList });
   if (result.truncated) throw new WorkspaceEnvelopeError(`PDS member list exceeds its ${WORKSPACE_ENVELOPE.memberList}-entry scan limit (people and apps); operator state may be incomplete.`);
   return result.members;

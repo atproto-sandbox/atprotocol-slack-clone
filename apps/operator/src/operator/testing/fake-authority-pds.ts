@@ -9,7 +9,7 @@ export type FakeMember = { did: string; read: boolean; write: boolean };
 
 export type FakeAuthorityPds = {
   session: OAuthSession;
-  /** Every write, in order, as `createSpace <uri>`, `putRecord <space> <collection>/<rkey>`, `putMember <space> <did>` or `removeMember <space> <did>`. */
+  /** Every write, in order, as `createSpace <uri>`, `putRecord <space> <collection>/<rkey>`, `putMembers <space> <did>` or `removeMembers <space> <did>`. */
   writes: string[];
   /** Every request, in order, as `<method> <space> [<collection>]`. */
   calls: string[];
@@ -19,7 +19,16 @@ export type FakeAuthorityPds = {
   membersOf(space: string): Map<string, FakeMember>;
 };
 
-type RequestBody = Record<string, string> & { record: Record<string, unknown>; read: boolean; write: boolean };
+type RequestBody = {
+  space?: string;
+  spaceType?: string;
+  skey?: string;
+  collection?: string;
+  rkey?: string;
+  record?: Record<string, unknown>;
+  members?: Array<{ did: string; read: boolean; write: boolean }>;
+  dids?: string[];
+};
 
 export type FakeAuthorityPdsOptions = {
   onWrite?: () => void;
@@ -74,16 +83,16 @@ export function fakeAuthorityPds(did: string, options: FakeAuthorityPdsOptions =
       if (intercepted) return intercepted;
       switch (method) {
         case "com.atproto.space.createSpace": {
-          const uri = `at://${did}/space/${body!.spaceType}/${body!.skey}`;
+          const uri = `at://${did}/space/${body!.spaceType!}/${body!.skey!}`;
           if (spaces.has(uri)) return Response.json({ error: "SpaceAlreadyExists", message: "Space already exists" }, { status: 400 });
           spaces.add(uri);
           write(`createSpace ${uri}`);
-          return Response.json({ uri });
+          return Response.json({ space: uri });
         }
         case "com.atproto.space.putRecord":
-          write(`putRecord ${body!.space} ${body!.collection}/${body!.rkey}`);
-          recordMap(body!.space, body!.collection).set(body!.rkey, body!.record);
-          return Response.json({ uri: `${body!.space}/${body!.collection}/${body!.rkey}`, cid: "bafyreib2rxk3rybk3aobmv5cjuql3bm2twh4jo5uxgf5ss5c3sk6tkztoe" });
+          write(`putRecord ${body!.space!} ${body!.collection!}/${body!.rkey!}`);
+          recordMap(body!.space!, body!.collection!).set(body!.rkey!, body!.record!);
+          return Response.json({ uri: `${body!.space!}/${body!.collection!}/${body!.rkey!}`, cid: "bafyreib2rxk3rybk3aobmv5cjuql3bm2twh4jo5uxgf5ss5c3sk6tkztoe" });
         case "com.atproto.space.getRecord": {
           const value = recordMap(params.get("space")!, params.get("collection")!).get(params.get("rkey")!);
           return value
@@ -92,27 +101,51 @@ export function fakeAuthorityPds(did: string, options: FakeAuthorityPdsOptions =
         }
         case "com.atproto.space.getSpace":
           return spaces.has(params.get("space")!)
-            ? Response.json({ uri: params.get("space"), policy: memberspacePolicy() })
+            ? Response.json({ space: params.get("space"), policy: memberspacePolicy() })
             : Response.json({ error: "SpaceNotFound", message: "Space not found" }, { status: 400 });
         case "com.atproto.space.listRecords": {
           const collection = params.get("collection")!;
           return Response.json({ records: [...recordMap(params.get("space")!, collection)].map(([rkey, value]) => ({ collection, rkey, value })) });
         }
         case "com.atproto.memberspace.listMembers": {
-          const space = params.get("space")!;
-          if (!spaces.has(space)) return Response.json({ error: "SpaceNotFound", message: "Space not found" }, { status: 400 });
-          return Response.json({ members: [...memberMap(space).values()] });
+          const spaceUri = params.get("space")!;
+          if (!spaces.has(spaceUri)) return Response.json({ error: "SpaceNotFound", message: "Space not found" }, { status: 400 });
+          const allMembers = [...memberMap(spaceUri).values()];
+          const rawLimit = params.get("limit");
+          const limit = rawLimit ? Number(rawLimit) : allMembers.length;
+          const rawCursor = params.get("cursor");
+          const start = rawCursor ? Number(rawCursor) : 0;
+          const slice = allMembers.slice(start, start + limit);
+          const next = start + slice.length;
+          return Response.json({
+            members: slice,
+            ...(next < allMembers.length ? { cursor: String(next) } : {}),
+          });
         }
-        case "com.atproto.memberspace.putMember":
-          if (!spaces.has(body!.space)) return Response.json({ error: "SpaceNotFound", message: "Space not found" }, { status: 400 });
-          write(`putMember ${body!.space} ${body!.did}`);
-          memberMap(body!.space).set(body!.did, { did: body!.did, read: body!.read, write: body!.write });
+        case "com.atproto.memberspace.putMembers": {
+          const spaceUri = body!.space!;
+          if (!spaces.has(spaceUri)) return Response.json({ error: "SpaceNotFound", message: "Space not found" }, { status: 400 });
+          if (!Array.isArray(body!.members) || body!.members.length > 100) {
+            return Response.json({ error: "InvalidRequest", message: "members must be an array of at most 100 entries" }, { status: 400 });
+          }
+          for (const entry of body!.members) {
+            write(`putMembers ${spaceUri} ${entry.did}`);
+            memberMap(spaceUri).set(entry.did, { did: entry.did, read: entry.read, write: entry.write });
+          }
           return Response.json({});
-        case "com.atproto.memberspace.removeMember":
-          if (!spaces.has(body!.space)) return Response.json({ error: "SpaceNotFound", message: "Space not found" }, { status: 400 });
-          write(`removeMember ${body!.space} ${body!.did}`);
-          memberMap(body!.space).delete(body!.did);
+        }
+        case "com.atproto.memberspace.removeMembers": {
+          const spaceUri = body!.space!;
+          if (!spaces.has(spaceUri)) return Response.json({ error: "SpaceNotFound", message: "Space not found" }, { status: 400 });
+          if (!Array.isArray(body!.dids) || body!.dids.length > 100) {
+            return Response.json({ error: "InvalidRequest", message: "dids must be an array of at most 100 DIDs" }, { status: 400 });
+          }
+          for (const memberDid of body!.dids) {
+            write(`removeMembers ${spaceUri} ${memberDid}`);
+            memberMap(spaceUri).delete(memberDid);
+          }
           return Response.json({});
+        }
         default:
           throw new Error(`unexpected request: ${path}`);
       }

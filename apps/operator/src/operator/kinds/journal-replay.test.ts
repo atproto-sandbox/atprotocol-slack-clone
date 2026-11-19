@@ -138,7 +138,7 @@ for (const scenario of [
     const designWrites = pds.writes.filter((write) => write.includes(channel) || write.endsWith(`/${scenario.skey}-design`));
     const expected = [
       ...(scenario.done.includes("channel-space") ? [] : [`createSpace ${channel}`]),
-      ...(scenario.done.includes(`channel-member-${ADMIN}`) ? [] : [`putMember ${channel} ${ADMIN}`]),
+      ...(scenario.done.includes(`channel-member-${ADMIN}`) ? [] : [`putMembers ${channel} ${ADMIN}`]),
       `putRecord ${channel} ${COLLECTION.channelRoster}/${subjectKey(ADMIN)}`,
       `putRecord ${workspace} ${COLLECTION.directory}/${scenario.skey}-design`,
     ];
@@ -170,7 +170,6 @@ function recordingRegistration() {
   const registered: string[] = [];
   const deps: RegistrationDeps = {
     register: async (_session, space) => { registered.push(space); return Date.now() + 24 * 60 * 60 * 1000; },
-    unregister: async () => undefined,
     now: () => Date.now(),
   };
   return { deps, registered };
@@ -235,8 +234,8 @@ test("partially completed pre-R11 inviteMember and removeMember rows replay clea
   assert.deepEqual(JSON.parse(journalRow(inviteId).steps_json), [
     "member-workspace", "member-inbox-writer", "member-public-channel-eta-general", "member-workspace-roster", "member-state-verified",
   ]);
-  assert.equal(pds.writes.slice(writesBeforeInviteResume).some((w) => w.includes(`putMember ${workspace} ${member}`)), false);
-  assert.equal(pds.writes.slice(writesBeforeInviteResume).some((w) => w.includes(`putMember ${inbox} ${member}`)), false);
+  assert.equal(pds.writes.slice(writesBeforeInviteResume).some((w) => w.includes(`putMembers ${workspace} ${member}`)), false);
+  assert.equal(pds.writes.slice(writesBeforeInviteResume).some((w) => w.includes(`putMembers ${inbox} ${member}`)), false);
   assert.deepEqual(pds.membersOf(general).get(member), { did: member, read: true, write: true });
 
   // Pre-R11 partial removeMember stopped after remove-inbox-membership on a workspace with a cleanly disabled extension (cleanupComplete: true)
@@ -268,7 +267,7 @@ test("partially completed pre-R11 inviteMember and removeMember rows replay clea
   const afterRemove = await executeOperatorOperation(owner, "222222222223d", { kind: "reconcileWorkspace" });
   assert.equal(afterRemove.state, "completed");
   assert.equal(journalRow(removeId).state, "completed");
-  assert.equal(pds.writes.slice(writesBeforeRemoveResume).some((w) => w.includes(`removeMember ${inbox} ${member}`)), false);
+  assert.equal(pds.writes.slice(writesBeforeRemoveResume).some((w) => w.includes(`removeMembers ${inbox} ${member}`)), false);
   assert.equal(pds.recordsOf(workspace, COLLECTION.workspaceRoster).get(subjectKey(member))?.active, false);
 });
 

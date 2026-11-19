@@ -34,7 +34,15 @@ export interface SlackDb {
     details_json: string;
     created_at: number;
   };
-  notification_registration: { service_ref: string; space_uri: string; expires_at: number; workspace_uri: string | null };
+  notification_registration: {
+    service_ref: string;
+    space_uri: string;
+    expires_at: number;
+    workspace_uri: string | null;
+    token: string;
+    renew_at: number;
+    last_space_rev: string | null;
+  };
   notification_registration_failure: { space_uri: string; workspace_uri: string; failures: number; next_attempt_at: number; last_error: string };
   space_notification: { id: number; space_uri: string; space_type: string; type_seq: number; repo_did: string; rev: string; notified_at: number };
 }
@@ -169,6 +177,9 @@ export function getDb(): Kysely<SlackDb> {
       space_uri TEXT NOT NULL,
       expires_at INTEGER NOT NULL,
       workspace_uri TEXT,
+      token TEXT NOT NULL DEFAULT '',
+      renew_at INTEGER NOT NULL DEFAULT 0,
+      last_space_rev TEXT,
       PRIMARY KEY (service_ref, space_uri)
     );
     CREATE TABLE IF NOT EXISTS notification_registration_failure (
@@ -187,7 +198,19 @@ export function getDb(): Kysely<SlackDb> {
     if (!registrationColumns.some(({ name }) => name === "workspace_uri")) {
       rawDatabase.exec("ALTER TABLE notification_registration ADD COLUMN workspace_uri TEXT");
     }
+    if (!registrationColumns.some(({ name }) => name === "token")) {
+      rawDatabase.exec("ALTER TABLE notification_registration ADD COLUMN token TEXT NOT NULL DEFAULT ''");
+    }
+    if (!registrationColumns.some(({ name }) => name === "renew_at")) {
+      rawDatabase.exec("ALTER TABLE notification_registration ADD COLUMN renew_at INTEGER NOT NULL DEFAULT 0");
+    }
+    if (!registrationColumns.some(({ name }) => name === "last_space_rev")) {
+      rawDatabase.exec("ALTER TABLE notification_registration ADD COLUMN last_space_rev TEXT");
+    }
+    // Legacy registerNotify-era rows have no inline webhook token (and could have ~24h expires_at); reset so startup renews immediately.
+    rawDatabase.exec("UPDATE notification_registration SET expires_at = 0, renew_at = 0 WHERE token = ''");
     rawDatabase.exec("CREATE INDEX IF NOT EXISTS notification_registration_workspace ON notification_registration(workspace_uri, expires_at)");
+    rawDatabase.exec("CREATE INDEX IF NOT EXISTS notification_registration_due ON notification_registration(service_ref, renew_at)");
     const operationColumns = rawDatabase.prepare("PRAGMA table_info(operation)").all() as Array<{ name: string }>;
     if (!operationColumns.some(({ name }) => name === "workspace_uri")) {
       rawDatabase.exec("ALTER TABLE operation ADD COLUMN workspace_uri TEXT");

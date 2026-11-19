@@ -2,16 +2,17 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test, { after } from "node:test";
+import test, { after, beforeEach } from "node:test";
 import { closeDb, getRawDb } from "../lib/db";
-import { dmInboxUri } from "@flock/protocol/keys";
-import { OperatorAuthError } from "./errors";
-import { authenticateSpaceNotification } from "./space-notification";
+import { dmConversationUri, dmInboxUri } from "@flock/protocol/keys";
+import { WebhookAuthError } from "./errors";
+import { authenticateSpaceWebhook, deriveDmNotifyToken } from "./space-notification";
 
 const DIRECTORY = mkdtempSync(join(tmpdir(), "slack-space-notification-test-"));
 const SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
+const KEY_HEX = "33".repeat(32);
 process.env.DATABASE_PATH = join(DIRECTORY, "notification-auth.db");
-process.env.AUTH_ENCRYPTION_KEY = "33".repeat(32);
+process.env.AUTH_ENCRYPTION_KEY = KEY_HEX;
 process.env.APP_URL = "http://127.0.0.1:3000";
 process.env.OPERATOR_SERVICE_REF = SERVICE_REF;
 after(() => {
@@ -19,78 +20,95 @@ after(() => {
   rmSync(DIRECTORY, { recursive: true, force: true });
 });
 
+beforeEach(() => {
+  getRawDb().prepare("DELETE FROM notification_registration").run();
+});
+
 const CHANNEL = "at://did:plc:owner/space/new.flock.channel/alpha";
-const METHOD = "com.atproto.space.notifyWrite";
+const ALICE = "did:plc:alice";
+const BOB = "did:plc:bob";
+const isWebhookRefusal = (error: unknown) => error instanceof WebhookAuthError && error.status === 400;
 
-/** The `authorization` header of a notice whose token claims `iss` (or none); its signature is junk, which only a verifier would notice. */
-function requestClaiming(iss?: string): string | undefined {
-  const part = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
-  return iss ? `Bearer ${part({ alg: "ES256K", typ: "JWT" })}.${part({ iss })}.signature` : undefined;
+function seedRegistration(space: string, token: string, expiresAt: number, serviceRef = SERVICE_REF): void {
+  getRawDb()
+    .prepare("INSERT OR REPLACE INTO notification_registration (service_ref, space_uri, expires_at, token, renew_at) VALUES (?, ?, ?, ?, 0)")
+    .run(serviceRef, space, expiresAt, token);
 }
 
-const register = (space: string) => getRawDb().prepare("INSERT OR REPLACE INTO notification_registration (service_ref,space_uri,expires_at) VALUES (?,?,?)").run(SERVICE_REF, space, Date.now() + 3_600_000);
-const unregisterAll = () => getRawDb().prepare("DELETE FROM notification_registration").run();
-const isRefusal = (error: unknown) => error instanceof OperatorAuthError && error.message === "Notification is not authorized.";
+test("authenticateSpaceWebhook accepts matching operator tokens regardless of expires_at (staged 0 and >5 min expired)", () => {
+  // Staged placeholder row (expires_at = 0) during synchronous confirmRegistration inside authorizeSpaceSync
+  seedRegistration(CHANNEL, "operator-secret-token-1", 0);
+  assert.deepEqual(authenticateSpaceWebhook(CHANNEL, "operator-secret-token-1"), { kind: "operator" });
 
-/** A stand-in for the real verifier that counts how often it is asked, so a test can prove it was never reached. */
-function verifier(outcome: () => string | Promise<string>) {
-  const calls = { count: 0 };
-  return { calls, authenticate: async () => { calls.count += 1; return outcome(); } };
-}
-
-test("every refusal carries the same message: no token, a token naming a stranger, an unregistered space, a bad signature", async () => {
-  // #given the channel is registered
-  unregisterAll();
-  register(CHANNEL);
-
-  // #when/#then none of the ways to be refused can be told apart from another
-  await assert.rejects(authenticateSpaceNotification(requestClaiming(), METHOD, CHANNEL), isRefusal);
-  await assert.rejects(authenticateSpaceNotification(requestClaiming("did:plc:stranger"), METHOD, CHANNEL), isRefusal);
-  await assert.rejects(authenticateSpaceNotification(requestClaiming("did:plc:owner"), METHOD, CHANNEL, async () => { throw new OperatorAuthError("Service authorization is invalid or expired."); }), isRefusal);
-  await assert.rejects(authenticateSpaceNotification(requestClaiming("did:plc:owner"), METHOD, "at://did:plc:owner/space/new.flock.channel/unregistered"), isRefusal);
+  // Long-expired row (>30 minutes past expires_at) when #registrationExpired arrives late
+  seedRegistration(CHANNEL, "operator-secret-token-1", Date.now() - 30 * 60_000);
+  assert.deepEqual(authenticateSpaceWebhook(CHANNEL, "operator-secret-token-1"), { kind: "operator" });
 });
 
-test("a token that names anyone but the space's authority is refused before registration is looked up or any DID is resolved", async () => {
-  register(CHANNEL);
-  const { calls, authenticate } = verifier(() => "did:plc:stranger");
+test("authenticateSpaceWebhook rejects missing, empty, mismatched, unregistered, tokenless, or other-service tokens with 400", () => {
+  seedRegistration(CHANNEL, "operator-secret-token-1", Date.now() + 600_000);
 
-  await assert.rejects(authenticateSpaceNotification(requestClaiming("did:plc:stranger"), METHOD, CHANNEL, authenticate), isRefusal);
-  assert.equal(calls.count, 0, "the verifier, which resolves the issuer's DID, was never reached");
+  assert.throws(() => authenticateSpaceWebhook(CHANNEL, ""), isWebhookRefusal);
+  assert.throws(() => authenticateSpaceWebhook(CHANNEL, "wrong-token"), isWebhookRefusal);
+  assert.throws(() => authenticateSpaceWebhook(CHANNEL, "operator-secret-token-1-extra"), isWebhookRefusal);
+  assert.throws(() => authenticateSpaceWebhook("at://did:plc:owner/space/new.flock.channel/unregistered", "operator-secret-token-1"), isWebhookRefusal);
+  assert.throws(() => authenticateSpaceWebhook("not-a-space", "operator-secret-token-1"), isWebhookRefusal);
+  assert.throws(() => authenticateSpaceWebhook(CHANNEL, "x".repeat(513)), isWebhookRefusal);
+
+  // Pre-renewal migrated row with empty token='' cannot authenticate webhooks
+  seedRegistration(CHANNEL, "", 0);
+  assert.throws(() => authenticateSpaceWebhook(CHANNEL, ""), isWebhookRefusal);
+  assert.throws(() => authenticateSpaceWebhook(CHANNEL, "anything"), isWebhookRefusal);
+
+  // Row belonging to another operatorServiceRef is ignored
+  getRawDb().prepare("DELETE FROM notification_registration").run();
+  seedRegistration(CHANNEL, "other-service-token", Date.now() + 600_000, "did:web:other.test#atproto_flock_operator");
+  assert.throws(() => authenticateSpaceWebhook(CHANNEL, "other-service-token"), isWebhookRefusal);
 });
 
-test("an unregistered space is refused before any DID is resolved, even for a token that names its authority", async () => {
-  unregisterAll();
-  const { calls, authenticate } = verifier(() => "did:plc:owner");
+test("deriveDmNotifyToken is deterministic per (space, callerDid), isolates callers, and verifies without touching SQLite", () => {
+  const dmConv = dmConversationUri(ALICE, "3kabcdefghij2");
+  const dmInbox = dmInboxUri(ALICE);
 
-  await assert.rejects(authenticateSpaceNotification(requestClaiming("did:plc:owner"), METHOD, CHANNEL, authenticate), isRefusal);
-  assert.equal(calls.count, 0);
+  const aliceToken1 = deriveDmNotifyToken(dmConv, ALICE);
+  const aliceToken2 = deriveDmNotifyToken(dmConv, ALICE);
+  const bobToken = deriveDmNotifyToken(dmConv, BOB);
+  assert.equal(aliceToken1, aliceToken2, "same caller and DM space yields stable token across renewals");
+  assert.notEqual(aliceToken1, bobToken, "cross-caller isolation prevents registration withdrawal DoS");
+  assert.ok(aliceToken1.startsWith("dm1."), "uses versioned dm1 prefix");
+
+  assert.deepEqual(authenticateSpaceWebhook(dmConv, aliceToken1), { kind: "dm", callerDid: ALICE });
+  assert.deepEqual(authenticateSpaceWebhook(dmConv, bobToken), { kind: "dm", callerDid: BOB });
+  assert.deepEqual(authenticateSpaceWebhook(dmInbox, deriveDmNotifyToken(dmInbox, ALICE)), { kind: "dm", callerDid: ALICE });
+
+  // Zero SQLite rows exist in notification_registration
+  const count = (getRawDb().prepare("SELECT count(*) AS count FROM notification_registration").get() as { count: number }).count;
+  assert.equal(count, 0);
 });
 
-test("a registered space accepts a notice only when the verified issuer is the space's own authority", async () => {
-  register(CHANNEL);
+test("authenticateSpaceWebhook rejects cross-space, tampered, non-dm1, wrong-key, and non-DM-target dm1 tokens with 400", () => {
+  const convA = dmConversationUri(ALICE, "3kabcdefghij2");
+  const convB = dmConversationUri(ALICE, "3kabcdefghij3");
+  const validA = deriveDmNotifyToken(convA, ALICE);
 
-  // #given a token that names the authority but verifies as someone else, and one that verifies as the authority
-  const forged = verifier(() => "did:plc:stranger");
-  const genuine = verifier(() => "did:plc:owner");
+  // Wrong DM space
+  assert.throws(() => authenticateSpaceWebhook(convB, validA), isWebhookRefusal);
 
-  // #then only the genuine one is accepted
-  await assert.rejects(authenticateSpaceNotification(requestClaiming("did:plc:owner"), METHOD, CHANNEL, forged.authenticate), isRefusal);
-  await assert.doesNotReject(authenticateSpaceNotification(requestClaiming("did:plc:owner"), METHOD, CHANNEL, genuine.authenticate));
-  assert.equal(genuine.calls.count, 1);
-});
+  // Valid dm1 format cannot be used on a workspace/channel space, even if someone tried
+  assert.throws(() => authenticateSpaceWebhook(CHANNEL, validA), isWebhookRefusal);
+  assert.throws(() => deriveDmNotifyToken(CHANNEL, ALICE), /DM spaces/);
 
-test("a DM space needs no registration, but its notice must still come from its own authority", async () => {
-  unregisterAll();
-  const inbox = dmInboxUri("did:plc:alice");
-  const asAlice = verifier(() => "did:plc:alice");
-  const asStranger = verifier(() => "did:plc:stranger");
+  // Tampered MAC
+  const [ver, callerPart, macPart] = validA.split(".");
+  const flipped = `${macPart!.slice(0, -1)}${macPart!.endsWith("A") ? "B" : "A"}`;
+  assert.throws(() => authenticateSpaceWebhook(convA, `${ver}.${callerPart}.${flipped}`), isWebhookRefusal);
 
-  await assert.doesNotReject(authenticateSpaceNotification(requestClaiming("did:plc:alice"), METHOD, inbox, asAlice.authenticate));
-  await assert.rejects(authenticateSpaceNotification(requestClaiming("did:plc:stranger"), METHOD, inbox, asStranger.authenticate), isRefusal);
-  assert.equal(asStranger.calls.count, 0, "a stranger's token is refused without resolving the stranger's DID");
-});
+  // Non-dm1 version prefix or random string on DM space
+  assert.throws(() => authenticateSpaceWebhook(convA, `dm2.${callerPart}.${macPart}`), isWebhookRefusal);
+  assert.throws(() => authenticateSpaceWebhook(convA, "plain-random-token"), isWebhookRefusal);
+  assert.throws(() => authenticateSpaceWebhook(convA, `dm1.not_a_did.${macPart}`), isWebhookRefusal);
 
-test("a transient failure to verify a notice is not turned into a refusal, so the authority retries", async () => {
-  register(CHANNEL);
-  await assert.rejects(authenticateSpaceNotification(requestClaiming("did:plc:owner"), METHOD, CHANNEL, async () => { throw new Error("PLC unreachable"); }), /PLC unreachable/);
+  // Derived with a different operator encryption key
+  const wrongKeyToken = deriveDmNotifyToken(convA, ALICE, Buffer.from("99".repeat(32), "hex"));
+  assert.throws(() => authenticateSpaceWebhook(convA, wrongKeyToken), isWebhookRefusal);
 });

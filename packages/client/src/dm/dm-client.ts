@@ -1,10 +1,19 @@
-import { listBoundedMembers, listBoundedRecords, listBoundedRepos, listBoundedSpaces } from "@flock/protocol/atproto/record-pages";
-import { isCredentialRefused, SpaceCredential, SpaceCredentialError } from "@flock/protocol/atproto/space-credential-core";
-import { AtprotoClient, isMissingXrpcResource, isSpaceAlreadyExists } from "@flock/protocol/atproto/xrpc";
+import { listBoundedMembers, listBoundedRecords, listBoundedSpaces, listBoundedWriters } from "@flock/protocol/atproto/record-pages";
+import {
+  createSpaceSigHeaders,
+   credentialLifetimeMs,
+  isCredentialRefused,
+  SPACE_CREDENTIAL_LIFETIME_MS,
+  SpaceCredential,
+  SpaceCredentialError,
+  type SpaceNotifyTarget,
+} from "@flock/protocol/atproto/space-credential-core";
+import { AtprotoClient, isMissingXrpcResource, isScopeMissingError, isSpaceAlreadyExists } from "@flock/protocol/atproto/xrpc";
 import { CredentialCache } from "../credentials";
 import { withIdentityCache } from "../identity";
 import { MemoryStore } from "../memory-store";
 import { decodeCursor, encodeCursor } from "../merge";
+import { OperatorClient, OperatorRemoteError, type DmNotifyTargetInput, type OperatorService } from "../operator-client";
 import type { SyncStore } from "../store";
 import { SyncCore } from "../sync";
 import type { ClientTransport } from "../transport";
@@ -24,7 +33,7 @@ import {
 } from "@flock/protocol/keys";
 import { validateDmDeclaration, validateDmHeaderMatchesRequest, validateSpaceRecord } from "@flock/protocol/registry";
 import { advanceRenotifyState, isRenotifyDue, type DmRenotifyState } from "./backoff";
-import { classifyRepoFailure } from "@flock/protocol/atproto/repo-failure";
+import { classifyRepoFailure, isAuthoritySuspendedError } from "@flock/protocol/atproto/repo-failure";
 import { memberspacePolicy, readMemberspacePolicy, withPublicWrite } from "@flock/protocol/atproto/space-policy";
 import { isSenderAllowedUnderMode, modeForInboxPolicy, publicWriteForMode, type DmRequestMode } from "./request-policy";
 import { COLLECTION, REPO_COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
@@ -34,12 +43,16 @@ export type { DmRequestMode } from "./request-policy";
 const FANOUT = 8;
 const DEFAULT_PAGE = 100;
 const MAX_PARTICIPANTS = 100;
+const MAX_MEMBER_BATCH = 100;
 const DM_DECLARATION_COLLECTION = REPO_COLLECTION.dmDeclaration;
 const MAX_ALLOWLIST = 1_000;
 const MAX_INBOX_SCAN = 10_000;
 const EMPTY_SENDER_TTL_MS = 5 * 60_000;
 const MAX_REQUESTS_PER_WRITER = 1_000;
 const MAX_OWN_CONVERSATIONS = 10_000;
+const FIRST_NOTIFY_RETRY_MS = 15_000;
+const MAX_NOTIFY_RETRY_MS = 120_000;
+const MAX_RENEW_WITHIN_MS = 3 * 60_000;
 
 export type DmStore = {
   get(key: string): Promise<string | null>;
@@ -47,12 +60,41 @@ export type DmStore = {
   delete(key: string): Promise<void>;
 };
 
+export type DmNotifyOperator = {
+  readonly serviceRef?: string;
+  readonly operatorServiceRef?: string;
+  getDmNotifyTarget(input: DmNotifyTargetInput, signal?: AbortSignal): Promise<SpaceNotifyTarget>;
+};
+
+export type DmWatchTiming = {
+  initialRetryMs?: number;
+  maxRetryMs?: number;
+  renewWithinMs?: (ttlMs: number) => number;
+};
+
+export type DmWatchTimers = {
+  setTimeout: (fn: () => void, delayMs: number) => unknown;
+  clearTimeout: (handle: unknown) => void;
+};
+
+export type DmWatchOptions = {
+  signal?: AbortSignal;
+  serviceRef?: string;
+  operator?: DmNotifyOperator;
+};
+
 export type DmDeps = ClientTransport & {
   /** Small per-account settings: hidden requests, hidden conversations, re-notify state. */
   store: DmStore;
   /** Where conversation records are held between reads; memory by default, as DM content never goes to disk (D10). */
   syncStore?: SyncStore;
+  /** Optional operator client or service descriptor used to register stateless push-notification targets in `watch`. */
+  operator?: DmNotifyOperator | OperatorService;
+  /** Explicit operator service ref (`did:web:...#atproto_flock_operator`) if not carried by `operator`. */
+  operatorServiceRef?: string;
   limits?: { maxInboxScan?: number; maxRequestsPerWriter?: number; maxRecordsPerHalf?: number };
+  watchTiming?: DmWatchTiming;
+  timers?: DmWatchTimers;
 };
 
 export type DmInboxState = { exists: boolean; mode: DmRequestMode; allowlist: string[] };
@@ -86,6 +128,17 @@ export type DmConversationPage = {
   nextBefore?: string;
 };
 
+type TimerHandle = unknown;
+
+type DmWatchState = {
+  watchers: Set<AbortSignal | null>;
+  abortCleanup: Map<AbortSignal, () => void>;
+  timer: TimerHandle | undefined;
+  failures: number;
+  operator: DmNotifyOperator | undefined;
+  serviceRef: string | undefined;
+};
+
 /**
  * The DM engine (M4). Isomorphic: it depends only on injected transports, so the same class runs in the browser (M5) and in
  * Node tests/acceptance against a fake or real PDS. It reads through the engine's credential cache and sync core: each half
@@ -98,12 +151,19 @@ export class DmClient {
   private readonly sync: SyncCore;
   /** Active allowlist members the last scan found nothing to read from, and until when that answer is trusted. */
   private readonly emptySenders = new Map<string, number>();
+  /** Stable `{ endpoint, token }` per space fetched from `getDmNotifyTarget`, reused across renewals without re-querying. */
+  private readonly notifyTargets = new Map<string, SpaceNotifyTarget>();
+  private readonly watches = new Map<string, DmWatchState>();
+  private readonly operator: DmNotifyOperator | undefined;
+  private notifyScopeMissing = false;
+  private closed = false;
 
   private readonly deps: DmDeps;
 
   constructor(deps: DmDeps) {
     const store = deps.syncStore ?? new MemoryStore();
     this.deps = { ...deps, ...withIdentityCache(deps, store) };
+    this.operator = resolveDmOperator(this.deps);
     this.credentials = new CredentialCache(this.deps);
     this.sync = new SyncCore({
       transport: this.deps, credentials: this.credentials, store,
@@ -141,13 +201,11 @@ export class DmClient {
   /**
    * Switches the write policy and reconciles membership so the allowlist
    * survives the switch: "nobody" deactivates every currently-allowed member
-   * to a dormant (`write: false`) entry instead of removing them, and
-   * "allowlist" reactivates every dormant entry. "everyone" only flips the
-   * policy's `publicWrite`; member entries are left as they are, since they
-   * become the allowlist again the moment the owner switches back. It also
-   * repairs a missing or invalid inbox declaration (an inbox created before
-   * senders needed one) without rewriting a valid one, so a settings change
-   * does not become a public commit.
+   * to a dormant (`write: false`) entry instead of removing them, while
+   * "allowlist" and "everyone" reactivate every dormant (`read: false, write: false`)
+   * entry (`D12.8.2` H6: explicit `write: false` members are blocked by upstream
+   * `space-policy` even when `publicWrite: true`). It also repairs a missing or
+   * invalid inbox declaration without rewriting a valid one.
    */
   async setRequestMode(mode: DmRequestMode): Promise<void> {
     await this.applyRequestMode(mode);
@@ -163,15 +221,16 @@ export class DmClient {
     await this.deps.memberClient.procedure("com.atproto.space.updateSpace", {
       space, policy: withPublicWrite(current.policy, publicWriteForMode(mode)),
     });
-    if (mode === "everyone") return;
     const members = await listBoundedMembers(this.deps.memberClient, { space, maxMembers: MAX_ALLOWLIST });
     if (members.truncated) throw new Error("DM inbox allowlist exceeds the bounded scan limit.");
+    const write = mode !== "nobody";
     const toFlip = mode === "nobody"
       ? members.members.filter((member) => member.write)
-      : members.members.filter((member) => !member.write);
-    const write = mode === "allowlist";
-    await mapLimited(toFlip, FANOUT, (member) =>
-      this.deps.memberClient.procedure("com.atproto.memberspace.putMember", { space, did: member.did, read: false, write }));
+      : members.members.filter((member) => !member.read && !member.write);
+    await this.putMembersBatched(
+      space,
+      toFlip.map((member) => ({ did: member.did, read: false, write })),
+    );
   }
 
   /** Adds `dids` to the allowlist. In "nobody" mode they're added dormant, so accepting a request there does not silently switch the mode. */
@@ -183,14 +242,32 @@ export class DmClient {
   private async putAllowlistMembers(dids: readonly string[], write: boolean): Promise<void> {
     this.emptySenders.clear();
     const space = dmInboxUri(this.deps.did);
-    await mapLimited(canonicalizeDids(dids), FANOUT, (did) =>
-      this.deps.memberClient.procedure("com.atproto.memberspace.putMember", { space, did, read: false, write }));
+    await this.putMembersBatched(
+      space,
+      canonicalizeDids(dids).map((did) => ({ did, read: false, write })),
+    );
   }
 
   async disallow(dids: readonly string[]): Promise<void> {
     const space = dmInboxUri(this.deps.did);
-    await mapLimited(canonicalizeDids(dids), FANOUT, (did) =>
-      this.deps.memberClient.procedure("com.atproto.memberspace.removeMember", { space, did }));
+    await this.removeMembersBatched(space, canonicalizeDids(dids));
+  }
+
+  private async putMembersBatched(
+    space: string,
+    members: ReadonlyArray<{ did: string; read: boolean; write: boolean }>,
+  ): Promise<void> {
+    if (members.length === 0) return;
+    await mapLimited(chunkArray(members, MAX_MEMBER_BATCH), FANOUT, (batch) =>
+      this.deps.memberClient.procedure("com.atproto.memberspace.putMembers", { space, members: batch }),
+    );
+  }
+
+  private async removeMembersBatched(space: string, dids: readonly string[]): Promise<void> {
+    if (dids.length === 0) return;
+    await mapLimited(chunkArray(dids, MAX_MEMBER_BATCH), FANOUT, (batch) =>
+      this.deps.memberClient.procedure("com.atproto.memberspace.removeMembers", { space, dids: batch }),
+    );
   }
 
   // --- Discovery ---
@@ -202,7 +279,7 @@ export class DmClient {
   /**
    * One hostile sender must not take the whole inbox down: a sender with too many
    * records, or whose host cannot be read, is skipped and reported instead. The
-   * PDS evicts a writer on `removeMember` or `putMember` with `write: false`, but not on `updateSpace`, so a tracked
+   * PDS evicts a writer on `removeMembers` or `putMembers` with `write: false`, but not on `updateSpace`, so a tracked
    * stranger from an open period stays listed, and the scan bounds are the defense against it.
    */
   async scanRequests(): Promise<DmRequestScan> {
@@ -214,7 +291,7 @@ export class DmClient {
     const maxRequestsPerWriter = this.deps.limits?.maxRequestsPerWriter ?? MAX_REQUESTS_PER_WRITER;
     const credential = await this.credentials.get(inboxSpace);
     const repoClient = credential.client(await this.deps.resolvePds(this.deps.did));
-    const writerScan = await listBoundedRepos(repoClient, { space: inboxSpace, maxRepos: maxInboxScan });
+    const writerScan = await listBoundedWriters(repoClient, { space: inboxSpace, maxRepos: maxInboxScan });
     skipped.writerSetTruncated = writerScan.truncated;
     const ownHalves = await this.ownConversationKeys();
 
@@ -223,7 +300,7 @@ export class DmClient {
     // therefore a candidate too; one who never wrote simply has no repo to read.
     // A member with nothing to read can only gain something by writing, which lists them as a writer, so asking again is needed
     // only after the allowlist changed or the answer aged; otherwise every poll would cost one request per co-member.
-    const writers = new Set(writerScan.repos.map((repo) => repo.did));
+    const writers = new Set(writerScan.writers.map((writer) => writer.repo));
     const now = this.now();
     for (const [did, until] of this.emptySenders) if (until <= now || writers.has(did) || !inbox.activeAllowlist.includes(did)) this.emptySenders.delete(did);
     const candidates = [...writers, ...inbox.activeAllowlist.filter((did) => !writers.has(did) && !this.emptySenders.has(did))];
@@ -278,9 +355,9 @@ export class DmClient {
     const halves = await listBoundedSpaces(this.deps.memberClient, { spaceType: SPACE_TYPE.dmConversation, maxSpaces: MAX_OWN_CONVERSATIONS });
     if (halves.truncated) throw new Error("Own DM conversation count exceeds the bounded scan limit.");
     const own = await mapLimited(halves.spaces, FANOUT, async (space): Promise<DmConversationSummary | null> => {
-      const parsed = parseDmConversationUri(space.uri);
+      const parsed = parseDmConversationUri(space.space);
       if (!parsed || await this.hasLeft(parsed.convKey)) return null;
-      const header = await this.getValidatedOwnHeader(space.uri);
+      const header = await this.getValidatedOwnHeader(space.space);
       if (!header) return null;
       return { convKey: parsed.convKey, participants: header.participants };
     });
@@ -299,8 +376,10 @@ export class DmClient {
     const half = dmConversationUri(this.deps.did, convKey);
     await this.createHalf(convKey);
     const others = participants.filter((did) => did !== this.deps.did);
-    await mapLimited(others, FANOUT, (did) =>
-      this.deps.memberClient.procedure("com.atproto.memberspace.putMember", { space: half, did, read: true, write: false }));
+    await this.putMembersBatched(
+      half,
+      others.map((did) => ({ did, read: true, write: false })),
+    );
     const createdAt = new Date(this.now()).toISOString();
     await this.putValidated(half, COLLECTION.dmHeader, "self", { convKey, participants, createdAt });
 
@@ -315,8 +394,10 @@ export class DmClient {
     const half = dmConversationUri(this.deps.did, request.convKey);
     await this.createHalf(request.convKey);
     const others = request.participants.filter((did) => did !== this.deps.did);
-    await mapLimited(others, FANOUT, (did) =>
-      this.deps.memberClient.procedure("com.atproto.memberspace.putMember", { space: half, did, read: true, write: false }));
+    await this.putMembersBatched(
+      half,
+      others.map((did) => ({ did, read: true, write: false })),
+    );
     const createdAt = new Date(this.now()).toISOString();
     await this.putValidated(half, COLLECTION.dmHeader, "self", { convKey: request.convKey, participants: request.participants, createdAt });
 
@@ -397,7 +478,7 @@ export class DmClient {
       try {
         credential = await this.credentials.get(half);
       } catch (error) {
-        halves[ownerDid] = classifyHalfError(error);
+        halves[ownerDid] = classifyHalfError(error, ownerDid === this.deps.did);
         return;
       }
       let header: Record<string, unknown> | null;
@@ -408,7 +489,7 @@ export class DmClient {
         // unreadable half, not a reason to hide the other halves. A failure reading the caller's own half is the caller's own
         // problem (offline, their host down), not a participant's, and fails the read.
         if (isCredentialRefused(error)) this.credentials.drop(half);
-        if (ownerDid === this.deps.did || !classifyRepoFailure(error)) throw error;
+        if (ownerDid === this.deps.did || !classifyRepoFailure(error, { space: half, repo: ownerDid })) throw error;
         halves[ownerDid] = "missing";
         return;
       }
@@ -479,8 +560,10 @@ export class DmClient {
     const half = dmConversationUri(this.deps.did, convKey);
     const members = await listBoundedMembers(this.deps.memberClient, { space: half, maxMembers: MAX_PARTICIPANTS });
     if (members.truncated) throw new Error("DM conversation member count exceeds the bounded scan limit.");
-    await mapLimited(members.members, FANOUT, (member) =>
-      this.deps.memberClient.procedure("com.atproto.memberspace.removeMember", { space: half, did: member.did }));
+    await this.removeMembersBatched(
+      half,
+      members.members.map((member) => member.did),
+    );
     await this.deps.store.set(hiddenConversationKey(convKey), "1");
   }
 
@@ -498,8 +581,10 @@ export class DmClient {
     if (members.truncated) throw new Error("DM conversation member count exceeds the bounded scan limit.");
     const readers = new Set(members.members.filter((member) => member.read).map((member) => member.did));
     const removed = header.participants.filter((did) => did !== this.deps.did && !readers.has(did));
-    await mapLimited(removed, FANOUT, (did) =>
-      this.deps.memberClient.procedure("com.atproto.memberspace.putMember", { space: half, did, read: true, write: false }));
+    await this.putMembersBatched(
+      half,
+      removed.map((did) => ({ did, read: true, write: false })),
+    );
     await this.deps.store.delete(hiddenConversationKey(header.convKey));
     const delivery: Record<string, DmDelivery> = {};
     await mapLimited(removed, FANOUT, async (recipient) => {
@@ -519,29 +604,233 @@ export class DmClient {
     const halves = await listBoundedSpaces(this.deps.memberClient, { spaceType: SPACE_TYPE.dmConversation, maxSpaces: MAX_OWN_CONVERSATIONS });
     if (halves.truncated) throw new Error("Own DM conversation count exceeds the bounded scan limit.");
     await mapLimited(halves.spaces, FANOUT, async (space) => {
-      const parsed = parseDmConversationUri(space.uri);
+      const parsed = parseDmConversationUri(space.space);
       if (!parsed || await this.hasLeft(parsed.convKey)) return;
-      const header = await this.getValidatedOwnHeader(space.uri);
+      const header = await this.getValidatedOwnHeader(space.space);
       if (!header) return;
       const others = header.participants.filter((did) => did !== this.deps.did);
       await mapLimited(others, FANOUT, (participant) => this.renotifyOne(header.convKey, participant, header.participants, header.createdAt));
     });
   }
 
-  // --- Notifications ---
+  // --- Notifications (`D12.3b.3`, `H5`) ---
 
-  async watch(spaces: readonly string[], serviceRef: string): Promise<Record<string, string>> {
-    const entries = await mapLimited(spaces, FANOUT, async (space): Promise<readonly [string, string]> => {
-      const parsed = parseSpaceUri(space);
-      if (!parsed) throw new Error("Invalid DM space URI.");
-      const credential = await this.credentials.get(space);
-      const client = credential.client(await this.deps.resolvePds(parsed.authorityDid));
-      const result = await client.procedure<{ space: string; service: string }, { expiresAt: string }>(
-        "com.atproto.space.registerNotify", { space, service: serviceRef },
-      );
-      return [space, result.expiresAt];
+  async watch(spaces: readonly string[], opts?: DmWatchOptions | string): Promise<Record<string, string>> {
+    const options: DmWatchOptions = typeof opts === "string" ? { serviceRef: opts } : (opts ?? {});
+    for (const space of spaces) {
+      if (!parseSpaceUri(space)) throw new Error("Invalid DM space URI.");
+    }
+    if (this.closed || options.signal?.aborted) return {};
+
+    const uniqueSpaces = [...new Set(spaces)];
+    const entries = await mapLimited(uniqueSpaces, FANOUT, async (space): Promise<readonly [string, string]> => {
+      const operator = options.operator ?? this.operator;
+      const serviceRef =
+        options.serviceRef
+        ?? operator?.operatorServiceRef
+        ?? operator?.serviceRef
+        ?? this.deps.operatorServiceRef;
+      const watchState = this.registerWatcher(space, options.signal ?? null, operator, serviceRef);
+      const cred = await this.authorizeWatchedSpace(space, watchState, false, options.signal);
+      return [space, new Date(cred.expiresAt).toISOString()];
     });
     return Object.fromEntries(entries);
+  }
+
+  unwatch(spaces?: readonly string[]): void {
+    const targets = spaces ?? [...this.watches.keys()];
+    for (const space of targets) {
+      const state = this.watches.get(space);
+      if (!state) continue;
+      this.clearWatchState(space, state);
+    }
+  }
+
+  close(): void {
+    this.closed = true;
+    this.unwatch();
+  }
+
+  /** Whether the operator rejected `getDmNotifyTarget` with `ScopeMissingError` (pre-R12 session lacking push-notify scope). */
+  isNotifyScopeMissing(): boolean {
+    return this.notifyScopeMissing;
+  }
+
+  private registerWatcher(
+    space: string,
+    signal: AbortSignal | null,
+    operator: DmNotifyOperator | undefined,
+    serviceRef: string | undefined,
+  ): DmWatchState {
+    let state = this.watches.get(space);
+    if (!state) {
+      state = {
+        watchers: new Set(),
+        abortCleanup: new Map(),
+        timer: undefined,
+        failures: 0,
+        operator,
+        serviceRef,
+      };
+      this.watches.set(space, state);
+    } else {
+      if (operator) state.operator = operator;
+      if (serviceRef) state.serviceRef = serviceRef;
+    }
+
+    state.watchers.add(signal);
+    if (signal && !state.abortCleanup.has(signal)) {
+      const onAbort = () => {
+        const current = this.watches.get(space);
+        if (!current) return;
+        current.watchers.delete(signal);
+        current.abortCleanup.delete(signal);
+        if (current.watchers.size === 0) {
+          this.clearWatchState(space, current);
+        }
+      };
+      if (signal.aborted) {
+        onAbort();
+      } else {
+        state.abortCleanup.set(signal, () => signal.removeEventListener("abort", onAbort));
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
+    }
+    return state;
+  }
+
+  private clearWatchState(space: string, state: DmWatchState): void {
+    if (state.timer !== undefined) {
+      this.clearWatchTimer(state.timer);
+      state.timer = undefined;
+    }
+    for (const cleanup of state.abortCleanup.values()) cleanup();
+    state.abortCleanup.clear();
+    state.watchers.clear();
+    this.watches.delete(space);
+  }
+
+  private async authorizeWatchedSpace(
+    space: string,
+    state: DmWatchState,
+    forceFresh: boolean,
+    signal?: AbortSignal,
+  ): Promise<SpaceCredential> {
+    const operator = state.operator;
+    const serviceRef = state.serviceRef;
+    const cachedTarget = this.notifyTargets.get(space);
+
+    if (cachedTarget && !this.notifyScopeMissing) {
+      let cred = forceFresh
+        ? await this.credentials.fresh(space, { notify: cachedTarget })
+        : await this.credentials.get(space, { notify: cachedTarget });
+      if (!forceFresh && cred.notify) {
+        const renewWithinMs = this.computeRenewWithinMs(cred);
+        if (cred.expiresAt - this.now() <= renewWithinMs) {
+          cred = await this.credentials.fresh(space, { notify: cachedTarget });
+        }
+      }
+      this.scheduleWatchTimer(space, state, cred);
+      return cred;
+    }
+
+    let cred = forceFresh
+      ? await this.credentials.fresh(space)
+      : await this.credentials.get(space);
+
+    if (operator && serviceRef && !this.notifyScopeMissing && !signal?.aborted && !this.closed) {
+      try {
+        const { headers } = await createSpaceSigHeaders({
+          authorization: `Atproto-Space-Credential ${cred.token}`,
+          audience: serviceRef as Parameters<typeof createSpaceSigHeaders>[0]["audience"],
+          keypair: cred.keypair,
+        });
+        const target = await operator.getDmNotifyTarget(
+          {
+            space,
+            credential: cred.token,
+            proof: {
+              authorization: headers.authorization!,
+              signatureInput: headers["signature-input"]!,
+              signature: headers.signature!,
+            },
+          },
+          signal,
+        );
+        this.notifyTargets.set(space, target);
+        cred = await this.credentials.get(space, { notify: target });
+      } catch (error) {
+        if (isMissingNotifyScope(error)) {
+          this.notifyScopeMissing = true;
+        } else if (error instanceof SpaceCredentialError) {
+          throw error;
+        } else {
+          // Ensure CredentialCache retains a valid un-notified credential if re-minting with notify failed transiently.
+          cred = await this.credentials.get(space);
+        }
+      }
+    }
+
+    this.scheduleWatchTimer(space, state, cred);
+    return cred;
+  }
+
+  private computeRenewWithinMs(cred: SpaceCredential): number {
+    const fullTtlMs = credentialLifetimeMs(cred.token) ?? SPACE_CREDENTIAL_LIFETIME_MS;
+    if (this.deps.watchTiming?.renewWithinMs) {
+      return Math.max(0, this.deps.watchTiming.renewWithinMs(fullTtlMs));
+    }
+    return fullTtlMs > 0 ? Math.min(MAX_RENEW_WITHIN_MS, Math.floor(fullTtlMs * 0.3)) : MAX_RENEW_WITHIN_MS;
+  }
+
+  private scheduleWatchTimer(space: string, state: DmWatchState, cred: SpaceCredential | null): void {
+    if (state.timer !== undefined) {
+      this.clearWatchTimer(state.timer);
+      state.timer = undefined;
+    }
+    if (this.closed || this.watches.get(space) !== state || state.watchers.size === 0) return;
+    if (!state.operator || !state.serviceRef || this.notifyScopeMissing) return;
+
+    let delayMs: number;
+    if (cred?.notify) {
+      state.failures = 0;
+      const renewWithinMs = this.computeRenewWithinMs(cred);
+      delayMs = Math.max(50, cred.expiresAt - renewWithinMs - this.now());
+    } else {
+      state.failures += 1;
+      const initialRetryMs = this.deps.watchTiming?.initialRetryMs ?? FIRST_NOTIFY_RETRY_MS;
+      const maxRetryMs = this.deps.watchTiming?.maxRetryMs ?? MAX_NOTIFY_RETRY_MS;
+      delayMs = Math.min(maxRetryMs, initialRetryMs * 2 ** (state.failures - 1));
+    }
+
+    const schedule = this.deps.timers?.setTimeout ?? ((fn, ms) => setTimeout(fn, ms));
+    const handle = schedule(() => {
+      state.timer = undefined;
+      void this.runWatchTick(space, state);
+    }, delayMs);
+    unrefTimer(handle);
+    state.timer = handle;
+  }
+
+  private clearWatchTimer(handle: TimerHandle): void {
+    if (this.deps.timers) {
+      this.deps.timers.clearTimeout(handle);
+      return;
+    }
+    clearTimeout(handle as ReturnType<typeof setTimeout>);
+  }
+
+  private async runWatchTick(space: string, state: DmWatchState): Promise<void> {
+    if (this.closed || this.watches.get(space) !== state || state.watchers.size === 0) return;
+    try {
+      await this.authorizeWatchedSpace(space, state, Boolean(this.notifyTargets.get(space)));
+    } catch (error) {
+      if (error instanceof SpaceCredentialError) {
+        this.clearWatchState(space, state);
+        return;
+      }
+      this.scheduleWatchTimer(space, state, null);
+    }
   }
 
   // --- Internals ---
@@ -672,7 +961,7 @@ export class DmClient {
     if (halves.truncated) throw new Error("Own DM conversation count exceeds the bounded scan limit.");
     let left: DmHeader | null = null;
     for (const space of halves.spaces) {
-      const header = await this.getValidatedOwnHeader(space.uri);
+      const header = await this.getValidatedOwnHeader(space.space);
       if (!header || !sameParticipants(header.participants, participants)) continue;
       if (!(await this.hasLeft(header.convKey))) return header;
       left ??= header;
@@ -696,7 +985,7 @@ export class DmClient {
     const halves = await listBoundedSpaces(this.deps.memberClient, { spaceType: SPACE_TYPE.dmConversation, maxSpaces: MAX_OWN_CONVERSATIONS });
     if (halves.truncated) throw new Error("Own DM conversation count exceeds the bounded scan limit.");
     return new Set(halves.spaces.flatMap((space) => {
-      const parsed = parseDmConversationUri(space.uri);
+      const parsed = parseDmConversationUri(space.space);
       return parsed ? [parsed.convKey] : [];
     }));
   }
@@ -745,17 +1034,19 @@ export class DmClient {
       // account's access; both read as pending, and the re-sends that costs are bounded by the backoff schedule. A deleted
       // half (SpaceDeleted) means they left, so it is not pending.
       if (error instanceof SpaceCredentialError) return error.code === "SpaceNotFound";
+      if (isAuthoritySuspendedError(error)) return false;
       throw error;
     }
   }
 }
 
-function classifyHalfError(error: unknown): DmHalfStatus {
+function classifyHalfError(error: unknown, isOwnHalf = false): DmHalfStatus {
   if (error instanceof SpaceCredentialError) {
     if (error.code === "SpaceNotFound") return "missing";
     if (error.code === "SpaceDeleted") return "deleted";
     return "revoked";
   }
+  if (!isOwnHalf && isAuthoritySuspendedError(error)) return "missing";
   throw error;
 }
 
@@ -793,4 +1084,32 @@ function isRecordNotFound(error: unknown): boolean {
 
 function hasErrorCode(error: unknown, code: string): boolean {
   return typeof error === "object" && error !== null && "code" in error && (error as { code: unknown }).code === code;
+}
+
+function resolveDmOperator(deps: DmDeps): DmNotifyOperator | undefined {
+  if (!deps.operator) return undefined;
+  if ("getDmNotifyTarget" in deps.operator && typeof deps.operator.getDmNotifyTarget === "function") {
+    return deps.operator;
+  }
+  return new OperatorClient(deps, deps.operator as OperatorService);
+}
+
+function isMissingNotifyScope(error: unknown): boolean {
+  if (isScopeMissingError(error)) return true;
+  return error instanceof OperatorRemoteError && error.status === 403 && error.code === "ScopeMissingError";
+}
+
+function unrefTimer(handle: TimerHandle): void {
+  if (typeof handle === "object" && handle !== null && "unref" in handle) {
+    const maybe = handle as { unref?: () => unknown };
+    maybe.unref?.();
+  }
+}
+
+function chunkArray<T>(items: readonly T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+  return chunks;
 }

@@ -1,12 +1,14 @@
-import { verifyJwt } from "@atproto/xrpc-server";
+import { cryptoVerifySignatureWithKey, verifyJwt } from "@atproto/xrpc-server";
 import type { OAuthSession } from "@atproto/oauth-client-node";
-import { getIdResolver } from "../atproto/identity";
+import { getIdResolver, resolveSigningKey as cachedResolveSigningKey } from "../atproto/identity";
 import { sessionClient } from "../atproto/client";
 import { listBoundedMembers } from "@flock/protocol/atproto/record-pages";
+import { verifyCredentialSig } from "@flock/protocol/atproto/space-credential-core";
 import { listSpaceMembers } from "../atproto/space-ops";
 import { getConfig } from "@flock/deployment/config";
-import { inboxUri, isDid, subjectKey } from "@flock/protocol/keys";
+import { inboxUri, isDid, parseDmSpaceUri, parseSpaceUri, requireSpaceAuthority, subjectKey } from "@flock/protocol/keys";
 import { WorkspaceEnvelopeError } from "@flock/protocol/workspace-summary";
+import { authorizeDmSubscription } from "../lib/dm-subscription";
 import { restoreAuthorityGrant } from "./authority-grant";
 import { OperatorAuthError, OperatorInfrastructureError, isTransientOperatorInfrastructureError } from "./errors";
 import { hasJournaledOperation } from "./journal";
@@ -17,6 +19,17 @@ import { parseWorkspaceRef, type OperatorActor, type WorkspaceRef } from "./acto
 import { getOwnerRecord } from "./workspace-state";
 
 const MAX_READ_ONLY_MEMBER_SCAN = 1_000;
+const SPACE_CREDENTIAL_TYP = "atproto-space-credential+jwt";
+const SPACE_CREDENTIAL_MAX_AGE_SECONDS = 3_600;
+const CREDENTIAL_IAT_CLOCK_SKEW_SECONDS = 5;
+const PROOF_CREATED_WINDOW_SECONDS = 60;
+const MAX_DM_PROOF_REPLAY_ENTRIES = 16_384;
+
+const dmProofReplayCache = new Map<string, number>();
+
+export function resetDmProofReplayCacheForTests(): void {
+  dmProofReplayCache.clear();
+}
 
 /** The bearer token an `authorization` header value carries. */
 function bearerToken(authorization: string | undefined): string | undefined {
@@ -39,8 +52,8 @@ export function unverifiedBearerIssuer(authorization: string | undefined): strin
 }
 
 /**
- * How long a service token may live, from when it was issued, per method: a minute and a little more for one call (the
- * PDS's notices included), fifteen minutes for the long poll, so a client reuses one token across polls.
+ * How long a service token may live, from when it was issued, per method: a minute and a little more for one call,
+ * fifteen minutes for the long poll, so a client reuses one token across polls.
  */
 const SERVICE_TOKEN_LIFETIME_SECONDS: Readonly<Record<string, number>> = { [OPERATOR_METHOD.getChanges]: 15 * 60 };
 const DEFAULT_SERVICE_TOKEN_LIFETIME_SECONDS = 75;
@@ -81,6 +94,217 @@ export async function authenticateOperatorRequest(
     throw new OperatorAuthError("Service authorization is outside the accepted lifetime.");
   }
   return payload.iss;
+}
+
+export type DmCredentialProof = {
+  authorization: string;
+  signatureInput: string;
+  signature: string;
+};
+
+export type VerifyDmNotifyTargetDeps = {
+  resolveSigningKey?: (did: string, forceRefresh: boolean) => Promise<string>;
+  operatorServiceRef?: string;
+  now?: () => number;
+};
+
+/**
+ * Verifies that `callerDid` may watch `space` (a DM inbox or DM conversation) and holds both:
+ * 1) an unexpired `SpaceCredential` JWT issued by `requireSpaceAuthority(space)` for `sub === space`, and
+ * 2) a fresh RFC 9421 PoP signature (`tag="atproto-space-credential"`) bound to `payload.cnf.kid` and `operatorServiceRef`,
+ *    checked against a bounded replay cache and optional `created` timestamp window.
+ */
+export async function verifyDmNotifyCredentialAndProof(
+  input: {
+    space: string;
+    callerDid: string;
+    credential: string;
+    proof: DmCredentialProof;
+  },
+  deps: VerifyDmNotifyTargetDeps = {},
+): Promise<void> {
+  if (!parseSpaceUri(input.space)) {
+    throw new Error("Invalid permissioned space URI.");
+  }
+  if (!parseDmSpaceUri(input.space)) {
+    throw new OperatorAuthError("DM notification targets are available only for DM spaces.");
+  }
+  const subscription = authorizeDmSubscription(input.space, input.callerDid);
+  if (!subscription.allowed) {
+    if (subscription.status === 400) throw new Error(subscription.reason);
+    throw new OperatorAuthError(subscription.reason);
+  }
+
+  const nowMs = (deps.now ?? Date.now)();
+  const nowSec = Math.floor(nowMs / 1000);
+  const expectedIssuer = requireSpaceAuthority(input.space);
+  const parsed = parseCredentialJwt(input.credential, input.space, expectedIssuer, nowSec);
+
+  const resolveKey = deps.resolveSigningKey ?? cachedResolveSigningKey;
+  let signatureValid = false;
+  try {
+    const didKey = await resolveKey(expectedIssuer, false);
+    signatureValid = await cryptoVerifySignatureWithKey(didKey, parsed.signingInput, parsed.sig, parsed.alg);
+    if (!signatureValid) {
+      const freshKey = await resolveKey(expectedIssuer, true);
+      if (freshKey !== didKey) {
+        signatureValid = await cryptoVerifySignatureWithKey(freshKey, parsed.signingInput, parsed.sig, parsed.alg);
+      }
+    }
+  } catch (error) {
+    if (isTransientOperatorInfrastructureError(error)) throw new OperatorInfrastructureError();
+    throw new OperatorAuthError("Space credential signature could not be verified.");
+  }
+  if (!signatureValid) {
+    throw new OperatorAuthError("Space credential signature is invalid.");
+  }
+
+  const expectedAuthorization = `Atproto-Space-Credential ${input.credential}`;
+  if (input.proof.authorization !== expectedAuthorization) {
+    throw new OperatorAuthError("Credential proof authorization does not match the presented credential.");
+  }
+
+  const operatorServiceRef = deps.operatorServiceRef ?? getConfig().operatorServiceRef;
+  try {
+    await verifyCredentialSig(
+      {
+        authorization: input.proof.authorization,
+        "atproto-space-audience": operatorServiceRef,
+        "signature-input": input.proof.signatureInput,
+        signature: input.proof.signature,
+      },
+      parsed.cnfKid,
+    );
+  } catch {
+    throw new OperatorAuthError("Invalid space credential possession proof.");
+  }
+
+  assertProofSignatureTimestamps(input.proof.signatureInput, nowSec);
+  recordAndCheckProofReplay(parsed.jti, input.proof.signatureInput, input.proof.signature, parsed.exp * 1000, nowMs);
+}
+
+function parseCredentialJwt(
+  jwt: string,
+  expectedSpace: string,
+  expectedIssuer: string,
+  nowSec: number,
+): {
+  alg: string;
+  cnfKid: `did:key:${string}`;
+  jti: string;
+  exp: number;
+  signingInput: Uint8Array;
+  sig: Uint8Array;
+} {
+  const refusal = () => new OperatorAuthError("Invalid or expired space credential.");
+  if (typeof jwt !== "string" || jwt.length === 0 || jwt.length > 8192) throw refusal();
+  const parts = jwt.split(".");
+  if (parts.length !== 3) throw refusal();
+  const [headerB64, payloadB64, sigB64] = parts as [string, string, string];
+  if (!headerB64 || !payloadB64 || !sigB64 || !/^[A-Za-z0-9_-]+$/.test(sigB64)) throw refusal();
+
+  let header: unknown;
+  let payload: unknown;
+  try {
+    header = JSON.parse(Buffer.from(headerB64, "base64url").toString("utf8"));
+    payload = JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf8"));
+  } catch {
+    throw refusal();
+  }
+  if (!isPlainObject(header) || !isPlainObject(payload)) throw refusal();
+  if (header.typ !== SPACE_CREDENTIAL_TYP || header.kid !== "#atproto" || typeof header.alg !== "string" || header.alg.length === 0) {
+    throw refusal();
+  }
+  // Check issuer and subject before resolving any DID document.
+  if (payload.iss !== expectedIssuer || payload.sub !== expectedSpace) {
+    throw refusal();
+  }
+  if (typeof payload.jti !== "string" || payload.jti.length === 0 || payload.jti.length > 256) {
+    throw refusal();
+  }
+  if (
+    typeof payload.iat !== "number"
+    || !Number.isFinite(payload.iat)
+    || typeof payload.exp !== "number"
+    || !Number.isFinite(payload.exp)
+    || payload.exp <= payload.iat
+    || payload.exp - payload.iat > SPACE_CREDENTIAL_MAX_AGE_SECONDS
+  ) {
+    throw refusal();
+  }
+  if (payload.iat > nowSec + CREDENTIAL_IAT_CLOCK_SKEW_SECONDS) {
+    throw refusal();
+  }
+  // Strict credential expiry cutoff (D12.2: zero clock-skew extension past exp).
+  if (nowSec >= payload.exp) {
+    throw refusal();
+  }
+  const cnf = payload.cnf;
+  if (!isPlainObject(cnf) || typeof cnf.kid !== "string" || !cnf.kid.startsWith("did:key:")) {
+    throw refusal();
+  }
+
+  const sig = Buffer.from(sigB64, "base64url");
+  if (sig.toString("base64url") !== sigB64 || sig.byteLength !== 64) {
+    throw refusal();
+  }
+  return {
+    alg: header.alg,
+    cnfKid: cnf.kid as `did:key:${string}`,
+    jti: payload.jti,
+    exp: payload.exp,
+    signingInput: Buffer.from(`${headerB64}.${payloadB64}`, "utf8"),
+    sig,
+  };
+}
+
+function assertProofSignatureTimestamps(signatureInput: string, nowSec: number): void {
+  // Inspect parameters on the tagged credential signature entry (verified by verifyCredentialSig).
+  for (const member of signatureInput.split(",")) {
+    if (!member.includes('tag="atproto-space-credential"')) continue;
+    const closeParen = member.indexOf(")");
+    const paramTail = closeParen >= 0 ? member.slice(closeParen + 1) : member;
+    const createdMatch = /;created=([^;,\s]+)/.exec(paramTail);
+    if (createdMatch) {
+      const raw = createdMatch[1]!;
+      if (!/^(0|[1-9][0-9]*)$/.test(raw)) {
+        throw new OperatorAuthError("Malformed created parameter in credential proof.");
+      }
+      const created = Number(raw);
+      if (!Number.isSafeInteger(created) || Math.abs(nowSec - created) > PROOF_CREATED_WINDOW_SECONDS) {
+        throw new OperatorAuthError("Credential proof timestamp is outside the accepted window.");
+      }
+    }
+    const expiresMatch = /;expires=([^;,\s]+)/.exec(paramTail);
+    if (expiresMatch) {
+      const raw = expiresMatch[1]!;
+      if (!/^(0|[1-9][0-9]*)$/.test(raw) || Number(raw) <= nowSec) {
+        throw new OperatorAuthError("Credential proof has expired.");
+      }
+    }
+  }
+}
+
+function recordAndCheckProofReplay(
+  jti: string,
+  signatureInput: string,
+  signature: string,
+  expiresAtMs: number,
+  nowMs: number,
+): void {
+  for (const [key, exp] of dmProofReplayCache) {
+    if (exp <= nowMs) dmProofReplayCache.delete(key);
+  }
+  const replayKey = `${jti}\u0000${signatureInput}\u0000${signature}`;
+  if (dmProofReplayCache.has(replayKey)) {
+    throw new OperatorAuthError("Credential proof has already been used.");
+  }
+  dmProofReplayCache.set(replayKey, expiresAtMs);
+  while (dmProofReplayCache.size > MAX_DM_PROOF_REPLAY_ENTRIES) {
+    const oldest = dmProofReplayCache.keys().next();
+    if (oldest.done) break;
+    dmProofReplayCache.delete(oldest.value);
+  }
 }
 
 export async function requireActiveWorkspaceAdmin(

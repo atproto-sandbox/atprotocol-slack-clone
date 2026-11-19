@@ -39,7 +39,7 @@ const SCOPE_MISSING = () => Response.json(
   { status: 403 },
 );
 const OUTAGE = () => Response.json({ error: "InternalServerError", message: "outage" }, { status: 500 });
-const WRITES = new Set(["com.atproto.space.createSpace", "com.atproto.space.putRecord", "com.atproto.memberspace.putMember"]);
+const WRITES = new Set(["com.atproto.space.createSpace", "com.atproto.space.putRecord", "com.atproto.memberspace.putMembers"]);
 
 const rowOf = (operationId: string) => getRawDb().prepare("SELECT actor, workspace, state, steps_json FROM operation WHERE operation_id = ?")
   .get(operationId) as { actor: string; workspace: string; state: string; steps_json: string } | undefined;
@@ -192,7 +192,7 @@ test("a workspace account creating under itself needs only its grant, and is not
   const { workspace } = spacesOf("Own Team");
   assert.equal(result.state, "completed");
   assert.deepEqual(result.completedSteps, createWorkspaceKind.steps.filter((step) => !["creator-workspace", "creator-inbox", "creator-general"].includes(step)));
-  assert.equal(pds.writes.some((write) => write.startsWith("putMember")), false);
+  assert.equal(pds.writes.some((write) => write.startsWith("putMembers")), false);
   assert.equal(pds.recordsOf(workspace, COLLECTION.admin).get(subjectKey(AUTHORITY))?.active, true);
 });
 

@@ -35,6 +35,7 @@ export type DmContextValue = {
   setShowAll: (value: boolean) => void;
   view: DmView | null;
   openView: (view: DmView | null) => void;
+  needsNotifyScopeUpgrade: boolean;
   error: string;
   setError: (message: string) => void;
   refresh: () => Promise<void>;
@@ -94,10 +95,16 @@ export function DmProvider({ did, dmConfig, workspaces, activeWorkspace, view, o
   useEffect(() => {
     if (status !== "ready" || !client) return;
     let cancelled = false;
+    const watchController = new AbortController();
     const cycle = async () => {
       if (cancelled) return;
       await runDmCycle({
-        refresh, client, inboxUri: dmInboxUri(did), serviceRef: dmConfig.serviceRef, declarationChecked: declarationCheckedRef,
+        refresh,
+        client,
+        inboxUri: dmInboxUri(did),
+        serviceRef: dmConfig.serviceRef,
+        signal: watchController.signal,
+        declarationChecked: declarationCheckedRef,
         report: (caught) => { if (!cancelled) setError(messageOf(caught)); },
       });
     };
@@ -105,6 +112,7 @@ export function DmProvider({ did, dmConfig, workspaces, activeWorkspace, view, o
     const timer = window.setInterval(() => void cycle(), 60_000);
     return () => {
       cancelled = true;
+      watchController.abort();
       window.clearInterval(timer);
     };
   }, [status, client, did, dmConfig.serviceRef, refresh]);
@@ -132,10 +140,10 @@ export function DmProvider({ did, dmConfig, workspaces, activeWorkspace, view, o
     if (!client || !live || !inboxExists) return;
     let stop: (() => void) | undefined;
     let stopped = false;
-    // The operator's change feed says when the inbox changed; the DM client reads it again then.
+    // The operator's change feed says when the inbox changed; if unavailable, the 60-second poll keeps the view current.
     void live.watch(`dm:inbox:${did}`, [dmInboxUri(did)], () => refresh()).then(
       (unwatch) => { if (stopped) unwatch(); else stop = unwatch; },
-      (caught) => setError(messageOf(caught)),
+      () => undefined,
     );
     return () => { stopped = true; stop?.(); };
   }, [client, live, did, inboxExists, refresh]);
@@ -172,6 +180,8 @@ export function DmProvider({ did, dmConfig, workspaces, activeWorkspace, view, o
     };
   }, [conversations, requests, labels, did, dmConfig.plcUrl, dmConfig.loopback]);
 
+  const needsNotifyScopeUpgrade = session.needsNotifyScopeUpgrade || Boolean(client?.isNotifyScopeMissing());
+
   const value = useMemo<DmContextValue>(() => ({
     did,
     dmConfig,
@@ -190,6 +200,7 @@ export function DmProvider({ did, dmConfig, workspaces, activeWorkspace, view, o
     setShowAll,
     view,
     openView,
+    needsNotifyScopeUpgrade,
     error,
     setError,
     refresh: async () => {
@@ -199,7 +210,7 @@ export function DmProvider({ did, dmConfig, workspaces, activeWorkspace, view, o
         setError(messageOf(caught));
       }
     },
-  }), [did, dmConfig, status, loaded, client, store, conversations, requests, skippedNote, inbox, labels, workspaces, activeWorkspace, showAll, view, openView, error, refresh]);
+  }), [did, dmConfig, status, loaded, client, store, conversations, requests, skippedNote, inbox, labels, workspaces, activeWorkspace, showAll, view, openView, needsNotifyScopeUpgrade, error, refresh]);
 
   return (
     <DmContext.Provider value={value}>

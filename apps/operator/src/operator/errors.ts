@@ -1,5 +1,5 @@
 import { isTransientOAuthInfrastructureError } from "../auth/oauth-request-lock";
-import { isScopeMissingError, XrpcError } from "@flock/protocol/atproto/xrpc";
+import { isAccountSuspendedError, isScopeMissingError, XrpcError } from "@flock/protocol/atproto/xrpc";
 import { UpstreamResponseTooLargeError } from "@flock/protocol/bounded-json";
 import { TokenRefreshError } from "@atproto/oauth-client-node";
 import { AuthorityReauthorizationRequiredError } from "./authority-grant";
@@ -9,6 +9,14 @@ export class OperatorAuthError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "OperatorAuthError";
+  }
+}
+
+export class WebhookAuthError extends Error {
+  readonly status = 400;
+  constructor(message = "Invalid notification token.") {
+    super(message);
+    this.name = "WebhookAuthError";
   }
 }
 
@@ -42,6 +50,13 @@ export function operatorHttpFailure(error: unknown): { status: 502 | 503; name: 
       status: 502,
       name: "InvalidUpstreamResponse",
       message: "An upstream service returned a response larger than the configured limit.",
+    };
+  }
+  if (isAccountSuspendedError(error) || (error instanceof XrpcError && (error.code === "RepoTakendown" || error.code === "RepoDeactivated"))) {
+    return {
+      status: 503,
+      name: "UpstreamUnavailable",
+      message: "The workspace authority account is currently suspended or deactivated.",
     };
   }
   if (isTransientOperatorInfrastructureError(error)) {

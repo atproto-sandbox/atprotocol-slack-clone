@@ -37,7 +37,7 @@ after(() => {
 
 const OUTAGE = () => Response.json({ error: "InternalServerError", message: "outage" }, { status: 500 });
 const SCOPE_MISSING = () => Response.json({ error: "ScopeMissingError", message: `Missing required scope "space:${SPACE_TYPE.tasks}"` }, { status: 403 });
-const WRITES = new Set(["com.atproto.space.createSpace", "com.atproto.space.putRecord", "com.atproto.memberspace.putMember", "com.atproto.memberspace.removeMember"]);
+const WRITES = new Set(["com.atproto.space.createSpace", "com.atproto.space.putRecord", "com.atproto.memberspace.putMembers", "com.atproto.memberspace.removeMembers"]);
 
 async function workspace(name: string, intercept: FakeAuthorityPdsOptions["intercept"] = () => undefined) {
   let ready = false;
@@ -138,8 +138,8 @@ test("enableExtension and disableExtension resume cleanly after an outage at eve
       const writes = pds.writes.slice(before);
       assert.equal(writes.length, scenario.writes, `${scenario.label} stop ${index}: ${writes.join(", ")}`);
       const expectedWrites = scenario.label === "enable"
-        ? [`createSpace ${tasksSpace}`, `putRecord ${owner.workspace.uri} ${COLLECTION.extInstall}/tasks`, `putMember ${tasksSpace} ${PERSON}`]
-        : [`putRecord ${owner.workspace.uri} ${COLLECTION.extInstall}/tasks`, `removeMember ${tasksSpace} ${PERSON}`, `putRecord ${owner.workspace.uri} ${COLLECTION.extInstall}/tasks`];
+        ? [`createSpace ${tasksSpace}`, `putRecord ${owner.workspace.uri} ${COLLECTION.extInstall}/tasks`, `putMembers ${tasksSpace} ${PERSON}`]
+        : [`putRecord ${owner.workspace.uri} ${COLLECTION.extInstall}/tasks`, `removeMembers ${tasksSpace} ${PERSON}`, `putRecord ${owner.workspace.uri} ${COLLECTION.extInstall}/tasks`];
       assert.deepEqual(writes, expectedWrites, `${scenario.label} stop ${index}: exact writes, none repeated`);
       const record = extInstallRecord(pds, owner);
       if (scenario.label === "enable") {

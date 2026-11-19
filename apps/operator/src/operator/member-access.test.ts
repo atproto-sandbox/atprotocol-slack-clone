@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { XrpcError } from "@flock/protocol/atproto/xrpc";
 import { appInboxUri, channelUri, dmConversationUri, dmInboxUri, inboxUri, tasksSpaceUri, workspaceUri } from "@flock/protocol/keys";
-import { dropMemberList, MEMBER_LIST_TTL_MS, mayFollow, type MemberAccessDeps } from "./member-access";
+import { dropMemberList, MEMBER_LIST_SUSPENDED_BACKOFF_MS, MEMBER_LIST_TTL_MS, mayFollow, type MemberAccessDeps } from "./member-access";
 
 // Who may follow a space's changes: the feed authorization rows of the plan's R5 tests, against an injected member list.
 
@@ -134,4 +135,23 @@ test("a Tasks extension space admits registered members with read=true and the a
   assert.equal(await mayFollow(tasks, MEMBER, access), true, "cached within TTL");
   dropMemberList(tasks);
   assert.equal(await mayFollow(tasks, MEMBER, access), false, "dropMemberList invalidates immediately");
+});
+
+test("401 AccountTakedown and AccountDeactivated deny mayFollow cleanly with a 15-second negative backoff instead of storming the PDS", async () => {
+  const suspendedChannel = channelUri(OWNER, "rules-suspended");
+  const lists = new Map<string, Member[] | Error>([
+    [suspendedChannel, new XrpcError(401, "Account is takendown", "AccountTakedown")],
+  ]);
+  const { access, reads, clock } = deps(lists);
+
+  assert.equal(await mayFollow(suspendedChannel, MEMBER, access), false);
+  // Allow the microtask catch handler on entry.members to tighten expiresAt to MEMBER_LIST_SUSPENDED_BACKOFF_MS.
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(await mayFollow(suspendedChannel, MEMBER, access), false);
+  assert.equal(reads.length, 1, "suspended authority is negatively cached briefly instead of re-reading on every poll");
+
+  lists.set(suspendedChannel, [{ did: MEMBER, read: true, write: true }]);
+  clock.now += MEMBER_LIST_SUSPENDED_BACKOFF_MS;
+  assert.equal(await mayFollow(suspendedChannel, MEMBER, access), true);
+  assert.equal(reads.length, 2);
 });
