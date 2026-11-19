@@ -266,9 +266,15 @@ export class OperatorClient {
       throw signal.reason ?? new DOMException("The operation was aborted.", "AbortError");
     }
     const { token } = await raceWithSignal(
-      this.transport.memberClient.query<{ token: string }>("com.atproto.server.getServiceAuth", {
-        aud: this.service.serviceRef, lxm: method, ...(exp === undefined ? {} : { exp: String(exp) }),
-      }),
+      this.transport.memberClient.query<{ token: string }>(
+        "com.atproto.server.getServiceAuth",
+        {
+          aud: this.service.serviceRef,
+          lxm: method,
+          ...(exp === undefined ? {} : { exp: String(exp) }),
+        },
+        signal ? { signal } : undefined,
+      ),
       signal,
     );
     return token;

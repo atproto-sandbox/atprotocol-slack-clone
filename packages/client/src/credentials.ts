@@ -5,7 +5,12 @@ import {
   type SpaceNotifyTarget,
 } from "@flock/protocol/atproto/space-credential-core";
 import { XrpcError, type AtprotoClient } from "@flock/protocol/atproto/xrpc";
+import { raceWithSignal } from "./operator-client";
 import { transportNow, type ClientTransport } from "./transport";
+
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException("The operation was aborted.", "AbortError");
+}
 
 export function isRegistrationNotConfirmed(error: unknown): boolean {
   if (error instanceof XrpcError && error.code === "RegistrationNotConfirmed") return true;
@@ -35,28 +40,29 @@ export class CredentialCache {
     private readonly onAccessLost?: (space: string, error: SpaceCredentialError) => Promise<void>,
   ) {}
 
-  async get(space: string, opts?: { notify?: SpaceNotifyTarget }): Promise<SpaceCredential> {
+  async get(space: string, opts?: { notify?: SpaceNotifyTarget; signal?: AbortSignal }): Promise<SpaceCredential> {
+    if (opts?.signal?.aborted) throw abortReason(opts.signal);
     if (opts?.notify !== undefined) {
       const pending = this.credentials.get(space);
       if (pending) {
-        const existing = await pending.catch(() => undefined);
+        const existing = await raceWithSignal(pending.catch(() => undefined), opts.signal);
         if (existing && this.isUsable(existing) && sameNotify(existing.notify, opts.notify)) {
           this.notifyTargets.set(space, opts.notify);
           return existing;
         }
       }
-      return this.mintSidecarNotify(space, opts.notify);
+      return this.mintSidecarNotify(space, opts.notify, opts.signal);
     }
 
     const pending = this.credentials.get(space);
     if (pending) {
-      const credential = await pending;
+      const credential = await raceWithSignal(pending, opts?.signal);
       if (this.isUsable(credential)) {
         return credential;
       }
       const current = this.credentials.get(space);
       if (current && current !== pending) {
-        const next = await current;
+        const next = await raceWithSignal(current, opts?.signal);
         if (this.isUsable(next)) {
           return next;
         }
@@ -67,8 +73,18 @@ export class CredentialCache {
     const minted = this.mint(space, effectiveNotify);
     this.credentials.set(space, minted);
     try {
-      return await minted;
+      return await raceWithSignal(minted, opts?.signal);
     } catch (error) {
+      if (opts?.signal?.aborted) {
+        void minted.catch((mintError) => {
+          if (this.credentials.get(space) === minted) this.credentials.delete(space);
+          if (mintError instanceof SpaceCredentialError) {
+            this.notifyTargets.delete(space);
+            void this.onAccessLost?.(space, mintError);
+          }
+        });
+        throw error;
+      }
       if (this.credentials.get(space) === minted) this.credentials.delete(space);
       if (error instanceof SpaceCredentialError) {
         this.notifyTargets.delete(space);
@@ -79,27 +95,33 @@ export class CredentialCache {
   }
 
   /** A credential minted now, for a write that must not rely on membership checked up to ten minutes ago. */
-  async fresh(space: string, opts?: { notify?: SpaceNotifyTarget }): Promise<SpaceCredential> {
+  async fresh(space: string, opts?: { notify?: SpaceNotifyTarget; signal?: AbortSignal }): Promise<SpaceCredential> {
+    if (opts?.signal?.aborted) throw abortReason(opts.signal);
     if (opts?.notify !== undefined) {
-      return this.mintSidecarNotify(space, opts.notify);
+      return this.mintSidecarNotify(space, opts.notify, opts.signal);
     }
     this.credentials.delete(space);
-    return this.get(space);
+    return this.get(space, opts);
   }
 
   /**
    * Mints a brand-new un-notified credential (fresh `jti`) for single-use proof-of-possession without
    * triggering `{ notify }` confirmation or clobbering an active notified credential in the cache.
    */
-  async mintFreshUnnotified(space: string): Promise<SpaceCredential> {
+  async mintFreshUnnotified(space: string, signal?: AbortSignal): Promise<SpaceCredential> {
+    if (signal?.aborted) throw abortReason(signal);
     try {
-      const credential = await mintSpaceCredentialWith(this.transport, space);
+      const credential = await raceWithSignal(
+        mintSpaceCredentialWith(this.transport, space, signal ? { signal } : undefined),
+        signal,
+      );
+      if (signal?.aborted) throw abortReason(signal);
       if (!this.credentials.has(space) && !this.notifyTargets.has(space)) {
         this.credentials.set(space, Promise.resolve(credential));
       }
       return credential;
     } catch (error) {
-      if (error instanceof SpaceCredentialError) {
+      if (!signal?.aborted && error instanceof SpaceCredentialError) {
         this.credentials.delete(space);
         this.notifyTargets.delete(space);
         await this.onAccessLost?.(space, error);
@@ -128,28 +150,62 @@ export class CredentialCache {
     return credential.expiresAt - transportNow(this.transport) > credential.renewBeforeMs;
   }
 
-  private mintSidecarNotify(space: string, notify: SpaceNotifyTarget): Promise<SpaceCredential> {
+  private mintSidecarNotify(
+    space: string,
+    notify: SpaceNotifyTarget,
+    signal?: AbortSignal,
+  ): Promise<SpaceCredential> {
+    if (signal?.aborted) {
+      return Promise.reject(abortReason(signal));
+    }
     const mintKey = `${space}\0${notify.endpoint}\0${notify.token}`;
     const inFlight = this.pendingNotifyMints.get(mintKey);
-    if (inFlight) return inFlight;
+    if (inFlight) return raceWithSignal(inFlight, signal);
 
-    const run: Promise<SpaceCredential> = this.runSidecarNotifyMint(space, notify).finally(() => {
+    const run: Promise<SpaceCredential> = this.runSidecarNotifyMint(space, notify, signal).finally(() => {
       if (this.pendingNotifyMints.get(mintKey) === run) {
         this.pendingNotifyMints.delete(mintKey);
       }
     });
 
     this.pendingNotifyMints.set(mintKey, run);
+    if (signal) {
+      const detachOnAbort = () => {
+        if (this.pendingNotifyMints.get(mintKey) === run) {
+          this.pendingNotifyMints.delete(mintKey);
+        }
+      };
+      signal.addEventListener("abort", detachOnAbort, { once: true });
+      void run.then(
+        () => signal.removeEventListener("abort", detachOnAbort),
+        () => signal.removeEventListener("abort", detachOnAbort),
+      );
+    }
     return run;
   }
 
-  private async runSidecarNotifyMint(space: string, notify: SpaceNotifyTarget): Promise<SpaceCredential> {
+  private async runSidecarNotifyMint(
+    space: string,
+    notify: SpaceNotifyTarget,
+    signal?: AbortSignal,
+  ): Promise<SpaceCredential> {
+    if (signal?.aborted) throw abortReason(signal);
     try {
-      const credential = await mintSpaceCredentialWith(this.transport, space, { notify });
+      const credential = await raceWithSignal(
+        mintSpaceCredentialWith(this.transport, space, {
+          notify,
+          ...(signal ? { signal } : {}),
+        }),
+        signal,
+      );
+      if (signal?.aborted) throw abortReason(signal);
       this.notifyTargets.set(space, notify);
       this.credentials.set(space, Promise.resolve(credential));
       return credential;
     } catch (error) {
+      if (signal?.aborted) {
+        throw error;
+      }
       this.notifyTargets.delete(space);
       if (error instanceof SpaceCredentialError) {
         this.credentials.delete(space);
@@ -161,17 +217,21 @@ export class CredentialCache {
       }
       const current = this.credentials.get(space);
       if (current) {
-        const existing = await current.catch(() => undefined);
+        const existing = await raceWithSignal(current.catch(() => undefined), signal);
         if (existing && existing.notify === undefined && this.isUsable(existing)) {
           return existing;
         }
       }
       try {
-        const fallback = await mintSpaceCredentialWith(this.transport, space);
+        const fallback = await raceWithSignal(
+          mintSpaceCredentialWith(this.transport, space, signal ? { signal } : undefined),
+          signal,
+        );
+        if (signal?.aborted) throw abortReason(signal);
         this.credentials.set(space, Promise.resolve(fallback));
         return fallback;
       } catch (fallbackError) {
-        if (fallbackError instanceof SpaceCredentialError) {
+        if (!signal?.aborted && fallbackError instanceof SpaceCredentialError) {
           this.credentials.delete(space);
           await this.onAccessLost?.(space, fallbackError);
         }

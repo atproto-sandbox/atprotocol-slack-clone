@@ -27,7 +27,7 @@ import {
 import { generateSpaceKey } from "@flock/protocol/atproto/space-key";
 import { MEMBERSPACE_POLICY } from "@flock/protocol/atproto/space-policy";
 import { AtprotoClient } from "@flock/protocol/atproto/xrpc";
-import { isDid, isSkey, isTid, parseSpaceUri } from "@flock/protocol/keys";
+import { isDid, isSkey, parseSpaceUri } from "@flock/protocol/keys";
 
 /**
  * An in-memory, multi-host fake of the pinned ATProto Spaces PDS protocol (`#5187`).
@@ -833,18 +833,25 @@ export class FakeNetwork {
       if (typeof params.delegationToken !== "string") {
         throw new FakeXrpcError(400, "InvalidDelegationToken", "Invalid delegation token");
       }
-      const delegation = this.delegations.get(params.delegationToken);
-      const nowSec = Math.floor(this.now() / 1000);
-      if (!delegation || delegation.used || delegation.space !== spaceUriStr || nowSec - CLOCK_SKEW_SEC >= delegation.exp) {
-        throw new FakeXrpcError(400, "InvalidDelegationToken", "Delegation token is invalid, expired, replayed, or does not match requested space");
+      if (params.delegationToken !== "") {
+        const delegation = this.delegations.get(params.delegationToken);
+        const nowSec = Math.floor(this.now() / 1000);
+        if (!delegation || delegation.used || delegation.space !== spaceUriStr || nowSec - CLOCK_SKEW_SEC >= delegation.exp) {
+          throw new FakeXrpcError(400, "InvalidDelegationToken", "Delegation token is invalid, expired, replayed, or does not match requested space");
+        }
+        delegation.used = true;
+        userDid = delegation.granteeDid;
       }
-      delegation.used = true;
-      userDid = delegation.granteeDid;
     }
 
     let clientId: string | undefined;
     if (params.clientAttestation !== undefined) {
-      clientId = await this.verifyClientAttestation(params.clientAttestation, ref.authorityDid);
+      if (typeof params.clientAttestation !== "string") {
+        throw new FakeXrpcError(400, "InvalidClientAttestation", "Invalid client attestation");
+      }
+      if (params.clientAttestation !== "") {
+        clientId = await this.verifyClientAttestation(params.clientAttestation, ref.authorityDid);
+      }
     }
 
     const space = this.requireActiveSpace(spaceUriStr);
@@ -2046,10 +2053,7 @@ export class FakeNetwork {
     this.assertActiveSpaceHost(ref.authorityDid);
     const space = this.requireActiveSpace(params.space);
     const limit = clampLimit(params.limit, 100, 1000);
-    const after = typeof params.cursor === "string" ? params.cursor : undefined;
-    if (after !== undefined && !isTid(after)) {
-      throw new FakeXrpcError(400, "InvalidCursor", "Malformed cursor");
-    }
+    const after = typeof params.cursor === "string" && params.cursor.length > 0 ? params.cursor : undefined;
     const updated = [...space.writers.entries()]
       .filter(([, entry]) => after === undefined || entry.spaceRev > after)
       .sort((left, right) => compareLex(left[1].spaceRev, right[1].spaceRev));

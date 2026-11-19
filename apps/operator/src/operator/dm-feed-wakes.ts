@@ -13,11 +13,13 @@ import { onDbClose } from "../lib/db";
 export const MAX_TRACKED_DM_CALLERS = 50_000;
 export const MAX_TRACKED_DM_SPACES = 50_000;
 export const MAX_SPACES_PER_CALLER = 2_000;
+export const SNAPSHOT_CHUNK_MAX_SPACES = 250;
 /** 36^4 - 1: keeps base36 sequence <= 4 chars so `<epoch>.<dbBase36>.<dmBase36>` always fits within 16 chars. */
 export const MAX_DM_SEQ_PER_EPOCH = 36 ** 4 - 1;
 export const DM_WAKE_RATE_LIMIT_MAX = 120;
 export const DM_WAKE_RATE_LIMIT_WINDOW_MS = 60_000;
 
+const SNAPSHOT_CHUNK_MAX_CALLERS = 250;
 const MAX_RATE_LIMIT_BUCKETS = 50_000;
 const DM_IPC_KEY_INFO = "flock-dm-ipc-v1";
 const MAX_IPC_FRAME_BYTES = 8 * 1024 * 1024;
@@ -58,6 +60,18 @@ type SerializedCallerState = {
   spaces: Array<[string, number]>;
 };
 
+type GlobalWakeEntry = {
+  callerDid: string;
+  space: string;
+  seq: number;
+};
+
+type GlobalSpaceEviction = {
+  callerDid: string;
+  space: string;
+  evictedFloor: number;
+};
+
 type WakeMutation = {
   callerDid: string;
   space: string;
@@ -66,6 +80,7 @@ type WakeMutation = {
   seq: number;
   evictedFloor: number;
   evictedCallers: number;
+  globalEvictions?: GlobalSpaceEviction[];
 };
 
 type RateBucket = {
@@ -76,13 +91,15 @@ type RateBucket = {
 type IpcFrame =
   | { type: "challenge"; nonce: string }
   | { type: "auth"; nonce: string }
-  | { type: "snapshot"; epoch: string; evictedCallers: number; callers: SerializedCallerState[] }
+  | { type: "snapshot_begin"; epoch: string; evictedCallers: number; maxSpaces: number }
+  | { type: "snapshot_chunk"; callers: SerializedCallerState[] }
+  | { type: "snapshot_end" }
   | { type: "wake"; bcastId: number; mutation: WakeMutation }
   | { type: "wake_ack"; bcastId: number }
   | { type: "record_wake"; reqId: number; callerDid: string; space: string; nowMs: number }
   | { type: "record_ok"; reqId: number }
   | { type: "record_err"; reqId: number; code: "rate_limit" | "error"; message: string }
-  | { type: "reset"; epoch: string };
+  | { type: "reset"; epoch: string; maxSpaces: number };
 
 function generateBootEpoch(previous?: string): string {
   while (true) {
@@ -94,12 +111,70 @@ function generateBootEpoch(previous?: string): string {
 
 let clusterEpoch = generateBootEpoch();
 let evictedCallers = 0;
+let maxTrackedDmSpaces = MAX_TRACKED_DM_SPACES;
 const callers = new Map<string, CallerWakeState>();
+const globalEntries = new Map<string, GlobalWakeEntry>();
 const rateBuckets = new Map<string, RateBucket>();
 const wakeListeners = new Set<(callerDid?: string) => void>();
 
 function notifyListeners(callerDid?: string): void {
   for (const listener of [...wakeListeners]) listener(callerDid);
+}
+
+function notifyMutationListeners(mutation: WakeMutation): void {
+  notifyListeners(mutation.callerDid);
+  if (mutation.globalEvictions) {
+    const seen = new Set<string>([mutation.callerDid]);
+    for (const ev of mutation.globalEvictions) {
+      if (!seen.has(ev.callerDid)) {
+        seen.add(ev.callerDid);
+        notifyListeners(ev.callerDid);
+      }
+    }
+  }
+}
+
+function globalEntryKey(callerDid: string, space: string): string {
+  return `${callerDid}\0${space}`;
+}
+
+function upsertGlobalEntry(callerDid: string, space: string, seq: number): void {
+  const key = globalEntryKey(callerDid, space);
+  globalEntries.delete(key);
+  globalEntries.set(key, { callerDid, space, seq });
+}
+
+function deleteGlobalEntry(callerDid: string, space: string): void {
+  globalEntries.delete(globalEntryKey(callerDid, space));
+}
+
+function clearCallerGlobalEntries(callerDid: string, state: CallerWakeState): void {
+  for (const space of state.spaces.keys()) {
+    globalEntries.delete(globalEntryKey(callerDid, space));
+  }
+}
+
+function evictGlobalOverflow(): GlobalSpaceEviction[] {
+  const evicted: GlobalSpaceEviction[] = [];
+  while (globalEntries.size > maxTrackedDmSpaces) {
+    const oldest = globalEntries.entries().next();
+    if (oldest.done) break;
+    const [oldestKey, oldestEntry] = oldest.value;
+    globalEntries.delete(oldestKey);
+    const ownerState = callers.get(oldestEntry.callerDid);
+    if (ownerState) {
+      ownerState.spaces.delete(oldestEntry.space);
+      if (oldestEntry.seq > ownerState.evictedFloor) {
+        ownerState.evictedFloor = oldestEntry.seq;
+      }
+      evicted.push({
+        callerDid: oldestEntry.callerDid,
+        space: oldestEntry.space,
+        evictedFloor: ownerState.evictedFloor,
+      });
+    }
+  }
+  return evicted;
 }
 
 export function onDmWake(listener: (callerDid?: string) => void): () => void {
@@ -170,6 +245,7 @@ function applyAuthoritativeWake(callerDid: string, space: string): WakeMutation 
   }
 
   if (state.head >= MAX_DM_SEQ_PER_EPOCH) {
+    clearCallerGlobalEntries(callerDid, state);
     state.epoch = generateBootEpoch(state.epoch);
     state.head = 0;
     state.evictedFloor = 0;
@@ -179,22 +255,28 @@ function applyAuthoritativeWake(callerDid: string, space: string): WakeMutation 
   state.head += 1;
   state.spaces.delete(space);
   state.spaces.set(space, state.head);
+  upsertGlobalEntry(callerDid, space, state.head);
 
   while (state.spaces.size > MAX_SPACES_PER_CALLER) {
     const oldest = state.spaces.entries().next();
     if (oldest.done) break;
     const [oldestSpace, oldestSeq] = oldest.value;
     state.spaces.delete(oldestSpace);
+    deleteGlobalEntry(callerDid, oldestSpace);
     if (oldestSeq > state.evictedFloor) state.evictedFloor = oldestSeq;
   }
 
   callers.set(callerDid, state);
   while (callers.size > MAX_TRACKED_DM_CALLERS) {
-    const oldestCaller = callers.keys().next();
+    const oldestCaller = callers.entries().next();
     if (oldestCaller.done) break;
-    callers.delete(oldestCaller.value);
+    const [evictedDid, evictedState] = oldestCaller.value;
+    clearCallerGlobalEntries(evictedDid, evictedState);
+    callers.delete(evictedDid);
     evictedCallers += 1;
   }
+
+  const globalEvictions = evictGlobalOverflow();
 
   return {
     callerDid,
@@ -204,12 +286,17 @@ function applyAuthoritativeWake(callerDid: string, space: string): WakeMutation 
     seq: state.head,
     evictedFloor: state.evictedFloor,
     evictedCallers,
+    ...(globalEvictions.length > 0 ? { globalEvictions } : {}),
   };
 }
 
 function applyReplicaMutation(mutation: WakeMutation): void {
   let state = callers.get(mutation.callerDid);
   if (!state || state.epoch !== mutation.callerEpoch || mutation.head < state.head) {
+    if (state) {
+      clearCallerGlobalEntries(mutation.callerDid, state);
+      callers.delete(mutation.callerDid);
+    }
     state = {
       epoch: mutation.callerEpoch,
       head: mutation.head,
@@ -225,48 +312,118 @@ function applyReplicaMutation(mutation: WakeMutation): void {
   }
   state.spaces.delete(mutation.space);
   state.spaces.set(mutation.space, mutation.seq);
+  upsertGlobalEntry(mutation.callerDid, mutation.space, mutation.seq);
   while (state.spaces.size > MAX_SPACES_PER_CALLER) {
     const oldest = state.spaces.entries().next();
     if (oldest.done) break;
     const [oldestSpace, oldestSeq] = oldest.value;
     state.spaces.delete(oldestSpace);
+    deleteGlobalEntry(mutation.callerDid, oldestSpace);
     if (oldestSeq > state.evictedFloor) state.evictedFloor = oldestSeq;
   }
   callers.set(mutation.callerDid, state);
   evictedCallers = mutation.evictedCallers;
   while (callers.size > MAX_TRACKED_DM_CALLERS) {
-    const oldestCaller = callers.keys().next();
+    const oldestCaller = callers.entries().next();
     if (oldestCaller.done) break;
-    callers.delete(oldestCaller.value);
+    const [evictedDid, evictedState] = oldestCaller.value;
+    clearCallerGlobalEntries(evictedDid, evictedState);
+    callers.delete(evictedDid);
   }
+  if (mutation.globalEvictions) {
+    for (const ev of mutation.globalEvictions) {
+      deleteGlobalEntry(ev.callerDid, ev.space);
+      const ownerState = callers.get(ev.callerDid);
+      if (ownerState) {
+        ownerState.spaces.delete(ev.space);
+        if (ev.evictedFloor > ownerState.evictedFloor) {
+          ownerState.evictedFloor = ev.evictedFloor;
+        }
+      }
+    }
+  }
+  evictGlobalOverflow();
 }
 
-function serializeCallers(): SerializedCallerState[] {
-  const out: SerializedCallerState[] = [];
+function buildSnapshotChunks(): SerializedCallerState[][] {
+  const chunks: SerializedCallerState[][] = [];
+  let currentChunk: SerializedCallerState[] = [];
+  let currentPairs = 0;
+
+  const flush = () => {
+    if (currentChunk.length > 0) {
+      chunks.push(currentChunk);
+      currentChunk = [];
+      currentPairs = 0;
+    }
+  };
+
   for (const [callerDid, state] of callers) {
-    out.push({
-      callerDid,
+    const allSpaces = [...state.spaces.entries()];
+    if (allSpaces.length === 0) {
+      if (currentChunk.length >= SNAPSHOT_CHUNK_MAX_CALLERS) {
+        flush();
+      }
+      currentChunk.push({
+        callerDid,
+        epoch: state.epoch,
+        head: state.head,
+        evictedFloor: state.evictedFloor,
+        spaces: [],
+      });
+      continue;
+    }
+
+    let offset = 0;
+    while (offset < allSpaces.length) {
+      if (currentPairs >= SNAPSHOT_CHUNK_MAX_SPACES || currentChunk.length >= SNAPSHOT_CHUNK_MAX_CALLERS) {
+        flush();
+      }
+      const room = SNAPSHOT_CHUNK_MAX_SPACES - currentPairs;
+      const slice = allSpaces.slice(offset, offset + room);
+      currentChunk.push({
+        callerDid,
+        epoch: state.epoch,
+        head: state.head,
+        evictedFloor: state.evictedFloor,
+        spaces: slice,
+      });
+      currentPairs += slice.length;
+      offset += slice.length;
+    }
+  }
+
+  flush();
+  return chunks;
+}
+
+function loadSnapshot(
+  epoch: string,
+  nextEvictedCallers: number,
+  snapshotCallers: ReadonlyMap<string, CallerWakeState>,
+  nextMaxSpaces?: number,
+): void {
+  clusterEpoch = epoch;
+  evictedCallers = nextEvictedCallers;
+  if (typeof nextMaxSpaces === "number" && Number.isSafeInteger(nextMaxSpaces) && nextMaxSpaces >= 1) {
+    maxTrackedDmSpaces = nextMaxSpaces;
+  }
+  callers.clear();
+  globalEntries.clear();
+  for (const [callerDid, state] of snapshotCallers) {
+    const spaces = new Map<string, number>();
+    for (const [space, seq] of state.spaces) {
+      spaces.set(space, seq);
+      upsertGlobalEntry(callerDid, space, seq);
+    }
+    callers.set(callerDid, {
       epoch: state.epoch,
       head: state.head,
       evictedFloor: state.evictedFloor,
-      spaces: [...state.spaces.entries()],
+      spaces,
     });
   }
-  return out;
-}
-
-function loadSnapshot(epoch: string, nextEvictedCallers: number, snapshotCallers: readonly SerializedCallerState[]): void {
-  clusterEpoch = epoch;
-  evictedCallers = nextEvictedCallers;
-  callers.clear();
-  for (const item of snapshotCallers) {
-    callers.set(item.callerDid, {
-      epoch: item.epoch,
-      head: item.head,
-      evictedFloor: item.evictedFloor,
-      spaces: new Map(item.spaces),
-    });
-  }
+  evictGlobalOverflow();
 }
 
 export function currentDmWakeHead(callerDid: string): { epoch: string; head: number } {
@@ -438,7 +595,7 @@ function broadcastFromHub(
 }
 
 function broadcastResetFromHub(hub: Extract<IpcState, { mode: "hub" }>): void {
-  const rawFrame = encodeIpcFrame(hub.ipcKey, { type: "reset", epoch: clusterEpoch });
+  const rawFrame = encodeIpcFrame(hub.ipcKey, { type: "reset", epoch: clusterEpoch, maxSpaces: maxTrackedDmSpaces });
   for (const peer of hub.peers) {
     if (peer.authenticated && !peer.socket.destroyed) {
       try {
@@ -487,12 +644,21 @@ function tryListenAsHub(sockPath: string, ipcKey: Buffer): Promise<Extract<IpcSt
           peer.authenticated = true;
           peerSocket.write(
             encodeIpcFrame(ipcKey, {
-              type: "snapshot",
+              type: "snapshot_begin",
               epoch: clusterEpoch,
               evictedCallers,
-              callers: serializeCallers(),
+              maxSpaces: maxTrackedDmSpaces,
             }),
           );
+          for (const chunk of buildSnapshotChunks()) {
+            peerSocket.write(
+              encodeIpcFrame(ipcKey, {
+                type: "snapshot_chunk",
+                callers: chunk,
+              }),
+            );
+          }
+          peerSocket.write(encodeIpcFrame(ipcKey, { type: "snapshot_end" }));
           return;
         }
 
@@ -532,7 +698,7 @@ function tryListenAsHub(sockPath: string, ipcKey: Buffer): Promise<Extract<IpcSt
           }
 
           const mutation = applyAuthoritativeWake(frame.callerDid, frame.space);
-          notifyListeners(frame.callerDid);
+          notifyMutationListeners(mutation);
           const currentHub = ipcState.mode === "hub" ? ipcState : null;
           const bcast = currentHub ? broadcastFromHub(currentHub, mutation) : Promise.resolve();
           void bcast.finally(() => {
@@ -580,31 +746,54 @@ function tryListenAsHub(sockPath: string, ipcKey: Buffer): Promise<Extract<IpcSt
 function tryConnectToHub(
   sockPath: string,
   ipcKey: Buffer,
-): Promise<Extract<IpcState, { mode: "client" }> | "enoent" | "refused"> {
+): Promise<Extract<IpcState, { mode: "client" }> | "enoent" | "stale_refused" | "protocol_failed"> {
   return new Promise((resolveConn, rejectConn) => {
     const socket = net.createConnection(sockPath);
-    socket.unref();
+    let connected = false;
     let settled = false;
     const pendingReqs = new Map<number, { resolve: () => void; reject: (err: Error) => void }>();
+    let pendingSnapshot: {
+      epoch: string;
+      evictedCallers: number;
+      maxSpaces?: number;
+      callers: Map<string, CallerWakeState>;
+    } | null = null;
 
-    const handshakeTimer = setTimeout(() => {
-      if (!settled) {
-        settled = true;
-        socket.destroy();
-        resolveConn("refused");
+    socket.once("connect", () => {
+      connected = true;
+    });
+
+    let handshakeTimer: ReturnType<typeof setTimeout> | undefined;
+    const clearHandshakeTimer = () => {
+      if (handshakeTimer) {
+        clearTimeout(handshakeTimer);
+        handshakeTimer = undefined;
       }
-    }, IPC_HANDSHAKE_TIMEOUT_MS);
-    handshakeTimer.unref?.();
+    };
+    const refreshHandshakeTimer = () => {
+      clearHandshakeTimer();
+      handshakeTimer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          socket.destroy();
+          resolveConn("protocol_failed");
+        }
+      }, IPC_HANDSHAKE_TIMEOUT_MS);
+      handshakeTimer.unref?.();
+    };
+    refreshHandshakeTimer();
 
     const onEarlyError = (err: NodeJS.ErrnoException) => {
       if (settled) return;
       settled = true;
-      clearTimeout(handshakeTimer);
+      clearHandshakeTimer();
       socket.destroy();
       if (err.code === "ENOENT") {
         resolveConn("enoent");
-      } else if (err.code === "ECONNREFUSED" || err.code === "ECONNRESET") {
-        resolveConn("refused");
+      } else if (!connected && err.code === "ECONNREFUSED") {
+        resolveConn("stale_refused");
+      } else if (connected || err.code === "ECONNREFUSED" || err.code === "ECONNRESET" || err.code === "EPIPE") {
+        resolveConn("protocol_failed");
       } else {
         rejectConn(err);
       }
@@ -614,8 +803,8 @@ function tryConnectToHub(
     socket.once("close", () => {
       if (!settled) {
         settled = true;
-        clearTimeout(handshakeTimer);
-        resolveConn("refused");
+        clearHandshakeTimer();
+        resolveConn("protocol_failed");
         return;
       }
       for (const pending of pendingReqs.values()) {
@@ -628,6 +817,7 @@ function tryConnectToHub(
         clusterEpoch = generateBootEpoch(clusterEpoch);
         evictedCallers = 0;
         callers.clear();
+        globalEntries.clear();
         notifyListeners(undefined);
         scheduleReconnect();
       }
@@ -636,15 +826,61 @@ function tryConnectToHub(
     attachFrameReader(socket, ipcKey, (frame) => {
       if (!settled) {
         if (frame.type === "challenge") {
+          refreshHandshakeTimer();
           socket.write(encodeIpcFrame(ipcKey, { type: "auth", nonce: frame.nonce }));
           return;
         }
-        if (frame.type === "snapshot") {
+        if (frame.type === "snapshot_begin") {
+          refreshHandshakeTimer();
+          pendingSnapshot = {
+            epoch: frame.epoch,
+            evictedCallers: frame.evictedCallers,
+            maxSpaces: frame.maxSpaces,
+            callers: new Map(),
+          };
+          return;
+        }
+        if (frame.type === "snapshot_chunk") {
+          if (!pendingSnapshot) {
+            socket.destroy();
+            return;
+          }
+          refreshHandshakeTimer();
+          for (const item of frame.callers) {
+            let existing = pendingSnapshot.callers.get(item.callerDid);
+            if (!existing) {
+              existing = {
+                epoch: item.epoch,
+                head: item.head,
+                evictedFloor: item.evictedFloor,
+                spaces: new Map(),
+              };
+              pendingSnapshot.callers.set(item.callerDid, existing);
+            } else {
+              existing.epoch = item.epoch;
+              if (item.head > existing.head) existing.head = item.head;
+              if (item.evictedFloor > existing.evictedFloor) existing.evictedFloor = item.evictedFloor;
+            }
+            for (const [space, seq] of item.spaces) {
+              existing.spaces.delete(space);
+              existing.spaces.set(space, seq);
+            }
+          }
+          return;
+        }
+        if (frame.type === "snapshot_end") {
+          if (!pendingSnapshot) {
+            socket.destroy();
+            return;
+          }
           settled = true;
-          clearTimeout(handshakeTimer);
+          clearHandshakeTimer();
           socket.removeListener("error", onEarlyError);
           socket.on("error", () => socket.destroy());
-          loadSnapshot(frame.epoch, frame.evictedCallers, frame.callers);
+          socket.unref();
+          const completed = pendingSnapshot;
+          pendingSnapshot = null;
+          loadSnapshot(completed.epoch, completed.evictedCallers, completed.callers, completed.maxSpaces);
           resolveConn({
             mode: "client",
             sockPath,
@@ -655,12 +891,13 @@ function tryConnectToHub(
           });
           return;
         }
+        socket.destroy();
         return;
       }
 
       if (frame.type === "wake") {
         applyReplicaMutation(frame.mutation);
-        notifyListeners(frame.mutation.callerDid);
+        notifyMutationListeners(frame.mutation);
         if (!socket.destroyed) {
           socket.write(encodeIpcFrame(ipcKey, { type: "wake_ack", bcastId: frame.bcastId }));
         }
@@ -669,8 +906,12 @@ function tryConnectToHub(
 
       if (frame.type === "reset") {
         clusterEpoch = frame.epoch;
+        if (typeof frame.maxSpaces === "number" && Number.isSafeInteger(frame.maxSpaces) && frame.maxSpaces >= 1) {
+          maxTrackedDmSpaces = frame.maxSpaces;
+        }
         evictedCallers = 0;
         callers.clear();
+        globalEntries.clear();
         notifyListeners(undefined);
         return;
       }
@@ -708,27 +949,39 @@ function scheduleReconnect(): void {
 
 function shortDelay(ms: number): Promise<void> {
   return new Promise((resolveDelay) => {
-    const timer = setTimeout(resolveDelay, ms);
-    timer.unref?.();
+    setTimeout(resolveDelay, ms);
   });
 }
 
 async function establishIpc(sockPath: string, ipcKey: Buffer): Promise<void> {
+  let protocolFailures = 0;
   for (let attempt = 0; attempt < 8; attempt += 1) {
     const conn = await tryConnectToHub(sockPath, ipcKey);
     if (typeof conn === "object") {
       ipcState = conn;
       return;
     }
-    if (conn === "refused") {
-      // Confirm stale socket after brief jitter before unlinking so concurrent startups do not unlink a live bind.
+    if (conn === "protocol_failed") {
+      // A live hub socket accepted the connection and failed protocol/auth handshake: NEVER unlink sockPath!
+      protocolFailures += 1;
+      if (protocolFailures >= 2) {
+        return;
+      }
+      await shortDelay(10);
+      continue;
+    }
+    if (conn === "stale_refused") {
+      // Confirm stale dead socket after brief jitter before unlinking so concurrent startups never unlink a live bind.
       await shortDelay(5 + Math.floor(Math.random() * 15));
       const retryConn = await tryConnectToHub(sockPath, ipcKey);
       if (typeof retryConn === "object") {
         ipcState = retryConn;
         return;
       }
-      if (retryConn === "refused") {
+      if (retryConn === "protocol_failed") {
+        return;
+      }
+      if (retryConn === "stale_refused") {
         try {
           unlinkSync(sockPath);
         } catch {
@@ -811,7 +1064,7 @@ export async function recordDmWake(callerDid: string, space: string, nowMs = Dat
 
   checkAndRecordRateLimit(callerDid, space, nowMs);
   const mutation = applyAuthoritativeWake(callerDid, space);
-  notifyListeners(callerDid);
+  notifyMutationListeners(mutation);
   if (ipcState.mode === "hub") {
     await broadcastFromHub(ipcState, mutation);
   }
@@ -854,7 +1107,9 @@ export function closeDmWakeIpc(options?: { keepMemoryState?: boolean }): void {
   if (!options?.keepMemoryState) {
     clusterEpoch = generateBootEpoch(clusterEpoch);
     evictedCallers = 0;
+    maxTrackedDmSpaces = MAX_TRACKED_DM_SPACES;
     callers.clear();
+    globalEntries.clear();
     rateBuckets.clear();
   }
 }
@@ -865,10 +1120,15 @@ onDbClose(() => {
 
 /** Simulates an operator process restart for unit tests (rotates `clusterEpoch` and clears in-memory DM state). */
 export function resetDmFeedWakesForTests(options?: { maxSpaces?: number }): void {
-  void options;
+  if (options?.maxSpaces !== undefined && Number.isFinite(options.maxSpaces)) {
+    maxTrackedDmSpaces = Math.max(1, Math.floor(options.maxSpaces));
+  } else {
+    maxTrackedDmSpaces = MAX_TRACKED_DM_SPACES;
+  }
   clusterEpoch = generateBootEpoch(clusterEpoch);
   evictedCallers = 0;
   callers.clear();
+  globalEntries.clear();
   rateBuckets.clear();
   if (ipcState.mode === "hub") {
     broadcastResetFromHub(ipcState);

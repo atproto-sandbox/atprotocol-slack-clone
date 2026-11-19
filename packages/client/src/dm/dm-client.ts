@@ -176,6 +176,7 @@ export class DmClient {
   private readonly notifyTargets = new Map<string, CachedNotifyTarget>();
   private readonly watches = new Map<string, DmWatchState>();
   private readonly inFlightWatchNotify = new Map<string, Promise<void>>();
+  private readonly activeNotifyTasks = new Set<Promise<void>>();
   private readonly usedPoPTokens = new Set<string>();
   private readonly scopeMissingListeners = new Set<() => void>();
   private readonly operator: DmNotifyOperator | undefined;
@@ -703,8 +704,8 @@ export class DmClient {
 
   /** Awaits all currently in-flight background DM watch notification registration or renewal tasks. */
   async flushWatchNotifications(): Promise<void> {
-    while (this.inFlightWatchNotify.size > 0) {
-      await Promise.allSettled([...this.inFlightWatchNotify.values()]);
+    while (this.inFlightWatchNotify.size > 0 || this.activeNotifyTasks.size > 0) {
+      await Promise.allSettled([...this.inFlightWatchNotify.values(), ...this.activeNotifyTasks]);
     }
   }
 
@@ -789,6 +790,7 @@ export class DmClient {
 
   private clearWatchState(space: string, state: DmWatchState): void {
     state.watchAbort.abort();
+    this.inFlightWatchNotify.delete(space);
     if (state.timer !== undefined) {
       this.clearWatchTimer(state.timer);
       state.timer = undefined;
@@ -859,10 +861,12 @@ export class DmClient {
     if (existing) return existing;
 
     const run = this.performNotifyRegistration(space, state, forceFresh).finally(() => {
+      this.activeNotifyTasks.delete(run);
       if (this.inFlightWatchNotify.get(space) === run) {
         this.inFlightWatchNotify.delete(space);
       }
     });
+    this.activeNotifyTasks.add(run);
     this.inFlightWatchNotify.set(space, run);
     return run;
   }
@@ -895,6 +899,9 @@ export class DmClient {
       return;
     }
 
+    const timeoutMs = this.notifyTimeoutMs();
+    const { signal: deadlineSignal, cleanup: cleanupDeadline } = createTimeoutSignal(timeoutMs, state.watchAbort.signal);
+
     try {
       let cachedTarget = this.notifyTargets.get(space);
       if (cachedTarget && this.isNotifyTargetStale(cachedTarget)) {
@@ -906,8 +913,8 @@ export class DmClient {
       if (cachedTarget) {
         const target: SpaceNotifyTarget = { endpoint: cachedTarget.endpoint, token: cachedTarget.token };
         let cred = forceFresh
-          ? await this.credentials.fresh(space, { notify: target })
-          : await this.credentials.get(space, { notify: target });
+          ? await this.credentials.fresh(space, { notify: target, signal: deadlineSignal })
+          : await this.credentials.get(space, { notify: target, signal: deadlineSignal });
         if (this.closed || this.watches.get(space) !== state || state.watchAbort.signal.aborted) {
           this.notifyTargets.delete(space);
           this.credentials.clearNotify(space);
@@ -916,7 +923,7 @@ export class DmClient {
         if (!forceFresh && cred.notify) {
           const renewWithinMs = this.computeRenewWithinMs(cred);
           if (cred.expiresAt - this.now() <= renewWithinMs) {
-            cred = await this.credentials.fresh(space, { notify: target });
+            cred = await this.credentials.fresh(space, { notify: target, signal: deadlineSignal });
           }
         }
         if (this.closed || this.watches.get(space) !== state || state.watchAbort.signal.aborted) {
@@ -932,9 +939,9 @@ export class DmClient {
         return;
       }
 
-      let popCred = await this.credentials.get(space);
+      let popCred = await this.credentials.get(space, { signal: deadlineSignal });
       if (this.usedPoPTokens.has(popCred.token)) {
-        popCred = await this.credentials.mintFreshUnnotified(space);
+        popCred = await this.credentials.mintFreshUnnotified(space, deadlineSignal);
       }
       if (this.closed || this.watches.get(space) !== state || state.watchAbort.signal.aborted) {
         return;
@@ -942,35 +949,31 @@ export class DmClient {
       this.recordUsedPoPToken(popCred.token);
 
       const createdSec = Math.max(1, Math.floor(this.now() / 1000));
-      const { headers } = await createTimestampedSpaceSigHeaders({
-        authorization: `Atproto-Space-Credential ${popCred.token}`,
-        audience: serviceRef,
-        keypair: popCred.keypair,
-        createdSec,
-      });
+      const { headers } = await raceWithSignal(
+        createTimestampedSpaceSigHeaders({
+          authorization: `Atproto-Space-Credential ${popCred.token}`,
+          audience: serviceRef,
+          keypair: popCred.keypair,
+          createdSec,
+        }),
+        deadlineSignal,
+      );
 
-      const timeoutMs = this.notifyTimeoutMs();
-      const { signal: deadlineSignal, cleanup: cleanupDeadline } = createTimeoutSignal(timeoutMs, state.watchAbort.signal);
-      let target: SpaceNotifyTarget;
-      try {
-        target = await raceWithSignal(
-          operator.getDmNotifyTarget(
-            {
-              space,
-              credential: popCred.token,
-              proof: {
-                authorization: headers.authorization!,
-                signatureInput: headers["signature-input"]!,
-                signature: headers.signature!,
-              },
+      const target = await raceWithSignal(
+        operator.getDmNotifyTarget(
+          {
+            space,
+            credential: popCred.token,
+            proof: {
+              authorization: headers.authorization!,
+              signatureInput: headers["signature-input"]!,
+              signature: headers.signature!,
             },
-            deadlineSignal,
-          ),
+          },
           deadlineSignal,
-        );
-      } finally {
-        cleanupDeadline();
-      }
+        ),
+        deadlineSignal,
+      );
 
       if (this.closed || this.watches.get(space) !== state || state.watchAbort.signal.aborted) {
         return;
@@ -978,7 +981,7 @@ export class DmClient {
 
       const fetchedAt = this.now();
       this.notifyTargets.set(space, { endpoint: target.endpoint, token: target.token, fetchedAt });
-      const cred = await this.credentials.get(space, { notify: target });
+      const cred = await this.credentials.get(space, { notify: target, signal: deadlineSignal });
       if (this.closed || this.watches.get(space) !== state || state.watchAbort.signal.aborted) {
         this.notifyTargets.delete(space);
         this.credentials.clearNotify(space);
@@ -1009,6 +1012,8 @@ export class DmClient {
         return;
       }
       this.scheduleWatchTimer(space, state, null);
+    } finally {
+      cleanupDeadline();
     }
   }
 

@@ -1753,3 +1753,233 @@ test("R12 Round 1 fixes: watch() resolves in <50ms on blackholed operator/getSer
     alice.close();
   }
 });
+
+test("R12 Round 2 L2: background notification credential minting is end-to-end cancellable on blackholed authorizeSpaceSync or getDelegationToken and on mid-flight unwatch(), allowing immediate recovery once PDS restores", async () => {
+  const OPERATOR: OperatorService = {
+    serviceRef: "did:web:operator.test#atproto_flock_operator",
+    endpoint: "https://operator.test",
+  };
+
+  // 1. Deadline cancellation: authority PDS blackholes forever on authorizeSpaceSync when notify is present ->
+  //    request.signal aborts at notifyTimeoutMs, pendingNotifyMints & inFlightWatchNotify settle cleanly,
+  //    retry timer is scheduled, and subsequent retry / watch() after restoring PDS succeeds!
+  {
+    const network = new FakeNetwork();
+    network.createAccount("did:plc:alice", "pds1");
+    network.createAccount("did:plc:bob", "pds2");
+
+    let confirmCalls = 0;
+    const deliveredSpaces: string[] = [];
+    network.registerEndpoint(OPERATOR.endpoint, async (req) => {
+      const url = new URL(req.url);
+      if (url.pathname === "/xrpc/com.atproto.space.confirmRegistration") {
+        confirmCalls += 1;
+        const body = (await req.json()) as { challenge: string };
+        return Response.json({ challenge: body.challenge });
+      }
+      if (url.pathname === "/xrpc/com.atproto.space.notifySpaceUpdate") {
+        const body = (await req.json()) as { space: string };
+        deliveredSpaces.push(body.space);
+        return Response.json({});
+      }
+      return Response.json({});
+    });
+
+    let blackholeNotifyAuthorize = true;
+    let sawNotifyAuthorizeSignal = false;
+    let notifyAuthorizeAborted = false;
+    const timers: Array<{ fn: () => void; delayMs: number; cleared: boolean; fired: boolean }> = [];
+
+    const alice = new DmClient({
+      did: "did:plc:alice",
+      memberClient: network.clientFor("did:plc:alice"),
+      resolvePds: network.resolvePds,
+      resolveKemKey: network.resolveKemKey,
+      fetchEndpoint: async (request) => {
+        const url = new URL(request.url);
+        if (url.origin === OPERATOR.endpoint) {
+          return Response.json({ endpoint: OPERATOR.endpoint, token: "dm1-deadline-test" });
+        }
+        if (request.url.includes("com.atproto.space.authorizeSpaceSync") && request.method === "POST") {
+          const parsed = (await request.clone().json()) as { notify?: unknown };
+          if (parsed.notify && blackholeNotifyAuthorize) {
+            sawNotifyAuthorizeSignal = Boolean(request.signal);
+            request.signal.addEventListener("abort", () => {
+              notifyAuthorizeAborted = true;
+            }, { once: true });
+            // Deliberately ignore request.signal to prove raceWithSignal ALSO detaches pendingNotifyMints!
+            return new Promise<Response>(() => {});
+          }
+        }
+        return network.fetchEndpoint(request);
+      },
+      generateKey: network.generateKey,
+      store: createStore(),
+      now: network.now,
+      operator: OPERATOR,
+      notifyTimeoutMs: 40,
+      watchTiming: { initialRetryMs: 50, maxRetryMs: 200 },
+      timers: {
+        setTimeout: (fn, delayMs) => {
+          const entry = {
+            fn: () => {
+              entry.fired = true;
+              fn();
+            },
+            delayMs,
+            cleared: false,
+            fired: false,
+          };
+          timers.push(entry);
+          return entry;
+        },
+        clearTimeout: (handle) => {
+          (handle as { cleared: boolean }).cleared = true;
+        },
+      },
+    });
+    const bob = new DmClient({
+      did: "did:plc:bob",
+      memberClient: network.clientFor("did:plc:bob"),
+      resolvePds: network.resolvePds,
+      resolveKemKey: network.resolveKemKey,
+      fetchEndpoint: network.fetchEndpoint,
+      generateKey: network.generateKey,
+      store: createStore(),
+      now: network.now,
+    });
+
+    await alice.enableDms("everyone");
+    const inbox = dmInboxUri("did:plc:alice");
+
+    await alice.watch([inbox]);
+    const flushStarted = performance.now();
+    await alice.flushWatchNotifications();
+    const flushElapsed = performance.now() - flushStarted;
+    assert.ok(flushElapsed < 500, `flushWatchNotifications() settled in ${flushElapsed.toFixed(1)}ms instead of hanging forever`);
+    assert.equal(sawNotifyAuthorizeSignal, true, "authorizeSpaceSync Request received AbortSignal");
+    assert.equal(notifyAuthorizeAborted, true, "authorizeSpaceSync Request signal aborted on notifyTimeoutMs");
+    assert.equal(confirmCalls, 0);
+
+    const retry = timers.find((t) => !t.cleared && !t.fired);
+    assert.ok(retry, "scheduled exponential backoff retry after authorizeSpaceSync timeout");
+    assert.equal(retry.delayMs, 50);
+
+    // Restore authority PDS -> scheduled retry (and/or subsequent watch) registers notifications cleanly!
+    blackholeNotifyAuthorize = false;
+    retry.fn();
+    await alice.flushWatchNotifications();
+    assert.equal(confirmCalls, 1, "subsequent retry after PDS restore completed webhook confirmation");
+
+    await bob.startConversation(["did:plc:alice"]);
+    await network.flushNotifications();
+    assert.deepEqual(deliveredSpaces, [inbox]);
+    alice.close();
+  }
+
+  // 2. Mid-flight unwatch() cancellation: calling unwatch() while authorizeSpaceSync({ notify }) OR getDelegationToken
+  //    is hung forever aborts the request immediately, settles flushWatchNotifications() in <50ms, and lets an
+  //    immediate subsequent watch() succeed once PDS is restored!
+  for (const hangLeg of ["authorizeSpaceSync", "getDelegationToken"] as const) {
+    const network = new FakeNetwork();
+    network.createAccount("did:plc:alice", "pds1");
+    const inbox = dmInboxUri("did:plc:alice");
+    await network.clientFor("did:plc:alice").procedure("com.atproto.space.createSpace", {
+      spaceType: "new.flock.dm.inbox",
+      skey: "self",
+      policy: { $type: "com.atproto.memberspace.policy", publicWrite: true },
+    });
+
+    let confirmCalls = 0;
+    network.registerEndpoint(OPERATOR.endpoint, async (req) => {
+      const url = new URL(req.url);
+      if (url.pathname === "/xrpc/com.atproto.space.confirmRegistration") {
+        confirmCalls += 1;
+        const body = (await req.json()) as { challenge: string };
+        return Response.json({ challenge: body.challenge });
+      }
+      return Response.json({});
+    });
+
+    let shouldHang = true;
+    let legAborted = false;
+    let enteredHang!: () => void;
+    const enteredHangPromise = new Promise<void>((resolve) => {
+      enteredHang = resolve;
+    });
+
+    const realMemberClient = network.clientFor("did:plc:alice");
+    let delegationCalls = 0;
+    const wrappedMemberClient = Object.create(realMemberClient, {
+      query: {
+        value: (method: string, params?: Record<string, unknown>, options?: { signal?: AbortSignal }) => {
+          if (method === "com.atproto.space.getDelegationToken") {
+            delegationCalls += 1;
+            // Let initial watch() ordinary credential mint (#1) succeed; hang background notify mint (#2)!
+            if (hangLeg === "getDelegationToken" && shouldHang && delegationCalls >= 2) {
+              assert.ok(options?.signal, "getDelegationToken received AbortSignal in options");
+              options.signal.addEventListener("abort", () => {
+                legAborted = true;
+              }, { once: true });
+              enteredHang();
+              return new Promise<never>(() => {});
+            }
+          }
+          return realMemberClient.query(method, params as never, options);
+        },
+      },
+    });
+
+    const alice = new DmClient({
+      did: "did:plc:alice",
+      memberClient: wrappedMemberClient,
+      resolvePds: network.resolvePds,
+      resolveKemKey: network.resolveKemKey,
+      fetchEndpoint: async (request) => {
+        const url = new URL(request.url);
+        if (url.origin === OPERATOR.endpoint) {
+          return Response.json({ endpoint: OPERATOR.endpoint, token: `dm1-unwatch-${hangLeg}` });
+        }
+        if (
+          hangLeg === "authorizeSpaceSync"
+          && shouldHang
+          && request.url.includes("com.atproto.space.authorizeSpaceSync")
+          && request.method === "POST"
+        ) {
+          const parsed = (await request.clone().json()) as { notify?: unknown };
+          if (parsed.notify) {
+            request.signal.addEventListener("abort", () => {
+              legAborted = true;
+            }, { once: true });
+            enteredHang();
+            return new Promise<Response>(() => {});
+          }
+        }
+        return network.fetchEndpoint(request);
+      },
+      generateKey: network.generateKey,
+      store: createStore(),
+      now: network.now,
+      operator: OPERATOR,
+      notifyTimeoutMs: 10_000,
+    });
+
+    await alice.watch([inbox]);
+    await enteredHangPromise;
+
+    const unwatchStart = performance.now();
+    alice.unwatch([inbox]);
+    await alice.flushWatchNotifications();
+    const unwatchElapsed = performance.now() - unwatchStart;
+    assert.equal(legAborted, true, `mid-flight unwatch() aborted hung ${hangLeg} signal immediately`);
+    assert.ok(unwatchElapsed < 100, `flushWatchNotifications() settled in ${unwatchElapsed.toFixed(1)}ms after unwatch()`);
+    assert.equal(confirmCalls, 0);
+
+    // Restore PDS and immediately watch([inbox]) again -> succeeds cleanly!
+    shouldHang = false;
+    await alice.watch([inbox]);
+    await alice.flushWatchNotifications();
+    assert.equal(confirmCalls, 1, `subsequent watch() after mid-flight unwatch() on ${hangLeg} registered webhook cleanly`);
+    alice.close();
+  }
+});

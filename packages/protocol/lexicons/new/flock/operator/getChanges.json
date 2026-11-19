@@ -4,7 +4,7 @@
   "defs": {
     "main": {
       "type": "procedure",
-      "description": "Waits up to about 25 seconds for any followed space to change, then says which did. It names no writer, revision or content: a client that sees a space change asks that space's authority for listRepos, where its access is checked. Each space has its own cursor. A space the caller may not follow comes back in denied and its cursor does not move; a space whose cursor is older than the notices the operator keeps comes back in reset and should be synced. A call that follows nothing returns head at once: a client reads head, syncs a space, then follows it from head. A procedure, not a query, because 200 space references do not fit in a request line.",
+      "description": "Waits up to about 25 seconds for any followed space to change, then says which did. It names no writer, revision or content: a client that sees a space change asks that space's authority for listWriters, where its access is checked. Each space has its own cursor. A space the caller may not follow comes back in denied and its cursor does not move; a space whose cursor is older than the notices the operator keeps comes back in reset and should be synced. A call that follows nothing returns head at once: a client reads head, syncs a space, then follows it from head. A procedure, not a query, because 200 space references do not fit in a request line.",
       "input": {
         "encoding": "application/json",
         "schema": {

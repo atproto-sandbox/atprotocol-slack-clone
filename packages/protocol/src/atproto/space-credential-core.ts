@@ -878,21 +878,27 @@ export function credentialLifetimeMs(token: string): number | null {
 export async function mintSpaceCredentialWith(
   deps: SpaceCredentialDeps,
   space: string,
-  opts?: { notify?: SpaceNotifyTarget; clientAttestation?: string },
+  opts?: { notify?: SpaceNotifyTarget; clientAttestation?: string; signal?: AbortSignal },
 ): Promise<SpaceCredential> {
   const parsed = parseSpaceUri(space);
   if (!parsed) throw new Error("Invalid permissioned space URI.");
+  if (opts?.signal?.aborted) throw abortReason(opts.signal);
   const delegation = await deps.memberClient.query<GetDelegationToken.OutputSchema>(
     "com.atproto.space.getDelegationToken",
     { space },
+    opts?.signal ? { signal: opts.signal } : undefined,
   );
+  if (opts?.signal?.aborted) throw abortReason(opts.signal);
   const authorityPds = await deps.resolvePds(parsed.authorityDid);
+  if (opts?.signal?.aborted) throw abortReason(opts.signal);
   const key = await deps.generateKey();
+  if (opts?.signal?.aborted) throw abortReason(opts.signal);
   const { credential, spaceRev } = await exchangeSpaceCredential({
     authorityPds,
     delegationToken: delegation.token,
     ...(opts?.clientAttestation !== undefined ? { clientAttestation: opts.clientAttestation } : {}),
     ...(opts?.notify !== undefined ? { notify: opts.notify } : {}),
+    ...(opts?.signal !== undefined ? { signal: opts.signal } : {}),
     space,
     key,
     fetchEndpoint: deps.fetchEndpoint,
@@ -923,11 +929,13 @@ export type ExchangeSpaceCredentialInput = {
   delegationToken?: string;
   clientAttestation?: string;
   notify?: SpaceNotifyTarget;
+  signal?: AbortSignal;
 } & ({ key: SpaceKey; credentialKey?: string } | { key?: SpaceKey; credentialKey: string });
 
 export async function exchangeSpaceCredential(
   input: ExchangeSpaceCredentialInput,
 ): Promise<SpaceCredentialExchangeResult> {
+  if (input.signal?.aborted) throw abortReason(input.signal);
   const credentialKey = input.credentialKey ?? input.key?.did();
   if (!credentialKey) {
     throw new Error("exchangeSpaceCredential requires credentialKey or key.");
@@ -945,6 +953,7 @@ export async function exchangeSpaceCredential(
     redirect: "error",
     headers: { accept: "application/json", "content-type": "application/json" },
     body: JSON.stringify(requestBody),
+    ...(input.signal ? { signal: input.signal } : {}),
   });
   const response = await input.fetchEndpoint(request);
   const body = await readUpstreamJson<{ credential?: unknown; spaceRev?: unknown; message?: unknown; error?: unknown }>(response, 64 * 1024);

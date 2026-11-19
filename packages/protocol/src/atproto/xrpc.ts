@@ -1,13 +1,18 @@
 import { readUpstreamJson } from "../bounded-json";
 
 export type XrpcParams = Record<string, string | number | boolean | readonly string[] | undefined>;
+export type XrpcRequestOptions = { signal?: AbortSignal };
 export type AtprotoFetchHandler = (path: string, init: RequestInit) => Promise<Response>;
 export const MAX_XRPC_RESPONSE_BYTES = 8 * 1024 * 1024;
 
 export class AtprotoClient {
   constructor(private readonly fetchHandler: AtprotoFetchHandler) {}
 
-  async query<TOutput>(method: string, params: XrpcParams = {}): Promise<TOutput> {
+  async query<TOutput>(
+    method: string,
+    params: XrpcParams = {},
+    options?: XrpcRequestOptions,
+  ): Promise<TOutput> {
     const query = new URLSearchParams();
     for (const [key, value] of Object.entries(params)) {
       if (value === undefined) continue;
@@ -18,13 +23,17 @@ export class AtprotoClient {
       }
     }
     const suffix = query.size ? `?${query.toString()}` : "";
-    return this.request<TOutput>(`/xrpc/${method}${suffix}`, { method: "GET" });
+    return this.request<TOutput>(`/xrpc/${method}${suffix}`, {
+      method: "GET",
+      ...(options?.signal ? { signal: options.signal } : {}),
+    });
   }
 
   async procedure<TInput, TOutput>(
     method: string,
     input: TInput,
     params: XrpcParams = {},
+    options?: XrpcRequestOptions,
   ): Promise<TOutput> {
     const query = new URLSearchParams();
     for (const [key, value] of Object.entries(params)) {
@@ -35,10 +44,14 @@ export class AtprotoClient {
       method: "POST",
       headers: { accept: "application/json", "content-type": "application/json" },
       body: JSON.stringify(input),
+      ...(options?.signal ? { signal: options.signal } : {}),
     });
   }
 
   private async request<T>(path: string, init: RequestInit): Promise<T> {
+    if (init.signal?.aborted) {
+      throw init.signal.reason ?? new DOMException("The operation was aborted.", "AbortError");
+    }
     const response = await this.fetchHandler(path, init);
     const body = await readUpstreamJson(response, MAX_XRPC_RESPONSE_BYTES);
     if (!response.ok) {

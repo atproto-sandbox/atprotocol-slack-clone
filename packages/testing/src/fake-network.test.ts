@@ -382,10 +382,46 @@ test("authorizeSpaceSync: no OAuth auth, credentialKey JWT & 10-min exp, spaceRe
   assert.equal(nonP256.status, 400);
   assert.equal(nonP256.error?.error, "InvalidRequest");
 
-  // Unauthenticated request on private space without delegationToken -> 400 SpaceNotFound
+  // Unauthenticated request on private space without delegationToken (or with empty "" delegationToken/clientAttestation) -> 400 SpaceNotFound
   const unauthNoToken = await authorizeSync(network, ALICE, { space });
   assert.equal(unauthNoToken.status, 400);
   assert.equal(unauthNoToken.error?.error, "SpaceNotFound");
+
+  const emptyStringTokensOnPrivate = await authorizeSync(network, ALICE, {
+    space,
+    delegationToken: "",
+    clientAttestation: "",
+  });
+  assert.equal(emptyStringTokensOnPrivate.status, 400);
+  assert.equal(emptyStringTokensOnPrivate.error?.error, "SpaceNotFound");
+
+  // Non-string delegationToken still fails with InvalidDelegationToken
+  const nonStringToken = await authorizeSync(network, ALICE, {
+    space,
+    delegationToken: 123 as unknown as string,
+  });
+  assert.equal(nonStringToken.status, 400);
+  assert.equal(nonStringToken.error?.error, "InvalidDelegationToken");
+
+  // Public-read space treats delegationToken: "" and clientAttestation: "" as absent and succeeds just like omitted tokens
+  const pubCreated = await alice.procedure<Record<string, unknown>, { space: SpaceUri }>(
+    "com.atproto.space.createSpace",
+    {
+      spaceType: TEST_SPACE_TYPE,
+      skey: "auth-sync-public",
+      policy: { ...memberspacePolicy(), publicRead: true },
+    },
+  );
+  const pubOmitted = await authorizeSync(network, ALICE, { space: pubCreated.space });
+  assert.equal(pubOmitted.status, 200);
+  const pubEmptyToken = await authorizeSync(network, ALICE, {
+    space: pubCreated.space,
+    delegationToken: "",
+    clientAttestation: "",
+  });
+  assert.equal(pubEmptyToken.status, 200);
+  assert.ok(pubEmptyToken.credential);
+  await alice.procedure("com.atproto.space.deleteSpace", { space: pubCreated.space });
 
   // Carol can obtain a delegation token on her own PDS, but Alice's PDS rejects her with SpaceNotFound
   const carolDel = await carol.query<{ token: string }>("com.atproto.space.getDelegationToken", { space });
@@ -946,10 +982,15 @@ test("listWriters: spaceCredentialAuth, RFC 9421 sig checks, #repoWrite/#repoRem
   assert.equal(flushedRepos.length, 1);
   assert.equal(flushedRepos[0]!.repo, ALICE);
 
-  // InvalidCursor check
-  const badCursor = await callList({ cursor: "not-a-valid-tid-cursor" });
-  assert.equal(badCursor.status, 400);
-  assert.equal(badCursor.json.error, "InvalidCursor");
+  // Non-TID cursors perform plain lexical spaceRev > cursor comparison matching upstream reader.ts:308
+  const highLexCursor = await callList({ cursor: "not-a-valid-tid-cursor" });
+  assert.equal(highLexCursor.status, 200);
+  assert.deepEqual(highLexCursor.json.repos, []);
+  assert.equal(highLexCursor.json.cursor, undefined);
+
+  const lowLexCursor = await callList({ cursor: "0" });
+  assert.equal(lowLexCursor.status, 200);
+  assert.equal((lowLexCursor.json.repos as Array<unknown>).length, 3);
 
   // Exact exp boundary: 599_999ms since auth ok, 600_000ms -> JwtExpired
   network.advanceClock(599_999);

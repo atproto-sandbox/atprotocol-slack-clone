@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
-import { dmConversationUri, dmInboxUri } from "@flock/protocol/keys";
+import { dmConversationUri, dmInboxUri, tidNow } from "@flock/protocol/keys";
 import { closeDb, getRawDb } from "../lib/db";
 import {
   currentDmWakeHead,
@@ -254,9 +254,74 @@ test("parseFollow accepts <=200 spaces with legacy decimal or epoch cursors (<=1
   assert.throws(() => parseFollow({ follow: [], extra: true }), FeedRequestError);
 });
 
-test("the published lexicon allows 200 followed spaces and 16-character cursors", () => {
+test("global aggregate maxSpaces cap evicts oldest (callerDid, space) entries across callers, preserves empty caller shells for accurate resets, and refreshes global LRU on wake", async () => {
+  resetDmFeedWakesForTests({ maxSpaces: 5 });
+  try {
+    const caller1 = "did:plc:caller1";
+    const caller2 = "did:plc:caller2";
+    const caller3 = "did:plc:caller3";
+    const caller4 = "did:plc:caller4";
+    const s1a = dmConversationUri(caller1, tidNow(1_700_000_001_000));
+    const s1b = dmConversationUri(caller1, tidNow(1_700_000_002_000));
+    const s2a = dmConversationUri(caller2, tidNow(1_700_000_003_000));
+    const s2b = dmConversationUri(caller2, tidNow(1_700_000_004_000));
+    const s3a = dmConversationUri(caller3, tidNow(1_700_000_005_000));
+    const s3b = dmConversationUri(caller3, tidNow(1_700_000_006_000));
+    const s3c = dmConversationUri(caller3, tidNow(1_700_000_007_000));
+    const s3d = dmConversationUri(caller3, tidNow(1_700_000_008_000));
+    const s4a = dmInboxUri(caller4);
+    const allowed = new Set([s1a, s1b, s2a, s2b, s3a, s3b, s3c, s3d, s4a]);
+
+    const head1 = (await getChanges(caller1, [], undefined, deps(allowed))).head;
+    const head2 = (await getChanges(caller2, [], undefined, deps(allowed))).head;
+    const head3 = (await getChanges(caller3, [], undefined, deps(allowed))).head;
+    const head4 = (await getChanges(caller4, [], undefined, deps(allowed))).head;
+
+    // 3 callers x 2 spaces = 6 total > maxSpaces(5) -> oldest (caller1, s1a) is evicted globally!
+    await recordDmWake(caller1, s1a);
+    await recordDmWake(caller1, s1b);
+    await recordDmWake(caller2, s2a);
+    await recordDmWake(caller2, s2b);
+    await recordDmWake(caller3, s3a);
+    await recordDmWake(caller3, s3b);
+
+    const ans1 = await getChanges(caller1, [followAt(s1a, head1), followAt(s1b, head1)], undefined, deps(allowed, 50));
+    assert.deepEqual(ans1.reset, [s1a], "oldest global entry (caller1, s1a) was evicted and reports reset");
+    assert.deepEqual(ans1.changed.map((c) => c.space), [s1b], "newer entry (caller1, s1b) stayed intact");
+
+    const ans2 = await getChanges(caller2, [followAt(s2a, head2), followAt(s2b, head2)], undefined, deps(allowed, 50));
+    assert.deepEqual(ans2.reset, []);
+    assert.deepEqual(ans2.changed.map((c) => c.space), [s2a, s2b]);
+
+    const ans3 = await getChanges(caller3, [followAt(s3a, head3), followAt(s3b, head3)], undefined, deps(allowed, 50));
+    assert.deepEqual(ans3.reset, []);
+    assert.deepEqual(ans3.changed.map((c) => c.space), [s3a, s3b]);
+
+    // Refreshing (caller1, s1b) moves it to newest in global LRU; adding s3c & s3d evicts BOTH of caller2's spaces!
+    await recordDmWake(caller1, s1b);
+    await recordDmWake(caller3, s3c);
+    await recordDmWake(caller3, s3d);
+
+    const ans1AfterRefresh = await getChanges(caller1, [followAt(s1b, head1)], undefined, deps(allowed, 50));
+    assert.deepEqual(ans1AfterRefresh.reset, [], "refreshed (caller1, s1b) survived subsequent global evictions");
+    assert.deepEqual(ans1AfterRefresh.changed.map((c) => c.space), [s1b]);
+
+    const ans2EmptyShell = await getChanges(caller2, [followAt(s2a, head2), followAt(s2b, head2)], undefined, deps(allowed, 50));
+    assert.deepEqual(ans2EmptyShell.reset, [s2a, s2b], "empty caller shell retains evictedFloor so caller2 receives accurate resets");
+
+    const ans4Untouched = await getChanges(caller4, [followAt(s4a, head4)], undefined, deps(allowed, 30));
+    assert.deepEqual(ans4Untouched.reset, [], "unrelated caller4 with zero evictions does not receive spurious resets");
+    assertZeroDmRowsInSqlite();
+  } finally {
+    resetDmFeedWakesForTests();
+  }
+});
+
+test("the published lexicon allows 200 followed spaces, 16-character cursors, and names listWriters", () => {
   assert.equal(lexicon.defs.main.input.schema.properties.follow.maxLength, MAX_FOLLOWED_SPACES);
   assert.equal(lexicon.defs.main.output.schema.properties.head.maxLength, 16);
   assert.equal(lexicon.defs.follow.properties.after.maxLength, 16);
   assert.equal(lexicon.defs.change.properties.cursor.maxLength, 16);
+  assert.equal(lexicon.defs.main.description.includes("listWriters"), true);
+  assert.equal(lexicon.defs.main.description.includes("listRepos"), false);
 });

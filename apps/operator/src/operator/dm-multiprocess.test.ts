@@ -10,10 +10,10 @@ import { fileURLToPath } from "node:url";
 import test, { after } from "node:test";
 import { Secp256k1Keypair } from "@atproto/crypto";
 import { createServiceJwt } from "@atproto/xrpc-server";
-import { dmConversationUri, dmInboxUri } from "@flock/protocol/keys";
+import { dmConversationUri, dmInboxUri, tidNow } from "@flock/protocol/keys";
 import { NOTICE_METHOD, OPERATOR_METHOD } from "@flock/protocol/nsids";
 import { closeDb, getRawDb } from "../lib/db";
-import { dmWakeSocketPath } from "./dm-feed-wakes";
+import { dmWakeSocketPath, recordDmWake, resetDmFeedWakesForTests } from "./dm-feed-wakes";
 import { createOperatorApp } from "./server";
 import { deriveDmNotifyToken } from "./space-notification";
 
@@ -313,12 +313,117 @@ test("multi-process DM wake hub delivers cross-worker long-poll wakes immediatel
   const dirFiles = readdirSync(DIRECTORY);
   assert.ok(dirFiles.every((name) => name.startsWith("multiproc.db")), `expected only SQLite DB files in ${DIRECTORY}, saw ${dirFiles.join(", ")}`);
 
+  // 5b. Live Hub socket protection: a peer with wrong AUTH_ENCRYPTION_KEY (or oversized/invalid frame) fails handshake as
+  //     "protocol_failed" and MUST NEVER unlink the live Hub's .sock file!
+  const liveSockInode = statSync(sockPath).ino;
+  const wakesModule = fileURLToPath(new URL("./dm-feed-wakes.ts", import.meta.url));
+  await new Promise<void>((resolveRogue, rejectRogue) => {
+    const rogueScript = `
+      import { ensureDmWakeReady } from ${JSON.stringify(wakesModule)};
+      await ensureDmWakeReady();
+      await ensureDmWakeReady();
+      process.exit(0);
+    `;
+    const rogue = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", rogueScript], {
+      cwd: process.cwd(),
+      env: { ...process.env, AUTH_ENCRYPTION_KEY: "ff".repeat(32) },
+      stdio: "ignore",
+    });
+    rogue.once("error", rejectRogue);
+    rogue.once("close", (code) => {
+      if (code === 0) resolveRogue();
+      else rejectRogue(new Error(`Rogue worker exited with code ${code}`));
+    });
+  });
+  // Also send an oversized frame header directly to the live hub socket and wait for close
+  await new Promise<void>((resolveOversized) => {
+    const badSock = net.createConnection(sockPath, () => {
+      const badHeader = Buffer.alloc(40, 0xff);
+      badSock.write(badHeader);
+    });
+    badSock.resume();
+    badSock.once("close", () => resolveOversized());
+    badSock.on("error", () => undefined);
+  });
+  assert.equal(existsSync(sockPath), true, "live Hub .sock file remains on disk after refused auth/protocol handshakes");
+  assert.equal(statSync(sockPath).ino, liveSockInode, "live Hub .sock inode was NEVER unlinked or rebound");
+
+  // 5c. Chunked IPC snapshot sync across >300 (callerDid, space) entries (including >250 spaces on one caller split across
+  //     snapshot_chunk frames!) + global maxSpaces eviction replication to newly joined Worker C and existing Worker B!
+  const aliceAuth = await mintGetChangesAuth(ALICE_DID, aliceKey);
+  const bobSpaces = Array.from({ length: 280 }, (_, idx) => dmConversationUri(ALICE_DID, tidNow(1_700_000_000_000 + idx * 1_000)));
+  const aliceSpaces = Array.from({ length: 70 }, (_, idx) => dmConversationUri(BOB_DID, tidNow(1_701_000_000_000 + idx * 1_000)));
+  for (const sp of bobSpaces) await recordDmWake(BOB_DID, sp);
+  for (const sp of aliceSpaces) await recordDmWake(ALICE_DID, sp);
+
+  const spawnedC = await spawnWorkerB();
+  try {
+    const bobCheckFirstChunk = await postGetChanges(
+      spawnedC.url,
+      bobAuth,
+      bobSpaces.slice(0, 150).map((space) => ({ space, after: headOnA.head })),
+    );
+    assert.equal(bobCheckFirstChunk.changed.length, 150, "Worker C synced first chunk of Bob's spaces");
+    assert.deepEqual(bobCheckFirstChunk.reset, []);
+
+    const bobCheckSecondChunk = await postGetChanges(
+      spawnedC.url,
+      bobAuth,
+      bobSpaces.slice(150, 280).map((space) => ({ space, after: headOnA.head })),
+    );
+    assert.equal(bobCheckSecondChunk.changed.length, 130, "Worker C merged second split chunk of Bob's 280 spaces");
+    assert.deepEqual(bobCheckSecondChunk.reset, []);
+
+    const aliceCheckChunk = await postGetChanges(
+      spawnedC.url,
+      aliceAuth,
+      aliceSpaces.map((space) => ({ space, after: headOnA.head })),
+    );
+    assert.equal(aliceCheckChunk.changed.length, 70, "Worker C synced Alice's 70 spaces across snapshot chunks (>350 total)");
+    assert.deepEqual(aliceCheckChunk.reset, []);
+
+    // Verify global aggregate maxSpaces eviction replicates cleanly from Hub to replicas (Worker B & Worker C)
+    resetDmFeedWakesForTests({ maxSpaces: 4 });
+    const freshBobHead = (await postGetChanges(workerAUrl, bobAuth, [])).head;
+    const freshAliceHead = (await postGetChanges(workerAUrl, aliceAuth, [])).head;
+    await recordDmWake(BOB_DID, bobSpaces[0]!);
+    await recordDmWake(BOB_DID, bobSpaces[1]!);
+    await recordDmWake(ALICE_DID, aliceSpaces[0]!);
+    await recordDmWake(ALICE_DID, aliceSpaces[1]!);
+    await recordDmWake(ALICE_DID, aliceSpaces[2]!); // 5th entry -> evicts oldest (BOB_DID, bobSpaces[0]) across cluster!
+
+    const bobOnReplica = await postGetChanges(spawnedC.url, bobAuth, [
+      { space: bobSpaces[0]!, after: freshBobHead },
+      { space: bobSpaces[1]!, after: freshBobHead },
+    ]);
+    assert.deepEqual(bobOnReplica.reset, [bobSpaces[0]!], "replica evicted oldest global space and reports reset");
+    assert.deepEqual(bobOnReplica.changed.map((c) => c.space), [bobSpaces[1]!], "replica retained newer space");
+    const aliceOnReplica = await postGetChanges(spawnedC.url, aliceAuth, [
+      { space: aliceSpaces[0]!, after: freshAliceHead },
+      { space: aliceSpaces[2]!, after: freshAliceHead },
+    ]);
+    assert.deepEqual(aliceOnReplica.reset, []);
+    assert.equal(aliceOnReplica.changed.length, 2);
+    resetDmFeedWakesForTests();
+  } finally {
+    if (spawnedC.child.exitCode === null) {
+      spawnedC.child.kill("SIGTERM");
+      await once(spawnedC.child, "close").catch(() => undefined);
+    }
+  }
+
+  // Re-establish a cursor on the post-reset epoch before testing Hub exit in step 6!
+  const preExitHead = (await postGetChanges(workerBUrl, bobAuth, [])).head;
+  await postNotifyUpdate(workerAUrl, dmSpace, bobToken, ALICE_DID);
+  const preExitWake = await postGetChanges(workerBUrl, bobAuth, [{ space: dmSpace, after: preExitHead }]);
+  const preExitCursor = preExitWake.changed[0]!.cursor;
+
   // 6. When Hub (Worker A) exits, Worker B detects hub loss, rotates epoch (triggering clean reset), and re-elects itself as Hub!
   closeDb();
   await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
-  const afterHubExit = await postGetChanges(workerBUrl, bobAuth, [{ space: dmSpace, after: cursor2 }]);
+  const afterHubExit = await postGetChanges(workerBUrl, bobAuth, [{ space: dmSpace, after: preExitCursor }]);
   assert.deepEqual(afterHubExit.reset, [dmSpace], "Worker B triggers clean reset when Hub exits");
-  assert.notEqual(epochOf(afterHubExit.head), epochOf(cursor2), "new elected Hub epoch differs from exited Hub epoch");
+  assert.notEqual(epochOf(afterHubExit.head), epochOf(preExitCursor), "new elected Hub epoch differs from exited Hub epoch");
 
   // Ensure net import is used
   assert.equal(typeof net.createConnection, "function");
