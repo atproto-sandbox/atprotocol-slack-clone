@@ -661,7 +661,7 @@ export class DmClient {
 
     const settled = await mapLimited(uniqueSpaces, FANOUT, async (space): Promise<InitialWatchResult> => {
       try {
-        const cred = await this.credentials.get(space);
+        const cred = await this.credentials.get(space, options.signal ? { signal: options.signal } : undefined);
         return { ok: true, space, cred };
       } catch (error) {
         return { ok: false, space, error };

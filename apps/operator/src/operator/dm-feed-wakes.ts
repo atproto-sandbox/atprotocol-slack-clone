@@ -5,10 +5,12 @@ import { join, resolve } from "node:path";
 import { createHash, createHmac, hkdfSync, randomBytes, timingSafeEqual } from "node:crypto";
 import { isDid, parseDmSpaceUri } from "@flock/protocol/keys";
 import { getOperatorConfig } from "../config";
-import { onDbClose } from "../lib/db";
+import { getRawDb, onDbClose } from "../lib/db";
 
 // Ephemeral, caller-scoped DM wake tracker with host-local multi-process Unix domain socket coordination.
-// Zero DM rows are ever persisted to SQLite, and zero DM data files are written to disk.
+// Zero DM rows (zero DM URIs, zero DIDs, zero user activity) are ever persisted to SQLite, and zero DM data files are written to disk.
+// Multi-process hub election uses a single static content-free leader lease row (`name = 'dm_ipc_hub'`) in `oauth_request_lock`
+// paired with a unique per-hub socket pathname (`flock-dm-v2-<digest>-<hubId>.sock`).
 
 export const MAX_TRACKED_DM_CALLERS = 50_000;
 export const MAX_TRACKED_DM_SPACES = 50_000;
@@ -18,13 +20,19 @@ export const SNAPSHOT_CHUNK_MAX_SPACES = 250;
 export const MAX_DM_SEQ_PER_EPOCH = 36 ** 4 - 1;
 export const DM_WAKE_RATE_LIMIT_MAX = 120;
 export const DM_WAKE_RATE_LIMIT_WINDOW_MS = 60_000;
+export const HUB_LEASE_TTL_MS = 15_000;
 
 const SNAPSHOT_CHUNK_MAX_CALLERS = 250;
 const MAX_RATE_LIMIT_BUCKETS = 50_000;
-const DM_IPC_KEY_INFO = "flock-dm-ipc-v1";
+const MAX_SEEN_OP_IDS = 16_384;
+const DM_IPC_KEY_INFO = "flock-dm-ipc-v2";
+const DM_IPC_PROTOCOL_VERSION = 2;
+const DM_IPC_HUB_LOCK_NAME = "dm_ipc_hub";
+const HUB_HEARTBEAT_MS = 4_000;
 const MAX_IPC_FRAME_BYTES = 8 * 1024 * 1024;
 const IPC_HANDSHAKE_TIMEOUT_MS = 3_000;
 const IPC_ACK_TIMEOUT_MS = 1_500;
+const IPC_RPC_TIMEOUT_MS = 3_000;
 const ALPHA = "abcdefghijklmnopqrstuvwxyz";
 const BASE36 = "0123456789abcdefghijklmnopqrstuvwxyz";
 
@@ -69,6 +77,8 @@ type GlobalWakeEntry = {
 type GlobalSpaceEviction = {
   callerDid: string;
   space: string;
+  callerEpoch: string;
+  head: number;
   evictedFloor: number;
 };
 
@@ -89,14 +99,15 @@ type RateBucket = {
 };
 
 type IpcFrame =
-  | { type: "challenge"; nonce: string }
-  | { type: "auth"; nonce: string }
+  | { type: "challenge"; nonce: string; version?: number }
+  | { type: "auth"; nonce: string; version?: number }
+  | { type: "snapshot"; epoch: string; evictedCallers: number; maxSpaces?: number; callers: SerializedCallerState[] }
   | { type: "snapshot_begin"; epoch: string; evictedCallers: number; maxSpaces: number }
   | { type: "snapshot_chunk"; callers: SerializedCallerState[] }
   | { type: "snapshot_end" }
   | { type: "wake"; bcastId: number; mutation: WakeMutation }
   | { type: "wake_ack"; bcastId: number }
-  | { type: "record_wake"; reqId: number; callerDid: string; space: string; nowMs: number }
+  | { type: "record_wake"; reqId: number; opId?: string; callerDid: string; space: string; nowMs: number }
   | { type: "record_ok"; reqId: number }
   | { type: "record_err"; reqId: number; code: "rate_limit" | "error"; message: string }
   | { type: "reset"; epoch: string; maxSpaces: number };
@@ -115,6 +126,7 @@ let maxTrackedDmSpaces = MAX_TRACKED_DM_SPACES;
 const callers = new Map<string, CallerWakeState>();
 const globalEntries = new Map<string, GlobalWakeEntry>();
 const rateBuckets = new Map<string, RateBucket>();
+const seenOpIds = new Map<string, Promise<void>>();
 const wakeListeners = new Set<(callerDid?: string) => void>();
 
 function notifyListeners(callerDid?: string): void {
@@ -154,8 +166,9 @@ function clearCallerGlobalEntries(callerDid: string, state: CallerWakeState): vo
   }
 }
 
-function evictGlobalOverflow(): GlobalSpaceEviction[] {
+function evictGlobalOverflow(activeCallerDid?: string): GlobalSpaceEviction[] {
   const evicted: GlobalSpaceEviction[] = [];
+  const advancedVictims = new Set<string>(activeCallerDid ? [activeCallerDid] : []);
   while (globalEntries.size > maxTrackedDmSpaces) {
     const oldest = globalEntries.entries().next();
     if (oldest.done) break;
@@ -164,12 +177,27 @@ function evictGlobalOverflow(): GlobalSpaceEviction[] {
     const ownerState = callers.get(oldestEntry.callerDid);
     if (ownerState) {
       ownerState.spaces.delete(oldestEntry.space);
-      if (oldestEntry.seq > ownerState.evictedFloor) {
+      const raisedFloor = oldestEntry.seq > ownerState.evictedFloor;
+      if (raisedFloor) {
         ownerState.evictedFloor = oldestEntry.seq;
+      }
+      if (raisedFloor && !advancedVictims.has(oldestEntry.callerDid)) {
+        advancedVictims.add(oldestEntry.callerDid);
+        if (ownerState.head >= MAX_DM_SEQ_PER_EPOCH) {
+          clearCallerGlobalEntries(oldestEntry.callerDid, ownerState);
+          ownerState.epoch = generateBootEpoch(ownerState.epoch);
+          ownerState.head = 1;
+          ownerState.evictedFloor = 0;
+          ownerState.spaces.clear();
+        } else {
+          ownerState.head += 1;
+        }
       }
       evicted.push({
         callerDid: oldestEntry.callerDid,
         space: oldestEntry.space,
+        callerEpoch: ownerState.epoch,
+        head: ownerState.head,
         evictedFloor: ownerState.evictedFloor,
       });
     }
@@ -191,16 +219,16 @@ export function waitForDmWake(
   signal?: AbortSignal,
 ): Promise<void> {
   void spaces;
-  return new Promise((resolve) => {
+  return new Promise((resolveWait) => {
     if (withinMs <= 0 || signal?.aborted) {
-      resolve();
+      resolveWait();
       return;
     }
     const done = () => {
       clearTimeout(timer);
       signal?.removeEventListener("abort", done);
       unsub();
-      resolve();
+      resolveWait();
     };
     const timer = setTimeout(done, withinMs);
     timer.unref?.();
@@ -253,9 +281,10 @@ function applyAuthoritativeWake(callerDid: string, space: string): WakeMutation 
   }
 
   state.head += 1;
+  const spaceSeq = state.head;
   state.spaces.delete(space);
-  state.spaces.set(space, state.head);
-  upsertGlobalEntry(callerDid, space, state.head);
+  state.spaces.set(space, spaceSeq);
+  upsertGlobalEntry(callerDid, space, spaceSeq);
 
   while (state.spaces.size > MAX_SPACES_PER_CALLER) {
     const oldest = state.spaces.entries().next();
@@ -276,14 +305,14 @@ function applyAuthoritativeWake(callerDid: string, space: string): WakeMutation 
     evictedCallers += 1;
   }
 
-  const globalEvictions = evictGlobalOverflow();
+  const globalEvictions = evictGlobalOverflow(callerDid);
 
   return {
     callerDid,
     space,
     callerEpoch: state.epoch,
     head: state.head,
-    seq: state.head,
+    seq: spaceSeq,
     evictedFloor: state.evictedFloor,
     evictedCallers,
     ...(globalEvictions.length > 0 ? { globalEvictions } : {}),
@@ -335,14 +364,39 @@ function applyReplicaMutation(mutation: WakeMutation): void {
       deleteGlobalEntry(ev.callerDid, ev.space);
       const ownerState = callers.get(ev.callerDid);
       if (ownerState) {
-        ownerState.spaces.delete(ev.space);
-        if (ev.evictedFloor > ownerState.evictedFloor) {
+        if (ev.callerEpoch && ownerState.epoch !== ev.callerEpoch) {
+          clearCallerGlobalEntries(ev.callerDid, ownerState);
+          ownerState.epoch = ev.callerEpoch;
+          ownerState.head = ev.head;
           ownerState.evictedFloor = ev.evictedFloor;
+          ownerState.spaces.clear();
+        } else {
+          ownerState.spaces.delete(ev.space);
+          if (ev.evictedFloor > ownerState.evictedFloor) {
+            ownerState.evictedFloor = ev.evictedFloor;
+          }
+          if (typeof ev.head === "number" && ev.head > ownerState.head) {
+            ownerState.head = ev.head;
+          }
         }
       }
     }
   }
-  evictGlobalOverflow();
+  evictGlobalOverflow(mutation.callerDid);
+}
+
+function serializeAllCallers(): SerializedCallerState[] {
+  const list: SerializedCallerState[] = [];
+  for (const [callerDid, state] of callers) {
+    list.push({
+      callerDid,
+      epoch: state.epoch,
+      head: state.head,
+      evictedFloor: state.evictedFloor,
+      spaces: [...state.spaces.entries()],
+    });
+  }
+  return list;
 }
 
 function buildSnapshotChunks(): SerializedCallerState[][] {
@@ -397,6 +451,32 @@ function buildSnapshotChunks(): SerializedCallerState[][] {
   return chunks;
 }
 
+function mergeSerializedCallers(
+  target: Map<string, CallerWakeState>,
+  items: ReadonlyArray<SerializedCallerState>,
+): void {
+  for (const item of items) {
+    let existing = target.get(item.callerDid);
+    if (!existing) {
+      existing = {
+        epoch: item.epoch,
+        head: item.head,
+        evictedFloor: item.evictedFloor,
+        spaces: new Map(),
+      };
+      target.set(item.callerDid, existing);
+    } else {
+      existing.epoch = item.epoch;
+      if (item.head > existing.head) existing.head = item.head;
+      if (item.evictedFloor > existing.evictedFloor) existing.evictedFloor = item.evictedFloor;
+    }
+    for (const [space, seq] of item.spaces) {
+      existing.spaces.delete(space);
+      existing.spaces.set(space, seq);
+    }
+  }
+}
+
 function loadSnapshot(
   epoch: string,
   nextEvictedCallers: number,
@@ -410,6 +490,7 @@ function loadSnapshot(
   }
   callers.clear();
   globalEntries.clear();
+  seenOpIds.clear();
   for (const [callerDid, state] of snapshotCallers) {
     const spaces = new Map<string, number>();
     for (const [space, seq] of state.spaces) {
@@ -462,7 +543,7 @@ export function readDmWakes(
 
 // ---- Host-local Unix domain socket IPC coordination (zero DM SQLite rows, zero DM files) ----
 
-export function dmWakeSocketPath(databasePath?: string, operatorServiceRef?: string): string | null {
+function dmWakeClusterDigest(databasePath?: string, operatorServiceRef?: string): string | null {
   let dbPath = databasePath;
   let serviceRef = operatorServiceRef;
   if (dbPath === undefined || serviceRef === undefined) {
@@ -475,11 +556,73 @@ export function dmWakeSocketPath(databasePath?: string, operatorServiceRef?: str
     }
   }
   if (!dbPath || dbPath === ":memory:") return null;
-  const digest = createHash("sha256")
+  return createHash("sha256")
     .update(`${resolve(dbPath)}\0${serviceRef ?? ""}`, "utf8")
     .digest("hex")
     .slice(0, 16);
-  return join(tmpdir(), `flock-dm-${digest}.sock`);
+}
+
+function socketDirectoryFor(filename: string): string {
+  const candidate = join(tmpdir(), filename);
+  // POSIX/macOS sockaddr_un sun_path is 104 bytes including trailing NUL.
+  return Buffer.byteLength(candidate, "utf8") <= 100 ? tmpdir() : "/tmp";
+}
+
+function buildHubSocketPath(clusterDigest: string, hubId: string): string {
+  const filename = `flock-dm-v2-${clusterDigest}-${hubId}.sock`;
+  return join(socketDirectoryFor(filename), filename);
+}
+
+export function formatHubLeaseToken(hubId: string, sockPath: string): string {
+  return `v2|${hubId}|${sockPath}`;
+}
+
+function parseHubLeaseToken(
+  token: string,
+  expectedDigest?: string,
+): { hubId: string; sockPath: string } | null {
+  if (!token.startsWith("v2|")) return null;
+  const secondPipe = token.indexOf("|", 3);
+  if (secondPipe <= 3 || secondPipe >= token.length - 1) return null;
+  const hubId = token.slice(3, secondPipe);
+  const sockPath = token.slice(secondPipe + 1);
+  if (!/^[0-9a-f]{12}$/.test(hubId) || !sockPath.endsWith(".sock")) return null;
+  if (expectedDigest && !sockPath.includes(`flock-dm-v2-${expectedDigest}-${hubId}.sock`)) {
+    return null;
+  }
+  return { hubId, sockPath };
+}
+
+function readHubLeaseRow(): { token: string; expires_at: number } | undefined {
+  try {
+    return getRawDb()
+      .prepare("SELECT token, expires_at FROM oauth_request_lock WHERE name = ?")
+      .get(DM_IPC_HUB_LOCK_NAME) as { token: string; expires_at: number } | undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function dmWakeSocketPath(
+  databasePath?: string,
+  operatorServiceRef?: string,
+  hubId?: string,
+): string | null {
+  const digest = dmWakeClusterDigest(databasePath, operatorServiceRef);
+  if (!digest) return null;
+  if (hubId) return buildHubSocketPath(digest, hubId);
+  if (databasePath === undefined && operatorServiceRef === undefined) {
+    if ((ipcState.mode === "hub" || ipcState.mode === "client") && ipcState.clusterDigest === digest) {
+      return ipcState.sockPath;
+    }
+    const row = readHubLeaseRow();
+    if (row && row.expires_at > Date.now()) {
+      const parsed = parseHubLeaseToken(row.token, digest);
+      if (parsed) return parsed.sockPath;
+    }
+  }
+  const filename = `flock-dm-v2-${digest}.sock`;
+  return join(socketDirectoryFor(filename), filename);
 }
 
 function deriveIpcKey(encryptionKey: Buffer): Buffer {
@@ -543,17 +686,22 @@ type HubPeer = {
 
 type IpcState =
   | { mode: "none" }
-  | { mode: "starting"; sockPath: string; promise: Promise<void> }
+  | { mode: "starting"; clusterDigest: string; promise: Promise<void> }
   | {
     mode: "hub";
+    clusterDigest: string;
+    hubId: string;
     sockPath: string;
+    leaseToken: string;
     ipcKey: Buffer;
     server: net.Server;
     peers: Set<HubPeer>;
     nextBcastId: number;
+    heartbeatTimer?: ReturnType<typeof setInterval>;
   }
   | {
     mode: "client";
+    clusterDigest: string;
     sockPath: string;
     ipcKey: Buffer;
     socket: net.Socket;
@@ -564,6 +712,70 @@ type IpcState =
 let ipcState: IpcState = { mode: "none" };
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 let closingIntentionally = false;
+
+function safeUnlinkSocket(sockPath: string | null | undefined): void {
+  if (!sockPath) return;
+  try {
+    unlinkSync(sockPath);
+  } catch {
+    // Ignore ENOENT or already-removed socket path.
+  }
+}
+
+function closeHubResources(hub: Extract<IpcState, { mode: "hub" }>): void {
+  if (hub.heartbeatTimer) {
+    clearInterval(hub.heartbeatTimer);
+    hub.heartbeatTimer = undefined;
+  }
+  for (const peer of hub.peers) {
+    for (const finishAck of peer.pendingAcks.values()) finishAck();
+    peer.pendingAcks.clear();
+    peer.socket.destroy();
+  }
+  hub.peers.clear();
+  try {
+    hub.server.close();
+  } catch {
+    // Ignore already-closed server.
+  }
+  safeUnlinkSocket(hub.sockPath);
+}
+
+function stepDownHub(hub: Extract<IpcState, { mode: "hub" }>): void {
+  if (ipcState.mode !== "hub" || ipcState !== hub) return;
+  ipcState = { mode: "none" };
+  closeHubResources(hub);
+  if (!closingIntentionally) {
+    clusterEpoch = generateBootEpoch(clusterEpoch);
+    evictedCallers = 0;
+    callers.clear();
+    globalEntries.clear();
+    seenOpIds.clear();
+    notifyListeners(undefined);
+    scheduleReconnect();
+  }
+}
+
+function startHubHeartbeat(hub: Extract<IpcState, { mode: "hub" }>): void {
+  const timer = setInterval(() => {
+    if (ipcState.mode !== "hub" || ipcState !== hub) {
+      clearInterval(timer);
+      return;
+    }
+    try {
+      const res = getRawDb()
+        .prepare("UPDATE oauth_request_lock SET expires_at = ? WHERE name = ? AND token = ?")
+        .run(Date.now() + HUB_LEASE_TTL_MS, DM_IPC_HUB_LOCK_NAME, hub.leaseToken);
+      if (res.changes === 0) {
+        stepDownHub(hub);
+      }
+    } catch {
+      // If DB was closed during shutdown, onDbClose tears down IPC cleanly.
+    }
+  }, HUB_HEARTBEAT_MS);
+  timer.unref?.();
+  hub.heartbeatTimer = timer;
+}
 
 function broadcastFromHub(
   hub: Extract<IpcState, { mode: "hub" }>,
@@ -607,7 +819,45 @@ function broadcastResetFromHub(hub: Extract<IpcState, { mode: "hub" }>): void {
   }
 }
 
-function tryListenAsHub(sockPath: string, ipcKey: Buffer): Promise<Extract<IpcState, { mode: "hub" }> | null> {
+async function applyAuthoritativeWakeIdempotent(
+  opId: string | undefined,
+  callerDid: string,
+  space: string,
+  nowMs: number,
+): Promise<void> {
+  if (opId) {
+    const existing = seenOpIds.get(opId);
+    if (existing) {
+      await existing;
+      return;
+    }
+  }
+
+  checkAndRecordRateLimit(callerDid, space, nowMs);
+  const mutation = applyAuthoritativeWake(callerDid, space);
+  notifyMutationListeners(mutation);
+  const currentHub = ipcState.mode === "hub" ? ipcState : null;
+  const bcast = currentHub ? broadcastFromHub(currentHub, mutation) : Promise.resolve();
+
+  if (opId) {
+    seenOpIds.set(opId, bcast);
+    while (seenOpIds.size > MAX_SEEN_OP_IDS) {
+      const oldest = seenOpIds.keys().next();
+      if (oldest.done) break;
+      seenOpIds.delete(oldest.value);
+    }
+  }
+
+  await bcast;
+}
+
+function tryListenAsHub(
+  clusterDigest: string,
+  hubId: string,
+  sockPath: string,
+  leaseToken: string,
+  ipcKey: Buffer,
+): Promise<Extract<IpcState, { mode: "hub" }> | null> {
   return new Promise((resolveHub, rejectHub) => {
     const peers = new Set<HubPeer>();
     const server = net.createServer((peerSocket) => {
@@ -642,6 +892,22 @@ function tryListenAsHub(sockPath: string, ipcKey: Buffer): Promise<Extract<IpcSt
           }
           clearTimeout(authTimer);
           peer.authenticated = true;
+          const peerVersion = typeof frame.version === "number" ? frame.version : 1;
+          if (peerVersion < 2) {
+            const v1Frame = encodeIpcFrame(ipcKey, {
+              type: "snapshot",
+              epoch: clusterEpoch,
+              evictedCallers,
+              maxSpaces: maxTrackedDmSpaces,
+              callers: serializeAllCallers(),
+            });
+            if (v1Frame.byteLength > MAX_IPC_FRAME_BYTES + 36) {
+              peerSocket.destroy();
+              return;
+            }
+            peerSocket.write(v1Frame);
+            return;
+          }
           peerSocket.write(
             encodeIpcFrame(ipcKey, {
               type: "snapshot_begin",
@@ -672,44 +938,39 @@ function tryListenAsHub(sockPath: string, ipcKey: Buffer): Promise<Extract<IpcSt
             peerSocket.write(encodeIpcFrame(ipcKey, { type: "record_ok", reqId: frame.reqId }));
             return;
           }
-          try {
-            checkAndRecordRateLimit(frame.callerDid, frame.space, frame.nowMs);
-          } catch (err) {
-            if (err instanceof DmRateLimitError) {
+          void applyAuthoritativeWakeIdempotent(frame.opId, frame.callerDid, frame.space, frame.nowMs).then(
+            () => {
+              if (!peerSocket.destroyed) {
+                peerSocket.write(encodeIpcFrame(ipcKey, { type: "record_ok", reqId: frame.reqId }));
+              }
+            },
+            (err: unknown) => {
+              if (peerSocket.destroyed) return;
+              if (err instanceof DmRateLimitError) {
+                peerSocket.write(
+                  encodeIpcFrame(ipcKey, {
+                    type: "record_err",
+                    reqId: frame.reqId,
+                    code: "rate_limit",
+                    message: err.message,
+                  }),
+                );
+                return;
+              }
               peerSocket.write(
                 encodeIpcFrame(ipcKey, {
                   type: "record_err",
                   reqId: frame.reqId,
-                  code: "rate_limit",
-                  message: err.message,
+                  code: "error",
+                  message: "DM wake failed.",
                 }),
               );
-              return;
-            }
-            peerSocket.write(
-              encodeIpcFrame(ipcKey, {
-                type: "record_err",
-                reqId: frame.reqId,
-                code: "error",
-                message: "DM wake failed.",
-              }),
-            );
-            return;
-          }
-
-          const mutation = applyAuthoritativeWake(frame.callerDid, frame.space);
-          notifyMutationListeners(mutation);
-          const currentHub = ipcState.mode === "hub" ? ipcState : null;
-          const bcast = currentHub ? broadcastFromHub(currentHub, mutation) : Promise.resolve();
-          void bcast.finally(() => {
-            if (!peerSocket.destroyed) {
-              peerSocket.write(encodeIpcFrame(ipcKey, { type: "record_ok", reqId: frame.reqId }));
-            }
-          });
+            },
+          );
         }
       });
 
-      peerSocket.write(encodeIpcFrame(ipcKey, { type: "challenge", nonce }));
+      peerSocket.write(encodeIpcFrame(ipcKey, { type: "challenge", nonce, version: DM_IPC_PROTOCOL_VERSION }));
     });
     server.unref();
 
@@ -733,7 +994,10 @@ function tryListenAsHub(sockPath: string, ipcKey: Buffer): Promise<Extract<IpcSt
       }
       resolveHub({
         mode: "hub",
+        clusterDigest,
+        hubId,
         sockPath,
+        leaseToken,
         ipcKey,
         server,
         peers,
@@ -743,7 +1007,30 @@ function tryListenAsHub(sockPath: string, ipcKey: Buffer): Promise<Extract<IpcSt
   });
 }
 
+function disconnectClientState(client: Extract<IpcState, { mode: "client" }>): void {
+  for (const pending of client.pendingReqs.values()) {
+    pending.reject(new Error("DM wake hub disconnected."));
+  }
+  client.pendingReqs.clear();
+  if (!client.socket.destroyed) {
+    client.socket.destroy();
+  }
+  if (ipcState.mode === "client" && ipcState === client) {
+    ipcState = { mode: "none" };
+    if (!closingIntentionally) {
+      clusterEpoch = generateBootEpoch(clusterEpoch);
+      evictedCallers = 0;
+      callers.clear();
+      globalEntries.clear();
+      seenOpIds.clear();
+      notifyListeners(undefined);
+      scheduleReconnect();
+    }
+  }
+}
+
 function tryConnectToHub(
+  clusterDigest: string,
   sockPath: string,
   ipcKey: Buffer,
 ): Promise<Extract<IpcState, { mode: "client" }> | "enoent" | "stale_refused" | "protocol_failed"> {
@@ -783,6 +1070,29 @@ function tryConnectToHub(
     };
     refreshHandshakeTimer();
 
+    const finishSnapshotHandshake = (
+      epoch: string,
+      nextEvictedCallers: number,
+      snapshotCallers: Map<string, CallerWakeState>,
+      nextMaxSpaces?: number,
+    ) => {
+      settled = true;
+      clearHandshakeTimer();
+      socket.removeListener("error", onEarlyError);
+      socket.on("error", () => socket.destroy());
+      socket.unref();
+      loadSnapshot(epoch, nextEvictedCallers, snapshotCallers, nextMaxSpaces);
+      resolveConn({
+        mode: "client",
+        clusterDigest,
+        sockPath,
+        ipcKey,
+        socket,
+        nextReqId: 0,
+        pendingReqs,
+      });
+    };
+
     const onEarlyError = (err: NodeJS.ErrnoException) => {
       if (settled) return;
       settled = true;
@@ -818,6 +1128,7 @@ function tryConnectToHub(
         evictedCallers = 0;
         callers.clear();
         globalEntries.clear();
+        seenOpIds.clear();
         notifyListeners(undefined);
         scheduleReconnect();
       }
@@ -827,7 +1138,13 @@ function tryConnectToHub(
       if (!settled) {
         if (frame.type === "challenge") {
           refreshHandshakeTimer();
-          socket.write(encodeIpcFrame(ipcKey, { type: "auth", nonce: frame.nonce }));
+          socket.write(encodeIpcFrame(ipcKey, { type: "auth", nonce: frame.nonce, version: DM_IPC_PROTOCOL_VERSION }));
+          return;
+        }
+        if (frame.type === "snapshot") {
+          const singleCallers = new Map<string, CallerWakeState>();
+          mergeSerializedCallers(singleCallers, frame.callers);
+          finishSnapshotHandshake(frame.epoch, frame.evictedCallers, singleCallers, frame.maxSpaces);
           return;
         }
         if (frame.type === "snapshot_begin") {
@@ -846,26 +1163,7 @@ function tryConnectToHub(
             return;
           }
           refreshHandshakeTimer();
-          for (const item of frame.callers) {
-            let existing = pendingSnapshot.callers.get(item.callerDid);
-            if (!existing) {
-              existing = {
-                epoch: item.epoch,
-                head: item.head,
-                evictedFloor: item.evictedFloor,
-                spaces: new Map(),
-              };
-              pendingSnapshot.callers.set(item.callerDid, existing);
-            } else {
-              existing.epoch = item.epoch;
-              if (item.head > existing.head) existing.head = item.head;
-              if (item.evictedFloor > existing.evictedFloor) existing.evictedFloor = item.evictedFloor;
-            }
-            for (const [space, seq] of item.spaces) {
-              existing.spaces.delete(space);
-              existing.spaces.set(space, seq);
-            }
-          }
+          mergeSerializedCallers(pendingSnapshot.callers, frame.callers);
           return;
         }
         if (frame.type === "snapshot_end") {
@@ -873,22 +1171,9 @@ function tryConnectToHub(
             socket.destroy();
             return;
           }
-          settled = true;
-          clearHandshakeTimer();
-          socket.removeListener("error", onEarlyError);
-          socket.on("error", () => socket.destroy());
-          socket.unref();
           const completed = pendingSnapshot;
           pendingSnapshot = null;
-          loadSnapshot(completed.epoch, completed.evictedCallers, completed.callers, completed.maxSpaces);
-          resolveConn({
-            mode: "client",
-            sockPath,
-            ipcKey,
-            socket,
-            nextReqId: 0,
-            pendingReqs,
-          });
+          finishSnapshotHandshake(completed.epoch, completed.evictedCallers, completed.callers, completed.maxSpaces);
           return;
         }
         socket.destroy();
@@ -912,6 +1197,7 @@ function tryConnectToHub(
         evictedCallers = 0;
         callers.clear();
         globalEntries.clear();
+        seenOpIds.clear();
         notifyListeners(undefined);
         return;
       }
@@ -953,66 +1239,167 @@ function shortDelay(ms: number): Promise<void> {
   });
 }
 
-async function establishIpc(sockPath: string, ipcKey: Buffer): Promise<void> {
+function claimVacantOrExpiredHubLease(
+  myToken: string,
+  expectedDigest: string,
+): { won: boolean; staleSockPath: string | null } {
+  const db = getRawDb();
+  return db.transaction(() => {
+    const now = Date.now();
+    const prev = db
+      .prepare("SELECT token, expires_at FROM oauth_request_lock WHERE name = ?")
+      .get(DM_IPC_HUB_LOCK_NAME) as { token: string; expires_at: number } | undefined;
+    const res = db
+      .prepare(`
+        INSERT INTO oauth_request_lock (name, token, expires_at) VALUES (?, ?, ?)
+        ON CONFLICT(name) DO UPDATE SET token = excluded.token, expires_at = excluded.expires_at
+        WHERE oauth_request_lock.expires_at <= ?
+      `)
+      .run(DM_IPC_HUB_LOCK_NAME, myToken, now + HUB_LEASE_TTL_MS, now);
+    if (res.changes === 1) {
+      const staleSockPath = prev ? parseHubLeaseToken(prev.token, expectedDigest)?.sockPath ?? null : null;
+      return { won: true, staleSockPath };
+    }
+    return { won: false, staleSockPath: null };
+  }).immediate();
+}
+
+function takeOverDeadHubLease(
+  myToken: string,
+  deadToken: string,
+  expectedDigest: string,
+): { won: boolean; deadSockPath: string | null } {
+  const db = getRawDb();
+  return db.transaction(() => {
+    const now = Date.now();
+    const cur = db
+      .prepare("SELECT token, expires_at FROM oauth_request_lock WHERE name = ?")
+      .get(DM_IPC_HUB_LOCK_NAME) as { token: string; expires_at: number } | undefined;
+    if (!cur) {
+      db.prepare("INSERT INTO oauth_request_lock (name, token, expires_at) VALUES (?, ?, ?)")
+        .run(DM_IPC_HUB_LOCK_NAME, myToken, now + HUB_LEASE_TTL_MS);
+      return { won: true, deadSockPath: parseHubLeaseToken(deadToken, expectedDigest)?.sockPath ?? null };
+    }
+    if (cur.token === deadToken) {
+      const res = db
+        .prepare("UPDATE oauth_request_lock SET token = ?, expires_at = ? WHERE name = ? AND token = ?")
+        .run(myToken, now + HUB_LEASE_TTL_MS, DM_IPC_HUB_LOCK_NAME, deadToken);
+      if (res.changes === 1) {
+        return { won: true, deadSockPath: parseHubLeaseToken(deadToken, expectedDigest)?.sockPath ?? null };
+      }
+      return { won: false, deadSockPath: null };
+    }
+    if (cur.expires_at <= now) {
+      const res = db
+        .prepare("UPDATE oauth_request_lock SET token = ?, expires_at = ? WHERE name = ? AND expires_at <= ?")
+        .run(myToken, now + HUB_LEASE_TTL_MS, DM_IPC_HUB_LOCK_NAME, now);
+      if (res.changes === 1) {
+        return { won: true, deadSockPath: parseHubLeaseToken(cur.token, expectedDigest)?.sockPath ?? null };
+      }
+    }
+    return { won: false, deadSockPath: null };
+  }).immediate();
+}
+
+async function tryElectSelfAsHub(
+  clusterDigest: string,
+  ipcKey: Buffer,
+  deadLeaseToken?: string,
+): Promise<Extract<IpcState, { mode: "hub" }> | null> {
+  const hubId = randomBytes(6).toString("hex");
+  const sockPath = buildHubSocketPath(clusterDigest, hubId);
+  const leaseToken = formatHubLeaseToken(hubId, sockPath);
+  const hub = await tryListenAsHub(clusterDigest, hubId, sockPath, leaseToken, ipcKey);
+  if (!hub) return null;
+
+  let claim: { won: boolean; staleSockPath: string | null };
+  try {
+    if (deadLeaseToken !== undefined) {
+      const taken = takeOverDeadHubLease(leaseToken, deadLeaseToken, clusterDigest);
+      claim = { won: taken.won, staleSockPath: taken.deadSockPath };
+    } else {
+      claim = claimVacantOrExpiredHubLease(leaseToken, clusterDigest);
+    }
+  } catch (err) {
+    closeHubResources(hub);
+    throw err;
+  }
+
+  if (!claim.won) {
+    closeHubResources(hub);
+    return null;
+  }
+
+  if (claim.staleSockPath && claim.staleSockPath !== sockPath) {
+    safeUnlinkSocket(claim.staleSockPath);
+  }
+  startHubHeartbeat(hub);
+  return hub;
+}
+
+async function establishIpc(clusterDigest: string, ipcKey: Buffer): Promise<void> {
+  // Ensure SQLite schema (`oauth_request_lock`) is initialized before leader election.
+  getRawDb();
+
   let protocolFailures = 0;
   for (let attempt = 0; attempt < 8; attempt += 1) {
-    const conn = await tryConnectToHub(sockPath, ipcKey);
-    if (typeof conn === "object") {
-      ipcState = conn;
-      return;
-    }
-    if (conn === "protocol_failed") {
-      // A live hub socket accepted the connection and failed protocol/auth handshake: NEVER unlink sockPath!
-      protocolFailures += 1;
-      if (protocolFailures >= 2) {
+    const now = Date.now();
+    const row = readHubLeaseRow();
+    const activeLease = row && row.expires_at > now ? parseHubLeaseToken(row.token, clusterDigest) : null;
+
+    if (row && activeLease) {
+      const conn = await tryConnectToHub(clusterDigest, activeLease.sockPath, ipcKey);
+      if (typeof conn === "object") {
+        ipcState = conn;
         return;
       }
-      await shortDelay(10);
+      if (conn === "protocol_failed") {
+        // A live hub socket accepted the connection and failed protocol/auth handshake: NEVER unlink its socket or steal its lease!
+        protocolFailures += 1;
+        if (protocolFailures >= 2) {
+          return;
+        }
+        await shortDelay(10);
+        continue;
+      }
+      // `enoent` or `stale_refused` on a published unique hub socket means that specific hub process died.
+      const takeoverHub = await tryElectSelfAsHub(clusterDigest, ipcKey, row.token);
+      if (takeoverHub) {
+        ipcState = takeoverHub;
+        return;
+      }
+      // Another worker won the atomic CAS takeover; connect to the new winner on the next iteration.
       continue;
     }
-    if (conn === "stale_refused") {
-      // Confirm stale dead socket after brief jitter before unlinking so concurrent startups never unlink a live bind.
-      await shortDelay(5 + Math.floor(Math.random() * 15));
-      const retryConn = await tryConnectToHub(sockPath, ipcKey);
-      if (typeof retryConn === "object") {
-        ipcState = retryConn;
-        return;
-      }
-      if (retryConn === "protocol_failed") {
-        return;
-      }
-      if (retryConn === "stale_refused") {
-        try {
-          unlinkSync(sockPath);
-        } catch {
-          // Another worker may have unlinked it already.
-        }
-      }
-    }
-    const hub = await tryListenAsHub(sockPath, ipcKey);
-    if (hub) {
-      ipcState = hub;
+
+    // No unexpired valid hub lease exists: bind a fresh unique socket and atomically claim `dm_ipc_hub`.
+    const electedHub = await tryElectSelfAsHub(clusterDigest, ipcKey);
+    if (electedHub) {
+      ipcState = electedHub;
       return;
     }
-    await shortDelay(10 * (attempt + 1));
+    // Another concurrent worker won `dm_ipc_hub`; loop immediately to connect to it.
+    if (attempt > 1) {
+      await shortDelay(10 * attempt);
+    }
   }
 }
 
 export async function ensureDmWakeReady(): Promise<void> {
   let encryptionKey: Buffer;
-  let sockPath: string | null;
+  let clusterDigest: string | null;
   try {
     const cfg = getOperatorConfig();
     encryptionKey = cfg.encryptionKey;
-    sockPath = dmWakeSocketPath(cfg.databasePath, cfg.operatorServiceRef);
+    clusterDigest = dmWakeClusterDigest(cfg.databasePath, cfg.operatorServiceRef);
   } catch {
     return;
   }
-  if (!sockPath) return;
+  if (!clusterDigest) return;
 
-  if (ipcState.mode === "hub" && ipcState.sockPath === sockPath) return;
-  if (ipcState.mode === "client" && ipcState.sockPath === sockPath && !ipcState.socket.destroyed) return;
-  if (ipcState.mode === "starting" && ipcState.sockPath === sockPath) {
+  if (ipcState.mode === "hub" && ipcState.clusterDigest === clusterDigest) return;
+  if (ipcState.mode === "client" && ipcState.clusterDigest === clusterDigest && !ipcState.socket.destroyed) return;
+  if (ipcState.mode === "starting" && ipcState.clusterDigest === clusterDigest) {
     await ipcState.promise;
     return;
   }
@@ -1020,54 +1407,102 @@ export async function ensureDmWakeReady(): Promise<void> {
   closeDmWakeIpc({ keepMemoryState: true });
   closingIntentionally = false;
   const ipcKey = deriveIpcKey(encryptionKey);
-  const promise = establishIpc(sockPath, ipcKey).finally(() => {
+  const promise = establishIpc(clusterDigest, ipcKey).finally(() => {
     if (ipcState.mode === "starting" && ipcState.promise === promise) {
       ipcState = { mode: "none" };
     }
   });
-  ipcState = { mode: "starting", sockPath, promise };
+  ipcState = { mode: "starting", clusterDigest, promise };
   await promise;
+}
+
+function sendRecordWakeToHub(
+  client: Extract<IpcState, { mode: "client" }>,
+  opId: string,
+  callerDid: string,
+  space: string,
+  nowMs: number,
+): Promise<void> {
+  const reqId = ++client.nextReqId;
+  return new Promise<void>((resolveReq, rejectReq) => {
+    const timer = setTimeout(() => {
+      client.pendingReqs.delete(reqId);
+      rejectReq(new Error("DM wake hub request timed out."));
+    }, IPC_RPC_TIMEOUT_MS);
+    timer.unref?.();
+
+    client.pendingReqs.set(reqId, {
+      resolve: () => {
+        clearTimeout(timer);
+        resolveReq();
+      },
+      reject: (err) => {
+        clearTimeout(timer);
+        rejectReq(err);
+      },
+    });
+
+    try {
+      client.socket.write(
+        encodeIpcFrame(client.ipcKey, {
+          type: "record_wake",
+          reqId,
+          opId,
+          callerDid,
+          space,
+          nowMs,
+        }),
+      );
+    } catch (err) {
+      clearTimeout(timer);
+      client.pendingReqs.delete(reqId);
+      rejectReq(err instanceof Error ? err : new Error(String(err)));
+    }
+  });
 }
 
 /**
  * Records an ephemeral, caller-scoped wake for `(callerDid, space)` (`dm.inbox` or `dm.conversation`), enforcing
  * per-`(callerDid, space)` rate limiting and broadcasting across any host-local operator workers sharing `DATABASE_PATH`
- * before resolving. Never touches SQLite.
+ * before resolving. Never writes DM URIs, DIDs, or user activity to SQLite.
  */
 export async function recordDmWake(callerDid: string, space: string, nowMs = Date.now()): Promise<void> {
   if (!isDid(callerDid) || !parseDmSpaceUri(space)) return;
-  await ensureDmWakeReady();
+  const opId = randomBytes(12).toString("hex");
 
-  if (ipcState.mode === "client" && !ipcState.socket.destroyed) {
-    const client = ipcState;
-    const reqId = ++client.nextReqId;
-    try {
-      await new Promise<void>((resolveReq, rejectReq) => {
-        client.pendingReqs.set(reqId, { resolve: resolveReq, reject: rejectReq });
-        client.socket.write(
-          encodeIpcFrame(client.ipcKey, {
-            type: "record_wake",
-            reqId,
-            callerDid,
-            space,
-            nowMs,
-          }),
-        );
-      });
-      return;
-    } catch (error) {
-      if (error instanceof DmRateLimitError) throw error;
-      // Hub disconnected mid-request: re-elect and complete on the new hub.
-      await ensureDmWakeReady();
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    await ensureDmWakeReady();
+
+    if (ipcState.mode === "client") {
+      if (ipcState.socket.destroyed) {
+        disconnectClientState(ipcState);
+        continue;
+      }
+      const client = ipcState;
+      try {
+        await sendRecordWakeToHub(client, opId, callerDid, space, nowMs);
+        return;
+      } catch (error) {
+        if (error instanceof DmRateLimitError) throw error;
+        disconnectClientState(client);
+        continue;
+      }
     }
+
+    await applyAuthoritativeWakeIdempotent(opId, callerDid, space, nowMs);
+    return;
   }
 
-  checkAndRecordRateLimit(callerDid, space, nowMs);
-  const mutation = applyAuthoritativeWake(callerDid, space);
-  notifyMutationListeners(mutation);
-  if (ipcState.mode === "hub") {
-    await broadcastFromHub(ipcState, mutation);
+  await ensureDmWakeReady();
+  if (ipcState.mode === "client" && !ipcState.socket.destroyed) {
+    await sendRecordWakeToHub(ipcState, opId, callerDid, space, nowMs);
+    return;
   }
+  if (ipcState.mode === "hub" || ipcState.mode === "none") {
+    await applyAuthoritativeWakeIdempotent(opId, callerDid, space, nowMs);
+    return;
+  }
+  throw new Error("DM wake hub unavailable after reconnection retries.");
 }
 
 export const recordDmSpaceWake = recordDmWake;
@@ -1087,21 +1522,13 @@ export function closeDmWakeIpc(options?: { keepMemoryState?: boolean }): void {
     current.pendingReqs.clear();
     current.socket.destroy();
   } else if (current.mode === "hub") {
-    for (const peer of current.peers) {
-      for (const finishAck of peer.pendingAcks.values()) finishAck();
-      peer.pendingAcks.clear();
-      peer.socket.destroy();
-    }
-    current.peers.clear();
+    closeHubResources(current);
     try {
-      current.server.close();
+      getRawDb()
+        .prepare("DELETE FROM oauth_request_lock WHERE name = ? AND token = ?")
+        .run(DM_IPC_HUB_LOCK_NAME, current.leaseToken);
     } catch {
-      // Ignore already-closed server.
-    }
-    try {
-      unlinkSync(current.sockPath);
-    } catch {
-      // Ignore already-unlinked socket path.
+      // Ignore if DB is already closed or uninitialized.
     }
   }
   if (!options?.keepMemoryState) {
@@ -1111,6 +1538,7 @@ export function closeDmWakeIpc(options?: { keepMemoryState?: boolean }): void {
     callers.clear();
     globalEntries.clear();
     rateBuckets.clear();
+    seenOpIds.clear();
   }
 }
 
@@ -1130,6 +1558,7 @@ export function resetDmFeedWakesForTests(options?: { maxSpaces?: number }): void
   callers.clear();
   globalEntries.clear();
   rateBuckets.clear();
+  seenOpIds.clear();
   if (ipcState.mode === "hub") {
     broadcastResetFromHub(ipcState);
   }

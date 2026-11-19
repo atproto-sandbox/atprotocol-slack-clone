@@ -317,6 +317,49 @@ test("global aggregate maxSpaces cap evicts oldest (callerDid, space) entries ac
   }
 });
 
+test("R3-L1: global maxSpaces eviction wakes a held 25s getChanges long-poll immediately (<500ms) with reset", async () => {
+  resetDmFeedWakesForTests({ maxSpaces: 2 });
+  try {
+    const caller1 = "did:plc:evict-victim";
+    const caller2 = "did:plc:evict-actor";
+    const caller1Space = dmInboxUri(caller1);
+    const caller1OtherSpace = dmConversationUri(caller1, tidNow(1_700_000_100_000));
+    const caller2SpaceA = dmConversationUri(caller2, tidNow(1_700_000_200_000));
+    const caller2SpaceB = dmConversationUri(caller2, tidNow(1_700_000_300_000));
+    const allowed = new Set([caller1Space, caller1OtherSpace, caller2SpaceA, caller2SpaceB]);
+
+    const initialHead = (await getChanges(caller1, [], undefined, deps(allowed))).head;
+
+    // Caller 1 starts a 25,000ms long-poll watching caller1Space at seq 0.
+    const pendingLongPoll = getChanges(
+      caller1,
+      [followAt(caller1Space, initialHead)],
+      undefined,
+      deps(allowed, 25_000),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    // A wake on an unfollowed DM space of Caller 1 advances Caller 1's head to seq 1;
+    // Caller 1 re-evaluates (no change on caller1Space) and sleeps in NoticePoller at seenHead = seq 1.
+    await recordDmWake(caller1, caller1OtherSpace);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    // Caller 2 now triggers global maxSpaces(2) eviction of Caller 1's entry, raising Caller 1's evictedFloor above seq 0!
+    const evictionStarted = Date.now();
+    await recordDmWake(caller2, caller2SpaceA);
+    await recordDmWake(caller2, caller2SpaceB);
+
+    const answer = await pendingLongPoll;
+    const elapsedMs = Date.now() - evictionStarted;
+    assert.ok(elapsedMs < 500, `expected held 25s long-poll to wake in <500ms on global eviction, took ${elapsedMs}ms`);
+    assert.deepEqual(answer.reset, [caller1Space]);
+    assert.deepEqual(answer.changed, []);
+    assertZeroDmRowsInSqlite();
+  } finally {
+    resetDmFeedWakesForTests();
+  }
+});
+
 test("the published lexicon allows 200 followed spaces, 16-character cursors, and names listWriters", () => {
   assert.equal(lexicon.defs.main.input.schema.properties.follow.maxLength, MAX_FOLLOWED_SPACES);
   assert.equal(lexicon.defs.main.output.schema.properties.head.maxLength, 16);

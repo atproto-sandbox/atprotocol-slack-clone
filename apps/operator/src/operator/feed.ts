@@ -151,8 +151,12 @@ export async function getChanges(did: string, follow: readonly Follow[], signal?
   if (allowed.length === 0) return { head: currentCombinedHead(did), changed: [], denied: [...denied], reset: [] };
   const deadline = Date.now() + deps.holdMs;
   let evaluated = evaluateFeed(did, allowed);
+  const hasPendingResult = () => {
+    const current = evaluateFeed(did, allowed);
+    return current.changed.length > 0 || current.reset.length > 0;
+  };
   while (evaluated.changed.length === 0 && evaluated.reset.length === 0 && Date.now() < deadline && !signal?.aborted) {
-    await poller.nextChange(did, evaluated.head, deadline - Date.now(), signal);
+    await poller.nextChange(did, evaluated.head, deadline - Date.now(), signal, hasPendingResult);
     evaluated = evaluateFeed(did, allowed);
   }
   const answered = [...evaluated.changed.map((change) => change.space), ...evaluated.reset];
@@ -177,13 +181,19 @@ async function deniedSpaces(did: string, spaces: readonly string[], deps: FeedDe
  * another process still wake waiters promptly.
  */
 class NoticePoller {
-  private readonly waiting = new Map<() => void, { did: string; seenHead: string }>();
+  private readonly waiting = new Map<() => void, { did: string; seenHead: string; hasPendingResult?: () => boolean }>();
   private timer: ReturnType<typeof setInterval> | undefined;
   private unsubSpace: (() => void) | undefined;
   private unsubDm: (() => void) | undefined;
 
-  /** Resolves once the caller's combined head is no longer `seenHead`, after `withinMs`, or when `signal` aborts. */
-  nextChange(did: string, seenHead: string, withinMs: number, signal?: AbortSignal): Promise<void> {
+  /** Resolves once the caller's combined head is no longer `seenHead`, a reset/change is ready, after `withinMs`, or when `signal` aborts. */
+  nextChange(
+    did: string,
+    seenHead: string,
+    withinMs: number,
+    signal?: AbortSignal,
+    hasPendingResult?: () => boolean,
+  ): Promise<void> {
     return new Promise((resolve) => {
       const done = () => {
         clearTimeout(timeout);
@@ -194,30 +204,34 @@ class NoticePoller {
       };
       const timeout = setTimeout(done, Math.max(0, withinMs));
       signal?.addEventListener("abort", done, { once: true });
-      this.waiting.set(done, { did, seenHead });
+      this.waiting.set(done, { did, seenHead, hasPendingResult });
       if (!this.timer) {
         this.timer = setInterval(() => this.wake(), POLL_MS);
         this.timer.unref?.();
         this.unsubSpace = onSpaceNotice(() => this.wake());
-        this.unsubDm = onDmWake((changedDid) => this.wake(changedDid));
+        this.unsubDm = onDmWake((changedDid) => this.wake(changedDid, true));
       }
-      // A notice that landed after the waiter read its spaces, and before it was registered here, still wakes it.
-      this.wake(did);
+      // A notice or eviction that landed after the waiter read its spaces, and before it was registered here, still wakes it.
+      this.wake(did, true);
     });
   }
 
-  private wake(changedDid?: string): void {
+  private wake(changedDid?: string, checkPendingResult = false): void {
     for (const [done, waiter] of [...this.waiting]) {
       if (changedDid !== undefined && waiter.did !== changedDid) continue;
       let head: string;
+      let ready = false;
       try {
         head = currentCombinedHead(waiter.did);
+        if (head === waiter.seenHead && checkPendingResult && waiter.hasPendingResult) {
+          ready = waiter.hasPendingResult();
+        }
       } catch {
         // The notices cannot be read (the database is closing): every waiter reads them itself and meets the error there.
         for (const allDone of [...this.waiting.keys()]) allDone();
         return;
       }
-      if (head !== waiter.seenHead) done();
+      if (head !== waiter.seenHead || ready) done();
     }
   }
 

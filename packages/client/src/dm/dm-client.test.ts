@@ -1983,3 +1983,278 @@ test("R12 Round 2 L2: background notification credential minting is end-to-end c
     alice.close();
   }
 });
+
+test("R12 Round 3 M3: aborted or timed-out ordinary CredentialCache mints never poison the cache across background renewal deadlines or mid-flight initial watch() aborts", async () => {
+  const OPERATOR: OperatorService = {
+    serviceRef: "did:web:operator.test#atproto_flock_operator",
+    endpoint: "https://operator.test",
+  };
+
+  // 1. Background performNotifyRegistration triggers ordinary credential renewal (credentials.get(space, { signal: deadlineSignal })
+  //    once cached credential enters its renewal window) against a blackholed PDS:
+  //    times out at notifyTimeoutMs, aborts wire signal, clears pending entry from CredentialCache immediately,
+  //    and once PDS recovers BOTH ordinary readConversation() AND the next notification retry succeed immediately!
+  {
+    const network = new FakeNetwork();
+    network.createAccount("did:plc:alice", "pds1");
+    network.createAccount("did:plc:bob", "pds2");
+
+    let operatorOnline = false;
+    let blackholeBobAuthorize = false;
+    let sawOrdinaryRenewalSignal = false;
+    let ordinaryRenewalAborted = false;
+    let confirmCalls = 0;
+    const deliveredSpaces: string[] = [];
+
+    network.registerEndpoint(OPERATOR.endpoint, async (req) => {
+      const url = new URL(req.url);
+      if (url.pathname === "/xrpc/com.atproto.space.confirmRegistration") {
+        confirmCalls += 1;
+        const body = (await req.json()) as { challenge: string };
+        return Response.json({ challenge: body.challenge });
+      }
+      if (url.pathname === "/xrpc/com.atproto.space.notifySpaceUpdate") {
+        const body = (await req.json()) as { space: string };
+        deliveredSpaces.push(body.space);
+        return Response.json({});
+      }
+      return Response.json({});
+    });
+
+    const timers: Array<{ fn: () => void; delayMs: number; cleared: boolean; fired: boolean }> = [];
+    const alice = new DmClient({
+      did: "did:plc:alice",
+      memberClient: network.clientFor("did:plc:alice"),
+      resolvePds: network.resolvePds,
+      resolveKemKey: network.resolveKemKey,
+      fetchEndpoint: async (request) => {
+        const url = new URL(request.url);
+        if (url.origin === OPERATOR.endpoint) {
+          if (!operatorOnline) {
+            return Response.json({ error: "BadGateway", message: "offline" }, { status: 502 });
+          }
+          return Response.json({ endpoint: OPERATOR.endpoint, token: "dm1-r3-m3-renew" });
+        }
+        if (
+          blackholeBobAuthorize
+          && request.url.includes("com.atproto.space.authorizeSpaceSync")
+          && request.method === "POST"
+        ) {
+          const parsed = (await request.clone().json()) as { space?: string; notify?: unknown };
+          if (parsed.space?.startsWith("at://did:plc:bob/") && parsed.notify === undefined) {
+            sawOrdinaryRenewalSignal = Boolean(request.signal);
+            request.signal.addEventListener("abort", () => {
+              ordinaryRenewalAborted = true;
+            }, { once: true });
+            // Never settle even after abort to prove CredentialCache detaches immediately without waiting for settlement!
+            return new Promise<Response>(() => {});
+          }
+        }
+        return network.fetchEndpoint(request);
+      },
+      generateKey: network.generateKey,
+      store: createStore(),
+      now: network.now,
+      operator: OPERATOR,
+      notifyTimeoutMs: 40,
+      watchTiming: { initialRetryMs: 50, maxRetryMs: 200 },
+      timers: {
+        setTimeout: (fn, delayMs) => {
+          const entry = {
+            fn: () => {
+              entry.fired = true;
+              fn();
+            },
+            delayMs,
+            cleared: false,
+            fired: false,
+          };
+          timers.push(entry);
+          return entry;
+        },
+        clearTimeout: (handle) => {
+          (handle as { cleared: boolean }).cleared = true;
+        },
+      },
+    });
+    const bob = new DmClient({
+      did: "did:plc:bob",
+      memberClient: network.clientFor("did:plc:bob"),
+      resolvePds: network.resolvePds,
+      resolveKemKey: network.resolveKemKey,
+      fetchEndpoint: network.fetchEndpoint,
+      generateKey: network.generateKey,
+      store: createStore(),
+      now: network.now,
+    });
+
+    await alice.enableDms("everyone");
+    await bob.enableDms("everyone");
+    const started = await bob.startConversation(["did:plc:alice"]);
+    await alice.accept((await alice.listRequests())[0]!);
+    await bob.send(started.convKey, "unpoisoned after renewal timeout");
+    const bobHalf = dmConversationUri("did:plc:bob", started.convKey);
+
+    // Watch bobHalf while operator returns 502 so CredentialCache holds an un-notified credential and schedules retry #1.
+    await alice.watch([bobHalf]);
+    await alice.flushWatchNotifications();
+    const retry1 = timers.find((t) => !t.cleared && !t.fired);
+    assert.ok(retry1, "initial 502 scheduled retry #1");
+
+    // Advance clock into the ordinary credential renewal window so credentials.get(bobHalf, { signal: deadlineSignal }) must re-mint!
+    network.advanceClock(SPACE_CREDENTIAL_LIFETIME_MS - SPACE_CREDENTIAL_RENEW_BEFORE_MS + 1_000);
+    operatorOnline = true;
+    blackholeBobAuthorize = true;
+
+    const renewStart = performance.now();
+    retry1.fn();
+    await alice.flushWatchNotifications();
+    const renewElapsed = performance.now() - renewStart;
+    assert.ok(renewElapsed < 500, `timed-out ordinary renewal settled in ${renewElapsed.toFixed(1)}ms`);
+    assert.equal(sawOrdinaryRenewalSignal, true, "ordinary renewal authorizeSpaceSync received AbortSignal");
+    assert.equal(ordinaryRenewalAborted, true, "ordinary renewal authorizeSpaceSync signal aborted at notifyTimeoutMs");
+    assert.equal(confirmCalls, 0);
+
+    const retry2 = timers.find((t) => !t.cleared && !t.fired);
+    assert.ok(retry2, "scheduled retry #2 after ordinary renewal timeout");
+
+    // PDS recovers -> BOTH ordinary readConversation() AND retry #2 succeed immediately with zero cache poisoning!
+    blackholeBobAuthorize = false;
+    const readStart = performance.now();
+    const page = await alice.readConversation(started.convKey, started.participants);
+    const readElapsed = performance.now() - readStart;
+    assert.ok(readElapsed < 500, `readConversation() after PDS recovery succeeded in ${readElapsed.toFixed(1)}ms`);
+    assert.equal(page.halves["did:plc:bob"], "ok");
+    assert.deepEqual(page.messages.map((m) => m.text), ["unpoisoned after renewal timeout"]);
+
+    retry2.fn();
+    await alice.flushWatchNotifications();
+    assert.equal(confirmCalls, 1, "next notification retry succeeded immediately after PDS recovery");
+
+    await bob.send(started.convKey, "second message");
+    await network.flushNotifications();
+    assert.deepEqual(deliveredSpaces, [bobHalf]);
+    alice.close();
+  }
+
+  // 2. Initial alice.watch([inbox], { signal }) aborted mid-flight while initial credential mint hangs:
+  //    rejects immediately on abort and leaves CredentialCache unpoisoned so subsequent listRequests() and watch([inbox]) succeed!
+  for (const hangLeg of ["authorizeSpaceSync", "getDelegationToken"] as const) {
+    const network = new FakeNetwork();
+    network.createAccount("did:plc:alice", "pds1");
+    network.createAccount("did:plc:bob", "pds2");
+
+    let confirmCalls = 0;
+    network.registerEndpoint(OPERATOR.endpoint, async (req) => {
+      const url = new URL(req.url);
+      if (url.pathname === "/xrpc/com.atproto.space.confirmRegistration") {
+        confirmCalls += 1;
+        const body = (await req.json()) as { challenge: string };
+        return Response.json({ challenge: body.challenge });
+      }
+      return Response.json({});
+    });
+
+    const bob = new DmClient({
+      did: "did:plc:bob",
+      memberClient: network.clientFor("did:plc:bob"),
+      resolvePds: network.resolvePds,
+      resolveKemKey: network.resolveKemKey,
+      fetchEndpoint: network.fetchEndpoint,
+      generateKey: network.generateKey,
+      store: createStore(),
+      now: network.now,
+    });
+
+    // Enable Alice's DMs before installing the blackhole wrapper so Bob can deliver a real request to Alice's inbox.
+    const setupAlice = new DmClient({
+      did: "did:plc:alice",
+      memberClient: network.clientFor("did:plc:alice"),
+      resolvePds: network.resolvePds,
+      resolveKemKey: network.resolveKemKey,
+      fetchEndpoint: network.fetchEndpoint,
+      generateKey: network.generateKey,
+      store: createStore(),
+      now: network.now,
+    });
+    await setupAlice.enableDms("everyone");
+    const startedReq = await bob.startConversation(["did:plc:alice"]);
+
+    let blackholeInitialMint = true;
+    let wireAborted = false;
+    let enteredInitialHang!: () => void;
+    const enteredInitialHangPromise = new Promise<void>((resolve) => {
+      enteredInitialHang = resolve;
+    });
+
+    const realMemberClient = network.clientFor("did:plc:alice");
+    const wrappedMemberClient = Object.create(realMemberClient, {
+      query: {
+        value: (method: string, params?: Record<string, unknown>, options?: { signal?: AbortSignal }) => {
+          if (hangLeg === "getDelegationToken" && blackholeInitialMint && method === "com.atproto.space.getDelegationToken") {
+            assert.ok(options?.signal, "initial watch getDelegationToken received AbortSignal");
+            options.signal.addEventListener("abort", () => {
+              wireAborted = true;
+            }, { once: true });
+            enteredInitialHang();
+            return new Promise<never>(() => {});
+          }
+          return realMemberClient.query(method, params as never, options);
+        },
+      },
+    });
+
+    const alice = new DmClient({
+      did: "did:plc:alice",
+      memberClient: wrappedMemberClient,
+      resolvePds: network.resolvePds,
+      resolveKemKey: network.resolveKemKey,
+      fetchEndpoint: async (request) => {
+        const url = new URL(request.url);
+        if (url.origin === OPERATOR.endpoint) {
+          return Response.json({ endpoint: OPERATOR.endpoint, token: `dm1-init-abort-${hangLeg}` });
+        }
+        if (
+          hangLeg === "authorizeSpaceSync"
+          && blackholeInitialMint
+          && request.url.includes("com.atproto.space.authorizeSpaceSync")
+          && request.method === "POST"
+        ) {
+          request.signal.addEventListener("abort", () => {
+            wireAborted = true;
+          }, { once: true });
+          enteredInitialHang();
+          return new Promise<Response>(() => {});
+        }
+        return network.fetchEndpoint(request);
+      },
+      generateKey: network.generateKey,
+      store: createStore(),
+      now: network.now,
+      operator: OPERATOR,
+    });
+
+    const inbox = dmInboxUri("did:plc:alice");
+    const watchController = new AbortController();
+    const pendingWatch = alice.watch([inbox], { signal: watchController.signal });
+    await enteredInitialHangPromise;
+
+    const abortStart = performance.now();
+    watchController.abort();
+    await assert.rejects(pendingWatch, (err: unknown) => (err as { name?: string })?.name === "AbortError");
+    const abortElapsed = performance.now() - abortStart;
+    assert.ok(abortElapsed < 100, `aborted initial watch() rejected in ${abortElapsed.toFixed(1)}ms (<100ms)`);
+    assert.equal(wireAborted, true, `wire ${hangLeg} signal aborted immediately when initial watch() aborted`);
+
+    // Restore PDS -> subsequent listRequests() AND watch([inbox]) succeed immediately with unpoisoned CredentialCache!
+    blackholeInitialMint = false;
+    const requests = await alice.listRequests();
+    assert.deepEqual(requests.map((r) => r.convKey), [startedReq.convKey]);
+
+    const expiries = await alice.watch([inbox]);
+    assert.ok(expiries[inbox], "subsequent watch([inbox]) returned valid expiry");
+    await alice.flushWatchNotifications();
+    assert.equal(confirmCalls, 1, `subsequent watch([inbox]) after aborted ${hangLeg} confirmed webhook registration`);
+    alice.close();
+  }
+});
