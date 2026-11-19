@@ -29,6 +29,7 @@ type InFlightOrdinaryMint = {
   opSeq: number;
   promise: Promise<SpaceCredential>;
   effectiveNotify: SpaceNotifyTarget | undefined;
+  snapshotNotifySeq: number;
   controller: AbortController;
   unSignaledWaiters: number;
   signaledWaiters: Map<AbortSignal, number>;
@@ -54,7 +55,8 @@ export class CredentialCache {
   private readonly pendingNotifyMints = new Map<string, InFlightSidecarMint>();
   private readonly activeOpSeqs = new Map<string, Set<number>>();
   private readonly nextOpSeq = new Map<string, number>();
-  private readonly committedCredSeq = new Map<string, number>();
+  private readonly settledFenceSeq = new Map<string, number>();
+  private readonly storedCredSeq = new Map<string, number>();
   private readonly committedNotifySeq = new Map<string, number>();
   private readonly accessLossSeq = new WeakMap<SpaceCredentialError, { space: string; seq: number }>();
 
@@ -96,13 +98,23 @@ export class CredentialCache {
     return false;
   }
 
-  private getCommittedCredSeq(space: string): number {
-    return this.committedCredSeq.get(space) ?? 0;
+  private getSettledFenceSeq(space: string): number {
+    return this.settledFenceSeq.get(space) ?? 0;
   }
 
-  private advanceCommittedCredSeq(space: string, seq: number): void {
-    if (seq > this.getCommittedCredSeq(space)) {
-      this.committedCredSeq.set(space, seq);
+  private advanceSettledFence(space: string, seq: number): void {
+    if (seq > this.getSettledFenceSeq(space)) {
+      this.settledFenceSeq.set(space, seq);
+    }
+  }
+
+  private getStoredCredSeq(space: string): number {
+    return this.storedCredSeq.get(space) ?? 0;
+  }
+
+  private advanceStoredCredSeq(space: string, seq: number): void {
+    if (seq > this.getStoredCredSeq(space)) {
+      this.storedCredSeq.set(space, seq);
     }
   }
 
@@ -117,11 +129,11 @@ export class CredentialCache {
   }
 
   /**
-   * True iff `opSeq` has not been superseded by any newer committed credential, invalidation (`drop`/`fresh`),
-   * authoritative access loss, or any newer in-flight operation (ordinary, sidecar, or unnotified) for `space`.
+   * True iff `opSeq` has not been superseded by any newer settled credential fence (`mintFreshUnnotified`,
+   * ordinary, sidecar, `drop`, `fresh`, or access loss) OR any newer in-flight operation for `space`.
    */
   private ownsCredentialSlot(space: string, opSeq: number): boolean {
-    if (opSeq <= this.getCommittedCredSeq(space)) return false;
+    if (opSeq <= this.getSettledFenceSeq(space)) return false;
     if (this.hasNewerActiveOp(space, opSeq)) return false;
     return true;
   }
@@ -130,10 +142,18 @@ export class CredentialCache {
     return this.ownsCredentialSlot(space, opSeq) && opSeq > this.getCommittedNotifySeq(space);
   }
 
+  private deleteOlderInFlightOrdinary(space: string, opSeq: number): void {
+    const active = this.inFlightOrdinaryMints.get(space);
+    if (active && active.opSeq <= opSeq) {
+      this.inFlightOrdinaryMints.delete(space);
+    }
+  }
+
   private recordAuthoritativeAccessLoss(space: string, opSeq: number, error: SpaceCredentialError): void {
-    this.advanceCommittedCredSeq(space, opSeq);
+    this.advanceSettledFence(space, opSeq);
+    this.advanceStoredCredSeq(space, opSeq);
     this.advanceCommittedNotifySeq(space, opSeq);
-    this.inFlightOrdinaryMints.delete(space);
+    this.deleteOlderInFlightOrdinary(space, opSeq);
     this.credentials.delete(space);
     this.notifyTargets.delete(space);
     this.accessLossSeq.set(error, { space, seq: opSeq });
@@ -141,7 +161,7 @@ export class CredentialCache {
 
   /**
    * True only when `error` is a `SpaceCredentialError` that owned the credential slot at `opSeq`
-   * and has not been superseded by any newer committed or in-flight operation.
+   * and has not been superseded by any newer settled fence or in-flight operation.
    */
   isAuthoritativeAccessLoss(space: string, error: unknown): error is SpaceCredentialError {
     if (!(error instanceof SpaceCredentialError)) return false;
@@ -149,7 +169,7 @@ export class CredentialCache {
     return (
       recorded !== undefined
       && recorded.space === space
-      && this.getCommittedCredSeq(space) === recorded.seq
+      && this.getSettledFenceSeq(space) === recorded.seq
       && !this.hasNewerActiveOp(space, recorded.seq)
     );
   }
@@ -158,22 +178,34 @@ export class CredentialCache {
     if (opts?.signal?.aborted) throw abortReason(opts.signal);
     if (opts?.notify !== undefined) {
       const pending = this.credentials.get(space);
-      const activeOrdinary = this.inFlightOrdinaryMints.get(space);
-      const canReusePending = !activeOrdinary || activeOrdinary.promise !== pending || sameNotify(activeOrdinary.effectiveNotify, opts.notify);
-      if (pending && canReusePending) {
+      if (pending) {
         const checkNotifySeq = this.getCommittedNotifySeq(space);
-        const checkCredSeq = this.getCommittedCredSeq(space);
-        const baselineSeq = Math.max(checkNotifySeq, checkCredSeq);
+        const checkFenceSeq = this.getSettledFenceSeq(space);
+        const baselineSeq = Math.max(checkNotifySeq, checkFenceSeq);
         const existing = await raceWithSignal(pending.catch(() => undefined), opts.signal);
         if (
           existing
           && this.isUsable(existing)
           && sameNotify(existing.notify, opts.notify)
           && this.getCommittedNotifySeq(space) === checkNotifySeq
-          && this.getCommittedCredSeq(space) === checkCredSeq
+          && this.getSettledFenceSeq(space) === checkFenceSeq
           && !this.hasNewerActiveOp(space, baselineSeq)
         ) {
           this.notifyTargets.set(space, opts.notify);
+          return existing;
+        }
+      }
+      const activeOrdinary = this.inFlightOrdinaryMints.get(space);
+      if (activeOrdinary && sameNotify(activeOrdinary.effectiveNotify, opts.notify)) {
+        const checkNotifySeq = this.getCommittedNotifySeq(space);
+        const existing = await this.joinOrdinaryMint(space, activeOrdinary, opts.signal).catch(() => undefined);
+        if (
+          existing
+          && this.isUsable(existing)
+          && sameNotify(existing.notify, opts.notify)
+          && this.getCommittedNotifySeq(space) === checkNotifySeq
+          && !this.hasNewerActiveOp(space, activeOrdinary.opSeq)
+        ) {
           return existing;
         }
       }
@@ -202,7 +234,7 @@ export class CredentialCache {
           return next;
         }
       }
-      if (this.credentials.get(space) === pending || this.credentials.get(space) === current) {
+      if (this.credentials.get(space) === pending) {
         this.credentials.delete(space);
       }
     }
@@ -217,8 +249,9 @@ export class CredentialCache {
       return this.mintSidecarNotify(space, opts.notify, opts.signal, true);
     }
     const seq = this.allocateOpSeq(space);
-    this.advanceCommittedCredSeq(space, seq);
-    this.inFlightOrdinaryMints.delete(space);
+    this.advanceSettledFence(space, seq);
+    this.advanceStoredCredSeq(space, seq);
+    this.deleteOlderInFlightOrdinary(space, seq);
     this.credentials.delete(space);
     return this.get(space, opts);
   }
@@ -239,11 +272,17 @@ export class CredentialCache {
         signal,
       );
       if (signal?.aborted) throw abortReason(signal);
-      if (this.ownsCredentialSlot(space, opSeq)) {
-        this.advanceCommittedCredSeq(space, opSeq);
-        if (!this.credentials.has(space) && !this.notifyTargets.has(space)) {
-          this.credentials.set(space, Promise.resolve(credential));
-        }
+      const canFillEmptyCache =
+        this.ownsCredentialSlot(space, opSeq)
+        && opSeq > this.getStoredCredSeq(space)
+        && !this.credentials.has(space)
+        && !this.notifyTargets.has(space);
+      // Unconditionally record this settled proof of access as a monotonic fence, even if a later opSeq
+      // is currently active and later aborts or fails transiently!
+      this.advanceSettledFence(space, opSeq);
+      if (canFillEmptyCache) {
+        this.advanceStoredCredSeq(space, opSeq);
+        this.credentials.set(space, Promise.resolve(credential));
       }
       return credential;
     } catch (error) {
@@ -277,8 +316,9 @@ export class CredentialCache {
 
   drop(space: string, opts?: { clearNotify?: boolean }): void {
     const seq = this.allocateOpSeq(space);
-    this.advanceCommittedCredSeq(space, seq);
-    this.inFlightOrdinaryMints.delete(space);
+    this.advanceSettledFence(space, seq);
+    this.advanceStoredCredSeq(space, seq);
+    this.deleteOlderInFlightOrdinary(space, seq);
     this.credentials.delete(space);
     if (opts?.clearNotify) {
       this.advanceCommittedNotifySeq(space, seq);
@@ -297,11 +337,13 @@ export class CredentialCache {
     const opSeq = this.allocateOpSeq(space);
     this.registerActiveOp(space, opSeq);
     const effectiveNotify = this.notifyTargets.get(space);
+    const snapshotNotifySeq = this.getCommittedNotifySeq(space);
     const controller = new AbortController();
     const entry: InFlightOrdinaryMint = {
       opSeq,
       promise: undefined as unknown as Promise<SpaceCredential>,
       effectiveNotify,
+      snapshotNotifySeq,
       controller,
       unSignaledWaiters: 0,
       signaledWaiters: new Map(),
@@ -310,7 +352,6 @@ export class CredentialCache {
     entry.promise = minted;
     void minted.catch(() => undefined);
     this.inFlightOrdinaryMints.set(space, entry);
-    this.credentials.set(space, minted);
     return this.joinOrdinaryMint(space, entry, signal);
   }
 
@@ -320,39 +361,40 @@ export class CredentialCache {
     entry: InFlightOrdinaryMint,
   ): Promise<SpaceCredential> {
     const { signal } = entry.controller;
-    const { opSeq } = entry;
+    const { opSeq, snapshotNotifySeq } = entry;
     try {
       const { credential, notifyConfirmed } = await this.mint(space, effectiveNotify, signal);
       if (signal.aborted) {
-        if (this.credentials.get(space) === entry.promise) {
-          this.credentials.delete(space);
-        }
         throw abortReason(signal);
       }
-      if (this.ownsCredentialSlot(space, opSeq)) {
-        this.advanceCommittedCredSeq(space, opSeq);
-        if (this.credentials.get(space) === entry.promise) {
+      this.advanceSettledFence(space, opSeq);
+      if (this.getCommittedNotifySeq(space) === snapshotNotifySeq) {
+        if (opSeq > this.getStoredCredSeq(space)) {
+          this.advanceStoredCredSeq(space, opSeq);
           this.credentials.set(space, Promise.resolve(credential));
-          if (effectiveNotify && opSeq > this.getCommittedNotifySeq(space)) {
-            this.advanceCommittedNotifySeq(space, opSeq);
+          if (effectiveNotify) {
             if (notifyConfirmed) {
+              this.advanceCommittedNotifySeq(space, opSeq);
               this.notifyTargets.set(space, effectiveNotify);
-            } else {
+            } else if (!this.hasNewerActiveOp(space, opSeq)) {
+              this.advanceCommittedNotifySeq(space, opSeq);
               this.notifyTargets.delete(space);
             }
           }
         }
+      } else if (
+        !this.notifyTargets.has(space)
+        && credential.notify === undefined
+        && opSeq > this.getStoredCredSeq(space)
+      ) {
+        this.advanceStoredCredSeq(space, opSeq);
+        this.credentials.set(space, Promise.resolve(credential));
       }
       return credential;
     } catch (error) {
-      const stillOwnsCacheSlot = this.credentials.get(space) === entry.promise;
-      if (stillOwnsCacheSlot) {
-        this.credentials.delete(space);
-      }
       if (
         !signal.aborted
         && error instanceof SpaceCredentialError
-        && stillOwnsCacheSlot
         && this.ownsCredentialSlot(space, opSeq)
       ) {
         this.recordAuthoritativeAccessLoss(space, opSeq, error);
@@ -401,9 +443,6 @@ export class CredentialCache {
         this.unregisterActiveOp(space, entry.opSeq);
         if (this.inFlightOrdinaryMints.get(space) === entry) {
           this.inFlightOrdinaryMints.delete(space);
-        }
-        if (this.credentials.get(space) === entry.promise) {
-          this.credentials.delete(space);
         }
         entry.controller.abort(abortReason(signal));
       }
@@ -531,23 +570,18 @@ export class CredentialCache {
         signal,
       );
       if (signal?.aborted) throw abortReason(signal);
-      if (this.ownsCredentialSlot(space, opSeq)) {
-        this.advanceCommittedCredSeq(space, opSeq);
-        if (opSeq > this.getCommittedNotifySeq(space)) {
-          this.advanceCommittedNotifySeq(space, opSeq);
-          this.notifyTargets.set(space, notify);
-          this.inFlightOrdinaryMints.delete(space);
-          this.credentials.set(space, Promise.resolve(credential));
-        }
+      this.advanceSettledFence(space, opSeq);
+      if (opSeq > this.getStoredCredSeq(space) && opSeq > this.getCommittedNotifySeq(space)) {
+        this.advanceStoredCredSeq(space, opSeq);
+        this.advanceCommittedNotifySeq(space, opSeq);
+        this.notifyTargets.set(space, notify);
+        this.deleteOlderInFlightOrdinary(space, opSeq);
+        this.credentials.set(space, Promise.resolve(credential));
       }
       return credential;
     } catch (error) {
       if (signal?.aborted) {
         throw error;
-      }
-      if (this.ownsNotifySlot(space, opSeq)) {
-        this.advanceCommittedNotifySeq(space, opSeq);
-        this.notifyTargets.delete(space);
       }
       if (error instanceof SpaceCredentialError) {
         if (this.ownsCredentialSlot(space, opSeq)) {
@@ -556,17 +590,17 @@ export class CredentialCache {
         }
         throw error;
       }
+      if (this.ownsNotifySlot(space, opSeq)) {
+        this.advanceCommittedNotifySeq(space, opSeq);
+        this.notifyTargets.delete(space);
+      }
       if (!isRegistrationNotConfirmed(error)) {
         throw error;
       }
       const current = this.credentials.get(space);
-      const activeOrdinary = this.inFlightOrdinaryMints.get(space);
-      if (current && current !== activeOrdinary?.promise) {
+      if (current) {
         const existing = await raceWithSignal(current.catch(() => undefined), signal);
         if (existing && this.isUsable(existing) && (existing.notify === undefined || !this.ownsCredentialSlot(space, opSeq))) {
-          if (this.ownsCredentialSlot(space, opSeq)) {
-            this.advanceCommittedCredSeq(space, opSeq);
-          }
           return existing;
         }
       }
@@ -576,9 +610,10 @@ export class CredentialCache {
           signal,
         );
         if (signal?.aborted) throw abortReason(signal);
-        if (this.ownsCredentialSlot(space, opSeq)) {
-          this.advanceCommittedCredSeq(space, opSeq);
-          this.inFlightOrdinaryMints.delete(space);
+        this.advanceSettledFence(space, opSeq);
+        if (this.ownsCredentialSlot(space, opSeq) && opSeq > this.getStoredCredSeq(space)) {
+          this.advanceStoredCredSeq(space, opSeq);
+          this.deleteOlderInFlightOrdinary(space, opSeq);
           this.credentials.set(space, Promise.resolve(fallback));
         }
         return fallback;

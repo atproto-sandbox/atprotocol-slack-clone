@@ -1792,12 +1792,7 @@ export async function recordDmWake(callerDid: string, space: string, nowMs = Dat
         await applyAuthoritativeWakeOnHub(hub, opId, callerDid, space, nowMs);
         return;
       } catch (error) {
-        if (error instanceof DmRateLimitError) {
-          if (!assertAndRefreshHubLease(hub)) {
-            continue;
-          }
-          throw error;
-        }
+        if (error instanceof DmRateLimitError) throw error;
         lastIpcError = error;
         if (error instanceof HubOwnershipLostError) {
           continue;

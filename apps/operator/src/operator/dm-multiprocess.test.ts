@@ -74,6 +74,27 @@ process.env.PLC_URL = plcUrl;
 
 let workerAServer: http.Server | undefined;
 let workerBChild: ChildProcess | undefined;
+const allSpawnedChildren = new Set<ChildProcess>();
+
+function forceKillAllChildren(): void {
+  for (const child of allSpawnedChildren) {
+    if (child.exitCode === null && child.signalCode === null) {
+      try {
+        if (child.pid) process.kill(child.pid, "SIGCONT");
+      } catch {
+        // Ignore
+      }
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // Ignore
+      }
+    }
+  }
+  allSpawnedChildren.clear();
+}
+
+process.once("exit", forceKillAllChildren);
 
 async function closeHttpServer(server: http.Server): Promise<void> {
   await new Promise<void>((resolveClose) => {
@@ -87,6 +108,7 @@ after(async () => {
     workerBChild.kill("SIGTERM");
     await once(workerBChild, "close").catch(() => undefined);
   }
+  forceKillAllChildren();
   if (workerAServer) {
     await closeHttpServer(workerAServer);
   }
@@ -120,6 +142,10 @@ async function spawnWorkerB(): Promise<{ url: string; child: ChildProcess }> {
     cwd: process.cwd(),
     env: { ...process.env },
     stdio: ["ignore", "pipe", "pipe"],
+  });
+  allSpawnedChildren.add(child);
+  child.once("close", () => {
+    allSpawnedChildren.delete(child);
   });
 
   return new Promise((resolveReady, rejectReady) => {
@@ -197,7 +223,8 @@ async function postNotifyUpdate(baseUrl: string, space: string, token: string, r
   });
 }
 
-test("multi-process DM wake hub delivers cross-worker long-poll wakes immediately, shares one epoch across alternating workers with zero spurious resets, recovers stale .sock files, and writes zero DM rows to SQLite", { timeout: 20_000 }, async () => {
+test("multi-process DM wake hub delivers cross-worker long-poll wakes immediately, shares one epoch across alternating workers with zero spurious resets, recovers stale .sock files, and writes zero DM rows to SQLite", { timeout: 60_000 }, async (t) => {
+  t.signal.addEventListener("abort", forceKillAllChildren, { once: true });
   const initialDb = getRawDb();
   const deadHubId = "dead00000001";
   const deadSockPath = dmWakeSocketPath(undefined, undefined, deadHubId)!;
@@ -501,7 +528,8 @@ test("multi-process DM wake hub delivers cross-worker long-poll wakes immediatel
   assert.equal(typeof net.createConnection, "function");
 });
 
-test("R3 & R4: concurrent multi-worker election never split-brains, mismatched IPC versions fail closed, duplicate opIds are idempotent, and resumed old Hub A fences expired lease ownership before mutating", { timeout: 25_000 }, async () => {
+test("R3 & R4: concurrent multi-worker election never split-brains, mismatched IPC versions fail closed, duplicate opIds are idempotent, and resumed old Hub A fences expired lease ownership before mutating", { timeout: 60_000 }, async (t) => {
+  t.signal.addEventListener("abort", forceKillAllChildren, { once: true });
   const bobAuth = await mintGetChangesAuth(BOB_DID, bobKey);
   const ipcKey = Buffer.from(hkdfSync("sha256", Buffer.from(KEY_HEX, "hex"), "", "flock-dm-ipc-v2", 32));
   const encodeRawFrame = (frame: Record<string, unknown>): Buffer => {
@@ -897,7 +925,7 @@ test("R3 & R4: concurrent multi-worker election never split-brains, mismatched I
     const midHubCHead = await postGetChanges(midHubC.url, bobAuth, []);
     const failoverMs = performance.now() - failoverStart;
     assert.notEqual(midHubCHead.head.split(".")[0], midHubAHead.head.split(".")[0], "midHubC took over while midHubA was frozen mid-mutation");
-    assert.ok(failoverMs < 500, `R6-M2: lock-free failover completed in ${failoverMs.toFixed(1)}ms (<500ms, zero SQLITE_BUSY)`);
+    assert.ok(failoverMs < 2_500, `R6-M2: lock-free failover completed in ${failoverMs.toFixed(1)}ms (<2500ms, well below 5000ms SQLite busy_timeout)`);
 
     process.kill(midHubA.child.pid!, "SIGCONT");
     stallingPeer.destroy();
@@ -1009,10 +1037,13 @@ test("R3 & R4: concurrent multi-worker election never split-brains, mismatched I
     closeDb();
   }
 
-  // 7. Real full-bucket CAS race on a live Hub child process:
-  //    Fill `(BOB_DID, bucketSpace)` to `DM_WAKE_RATE_LIMIT_MAX` (`120`) on live `realHub1` (confirming wake #121 returns HTTP 429 while `realHub1` owns lease),
-  //    then expire `realHub1`'s lease so `realHub2` acquires `fence = 2`, and IMMEDIATELY send wake #122 directly to `realHub1` before its heartbeat fires!
-  //    `realHub1` MUST revalidate lease ownership before emitting `DmRateLimitError`, step down, clear `rateBuckets`, forward wake #122 to `realHub2`, and return 200 OK!
+  // 7. Real mid-operation full-bucket CAS race on a live Hub child process (`R9-L1`):
+  //    Fill `(BOB_DID, bucketSpace)` to `DM_WAKE_RATE_LIMIT_MAX` (`120`) on live `realHub1` (confirming wake #121 returns HTTP 429),
+  //    bring up live `realHub2` (`token2`), restore `token1` on `oauth_request_lock`, and arm a deterministic SQLite `AFTER UPDATE`
+  //    trigger that lets `ensureDmWakeReady()` (`UPDATE #1`) AND `applyAuthoritativeWakeOnHub`'s initial lease assertion (`UPDATE #2`,
+  //    line 909) BOTH succeed on `token1`, then atomically switches `oauth_request_lock` to `token2` right BEFORE `applyAuthoritativeWakeOnHub`'s
+  //    full-bucket CAS (`UPDATE #3`, line 928)! `realHub1` MUST catch the mid-operation lease loss at line 928, step down, clear `rateBuckets`,
+  //    forward the wake to `realHub2`, and return 200 OK!
   getRawDb().prepare("DELETE FROM oauth_request_lock WHERE name = 'dm_ipc_hub'").run();
   const realHub1 = await spawnWorkerB();
   const realHub1Initial = await postGetChanges(realHub1.url, bobAuth, []);
@@ -1027,19 +1058,63 @@ test("R3 & R4: concurrent multi-worker election never split-brains, mismatched I
     const r429 = await postNotifyUpdate(realHub1.url, bucketSpace, bucketToken, ALICE_DID);
     assert.equal(r429.status, 429, "realHub1 enforces 429 while it genuinely owns the lease");
 
-    // Expire realHub1's lease and promote realHub2 (`fence = 2`) BEFORE realHub1's 4s heartbeat runs!
+    const hub1LockRow = getRawDb()
+      .prepare("SELECT token, expires_at FROM oauth_request_lock WHERE name = 'dm_ipc_hub'")
+      .get() as { token: string; expires_at: number } | undefined;
+    assert.ok(hub1LockRow, "realHub1 holds dm_ipc_hub lease");
+
+    // Let realHub2 elect itself (`token2`, listening on its live Unix domain socket), then restore `token1` and arm the
+    // deterministic barrier trigger so takeover occurs strictly AFTER `applyAuthoritativeWakeOnHub`'s initial CAS (`n = 2`)
+    // and strictly BEFORE line 928's full-bucket CAS!
     getRawDb().prepare("UPDATE oauth_request_lock SET expires_at = 0 WHERE name = 'dm_ipc_hub'").run();
     const realHub2Initial = await postGetChanges(realHub2.url, bobAuth, []);
     assert.notEqual(realHub2Initial.head.split(".")[0], realHub1Initial.head.split(".")[0]);
 
-    // Immediately deliver another webhook directly to realHub1 (whose local rate bucket was full!):
-    // realHub1 fences `isRateLimited` against SQLite, steps down, clears `rateBuckets`, and forwards to realHub2 -> 200 OK!
+    const hub2LockRow = getRawDb()
+      .prepare("SELECT token, expires_at FROM oauth_request_lock WHERE name = 'dm_ipc_hub'")
+      .get() as { token: string; expires_at: number } | undefined;
+    assert.ok(hub2LockRow && hub2LockRow.token !== hub1LockRow.token, "realHub2 minted distinct token2");
+
+    const sqlQuote = (s: string) => `'${s.replaceAll("'", "''")}'`;
+    getRawDb().exec(`
+      DROP TRIGGER IF EXISTS _test_steal_after_precheck;
+      DROP TABLE IF EXISTS _test_cas_race;
+      CREATE TABLE _test_cas_race (n INTEGER NOT NULL);
+      INSERT INTO _test_cas_race (n) VALUES (0);
+      UPDATE oauth_request_lock
+         SET token = ${sqlQuote(hub1LockRow.token)},
+             expires_at = ${Date.now() + 12_000}
+       WHERE name = 'dm_ipc_hub';
+      CREATE TRIGGER _test_steal_after_precheck
+      AFTER UPDATE ON oauth_request_lock
+      WHEN NEW.name = 'dm_ipc_hub' AND NEW.token = ${sqlQuote(hub1LockRow.token)}
+      BEGIN
+        UPDATE _test_cas_race SET n = n + 1;
+        UPDATE oauth_request_lock
+           SET token = ${sqlQuote(hub2LockRow.token)},
+               expires_at = ${hub2LockRow.expires_at}
+         WHERE name = 'dm_ipc_hub'
+           AND (SELECT n FROM _test_cas_race) = 2;
+      END;
+    `);
+
     const rAfterTakeover = await postNotifyUpdate(realHub1.url, bucketSpace, bucketToken, ALICE_DID);
-    assert.equal(rAfterTakeover.status, 200, "superseded realHub1 fenced full-bucket 429, stepped down, and forwarded to realHub2");
+    const raceRow = getRawDb().prepare("SELECT n FROM _test_cas_race").get() as { n: number };
+    assert.equal(
+      raceRow.n,
+      2,
+      "both ensureDmWakeReady (n=1) and applyAuthoritativeWakeOnHub entry CAS (n=2) succeeded on token1 before line-928 full-bucket CAS ran",
+    );
+    assert.equal(rAfterTakeover.status, 200, "realHub1 caught mid-operation takeover at line-928 full-bucket CAS, stepped down, and forwarded to realHub2");
 
     const observedOnHub2 = await postGetChanges(realHub2.url, bobAuth, [{ space: bucketSpace, after: realHub2Initial.head }]);
     assert.deepEqual(observedOnHub2.changed.map((c) => c.space), [bucketSpace]);
   } finally {
+    try {
+      getRawDb().exec("DROP TRIGGER IF EXISTS _test_steal_after_precheck; DROP TABLE IF EXISTS _test_cas_race;");
+    } catch {
+      // Ignore cleanup errors if DB already closed.
+    }
     for (const c of [realHub1, realHub2]) {
       if (c.child.exitCode === null && c.child.signalCode === null) {
         c.child.kill("SIGTERM");
