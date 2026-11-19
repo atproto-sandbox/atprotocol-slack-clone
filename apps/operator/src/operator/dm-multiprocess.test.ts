@@ -336,26 +336,64 @@ test("multi-process DM wake hub delivers cross-worker long-poll wakes immediatel
   const dirFiles = readdirSync(DIRECTORY);
   assert.ok(dirFiles.every((name) => name.startsWith("multiproc.db")), `expected only SQLite DB files in ${DIRECTORY}, saw ${dirFiles.join(", ")}`);
 
-  // 5b. Live Hub socket protection: a peer with wrong AUTH_ENCRYPTION_KEY (or oversized/invalid frame) fails handshake as
-  //     "protocol_failed" and MUST NEVER unlink the live Hub's .sock file!
+  // 5b. Live Hub socket protection + R4-M2 fail-closed IPC: a peer with wrong AUTH_ENCRYPTION_KEY fails handshake as
+  //     "protocol_failed", rejects with DmWakeIpcError (HTTP 503 Busy), NEVER degrades to isolated local authority,
+  //     and NEVER unlinks the live Hub's .sock file!
   const liveSockInode = statSync(sockPath).ino;
   const wakesModule = fileURLToPath(new URL("./dm-feed-wakes.ts", import.meta.url));
+  const serverModule = fileURLToPath(new URL("./server.ts", import.meta.url));
+  const notifModule = fileURLToPath(new URL("./space-notification.ts", import.meta.url));
+  const rogueConv = dmConversationUri(ALICE_DID, tidNow(1_701_555_000_000));
   await new Promise<void>((resolveRogue, rejectRogue) => {
     const rogueScript = `
-      import { ensureDmWakeReady } from ${JSON.stringify(wakesModule)};
-      await ensureDmWakeReady();
-      await ensureDmWakeReady();
+      import assert from "node:assert/strict";
+      import { once } from "node:events";
+      import { currentDmWakeHead, ensureDmWakeReady, recordDmWake } from ${JSON.stringify(wakesModule)};
+      import { createOperatorApp } from ${JSON.stringify(serverModule)};
+      import { deriveDmNotifyToken } from ${JSON.stringify(notifModule)};
+
+      await assert.rejects(() => ensureDmWakeReady(), { name: "DmWakeIpcError" });
+      await assert.rejects(() => recordDmWake(${JSON.stringify(BOB_DID)}, ${JSON.stringify(rogueConv)}), { name: "DmWakeIpcError" });
+      assert.equal(currentDmWakeHead(${JSON.stringify(BOB_DID)}).head, 0, "rogue worker never applied isolated local wake");
+
+      const app = createOperatorApp();
+      const srv = app.listen(0, "127.0.0.1");
+      await once(srv, "listening");
+      const port = srv.address().port;
+      const rogueToken = deriveDmNotifyToken(${JSON.stringify(rogueConv)}, ${JSON.stringify(BOB_DID)});
+      const res = await fetch(\`http://127.0.0.1:\${port}/xrpc/com.atproto.space.notifySpaceUpdate\`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          space: ${JSON.stringify(rogueConv)},
+          token: rogueToken,
+          update: {
+            $type: "com.atproto.space.defs#repoWrite",
+            repo: ${JSON.stringify(ALICE_DID)},
+            repoRev: "3kabcdefghij2",
+            spaceRev: "3kabcdefghij3",
+            data: { $bytes: Buffer.alloc(32, 0xcd).toString("base64") },
+          },
+        }),
+      });
+      assert.equal(res.status, 503, "misconfigured worker returns retryable 503 Busy instead of local-only 200 OK");
+      assert.equal(currentDmWakeHead(${JSON.stringify(BOB_DID)}).head, 0, "HTTP webhook on misconfigured worker left local head at 0");
+      srv.close();
       process.exit(0);
     `;
     const rogue = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", rogueScript], {
       cwd: process.cwd(),
       env: { ...process.env, AUTH_ENCRYPTION_KEY: "ff".repeat(32) },
-      stdio: "ignore",
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let rogueStderr = "";
+    rogue.stderr.setEncoding("utf8").on("data", (c: string) => {
+      rogueStderr += c;
     });
     rogue.once("error", rejectRogue);
     rogue.once("close", (code) => {
       if (code === 0) resolveRogue();
-      else rejectRogue(new Error(`Rogue worker exited with code ${code}`));
+      else rejectRogue(new Error(`Rogue worker exited with code ${code}: ${rogueStderr}`));
     });
   });
   // Also send an oversized frame header directly to the live hub socket and wait for close
@@ -463,7 +501,7 @@ test("multi-process DM wake hub delivers cross-worker long-poll wakes immediatel
   assert.equal(typeof net.createConnection, "function");
 });
 
-test("R3-M1 & R3-M2: concurrent multi-worker election never split-brains, v1 peers negotiate snapshot fallback, duplicate opIds are idempotent, and 3-worker Hub failover resends mid-flight recordDmWake through newly elected Hub C", { timeout: 25_000 }, async () => {
+test("R3 & R4: concurrent multi-worker election never split-brains, mismatched IPC versions fail closed, duplicate opIds are idempotent, and resumed old Hub A fences expired lease ownership before mutating", { timeout: 25_000 }, async () => {
   const bobAuth = await mintGetChangesAuth(BOB_DID, bobKey);
   const ipcKey = Buffer.from(hkdfSync("sha256", Buffer.from(KEY_HEX, "hex"), "", "flock-dm-ipc-v2", 32));
   const encodeRawFrame = (frame: Record<string, unknown>): Buffer => {
@@ -498,13 +536,39 @@ test("R3-M1 & R3-M2: concurrent multi-worker election never split-brains, v1 pee
     const electedSockPath = leaseRow.token.split("|")[2]!;
     assert.equal(existsSync(electedSockPath), true, "winning Hub's unique socket exists on disk");
 
-    // 2. R3-M1 & R3-M2 wire checks: v1 auth handshake negotiates single-frame `snapshot`, and duplicate `opId` retries are idempotent!
+    // 2a. R4-L3: Peer sending mismatched/missing IPC protocol version is rejected immediately (coordinated-drain v2 policy)!
+    await new Promise<void>((resolveMismatch, rejectMismatch) => {
+      const badVerSock = net.createConnection(electedSockPath);
+      let buf = Buffer.alloc(0);
+      let sawSnapshot = false;
+      badVerSock.on("error", () => undefined);
+      badVerSock.on("data", (chunk: Buffer) => {
+        buf = Buffer.concat([buf, chunk]);
+        while (buf.byteLength >= 36) {
+          const len = buf.readUInt32BE(0);
+          if (buf.byteLength < 36 + len) return;
+          const body = JSON.parse(buf.subarray(36, 36 + len).toString("utf8")) as Record<string, unknown>;
+          buf = buf.subarray(36 + len);
+          if (body.type === "challenge") {
+            assert.equal(body.version, 2, "Hub advertises protocol version 2 in challenge");
+            badVerSock.write(encodeRawFrame({ type: "auth", nonce: body.nonce, version: 1 }));
+          } else if (String(body.type).startsWith("snapshot")) {
+            sawSnapshot = true;
+          }
+        }
+      });
+      badVerSock.once("close", () => {
+        if (sawSnapshot) rejectMismatch(new Error("Expected Hub to reject version 1 peer without sending snapshot"));
+        else resolveMismatch();
+      });
+    });
+
+    // 2b. R3-M2: v2 auth handshake negotiates chunked snapshot (`snapshot_begin`..`snapshot_end`), and duplicate `opId` retries are idempotent!
     const dupSpace = dmConversationUri(ALICE_DID, tidNow(1_702_000_000_000));
     const baseHead = heads[0]!.head;
     await new Promise<void>((resolveWire, rejectWire) => {
       const sock = net.createConnection(electedSockPath);
       let buf = Buffer.alloc(0);
-      const received: Array<Record<string, unknown>> = [];
       sock.on("error", rejectWire);
       sock.on("data", (chunk: Buffer) => {
         buf = Buffer.concat([buf, chunk]);
@@ -513,12 +577,9 @@ test("R3-M1 & R3-M2: concurrent multi-worker election never split-brains, v1 pee
           if (buf.byteLength < 36 + len) return;
           const body = JSON.parse(buf.subarray(36, 36 + len).toString("utf8")) as Record<string, unknown>;
           buf = buf.subarray(36 + len);
-          received.push(body);
           if (body.type === "challenge") {
-            assert.equal(body.version, 2, "Hub advertises protocol version 2 in challenge");
-            // Omit `version` to simulate a v1 peer -> Hub must answer with single-frame `snapshot`!
-            sock.write(encodeRawFrame({ type: "auth", nonce: body.nonce }));
-          } else if (body.type === "snapshot") {
+            sock.write(encodeRawFrame({ type: "auth", nonce: body.nonce, version: 2 }));
+          } else if (body.type === "snapshot_end") {
             // Send 3 `record_wake` frames carrying the EXACT SAME `opId`!
             for (const reqId of [101, 102, 103]) {
               sock.write(
@@ -557,9 +618,11 @@ test("R3-M1 & R3-M2: concurrent multi-worker election never split-brains, v1 pee
     closeDb();
   }
 
-  // 3. R3-M2: 3-worker failover (Hub A + Client B + Client C):
-  //    Kill Hub A while Client B has an in-flight `recordDmWake` AND Worker C wins hub election ->
-  //    Client B resends `opId` through newly elected Hub C so BOTH Client B and Hub C observe the wake with zero divergence!
+  // 3. R3-M2 & R4-M1: 3-worker lease fencing + failover (Hub A + Client B + Hub C):
+  //    Pause Hub A (`SIGSTOP`) while Client B has an in-flight `recordDmWake`, expire Hub A's lease so Worker C wins election as Hub C,
+  //    and then RESUME (`SIGCONT`) old Hub A BEFORE its heartbeat interval fires!
+  //    Resumed Hub A MUST fence its expired lease before mutating state, step down (disconnecting Client B so Client B resends `opId` to Hub C),
+  //    and subsequent HTTP webhooks sent directly to resumed Worker A MUST forward through Hub C rather than mutating stale local state!
   getRawDb().prepare("DELETE FROM oauth_request_lock WHERE name = 'dm_ipc_hub'").run();
 
   // Start Hub A (child process) and elect it as Hub
@@ -578,7 +641,7 @@ test("R3-M1 & R3-M2: concurrent multi-worker election never split-brains, v1 pee
   const hubCChild = await spawnWorkerB();
   let resumeKillSafetyTimer: ReturnType<typeof setTimeout> | undefined;
   try {
-    // Freeze Hub A with SIGSTOP so Client B's record_wake sits genuinely in-flight on the socket!
+    // Freeze Hub A with SIGSTOP so Client B's record_wake sits genuinely in-flight on Hub A's socket!
     process.kill(hubAChild.child.pid!, "SIGSTOP");
     resumeKillSafetyTimer = setTimeout(() => {
       try {
@@ -598,28 +661,42 @@ test("R3-M1 & R3-M2: concurrent multi-worker election never split-brains, v1 pee
     const hubCInitial = await postGetChanges(hubCChild.url, bobAuth, []);
     assert.notEqual(hubCInitial.head.split(".")[0], hubAInitial.head.split(".")[0], "Worker C elected itself as new Hub C");
 
-    // Now SIGKILL frozen Hub A -> Client B's in-flight request rejects on socket close, reconnects to Hub C, and resends opId!
-    process.kill(hubAChild.child.pid!, "SIGKILL");
-    await once(hubAChild.child, "close").catch(() => undefined);
+    // RESUME old Hub A with SIGCONT (NOT SIGKILL!) while Hub C owns the lease:
+    // Resumed Hub A immediately processes the buffered `record_wake` from Client B, fences against `oauth_request_lock`,
+    // steps down without acknowledging a stale wake, and Client B reconnects to Hub C and resends `opId`!
+    process.kill(hubAChild.child.pid!, "SIGCONT");
 
     await inFlightWakeOnB;
 
-    const [observedOnHubC, observedOnClientB] = await Promise.all([
+    const [observedOnHubC, observedOnClientB, observedOnResumedA] = await Promise.all([
       postGetChanges(hubCChild.url, bobAuth, [{ space: failoverSpace, after: hubCInitial.head }]),
       postGetChanges(clientBUrl, bobAuth, [{ space: failoverSpace, after: hubCInitial.head }]),
+      postGetChanges(hubAChild.url, bobAuth, [{ space: failoverSpace, after: hubCInitial.head }]),
     ]);
     assert.deepEqual(observedOnHubC.changed.map((c) => c.space), [failoverSpace], "Hub C received resent wake from Client B");
     assert.deepEqual(observedOnClientB.changed.map((c) => c.space), [failoverSpace], "Client B observed identical wake from Hub C");
-    assert.equal(observedOnHubC.head, observedOnClientB.head, "Client B and Hub C share identical head after mid-flight failover");
-    assert.equal(
-      observedOnHubC.changed[0]!.cursor,
-      observedOnClientB.changed[0]!.cursor,
-      "Client B and Hub C report identical cursor for resent wake",
-    );
+    assert.deepEqual(observedOnResumedA.changed.map((c) => c.space), [failoverSpace], "Resumed Worker A stepped down and synced to Hub C");
+    assert.equal(observedOnHubC.head, observedOnClientB.head, "Client B and Hub C share identical head");
+    assert.equal(observedOnHubC.head, observedOnResumedA.head, "Resumed Worker A shares Hub C's exact head");
+
+    // Send a new HTTP DM webhook directly to resumed Worker A (`hubAChild.url`) and verify Hub C + Client B both observe it!
+    const postResumeSpace = dmConversationUri(ALICE_DID, tidNow(1_703_100_000_000));
+    const postResumeToken = deriveDmNotifyToken(postResumeSpace, BOB_DID);
+    const webhookResOnA = await postNotifyUpdate(hubAChild.url, postResumeSpace, postResumeToken, ALICE_DID);
+    assert.equal(webhookResOnA.status, 200, "HTTP webhook to resumed Worker A forwarded cleanly to Hub C");
+
+    const [afterWebhookHubC, afterWebhookClientB, afterWebhookResumedA] = await Promise.all([
+      postGetChanges(hubCChild.url, bobAuth, [{ space: postResumeSpace, after: observedOnHubC.head }]),
+      postGetChanges(clientBUrl, bobAuth, [{ space: postResumeSpace, after: observedOnHubC.head }]),
+      postGetChanges(hubAChild.url, bobAuth, [{ space: postResumeSpace, after: observedOnHubC.head }]),
+    ]);
+    assert.deepEqual(afterWebhookHubC.changed.map((c) => c.space), [postResumeSpace]);
+    assert.equal(afterWebhookHubC.head, afterWebhookClientB.head);
+    assert.equal(afterWebhookHubC.head, afterWebhookResumedA.head);
   } finally {
     if (resumeKillSafetyTimer) clearTimeout(resumeKillSafetyTimer);
     if (hubAChild.child.exitCode === null && hubAChild.child.signalCode === null) {
-      hubAChild.child.kill("SIGKILL");
+      hubAChild.child.kill("SIGTERM");
       await once(hubAChild.child, "close").catch(() => undefined);
     }
     if (hubCChild.child.exitCode === null && hubCChild.child.signalCode === null) {

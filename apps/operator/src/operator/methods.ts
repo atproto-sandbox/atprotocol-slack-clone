@@ -4,7 +4,7 @@ import { isDid } from "@flock/protocol/keys";
 import { NOTICE_METHOD, OPERATOR_METHOD } from "@flock/protocol/nsids";
 import { WorkspaceEnvelopeError } from "@flock/protocol/workspace-summary";
 import { AuthorityReauthorizationRequiredError, authorityFlowUrl, restoreAuthorityGrant } from "./authority-grant";
-import { DmRateLimitError, recordDmWake } from "./dm-feed-wakes";
+import { DmRateLimitError, DmWakeIpcError, recordDmWake } from "./dm-feed-wakes";
 import { AUTHORITY_APPROVAL_REQUIRED, OperatorAuthError, operatorHttpFailure, WebhookAuthError } from "./errors";
 import { FeedRequestError, getChanges, parseFollow } from "./feed";
 import { getActorOperation, OperationBusyError, OperationConflictError } from "./journal";
@@ -323,6 +323,7 @@ export function describeFailure(error: unknown, unexpected: OperatorMethodDefini
   if (error instanceof MethodError) return { status: error.status, error: error.error, message };
   if (error instanceof WebhookAuthError) return { status: 400, error: "InvalidRequest", message };
   if (error instanceof DmRateLimitError) return { status: 429, error: "RateLimitExceeded", message };
+  if (error instanceof DmWakeIpcError) return { status: 503, error: "Busy", message };
   if (error instanceof AdminMutationsPausedError) return { status: error.status, error: "Paused", message };
   const upstream = operatorHttpFailure(error);
   if (upstream) return { status: upstream.status, error: upstream.name, message: upstream.message.slice(0, 500) };

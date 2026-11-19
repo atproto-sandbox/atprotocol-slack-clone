@@ -45,6 +45,22 @@ export class DmRateLimitError extends Error {
   }
 }
 
+export class DmWakeIpcError extends Error {
+  readonly status = 503;
+  readonly error = "Busy";
+  constructor(message = "DM wake IPC coordination unavailable.") {
+    super(message);
+    this.name = "DmWakeIpcError";
+  }
+}
+
+class HubOwnershipLostError extends Error {
+  constructor(message = "DM wake hub lease ownership lost.") {
+    super(message);
+    this.name = "HubOwnershipLostError";
+  }
+}
+
 export type DmCursor = { epoch: string; seq: number };
 export type DmWakeAnswer = {
   epoch: string;
@@ -99,9 +115,8 @@ type RateBucket = {
 };
 
 type IpcFrame =
-  | { type: "challenge"; nonce: string; version?: number }
-  | { type: "auth"; nonce: string; version?: number }
-  | { type: "snapshot"; epoch: string; evictedCallers: number; maxSpaces?: number; callers: SerializedCallerState[] }
+  | { type: "challenge"; nonce: string; version: number }
+  | { type: "auth"; nonce: string; version: number }
   | { type: "snapshot_begin"; epoch: string; evictedCallers: number; maxSpaces: number }
   | { type: "snapshot_chunk"; callers: SerializedCallerState[] }
   | { type: "snapshot_end" }
@@ -383,20 +398,6 @@ function applyReplicaMutation(mutation: WakeMutation): void {
     }
   }
   evictGlobalOverflow(mutation.callerDid);
-}
-
-function serializeAllCallers(): SerializedCallerState[] {
-  const list: SerializedCallerState[] = [];
-  for (const [callerDid, state] of callers) {
-    list.push({
-      callerDid,
-      epoch: state.epoch,
-      head: state.head,
-      evictedFloor: state.evictedFloor,
-      spaces: [...state.spaces.entries()],
-    });
-  }
-  return list;
 }
 
 function buildSnapshotChunks(): SerializedCallerState[][] {
@@ -693,6 +694,7 @@ type IpcState =
     hubId: string;
     sockPath: string;
     leaseToken: string;
+    leaseExpiresAt: number;
     ipcKey: Buffer;
     server: net.Server;
     peers: Set<HubPeer>;
@@ -756,22 +758,36 @@ function stepDownHub(hub: Extract<IpcState, { mode: "hub" }>): void {
   }
 }
 
+function assertAndRefreshHubLease(hub: Extract<IpcState, { mode: "hub" }>): boolean {
+  if (ipcState.mode !== "hub" || ipcState !== hub) return false;
+  const now = Date.now();
+  if (now >= hub.leaseExpiresAt) {
+    stepDownHub(hub);
+    return false;
+  }
+  try {
+    const nextExpiresAt = now + HUB_LEASE_TTL_MS;
+    const res = getRawDb()
+      .prepare("UPDATE oauth_request_lock SET expires_at = ? WHERE name = ? AND token = ? AND expires_at > ?")
+      .run(nextExpiresAt, DM_IPC_HUB_LOCK_NAME, hub.leaseToken, now);
+    if (res.changes === 1) {
+      hub.leaseExpiresAt = nextExpiresAt;
+      return true;
+    }
+  } catch {
+    // Cannot prove lease ownership -> step down immediately.
+  }
+  stepDownHub(hub);
+  return false;
+}
+
 function startHubHeartbeat(hub: Extract<IpcState, { mode: "hub" }>): void {
   const timer = setInterval(() => {
     if (ipcState.mode !== "hub" || ipcState !== hub) {
       clearInterval(timer);
       return;
     }
-    try {
-      const res = getRawDb()
-        .prepare("UPDATE oauth_request_lock SET expires_at = ? WHERE name = ? AND token = ?")
-        .run(Date.now() + HUB_LEASE_TTL_MS, DM_IPC_HUB_LOCK_NAME, hub.leaseToken);
-      if (res.changes === 0) {
-        stepDownHub(hub);
-      }
-    } catch {
-      // If DB was closed during shutdown, onDbClose tears down IPC cleanly.
-    }
+    assertAndRefreshHubLease(hub);
   }, HUB_HEARTBEAT_MS);
   timer.unref?.();
   hub.heartbeatTimer = timer;
@@ -819,7 +835,48 @@ function broadcastResetFromHub(hub: Extract<IpcState, { mode: "hub" }>): void {
   }
 }
 
-async function applyAuthoritativeWakeIdempotent(
+async function applyAuthoritativeWakeOnHub(
+  hub: Extract<IpcState, { mode: "hub" }>,
+  opId: string | undefined,
+  callerDid: string,
+  space: string,
+  nowMs: number,
+): Promise<void> {
+  if (!assertAndRefreshHubLease(hub)) {
+    throw new HubOwnershipLostError();
+  }
+  if (opId) {
+    const existing = seenOpIds.get(opId);
+    if (existing) {
+      await existing;
+      if (!assertAndRefreshHubLease(hub)) {
+        throw new HubOwnershipLostError();
+      }
+      return;
+    }
+  }
+
+  checkAndRecordRateLimit(callerDid, space, nowMs);
+  const mutation = applyAuthoritativeWake(callerDid, space);
+  notifyMutationListeners(mutation);
+  const bcast = broadcastFromHub(hub, mutation);
+
+  if (opId) {
+    seenOpIds.set(opId, bcast);
+    while (seenOpIds.size > MAX_SEEN_OP_IDS) {
+      const oldest = seenOpIds.keys().next();
+      if (oldest.done) break;
+      seenOpIds.delete(oldest.value);
+    }
+  }
+
+  await bcast;
+  if (!assertAndRefreshHubLease(hub)) {
+    throw new HubOwnershipLostError();
+  }
+}
+
+async function applyLocalOnlyWakeIdempotent(
   opId: string | undefined,
   callerDid: string,
   space: string,
@@ -836,19 +893,15 @@ async function applyAuthoritativeWakeIdempotent(
   checkAndRecordRateLimit(callerDid, space, nowMs);
   const mutation = applyAuthoritativeWake(callerDid, space);
   notifyMutationListeners(mutation);
-  const currentHub = ipcState.mode === "hub" ? ipcState : null;
-  const bcast = currentHub ? broadcastFromHub(currentHub, mutation) : Promise.resolve();
 
   if (opId) {
-    seenOpIds.set(opId, bcast);
+    seenOpIds.set(opId, Promise.resolve());
     while (seenOpIds.size > MAX_SEEN_OP_IDS) {
       const oldest = seenOpIds.keys().next();
       if (oldest.done) break;
       seenOpIds.delete(oldest.value);
     }
   }
-
-  await bcast;
 }
 
 function tryListenAsHub(
@@ -860,6 +913,7 @@ function tryListenAsHub(
 ): Promise<Extract<IpcState, { mode: "hub" }> | null> {
   return new Promise((resolveHub, rejectHub) => {
     const peers = new Set<HubPeer>();
+    let hubRef: Extract<IpcState, { mode: "hub" }> | null = null;
     const server = net.createServer((peerSocket) => {
       peerSocket.unref();
       const nonce = randomBytes(16).toString("hex");
@@ -886,28 +940,16 @@ function tryListenAsHub(
 
       attachFrameReader(peerSocket, ipcKey, (frame) => {
         if (!peer.authenticated) {
-          if (frame.type !== "auth" || frame.nonce !== nonce) {
+          if (frame.type !== "auth" || frame.nonce !== nonce || frame.version !== DM_IPC_PROTOCOL_VERSION) {
+            peerSocket.destroy();
+            return;
+          }
+          if (!hubRef || !assertAndRefreshHubLease(hubRef)) {
             peerSocket.destroy();
             return;
           }
           clearTimeout(authTimer);
           peer.authenticated = true;
-          const peerVersion = typeof frame.version === "number" ? frame.version : 1;
-          if (peerVersion < 2) {
-            const v1Frame = encodeIpcFrame(ipcKey, {
-              type: "snapshot",
-              epoch: clusterEpoch,
-              evictedCallers,
-              maxSpaces: maxTrackedDmSpaces,
-              callers: serializeAllCallers(),
-            });
-            if (v1Frame.byteLength > MAX_IPC_FRAME_BYTES + 36) {
-              peerSocket.destroy();
-              return;
-            }
-            peerSocket.write(v1Frame);
-            return;
-          }
           peerSocket.write(
             encodeIpcFrame(ipcKey, {
               type: "snapshot_begin",
@@ -934,11 +976,15 @@ function tryListenAsHub(
         }
 
         if (frame.type === "record_wake") {
+          if (!hubRef || !assertAndRefreshHubLease(hubRef)) {
+            peerSocket.destroy();
+            return;
+          }
           if (!isDid(frame.callerDid) || !parseDmSpaceUri(frame.space)) {
             peerSocket.write(encodeIpcFrame(ipcKey, { type: "record_ok", reqId: frame.reqId }));
             return;
           }
-          void applyAuthoritativeWakeIdempotent(frame.opId, frame.callerDid, frame.space, frame.nowMs).then(
+          void applyAuthoritativeWakeOnHub(hubRef, frame.opId, frame.callerDid, frame.space, frame.nowMs).then(
             () => {
               if (!peerSocket.destroyed) {
                 peerSocket.write(encodeIpcFrame(ipcKey, { type: "record_ok", reqId: frame.reqId }));
@@ -946,6 +992,10 @@ function tryListenAsHub(
             },
             (err: unknown) => {
               if (peerSocket.destroyed) return;
+              if (err instanceof HubOwnershipLostError) {
+                peerSocket.destroy();
+                return;
+              }
               if (err instanceof DmRateLimitError) {
                 peerSocket.write(
                   encodeIpcFrame(ipcKey, {
@@ -992,17 +1042,19 @@ function tryListenAsHub(
       } catch {
         // Ignore if platform does not support chmod on socket inode.
       }
-      resolveHub({
+      hubRef = {
         mode: "hub",
         clusterDigest,
         hubId,
         sockPath,
         leaseToken,
+        leaseExpiresAt: 0,
         ipcKey,
         server,
         peers,
         nextBcastId: 0,
-      });
+      };
+      resolveHub(hubRef);
     });
   });
 }
@@ -1137,14 +1189,12 @@ function tryConnectToHub(
     attachFrameReader(socket, ipcKey, (frame) => {
       if (!settled) {
         if (frame.type === "challenge") {
+          if (frame.version !== DM_IPC_PROTOCOL_VERSION) {
+            socket.destroy();
+            return;
+          }
           refreshHandshakeTimer();
           socket.write(encodeIpcFrame(ipcKey, { type: "auth", nonce: frame.nonce, version: DM_IPC_PROTOCOL_VERSION }));
-          return;
-        }
-        if (frame.type === "snapshot") {
-          const singleCallers = new Map<string, CallerWakeState>();
-          mergeSerializedCallers(singleCallers, frame.callers);
-          finishSnapshotHandshake(frame.epoch, frame.evictedCallers, singleCallers, frame.maxSpaces);
           return;
         }
         if (frame.type === "snapshot_begin") {
@@ -1242,10 +1292,11 @@ function shortDelay(ms: number): Promise<void> {
 function claimVacantOrExpiredHubLease(
   myToken: string,
   expectedDigest: string,
-): { won: boolean; staleSockPath: string | null } {
+): { won: boolean; expiresAt: number; staleSockPath: string | null } {
   const db = getRawDb();
   return db.transaction(() => {
     const now = Date.now();
+    const expiresAt = now + HUB_LEASE_TTL_MS;
     const prev = db
       .prepare("SELECT token, expires_at FROM oauth_request_lock WHERE name = ?")
       .get(DM_IPC_HUB_LOCK_NAME) as { token: string; expires_at: number } | undefined;
@@ -1255,12 +1306,12 @@ function claimVacantOrExpiredHubLease(
         ON CONFLICT(name) DO UPDATE SET token = excluded.token, expires_at = excluded.expires_at
         WHERE oauth_request_lock.expires_at <= ?
       `)
-      .run(DM_IPC_HUB_LOCK_NAME, myToken, now + HUB_LEASE_TTL_MS, now);
+      .run(DM_IPC_HUB_LOCK_NAME, myToken, expiresAt, now);
     if (res.changes === 1) {
       const staleSockPath = prev ? parseHubLeaseToken(prev.token, expectedDigest)?.sockPath ?? null : null;
-      return { won: true, staleSockPath };
+      return { won: true, expiresAt, staleSockPath };
     }
-    return { won: false, staleSockPath: null };
+    return { won: false, expiresAt: 0, staleSockPath: null };
   }).immediate();
 }
 
@@ -1268,36 +1319,37 @@ function takeOverDeadHubLease(
   myToken: string,
   deadToken: string,
   expectedDigest: string,
-): { won: boolean; deadSockPath: string | null } {
+): { won: boolean; expiresAt: number; deadSockPath: string | null } {
   const db = getRawDb();
   return db.transaction(() => {
     const now = Date.now();
+    const expiresAt = now + HUB_LEASE_TTL_MS;
     const cur = db
       .prepare("SELECT token, expires_at FROM oauth_request_lock WHERE name = ?")
       .get(DM_IPC_HUB_LOCK_NAME) as { token: string; expires_at: number } | undefined;
     if (!cur) {
       db.prepare("INSERT INTO oauth_request_lock (name, token, expires_at) VALUES (?, ?, ?)")
-        .run(DM_IPC_HUB_LOCK_NAME, myToken, now + HUB_LEASE_TTL_MS);
-      return { won: true, deadSockPath: parseHubLeaseToken(deadToken, expectedDigest)?.sockPath ?? null };
+        .run(DM_IPC_HUB_LOCK_NAME, myToken, expiresAt);
+      return { won: true, expiresAt, deadSockPath: parseHubLeaseToken(deadToken, expectedDigest)?.sockPath ?? null };
     }
     if (cur.token === deadToken) {
       const res = db
         .prepare("UPDATE oauth_request_lock SET token = ?, expires_at = ? WHERE name = ? AND token = ?")
-        .run(myToken, now + HUB_LEASE_TTL_MS, DM_IPC_HUB_LOCK_NAME, deadToken);
+        .run(myToken, expiresAt, DM_IPC_HUB_LOCK_NAME, deadToken);
       if (res.changes === 1) {
-        return { won: true, deadSockPath: parseHubLeaseToken(deadToken, expectedDigest)?.sockPath ?? null };
+        return { won: true, expiresAt, deadSockPath: parseHubLeaseToken(deadToken, expectedDigest)?.sockPath ?? null };
       }
-      return { won: false, deadSockPath: null };
+      return { won: false, expiresAt: 0, deadSockPath: null };
     }
     if (cur.expires_at <= now) {
       const res = db
         .prepare("UPDATE oauth_request_lock SET token = ?, expires_at = ? WHERE name = ? AND expires_at <= ?")
-        .run(myToken, now + HUB_LEASE_TTL_MS, DM_IPC_HUB_LOCK_NAME, now);
+        .run(myToken, expiresAt, DM_IPC_HUB_LOCK_NAME, now);
       if (res.changes === 1) {
-        return { won: true, deadSockPath: parseHubLeaseToken(cur.token, expectedDigest)?.sockPath ?? null };
+        return { won: true, expiresAt, deadSockPath: parseHubLeaseToken(cur.token, expectedDigest)?.sockPath ?? null };
       }
     }
-    return { won: false, deadSockPath: null };
+    return { won: false, expiresAt: 0, deadSockPath: null };
   }).immediate();
 }
 
@@ -1312,11 +1364,11 @@ async function tryElectSelfAsHub(
   const hub = await tryListenAsHub(clusterDigest, hubId, sockPath, leaseToken, ipcKey);
   if (!hub) return null;
 
-  let claim: { won: boolean; staleSockPath: string | null };
+  let claim: { won: boolean; expiresAt: number; staleSockPath: string | null };
   try {
     if (deadLeaseToken !== undefined) {
       const taken = takeOverDeadHubLease(leaseToken, deadLeaseToken, clusterDigest);
-      claim = { won: taken.won, staleSockPath: taken.deadSockPath };
+      claim = { won: taken.won, expiresAt: taken.expiresAt, staleSockPath: taken.deadSockPath };
     } else {
       claim = claimVacantOrExpiredHubLease(leaseToken, clusterDigest);
     }
@@ -1330,11 +1382,23 @@ async function tryElectSelfAsHub(
     return null;
   }
 
+  hub.leaseExpiresAt = claim.expiresAt;
   if (claim.staleSockPath && claim.staleSockPath !== sockPath) {
     safeUnlinkSocket(claim.staleSockPath);
   }
   startHubHeartbeat(hub);
   return hub;
+}
+
+function configuredIpcRequirements(): { clusterDigest: string; encryptionKey: Buffer } | null {
+  try {
+    const cfg = getOperatorConfig();
+    const clusterDigest = dmWakeClusterDigest(cfg.databasePath, cfg.operatorServiceRef);
+    if (!clusterDigest) return null;
+    return { clusterDigest, encryptionKey: cfg.encryptionKey };
+  } catch {
+    return null;
+  }
 }
 
 async function establishIpc(clusterDigest: string, ipcKey: Buffer): Promise<void> {
@@ -1354,10 +1418,11 @@ async function establishIpc(clusterDigest: string, ipcKey: Buffer): Promise<void
         return;
       }
       if (conn === "protocol_failed") {
-        // A live hub socket accepted the connection and failed protocol/auth handshake: NEVER unlink its socket or steal its lease!
+        // A live hub socket accepted the connection and failed protocol/auth handshake:
+        // NEVER unlink its socket, NEVER steal its lease, and NEVER degrade to isolated local authority!
         protocolFailures += 1;
         if (protocolFailures >= 2) {
-          return;
+          throw new DmWakeIpcError("DM wake IPC handshake with active hub failed.");
         }
         await shortDelay(10);
         continue;
@@ -1383,25 +1448,35 @@ async function establishIpc(clusterDigest: string, ipcKey: Buffer): Promise<void
       await shortDelay(10 * attempt);
     }
   }
+
+  throw new DmWakeIpcError("DM wake IPC election exhausted without connecting to an active hub.");
+}
+
+function currentIpcState(): IpcState {
+  return ipcState;
 }
 
 export async function ensureDmWakeReady(): Promise<void> {
-  let encryptionKey: Buffer;
-  let clusterDigest: string | null;
-  try {
-    const cfg = getOperatorConfig();
-    encryptionKey = cfg.encryptionKey;
-    clusterDigest = dmWakeClusterDigest(cfg.databasePath, cfg.operatorServiceRef);
-  } catch {
+  const req = configuredIpcRequirements();
+  if (!req) return;
+  const { clusterDigest, encryptionKey } = req;
+
+  if (ipcState.mode === "hub" && ipcState.clusterDigest === clusterDigest && assertAndRefreshHubLease(ipcState)) {
     return;
   }
-  if (!clusterDigest) return;
-
-  if (ipcState.mode === "hub" && ipcState.clusterDigest === clusterDigest) return;
-  if (ipcState.mode === "client" && ipcState.clusterDigest === clusterDigest && !ipcState.socket.destroyed) return;
+  if (ipcState.mode === "client" && ipcState.clusterDigest === clusterDigest && !ipcState.socket.destroyed) {
+    return;
+  }
   if (ipcState.mode === "starting" && ipcState.clusterDigest === clusterDigest) {
     await ipcState.promise;
-    return;
+    const afterStart = currentIpcState();
+    if (
+      (afterStart.mode === "hub" || (afterStart.mode === "client" && !afterStart.socket.destroyed))
+      && afterStart.clusterDigest === clusterDigest
+    ) {
+      return;
+    }
+    throw new DmWakeIpcError();
   }
 
   closeDmWakeIpc({ keepMemoryState: true });
@@ -1470,8 +1545,24 @@ export async function recordDmWake(callerDid: string, space: string, nowMs = Dat
   if (!isDid(callerDid) || !parseDmSpaceUri(space)) return;
   const opId = randomBytes(12).toString("hex");
 
+  const req = configuredIpcRequirements();
+  if (!req) {
+    await applyLocalOnlyWakeIdempotent(opId, callerDid, space, nowMs);
+    return;
+  }
+
+  let lastIpcError: unknown;
   for (let attempt = 0; attempt < 4; attempt += 1) {
-    await ensureDmWakeReady();
+    try {
+      await ensureDmWakeReady();
+    } catch (error) {
+      lastIpcError = error;
+      if (attempt < 3) {
+        await shortDelay(25 * (attempt + 1));
+        continue;
+      }
+      throw error instanceof DmWakeIpcError ? error : new DmWakeIpcError("DM wake IPC coordination unavailable.");
+    }
 
     if (ipcState.mode === "client") {
       if (ipcState.socket.destroyed) {
@@ -1484,25 +1575,31 @@ export async function recordDmWake(callerDid: string, space: string, nowMs = Dat
         return;
       } catch (error) {
         if (error instanceof DmRateLimitError) throw error;
+        lastIpcError = error;
         disconnectClientState(client);
         continue;
       }
     }
 
-    await applyAuthoritativeWakeIdempotent(opId, callerDid, space, nowMs);
-    return;
+    if (ipcState.mode === "hub") {
+      const hub = ipcState;
+      try {
+        await applyAuthoritativeWakeOnHub(hub, opId, callerDid, space, nowMs);
+        return;
+      } catch (error) {
+        if (error instanceof DmRateLimitError) throw error;
+        lastIpcError = error;
+        if (error instanceof HubOwnershipLostError) {
+          continue;
+        }
+        throw error;
+      }
+    }
   }
 
-  await ensureDmWakeReady();
-  if (ipcState.mode === "client" && !ipcState.socket.destroyed) {
-    await sendRecordWakeToHub(ipcState, opId, callerDid, space, nowMs);
-    return;
-  }
-  if (ipcState.mode === "hub" || ipcState.mode === "none") {
-    await applyAuthoritativeWakeIdempotent(opId, callerDid, space, nowMs);
-    return;
-  }
-  throw new Error("DM wake hub unavailable after reconnection retries.");
+  throw lastIpcError instanceof DmWakeIpcError
+    ? lastIpcError
+    : new DmWakeIpcError("DM wake hub unavailable after reconnection retries.");
 }
 
 export const recordDmSpaceWake = recordDmWake;

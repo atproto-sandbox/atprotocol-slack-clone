@@ -157,6 +157,7 @@ export async function getChanges(did: string, follow: readonly Follow[], signal?
   };
   while (evaluated.changed.length === 0 && evaluated.reset.length === 0 && Date.now() < deadline && !signal?.aborted) {
     await poller.nextChange(did, evaluated.head, deadline - Date.now(), signal, hasPendingResult);
+    await ensureDmWakeReady();
     evaluated = evaluateFeed(did, allowed);
   }
   const answered = [...evaluated.changed.map((change) => change.space), ...evaluated.reset];

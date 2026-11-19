@@ -2258,3 +2258,229 @@ test("R12 Round 3 M3: aborted or timed-out ordinary CredentialCache mints never 
     alice.close();
   }
 });
+
+test("R12 Round 4 L1 & L2: superseded ordinary mint never clobbers newer sidecar notify/onAccessLost, and aborting a second watch() preserves active watchers", async () => {
+  const OPERATOR: OperatorService = {
+    serviceRef: "did:web:operator.test#atproto_flock_operator",
+    endpoint: "https://operator.test",
+  };
+
+  // 1. R4-L1: Superseded ordinary mint failing with SpaceCredentialError (NotAuthorized) or RegistrationNotConfirmed
+  //    MUST NOT delete notifyTargets or invoke onAccessLost after a newer sidecar get(space, { notify }) succeeded!
+  for (const staleFailure of ["NotAuthorized", "RegistrationNotConfirmed"] as const) {
+    const network = new FakeNetwork();
+    network.createAccount("did:plc:alice", "pds1");
+    const setupAlice = new DmClient({
+      did: "did:plc:alice",
+      memberClient: network.clientFor("did:plc:alice"),
+      resolvePds: network.resolvePds,
+      resolveKemKey: network.resolveKemKey,
+      fetchEndpoint: network.fetchEndpoint,
+      generateKey: network.generateKey,
+      store: createStore(),
+      now: network.now,
+    });
+    await setupAlice.enableDms("everyone");
+    const inbox = dmInboxUri("did:plc:alice");
+
+    network.registerEndpoint(OPERATOR.endpoint, async (req) => {
+      const url = new URL(req.url);
+      if (url.pathname === "/xrpc/com.atproto.space.confirmRegistration") {
+        const body = (await req.json()) as { challenge: string };
+        return Response.json({ challenge: body.challenge });
+      }
+      return Response.json({});
+    });
+
+    let interceptOrdinary = false;
+    let resolveStaleFetch!: (resp: Response) => void;
+    let enteredResolve!: () => void;
+    const ordinaryInFlight = new Promise<void>((r) => {
+      enteredResolve = r;
+    });
+
+    const authorizeNotifySeen: Array<{ endpoint: string; token: string } | null> = [];
+    const accessLostCalls: string[] = [];
+    const cache = new CredentialCache(
+      {
+        did: "did:plc:alice",
+        memberClient: network.clientFor("did:plc:alice"),
+        resolvePds: network.resolvePds,
+        resolveKemKey: network.resolveKemKey,
+        fetchEndpoint: async (request) => {
+          if (request.url.includes("com.atproto.space.authorizeSpaceSync") && request.method === "POST") {
+            const parsed = JSON.parse(await request.clone().text()) as { notify?: { endpoint: string; token: string } };
+            authorizeNotifySeen.push(parsed.notify ?? null);
+            if (interceptOrdinary) {
+              interceptOrdinary = false;
+              enteredResolve();
+              return new Promise<Response>((res) => {
+                resolveStaleFetch = res;
+              });
+            }
+          }
+          return network.fetchEndpoint(request);
+        },
+        generateKey: network.generateKey,
+        now: network.now,
+      },
+      async (space) => {
+        accessLostCalls.push(space);
+      },
+    );
+
+    if (staleFailure === "RegistrationNotConfirmed") {
+      // Seed an older notify target and advance into renewal window so ordinary get() mints WITH oldTarget!
+      await cache.get(inbox, { notify: { endpoint: OPERATOR.endpoint, token: "dm1-old-target" } });
+      network.advanceClock(SPACE_CREDENTIAL_LIFETIME_MS - SPACE_CREDENTIAL_RENEW_BEFORE_MS + 1_000);
+    }
+
+    // Start ordinary mint #1 (hangs in fetchEndpoint)
+    interceptOrdinary = true;
+    const staleOrdinary = cache.get(inbox);
+    await ordinaryInFlight;
+
+    // Complete sidecar notify mint #2 while ordinary mint #1 is still in flight!
+    const target = { endpoint: OPERATOR.endpoint, token: `dm1-sidecar-${staleFailure}` };
+    const sidecarCred = await cache.get(inbox, { notify: target });
+    assert.deepEqual(sidecarCred.notify, target);
+
+    // Now fail the superseded ordinary mint #1!
+    resolveStaleFetch(
+      Response.json(
+        { error: staleFailure, message: `Simulated stale ${staleFailure}` },
+        { status: staleFailure === "NotAuthorized" ? 403 : 400 },
+      ),
+    );
+    if (staleFailure === "NotAuthorized") {
+      await assert.rejects(staleOrdinary, { name: "SpaceCredentialError" });
+    } else {
+      await staleOrdinary;
+    }
+
+    assert.deepEqual(accessLostCalls, [], `stale ordinary ${staleFailure} must NOT invoke onAccessLost`);
+    const cachedNow = await cache.get(inbox);
+    assert.equal(cachedNow.token, sidecarCred.token, "newer sidecar credential remains intact in cache");
+
+    // Advance past credential renewal threshold -> next ordinary renewal STILL carries `target` (notifyTargets was NOT deleted!)
+    network.advanceClock(SPACE_CREDENTIAL_LIFETIME_MS - SPACE_CREDENTIAL_RENEW_BEFORE_MS + 1_000);
+    authorizeNotifySeen.length = 0;
+    const renewed = await cache.get(inbox);
+    assert.deepEqual(renewed.notify, target, `subsequent renewal after stale ${staleFailure} kept notifyTargets intact`);
+    assert.deepEqual(authorizeNotifySeen, [target]);
+  }
+
+  // 2. R4-L2: Aborting a second watch() call while a prior watcher is active MUST NOT clear existing watchers, timers, or notify state!
+  {
+    const network = new FakeNetwork();
+    network.createAccount("did:plc:alice", "pds1");
+    network.createAccount("did:plc:bob", "pds2");
+
+    const deliveredSpaces: string[] = [];
+    network.registerEndpoint(OPERATOR.endpoint, async (req) => {
+      const url = new URL(req.url);
+      if (url.pathname === "/xrpc/com.atproto.space.confirmRegistration") {
+        const body = (await req.json()) as { challenge: string };
+        return Response.json({ challenge: body.challenge });
+      }
+      if (url.pathname === "/xrpc/com.atproto.space.notifySpaceUpdate") {
+        const body = (await req.json()) as { space: string };
+        deliveredSpaces.push(body.space);
+        return Response.json({});
+      }
+      return Response.json({});
+    });
+
+    type ScheduledTimer = { id: number; fn: () => void; delayMs: number; cleared: boolean; fired: boolean };
+    let nextId = 1;
+    const timers: ScheduledTimer[] = [];
+
+    let hangUnnotifiedRenewal = false;
+    let enteredSecondWatchHang!: () => void;
+    const secondWatchHanging = new Promise<void>((r) => {
+      enteredSecondWatchHang = r;
+    });
+
+    const alice = new DmClient({
+      did: "did:plc:alice",
+      memberClient: network.clientFor("did:plc:alice"),
+      resolvePds: network.resolvePds,
+      resolveKemKey: network.resolveKemKey,
+      fetchEndpoint: async (request) => {
+        const url = new URL(request.url);
+        if (url.origin === OPERATOR.endpoint && url.pathname.includes(OPERATOR_METHOD.getDmNotifyTarget)) {
+          return Response.json({ endpoint: OPERATOR.endpoint, token: "dm1-r4-l2-stable" });
+        }
+        if (
+          hangUnnotifiedRenewal
+          && request.url.includes("com.atproto.space.authorizeSpaceSync")
+          && request.method === "POST"
+        ) {
+          enteredSecondWatchHang();
+          return new Promise<Response>(() => {});
+        }
+        return network.fetchEndpoint(request);
+      },
+      generateKey: network.generateKey,
+      store: createStore(),
+      now: network.now,
+      operator: OPERATOR,
+      timers: {
+        setTimeout: (fn, delayMs) => {
+          const entry: ScheduledTimer = { id: nextId++, fn: () => { entry.fired = true; fn(); }, delayMs, cleared: false, fired: false };
+          timers.push(entry);
+          return entry as unknown as ReturnType<typeof setTimeout>;
+        },
+        clearTimeout: (handle) => {
+          if (handle) (handle as unknown as ScheduledTimer).cleared = true;
+        },
+      },
+    });
+    const bob = new DmClient({
+      did: "did:plc:bob",
+      memberClient: network.clientFor("did:plc:bob"),
+      resolvePds: network.resolvePds,
+      resolveKemKey: network.resolveKemKey,
+      fetchEndpoint: network.fetchEndpoint,
+      generateKey: network.generateKey,
+      store: createStore(),
+      now: network.now,
+    });
+
+    await alice.enableDms("everyone");
+    const inbox = dmInboxUri("did:plc:alice");
+
+    // Watcher 1 starts and registers active webhook renewal timer
+    const sig1 = new AbortController();
+    await alice.watch([inbox], { signal: sig1.signal });
+    await alice.flushWatchNotifications();
+    const activeTimersBefore = timers.filter((t) => !t.cleared && !t.fired);
+    assert.equal(activeTimersBefore.length, 1, "Watcher 1 scheduled active renewal timer");
+
+    // Advance clock into renewal window so a second watch() call triggers credential renewal
+    network.advanceClock(SPACE_CREDENTIAL_LIFETIME_MS - SPACE_CREDENTIAL_RENEW_BEFORE_MS + 1_000);
+    hangUnnotifiedRenewal = true;
+
+    // Watcher 2 starts and aborts mid-flight!
+    const sig2 = new AbortController();
+    const secondWatch = alice.watch([inbox], { signal: sig2.signal });
+    await secondWatchHanging;
+    sig2.abort();
+    await assert.rejects(secondWatch, (err: unknown) => (err as { name?: string })?.name === "AbortError");
+
+    // Watcher 1's timer MUST NOT have been cleared, and firing Watcher 1's renewal timer renews webhook registration!
+    assert.equal(activeTimersBefore[0]!.cleared, false, "aborting Watcher 2 preserved Watcher 1's active renewal timer");
+    hangUnnotifiedRenewal = false;
+    activeTimersBefore[0]!.fn();
+    await alice.flushWatchNotifications();
+
+    // Advance past original TTL -> Watcher 1's renewed webhook registration STILL delivers live notifications!
+    network.advanceClock(SPACE_CREDENTIAL_RENEW_BEFORE_MS + 5_000);
+    await bob.startConversation(["did:plc:alice"]);
+    await network.flushNotifications();
+    assert.deepEqual(deliveredSpaces, [inbox], "Watcher 1's webhook registration remained alive past original TTL");
+
+    sig1.abort();
+    alice.close();
+  }
+});

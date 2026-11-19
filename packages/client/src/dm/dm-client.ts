@@ -2,6 +2,7 @@ import { listBoundedMembers, listBoundedRecords, listBoundedSpaces, listBoundedW
 import {
   createTimestampedSpaceSigHeaders,
   credentialLifetimeMs,
+  isAccessLost,
   isCredentialRefused,
   SPACE_CREDENTIAL_LIFETIME_MS,
   SpaceCredential,
@@ -677,7 +678,7 @@ export class DmClient {
           firstError = item.error;
         }
         const existingState = this.watches.get(item.space);
-        if (existingState) {
+        if (existingState && !options.signal?.aborted && (isAccessLost(item.error) || existingState.watchers.size === 0)) {
           this.clearWatchState(item.space, existingState);
         }
       }

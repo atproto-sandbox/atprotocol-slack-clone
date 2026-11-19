@@ -27,6 +27,7 @@ function sameNotify(left: SpaceNotifyTarget | undefined, right: SpaceNotifyTarge
 
 type InFlightOrdinaryMint = {
   promise: Promise<SpaceCredential>;
+  effectiveNotify: SpaceNotifyTarget | undefined;
   controller: AbortController;
   unSignaledWaiters: number;
   signaledWaiters: Map<AbortSignal, number>;
@@ -42,19 +43,49 @@ export class CredentialCache {
   private readonly inFlightOrdinaryMints = new Map<string, InFlightOrdinaryMint>();
   private readonly notifyTargets = new Map<string, SpaceNotifyTarget>();
   private readonly pendingNotifyMints = new Map<string, Promise<SpaceCredential>>();
+  private readonly cacheGenerations = new Map<string, number>();
+  private readonly notifyGenerations = new Map<string, number>();
 
   constructor(
     private readonly transport: ClientTransport,
     private readonly onAccessLost?: (space: string, error: SpaceCredentialError) => Promise<void>,
   ) {}
 
+  private currentCacheGen(space: string): number {
+    return this.cacheGenerations.get(space) ?? 0;
+  }
+
+  private bumpCacheGen(space: string): number {
+    const next = this.currentCacheGen(space) + 1;
+    this.cacheGenerations.set(space, next);
+    return next;
+  }
+
+  private currentNotifyGen(space: string): number {
+    return this.notifyGenerations.get(space) ?? 0;
+  }
+
+  private bumpNotifyGen(space: string): number {
+    const next = this.currentNotifyGen(space) + 1;
+    this.notifyGenerations.set(space, next);
+    return next;
+  }
+
   async get(space: string, opts?: { notify?: SpaceNotifyTarget; signal?: AbortSignal }): Promise<SpaceCredential> {
     if (opts?.signal?.aborted) throw abortReason(opts.signal);
     if (opts?.notify !== undefined) {
       const pending = this.credentials.get(space);
-      if (pending) {
+      const activeOrdinary = this.inFlightOrdinaryMints.get(space);
+      const canReusePending = !activeOrdinary || activeOrdinary.promise !== pending || sameNotify(activeOrdinary.effectiveNotify, opts.notify);
+      if (pending && canReusePending) {
+        const startedNotifyGen = this.currentNotifyGen(space);
         const existing = await raceWithSignal(pending.catch(() => undefined), opts.signal);
-        if (existing && this.isUsable(existing) && sameNotify(existing.notify, opts.notify)) {
+        if (
+          existing
+          && this.isUsable(existing)
+          && sameNotify(existing.notify, opts.notify)
+          && this.currentNotifyGen(space) === startedNotifyGen
+        ) {
           this.notifyTargets.set(space, opts.notify);
           return existing;
         }
@@ -98,6 +129,7 @@ export class CredentialCache {
     if (opts?.notify !== undefined) {
       return this.mintSidecarNotify(space, opts.notify, opts.signal);
     }
+    this.bumpCacheGen(space);
     this.inFlightOrdinaryMints.delete(space);
     this.credentials.delete(space);
     return this.get(space, opts);
@@ -109,18 +141,29 @@ export class CredentialCache {
    */
   async mintFreshUnnotified(space: string, signal?: AbortSignal): Promise<SpaceCredential> {
     if (signal?.aborted) throw abortReason(signal);
+    const startedCacheGen = this.currentCacheGen(space);
     try {
       const credential = await raceWithSignal(
         mintSpaceCredentialWith(this.transport, space, signal ? { signal } : undefined),
         signal,
       );
       if (signal?.aborted) throw abortReason(signal);
-      if (!this.credentials.has(space) && !this.notifyTargets.has(space)) {
+      if (
+        this.currentCacheGen(space) === startedCacheGen
+        && !this.credentials.has(space)
+        && !this.notifyTargets.has(space)
+      ) {
         this.credentials.set(space, Promise.resolve(credential));
       }
       return credential;
     } catch (error) {
-      if (!signal?.aborted && error instanceof SpaceCredentialError) {
+      if (
+        !signal?.aborted
+        && error instanceof SpaceCredentialError
+        && this.currentCacheGen(space) === startedCacheGen
+      ) {
+        this.bumpCacheGen(space);
+        this.bumpNotifyGen(space);
         this.inFlightOrdinaryMints.delete(space);
         this.credentials.delete(space);
         this.notifyTargets.delete(space);
@@ -138,13 +181,18 @@ export class CredentialCache {
 
   /** Stops re-registering `notify` on future renewals for `space` without dropping valid cached read credentials. */
   clearNotify(space: string): void {
+    this.bumpNotifyGen(space);
     this.notifyTargets.delete(space);
   }
 
   drop(space: string, opts?: { clearNotify?: boolean }): void {
+    this.bumpCacheGen(space);
     this.inFlightOrdinaryMints.delete(space);
     this.credentials.delete(space);
-    if (opts?.clearNotify) this.notifyTargets.delete(space);
+    if (opts?.clearNotify) {
+      this.bumpNotifyGen(space);
+      this.notifyTargets.delete(space);
+    }
   }
 
   private isUsable(credential: SpaceCredential): boolean {
@@ -155,15 +203,18 @@ export class CredentialCache {
     if (signal?.aborted) {
       return Promise.reject(abortReason(signal));
     }
+    const startedCacheGen = this.currentCacheGen(space);
+    const startedNotifyGen = this.currentNotifyGen(space);
     const effectiveNotify = this.notifyTargets.get(space);
     const controller = new AbortController();
     const entry: InFlightOrdinaryMint = {
       promise: undefined as unknown as Promise<SpaceCredential>,
+      effectiveNotify,
       controller,
       unSignaledWaiters: 0,
       signaledWaiters: new Map(),
     };
-    const minted = this.runOrdinaryMint(space, effectiveNotify, entry);
+    const minted = this.runOrdinaryMint(space, effectiveNotify, entry, startedCacheGen, startedNotifyGen);
     entry.promise = minted;
     void minted.catch(() => undefined);
     this.inFlightOrdinaryMints.set(space, entry);
@@ -175,22 +226,43 @@ export class CredentialCache {
     space: string,
     effectiveNotify: SpaceNotifyTarget | undefined,
     entry: InFlightOrdinaryMint,
+    startedCacheGen: number,
+    startedNotifyGen: number,
   ): Promise<SpaceCredential> {
     const { signal } = entry.controller;
+    const ownsCurrentState = () =>
+      this.inFlightOrdinaryMints.get(space) === entry
+      && this.credentials.get(space) === entry.promise
+      && this.currentCacheGen(space) === startedCacheGen;
     try {
-      const credential = await this.mint(space, effectiveNotify, signal);
+      const { credential, notifyConfirmed } = await this.mint(space, effectiveNotify, signal);
       if (signal.aborted) {
         if (this.credentials.get(space) === entry.promise) {
           this.credentials.delete(space);
         }
         throw abortReason(signal);
       }
+      if (ownsCurrentState() && effectiveNotify && this.currentNotifyGen(space) === startedNotifyGen) {
+        if (notifyConfirmed) {
+          this.notifyTargets.set(space, effectiveNotify);
+        } else {
+          this.notifyTargets.delete(space);
+        }
+      }
       return credential;
     } catch (error) {
-      if (this.credentials.get(space) === entry.promise) {
+      const stillOwnsCacheSlot = this.credentials.get(space) === entry.promise;
+      if (stillOwnsCacheSlot) {
         this.credentials.delete(space);
       }
-      if (!signal.aborted && error instanceof SpaceCredentialError) {
+      if (
+        !signal.aborted
+        && error instanceof SpaceCredentialError
+        && stillOwnsCacheSlot
+        && this.currentCacheGen(space) === startedCacheGen
+      ) {
+        this.bumpCacheGen(space);
+        this.bumpNotifyGen(space);
         this.notifyTargets.delete(space);
         await this.onAccessLost?.(space, error);
       }
@@ -297,6 +369,8 @@ export class CredentialCache {
     signal?: AbortSignal,
   ): Promise<SpaceCredential> {
     if (signal?.aborted) throw abortReason(signal);
+    const startedCacheGen = this.currentCacheGen(space);
+    const startedNotifyGen = this.currentNotifyGen(space);
     try {
       const credential = await raceWithSignal(
         mintSpaceCredentialWith(this.transport, space, {
@@ -306,26 +380,42 @@ export class CredentialCache {
         signal,
       );
       if (signal?.aborted) throw abortReason(signal);
-      this.notifyTargets.set(space, notify);
-      this.inFlightOrdinaryMints.delete(space);
-      this.credentials.set(space, Promise.resolve(credential));
+      if (
+        this.currentCacheGen(space) === startedCacheGen
+        && this.currentNotifyGen(space) === startedNotifyGen
+      ) {
+        this.bumpCacheGen(space);
+        this.bumpNotifyGen(space);
+        this.notifyTargets.set(space, notify);
+        this.inFlightOrdinaryMints.delete(space);
+        this.credentials.set(space, Promise.resolve(credential));
+      }
       return credential;
     } catch (error) {
       if (signal?.aborted) {
         throw error;
       }
-      this.notifyTargets.delete(space);
+      if (this.currentNotifyGen(space) === startedNotifyGen) {
+        this.bumpNotifyGen(space);
+        this.notifyTargets.delete(space);
+      }
       if (error instanceof SpaceCredentialError) {
-        this.inFlightOrdinaryMints.delete(space);
-        this.credentials.delete(space);
-        await this.onAccessLost?.(space, error);
+        if (this.currentCacheGen(space) === startedCacheGen) {
+          this.bumpCacheGen(space);
+          this.bumpNotifyGen(space);
+          this.inFlightOrdinaryMints.delete(space);
+          this.credentials.delete(space);
+          this.notifyTargets.delete(space);
+          await this.onAccessLost?.(space, error);
+        }
         throw error;
       }
       if (!isRegistrationNotConfirmed(error)) {
         throw error;
       }
       const current = this.credentials.get(space);
-      if (current) {
+      const activeOrdinary = this.inFlightOrdinaryMints.get(space);
+      if (current && current !== activeOrdinary?.promise) {
         const existing = await raceWithSignal(current.catch(() => undefined), signal);
         if (existing && existing.notify === undefined && this.isUsable(existing)) {
           return existing;
@@ -337,13 +427,23 @@ export class CredentialCache {
           signal,
         );
         if (signal?.aborted) throw abortReason(signal);
-        this.inFlightOrdinaryMints.delete(space);
-        this.credentials.set(space, Promise.resolve(fallback));
+        if (this.currentCacheGen(space) === startedCacheGen) {
+          this.bumpCacheGen(space);
+          this.inFlightOrdinaryMints.delete(space);
+          this.credentials.set(space, Promise.resolve(fallback));
+        }
         return fallback;
       } catch (fallbackError) {
-        if (!signal?.aborted && fallbackError instanceof SpaceCredentialError) {
+        if (
+          !signal?.aborted
+          && fallbackError instanceof SpaceCredentialError
+          && this.currentCacheGen(space) === startedCacheGen
+        ) {
+          this.bumpCacheGen(space);
+          this.bumpNotifyGen(space);
           this.inFlightOrdinaryMints.delete(space);
           this.credentials.delete(space);
+          this.notifyTargets.delete(space);
           await this.onAccessLost?.(space, fallbackError);
         }
         throw fallbackError;
@@ -351,7 +451,11 @@ export class CredentialCache {
     }
   }
 
-  private async mint(space: string, notify?: SpaceNotifyTarget, signal?: AbortSignal): Promise<SpaceCredential> {
+  private async mint(
+    space: string,
+    notify?: SpaceNotifyTarget,
+    signal?: AbortSignal,
+  ): Promise<{ credential: SpaceCredential; notifyConfirmed: boolean }> {
     if (signal?.aborted) throw abortReason(signal);
     if (notify) {
       try {
@@ -363,16 +467,15 @@ export class CredentialCache {
           signal,
         );
         if (signal?.aborted) throw abortReason(signal);
-        this.notifyTargets.set(space, notify);
-        return credential;
+        return { credential, notifyConfirmed: true };
       } catch (error) {
         if (signal?.aborted || !isRegistrationNotConfirmed(error)) throw error;
-        this.notifyTargets.delete(space);
       }
     }
-    return raceWithSignal(
+    const credential = await raceWithSignal(
       mintSpaceCredentialWith(this.transport, space, signal ? { signal } : undefined),
       signal,
     );
+    return { credential, notifyConfirmed: false };
   }
 }
