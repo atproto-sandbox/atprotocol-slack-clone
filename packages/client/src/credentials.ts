@@ -239,13 +239,11 @@ export class CredentialCache {
         signal,
       );
       if (signal?.aborted) throw abortReason(signal);
-      if (
-        this.ownsCredentialSlot(space, opSeq)
-        && !this.credentials.has(space)
-        && !this.notifyTargets.has(space)
-      ) {
+      if (this.ownsCredentialSlot(space, opSeq)) {
         this.advanceCommittedCredSeq(space, opSeq);
-        this.credentials.set(space, Promise.resolve(credential));
+        if (!this.credentials.has(space) && !this.notifyTargets.has(space)) {
+          this.credentials.set(space, Promise.resolve(credential));
+        }
       }
       return credential;
     } catch (error) {
@@ -331,15 +329,17 @@ export class CredentialCache {
         }
         throw abortReason(signal);
       }
-      if (this.credentials.get(space) === entry.promise && this.ownsCredentialSlot(space, opSeq)) {
+      if (this.ownsCredentialSlot(space, opSeq)) {
         this.advanceCommittedCredSeq(space, opSeq);
-        this.credentials.set(space, Promise.resolve(credential));
-        if (effectiveNotify && opSeq > this.getCommittedNotifySeq(space)) {
-          this.advanceCommittedNotifySeq(space, opSeq);
-          if (notifyConfirmed) {
-            this.notifyTargets.set(space, effectiveNotify);
-          } else {
-            this.notifyTargets.delete(space);
+        if (this.credentials.get(space) === entry.promise) {
+          this.credentials.set(space, Promise.resolve(credential));
+          if (effectiveNotify && opSeq > this.getCommittedNotifySeq(space)) {
+            this.advanceCommittedNotifySeq(space, opSeq);
+            if (notifyConfirmed) {
+              this.notifyTargets.set(space, effectiveNotify);
+            } else {
+              this.notifyTargets.delete(space);
+            }
           }
         }
       }
@@ -531,12 +531,14 @@ export class CredentialCache {
         signal,
       );
       if (signal?.aborted) throw abortReason(signal);
-      if (this.ownsNotifySlot(space, opSeq)) {
+      if (this.ownsCredentialSlot(space, opSeq)) {
         this.advanceCommittedCredSeq(space, opSeq);
-        this.advanceCommittedNotifySeq(space, opSeq);
-        this.notifyTargets.set(space, notify);
-        this.inFlightOrdinaryMints.delete(space);
-        this.credentials.set(space, Promise.resolve(credential));
+        if (opSeq > this.getCommittedNotifySeq(space)) {
+          this.advanceCommittedNotifySeq(space, opSeq);
+          this.notifyTargets.set(space, notify);
+          this.inFlightOrdinaryMints.delete(space);
+          this.credentials.set(space, Promise.resolve(credential));
+        }
       }
       return credential;
     } catch (error) {
@@ -562,6 +564,9 @@ export class CredentialCache {
       if (current && current !== activeOrdinary?.promise) {
         const existing = await raceWithSignal(current.catch(() => undefined), signal);
         if (existing && this.isUsable(existing) && (existing.notify === undefined || !this.ownsCredentialSlot(space, opSeq))) {
+          if (this.ownsCredentialSlot(space, opSeq)) {
+            this.advanceCommittedCredSeq(space, opSeq);
+          }
           return existing;
         }
       }

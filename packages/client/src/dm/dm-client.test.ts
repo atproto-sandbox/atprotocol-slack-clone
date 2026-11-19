@@ -3183,4 +3183,88 @@ test("R12 Round 7 M1: older sidecars are fenced while a newer sidecar is STILL p
     assert.equal(afterClear.notify, undefined, "R7-M1: clearNotify remained monotonic; older sidecar did NOT restore cleared target");
     assert.deepEqual(seenPayloads, [null]);
   }
+
+  // 3. R8-M1: A successful newer `mintFreshUnnotified` on a space with existing notified state MUST still advance
+  //    `committedCredSeq` durably (while leaving the cached notified credential intact), so an older in-flight sidecar
+  //    settling afterward CANNOT pass `ownsCredentialSlot`, delete cached state, or invoke `onAccessLost`!
+  {
+    const network = new FakeNetwork();
+    network.createAccount("did:plc:alice", "pds1");
+    const setupAlice = new DmClient({
+      did: "did:plc:alice",
+      memberClient: network.clientFor("did:plc:alice"),
+      resolvePds: network.resolvePds,
+      resolveKemKey: network.resolveKemKey,
+      fetchEndpoint: network.fetchEndpoint,
+      generateKey: network.generateKey,
+      store: createStore(),
+      now: network.now,
+    });
+    await setupAlice.enableDms("everyone");
+    const inbox = dmInboxUri("did:plc:alice");
+
+    network.registerEndpoint(OPERATOR.endpoint, async (req) => {
+      const url = new URL(req.url);
+      if (url.pathname === "/xrpc/com.atproto.space.confirmRegistration") {
+        const body = (await req.json()) as { challenge: string };
+        return Response.json({ challenge: body.challenge });
+      }
+      return Response.json({});
+    });
+
+    let resolveOlderSidecar!: (resp: Response) => void;
+    let enteredOlderSidecar!: () => void;
+    const olderSidecarHanging = new Promise<void>((r) => { enteredOlderSidecar = r; });
+    const accessLost: string[] = [];
+
+    const cache = new CredentialCache(
+      {
+        did: "did:plc:alice",
+        memberClient: network.clientFor("did:plc:alice"),
+        resolvePds: network.resolvePds,
+        resolveKemKey: network.resolveKemKey,
+        fetchEndpoint: async (request) => {
+          if (request.url.includes("com.atproto.space.authorizeSpaceSync") && request.method === "POST") {
+            const parsed = JSON.parse(await request.clone().text()) as { notify?: { token: string } };
+            if (parsed.notify?.token === "dm1-r8-stale-sidecar") {
+              enteredOlderSidecar();
+              return new Promise<Response>((res) => { resolveOlderSidecar = res; });
+            }
+          }
+          return network.fetchEndpoint(request);
+        },
+        generateKey: network.generateKey,
+        now: network.now,
+      },
+      async (sp) => {
+        accessLost.push(sp);
+      },
+    );
+
+    // Seed an active notified credential (`opSeq = 1`)
+    const activeTarget = { endpoint: OPERATOR.endpoint, token: "dm1-r8-active" };
+    const activeCred = await cache.get(inbox, { notify: activeTarget });
+    assert.deepEqual(activeCred.notify, activeTarget);
+
+    // Start an older sidecar (`opSeq = 2`) that hangs on the wire
+    const staleSidecar = cache.get(inbox, { notify: { endpoint: OPERATOR.endpoint, token: "dm1-r8-stale-sidecar" } });
+    await olderSidecarHanging;
+
+    // Run a newer `mintFreshUnnotified` (`opSeq = 3`) while `activeCred` & `activeTarget` are present:
+    // it returns a fresh un-notified PoP credential without clobbering `activeCred`, AND commits durable fence `3`!
+    const popCred = await cache.mintFreshUnnotified(inbox);
+    assert.equal(popCred.notify, undefined);
+    assert.notEqual(popCred.token, activeCred.token);
+
+    // Now older sidecar (`opSeq = 2`) fails with `SpaceCredentialError("NotAuthorized")` AFTER `mintFreshUnnotified` (`opSeq = 3`) unregistered!
+    resolveOlderSidecar(Response.json({ error: "NotAuthorized", message: "stale after mintFreshUnnotified" }, { status: 403 }));
+    let caughtStale: unknown;
+    await staleSidecar.catch((err) => { caughtStale = err; });
+
+    assert.equal(cache.isAuthoritativeAccessLoss(inbox, caughtStale), false, "R8-M1: older sidecar fenced by durable mintFreshUnnotified opSeq");
+    assert.deepEqual(accessLost, [], "R8-M1: onAccessLost NOT invoked");
+    const stillActive = await cache.get(inbox);
+    assert.equal(stillActive.token, activeCred.token, "R8-M1: active notified credential remained intact in cache");
+    assert.deepEqual(stillActive.notify, activeTarget, "R8-M1: active notify target remained intact");
+  }
 });

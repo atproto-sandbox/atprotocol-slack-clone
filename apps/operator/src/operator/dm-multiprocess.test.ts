@@ -1006,5 +1006,45 @@ test("R3 & R4: concurrent multi-worker election never split-brains, mismatched I
     } catch {
       // Ignore
     }
+    closeDb();
+  }
+
+  // 7. Real full-bucket CAS race on a live Hub child process:
+  //    Fill `(BOB_DID, bucketSpace)` to `DM_WAKE_RATE_LIMIT_MAX` (`120`) on live `realHub1` (confirming wake #121 returns HTTP 429 while `realHub1` owns lease),
+  //    then expire `realHub1`'s lease so `realHub2` acquires `fence = 2`, and IMMEDIATELY send wake #122 directly to `realHub1` before its heartbeat fires!
+  //    `realHub1` MUST revalidate lease ownership before emitting `DmRateLimitError`, step down, clear `rateBuckets`, forward wake #122 to `realHub2`, and return 200 OK!
+  getRawDb().prepare("DELETE FROM oauth_request_lock WHERE name = 'dm_ipc_hub'").run();
+  const realHub1 = await spawnWorkerB();
+  const realHub1Initial = await postGetChanges(realHub1.url, bobAuth, []);
+  const realHub2 = await spawnWorkerB();
+  try {
+    const bucketSpace = dmConversationUri(ALICE_DID, tidNow(1_707_000_000_000));
+    const bucketToken = deriveDmNotifyToken(bucketSpace, BOB_DID);
+    for (let i = 0; i < 120; i += 1) {
+      const r = await postNotifyUpdate(realHub1.url, bucketSpace, bucketToken, ALICE_DID);
+      assert.equal(r.status, 200);
+    }
+    const r429 = await postNotifyUpdate(realHub1.url, bucketSpace, bucketToken, ALICE_DID);
+    assert.equal(r429.status, 429, "realHub1 enforces 429 while it genuinely owns the lease");
+
+    // Expire realHub1's lease and promote realHub2 (`fence = 2`) BEFORE realHub1's 4s heartbeat runs!
+    getRawDb().prepare("UPDATE oauth_request_lock SET expires_at = 0 WHERE name = 'dm_ipc_hub'").run();
+    const realHub2Initial = await postGetChanges(realHub2.url, bobAuth, []);
+    assert.notEqual(realHub2Initial.head.split(".")[0], realHub1Initial.head.split(".")[0]);
+
+    // Immediately deliver another webhook directly to realHub1 (whose local rate bucket was full!):
+    // realHub1 fences `isRateLimited` against SQLite, steps down, clears `rateBuckets`, and forwards to realHub2 -> 200 OK!
+    const rAfterTakeover = await postNotifyUpdate(realHub1.url, bucketSpace, bucketToken, ALICE_DID);
+    assert.equal(rAfterTakeover.status, 200, "superseded realHub1 fenced full-bucket 429, stepped down, and forwarded to realHub2");
+
+    const observedOnHub2 = await postGetChanges(realHub2.url, bobAuth, [{ space: bucketSpace, after: realHub2Initial.head }]);
+    assert.deepEqual(observedOnHub2.changed.map((c) => c.space), [bucketSpace]);
+  } finally {
+    for (const c of [realHub1, realHub2]) {
+      if (c.child.exitCode === null && c.child.signalCode === null) {
+        c.child.kill("SIGTERM");
+        await once(c.child, "close").catch(() => undefined);
+      }
+    }
   }
 });
