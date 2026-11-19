@@ -117,15 +117,15 @@ type RateBucket = {
 type IpcFrame =
   | { type: "challenge"; nonce: string; version: number }
   | { type: "auth"; nonce: string; version: number }
-  | { type: "snapshot_begin"; epoch: string; evictedCallers: number; maxSpaces: number }
+  | { type: "snapshot_begin"; fence: number; leaseToken: string; epoch: string; evictedCallers: number; maxSpaces: number }
   | { type: "snapshot_chunk"; callers: SerializedCallerState[] }
   | { type: "snapshot_end" }
-  | { type: "wake"; bcastId: number; mutation: WakeMutation }
+  | { type: "wake"; bcastId: number; fence: number; leaseToken: string; mutation: WakeMutation }
   | { type: "wake_ack"; bcastId: number }
   | { type: "record_wake"; reqId: number; opId?: string; callerDid: string; space: string; nowMs: number }
   | { type: "record_ok"; reqId: number }
   | { type: "record_err"; reqId: number; code: "rate_limit" | "error"; message: string }
-  | { type: "reset"; epoch: string; maxSpaces: number };
+  | { type: "reset"; fence: number; leaseToken: string; epoch: string; maxSpaces: number };
 
 function generateBootEpoch(previous?: string): string {
   while (true) {
@@ -509,6 +509,7 @@ function loadSnapshot(
 }
 
 export function currentDmWakeHead(callerDid: string): { epoch: string; head: number } {
+  evictStaleIpcAttachmentSync();
   const state = callers.get(callerDid);
   if (!state) return { epoch: clusterEpoch, head: 0 };
   return { epoch: state.epoch, head: state.head };
@@ -518,6 +519,7 @@ export function readDmWakes(
   callerDid: string,
   follow: ReadonlyArray<{ space: string; cursor: DmCursor | null }>,
 ): DmWakeAnswer {
+  evictStaleIpcAttachmentSync();
   const state = callers.get(callerDid);
   const effectiveEpoch = state?.epoch ?? clusterEpoch;
   const effectiveHead = state?.head ?? 0;
@@ -574,24 +576,30 @@ function buildHubSocketPath(clusterDigest: string, hubId: string): string {
   return join(socketDirectoryFor(filename), filename);
 }
 
-export function formatHubLeaseToken(hubId: string, sockPath: string): string {
-  return `v2|${hubId}|${sockPath}`;
+export function formatHubLeaseToken(hubId: string, sockPath: string, fence = 1): string {
+  return `v2|${fence}|${hubId}|${sockPath}`;
 }
 
 function parseHubLeaseToken(
   token: string,
   expectedDigest?: string,
-): { hubId: string; sockPath: string } | null {
+): { fence: number; hubId: string; sockPath: string } | null {
   if (!token.startsWith("v2|")) return null;
   const secondPipe = token.indexOf("|", 3);
-  if (secondPipe <= 3 || secondPipe >= token.length - 1) return null;
-  const hubId = token.slice(3, secondPipe);
-  const sockPath = token.slice(secondPipe + 1);
+  if (secondPipe <= 3) return null;
+  const thirdPipe = token.indexOf("|", secondPipe + 1);
+  if (thirdPipe <= secondPipe + 1 || thirdPipe >= token.length - 1) return null;
+  const fenceStr = token.slice(3, secondPipe);
+  if (!/^[1-9]\d*$/.test(fenceStr)) return null;
+  const fence = Number(fenceStr);
+  if (!Number.isSafeInteger(fence) || fence < 1) return null;
+  const hubId = token.slice(secondPipe + 1, thirdPipe);
+  const sockPath = token.slice(thirdPipe + 1);
   if (!/^[0-9a-f]{12}$/.test(hubId) || !sockPath.endsWith(".sock")) return null;
   if (expectedDigest && !sockPath.includes(`flock-dm-v2-${expectedDigest}-${hubId}.sock`)) {
     return null;
   }
-  return { hubId, sockPath };
+  return { fence, hubId, sockPath };
 }
 
 function readHubLeaseRow(): { token: string; expires_at: number } | undefined {
@@ -602,6 +610,12 @@ function readHubLeaseRow(): { token: string; expires_at: number } | undefined {
   } catch {
     return undefined;
   }
+}
+
+function isLeaseTokenActiveInDb(expectedToken: string, nowMs = Date.now()): boolean {
+  if (!expectedToken) return false;
+  const row = readHubLeaseRow();
+  return row !== undefined && row.token === expectedToken && row.expires_at > nowMs;
 }
 
 export function dmWakeSocketPath(
@@ -694,6 +708,7 @@ type IpcState =
     hubId: string;
     sockPath: string;
     leaseToken: string;
+    fence: number;
     leaseExpiresAt: number;
     ipcKey: Buffer;
     server: net.Server;
@@ -705,6 +720,8 @@ type IpcState =
     mode: "client";
     clusterDigest: string;
     sockPath: string;
+    leaseToken: string;
+    hubFence: number;
     ipcKey: Buffer;
     socket: net.Socket;
     nextReqId: number;
@@ -712,8 +729,27 @@ type IpcState =
   };
 
 let ipcState: IpcState = { mode: "none" };
+let highestSeenFence = 0;
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 let closingIntentionally = false;
+
+function recordObservedFence(fence: number): void {
+  if (fence > highestSeenFence) {
+    highestSeenFence = fence;
+  }
+}
+
+function evictStaleIpcAttachmentSync(): void {
+  if (ipcState.mode === "hub") {
+    if (!isLeaseTokenActiveInDb(ipcState.leaseToken)) {
+      stepDownHub(ipcState);
+    }
+  } else if (ipcState.mode === "client") {
+    if (ipcState.socket.destroyed || !isLeaseTokenActiveInDb(ipcState.leaseToken)) {
+      disconnectClientState(ipcState);
+    }
+  }
+}
 
 function safeUnlinkSocket(sockPath: string | null | undefined): void {
   if (!sockPath) return;
@@ -801,7 +837,13 @@ function broadcastFromHub(
   if (authedPeers.length === 0) return Promise.resolve();
 
   const bcastId = ++hub.nextBcastId;
-  const rawFrame = encodeIpcFrame(hub.ipcKey, { type: "wake", bcastId, mutation });
+  const rawFrame = encodeIpcFrame(hub.ipcKey, {
+    type: "wake",
+    bcastId,
+    fence: hub.fence,
+    leaseToken: hub.leaseToken,
+    mutation,
+  });
   const ackPromises = authedPeers.map((peer) =>
     new Promise<void>((resolveAck) => {
       const finish = () => {
@@ -823,7 +865,14 @@ function broadcastFromHub(
 }
 
 function broadcastResetFromHub(hub: Extract<IpcState, { mode: "hub" }>): void {
-  const rawFrame = encodeIpcFrame(hub.ipcKey, { type: "reset", epoch: clusterEpoch, maxSpaces: maxTrackedDmSpaces });
+  if (!assertAndRefreshHubLease(hub)) return;
+  const rawFrame = encodeIpcFrame(hub.ipcKey, {
+    type: "reset",
+    fence: hub.fence,
+    leaseToken: hub.leaseToken,
+    epoch: clusterEpoch,
+    maxSpaces: maxTrackedDmSpaces,
+  });
   for (const peer of hub.peers) {
     if (peer.authenticated && !peer.socket.destroyed) {
       try {
@@ -832,6 +881,48 @@ function broadcastResetFromHub(hub: Extract<IpcState, { mode: "hub" }>): void {
         // Ignore broken peer socket.
       }
     }
+  }
+}
+
+type FencedHubMutationResult =
+  | { kind: "lost" }
+  | { kind: "rate_limit"; error: DmRateLimitError }
+  | { kind: "ok"; mutation: WakeMutation };
+
+function applyFencedHubMutationAtomically(
+  hub: Extract<IpcState, { mode: "hub" }>,
+  callerDid: string,
+  space: string,
+  nowMs: number,
+): FencedHubMutationResult {
+  if (ipcState.mode !== "hub" || ipcState !== hub) return { kind: "lost" };
+  try {
+    const db = getRawDb();
+    return db.transaction((): FencedHubMutationResult => {
+      if (ipcState.mode !== "hub" || ipcState !== hub) return { kind: "lost" };
+      const now = Date.now();
+      if (now >= hub.leaseExpiresAt) return { kind: "lost" };
+      const nextExpiresAt = now + HUB_LEASE_TTL_MS;
+      const res = db
+        .prepare("UPDATE oauth_request_lock SET expires_at = ? WHERE name = ? AND token = ? AND expires_at > ?")
+        .run(nextExpiresAt, DM_IPC_HUB_LOCK_NAME, hub.leaseToken, now);
+      if (res.changes !== 1) return { kind: "lost" };
+      hub.leaseExpiresAt = nextExpiresAt;
+      try {
+        checkAndRecordRateLimit(callerDid, space, nowMs);
+      } catch (err) {
+        if (err instanceof DmRateLimitError) {
+          return { kind: "rate_limit", error: err };
+        }
+        throw err;
+      }
+      // Applied while holding SQLite's RESERVED/EXCLUSIVE write lock on oauth_request_lock,
+      // so no other worker can claim dm_ipc_hub concurrently with this authoritative mutation.
+      const mutation = applyAuthoritativeWake(callerDid, space);
+      return { kind: "ok", mutation };
+    }).immediate();
+  } catch {
+    return { kind: "lost" };
   }
 }
 
@@ -856,8 +947,16 @@ async function applyAuthoritativeWakeOnHub(
     }
   }
 
-  checkAndRecordRateLimit(callerDid, space, nowMs);
-  const mutation = applyAuthoritativeWake(callerDid, space);
+  const outcome = applyFencedHubMutationAtomically(hub, callerDid, space, nowMs);
+  if (outcome.kind === "lost") {
+    stepDownHub(hub);
+    throw new HubOwnershipLostError();
+  }
+  if (outcome.kind === "rate_limit") {
+    throw outcome.error;
+  }
+
+  const { mutation } = outcome;
   notifyMutationListeners(mutation);
   const bcast = broadcastFromHub(hub, mutation);
 
@@ -908,7 +1007,6 @@ function tryListenAsHub(
   clusterDigest: string,
   hubId: string,
   sockPath: string,
-  leaseToken: string,
   ipcKey: Buffer,
 ): Promise<Extract<IpcState, { mode: "hub" }> | null> {
   return new Promise((resolveHub, rejectHub) => {
@@ -953,6 +1051,8 @@ function tryListenAsHub(
           peerSocket.write(
             encodeIpcFrame(ipcKey, {
               type: "snapshot_begin",
+              fence: hubRef.fence,
+              leaseToken: hubRef.leaseToken,
               epoch: clusterEpoch,
               evictedCallers,
               maxSpaces: maxTrackedDmSpaces,
@@ -1047,7 +1147,8 @@ function tryListenAsHub(
         clusterDigest,
         hubId,
         sockPath,
-        leaseToken,
+        leaseToken: "",
+        fence: 0,
         leaseExpiresAt: 0,
         ipcKey,
         server,
@@ -1081,15 +1182,30 @@ function disconnectClientState(client: Extract<IpcState, { mode: "client" }>): v
   }
 }
 
+function isClientBroadcastValid(
+  client: Extract<IpcState, { mode: "client" }>,
+  frameFence: unknown,
+  frameLeaseToken: unknown,
+): boolean {
+  if (typeof frameFence !== "number" || !Number.isSafeInteger(frameFence)) return false;
+  if (typeof frameLeaseToken !== "string" || frameLeaseToken.length === 0) return false;
+  if (frameFence < highestSeenFence) return false;
+  if (frameFence !== client.hubFence || frameLeaseToken !== client.leaseToken) return false;
+  return isLeaseTokenActiveInDb(frameLeaseToken);
+}
+
 function tryConnectToHub(
   clusterDigest: string,
   sockPath: string,
+  expectedLeaseToken: string,
+  expectedFence: number,
   ipcKey: Buffer,
 ): Promise<Extract<IpcState, { mode: "client" }> | "enoent" | "stale_refused" | "protocol_failed"> {
   return new Promise((resolveConn, rejectConn) => {
     const socket = net.createConnection(sockPath);
     let connected = false;
     let settled = false;
+    let clientRef: Extract<IpcState, { mode: "client" }> | null = null;
     const pendingReqs = new Map<number, { resolve: () => void; reject: (err: Error) => void }>();
     let pendingSnapshot: {
       epoch: string;
@@ -1122,27 +1238,43 @@ function tryConnectToHub(
     };
     refreshHandshakeTimer();
 
+    const failStaleDuringHandshake = () => {
+      if (settled) return;
+      settled = true;
+      clearHandshakeTimer();
+      socket.destroy();
+      resolveConn("stale_refused");
+    };
+
     const finishSnapshotHandshake = (
       epoch: string,
       nextEvictedCallers: number,
       snapshotCallers: Map<string, CallerWakeState>,
       nextMaxSpaces?: number,
     ) => {
+      if (!isLeaseTokenActiveInDb(expectedLeaseToken) || expectedFence < highestSeenFence) {
+        failStaleDuringHandshake();
+        return;
+      }
       settled = true;
       clearHandshakeTimer();
       socket.removeListener("error", onEarlyError);
       socket.on("error", () => socket.destroy());
       socket.unref();
+      recordObservedFence(expectedFence);
       loadSnapshot(epoch, nextEvictedCallers, snapshotCallers, nextMaxSpaces);
-      resolveConn({
+      clientRef = {
         mode: "client",
         clusterDigest,
         sockPath,
+        leaseToken: expectedLeaseToken,
+        hubFence: expectedFence,
         ipcKey,
         socket,
         nextReqId: 0,
         pendingReqs,
-      });
+      };
+      resolveConn(clientRef);
     };
 
     const onEarlyError = (err: NodeJS.ErrnoException) => {
@@ -1198,6 +1330,14 @@ function tryConnectToHub(
           return;
         }
         if (frame.type === "snapshot_begin") {
+          if (frame.leaseToken !== expectedLeaseToken || frame.fence !== expectedFence) {
+            socket.destroy();
+            return;
+          }
+          if (frame.fence < highestSeenFence || !isLeaseTokenActiveInDb(expectedLeaseToken)) {
+            failStaleDuringHandshake();
+            return;
+          }
           refreshHandshakeTimer();
           pendingSnapshot = {
             epoch: frame.epoch,
@@ -1231,6 +1371,11 @@ function tryConnectToHub(
       }
 
       if (frame.type === "wake") {
+        if (!clientRef || !isClientBroadcastValid(clientRef, frame.fence, frame.leaseToken)) {
+          if (clientRef) disconnectClientState(clientRef);
+          else socket.destroy();
+          return;
+        }
         applyReplicaMutation(frame.mutation);
         notifyMutationListeners(frame.mutation);
         if (!socket.destroyed) {
@@ -1240,6 +1385,11 @@ function tryConnectToHub(
       }
 
       if (frame.type === "reset") {
+        if (!clientRef || !isClientBroadcastValid(clientRef, frame.fence, frame.leaseToken)) {
+          if (clientRef) disconnectClientState(clientRef);
+          else socket.destroy();
+          return;
+        }
         clusterEpoch = frame.epoch;
         if (typeof frame.maxSpaces === "number" && Number.isSafeInteger(frame.maxSpaces) && frame.maxSpaces >= 1) {
           maxTrackedDmSpaces = frame.maxSpaces;
@@ -1290,9 +1440,10 @@ function shortDelay(ms: number): Promise<void> {
 }
 
 function claimVacantOrExpiredHubLease(
-  myToken: string,
+  hubId: string,
+  sockPath: string,
   expectedDigest: string,
-): { won: boolean; expiresAt: number; staleSockPath: string | null } {
+): { won: boolean; leaseToken: string; fence: number; expiresAt: number; staleSockPath: string | null } {
   const db = getRawDb();
   return db.transaction(() => {
     const now = Date.now();
@@ -1300,6 +1451,12 @@ function claimVacantOrExpiredHubLease(
     const prev = db
       .prepare("SELECT token, expires_at FROM oauth_request_lock WHERE name = ?")
       .get(DM_IPC_HUB_LOCK_NAME) as { token: string; expires_at: number } | undefined;
+    if (prev && prev.expires_at > now) {
+      return { won: false, leaseToken: "", fence: 0, expiresAt: 0, staleSockPath: null };
+    }
+    const prevParsed = prev ? parseHubLeaseToken(prev.token) : null;
+    const fence = Math.max(highestSeenFence, prevParsed?.fence ?? 0) + 1;
+    const myToken = formatHubLeaseToken(hubId, sockPath, fence);
     const res = db
       .prepare(`
         INSERT INTO oauth_request_lock (name, token, expires_at) VALUES (?, ?, ?)
@@ -1309,47 +1466,52 @@ function claimVacantOrExpiredHubLease(
       .run(DM_IPC_HUB_LOCK_NAME, myToken, expiresAt, now);
     if (res.changes === 1) {
       const staleSockPath = prev ? parseHubLeaseToken(prev.token, expectedDigest)?.sockPath ?? null : null;
-      return { won: true, expiresAt, staleSockPath };
+      return { won: true, leaseToken: myToken, fence, expiresAt, staleSockPath };
     }
-    return { won: false, expiresAt: 0, staleSockPath: null };
+    return { won: false, leaseToken: "", fence: 0, expiresAt: 0, staleSockPath: null };
   }).immediate();
 }
 
 function takeOverDeadHubLease(
-  myToken: string,
+  hubId: string,
+  sockPath: string,
   deadToken: string,
   expectedDigest: string,
-): { won: boolean; expiresAt: number; deadSockPath: string | null } {
+): { won: boolean; leaseToken: string; fence: number; expiresAt: number; deadSockPath: string | null } {
   const db = getRawDb();
   return db.transaction(() => {
     const now = Date.now();
     const expiresAt = now + HUB_LEASE_TTL_MS;
+    const deadParsed = parseHubLeaseToken(deadToken);
     const cur = db
       .prepare("SELECT token, expires_at FROM oauth_request_lock WHERE name = ?")
       .get(DM_IPC_HUB_LOCK_NAME) as { token: string; expires_at: number } | undefined;
+    const curParsed = cur ? parseHubLeaseToken(cur.token) : null;
+    const fence = Math.max(highestSeenFence, deadParsed?.fence ?? 0, curParsed?.fence ?? 0) + 1;
+    const myToken = formatHubLeaseToken(hubId, sockPath, fence);
     if (!cur) {
       db.prepare("INSERT INTO oauth_request_lock (name, token, expires_at) VALUES (?, ?, ?)")
         .run(DM_IPC_HUB_LOCK_NAME, myToken, expiresAt);
-      return { won: true, expiresAt, deadSockPath: parseHubLeaseToken(deadToken, expectedDigest)?.sockPath ?? null };
+      return { won: true, leaseToken: myToken, fence, expiresAt, deadSockPath: parseHubLeaseToken(deadToken, expectedDigest)?.sockPath ?? null };
     }
     if (cur.token === deadToken) {
       const res = db
         .prepare("UPDATE oauth_request_lock SET token = ?, expires_at = ? WHERE name = ? AND token = ?")
         .run(myToken, expiresAt, DM_IPC_HUB_LOCK_NAME, deadToken);
       if (res.changes === 1) {
-        return { won: true, expiresAt, deadSockPath: parseHubLeaseToken(deadToken, expectedDigest)?.sockPath ?? null };
+        return { won: true, leaseToken: myToken, fence, expiresAt, deadSockPath: parseHubLeaseToken(deadToken, expectedDigest)?.sockPath ?? null };
       }
-      return { won: false, expiresAt: 0, deadSockPath: null };
+      return { won: false, leaseToken: "", fence: 0, expiresAt: 0, deadSockPath: null };
     }
     if (cur.expires_at <= now) {
       const res = db
         .prepare("UPDATE oauth_request_lock SET token = ?, expires_at = ? WHERE name = ? AND expires_at <= ?")
         .run(myToken, expiresAt, DM_IPC_HUB_LOCK_NAME, now);
       if (res.changes === 1) {
-        return { won: true, expiresAt, deadSockPath: parseHubLeaseToken(cur.token, expectedDigest)?.sockPath ?? null };
+        return { won: true, leaseToken: myToken, fence, expiresAt, deadSockPath: parseHubLeaseToken(cur.token, expectedDigest)?.sockPath ?? null };
       }
     }
-    return { won: false, expiresAt: 0, deadSockPath: null };
+    return { won: false, leaseToken: "", fence: 0, expiresAt: 0, deadSockPath: null };
   }).immediate();
 }
 
@@ -1360,17 +1522,22 @@ async function tryElectSelfAsHub(
 ): Promise<Extract<IpcState, { mode: "hub" }> | null> {
   const hubId = randomBytes(6).toString("hex");
   const sockPath = buildHubSocketPath(clusterDigest, hubId);
-  const leaseToken = formatHubLeaseToken(hubId, sockPath);
-  const hub = await tryListenAsHub(clusterDigest, hubId, sockPath, leaseToken, ipcKey);
+  const hub = await tryListenAsHub(clusterDigest, hubId, sockPath, ipcKey);
   if (!hub) return null;
 
-  let claim: { won: boolean; expiresAt: number; staleSockPath: string | null };
+  let claim: { won: boolean; leaseToken: string; fence: number; expiresAt: number; staleSockPath: string | null };
   try {
     if (deadLeaseToken !== undefined) {
-      const taken = takeOverDeadHubLease(leaseToken, deadLeaseToken, clusterDigest);
-      claim = { won: taken.won, expiresAt: taken.expiresAt, staleSockPath: taken.deadSockPath };
+      const taken = takeOverDeadHubLease(hubId, sockPath, deadLeaseToken, clusterDigest);
+      claim = {
+        won: taken.won,
+        leaseToken: taken.leaseToken,
+        fence: taken.fence,
+        expiresAt: taken.expiresAt,
+        staleSockPath: taken.deadSockPath,
+      };
     } else {
-      claim = claimVacantOrExpiredHubLease(leaseToken, clusterDigest);
+      claim = claimVacantOrExpiredHubLease(hubId, sockPath, clusterDigest);
     }
   } catch (err) {
     closeHubResources(hub);
@@ -1382,7 +1549,10 @@ async function tryElectSelfAsHub(
     return null;
   }
 
+  hub.leaseToken = claim.leaseToken;
+  hub.fence = claim.fence;
   hub.leaseExpiresAt = claim.expiresAt;
+  recordObservedFence(claim.fence);
   if (claim.staleSockPath && claim.staleSockPath !== sockPath) {
     safeUnlinkSocket(claim.staleSockPath);
   }
@@ -1412,7 +1582,7 @@ async function establishIpc(clusterDigest: string, ipcKey: Buffer): Promise<void
     const activeLease = row && row.expires_at > now ? parseHubLeaseToken(row.token, clusterDigest) : null;
 
     if (row && activeLease) {
-      const conn = await tryConnectToHub(clusterDigest, activeLease.sockPath, ipcKey);
+      const conn = await tryConnectToHub(clusterDigest, activeLease.sockPath, row.token, activeLease.fence, ipcKey);
       if (typeof conn === "object") {
         ipcState = conn;
         return;
@@ -1464,14 +1634,25 @@ export async function ensureDmWakeReady(): Promise<void> {
   if (ipcState.mode === "hub" && ipcState.clusterDigest === clusterDigest && assertAndRefreshHubLease(ipcState)) {
     return;
   }
-  if (ipcState.mode === "client" && ipcState.clusterDigest === clusterDigest && !ipcState.socket.destroyed) {
+  if (
+    ipcState.mode === "client"
+    && ipcState.clusterDigest === clusterDigest
+    && !ipcState.socket.destroyed
+    && isLeaseTokenActiveInDb(ipcState.leaseToken)
+  ) {
     return;
+  }
+  if (ipcState.mode === "client") {
+    disconnectClientState(ipcState);
   }
   if (ipcState.mode === "starting" && ipcState.clusterDigest === clusterDigest) {
     await ipcState.promise;
     const afterStart = currentIpcState();
     if (
-      (afterStart.mode === "hub" || (afterStart.mode === "client" && !afterStart.socket.destroyed))
+      (
+        (afterStart.mode === "hub" && assertAndRefreshHubLease(afterStart))
+        || (afterStart.mode === "client" && !afterStart.socket.destroyed && isLeaseTokenActiveInDb(afterStart.leaseToken))
+      )
       && afterStart.clusterDigest === clusterDigest
     ) {
       return;
@@ -1565,7 +1746,7 @@ export async function recordDmWake(callerDid: string, space: string, nowMs = Dat
     }
 
     if (ipcState.mode === "client") {
-      if (ipcState.socket.destroyed) {
+      if (ipcState.socket.destroyed || !isLeaseTokenActiveInDb(ipcState.leaseToken)) {
         disconnectClientState(ipcState);
         continue;
       }
@@ -1621,14 +1802,16 @@ export function closeDmWakeIpc(options?: { keepMemoryState?: boolean }): void {
   } else if (current.mode === "hub") {
     closeHubResources(current);
     try {
+      // Mark lease expired while retaining the monotonic `fence` token in SQLite for future elections.
       getRawDb()
-        .prepare("DELETE FROM oauth_request_lock WHERE name = ? AND token = ?")
+        .prepare("UPDATE oauth_request_lock SET expires_at = 0 WHERE name = ? AND token = ?")
         .run(DM_IPC_HUB_LOCK_NAME, current.leaseToken);
     } catch {
       // Ignore if DB is already closed or uninitialized.
     }
   }
   if (!options?.keepMemoryState) {
+    highestSeenFence = 0;
     clusterEpoch = generateBootEpoch(clusterEpoch);
     evictedCallers = 0;
     maxTrackedDmSpaces = MAX_TRACKED_DM_SPACES;

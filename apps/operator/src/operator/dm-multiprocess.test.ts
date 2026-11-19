@@ -532,8 +532,8 @@ test("R3 & R4: concurrent multi-worker election never split-brains, mismatched I
       .prepare("SELECT token, expires_at FROM oauth_request_lock WHERE name = 'dm_ipc_hub'")
       .get() as { token: string; expires_at: number } | undefined;
     assert.ok(leaseRow && leaseRow.expires_at > Date.now(), "active dm_ipc_hub lease recorded in oauth_request_lock");
-    assert.match(leaseRow.token, /^v2\|[0-9a-f]{12}\|.*flock-dm-v2-[0-9a-f]{16}-[0-9a-f]{12}\.sock$/);
-    const electedSockPath = leaseRow.token.split("|")[2]!;
+    assert.match(leaseRow.token, /^v2\|[1-9]\d*\|[0-9a-f]{12}\|.*flock-dm-v2-[0-9a-f]{16}-[0-9a-f]{12}\.sock$/);
+    const electedSockPath = leaseRow.token.split("|")[3]!;
     assert.equal(existsSync(electedSockPath), true, "winning Hub's unique socket exists on disk");
 
     // 2a. R4-L3: Peer sending mismatched/missing IPC protocol version is rejected immediately (coordinated-drain v2 policy)!
@@ -618,30 +618,29 @@ test("R3 & R4: concurrent multi-worker election never split-brains, mismatched I
     closeDb();
   }
 
-  // 3. R3-M2 & R4-M1: 3-worker lease fencing + failover (Hub A + Client B + Hub C):
-  //    Pause Hub A (`SIGSTOP`) while Client B has an in-flight `recordDmWake`, expire Hub A's lease so Worker C wins election as Hub C,
-  //    and then RESUME (`SIGCONT`) old Hub A BEFORE its heartbeat interval fires!
-  //    Resumed Hub A MUST fence its expired lease before mutating state, step down (disconnecting Client B so Client B resends `opId` to Hub C),
-  //    and subsequent HTTP webhooks sent directly to resumed Worker A MUST forward through Hub C rather than mutating stale local state!
+  // 3. R3-M2, R4-M1, R5-M1 & R5-M2: 4-worker lease fencing + frozen-hub replica turnover + pause-after-precheck fenced broadcast rejection:
   getRawDb().prepare("DELETE FROM oauth_request_lock WHERE name = 'dm_ipc_hub'").run();
 
-  // Start Hub A (child process) and elect it as Hub
+  // Start Hub A (child process) and elect it as Hub (`fence = 1`)
   const hubAChild = await spawnWorkerB();
   const hubAInitial = await postGetChanges(hubAChild.url, bobAuth, []);
 
-  // Start Client B (in-process) and connect it to Hub A as IPC client
+  // Start Client B (in-process) and Replica D (child process) and connect both to Hub A as IPC clients
   const clientBServer = createOperatorApp().listen(0, "127.0.0.1");
   await once(clientBServer, "listening");
   const clientBUrl = `http://127.0.0.1:${(clientBServer.address() as AddressInfo).port}`;
   await ensureDmWakeReady();
   const clientBInitial = await postGetChanges(clientBUrl, bobAuth, []);
+  const replicaDChild = await spawnWorkerB();
+  const replicaDInitial = await postGetChanges(replicaDChild.url, bobAuth, []);
   assert.equal(clientBInitial.head, hubAInitial.head, "Client B connected to Hub A and synced initial epoch");
+  assert.equal(replicaDInitial.head, hubAInitial.head, "Replica D connected to Hub A and synced initial epoch");
 
   // Pre-spawn Worker C warm (before it connects to IPC) so promotion takes <10ms without racing IPC_RPC_TIMEOUT_MS!
   const hubCChild = await spawnWorkerB();
   let resumeKillSafetyTimer: ReturnType<typeof setTimeout> | undefined;
   try {
-    // Freeze Hub A with SIGSTOP so Client B's record_wake sits genuinely in-flight on Hub A's socket!
+    // Freeze Hub A with SIGSTOP so Client B's record_wake sits in-flight AND Replica D's socket to Hub A stays open!
     process.kill(hubAChild.child.pid!, "SIGSTOP");
     resumeKillSafetyTimer = setTimeout(() => {
       try {
@@ -649,21 +648,37 @@ test("R3 & R4: concurrent multi-worker election never split-brains, mismatched I
       } catch {
         // Ignore if already exited.
       }
-    }, 5_000);
+    }, 8_000);
     resumeKillSafetyTimer.unref?.();
 
     const failoverSpace = dmConversationUri(ALICE_DID, tidNow(1_703_000_000_000));
     const inFlightWakeOnB = recordDmWake(BOB_DID, failoverSpace);
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 35));
 
-    // Expire Hub A's SQLite lease and promote warm Worker C so Worker C deterministically wins election as Hub C!
+    // Expire Hub A's SQLite lease and promote warm Worker C so Worker C wins election as Hub C (`fence = 2`)!
     getRawDb().prepare("UPDATE oauth_request_lock SET expires_at = 0 WHERE name = 'dm_ipc_hub'").run();
     const hubCInitial = await postGetChanges(hubCChild.url, bobAuth, []);
     assert.notEqual(hubCInitial.head.split(".")[0], hubAInitial.head.split(".")[0], "Worker C elected itself as new Hub C");
 
-    // RESUME old Hub A with SIGCONT (NOT SIGKILL!) while Hub C owns the lease:
-    // Resumed Hub A immediately processes the buffered `record_wake` from Client B, fences against `oauth_request_lock`,
-    // steps down without acknowledging a stale wake, and Client B reconnects to Hub C and resends `opId`!
+    // R5-M2: WHILE Hub A IS STILL FROZEN (`SIGSTOP`, so Replica D's socket to Hub A is NOT destroyed!),
+    // deliver a DM webhook to Hub C and query Replica D -> Replica D MUST detect lease turnover in oauth_request_lock,
+    // drop its stale open socket to frozen Hub A, attach to Hub C, and serve Hub C's wake immediately!
+    const whileFrozenSpace = dmConversationUri(ALICE_DID, tidNow(1_703_050_000_000));
+    const whileFrozenToken = deriveDmNotifyToken(whileFrozenSpace, BOB_DID);
+    const frozenWebhookRes = await postNotifyUpdate(hubCChild.url, whileFrozenSpace, whileFrozenToken, ALICE_DID);
+    assert.equal(frozenWebhookRes.status, 200);
+    const observedOnReplicaDWhileAFrozen = await postGetChanges(
+      replicaDChild.url,
+      bobAuth,
+      [{ space: whileFrozenSpace, after: hubCInitial.head }],
+    );
+    assert.deepEqual(
+      observedOnReplicaDWhileAFrozen.changed.map((c) => c.space),
+      [whileFrozenSpace],
+      "R5-M2: Replica D detached from still-frozen Hub A and served Hub C's wake on read",
+    );
+
+    // RESUME old Hub A with SIGCONT while Hub C owns the lease (`fence = 2`)
     process.kill(hubAChild.child.pid!, "SIGCONT");
 
     await inFlightWakeOnB;
@@ -695,14 +710,126 @@ test("R3 & R4: concurrent multi-worker election never split-brains, mismatched I
     assert.equal(afterWebhookHubC.head, afterWebhookResumedA.head);
   } finally {
     if (resumeKillSafetyTimer) clearTimeout(resumeKillSafetyTimer);
-    if (hubAChild.child.exitCode === null && hubAChild.child.signalCode === null) {
-      hubAChild.child.kill("SIGTERM");
-      await once(hubAChild.child, "close").catch(() => undefined);
-    }
-    if (hubCChild.child.exitCode === null && hubCChild.child.signalCode === null) {
-      hubCChild.child.kill("SIGTERM");
-      await once(hubCChild.child, "close").catch(() => undefined);
+    for (const c of [hubAChild, hubCChild, replicaDChild]) {
+      if (c.child.exitCode === null && c.child.signalCode === null) {
+        c.child.kill("SIGTERM");
+        await once(c.child, "close").catch(() => undefined);
+      }
     }
     await closeHttpServer(clientBServer);
+    closeDb();
+  }
+
+  // 4. R5-M1 pause-after-precheck fencing token proof:
+  //    Simulate a Hub (`fence = 1`) that already passed precheck, completed handshake with a replica, and mutated locally,
+  //    then paused while Hub C acquired `fence = 2` in SQLite, and resumed to emit a `wake` broadcast carrying `fence = 1`.
+  //    The replica MUST reject the superseded `fence = 1` broadcast without applying its mutation or sending `wake_ack`,
+  //    disconnect from the stale hub, and synchronize with `fence = 2` Hub C!
+  const fakeHubId = "cafe00000001";
+  const fakeHubSock = dmWakeSocketPath(undefined, undefined, fakeHubId)!;
+  const fakeHubToken = formatHubLeaseToken(fakeHubId, fakeHubSock, 1);
+  let peerOnFakeHub: net.Socket | null = null;
+  let sawWakeAckFromReplica = false;
+  const fakeHubServer = net.createServer((peerSock) => {
+    peerOnFakeHub = peerSock;
+    const nonce = "00112233445566778899aabbccddeeff";
+    let buf = Buffer.alloc(0);
+    peerSock.on("error", () => undefined);
+    peerSock.on("data", (chunk: Buffer) => {
+      buf = Buffer.concat([buf, chunk]);
+      while (buf.byteLength >= 36) {
+        const len = buf.readUInt32BE(0);
+        if (buf.byteLength < 36 + len) return;
+        const body = JSON.parse(buf.subarray(36, 36 + len).toString("utf8")) as Record<string, unknown>;
+        buf = buf.subarray(36 + len);
+        if (body.type === "auth") {
+          peerSock.write(
+            encodeRawFrame({
+              type: "snapshot_begin",
+              fence: 1,
+              leaseToken: fakeHubToken,
+              epoch: "zzz",
+              evictedCallers: 0,
+              maxSpaces: 50_000,
+            }),
+          );
+          peerSock.write(encodeRawFrame({ type: "snapshot_end" }));
+        } else if (body.type === "wake_ack") {
+          sawWakeAckFromReplica = true;
+        }
+      }
+    });
+    peerSock.write(encodeRawFrame({ type: "challenge", nonce, version: 2 }));
+  });
+  await new Promise<void>((resolveListen) => fakeHubServer.listen(fakeHubSock, resolveListen));
+  getRawDb()
+    .prepare("INSERT OR REPLACE INTO oauth_request_lock (name, token, expires_at) VALUES ('dm_ipc_hub', ?, ?)")
+    .run(fakeHubToken, Date.now() + HUB_LEASE_TTL_MS);
+
+  const replicaServer = createOperatorApp().listen(0, "127.0.0.1");
+  await once(replicaServer, "listening");
+  const replicaUrl = `http://127.0.0.1:${(replicaServer.address() as AddressInfo).port}`;
+  const realHubC = await spawnWorkerB();
+  try {
+    // Attach in-process replica to fakeHub (`fence = 1`, epoch `zzz`)
+    const attachedAtFence1 = await postGetChanges(replicaUrl, bobAuth, []);
+    assert.equal(attachedAtFence1.head.split(".")[0], "zzz");
+    const fakePeer = peerOnFakeHub as net.Socket | null;
+    assert.ok(fakePeer, "in-process replica connected to fakeHub (fence = 1)");
+
+    // Expire fakeHub's lease so realHubC claims `fence = 2`!
+    getRawDb().prepare("UPDATE oauth_request_lock SET expires_at = 0 WHERE name = 'dm_ipc_hub'").run();
+    const realHubCHead = await postGetChanges(realHubC.url, bobAuth, []);
+    assert.notEqual(realHubCHead.head.split(".")[0], "zzz", "realHubC claimed fence = 2");
+
+    // Now fakeHub ("resuming after pause-after-precheck") broadcasts a `wake` carrying superseded `fence = 1`!
+    const poisonedSpace = dmConversationUri(ALICE_DID, tidNow(1_704_000_000_000));
+    const peerClosed = once(fakePeer, "close");
+    fakePeer.write(
+      encodeRawFrame({
+        type: "wake",
+        bcastId: 77,
+        fence: 1,
+        leaseToken: fakeHubToken,
+        mutation: {
+          callerDid: BOB_DID,
+          space: poisonedSpace,
+          callerEpoch: "zzz",
+          head: 1,
+          seq: 1,
+          evictedFloor: 0,
+          evictedCallers: 0,
+        },
+      }),
+    );
+    await peerClosed;
+    assert.equal(sawWakeAckFromReplica, false, "replica rejected superseded fence=1 broadcast without sending wake_ack");
+
+    // Querying the replica now serves realHubC (`fence = 2`) with ZERO poisonedSpace change!
+    const afterPoisonAttempt = await postGetChanges(
+      replicaUrl,
+      bobAuth,
+      [{ space: poisonedSpace, after: realHubCHead.head }],
+      AbortSignal.timeout(250),
+    ).catch(() => null);
+    // Long-poll times out cleanly (or returns empty changed) with realHubC's epoch because poisonedSpace was NEVER applied!
+    if (afterPoisonAttempt) {
+      assert.equal(afterPoisonAttempt.head, realHubCHead.head);
+      assert.deepEqual(afterPoisonAttempt.changed, []);
+    }
+    const replicaHeadNow = await postGetChanges(replicaUrl, bobAuth, []);
+    assert.equal(replicaHeadNow.head, realHubCHead.head, "replica re-attached to fence=2 Hub C with zero stale state");
+  } finally {
+    if (realHubC.child.exitCode === null && realHubC.child.signalCode === null) {
+      realHubC.child.kill("SIGTERM");
+      await once(realHubC.child, "close").catch(() => undefined);
+    }
+    await closeHttpServer(replicaServer);
+    await new Promise<void>((resolveClose) => fakeHubServer.close(() => resolveClose()));
+    try {
+      rmSync(fakeHubSock, { force: true });
+    } catch {
+      // Ignore
+    }
   }
 });

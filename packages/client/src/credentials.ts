@@ -45,6 +45,8 @@ export class CredentialCache {
   private readonly pendingNotifyMints = new Map<string, Promise<SpaceCredential>>();
   private readonly cacheGenerations = new Map<string, number>();
   private readonly notifyGenerations = new Map<string, number>();
+  private readonly lastLossGen = new Map<string, number>();
+  private readonly accessLossGen = new WeakMap<SpaceCredentialError, { space: string; cacheGen: number }>();
 
   constructor(
     private readonly transport: ClientTransport,
@@ -69,6 +71,26 @@ export class CredentialCache {
     const next = this.currentNotifyGen(space) + 1;
     this.notifyGenerations.set(space, next);
     return next;
+  }
+
+  private recordAuthoritativeAccessLoss(space: string, error: SpaceCredentialError): void {
+    const lossGen = this.bumpCacheGen(space);
+    this.bumpNotifyGen(space);
+    this.lastLossGen.set(space, lossGen);
+    this.inFlightOrdinaryMints.delete(space);
+    this.credentials.delete(space);
+    this.notifyTargets.delete(space);
+    this.accessLossGen.set(error, { space, cacheGen: lossGen });
+  }
+
+  /**
+   * True only when `error` is a `SpaceCredentialError` that owned the current cache generation for `space`
+   * and has not been superseded by a newer credential, refresh, or drop.
+   */
+  isAuthoritativeAccessLoss(space: string, error: unknown): error is SpaceCredentialError {
+    if (!(error instanceof SpaceCredentialError)) return false;
+    const recorded = this.accessLossGen.get(error);
+    return recorded !== undefined && recorded.space === space && this.currentCacheGen(space) === recorded.cacheGen;
   }
 
   async get(space: string, opts?: { notify?: SpaceNotifyTarget; signal?: AbortSignal }): Promise<SpaceCredential> {
@@ -148,12 +170,13 @@ export class CredentialCache {
         signal,
       );
       if (signal?.aborted) throw abortReason(signal);
-      if (
-        this.currentCacheGen(space) === startedCacheGen
-        && !this.credentials.has(space)
-        && !this.notifyTargets.has(space)
-      ) {
-        this.credentials.set(space, Promise.resolve(credential));
+      if (this.currentCacheGen(space) === startedCacheGen) {
+        if (this.lastLossGen.get(space) === startedCacheGen) {
+          this.bumpCacheGen(space);
+        }
+        if (!this.credentials.has(space) && !this.notifyTargets.has(space)) {
+          this.credentials.set(space, Promise.resolve(credential));
+        }
       }
       return credential;
     } catch (error) {
@@ -162,11 +185,7 @@ export class CredentialCache {
         && error instanceof SpaceCredentialError
         && this.currentCacheGen(space) === startedCacheGen
       ) {
-        this.bumpCacheGen(space);
-        this.bumpNotifyGen(space);
-        this.inFlightOrdinaryMints.delete(space);
-        this.credentials.delete(space);
-        this.notifyTargets.delete(space);
+        this.recordAuthoritativeAccessLoss(space, error);
         await this.onAccessLost?.(space, error);
       }
       throw error;
@@ -242,11 +261,17 @@ export class CredentialCache {
         }
         throw abortReason(signal);
       }
-      if (ownsCurrentState() && effectiveNotify && this.currentNotifyGen(space) === startedNotifyGen) {
-        if (notifyConfirmed) {
-          this.notifyTargets.set(space, effectiveNotify);
-        } else {
-          this.notifyTargets.delete(space);
+      if (ownsCurrentState()) {
+        if (this.lastLossGen.get(space) === startedCacheGen) {
+          this.bumpCacheGen(space);
+        }
+        if (effectiveNotify && this.currentNotifyGen(space) === startedNotifyGen) {
+          this.bumpNotifyGen(space);
+          if (notifyConfirmed) {
+            this.notifyTargets.set(space, effectiveNotify);
+          } else {
+            this.notifyTargets.delete(space);
+          }
         }
       }
       return credential;
@@ -261,9 +286,7 @@ export class CredentialCache {
         && stillOwnsCacheSlot
         && this.currentCacheGen(space) === startedCacheGen
       ) {
-        this.bumpCacheGen(space);
-        this.bumpNotifyGen(space);
-        this.notifyTargets.delete(space);
+        this.recordAuthoritativeAccessLoss(space, error);
         await this.onAccessLost?.(space, error);
       }
       throw error;
@@ -395,17 +418,16 @@ export class CredentialCache {
       if (signal?.aborted) {
         throw error;
       }
-      if (this.currentNotifyGen(space) === startedNotifyGen) {
+      if (
+        this.currentCacheGen(space) === startedCacheGen
+        && this.currentNotifyGen(space) === startedNotifyGen
+      ) {
         this.bumpNotifyGen(space);
         this.notifyTargets.delete(space);
       }
       if (error instanceof SpaceCredentialError) {
         if (this.currentCacheGen(space) === startedCacheGen) {
-          this.bumpCacheGen(space);
-          this.bumpNotifyGen(space);
-          this.inFlightOrdinaryMints.delete(space);
-          this.credentials.delete(space);
-          this.notifyTargets.delete(space);
+          this.recordAuthoritativeAccessLoss(space, error);
           await this.onAccessLost?.(space, error);
         }
         throw error;
@@ -439,11 +461,7 @@ export class CredentialCache {
           && fallbackError instanceof SpaceCredentialError
           && this.currentCacheGen(space) === startedCacheGen
         ) {
-          this.bumpCacheGen(space);
-          this.bumpNotifyGen(space);
-          this.inFlightOrdinaryMints.delete(space);
-          this.credentials.delete(space);
-          this.notifyTargets.delete(space);
+          this.recordAuthoritativeAccessLoss(space, fallbackError);
           await this.onAccessLost?.(space, fallbackError);
         }
         throw fallbackError;
