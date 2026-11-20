@@ -1125,12 +1125,16 @@ test("R12 D12.3c: CredentialCache upgrades un-notified credentials, re-mints on 
   assert.deepEqual(notifyPayloads.at(-1), targetB);
   assert.equal(confirmations, 2);
 
-  // 5. RegistrationNotConfirmed strips notify and immediately mints a working un-notified credential!
+  // 5. RegistrationNotConfirmed strips notify and immediately mints AND caches a working un-notified credential!
   confirmShouldSucceed = false;
   const targetUnconfirmed = { endpoint: "https://webhook.test", token: "tok-fail" };
   const c5Fallback = await cache.get(inbox, { notify: targetUnconfirmed });
   assert.ok(c5Fallback.token);
+  assert.equal(c5Fallback.notify, undefined, "fallback credential has no notify binding");
   assert.deepEqual(notifyPayloads.slice(-2), [targetUnconfirmed, null], "retried immediately without notify after RegistrationNotConfirmed");
+  const c5Cached = await cache.get(inbox);
+  assert.equal(c5Cached.token, c5Fallback.token, "R10-M2: unnotified fallback updated CredentialCache slot");
+  assert.equal(c5Cached.notify, undefined, "R10-M2: previous notified credential was replaced in cache");
 });
 
 test("R12 D12.3b.3 (H5): DmClient.watch proves SpaceCredential possession via RFC 9421 PoP, renews notify registrations, never blocks DM reads on operator/webhook failures, and cleans up on abort", async () => {
@@ -3409,5 +3413,117 @@ test("R12 Round 7 M1: older sidecars are fenced while a newer sidecar is STILL p
         assert.deepEqual(cachedAfter.notify, expectedTarget, `${label}: valid notify target survived`);
       }
     }
+  }
+
+  // 5. R10-M1 / R7-M1: `RegistrationNotConfirmed` fast-path reuse (and unnotified fallback) MUST advance `settledFenceSeq`
+  //    (upstream `authorizeSpaceSync` verifies space access BEFORE `confirmRegistration`), so an older pending sidecar
+  //    rejecting afterward with `SpaceCredentialError` NEVER purges cached state or invokes `onAccessLost`!
+  for (const withLaterAbortedOp4 of [false, true] as const) {
+    const network = new FakeNetwork();
+    network.createAccount("did:plc:alice", "pds1");
+    const setupAlice = new DmClient({
+      did: "did:plc:alice",
+      memberClient: network.clientFor("did:plc:alice"),
+      resolvePds: network.resolvePds,
+      resolveKemKey: network.resolveKemKey,
+      fetchEndpoint: network.fetchEndpoint,
+      generateKey: network.generateKey,
+      store: createStore(),
+      now: network.now,
+    });
+    await setupAlice.enableDms("everyone");
+    const inbox = dmInboxUri("did:plc:alice");
+
+    // Operator rejects confirmRegistration (`RegistrationNotConfirmed`)!
+    network.registerEndpoint(OPERATOR.endpoint, async (req) => {
+      const url = new URL(req.url);
+      if (url.pathname === "/xrpc/com.atproto.space.confirmRegistration") {
+        return Response.json({ error: "InvalidRequest", message: "refused" }, { status: 400 });
+      }
+      return Response.json({});
+    });
+
+    let resolveOlderOp2!: (resp: Response) => void;
+    let resolveOp3!: (resp: Response) => void;
+    let savedOp3Req!: Request;
+    let enteredOp2!: () => void;
+    let enteredOp3!: () => void;
+    let enteredOp4!: () => void;
+    const op2InFlight = new Promise<void>((r) => { enteredOp2 = r; });
+    const op3InFlight = new Promise<void>((r) => { enteredOp3 = r; });
+    const op4InFlight = new Promise<void>((r) => { enteredOp4 = r; });
+    const accessLost: string[] = [];
+
+    const cache = new CredentialCache(
+      {
+        did: "did:plc:alice",
+        memberClient: network.clientFor("did:plc:alice"),
+        resolvePds: network.resolvePds,
+        resolveKemKey: network.resolveKemKey,
+        fetchEndpoint: async (request) => {
+          if (request.url.includes("com.atproto.space.authorizeSpaceSync") && request.method === "POST") {
+            const parsed = JSON.parse(await request.clone().text()) as { notify?: { token: string } };
+            if (parsed.notify?.token === "dm1-r10-stale-op2") {
+              enteredOp2();
+              return new Promise<Response>((res) => { resolveOlderOp2 = res; });
+            }
+            if (parsed.notify?.token === "dm1-r10-unconfirmed-op3") {
+              savedOp3Req = request.clone();
+              enteredOp3();
+              return new Promise<Response>((res) => { resolveOp3 = res; });
+            }
+            if (parsed.notify?.token === "dm1-r10-aborted-op4") {
+              enteredOp4();
+              return new Promise<Response>(() => {});
+            }
+          }
+          return network.fetchEndpoint(request);
+        },
+        generateKey: network.generateKey,
+        now: network.now,
+      },
+      async (sp) => {
+        accessLost.push(sp);
+      },
+    );
+
+    // Seed usable un-notified credential (`op1`, `seq = 1`) so `op3` takes the `RegistrationNotConfirmed` fast path!
+    const op1Unnotified = await cache.get(inbox);
+    assert.equal(op1Unnotified.notify, undefined);
+
+    // Start older sidecar `op2` (`seq = 2`) and hang
+    const op2Promise = cache.get(inbox, { notify: { endpoint: OPERATOR.endpoint, token: "dm1-r10-stale-op2" } });
+    await op2InFlight;
+
+    // Start newer sidecar `op3` (`seq = 3`) which hits real `RegistrationNotConfirmed` and takes fast path returning `op1Unnotified`!
+    const op3Promise = cache.get(inbox, { notify: { endpoint: OPERATOR.endpoint, token: "dm1-r10-unconfirmed-op3" } });
+    await op3InFlight;
+
+    const op4Ctrl = new AbortController();
+    let op4Promise: Promise<unknown> | undefined;
+    if (withLaterAbortedOp4) {
+      op4Promise = cache.get(inbox, { notify: { endpoint: OPERATOR.endpoint, token: "dm1-r10-aborted-op4" }, signal: op4Ctrl.signal });
+      await op4InFlight;
+    }
+
+    // Resolve `op3` against FakeNetwork -> operator refuses confirmation -> PDS returns `RegistrationNotConfirmed` -> fast path returns `op1Unnotified`!
+    resolveOp3(await network.fetchEndpoint(savedOp3Req));
+    const op3Returned = await op3Promise;
+    assert.equal(op3Returned.token, op1Unnotified.token, "op3 took RegistrationNotConfirmed fast path");
+
+    if (op4Promise) {
+      op4Ctrl.abort();
+      await assert.rejects(op4Promise);
+    }
+
+    // Now older `op2` (`seq = 2`) rejects with `SpaceCredentialError("NotAuthorized")` -> MUST be fenced by `op3`!
+    resolveOlderOp2(Response.json({ error: "NotAuthorized", message: "stale op2 refusal" }, { status: 403 }));
+    let err2: unknown;
+    await op2Promise.catch((e) => { err2 = e; });
+
+    assert.equal(cache.isAuthoritativeAccessLoss(inbox, err2), false, `R10-M1 (op4=${withLaterAbortedOp4}): older op2 fenced after RegistrationNotConfirmed fast path`);
+    assert.deepEqual(accessLost, [], `R10-M1 (op4=${withLaterAbortedOp4}): onAccessLost NOT invoked`);
+    const cachedAfter = await cache.get(inbox);
+    assert.equal(cachedAfter.token, op1Unnotified.token, `R10-M1 (op4=${withLaterAbortedOp4}): cached unnotified credential survived intact`);
   }
 });

@@ -362,9 +362,20 @@ export class CredentialCache {
   ): Promise<SpaceCredential> {
     const { signal } = entry.controller;
     const { opSeq, snapshotNotifySeq } = entry;
+    let authorizedBeforeUnconfirmed = false;
     try {
-      const { credential, notifyConfirmed } = await this.mint(space, effectiveNotify, signal);
+      const { credential, notifyConfirmed } = await this.mint(
+        space,
+        effectiveNotify,
+        signal,
+        () => {
+          authorizedBeforeUnconfirmed = true;
+        },
+      );
       if (signal.aborted) {
+        if (authorizedBeforeUnconfirmed) {
+          this.advanceSettledFence(space, opSeq);
+        }
         throw abortReason(signal);
       }
       this.advanceSettledFence(space, opSeq);
@@ -399,6 +410,8 @@ export class CredentialCache {
       ) {
         this.recordAuthoritativeAccessLoss(space, opSeq, error);
         await this.onAccessLost?.(space, error);
+      } else if (authorizedBeforeUnconfirmed) {
+        this.advanceSettledFence(space, opSeq);
       }
       throw error;
     } finally {
@@ -599,8 +612,16 @@ export class CredentialCache {
       }
       const current = this.credentials.get(space);
       if (current) {
-        const existing = await raceWithSignal(current.catch(() => undefined), signal);
+        const existing = await raceWithSignal(current.catch(() => undefined), signal).catch((abortErr) => {
+          this.advanceSettledFence(space, opSeq);
+          throw abortErr;
+        });
+        if (signal?.aborted) {
+          this.advanceSettledFence(space, opSeq);
+          throw abortReason(signal);
+        }
         if (existing && this.isUsable(existing) && (existing.notify === undefined || !this.ownsCredentialSlot(space, opSeq))) {
+          this.advanceSettledFence(space, opSeq);
           return existing;
         }
       }
@@ -609,9 +630,13 @@ export class CredentialCache {
           mintSpaceCredentialWith(this.transport, space, signal ? { signal } : undefined),
           signal,
         );
-        if (signal?.aborted) throw abortReason(signal);
+        if (signal?.aborted) {
+          this.advanceSettledFence(space, opSeq);
+          throw abortReason(signal);
+        }
+        const canStoreFallback = this.ownsCredentialSlot(space, opSeq) && opSeq > this.getStoredCredSeq(space);
         this.advanceSettledFence(space, opSeq);
-        if (this.ownsCredentialSlot(space, opSeq) && opSeq > this.getStoredCredSeq(space)) {
+        if (canStoreFallback) {
           this.advanceStoredCredSeq(space, opSeq);
           this.deleteOlderInFlightOrdinary(space, opSeq);
           this.credentials.set(space, Promise.resolve(fallback));
@@ -625,6 +650,9 @@ export class CredentialCache {
         ) {
           this.recordAuthoritativeAccessLoss(space, opSeq, fallbackError);
           await this.onAccessLost?.(space, fallbackError);
+        } else {
+          // Upstream `authorizeSpaceSync` already verified space access before throwing `RegistrationNotConfirmed`.
+          this.advanceSettledFence(space, opSeq);
         }
         throw fallbackError;
       }
@@ -635,6 +663,7 @@ export class CredentialCache {
     space: string,
     notify?: SpaceNotifyTarget,
     signal?: AbortSignal,
+    onRegistrationNotConfirmed?: () => void,
   ): Promise<{ credential: SpaceCredential; notifyConfirmed: boolean }> {
     if (signal?.aborted) throw abortReason(signal);
     if (notify) {
@@ -650,6 +679,7 @@ export class CredentialCache {
         return { credential, notifyConfirmed: true };
       } catch (error) {
         if (signal?.aborted || !isRegistrationNotConfirmed(error)) throw error;
+        onRegistrationNotConfirmed?.();
       }
     }
     const credential = await raceWithSignal(

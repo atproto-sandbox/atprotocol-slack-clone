@@ -1037,78 +1037,101 @@ test("R3 & R4: concurrent multi-worker election never split-brains, mismatched I
     closeDb();
   }
 
-  // 7. Real mid-operation full-bucket CAS race on a live Hub child process (`R9-L1`):
-  //    Fill `(BOB_DID, bucketSpace)` to `DM_WAKE_RATE_LIMIT_MAX` (`120`) on live `realHub1` (confirming wake #121 returns HTTP 429),
-  //    bring up live `realHub2` (`token2`), restore `token1` on `oauth_request_lock`, and arm a deterministic SQLite `AFTER UPDATE`
-  //    trigger that lets `ensureDmWakeReady()` (`UPDATE #1`) AND `applyAuthoritativeWakeOnHub`'s initial lease assertion (`UPDATE #2`,
-  //    line 909) BOTH succeed on `token1`, then atomically switches `oauth_request_lock` to `token2` right BEFORE `applyAuthoritativeWakeOnHub`'s
-  //    full-bucket CAS (`UPDATE #3`, line 928)! `realHub1` MUST catch the mid-operation lease loss at line 928, step down, clear `rateBuckets`,
-  //    forward the wake to `realHub2`, and return 200 OK!
+  // 7. Real mid-operation full-bucket CAS race on a live Hub child process (`R9-L1` / `R10-L1` / `R10-M3`):
+  //    Pre-spawn `realHub1` and `realHub2` BEFORE starting `realHub1`'s lease timer, fill `(BOB_DID, bucketSpace)` in fast
+  //    parallel waves so the entire sub-test completes strictly inside `< 3,000ms` (`< 4,000ms` `HUB_HEARTBEAT_MS`, making
+  //    background heartbeat `UPDATE`s physically impossible!), and verify BOTH deterministic takeover points:
+  //    - `stealAtUpdate = 2`: `ensureDmWakeReady` (`n = 1`) and `applyAuthoritativeWakeOnHub` entry (`n = 2`, line 909) succeed,
+  //      then takeover switches `oauth_request_lock` to `token2` right BEFORE line 928's full-bucket CAS (`n === 2`).
+  //    - `stealAtUpdate = 3`: line 928's full-bucket CAS ALSO executes (`n = 3` — directly proving entry into line 928!),
+  //      then takeover switches `oauth_request_lock` to `token2` right BEFORE `recordDmWake`'s catch-block CAS (`R10-M3`, line 1801).
   getRawDb().prepare("DELETE FROM oauth_request_lock WHERE name = 'dm_ipc_hub'").run();
   const realHub1 = await spawnWorkerB();
-  const realHub1Initial = await postGetChanges(realHub1.url, bobAuth, []);
   const realHub2 = await spawnWorkerB();
   try {
-    const bucketSpace = dmConversationUri(ALICE_DID, tidNow(1_707_000_000_000));
-    const bucketToken = deriveDmNotifyToken(bucketSpace, BOB_DID);
-    for (let i = 0; i < 120; i += 1) {
-      const r = await postNotifyUpdate(realHub1.url, bucketSpace, bucketToken, ALICE_DID);
-      assert.equal(r.status, 200);
-    }
-    const r429 = await postNotifyUpdate(realHub1.url, bucketSpace, bucketToken, ALICE_DID);
-    assert.equal(r429.status, 429, "realHub1 enforces 429 while it genuinely owns the lease");
-
-    const hub1LockRow = getRawDb()
-      .prepare("SELECT token, expires_at FROM oauth_request_lock WHERE name = 'dm_ipc_hub'")
-      .get() as { token: string; expires_at: number } | undefined;
-    assert.ok(hub1LockRow, "realHub1 holds dm_ipc_hub lease");
-
-    // Let realHub2 elect itself (`token2`, listening on its live Unix domain socket), then restore `token1` and arm the
-    // deterministic barrier trigger so takeover occurs strictly AFTER `applyAuthoritativeWakeOnHub`'s initial CAS (`n = 2`)
-    // and strictly BEFORE line 928's full-bucket CAS!
-    getRawDb().prepare("UPDATE oauth_request_lock SET expires_at = 0 WHERE name = 'dm_ipc_hub'").run();
-    const realHub2Initial = await postGetChanges(realHub2.url, bobAuth, []);
-    assert.notEqual(realHub2Initial.head.split(".")[0], realHub1Initial.head.split(".")[0]);
-
-    const hub2LockRow = getRawDb()
-      .prepare("SELECT token, expires_at FROM oauth_request_lock WHERE name = 'dm_ipc_hub'")
-      .get() as { token: string; expires_at: number } | undefined;
-    assert.ok(hub2LockRow && hub2LockRow.token !== hub1LockRow.token, "realHub2 minted distinct token2");
-
     const sqlQuote = (s: string) => `'${s.replaceAll("'", "''")}'`;
-    getRawDb().exec(`
-      DROP TRIGGER IF EXISTS _test_steal_after_precheck;
-      DROP TABLE IF EXISTS _test_cas_race;
-      CREATE TABLE _test_cas_race (n INTEGER NOT NULL);
-      INSERT INTO _test_cas_race (n) VALUES (0);
-      UPDATE oauth_request_lock
-         SET token = ${sqlQuote(hub1LockRow.token)},
-             expires_at = ${Date.now() + 12_000}
-       WHERE name = 'dm_ipc_hub';
-      CREATE TRIGGER _test_steal_after_precheck
-      AFTER UPDATE ON oauth_request_lock
-      WHEN NEW.name = 'dm_ipc_hub' AND NEW.token = ${sqlQuote(hub1LockRow.token)}
-      BEGIN
-        UPDATE _test_cas_race SET n = n + 1;
+    for (const [iterIdx, stealAtUpdate] of ([2, 3] as const).entries()) {
+      getRawDb().exec("DROP TRIGGER IF EXISTS _test_steal_after_precheck; DROP TABLE IF EXISTS _test_cas_race;");
+      if (iterIdx === 0) {
+        getRawDb().prepare("DELETE FROM oauth_request_lock WHERE name = 'dm_ipc_hub'").run();
+      } else {
+        getRawDb().prepare("UPDATE oauth_request_lock SET expires_at = 0 WHERE name = 'dm_ipc_hub'").run();
+      }
+
+      // Capture monotonic start BEFORE realHub1 elects itself & registers `setInterval(..., 4000)`!
+      const hub1ElectStartedAt = performance.now();
+      const realHub1Initial = await postGetChanges(realHub1.url, bobAuth, []);
+
+      const bucketSpace = dmConversationUri(ALICE_DID, tidNow(1_707_000_000_000 + iterIdx * 10_000));
+      const bucketToken = deriveDmNotifyToken(bucketSpace, BOB_DID);
+      for (let wave = 0; wave < 3; wave += 1) {
+        const batch = await Promise.all(
+          Array.from({ length: 40 }, () => postNotifyUpdate(realHub1.url, bucketSpace, bucketToken, ALICE_DID)),
+        );
+        for (const r of batch) assert.equal(r.status, 200);
+      }
+      const r429 = await postNotifyUpdate(realHub1.url, bucketSpace, bucketToken, ALICE_DID);
+      assert.equal(r429.status, 429, "realHub1 enforces 429 while it genuinely owns the lease");
+
+      const hub1LockRow = getRawDb()
+        .prepare("SELECT token, expires_at FROM oauth_request_lock WHERE name = 'dm_ipc_hub'")
+        .get() as { token: string; expires_at: number } | undefined;
+      assert.ok(hub1LockRow, "realHub1 holds dm_ipc_hub lease");
+
+      getRawDb().prepare("UPDATE oauth_request_lock SET expires_at = 0 WHERE name = 'dm_ipc_hub'").run();
+      const realHub2Initial = await postGetChanges(realHub2.url, bobAuth, []);
+      assert.notEqual(realHub2Initial.head.split(".")[0], realHub1Initial.head.split(".")[0]);
+
+      const hub2LockRow = getRawDb()
+        .prepare("SELECT token, expires_at FROM oauth_request_lock WHERE name = 'dm_ipc_hub'")
+        .get() as { token: string; expires_at: number } | undefined;
+      assert.ok(hub2LockRow && hub2LockRow.token !== hub1LockRow.token, "realHub2 minted distinct token2");
+
+      getRawDb().exec(`
+        CREATE TABLE _test_cas_race (n INTEGER NOT NULL);
+        INSERT INTO _test_cas_race (n) VALUES (0);
         UPDATE oauth_request_lock
-           SET token = ${sqlQuote(hub2LockRow.token)},
-               expires_at = ${hub2LockRow.expires_at}
-         WHERE name = 'dm_ipc_hub'
-           AND (SELECT n FROM _test_cas_race) = 2;
-      END;
-    `);
+           SET token = ${sqlQuote(hub1LockRow.token)},
+               expires_at = ${Date.now() + 12_000}
+         WHERE name = 'dm_ipc_hub';
+        CREATE TRIGGER _test_steal_after_precheck
+        AFTER UPDATE ON oauth_request_lock
+        WHEN NEW.name = 'dm_ipc_hub' AND NEW.token = ${sqlQuote(hub1LockRow.token)}
+        BEGIN
+          UPDATE _test_cas_race SET n = n + 1;
+          UPDATE oauth_request_lock
+             SET token = ${sqlQuote(hub2LockRow.token)},
+                 expires_at = ${hub2LockRow.expires_at}
+           WHERE name = 'dm_ipc_hub'
+             AND (SELECT n FROM _test_cas_race) = ${stealAtUpdate};
+        END;
+      `);
 
-    const rAfterTakeover = await postNotifyUpdate(realHub1.url, bucketSpace, bucketToken, ALICE_DID);
-    const raceRow = getRawDb().prepare("SELECT n FROM _test_cas_race").get() as { n: number };
-    assert.equal(
-      raceRow.n,
-      2,
-      "both ensureDmWakeReady (n=1) and applyAuthoritativeWakeOnHub entry CAS (n=2) succeeded on token1 before line-928 full-bucket CAS ran",
-    );
-    assert.equal(rAfterTakeover.status, 200, "realHub1 caught mid-operation takeover at line-928 full-bucket CAS, stepped down, and forwarded to realHub2");
+      const preReqRow = getRawDb().prepare("SELECT n FROM _test_cas_race").get() as { n: number };
+      assert.equal(preReqRow.n, 0, "zero background updates before triggering webhook");
 
-    const observedOnHub2 = await postGetChanges(realHub2.url, bobAuth, [{ space: bucketSpace, after: realHub2Initial.head }]);
-    assert.deepEqual(observedOnHub2.changed.map((c) => c.space), [bucketSpace]);
+      const rAfterTakeover = await postNotifyUpdate(realHub1.url, bucketSpace, bucketToken, ALICE_DID);
+      const elapsedSinceHub1ElectMs = performance.now() - hub1ElectStartedAt;
+      const raceRow = getRawDb().prepare("SELECT n FROM _test_cas_race").get() as { n: number };
+
+      assert.ok(
+        elapsedSinceHub1ElectMs < 3_500,
+        `completed in ${elapsedSinceHub1ElectMs.toFixed(1)}ms (<3500ms < 4000ms HUB_HEARTBEAT_MS), so zero heartbeat timers could fire`,
+      );
+      assert.equal(
+        raceRow.n,
+        stealAtUpdate,
+        `stealAtUpdate=${stealAtUpdate}: exact expected CAS sequence executed without heartbeat interference`,
+      );
+      assert.equal(
+        rAfterTakeover.status,
+        200,
+        `stealAtUpdate=${stealAtUpdate}: superseded realHub1 stepped down, cleared rateBuckets, and forwarded to realHub2`,
+      );
+
+      const observedOnHub2 = await postGetChanges(realHub2.url, bobAuth, [{ space: bucketSpace, after: realHub2Initial.head }]);
+      assert.deepEqual(observedOnHub2.changed.map((c) => c.space), [bucketSpace]);
+    }
   } finally {
     try {
       getRawDb().exec("DROP TRIGGER IF EXISTS _test_steal_after_precheck; DROP TABLE IF EXISTS _test_cas_race;");
