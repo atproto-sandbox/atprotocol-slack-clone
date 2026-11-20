@@ -51,16 +51,14 @@ test("the echo bot answers a person within one poll, and once uninstalled is den
     let polls = 0;
     let pollAtAnswer: number | undefined;
     const errors: unknown[] = [];
+    const send = engine.channels.send.bind(engine.channels);
+    engine.channels.send = (...args) => {
+      pollAtAnswer ??= polls;
+      return send(...args);
+    };
     running = startEchoBot({
       engine: {
         ...engine,
-        channels: {
-          ...engine.channels,
-          send: (...args) => {
-            pollAtAnswer ??= polls;
-            return engine.channels.send(...args);
-          },
-        },
         operator: {
           getChanges: (follow, signal) => {
             if (follow.some((entry) => entry.space === created.channel)) polls += 1;
@@ -103,10 +101,11 @@ test("the echo bot answers a person within one poll, and once uninstalled is den
     assert.ok(refusal && isAccessLost(refusal), `its next credential is refused: ${String(refusal)}`);
 
     // and the bot itself learns it, from the feed, and says so: it follows nothing of the workspace any more
-    for (const started = Date.now(); !errors.some((error) => error instanceof AppAccessLostError); await new Promise((resolve) => setTimeout(resolve, 250))) {
+    const isLostAccess = (error: unknown): boolean => typeof error === "object" && error !== null && error instanceof AppAccessLostError;
+    for (const started = Date.now(); !errors.some(isLostAccess); await new Promise((resolve) => setTimeout(resolve, 250))) {
       assert.ok(Date.now() - started < 60_000, `the bot reported its lost access: ${errors.map(String).join("; ")}`);
     }
-    assert.deepEqual(errors.filter((error) => !(error instanceof AppAccessLostError)), [], "nothing but the lost access was reported");
+    assert.deepEqual(errors.filter((error) => !isLostAccess(error)), [], "nothing but the lost access was reported");
   } finally {
     stop.abort();
     await running?.catch(() => undefined);
