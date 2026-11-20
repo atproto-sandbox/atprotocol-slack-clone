@@ -69,15 +69,17 @@ export const OPERATOR_METHOD = {
   createWorkspace: nsid("operator.createWorkspace"),
   startAuthorityFlow: nsid("operator.startAuthorityFlow"),
   listStalledOperations: nsid("operator.listStalledOperations"),
+  getDmNotifyTarget: nsid("operator.getDmNotifyTarget"),
 } as const;
 
 /** The protocol's notices a space authority sends to a service it registered: the operator receives these. */
 export const NOTICE_METHOD = {
-  notifyWrite: "com.atproto.space.notifyWrite",
-  notifySpaceDeleted: "com.atproto.space.notifySpaceDeleted",
+  confirmRegistration: "com.atproto.space.confirmRegistration",
+  notifySpaceUpdate: "com.atproto.space.notifySpaceUpdate",
 } as const;
 
 export type SpaceType = (typeof SPACE_TYPE)[keyof typeof SPACE_TYPE];
 export type Collection = (typeof COLLECTION)[keyof typeof COLLECTION];
 export type BlockType = (typeof BLOCK_TYPE)[keyof typeof BLOCK_TYPE];
 export type OperatorMethod = (typeof OPERATOR_METHOD)[keyof typeof OPERATOR_METHOD];
+export type NoticeMethod = (typeof NOTICE_METHOD)[keyof typeof NOTICE_METHOD];

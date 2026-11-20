@@ -18,7 +18,6 @@ const id = 'com.atproto.space.deleteSpace'
 export type QueryParams = {}
 
 export interface InputSchema {
-  /** Reference to the space to delete. */
   space: string
 }
 
@@ -40,7 +39,7 @@ export class SpaceNotFoundError extends XRPCError {
   }
 }
 
-export class NotSpaceOwnerError extends XRPCError {
+export class NotAuthorizedError extends XRPCError {
   constructor(src: XRPCError) {
     super(src.status, src.error, src.message, src.headers, { cause: src })
   }
@@ -49,7 +48,7 @@ export class NotSpaceOwnerError extends XRPCError {
 export function toKnownErr(e: any) {
   if (e instanceof XRPCError) {
     if (e.error === 'SpaceNotFound') return new SpaceNotFoundError(e)
-    if (e.error === 'NotSpaceOwner') return new NotSpaceOwnerError(e)
+    if (e.error === 'NotAuthorized') return new NotAuthorizedError(e)
   }
 
   return e

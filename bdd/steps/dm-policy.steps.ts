@@ -226,7 +226,7 @@ Then("switching the policy alone leaves those writers listed by the PDS", functi
 });
 
 Then("switching an allowed writer off evicts that writer", function (this: AppWorld) {
-  // "Nobody" turns every allowlist entry off (putMember write:false), which now drops that member from the writer set;
+  // "Nobody" turns every allowlist entry off (putMembers write:false), which now drops that member from the writer set;
   // the writer who was never on the allowlist is not touched by the member change.
   assert.deepEqual((this.scratch.get("afterNobody") as PolicyObservation).pdsWriters, [actorNamed(this, "dropped").did]);
 });

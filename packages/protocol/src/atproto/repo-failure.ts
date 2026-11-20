@@ -1,5 +1,7 @@
-import { RepoVerificationError, StarParseError } from "@atproto/space";
+import { SpaceKemError, SpaceRepoVerificationError } from "@atproto/space";
+import { StarParseError } from "@atproto/star";
 import { UpstreamResponseTooLargeError } from "../bounded-json";
+import { parseSpaceUri } from "../keys";
 import { KemKeyError, isUnverifiableRepo } from "./kem-key";
 import { XrpcError } from "./xrpc";
 
@@ -18,6 +20,15 @@ export type RepoFailure = {
   permanent: boolean;
 };
 
+export type RepoFailureContext = {
+  /** Space URI being read; used to recognize authority-as-writer suspension (`repo === authorityDid`). */
+  space?: string;
+  /** Repo DID being read. */
+  repo?: string;
+  /** Explicit authority DID override (derived from `space` if omitted). */
+  authorityDid?: string;
+};
+
 const ACCOUNT_STATE: Readonly<Record<string, string>> = {
   RepoDeactivated: "its account is deactivated",
   RepoTakendown: "its account was taken down",
@@ -25,26 +36,55 @@ const ACCOUNT_STATE: Readonly<Record<string, string>> = {
   RepoNotFound: "its host has no repo for it",
 };
 
+const AUTHORITY_SUSPENSION_CODES: ReadonlySet<string> = new Set([
+  "RepoTakendown",
+  "RepoDeactivated",
+  "RepoSuspended",
+]);
+
+/** Whether an error from a space authority endpoint (`authorizeSpaceSync`, `listWriters`) or authority repo indicates temporary suspension. */
+export function isAuthoritySuspendedError(error: unknown): boolean {
+  return error instanceof XrpcError && AUTHORITY_SUSPENSION_CODES.has(error.code);
+}
+
+function isAuthorityRepoContext(context?: RepoFailureContext): boolean {
+  if (!context?.repo) return false;
+  const authorityDid = context.authorityDid ?? (context.space ? parseSpaceUri(context.space)?.authorityDid : undefined);
+  return authorityDid !== undefined && context.repo === authorityDid;
+}
+
 /**
  * Classifies a failure to read one writer's repo, so that a single member's account state or host cannot make a space unreadable
  * for everyone else. The pinned PDS answers a read of a deactivated or taken-down account with 400 `RepoDeactivated` or
  * `RepoTakendown` even though the space authority still issues credentials for it, and a member-run host can be down, slow,
  * oversized or malformed.
  *
+ * When `context` identifies the space authority's own repo (`repo === authorityDid`, `D12.6` N3), `RepoTakendown`,
+ * `RepoDeactivated`, and `RepoSuspended` classify as transient suspension (`permanent: false`) so local authority records
+ * remain intact until recovery; non-authority writers ALWAYS remain `permanent: true`.
+ *
  * Returns `null` for a failure that is this app's own and must not be hidden behind a writer: a store (SQLite) error. A
  * credential refusal while reading a writer's repo is that host's answer about that repo; whether the *reader* lost access to
  * the space is decided where the credential is minted, so it is classified here as a host failure.
  */
-export function classifyRepoFailure(error: unknown): RepoFailure | null {
+export function classifyRepoFailure(error: unknown, context?: RepoFailureContext): RepoFailure | null {
   if (isStoreFailure(error)) return null;
-  if (isUnverifiableRepo(error)) {
+  if (isUnverifiableRepo(error) || error instanceof SpaceRepoVerificationError || error instanceof StarParseError) {
     // The error text can quote the writer's own DID document, so the reason is fixed.
-    return { reason: error instanceof KemKeyError ? "it publishes no usable #atproto_kem key" : "its records could not be authenticated", permanent: true };
+    return {
+      reason: error instanceof KemKeyError || error instanceof SpaceKemError
+        ? "it publishes no usable #atproto_kem key"
+        : "its records could not be authenticated",
+      permanent: true,
+    };
   }
   if (error instanceof UpstreamResponseTooLargeError) return { reason: "its answer is larger than this app reads", permanent: true };
   if (error instanceof XrpcError) {
     const accountState = ACCOUNT_STATE[error.code];
-    if (accountState) return { reason: accountState, permanent: true };
+    if (accountState) {
+      const permanent = !(AUTHORITY_SUSPENSION_CODES.has(error.code) && isAuthorityRepoContext(context));
+      return { reason: accountState, permanent };
+    }
     return { reason: `its host answered HTTP ${error.status}`, permanent: false };
   }
   return { reason: "its host could not be read", permanent: false };
@@ -55,20 +95,33 @@ export function classifyRepoFailure(error: unknown): RepoFailure | null {
  * cold `@flock/reader` and warm `@flock/client`):
  * - `RepoNotFound` failing closed without signed proof is transient (`permanent: false`) so verified
  *   cached records stay intact until signed/authenticated account state arrives.
- * - Persistent `RepoVerificationError` / `StarParseError` after bounded retries cannot be authenticated
+ * - Persistent `SpaceRepoVerificationError` / `StarParseError` after bounded retries cannot be authenticated
  *   (`permanent: true`).
  * - Size limits (`RepoStarLimitError` extends `UpstreamResponseTooLargeError`), `#atproto_kem`/MAC errors,
- *   and authenticated account states delegate to `classifyRepoFailure`.
+ *   and authenticated account states delegate to `classifyRepoFailure` (including `N3` authority-as-writer transient suspension).
  */
-export function classifyVerifiedRepoFailure(error: unknown): RepoFailure | null {
+export function classifyVerifiedRepoFailure(error: unknown, context?: RepoFailureContext): RepoFailure | null {
   if (isStoreFailure(error)) return null;
   if (error instanceof XrpcError && error.code === "RepoNotFound") {
     return { reason: ACCOUNT_STATE.RepoNotFound!, permanent: false };
   }
-  if (error instanceof RepoVerificationError || error instanceof StarParseError) {
-    return { reason: "its records could not be authenticated", permanent: true };
+  return classifyRepoFailure(error, context);
+}
+
+/**
+ * Classifies a failure on a space-authority endpoint (`authorizeSpaceSync`, `listWriters`). Authority `RepoTakendown`,
+ * `RepoDeactivated`, and `RepoSuspended` (`assertActiveSpaceHost`) are always transient suspensions (`permanent: false`), keeping local data intact.
+ */
+export function classifySpaceHostFailure(error: unknown): RepoFailure | null {
+  if (isStoreFailure(error)) return null;
+  if (error instanceof XrpcError) {
+    const accountState = ACCOUNT_STATE[error.code];
+    if (accountState && AUTHORITY_SUSPENSION_CODES.has(error.code)) {
+      return { reason: accountState, permanent: false };
+    }
+    return { reason: `its host answered HTTP ${error.status}`, permanent: false };
   }
-  return classifyRepoFailure(error);
+  return { reason: "its host could not be read", permanent: false };
 }
 
 /**

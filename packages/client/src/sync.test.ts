@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { LTHASH_STATE_BYTES, RepoCommit, serializedRecordBytes, SpaceMacError } from "@flock/protocol/atproto/space-credential-core";
+import { WRITER_CURSOR_MAX_AGE_MS } from "@flock/protocol/atproto/record-pages";
+import { isAccessLost, LTHASH_STATE_BYTES, RepoCommit, serializedRecordBytes, SpaceMacError } from "@flock/protocol/atproto/space-credential-core";
 import { memberspacePolicy } from "@flock/protocol/atproto/space-policy";
 import { extSpaceUriFor } from "@flock/protocol/extensions";
 import { subjectKey, tidNow } from "@flock/protocol/keys";
 import { COLLECTION } from "@flock/protocol/nsids";
 import { FakeNetwork } from "@flock/testing/fake-network";
+import { createEngine } from "./engine";
 import { MAX_HOLD_MS } from "./key-window";
 import { MemoryStore } from "./memory-store";
 import { AUTHORITY, countCalls, createChannel, createWorkspace, key, readChannel, syncFor, transportFor, writeMessage } from "./testing/engine-fixture";
@@ -43,7 +45,7 @@ test("a reopen within the truth interval asks the authority once and no writer",
   const { network, space, core } = await seeded();
   await readChannel(core, space);
   const calls = await countCalls(network, () => readChannel(core, space));
-  assert.deepEqual(calls, { "com.atproto.space.listRepos": 1 });
+  assert.deepEqual(calls, { "com.atproto.space.listWriters": 1 });
 });
 
 test("a reopen after a new space session asks every writer once, and lists none that did not move", async () => {
@@ -98,7 +100,10 @@ test("a writer with no records and a new writer are both read", async () => {
   assert.deepEqual(keysOf(first), [key(10), key(9), key(8)]);
   assert.equal(first.complete, true, "a writer with nothing left holds a complete, empty coverage");
   const dave = "did:plc:dave";
-  await network.clientFor("did:plc:authority").procedure("com.atproto.memberspace.putMember", { space, did: dave, read: true, write: true });
+  await network.clientFor("did:plc:authority").procedure("com.atproto.memberspace.putMembers", {
+    space,
+    members: [{ did: dave, read: true, write: true }],
+  });
   network.createAccount(dave, "pds1");
   await writeMessage(network, dave, space, 12);
   assert.deepEqual(keysOf(await readChannel(core, space, { limit: 2 })), [key(12), key(10)]);
@@ -497,7 +502,7 @@ test("syncVerifiedSpace cold STAR, warm reopen with 0 writer calls, and incremen
     assert.equal(res.complete, true);
     assert.equal(res.records.length, 2);
   });
-  assert.equal(warmCalls["com.atproto.space.listRepos"], 2);
+  assert.equal(warmCalls["com.atproto.space.listWriters"], 1);
   assert.equal(warmCalls["com.atproto.space.getRepo"], undefined);
   assert.equal(warmCalls["com.atproto.space.listRepoOps"], undefined);
   assert.equal(warmCalls["com.atproto.space.listRecords"], undefined);
@@ -642,8 +647,8 @@ test("D14 purge waits for both listRepos and verifiedRosterMembers, and RepoNotF
   assert.equal(first.emptyReasons[BOB], "unwrittenOrAbsent");
   assert.equal((await store.getWriter(channels.tasks!, BOB))?.syncedRev, null);
 
-  // Remove ALICE from listRepos while still in verifiedRosterMembers -> NOT purged under D14 yet!
-  await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMember", { space: channels.tasks!, did: ALICE });
+  // Remove ALICE from listWriters while still in verifiedRosterMembers -> NOT purged under D14 yet!
+  await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMembers", { space: channels.tasks!, dids: [ALICE] });
   network.advanceClock(core.options.truthIntervalMs);
   const midEvict = await core.syncVerifiedSpace({
     space: channels.tasks!,
@@ -692,7 +697,7 @@ test("D14 purge waits for both listRepos and verifiedRosterMembers, and RepoNotF
   assert.deepEqual(missingAfterSync.setAside, [{ did: BOB, reason: "its host has no repo for it", permanent: false }]);
   assert.equal(missingAfterSync.records.find((r) => r.repo === BOB)?.value.text, "bob-first-write");
   // Repeat read still fails closed (permanent: false) until writer recovers or is evicted under D14.
-  await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMember", { space: channels.tasks!, did: BOB });
+  await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMembers", { space: channels.tasks!, dids: [BOB] });
   await core.markSpaceStale(channels.tasks!);
   const missingSecondRead = await core.syncVerifiedSpace({
     space: channels.tasks!,
@@ -994,7 +999,8 @@ test("followRepoOps keeps initial baseline sticky across baseline failures and e
     network.interceptResponse = ({ method, params, response }) => {
       if (corruptBobMac && method === "com.atproto.space.getLatestCommit" && params.repo === BOB && response.ok) {
         const headers = new Headers(response.headers);
-        headers.delete("atproto-space-mac");
+        headers.delete("signature");
+        headers.delete("signature-input");
         return new Response(response.body, { status: 200, headers });
       }
       return response;
@@ -1168,17 +1174,19 @@ test("fetchRepoOpsPages aborts multi-page listRepoOps early on staging payload o
     await writeMessage(network, BOB, space, 2, "bob-trigger");
     const cursorsRequested: Array<string | undefined> = [];
     const largeChunk = "z".repeat(4_800_000);
-    network.interceptResponse = ({ method, params, response }) => {
+    network.interceptResponse = async ({ method, params, response }) => {
       if (method === "com.atproto.space.listRepoOps" && params.repo === BOB) {
         const cursor = typeof params.cursor === "string" ? params.cursor : undefined;
         cursorsRequested.push(cursor);
-        const pageNum = cursor === undefined ? 1 : Number(cursor.replace("p", ""));
+        const pageNum = cursor === undefined ? 1 : Number(cursor.split("/")[1]);
+        const body = (await response.json()) as { commit: unknown };
         return new Response(
           JSON.stringify({
             ops: [
-              { rev: `rev-${pageNum}`, idx: 0, collection: COLLECTION.message, rkey: key(pageNum + 2), cid: "bafyreigbtj4x7ip5legnfznqu3bdr24v6s2s6x2f3b5f6r6x5c7u6o2t3y", prev: null, value: { text: largeChunk } },
+              { rev: `222222222222${pageNum}`, idx: 0, collection: COLLECTION.message, rkey: key(pageNum + 2), cid: "bafyreigbtj4x7ip5legnfznqu3bdr24v6s2s6x2f3b5f6r6x5c7u6o2t3y", prev: null, value: { text: largeChunk } },
             ],
-            ...(pageNum < 10 ? { cursor: `p${pageNum + 1}` } : {}),
+            commit: body.commit,
+            ...(pageNum < 10 ? { cursor: `2222222222221/${pageNum + 1}` } : {}),
           }),
           { status: 200, headers: response.headers },
         );
@@ -1189,7 +1197,7 @@ test("fetchRepoOpsPages aborts multi-page listRepoOps early on staging payload o
     const res = await core.syncVerifiedSpace({ space, collections: [COLLECTION.message] });
     assert.equal(res.complete, true, "falls back cleanly via STAR to actual host state");
     assert.ok(cursorsRequested.length >= 3 && cursorsRequested.length <= 4, `aborted early at <=4 pages (~16 MiB staging cap), fetched ${cursorsRequested.length}`);
-    assert.equal(cursorsRequested.includes("p6"), false, "remaining cursor pages were never fetched");
+    assert.equal(cursorsRequested.includes("2222222222221/6"), false, "remaining cursor pages were never fetched");
   }
 
   // 2. followRepoOps aborts multi-page listRepoOps early and triggers bounded reset instead of buffering unbounded pages in RAM.
@@ -1203,17 +1211,19 @@ test("fetchRepoOpsPages aborts multi-page listRepoOps early on staging payload o
     await writeMessage(network, ALICE, space, 2, "alice-trigger");
     const cursorsRequested: Array<string | undefined> = [];
     const largeChunk = "w".repeat(4_800_000);
-    network.interceptResponse = ({ method, params, response }) => {
+    network.interceptResponse = async ({ method, params, response }) => {
       if (method === "com.atproto.space.listRepoOps" && params.repo === ALICE) {
         const cursor = typeof params.cursor === "string" ? params.cursor : undefined;
         cursorsRequested.push(cursor);
-        const pageNum = cursor === undefined ? 1 : Number(cursor.replace("p", ""));
+        const pageNum = cursor === undefined ? 1 : Number(cursor.split("/")[1]);
+        const body = (await response.json()) as { commit: unknown };
         return new Response(
           JSON.stringify({
             ops: [
-              { rev: `rev-${pageNum}`, idx: 0, collection: COLLECTION.message, rkey: key(pageNum + 2), cid: "bafyreigbtj4x7ip5legnfznqu3bdr24v6s2s6x2f3b5f6r6x5c7u6o2t3y", prev: null, value: { text: largeChunk } },
+              { rev: `222222222222${pageNum}`, idx: 0, collection: COLLECTION.message, rkey: key(pageNum + 2), cid: "bafyreigbtj4x7ip5legnfznqu3bdr24v6s2s6x2f3b5f6r6x5c7u6o2t3y", prev: null, value: { text: largeChunk } },
             ],
-            ...(pageNum < 10 ? { cursor: `p${pageNum + 1}` } : {}),
+            commit: body.commit,
+            ...(pageNum < 10 ? { cursor: `2222222222221/${pageNum + 1}` } : {}),
           }),
           { status: 200, headers: response.headers },
         );
@@ -1231,7 +1241,7 @@ test("fetchRepoOpsPages aborts multi-page listRepoOps early on staging payload o
     });
     assert.equal(poll.kind, "reset");
     assert.ok(cursorsRequested.length >= 3 && cursorsRequested.length <= 4, `aborted followRepoOps paging early at ${cursorsRequested.length} pages`);
-    assert.equal(cursorsRequested.includes("p6"), false);
+    assert.equal(cursorsRequested.includes("2222222222221/6"), false);
     assert.match(resets[0]!, /payload byte staging bound/);
   }
 });
@@ -1328,11 +1338,9 @@ test("followRepoOps isolates failed initial writers from new joiners, tracks per
 
     // Carol joins after initial baseline while Bob is still deactivated!
     network.createAccount(CAROL, "pds2");
-    await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.putMember", {
+    await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.putMembers", {
       space,
-      did: CAROL,
-      read: true,
-      write: true,
+      members: [{ did: CAROL, read: true, write: true }],
     });
     await network.writeAs(CAROL, space, COLLECTION.message, tidNow(network.now(), 0), {
       text: "carol-first-live-command",
@@ -1564,10 +1572,11 @@ test("fetchRepoOpsPages strips unknown fields, rejects oversized headers/cursors
   for (const label of ["oversized-rkey", "oversized-cursor"] as const) {
     const cursors: Array<string | undefined> = [];
     await writeMessage(network, BOB, space, label === "oversized-rkey" ? 3 : 4, `trigger-${label}`);
-    network.interceptResponse = ({ method, params, response }) => {
+    network.interceptResponse = async ({ method, params, response }) => {
       if (method === "com.atproto.space.listRepoOps" && params.repo === BOB) {
         cursors.push(typeof params.cursor === "string" ? params.cursor : undefined);
         const huge = "x".repeat(1_200);
+        const body = (await response.json()) as { commit: unknown };
         return new Response(
           JSON.stringify({
             ops: [
@@ -1580,7 +1589,8 @@ test("fetchRepoOpsPages strips unknown fields, rejects oversized headers/cursors
                 value: null,
               },
             ],
-            cursor: label === "oversized-cursor" ? huge : "p2",
+            commit: body.commit,
+            cursor: label === "oversized-cursor" ? huge : "2222222222221/2",
           }),
           { status: 200, headers: response.headers },
         );
@@ -1595,11 +1605,12 @@ test("fetchRepoOpsPages strips unknown fields, rejects oversized headers/cursors
   // 3. Cumulative metadata-only (value: null) op header + cursor bytes exceeding maxStarBytes abort pagination early before fetching later pages.
   await writeMessage(network, BOB, space, 5, "trigger-meta-cap");
   const metaCursors: Array<string | undefined> = [];
-  network.interceptResponse = ({ method, params, response }) => {
+  network.interceptResponse = async ({ method, params, response }) => {
     if (method === "com.atproto.space.listRepoOps" && params.repo === BOB) {
       const cursor = typeof params.cursor === "string" ? params.cursor : undefined;
       metaCursors.push(cursor);
-      const pageNum = cursor === undefined ? 1 : Number(cursor.replace("m", ""));
+      const pageNum = cursor === undefined ? 1 : Number(cursor.split("/")[1]);
+      const body = (await response.json()) as { commit: unknown };
       return new Response(
         JSON.stringify({
           ops: Array.from({ length: 4 }, (_, i) => ({
@@ -1610,7 +1621,8 @@ test("fetchRepoOpsPages strips unknown fields, rejects oversized headers/cursors
             prev: null,
             value: null,
           })),
-          ...(pageNum < 10 ? { cursor: `m${pageNum + 1}` } : {}),
+          commit: body.commit,
+          ...(pageNum < 10 ? { cursor: `2222222222221/${pageNum + 1}` } : {}),
         }),
         { status: 200, headers: response.headers },
       );
@@ -1620,7 +1632,7 @@ test("fetchRepoOpsPages strips unknown fields, rejects oversized headers/cursors
   const limited = await core.syncVerifiedSpace({ space, collections: [COLLECTION.message], maxStarBytes: 4_000 });
   assert.equal(limited.complete, true);
   assert.ok(metaCursors.length >= 2 && metaCursors.length <= 3, `metadata byte cap aborted early at ${metaCursors.length} pages`);
-  assert.equal(metaCursors.includes("m5"), false);
+  assert.equal(metaCursors.includes("2222222222221/5"), false);
 });
 
 test("delayed cold-sync permanent failure cleanup never erases a newer concurrent verified commit on a shared store (Codex R3-#2)", async () => {
@@ -1780,18 +1792,19 @@ test("followRepoOps consumes stale hints on permanent failures without defeating
     await writeMessage(network, BOB, space, 1, "bob-1");
     const { core } = syncFor(network, READER);
 
-    const savedListRepos = new Map<string, { body: string; status: number; headers: Headers }>();
-    let freezeListRepos = false;
+    const savedListWriters = new Map<string, { body: string; status: number; headers: Headers }>();
+    let freezeListWriters = false;
     network.interceptResponse = async ({ method, params, response }) => {
-      if (method === "com.atproto.space.listRepos" && params.space === space && response.ok) {
+      if (method === "com.atproto.space.listWriters" && params.space === space && response.ok) {
         const cursorKey = typeof params.cursor === "string" ? params.cursor : "";
-        if (!freezeListRepos) {
+        if (!freezeListWriters) {
           const body = await response.text();
-          savedListRepos.set(cursorKey, { body, status: response.status, headers: response.headers });
+          savedListWriters.set(cursorKey, { body, status: response.status, headers: response.headers });
           return new Response(body, { status: response.status, headers: response.headers });
         }
-        const saved = savedListRepos.get(cursorKey);
+        const saved = savedListWriters.get(cursorKey);
         if (saved) return new Response(saved.body, { status: saved.status, headers: saved.headers });
+        return new Response(JSON.stringify({ repos: [] }), { status: 200, headers: response.headers });
       }
       return response;
     };
@@ -1808,8 +1821,8 @@ test("followRepoOps consumes stale hints on permanent failures without defeating
       clock,
       onEvent: async () => undefined,
     });
-    assert.ok(savedListRepos.size > 0, "captured initial listRepos snapshot");
-    freezeListRepos = true;
+    assert.ok(savedListWriters.size > 0, "captured initial listWriters snapshot");
+    freezeListWriters = true;
 
     // Bob writes bob-2 while listRepos lags at bob-1; markSpaceStale sets staleSeq > ackedStaleSeq.
     await writeMessage(network, BOB, space, 2, "bob-2");
@@ -1868,4 +1881,287 @@ test("followRepoOps consumes stale hints on permanent failures without defeating
     network.interceptResponse = undefined;
     assert.equal(bobPoll3OpsCalls, 0);
   }
+});
+
+test("R12 D12.4: listWriters incremental #repoRemoved evicts writer rows and follower state without repo calls, and >72h / InvalidCursor fall back to full listBoundedWriters", async () => {
+  // 1. Incremental #repoRemoved within truthIntervalMs purges cached writer rows and followRepoOps state with zero getRepo/listRepoOps calls.
+  {
+    const network = new FakeNetwork();
+    const space = await createChannel(network, "r12-repo-removed", [ALICE, BOB, READER]);
+    await writeMessage(network, ALICE, space, 1, "alice-stays");
+    await writeMessage(network, BOB, space, 2, "bob-removed");
+
+    const { core, store } = syncFor(network, READER);
+    const initial = await core.syncVerifiedSpace({ space, collections: [COLLECTION.message] });
+    assert.equal(initial.records.length, 2);
+    assert.equal((await store.records(space, COLLECTION.message, BOB)).length, 1);
+
+    await core.followRepoOps({
+      space,
+      collections: [COLLECTION.message],
+      deliver: false,
+      onEvent: async () => undefined,
+    });
+
+    // Remove BOB while still inside truthIntervalMs -> incremental listWriters emits #repoRemoved!
+    await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMembers", { space, dids: [BOB] });
+    let bobRepoCalls = 0;
+    network.interceptResponse = ({ params, response }) => {
+      if (params.space === space && params.repo === BOB) bobRepoCalls += 1;
+      return response;
+    };
+
+    const calls = await countCalls(network, async () => {
+      const afterRemoval = await core.syncVerifiedSpace({ space, collections: [COLLECTION.message] });
+      assert.deepEqual(afterRemoval.records.map((r) => r.repo), [ALICE]);
+      assert.deepEqual(afterRemoval.listedWriters, [ALICE]);
+    });
+    network.interceptResponse = undefined;
+
+    assert.equal(calls["com.atproto.space.listWriters"], 1, "single incremental listWriters since stored spaceRev");
+    assert.equal(bobRepoCalls, 0, "#repoRemoved evicts writer locally without calling getRepo or listRepoOps on Bob");
+    assert.deepEqual(await store.records(space, COLLECTION.message, BOB), []);
+    assert.equal((await store.getWriter(space, BOB))?.syncedRev, null);
+
+    // Follow state for Bob was evicted too: if Bob is re-added later and writes, he baselines cleanly.
+    await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.putMembers", {
+      space,
+      members: [{ did: BOB, read: true, write: true }],
+    });
+    await writeMessage(network, BOB, space, 3, "bob-rejoined");
+    const delivered: string[] = [];
+    const poll = await core.followRepoOps({
+      space,
+      collections: [COLLECTION.message],
+      deliver: true,
+      onEvent: async (ev) => { delivered.push(String(ev.value.text)); },
+    });
+    assert.deepEqual(poll.delivered.map((e) => String(e.value.text)), ["bob-rejoined"]);
+  }
+
+  // 2. >72h checkpoint age (both via writersListedAt age and via TID spaceRev age) and InvalidCursor fall back to full listBoundedWriters reconciliation.
+  {
+    const network = new FakeNetwork();
+    const space = await createChannel(network, "r12-cursor-fallback", [ALICE, BOB, READER]);
+    await writeMessage(network, ALICE, space, 1, "alice-1");
+    await writeMessage(network, BOB, space, 2, "bob-2");
+
+    // Set truthIntervalMs > 72h so ONLY the 72h cursor-age rule triggers the full scan!
+    const hugeTruthInterval = WRITER_CURSOR_MAX_AGE_MS * 4;
+    const { core, store } = syncFor(network, READER, { options: { truthIntervalMs: hugeTruthInterval } });
+    await core.syncVerifiedSpace({ space, collections: [COLLECTION.message], truthIntervalMs: hugeTruthInterval });
+
+    // Clean incremental listWritersSince refreshes writersListedAt, so steady <72h incremental polls across >72h total
+    // wall-clock time never trigger a needless >72h writersListedAt full-scan fallback (Opus L3).
+    const incrementalCursors: Array<string | undefined> = [];
+    network.interceptResponse = ({ method, params, response }) => {
+      if (method === "com.atproto.space.listWriters" && params.space === space) {
+        incrementalCursors.push(typeof params.cursor === "string" ? params.cursor : undefined);
+      }
+      return response;
+    };
+    network.advanceClock(Math.floor(WRITER_CURSOR_MAX_AGE_MS * 0.6));
+    await core.syncVerifiedSpace({ space, collections: [COLLECTION.message], truthIntervalMs: hugeTruthInterval });
+    assert.equal((await store.getSpace(space))?.writersListedAt, network.now(), "incremental catch-up refreshed writersListedAt");
+    network.advanceClock(Math.floor(WRITER_CURSOR_MAX_AGE_MS * 0.6));
+    await core.syncVerifiedSpace({ space, collections: [COLLECTION.message], truthIntervalMs: hugeTruthInterval });
+    network.interceptResponse = undefined;
+    assert.equal(incrementalCursors.length, 2);
+    assert.ok(incrementalCursors.every((c) => c !== undefined), "refreshed writersListedAt kept incremental cursor across 1.2x 72h span");
+
+    // Simulate a GC'd removal when writersListedAt is >72h old: intercept incremental cursor call if it were attempted (it must NOT be!).
+    const cursorsSeen: Array<string | undefined> = [];
+    network.interceptResponse = ({ method, params, response }) => {
+      if (method === "com.atproto.space.listWriters" && params.space === space) {
+        cursorsSeen.push(typeof params.cursor === "string" ? params.cursor : undefined);
+      }
+      return response;
+    };
+    network.advanceClock(WRITER_CURSOR_MAX_AGE_MS + 1_000);
+    await core.syncVerifiedSpace({ space, collections: [COLLECTION.message], truthIntervalMs: hugeTruthInterval });
+    network.interceptResponse = undefined;
+    assert.equal(cursorsSeen[0], undefined, ">72h writersListedAt forces un-cursored full listBoundedWriters scan");
+
+    // Also test real-epoch TID spaceRev >72h old even if writersListedAt was recently touched, AND InvalidCursor fallback:
+    const oldSpaceRevTid = tidNow(network.now() - WRITER_CURSOR_MAX_AGE_MS - 60_000, 0);
+    const savedSpace = (await store.getSpace(space))!;
+    await store.putSpace({ ...savedSpace, spaceRev: oldSpaceRevTid, writersListedAt: network.now() });
+    const tidCursors: Array<string | undefined> = [];
+    network.interceptResponse = ({ method, params, response }) => {
+      if (method === "com.atproto.space.listWriters" && params.space === space) {
+        tidCursors.push(typeof params.cursor === "string" ? params.cursor : undefined);
+      }
+      return response;
+    };
+    await core.syncVerifiedSpace({ space, collections: [COLLECTION.message], truthIntervalMs: hugeTruthInterval });
+    network.interceptResponse = undefined;
+    assert.equal(tidCursors[0], undefined, ">72h TID spaceRev forces full listBoundedWriters scan");
+
+    // InvalidCursor from listWriters(cursor) falls back seamlessly to un-cursored full listBoundedWriters scan and catches GC'd removals.
+    let rejectCursorOnce = true;
+    const invalidCursorCalls: Array<string | undefined> = [];
+    await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMembers", { space, dids: [BOB] });
+    network.interceptResponse = ({ method, params, response }) => {
+      if (method === "com.atproto.space.listWriters" && params.space === space) {
+        const cur = typeof params.cursor === "string" ? params.cursor : undefined;
+        invalidCursorCalls.push(cur);
+        if (cur !== undefined && rejectCursorOnce) {
+          rejectCursorOnce = false;
+          return new Response(JSON.stringify({ error: "InvalidCursor", message: "Cursor expired" }), {
+            status: 400,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        // Simulate tombstone already GC'd on full scan: filter out #repoRemoved so only active writers remain!
+        if (cur === undefined) {
+          return response.json().then((body: { repos: Array<{ $type?: string }>; cursor?: string }) => {
+            const activeOnly = body.repos.filter((r) => r.$type !== "com.atproto.space.defs#repoRemoved");
+            return new Response(JSON.stringify({ repos: activeOnly }), { status: 200, headers: response.headers });
+          });
+        }
+      }
+      return response;
+    };
+    const reconciled = await core.syncVerifiedSpace({ space, collections: [COLLECTION.message], truthIntervalMs: hugeTruthInterval });
+    network.interceptResponse = undefined;
+    assert.equal(invalidCursorCalls.length >= 2 && invalidCursorCalls[0] !== undefined && invalidCursorCalls[1] === undefined, true);
+    assert.deepEqual(reconciled.records.map((r) => r.repo), [ALICE], "InvalidCursor fallback reconciles full writer set and purges GC'd Bob");
+  }
+});
+
+test("R12 D12.5: multi-page listRepoOps verifies commit + MAC on every intermediate and final page without STAR fallback", async () => {
+  const network = new FakeNetwork();
+  const space = await createChannel(network, "r12-multipage-ops", [ALICE, READER]);
+  await writeMessage(network, ALICE, space, 1, "seed");
+
+  const { core } = syncFor(network, READER);
+  assert.equal((await core.syncVerifiedSpace({ space, collections: [COLLECTION.message] })).complete, true);
+
+  // Write 1,080 new ops in 6 batches of 180 (<=200 max per applyWrites) -> spans 2 listRepoOps pages at FakeNetwork's 1,000-op max page limit,
+  // with signed + MAC'd `commit` AND `cursor` on page 1, and signed + MAC'd `commit` with `cursor === undefined` on page 2!
+  for (let batch = 0; batch < 6; batch += 1) {
+    await network.applyWritesAs(
+      ALICE,
+      space,
+      Array.from({ length: 180 }, (_, idx) => {
+        const num = batch * 180 + idx + 2;
+        return {
+          action: "create" as const,
+          collection: COLLECTION.message,
+          rkey: key(num),
+          value: { text: `msg-${num}`, createdAt: "2026-11-10T12:00:00.000Z" },
+        };
+      }),
+    );
+  }
+
+  let listRepoOpsPages = 0;
+  let intermediatePagesWithCommitAndCursor = 0;
+  network.interceptResponse = async ({ method, params, response }) => {
+    if (method === "com.atproto.space.listRepoOps" && params.repo === ALICE) {
+      listRepoOpsPages += 1;
+      const cloned = response.clone();
+      const body = (await cloned.json()) as { commit?: unknown; cursor?: string };
+      if (body.commit && body.cursor) intermediatePagesWithCommitAndCursor += 1;
+    }
+    return response;
+  };
+
+  try {
+    const calls = await countCalls(network, async () => {
+      const synced = await core.syncVerifiedSpace({ space, collections: [COLLECTION.message] });
+      assert.equal(synced.complete, true);
+      assert.equal(synced.records.length, 1_081);
+    });
+    assert.equal(listRepoOpsPages, 3, "fetched all 3 oplog pages (500 + 500 + 80)");
+    assert.equal(intermediatePagesWithCommitAndCursor, 2, "both intermediate pages carried commit + cursor and verified MAC");
+    assert.equal(calls["com.atproto.space.getRepo"], undefined, "reconciled purely via multi-page listRepoOps with 0 STAR getRepo calls");
+  } finally {
+    network.interceptResponse = undefined;
+  }
+});
+
+test("R12 D12.6.2 (N3): authority RepoTakendown/RepoDeactivated is transient suspension preserving local authority data, while non-authority writer takedown remains permanent", async () => {
+  const network = new FakeNetwork();
+  const fixture = await createWorkspace(network, {
+    members: [ALICE, BOB],
+    admins: [ALICE],
+    channels: [{ skey: "general", visibility: "public" }],
+  });
+  const general = fixture.channels.general!;
+  const ref = { workspace: fixture.workspace, skey: "acme-general" };
+  await writeMessage(network, AUTHORITY, general, 1, "authority-announcement");
+  await writeMessage(network, ALICE, general, 2, "alice-msg");
+  await writeMessage(network, BOB, general, 3, "bob-msg");
+
+  const alice = createEngine(transportFor(network, ALICE));
+  const initialSnap = await alice.sync.syncVerifiedWorkspaceSnapshot(fixture.workspace);
+  assert.equal(initialSnap.summary?.name, "Workspace acme");
+  const initialPage = await alice.channels.readPage(ref);
+  assert.deepEqual(initialPage.messages.map((m) => m.value.text), ["bob-msg", "alice-msg", "authority-announcement"]);
+
+  // Case A (warm credential -> repo read path where repo === authorityDid, AND cold credential -> authorizeSpaceSync/listWriters path):
+  for (const state of ["takendown", "deactivated"] as const) {
+    network.setAccountState(AUTHORITY, state);
+
+    // 1) Warm credential still valid (< 10m): markSpaceStale forces repo reads (listRepoOps/getRepo/getLatestCommit) on repo === AUTHORITY
+    //    AND listWriters on space authority! Neither may drop local workspace/channel records!
+    await alice.sync.markSpaceStale(fixture.workspace);
+    await alice.sync.markSpaceStale(general);
+
+    const snapDuringWarmSuspension = await alice.sync.syncVerifiedWorkspaceSnapshot(fixture.workspace, { fresh: true });
+    assert.equal(snapDuringWarmSuspension.setAside.length, 1);
+    assert.equal(snapDuringWarmSuspension.setAside[0]?.did, AUTHORITY);
+    assert.equal(snapDuringWarmSuspension.setAside[0]?.permanent, false, `authority ${state} on repo read must be transient (permanent: false)`);
+    assert.equal(snapDuringWarmSuspension.summary?.name, "Workspace acme", "local workspace.profile preserved during authority suspension");
+    assert.equal(snapDuringWarmSuspension.summary?.channels.length, 1, "local directory preserved during authority suspension");
+    assert.equal(snapDuringWarmSuspension.rosterMembers.has(ALICE), true, "local workspace.roster preserved during authority suspension");
+    assert.equal((await alice.sync.store.records(fixture.workspace, COLLECTION.admin, AUTHORITY)).length, 2, "local admin records (authority + Alice) preserved");
+
+    const channelVerifiedDuringSuspension = await alice.sync.syncVerifiedSpace({
+      space: general,
+      collections: [COLLECTION.message],
+      includeAuthority: true,
+    });
+    assert.equal(channelVerifiedDuringSuspension.complete, false);
+    assert.deepEqual(channelVerifiedDuringSuspension.setAside.map((s) => ({ did: s.did, permanent: s.permanent })), [
+      { did: AUTHORITY, permanent: false },
+    ]);
+    assert.equal(
+      channelVerifiedDuringSuspension.records.some((r) => r.repo === AUTHORITY && r.value.text === "authority-announcement"),
+      true,
+      `authority message preserved during ${state}`,
+    );
+
+    // 2) Advance past 10m credential expiry -> authorizeSpaceSync throws 400 RepoTakendown/RepoDeactivated:
+    //    isAccessLost(err) MUST be false, and discover() / readPage() MUST NOT purge stored workspace or channel records!
+    network.advanceClock(15 * 60_000);
+    let hostErr: unknown;
+    try {
+      await alice.credentials.fresh(fixture.workspace);
+    } catch (err) {
+      hostErr = err;
+    }
+    assert.ok(hostErr, `authorizeSpaceSync threw on ${state} authority`);
+    assert.equal(isAccessLost(hostErr), false, `authority ${state} must NOT be classified as lost access`);
+
+    await assert.rejects(() => alice.channels.readPage(ref));
+    assert.equal((await alice.sync.store.records(general, COLLECTION.message, AUTHORITY)).length, 1, "authority channel message still in store");
+    assert.equal((await alice.sync.store.records(fixture.workspace, COLLECTION.directory, AUTHORITY)).length, 1, "directory still in store");
+
+    // Recover authority -> everything resumes cleanly!
+    network.setAccountState(AUTHORITY, "active");
+    const recoveredSummary = await alice.workspaces.summary(fixture.workspace);
+    assert.equal(recoveredSummary?.name, "Workspace acme");
+    const recoveredPage = await alice.channels.readPage(ref);
+    assert.equal(recoveredPage.messages.some((m) => m.repo === AUTHORITY), true);
+  }
+
+  // Case B: Non-authority writer (BOB !== authorityDid) RepoTakendown / RepoDeactivated remains PERMANENT (evicting Bob's cached records)!
+  network.setAccountState(BOB, "takendown");
+  await alice.sync.markSpaceStale(general);
+  const afterBobTakedown = await alice.channels.readPage(ref);
+  assert.equal(afterBobTakedown.messages.some((m) => m.repo === BOB), false, "taken-down non-authority writer is hidden");
+  assert.deepEqual(await alice.sync.store.records(general, COLLECTION.message, BOB), [], "taken-down non-authority writer's cached records are evicted");
+  assert.equal((await alice.sync.store.records(general, COLLECTION.message, AUTHORITY)).length, 1, "authority records remain untouched");
 });

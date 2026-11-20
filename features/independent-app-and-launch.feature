@@ -17,7 +17,7 @@ Feature: Independent app conformance and launch limits
 
     Scenario: Do not infer membership from the writer set
       Given a workspace member has not written to a channel
-      When an app reads listRepos
+      When an app reads listWriters
       Then it does not treat absence from that writer set as absence from membership
 
   Rule: The supported envelope is measured before launch

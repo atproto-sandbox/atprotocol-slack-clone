@@ -5,7 +5,7 @@
     "main": {
       "type": "space",
       "key": "any",
-      "name": "Tasks",
+      "title": "Tasks",
       "collections": [
         "new.flock.ext.tasks.project",
         "new.flock.ext.tasks.projectEdit",

@@ -10,7 +10,7 @@ For runtime detail and file-level ownership, follow up with [`ARCHITECTURE.md`](
 
 Flock is a **browser client** plus a small **operator service**. There is **no application database of record** for workspace or channel content. Durable state lives in **spaces on members’ PDSes**; **member lists** enforce who can read and write. The operator keeps a **SQLite journal** only for resumable admin mutations, OAuth material for the workspace authority, and **content-free** change notices—not for messages, roles, or membership truth.
 
-**Status:** alpha, pinned to a draft PDS implementation ([PR #5187](https://github.com/bluesky-social/atproto/pull/5187), commit `5d88b414`). Expect breakage when upstream moves.
+**Status:** alpha, pinned to a draft PDS implementation ([PR #5187](https://github.com/bluesky-social/atproto/pull/5187), commit `6747610566`, snapshot `0.0.0-spaces-alpha-20261117141222`). Expect breakage when upstream moves.
 
 ---
 
@@ -254,9 +254,9 @@ On the pinned PDS, third-party `new.flock.*` schemas are **not** dynamically val
 
 ## Local development (short path)
 
-1. Pin and build atproto per [`docs/protocol/atproto-spaces-pin.md`](protocol/atproto-spaces-pin.md) (`atproto-spaces-phase3` + `strict-credential-expiry.patch`).
+1. Pin and build atproto per [`docs/protocol/atproto-spaces-pin.md`](protocol/atproto-spaces-pin.md) (`atproto-spaces-r12` + `strict-credential-expiry.patch`).
 2. `corepack pnpm install --frozen-lockfile && corepack pnpm build`
-3. `ATPROTO_PINNED_CHECKOUT=../atproto-spaces-phase3 corepack pnpm playground`
+3. `ATPROTO_PINNED_CHECKOUT=../atproto-spaces-r12 corepack pnpm playground`
 
 Playground spins up in-memory PDS hosts, PLC, and the app. Use the printed DIDs (not handles) to sign in. For deployment layout, see [`README.md`](../README.md) and [`docs/operations.md`](operations.md).
 

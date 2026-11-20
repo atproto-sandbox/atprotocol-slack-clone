@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Secp256k1Keypair } from "@atproto/crypto";
 import { createServiceJwt } from "@atproto/xrpc-server";
-import { OPERATOR_METHOD } from "@flock/protocol/nsids";
+import { NOTICE_METHOD, OPERATOR_METHOD } from "@flock/protocol/nsids";
 import { OperatorAuthError } from "./errors";
 import { authenticateOperatorRequest, serviceTokenLifetimeSeconds } from "./security";
 
@@ -26,10 +26,13 @@ const refused = (error: unknown) => error instanceof OperatorAuthError;
 
 test("a long-poll token may live fifteen minutes, and every other method's a minute and a little more", async () => {
   assert.equal(serviceTokenLifetimeSeconds(OPERATOR_METHOD.getChanges), 900);
+  assert.equal(serviceTokenLifetimeSeconds(OPERATOR_METHOD.getDmNotifyTarget), 75);
   assert.equal(await call(OPERATOR_METHOD.getChanges, { lifetimeSeconds: 900, ageSeconds: 600 }), CALLER);
   assert.equal(await call(OPERATOR_METHOD.execute, { lifetimeSeconds: 60 }), CALLER);
+  assert.equal(await call(OPERATOR_METHOD.getDmNotifyTarget, { lifetimeSeconds: 60 }), CALLER);
   await assert.rejects(call(OPERATOR_METHOD.execute, { lifetimeSeconds: 900, ageSeconds: 600 }), refused, "a ten-minute-old token is refused for execute");
-  await assert.rejects(call("com.atproto.space.notifyWrite", { lifetimeSeconds: 900, ageSeconds: 600 }), refused, "and for the PDS's notices");
+  await assert.rejects(call(OPERATOR_METHOD.getDmNotifyTarget, { lifetimeSeconds: 900, ageSeconds: 600 }), refused, "and for getDmNotifyTarget");
+  await assert.rejects(call(NOTICE_METHOD.notifySpaceUpdate, { lifetimeSeconds: 900, ageSeconds: 600 }), refused);
 });
 
 test("a token is refused once it is older than its method's lifetime, whatever expiry the client asked for", async () => {

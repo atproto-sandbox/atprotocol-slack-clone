@@ -18,9 +18,7 @@ const id = 'com.atproto.space.clearRecords'
 export type QueryParams = {}
 
 export interface InputSchema {
-  /** Reference to the space. */
   space: string
-  /** The DID of the repo to clear (the authenticated member). */
   repo: string
 }
 

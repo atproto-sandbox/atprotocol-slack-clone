@@ -6,10 +6,11 @@
     "./*": "./src/*.ts"
   },
   "dependencies": {
-    "@atproto/crypto": "0.0.0-spaces-alpha-20261029171913",
-    "@atproto/lex-data": "0.0.0-spaces-alpha-20261029171913",
-    "@atproto/lexicon": "0.0.0-spaces-alpha-20261029171913",
-    "@atproto/space": "0.0.0-spaces-alpha-20261029171913",
+    "@atproto/crypto": "0.0.0-spaces-alpha-20261117141222",
+    "@atproto/lex-data": "0.0.0-spaces-alpha-20261117141222",
+    "@atproto/lexicon": "0.0.0-spaces-alpha-20261117141222",
+    "@atproto/space": "0.0.0-spaces-alpha-20261117141222",
+    "@atproto/star": "0.0.0-spaces-alpha-20261117141222",
     "@flock/protocol": "workspace:*"
   }
 }

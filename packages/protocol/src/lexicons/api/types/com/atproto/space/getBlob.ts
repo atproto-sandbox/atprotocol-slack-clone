@@ -16,11 +16,8 @@ const is$typed = _is$typed,
 const id = 'com.atproto.space.getBlob'
 
 export type QueryParams = {
-  /** Reference to the space. */
   space: string
-  /** The DID of the account whose repo holds the blob. */
   repo: string
-  /** The CID of the blob to fetch. */
   cid: string
 }
 export type InputSchema = undefined

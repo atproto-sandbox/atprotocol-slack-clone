@@ -356,7 +356,7 @@ export class TasksClient {
       degraded: !complete || degradedReasons.length > 0,
       degradedReasons,
       hasUncertainAncestry,
-      setAside: [...snapshot.setAside, ...spaceSync.setAside].sort((left, right) => left.did.localeCompare(right.did)),
+      setAside: dedupeSetAside([...snapshot.setAside, ...spaceSync.setAside]),
       changing: [...spaceSync.changing].sort(),
       rosterMembers: [...snapshot.rosterMembers].sort(),
       writerUniverse: spaceSync.writers,
@@ -1472,6 +1472,17 @@ export class TasksClient {
 }
 
 export { filterTaskComments };
+
+function dedupeSetAside(entries: readonly SetAside[]): SetAside[] {
+  const byDid = new Map<string, SetAside>();
+  for (const entry of entries) {
+    const existing = byDid.get(entry.did);
+    if (!existing || (entry.permanent && !existing.permanent)) {
+      byDid.set(entry.did, entry);
+    }
+  }
+  return [...byDid.values()].sort((left, right) => left.did.localeCompare(right.did));
+}
 
 function requireWorkspaceTasksSpace(workspaceUri: string): {
   authorityDid: string;

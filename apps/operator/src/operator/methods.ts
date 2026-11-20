@@ -1,21 +1,28 @@
-import { parseSpaceDeletedNotification, parseWriteNotification } from "../atproto/write-notification";
+import { getConfig } from "@flock/deployment/config";
+import { parseConfirmRegistration, parseSpaceUpdateNotification } from "../atproto/write-notification";
 import { isDid } from "@flock/protocol/keys";
 import { NOTICE_METHOD, OPERATOR_METHOD } from "@flock/protocol/nsids";
 import { WorkspaceEnvelopeError } from "@flock/protocol/workspace-summary";
 import { AuthorityReauthorizationRequiredError, authorityFlowUrl, restoreAuthorityGrant } from "./authority-grant";
-import { AUTHORITY_APPROVAL_REQUIRED, OperatorAuthError, operatorHttpFailure } from "./errors";
+import { DmRateLimitError, DmWakeIpcError, recordDmWake } from "./dm-feed-wakes";
+import { AUTHORITY_APPROVAL_REQUIRED, OperatorAuthError, operatorHttpFailure, WebhookAuthError } from "./errors";
 import { FeedRequestError, getChanges, parseFollow } from "./feed";
 import { getActorOperation, OperationBusyError, OperationConflictError } from "./journal";
 import { CreationNotAuthorizedError } from "./creation-authorization";
 import { assertCreationAdmissible, createWorkspace, WorkspaceExistsError } from "./kinds/create-workspace";
 import { assertWorkspaceName } from "./workspace-spaces";
-import { dropMemberList } from "./member-access";
 import { AdminMutationsPausedError, assertAdminMutationsEnabled } from "./mutations-paused";
-import { purgeSpaceNotifications, recordWriteNotification } from "./notices";
+import { advanceSpaceRev, recordSpaceWake, recordWriteNotification } from "./notices";
 import { executeOperatorOperation, listInboxWriters } from "./operations";
-import { registrationDeps } from "./registrations";
-import { authenticateOperatorRequest, requireActiveWorkspaceAdmin, requireWorkspaceActorForOperation } from "./security";
-import { authenticateSpaceNotification } from "./space-notification";
+import { handleRegistrationExpiredNotice, handleSpaceDeletedNotice, registrationDeps } from "./registrations";
+import {
+  authenticateOperatorRequest,
+  requireActiveWorkspaceAdmin,
+  requireWorkspaceActorForOperation,
+  verifyDmNotifyCredentialAndProof,
+  type DmCredentialProof,
+} from "./security";
+import { authenticateSpaceWebhook, deriveDmNotifyToken, operatorNotifyEndpoint } from "./space-notification";
 import { listStalledWork } from "./stalled";
 import { assertOperatorWorkspaceWithinEnvelope } from "./workspace-envelope";
 
@@ -25,7 +32,7 @@ import { assertOperatorWorkspaceWithinEnvelope } from "./workspace-envelope";
 
 /** What a call to one of the operator's methods carries. */
 export type MethodCall = {
-  /** The `authorization` header: a service token from the caller's own host. */
+  /** The `authorization` header: a service token from the caller's own host (absent on token-authenticated PDS webhooks). */
   authorization: string | undefined;
   params: Readonly<Record<string, unknown>>;
   body: unknown;
@@ -50,7 +57,7 @@ export type OperatorMethodDefinition = {
   jsonLimit?: number;
   /** What a failure the method does not name answers with: its message as a bad request, or an internal error. */
   unexpected: "InvalidRequest" | "InternalServerError";
-  /** The method's output, or nothing for a method whose lexicon declares none (the notices). */
+  /** The method's output, or nothing for a method whose lexicon declares none (`notifySpaceUpdate`). */
   serve(call: MethodCall): Promise<object | undefined>;
 };
 
@@ -67,6 +74,35 @@ function objectBody(call: MethodCall, allowed: readonly string[], refusal: strin
     throw new MethodError(400, "InvalidRequest", refusal);
   }
   return body as Record<string, unknown>;
+}
+
+function parseDmCredentialProof(raw: unknown): DmCredentialProof {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new MethodError(400, "InvalidRequest", "Credential possession proof is required.");
+  }
+  const proof = raw as Record<string, unknown>;
+  const allowedKeys = new Set(["$type", "authorization", "signatureInput", "signature"]);
+  if (Object.keys(proof).some((key) => !allowedKeys.has(key))) {
+    throw new MethodError(400, "InvalidRequest", "Unexpected credential proof fields.");
+  }
+  if (proof.$type !== undefined && proof.$type !== `${OPERATOR_METHOD.getDmNotifyTarget}#credentialProof`) {
+    throw new MethodError(400, "InvalidRequest", "Invalid credential proof type.");
+  }
+  if (
+    typeof proof.authorization !== "string"
+    || proof.authorization.length === 0
+    || typeof proof.signatureInput !== "string"
+    || proof.signatureInput.length === 0
+    || typeof proof.signature !== "string"
+    || proof.signature.length === 0
+  ) {
+    throw new MethodError(400, "InvalidRequest", "Credential proof requires authorization, signatureInput, and signature.");
+  }
+  return {
+    authorization: proof.authorization,
+    signatureInput: proof.signatureInput,
+    signature: proof.signature,
+  };
 }
 
 /** An admin's read of a workspace: the caller authenticated and an active admin, and the workspace within the envelope where the method needs it. */
@@ -143,6 +179,29 @@ export const OPERATOR_METHODS: Readonly<Record<string, OperatorMethodDefinition>
       return getChanges(did, parseFollow(call.body), call.signal);
     },
   },
+  [OPERATOR_METHOD.getDmNotifyTarget]: {
+    type: "procedure",
+    jsonLimit: 32 * 1024,
+    unexpected: "InvalidRequest",
+    async serve(call) {
+      const callerDid = await authenticateOperatorRequest(call.authorization, OPERATOR_METHOD.getDmNotifyTarget);
+      const body = objectBody(call, ["space", "credential", "proof"], "The request requires space, credential, and proof.");
+      if (typeof body.space !== "string" || typeof body.credential !== "string") {
+        throw new MethodError(400, "InvalidRequest", "A DM space URI and space credential are required.");
+      }
+      const proof = parseDmCredentialProof(body.proof);
+      await verifyDmNotifyCredentialAndProof({
+        space: body.space,
+        callerDid,
+        credential: body.credential,
+        proof,
+      });
+      return {
+        endpoint: operatorNotifyEndpoint(getConfig().operatorUrl),
+        token: deriveDmNotifyToken(body.space, callerDid),
+      };
+    },
+  },
   [OPERATOR_METHOD.createWorkspace]: {
     type: "procedure",
     unexpected: "InvalidRequest",
@@ -173,8 +232,6 @@ export const OPERATOR_METHODS: Readonly<Record<string, OperatorMethodDefinition>
         result = await createWorkspace(grant, { creator: did, name: body.name, operationId: body.operationId }, registrationDeps);
       } catch (error) {
         if (error instanceof OperationConflictError) throw new MethodError(409, "OperationIdConflict", error.message);
-        // Someone other than the workspace account, with no approval for this workspace: the same answer as a missing grant,
-        // so the web app's one path (approve, return, retry the same operation) serves both.
         if (error instanceof CreationNotAuthorizedError) throw new MethodError(403, "AuthorizationRequired", AUTHORIZATION_REQUIRED);
         if (error instanceof WorkspaceExistsError) throw new MethodError(409, "WorkspaceExists", error.message);
         throw error;
@@ -200,34 +257,59 @@ export const OPERATOR_METHODS: Readonly<Record<string, OperatorMethodDefinition>
       return { url: authorityFlowUrl(did, authority, body.name.trim()).toString() };
     },
   },
-  [NOTICE_METHOD.notifyWrite]: {
+  [NOTICE_METHOD.confirmRegistration]: {
     type: "procedure",
     jsonLimit: 8 * 1024,
     unexpected: "InternalServerError",
     async serve(call) {
-      const notification = parseWriteNotification(call.body);
-      if (!notification) throw new MethodError(400, "InvalidRequest", "Invalid space write notification.");
-      await authenticateSpaceNotification(call.authorization, NOTICE_METHOD.notifyWrite, notification.space);
-      recordWriteNotification(notification);
-      return undefined;
+      const confirmation = parseConfirmRegistration(call.body);
+      if (!confirmation) throw new MethodError(400, "InvalidRequest", "Invalid registration confirmation.");
+      authenticateSpaceWebhook(confirmation.space, confirmation.token);
+      return { challenge: confirmation.challenge };
     },
   },
-  /**
-   * The space authority says a registered space was deleted: its notices and registration go, and so does the member list
-   * the change feed answers from. Applying it twice changes nothing; the registration is dropped with the notices, so a retry
-   * of an already-applied notice is refused, which loses nothing.
-   */
-  [NOTICE_METHOD.notifySpaceDeleted]: {
+  [NOTICE_METHOD.notifySpaceUpdate]: {
     type: "procedure",
-    jsonLimit: 8 * 1024,
+    jsonLimit: 16 * 1024,
     unexpected: "InternalServerError",
     async serve(call) {
-      const notification = parseSpaceDeletedNotification(call.body);
-      if (!notification) throw new MethodError(400, "InvalidRequest", "Invalid space deletion notification.");
-      await authenticateSpaceNotification(call.authorization, NOTICE_METHOD.notifySpaceDeleted, notification.space);
-      purgeSpaceNotifications(notification.space);
-      dropMemberList(notification.space);
-      return undefined;
+      const notification = parseSpaceUpdateNotification(call.body);
+      if (!notification) throw new MethodError(400, "InvalidRequest", "Invalid space update notification.");
+      const target = authenticateSpaceWebhook(notification.space, notification.token);
+      const { space, update } = notification;
+
+      switch (update.kind) {
+        case "repoWrite":
+          if (target.kind === "dm") {
+            await recordDmWake(target.callerDid, space);
+          } else {
+            recordWriteNotification({ space, repo: update.repo, repoRev: update.repoRev });
+            advanceSpaceRev(space, update.spaceRev);
+          }
+          return undefined;
+        case "repoRemoved":
+          if (target.kind === "dm") {
+            await recordDmWake(target.callerDid, space);
+          } else {
+            recordSpaceWake(space, update.repo, "");
+            advanceSpaceRev(space, update.spaceRev);
+          }
+          return undefined;
+        case "registrationExpired":
+          if (target.kind === "dm") {
+            // Returning 400 instructs PDS to run abandonSyncerNotice and drop lapsed browser DM registrations immediately.
+            throw new WebhookAuthError("DM notification registration expired.");
+          }
+          handleRegistrationExpiredNotice(space, update.spaceRev);
+          return undefined;
+        case "spaceDeleted":
+          if (target.kind === "dm") {
+            await recordDmWake(target.callerDid, space);
+            return undefined;
+          }
+          await handleSpaceDeletedNotice(space);
+          return undefined;
+      }
     },
   },
 };
@@ -239,6 +321,9 @@ export type Failure = { status: number; error: string; message: string; unnamed?
 export function describeFailure(error: unknown, unexpected: OperatorMethodDefinition["unexpected"]): Failure {
   const message = (error instanceof Error ? error.message : "The operator request failed.").slice(0, 500);
   if (error instanceof MethodError) return { status: error.status, error: error.error, message };
+  if (error instanceof WebhookAuthError) return { status: 400, error: "InvalidRequest", message };
+  if (error instanceof DmRateLimitError) return { status: 429, error: "RateLimitExceeded", message };
+  if (error instanceof DmWakeIpcError) return { status: 503, error: "Busy", message };
   if (error instanceof AdminMutationsPausedError) return { status: error.status, error: "Paused", message };
   const upstream = operatorHttpFailure(error);
   if (upstream) return { status: upstream.status, error: upstream.name, message: upstream.message.slice(0, 500) };

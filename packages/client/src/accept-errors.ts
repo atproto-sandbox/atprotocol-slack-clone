@@ -10,8 +10,8 @@ export function acceptFailure(error: unknown): AcceptFailure | null {
   }
   if (!(error instanceof SpaceCredentialError)) return null;
   // The reference authority gives a user the policy does not authorize the same answer it gives for a space that does not
-  // exist, so it cannot say which. UserNotAuthorized stays handled for authorities that still tell the two apart.
-  if (error.code === "UserNotAuthorized") {
+  // exist, so it cannot say which. AccountNotAuthorized and NotAuthorized stay handled for authorities that tell the two apart.
+  if (error.code === "AccountNotAuthorized" || error.code === "NotAuthorized") {
     return { status: 403, code: "not_a_member", error: "You haven't been added to this workspace yet. Ask an admin to invite your account, then open the invite link again." };
   }
   if (error.code === "SpaceNotFound") {

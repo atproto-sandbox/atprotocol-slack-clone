@@ -1,4 +1,4 @@
-import type * as ListMembers from "@flock/protocol/lexicons/api/types/com/atproto/memberspace/listMembers";
+import type * as MemberspaceDefs from "@flock/protocol/lexicons/api/types/com/atproto/memberspace/defs";
 import { listSpaceMembers } from "../atproto/space-ops";
 import { getConfig } from "@flock/deployment/config";
 import { getRawDb } from "../lib/db";
@@ -6,9 +6,17 @@ import { authorizeDmSubscription } from "../lib/dm-subscription";
 import { parseDmSpaceUri, parseSpaceUri } from "@flock/protocol/keys";
 import { SPACE_TYPE } from "@flock/protocol/nsids";
 import { restoreAuthorityGrant } from "./authority-grant";
+import {
+  AUTHORITY_SUSPENDED_BACKOFF_MS,
+  invalidateAuthorityHealth,
+  isAuthoritySuspended,
+  runThroughAuthorityBreaker,
+} from "./authority-suspension";
 
 /** How long a space's member list answers who may follow it before it is read again (D12). */
 export const MEMBER_LIST_TTL_MS = 60_000;
+/** Short negative backoff when an authority account is suspended (`AccountTakedown` / `AccountDeactivated`), avoiding PDS retry storms. */
+export const MEMBER_LIST_SUSPENDED_BACKOFF_MS = AUTHORITY_SUSPENDED_BACKOFF_MS;
 
 const FOLLOWED_BY_MEMBER_LIST: ReadonlySet<string> = new Set([
   SPACE_TYPE.workspace,
@@ -22,7 +30,7 @@ export type MemberAccessDeps = {
   /** Whether the operator registered (or tried to register) its notice sink for the space: it knows the space exists. */
   isRegistered(space: string): boolean;
   /** The space's member list, read with its authority's grant; throws when there is no grant or the list cannot be read. */
-  readMembers(space: string, authorityDid: string): Promise<ListMembers.Member[]>;
+  readMembers(space: string, authorityDid: string): Promise<MemberspaceDefs.Member[]>;
   now(): number;
 };
 
@@ -38,7 +46,7 @@ const defaultDeps: MemberAccessDeps = {
   now: () => Date.now(),
 };
 
-const lists = new Map<string, { at: number; members: Promise<ListMembers.Member[]> }>();
+const lists = new Map<string, { expiresAt: number; members: Promise<MemberspaceDefs.Member[]> }>();
 let prunedAt = Number.NEGATIVE_INFINITY;
 
 /**
@@ -63,20 +71,35 @@ export async function mayFollow(space: string, did: string, deps: MemberAccessDe
 /** Forgets a space's member list: the operator changed it, or the space was deleted. */
 export function dropMemberList(space: string): void {
   lists.delete(space);
+  const parsed = parseSpaceUri(space);
+  if (parsed) invalidateAuthorityHealth(parsed.authorityDid);
 }
 
-function memberList(space: string, authorityDid: string, deps: MemberAccessDeps): Promise<ListMembers.Member[]> {
+function memberList(space: string, authorityDid: string, deps: MemberAccessDeps): Promise<MemberspaceDefs.Member[]> {
   const now = deps.now();
+  if (isAuthoritySuspended(authorityDid, now)) {
+    return Promise.reject(new Error("AuthoritySuspended"));
+  }
   const held = lists.get(space);
-  if (held && now - held.at >= 0 && now - held.at < MEMBER_LIST_TTL_MS) return held.members;
+  if (held && now < held.expiresAt && held.expiresAt - now <= MEMBER_LIST_TTL_MS) return held.members;
   // Lists past their minute are dropped at most once a minute, so a call with many uncached spaces walks the cache once.
   if (now - prunedAt >= MEMBER_LIST_TTL_MS || now < prunedAt) {
     prunedAt = now;
-    for (const [cached, { at }] of lists) if (now - at < 0 || now - at >= MEMBER_LIST_TTL_MS) lists.delete(cached);
+    for (const [cached, { expiresAt }] of lists) {
+      if (now >= expiresAt || expiresAt - now > MEMBER_LIST_TTL_MS) {
+        lists.delete(cached);
+        const parsedCached = parseSpaceUri(cached);
+        if (parsedCached) invalidateAuthorityHealth(parsedCached.authorityDid);
+      }
+    }
   }
-  const entry = { at: now, members: deps.readMembers(space, authorityDid) };
+  const membersPromise = runThroughAuthorityBreaker(
+    authorityDid,
+    () => deps.now(),
+    () => deps.readMembers(space, authorityDid),
+  );
+  const entry = { expiresAt: now + MEMBER_LIST_TTL_MS, members: membersPromise };
   lists.set(space, entry);
-  // A failed read is not kept: the next ask reads again.
   entry.members.catch(() => {
     if (lists.get(space) === entry) lists.delete(space);
   });

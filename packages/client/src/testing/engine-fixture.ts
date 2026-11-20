@@ -29,7 +29,12 @@ export async function createChannel(network: FakeNetwork, skey: string, members:
   const space = channelUri(authority, skey);
   for (const member of members) {
     if (!network.hasAccount(member)) network.createAccount(member, member.endsWith("2") ? "pds2" : "pds1");
-    await owner.procedure("com.atproto.memberspace.putMember", { space, did: member, read: true, write: true });
+  }
+  if (members.length > 0) {
+    await owner.procedure("com.atproto.memberspace.putMembers", {
+      space,
+      members: members.map((did) => ({ did, read: true, write: true })),
+    });
   }
   return space;
 }
@@ -106,9 +111,9 @@ export async function createWorkspace(network: FakeNetwork, input: {
   if (!network.hasAccount(authority)) network.createAccount(authority, "pds1");
   const owner = network.clientFor(authority);
   const create = async (spaceType: string, spaceKey: string) =>
-    (await owner.procedure<unknown, { uri: string }>("com.atproto.space.createSpace", { spaceType, skey: spaceKey, policy: memberspacePolicy() })).uri;
+    (await owner.procedure<unknown, { space: string }>("com.atproto.space.createSpace", { spaceType, skey: spaceKey, policy: memberspacePolicy() })).space;
   const putMember = (space: string, did: string, read: boolean, write: boolean) =>
-    owner.procedure("com.atproto.memberspace.putMember", { space, did, read, write });
+    owner.procedure("com.atproto.memberspace.putMembers", { space, members: [{ did, read, write }] });
   const workspace = await create(SPACE_TYPE.workspace, skey);
   const inbox = await create(SPACE_TYPE.inbox, skey);
   const admins = new Set([authority, ...(input.admins ?? [])]);

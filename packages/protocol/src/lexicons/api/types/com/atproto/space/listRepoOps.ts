@@ -17,25 +17,18 @@ const is$typed = _is$typed,
 const id = 'com.atproto.space.listRepoOps'
 
 export type QueryParams = {
-  /** Reference to the space. */
   space: string
-  /** The DID of the account whose oplog to retrieve. */
   repo: string
-  /** Return operations after this revision. The caller's own sync position; use `cursor` to continue a paginated response. */
   since?: string
-  /** Maximum number of operations to return. */
   limit?: number
-  /** Opaque pagination cursor from a previous response. Takes precedence over `since` when both are supplied. */
   cursor?: string
-  /** If true, omit inlined record values and return only operation metadata. */
   excludeValues?: boolean
 }
 export type InputSchema = undefined
 
 export interface OutputSchema {
   ops: OpEntry[]
-  commit?: ComAtprotoSpaceDefs.Commit
-  /** Pass as `cursor` to fetch the next page. Absent once the response reaches the head of the oplog. */
+  commit: ComAtprotoSpaceDefs.Commit
   cursor?: string
 }
 
@@ -50,7 +43,7 @@ export interface Response {
   data: OutputSchema
 }
 
-export class BadSpaceMacError extends XRPCError {
+export class InvalidSpaceMacError extends XRPCError {
   constructor(src: XRPCError) {
     super(src.status, src.error, src.message, src.headers, { cause: src })
   }
@@ -86,28 +79,37 @@ export class RepoDeactivatedError extends XRPCError {
   }
 }
 
+export class InvalidCursorError extends XRPCError {
+  constructor(src: XRPCError) {
+    super(src.status, src.error, src.message, src.headers, { cause: src })
+  }
+}
+
 export function toKnownErr(e: any) {
   if (e instanceof XRPCError) {
-    if (e.error === 'BadSpaceMac') return new BadSpaceMacError(e)
+    if (e.error === 'InvalidSpaceMac') return new InvalidSpaceMacError(e)
     if (e.error === 'SpaceNotFound') return new SpaceNotFoundError(e)
     if (e.error === 'RepoNotFound') return new RepoNotFoundError(e)
     if (e.error === 'RepoTakendown') return new RepoTakendownError(e)
     if (e.error === 'RepoSuspended') return new RepoSuspendedError(e)
     if (e.error === 'RepoDeactivated') return new RepoDeactivatedError(e)
+    if (e.error === 'InvalidCursor') return new InvalidCursorError(e)
   }
 
   return e
 }
 
-/** A single operation in a permissioned repo's oplog. cid is null for deletes; prev is null for creates. Operations sharing the same rev belong to the same batch. value carries the record's current value for creates and updates, unless excludeValues was set or the value is stale (superseded by a later operation). */
+/** Operations that share a rev were applied in the same commit. */
 export interface OpEntry {
   $type?: 'com.atproto.space.listRepoOps#opEntry'
   rev: string
   collection: string
   rkey: string
+  /** CID of the record after the operation. Null for deletes. */
   cid: string | null
+  /** CID of the record before the operation. Null for creates. */
   prev: string | null
-  /** The record's current value, inlined for create and update operations. Omitted when excludeValues is set, for deletes, or when the value has been superseded by a later operation. */
+  /** Omitted for deletes, if excludeValues is set, or if the record has since changed. */
   value?: { [_ in string]: unknown }
 }
 

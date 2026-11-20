@@ -33,10 +33,10 @@
     "playground": "node --import tsx scripts/playground.ts"
   },
   "dependencies": {
-    "@atproto/crypto": "0.0.0-spaces-alpha-20261029171913",
+    "@atproto/crypto": "0.0.0-spaces-alpha-20261117141222",
     "@atproto/jwk-jose": "0.2.4",
     "@atproto/oauth-client-node": "0.5.7",
-    "@atproto/xrpc-server": "0.0.0-spaces-alpha-20261029171913",
+    "@atproto/xrpc-server": "0.0.0-spaces-alpha-20261117141222",
     "@flock/client": "workspace:*",
     "@flock/echo-bot": "workspace:*",
     "@flock/operator": "workspace:*",

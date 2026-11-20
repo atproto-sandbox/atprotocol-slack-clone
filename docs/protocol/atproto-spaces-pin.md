@@ -1,21 +1,137 @@
 # atproto Spaces Protocol Pin and Conformance
 
-Status: pinned PDS API/policy and strict-expiry conformance pass with the checked-in verifier patch; the unmodified upstream base still fails the PRD cutoff  
-Verified: 2026-10-30 (re-based from `619c6e85`, verified 2026-10-21; before that `5b95b2f2`, 2026-10-09, and `787a730f`, 2026-09-25)
+Status: **R12 pinned & aligned (`6747610566`, `0.0.0-spaces-alpha-20261117141222`); `@atproto/space` patched & passing (9/9 files, 173/173 tests); Flock protocol, operator, reader, client, web, and conformance suites aligned to `#5187` @ `6747610566`**  
+Verified pin & patch: 2026-11-17 (updated from `5d88b414`, 2026-10-30; before that `619c6e85`, `5b95b2f2`, `787a730f`)
 
 ## Pinned source
 
 | Component | Pin |
 |---|---|
-| Proposal 0016 | `bluesky-social/proposals` `main` at `701ef9c6be5a99c2d3e87e107fe2531459d1c984` (the October 29 combined proposal; previously `c76714ac`, `119fa6b6`) |
-| PDS implementation | `bluesky-social/atproto` `permissioned-data`, PR [#5187](https://github.com/bluesky-social/atproto/pull/5187), commit `5d88b414a98de1ada22c94c78fa0667a7028163c` (the "combined implementation" of the October 29 alpha; previously `619c6e85`, `5b95b2f2`, `787a730f`) |
-| `@atproto/pds` | `0.5.32` |
-| `@atproto/oauth-scopes` | `0.5.11` |
-| `@atproto/oauth-provider` | `0.22.6` |
-| `@atproto/space` | `0.0.1` |
-| PDS development environment | Same pinned monorepo commit; `@atproto/dev-env` multi-PDS fixture |
-| App dependencies | `@atproto/space`, `@atproto/crypto` and `@atproto/lex-data` at `0.0.0-spaces-alpha-20261029171913`, the npm snapshot built from this commit. Other `@atproto/*` copies remain at their own versions because the unchanged packages depend on them (`crypto` 0.5.5 for `identity` and `xrpc-server`, `lex-data` 0.1.7 and `lex-cbor` 0.1.6 for `lex-client`, `xrpc` and friends, `syntax` 0.7.6); the alpha copies serve `@atproto/space` and the app's own signing and MAC code. Their `^0.0.0-spaces-alpha-…` ranges also match stray `0.0.0` releases of `@atproto/lex-cbor` and `@atproto/lex-data` that still list `workspace:*` dependencies and cannot install, so `pnpm-workspace.yaml` overrides both ranges to the snapshot |
-| Strict credential-expiry overlay | [`protocol-tests/atproto/strict-credential-expiry.patch`](../../protocol-tests/atproto/strict-credential-expiry.patch), SHA-256 `e9cfae5beb29d01c494087abf79eaf58fd48312956422c91ff29a405977aae3f` |
+| Upstream PR / Commit | `bluesky-social/atproto` `permissioned-data`, PR [#5187](https://github.com/bluesky-social/atproto/pull/5187), commit `6747610566eee1b6d743617bd8eb1136adccb362` (previously `5d88b414a98de1ada22c94c78fa0667a7028163c`) |
+| PDS development environment | Same pinned monorepo commit in `../atproto-spaces-r12`; `@atproto/dev-env` multi-PDS fixture (`devMode: true`, `disableSsrfProtection: true`) |
+| App Spaces dependencies | `@atproto/space`, `@atproto/star`, `@atproto/crypto`, `@atproto/lex-data`, `@atproto/lexicon`, `@atproto/xrpc-server` at `0.0.0-spaces-alpha-20261117141222` (snapshot from `223114799`, byte-identical to `6747610566` across `lexicons/`, `packages/{space,star,crypto,xrpc-server}`, and `packages/oauth/{oauth-client*,jwk-jose,oauth-provider}`). Stable non-Spaces packages (`@atproto/oauth-client-{node,browser}`, `@atproto/identity`, `@atproto/jwk-jose`, `@atproto/xrpc`, `@atproto/lex-cli`) stay on their existing pins. `pnpm-workspace.yaml` pins all `^0.0.0-spaces-alpha-*` overrides and `minimumReleaseAgeExclude` entries to `0.0.0-spaces-alpha-20261117141222` to prevent matching stray uninstallable `0.0.0` releases |
+| Strict credential-expiry overlay | [`protocol-tests/atproto/strict-credential-expiry.patch`](../../protocol-tests/atproto/strict-credential-expiry.patch), SHA-256 `3f413baa779473b5466e8e6ca9edc92335f5056edbd13aa3d4bfc57a509b32dd` (rebased onto `6747610566`: `packages/space/src/credential.ts` + `packages/space/src/credential.test.ts`) |
+
+PR #5187 (`permissioned-data`) remains in active development, and unmodified `6747610566` still applies five seconds of expiry tolerance (`CLOCK_SKEW_SEC = 5`) to all space tokens including credentials (`packages/space/src/credential.ts:296`). The rebased overlay preserves strict zero-skew cutoff on `'credential'` (`type === 'credential' ? 0 : CLOCK_SKEW_SEC`) while keeping five-second tolerance on `'delegation'` and `'clientAttestation'`, and updates `packages/space/src/credential.test.ts` (moved from `packages/space/tests/` in upstream PR `#5924`). Any deployment must retain this overlay or an upstream fix and rerun Gate 4 conformance.
+
+Production operator & webhook deployment notes:
+- **Public HTTPS webhook endpoint (`L7`):** Upstream `authorizeSpaceSync` and `SpaceNotifications` deliver `confirmRegistration` and `notifySpaceUpdate` through `ctx.safeClient(endpoint)` (with `disableSsrfProtection` disabled outside `devMode: true`). Production `OPERATOR_URL` must therefore be a **public HTTPS origin**; loopback/private IPs are rejected in non-dev PDS deployments.
+- **OAuth lexicon republish (`L8`):** Production deployments using OAuth space-permission consent screens must republish the 7 updated `new.flock.*` space lexicons carrying `"title"` (replacing `"name"`), together with `new.flock.operator.getDmNotifyTarget` and `new.flock.permissions.{member,workspaceAuthority}`.
+
+## Reproduce the pinned checkout & build (`../atproto-spaces-r12`)
+
+Upstream `6747610566` uses `pnpm@12.16.1` (`lockfileVersion: '9.0'`) and declares `devEngines.runtime` `^22.23.4 || ^24.22.1 || ^26.12.1` (with `undici@8.12.3`). Use Node `>= 22.23.4` (`< 23`, matching root `NODE_MODULE_VERSION` 127) if installed; on hosts with Node `22.17.0` + `/opt/homebrew/bin/node` (`v25.4.0`), `oauth-provider-ui` Lingui extraction (`lingui` CLI `import.meta.main`) runs once under Node `>= 24.2`, while native addons (`better-sqlite3`, `@swc/core`, `sharp`) and `dev-env` build under Node `22.x` (`PUPPETEER_SKIP_DOWNLOAD=true`, `--runtime-on-fail=ignore`):
+
+```sh
+git clone --filter=blob:none --no-checkout https://github.com/bluesky-social/atproto.git atproto-spaces-r12
+git -C atproto-spaces-r12 fetch --depth=1 origin 6747610566eee1b6d743617bd8eb1136adccb362
+git -C atproto-spaces-r12 checkout --detach 6747610566eee1b6d743617bd8eb1136adccb362
+cd atproto-spaces-r12
+shasum -a 256 /path/to/atproto-slack-clone-r12/protocol-tests/atproto/strict-credential-expiry.patch
+git apply /path/to/atproto-slack-clone-r12/protocol-tests/atproto/strict-credential-expiry.patch
+PUPPETEER_SKIP_DOWNLOAD=true pnpm --runtime-on-fail=ignore install --frozen-lockfile
+pnpm --runtime-on-fail=ignore run build:tooling
+# Run oauth-provider-ui prebuild with Node >= 24.2 if on Node 22.x:
+pnpm --runtime-on-fail=ignore --filter @atproto/oauth-provider-ui prebuild
+pnpm --runtime-on-fail=ignore --filter @atproto/dev-env... --filter @atproto/space --filter @atproto/star prebuild
+pnpm --runtime-on-fail=ignore --filter @atproto/dev-env... --filter @atproto/space --filter @atproto/star --filter @atproto/lex-cli build
+pnpm --runtime-on-fail=ignore --filter @atproto/space test
+```
+
+Verified on 2026-11-17: `@atproto/space` passed 9/9 test files, 173/173 tests (including 33 tests in `src/credential.test.ts` with strict expiry enforced). To run Gate 4 multi-PDS conformance against the built `../atproto-spaces-r12` checkout, temporarily copy `protocol-tests/atproto/slack-{inbox,dm,authority-oauth}-conformance.test.ts` into `../atproto-spaces-r12/packages/pds/tests/space/`, execute `NODE_OPTIONS=--experimental-vm-modules pnpm -C ../atproto-spaces-r12 --filter @atproto/pds exec jest --runInBand tests/space/`, and remove the temporary copies afterward so `../atproto-spaces-r12` stays clean apart from `strict-credential-expiry.patch`.
+
+The pinned PDS validates only lexicons in its built-in schema map; app writes therefore leave `validate` unset and run `validateSpaceRecord` locally before every write, and every reader validates author, schema, key, and cross-record references. Hash-derived record keys retain `:` between adjacent lowercase base32 symbols so digests cannot trigger the PDS explicit-slur filter.
+
+## What changed since `5d88b414` (to `6747610566` — Wave `R12`)
+
+The drift from `5d88b414` to `6747610566` spans 88 commits on PR #5187 (`alpha-migrations/prompt-11-5-26.md` and `alpha-migrations/prompt-11-12-26.md`, published as npm snapshot `0.0.0-spaces-alpha-20261117141222`).
+
+| Upstream change (`5d88b414..6747610566`) | Flock alignment |
+|---|---|
+| `getSpaceCredential`, `registerNotify`, `unregisterNotify`, `notifySpaceDeleted` removed; `notifyWrite` -> `notifyRepoUpdate` (PDS-to-authority only). New `com.atproto.space.authorizeSpaceSync` (`{ space, credentialKey, delegationToken?, clientAttestation?, notify? }` -> `{ credential, spaceRev? }`); inline `notify: { endpoint, token }` (`<= 512` chars) triggers sync `confirmRegistration` on first registration for `(space, endpoint, token)`, expires with `credential.exp` (`600 s` default, `3600 s` ceiling), and delivers `notifySpaceUpdate` (`#repoWrite`, `#repoRemoved`, `#registrationExpired`, `#spaceDeleted`). `safeClient` enforces SSRF protection (`L7`) | `exchangeSpaceCredential` & `mintSpaceCredentialWith` (`space-credential-core.ts`); `NOTICE_METHOD` serves only `confirmRegistration` and `notifySpaceUpdate` with constant-time `timingSafeEqual` token auth (`notices.ts`, `space-notification.ts`). Operator persists one stable random token per space in `notification_registration.{token, renew_at, last_space_rev}`, renews via 60s SQL-first loop (`15 s -> 2 min` backoff) + 30m discovery sweep, catches gaps via `spaceRev`, and confirms `#spaceDeleted` via authority `authorizeSpaceSync` before purging state |
+| Browser DM push notifications need a public HTTPS webhook sink without server-held member sessions or SQLite DM rows | `new.flock.operator.getDmNotifyTarget` verifies a caller-held `SpaceCredential` (`sub === space`) + fresh RFC 9421 `verifyCredentialSig` PoP + replay guard and derives a deterministic stateless `dm1` HMAC token (`AUTH_ENCRYPTION_KEY`, `"flock-dm-notify-v1"`). Inbound DM wakes flow through ephemeral in-memory `apps/operator/src/operator/dm-feed-wakes.ts` (zero DM rows in any SQLite table, `reset` across restarts); DM `#registrationExpired` returns HTTP `400` (`abandonSyncerNotice`); `DmClient.watch` falls back immediately to `authorizeSpaceSync` without `notify`; `session.ts` keeps pre-R12 sessions lacking `getDmNotifyTarget` signed in |
+| RFC 9421 HTTP message signatures & HPKE MACs: `createSpaceSigHeaders({ authorization, audience, keypair })` (`tag="atproto-space-credential"`); `Accept-Signature` (`COMMIT_MAC_PROFILE`, `RECORD_MAC_PROFILE`) with ephemeral `encapsulate` key share (`info: "atproto-mac"`, `SpaceKemError`); response headers `Atproto-Space-Commit` / `Atproto-Space-Record` + `Signature-Input` + `Signature`; throwing `verifyCommitMac` / `verifyRecordMac` / `verifyCommit` / `verifyRecord` (`SpaceMacError` `InvalidSpaceMac`, `SpaceRepoVerificationError` `InvalidSpaceRepo`) | `space-credential-core.ts`, `kem-key.ts`, `repo-failure.ts`, `FakeNetwork` (including CORS `Access-Control-Expose-Headers: atproto-space-commit, atproto-space-record, signature-input, signature` and `Vary: Accept-Signature`), and `@flock/reader` |
+| `@atproto/star` extracted; `getRepo` serves `application/vnd.dasl.star`; `serializeRepo` -> `writeRepoStar(commit, entries)`; STAR record entries carry `0x01 + varint(keyLen) + key + varint(valLen) + val` (no CID); `LTHASH_STATE_BYTES` removed from `@atproto/space` | Direct `@atproto/star` dep in `@flock/{protocol,reader,testing}`; `starEntryBytes` exact byte parity with `writeRepoStar`; `LTHASH_STATE_BYTES = new LtHash().state().byteLength` (`2048`) |
+| `listRepos` -> `listWriters` (`repos` union of `com.atproto.space.defs#repoWrite` `{ repo, repoRev, spaceRev, data }` and `#repoRemoved` `{ repo, spaceRev }`; `#repoRemoved` GC'd after 72h; `InvalidCursor`). `listRepoOps` includes signed/MAC'd `commit` on **every** page and returns `400 RepoNotFound` for unwritten repos | `listBoundedWriters` (latest-entry-wins per `repo` across pages) and `listWritersSince` (>72h or `InvalidCursor` full-reconciliation fallback); `UnsignedEmptyRepoOpsError` and intermediate-page `commit`+`cursor` workarounds removed so every `listRepoOps` page verifies commit+MAC |
+| Account suspension vs takedown: `RepoTakendown` / `RepoDeactivated` on `authorizeSpaceSync` and `listWriters` indicates authority suspension (`assertActiveSpaceHost`); `401 AccountTakedown` / `AccountDeactivated` on management endpoints | `RepoTakendown`/`RepoDeactivated` on `authorizeSpaceSync`, `listWriters`, **and** repo reads where `repo === authorityDid` classify as transient suspension (preserving local cached state), while `repo !== authorityDid` remains `permanent: true` per-writer eviction; `401 AccountTakedown`/`AccountDeactivated` on operator management calls preserves `authority_grant` without retry storms |
+| `putMember` / `removeMember` -> batched `putMembers` (`{ space, members }`, `<= 100`) and `removeMembers` (`{ space, dids }`, `<= 100`); explicit `write: false` entries stay excluded even when `publicWrite: true`; `managedspace.checkUserAccess` -> `checkAccess`; `.uri` -> `.space` (`createSpace`, `getSpace`, `listSpaces`), `did` -> `spaceDid` (`listSpaces`), `did` -> `repo` (`removeWriter`), `listRecords` drops `reverse`; `NotSpaceOwner` -> `NotAuthorized`, `UserNotAuthorized` -> `AccountNotAuthorized`; `ACCESS_FULL` enforced on account-authenticated space/memberspace endpoints (`#5923`); space lexicon `"name"` -> `"title"` | Updated across `space-ops.ts`, `members.ts`, `dm-client.ts` (`setRequestMode("everyone")` reactivates dormant allowlist rows to `{ read: false, write: true }`; Flock's `OperationRequest.kind = "removeMember"` preserved), `FakeNetwork`, 7 `new.flock.*` space lexicons (`L8`), and platform/conformance tests |
+
+## API and authorization mapping (current `6747610566` pin)
+
+| Product operation | Pinned API and observed behavior |
+|---|---|
+| Create/update a space | `com.atproto.space.createSpace`, `updateSpace`, `getSpace`, `deleteSpace`; output uses `space` (`at://<authority-did>/space/<type>/<skey>`). Every Flock space uses `com.atproto.memberspace.policy` (`packages/protocol/src/atproto/space-policy.ts`); `publicRead` and `publicWrite` default to `false`, and the DM inbox sets `publicWrite: true` for `"everyone"`. `updateSpace` replaces the whole policy; `getSpace` is owner-only (`NotAuthorized` for non-owners). Account-authenticated space/memberspace endpoints require `ACCESS_FULL` (refusing app passwords with `InvalidToken: Bad token scope`, `#5923`). |
+| Set/remove membership | `com.atproto.memberspace.putMembers` (`{ space, members }`, `<= 100`) replaces `read` and `write` per member; `removeMembers` (`{ space, dids }`, `<= 100`) deletes members; `com.atproto.space.removeWriter` takes `{ space, repo }`. Removing a member or setting `write: false` emits `#repoRemoved` in `listWriters` (and explicit `write: false` entries remain excluded even under `publicWrite: true`, so switching a DM inbox to `"everyone"` reactivates dormant allowlist rows to `{ read: false, write: true }`). Requires the space authority DID and `manage=update` (`PolicyMismatch` on non-memberspace policies). |
+| Read membership state | `com.atproto.memberspace.listMembers` returns `{ members: [{ did, read, write }], cursor? }` and requires the owner session with `action=read_self`. A space credential and non-owner member cannot call it. The authority is implicitly admitted for reads and credentials without being listed as a member. |
+| Discover spaces | `com.atproto.space.listSpaces` (`spaceDid`, `spaceType`) returns `spaces` views carrying `space` (and optional `repoRev`, `data`, `spaceRev`) from the caller's own repo. The invitee's `new.flock.acceptance` record supplies that index entry; it is not a membership check. |
+| Mint a read credential & register sync notifications | The account PDS issues `com.atproto.space.getDelegationToken`; the space authority exchanges it via `com.atproto.space.authorizeSpaceSync` (`{ space, credentialKey, delegationToken?, clientAttestation?, notify? }` -> `{ credential, spaceRev? }`, body-only POST with no session auth header). The member list (or `publicRead`) controls issuance; unauthorized callers and missing spaces both receive `SpaceNotFound` (`SpaceDeleted` first; `AccountNotAuthorized` for explicit policy denials). `RegistrationNotConfirmed` and authority `RepoTakendown`/`RepoDeactivated` remain non-refusal errors (`isAccessLost === false`). Credentials carry `cnf.kid` and `jti`, are presented with `createSpaceSigHeaders` (`tag="atproto-space-credential"`), and live 600 s by default (`3,600 s` ceiling). Optional `notify: { endpoint, token }` binds webhook delivery to `credential.exp`, running synchronous `confirmRegistration` on first registration of `(space, endpoint, token)` and delivering `notifySpaceUpdate`. |
+| Read records & verify MACs / STAR | `listWriters` and `listRecords` (server default `uri desc`) require only a signed space-credential header. `getRecord` (`RECORD_MAC_PROFILE`), `getLatestCommit`, `listRepoOps` (`COMMIT_MAC_PROFILE` + signed `commit` on every page; `400 RepoNotFound` when unwritten), and `getRepo` (`Accept: application/vnd.dasl.star`, `@atproto/star`) send an ephemeral HPKE key share in `Accept-Signature` (`encapsulate` against `#atproto_kem`, `info: "atproto-mac"`) and verify `Atproto-Space-Commit` / `Atproto-Space-Record` + `Signature-Input` + `Signature` (`SpaceKemError`, `SpaceMacError` `InvalidSpaceMac`, `SpaceRepoVerificationError` `InvalidSpaceRepo`). |
+| Write records | `com.atproto.space.createRecord`, `putRecord`, `deleteRecord`, and `applyWrites` address the author's own repo (`ACCESS_FULL` required; OAuth scope checks distinguish create/update/delete and target collection). Writes and read credentials are separate protocol permissions. |
+| Synchronize writers & suspension | PDS-to-authority `com.atproto.space.notifyRepoUpdate` updates the authority's writer set; `com.atproto.space.listWriters` enumerates `repos` union items (`com.atproto.space.defs#repoWrite` `{ repo, repoRev, spaceRev, data }` and `#repoRemoved` `{ repo, spaceRev }`) in ascending `spaceRev` order (`InvalidCursor` or cursors >72h fall back to full `listBoundedWriters` latest-entry-wins reconciliation). If PDS-to-authority `notifyRepoUpdate` is dropped, owner-only `listMembers` (`listInboxWriters`) enumerates `write=true` inbox candidates. `RepoTakendown`/`RepoDeactivated` on `authorizeSpaceSync`, `listWriters`, or `repo === authorityDid` is treated as temporary authority suspension, whereas `repo !== authorityDid` remains permanent per-writer takedown. |
+
+## Slack split-policy conformance
+
+The retained multi-PDS inbox conformance suite (`protocol-tests/atproto/slack-inbox-conformance.test.ts`) creates a `new.flock.inbox` with `com.atproto.memberspace.policy`. The requester and ordinary member have `read=false, write=true` (via `putMembers`); the admin has `read=true, write=true`. The requester writes a request to their own PDS. The requester's repo appears as `#repoWrite` in `listWriters` when `notifyRepoUpdate` arrives, and an admin credential minted via `authorizeSpaceSync` reads and MAC-verifies the record. The requester can read their own repo but cannot mint an inbox credential (`SpaceNotFound`) or read another writer's repo. The authority owner has implicit access. An authority-authored `new.flock.admin` record does not let that human DID mutate the PDS member list (`NotAuthorized`).
+
+The conformance test also drops the requester's PDS-to-authority notification: `listWriters` omits the requester while authority `listMembers` still reports `write=true`, and the admin credential reads that candidate repo directly. Membership removal (`removeMembers`) emits `#repoRemoved` and prevents minting a fresh credential; the rebased strict-expiry overlay (`3f413baa779473b5466e8e6ca9edc92335f5056edbd13aa3d4bfc57a509b32dd`) rejects an already-minted space credential at `exp` (`exp + 2s` on both PDS hosts) while preserving five-second clock-skew tolerance on delegation tokens and client attestations.
+
+## Direct-message conformance
+
+`protocol-tests/atproto/slack-dm-conformance.test.ts` verifies symmetric conversation halves across PDS hosts (`listWriters` lists only the half owner; foreign writes are untracked and rejected by author validation), closed existence oracle (`SpaceNotFound` for unauthorized/missing spaces, `SpaceDeleted` after deletion; public `new.flock.dm.declaration` indicates an enabled inbox), public-write vs allowlist policy transitions (`putMembers` / `removeMembers` emit `#repoRemoved`, and switching back to `publicWrite: true` reactivates dormant allowlist rows to `{ read: false, write: true }`), public browser OAuth scopes (`token_endpoint_auth_method: "none"`), non-extractable P-256 `credentialKey` (`cnf.kid`) binding on `authorizeSpaceSync`, and credential expiry after `removeMembers`.
+
+## OAuth scope proof
+
+`protocol-tests/atproto/slack-authority-oauth-conformance.test.ts` uses a real PDS OAuth `TokenManager` to sign a DPoP-bound OAuth access token (OAuth keeps DPoP; space-credential requests use RFC 9421 HTTP message signatures). The token calls `putMembers` and authority record-write handlers with `manage=update` plus the exact `new.flock.admin` collection actions, denies membership mutation when restricted to `action=read`, and mints a `com.atproto.server.getServiceAuth` JWT whose `iss`, `aud`, and `lxm` match the operator contract. `protocol-tests/platform-capabilities.test.ts` additionally verifies `#5923` app-password enforcement (`createRecord` and `getDelegationToken` rejected with `InvalidToken: Bad token scope`, while `getServiceAuth` remains allowed).
+
+## Authority operator scopes
+
+The operator's workspace-DID OAuth session (`workspaceAuthorityScopes` in `packages/protocol/src/scopes.ts`, mirrored in `new.flock.permissions.workspaceAuthority`) is limited to these scopes, where `authority=self` resolves to the workspace DID and `skey=*` covers only spaces under that authority:
+
+```text
+space:new.flock.workspace?authority=self&skey=*&action=read_self&action=read&manage=create&manage=update
+space:new.flock.workspace?authority=self&skey=*&collection=new.flock.workspace.profile&collection=new.flock.directory&collection=new.flock.workspace.roster&collection=new.flock.admin&collection=new.flock.app.install&collection=new.flock.ext.install&action=create&action=update&action=delete
+
+space:new.flock.inbox?authority=self&skey=*&action=read_self&action=read&manage=create&manage=update
+space:new.flock.inbox?authority=self&skey=*&collection=new.flock.joinDecision&action=create&action=update&action=delete
+
+space:new.flock.channel?authority=self&skey=*&action=read_self&action=read&manage=create&manage=update
+space:new.flock.channel?authority=self&skey=*&collection=new.flock.channel.roster&action=create&action=update&action=delete
+
+space:new.flock.app.inbox?authority=self&skey=*&action=read_self&action=read&manage=create&manage=update
+
+space:new.flock.ext.tasks?authority=self&skey=*&action=read_self&action=read&manage=create&manage=update
+```
+
+The operator has no message, reaction, join-request, or DM scope. Browser member sessions request one combined operator RPC token (`memberGrantScopes` in `packages/protocol/src/scopes.ts`), replacing `OPERATOR_DID` with the DID publishing `#atproto_flock_operator`:
+
+```text
+rpc?lxm=new.flock.operator.execute&lxm=new.flock.operator.getOperation&lxm=new.flock.operator.listInboxWriters&lxm=new.flock.operator.getChanges&lxm=new.flock.operator.createWorkspace&lxm=new.flock.operator.startAuthorityFlow&lxm=new.flock.operator.listStalledOperations&lxm=new.flock.operator.getDmNotifyTarget&aud=OPERATOR_DID%23atproto_flock_operator
+```
+
+Pre-R12 browser sessions holding `LEGACY_OPERATOR_METHODS` (without `new.flock.operator.getDmNotifyTarget`) remain admissible in `apps/web/src/browser/session.ts` for reads, admin/member mutations, and polling fallback. For each operator call, the client calls `com.atproto.server.getServiceAuth` with `aud=OPERATOR_DID#atproto_flock_operator` and `lxm` equal to that method's NSID; the operator verifies the service JWT, takes the actor DID strictly from `iss`, and rechecks authority records and PDS membership on every admin method.
+
+## Stable key encoding
+
+For each hashed rkey, calculate SHA-256 over UTF-8 bytes and encode the 32-byte digest with RFC 4648 base32 using lowercase alphabet `abcdefghijklmnopqrstuvwxyz234567` and no padding. Insert `:` between every adjacent base32 symbol before adding the key prefix. Prefix the delimited string with:
+
+| Key | Input |
+|---|---|
+| `d-` subject/roster | Canonical DID string |
+| `r-` request | Canonical channel URI, NUL byte, requester DID |
+| `a-` acceptance | Canonical workspace URI |
+| `x-` reaction | Canonical message URI, NUL byte, emoji, NUL byte, author DID |
+| `q-` decision | Canonical request URI |
+| `i-` app inbox skey | Workspace `skey`, NUL byte, canonical app DID |
+| `x-` extension space skey | `${extId}:${workspaceSkey}` |
+
+Each string is already required to be valid UTF-8 and contain no NUL. URI values are parsed and serialized to the canonical atproto URI form before hashing. The workspace directory uses the literal channel `skey`; a request generation remains a fresh TID in the record value. The full canonical rule is also in the [PRD](../prd/atproto-slack-clone.md#lexicons-and-current-record-rules).
+
+---
+
+## Historical Pin Log (Prior `5d88b414`, `619c6e85`, `5b95b2f2`, `787a730f` verification notes — preserved for reference)
+
+Status (historical `5d88b414`): pinned PDS API/policy and strict-expiry conformance pass with the checked-in verifier patch; the unmodified upstream base still fails the PRD cutoff  
+Verified (`5d88b414`): 2026-10-30 (re-based from `619c6e85`, verified 2026-10-21; before that `5b95b2f2`, 2026-10-09, and `787a730f`, 2026-09-25)
 
 The proposal describes itself as a proposal, and PR #5187 (branch `permissioned-data`) is still marked Draft as of this verification. The unmodified `5d88b414` source still allows five seconds of expiry skew for credentials. The checked-in overlay changes `verifySpaceToken` in `packages/space/src/credential.ts` so a space credential is rejected at `exp` (zero skew) while delegation tokens and client attestations keep the five-second allowance, and it replaces the skew test in `packages/space/tests/credential.test.ts` with an at-`exp` rejection test plus a delegation-skew test. Space credentials are presented with HTTP message signatures (tagged `atproto-space-credential`), not DPoP, so the overlay does not mention DPoP proofs. It applies to the `5d88b414` sources with line offsets only. This is a local protocol fork requirement: any deployment must use this overlay or a compatible upstream revision and rerun conformance. Treat protocol drift as a release blocker.
 
@@ -23,7 +139,7 @@ The pinned PDS validates only lexicons in its built-in schema map; publishing th
 
 The pinned PDS also rejects record keys matching its explicit-slur filter. A contiguous base32 digest can trigger that filter by chance, so every hash-derived record key inserts `:` between the lowercase base32 symbols. The filter does not remove colons when checking for words, and the pinned record-key syntax accepts them. This delimiter is part of the published canonical key encoding; interoperable apps must preserve it.
 
-## Reproduce the PDS conformance run
+### Reproduce the PDS conformance run (historical `5d88b414`)
 
 Use Node 24 as selected by the pinned checkout's `.nvmrc` (the local proof also ran on Node 22.17.0) and pnpm 11.11.0. In a disposable clone (the app's checkout name for it is `atproto-spaces-phase3`; make it a standalone clone, not a `git worktree`, so deleting an older checkout cannot break it):
 
@@ -53,7 +169,7 @@ Build notes (recorded on `5b95b2f2`): the install needs `PUPPETEER_SKIP_DOWNLOAD
 
 The verification recorded on `787a730f` passed 101 `@atproto/space` tests and six PDS suites with 108 tests passing and one upstream `todo`; the figures for `619c6e85` are in `PROGRESS.md`. It exercised independent accounts on up to three in-memory PDS hosts; the custom expiry test rejects at `exp + 2s` on both PDS hosts. The custom tests and exact source patch are retained in this checkout; see [protocol test instructions](../../protocol-tests/atproto/README.md).
 
-## What changed since `619c6e85`
+### What changed since `619c6e85` (to `5d88b414`)
 
 The drift to `5d88b414` is the October 22 and October 29 alpha releases (about 40 commits on PR #5187, still a draft). The upstream migration prompts are `alpha-migrations/prompt-10-22-26.md` and `prompt-10-29-26.md` in `permissioned-data`. The strict-expiry overlay applies with offsets only (same SHA-256). `getRepo` (now STAR, not CAR), account migration, `clearRecords`, `importRepo`, published policy and member records, and `personalspace`/`managedspace` are not used by this app.
 
@@ -82,7 +198,7 @@ A credential renewal that returns `SpaceDeleted` drops the account's copies of t
 
 Every account whose repo is read with a credential needs a published `#atproto_kem` key. The reference PDS backfills one for its existing accounts at first start after upgrading; an account whose PDS cannot publish it (did:web, no rotation key) must add it to its DID document. Without one a credentialed read fails with an error that names the DID.
 
-## What changed since `5b95b2f2` (to `619c6e85`)
+### What changed since `5b95b2f2` (to `619c6e85`)
 
 The drift to `619c6e85` is four upstream commits on PR #5187 (still a draft) plus a proposal revision. The overlay applies unchanged (same SHA-256), and the lexicons under `packages/protocol/lexicons/com/atproto/space`, `packages/protocol/lexicons/com/atproto/simplespace` and `packages/protocol/lexicons/com/atproto/server/getServiceAuth.json` are byte-identical, so the generated clients are unchanged.
 
@@ -92,7 +208,7 @@ The drift to `619c6e85` is four upstream commits on PR #5187 (still a draft) plu
 | An authority writing to its own missing or deleted space gets `SpaceNotFound` (`7bad5ee2`, merged as #5655); a write into another authority's space stays unchecked and is now specified behavior | No change at the time: nothing writes before creating its space. The DM probe (asking the recipient's inbox for a credential before sending a request) was then the only way to detect a missing foreign inbox; `5d88b414` closed it, and a public declaration record replaced it (see "What changed since `619c6e85`"). The fake PDS in the unit tests mirrors the rule |
 | Proposal "Repo lifecycle" (#121): the first write creates a repo, an empty repo equals a missing one, a user deletes a repo by deleting its records | No change |
 
-## What changed since `787a730f`
+### What changed since `787a730f` (to `5b95b2f2`)
 
 Old pin `787a730f` (verified 2026-09-25); the drift to `5b95b2f2` is 22 upstream commits from 2026-09-28 to 2026-10-01. The plan and review are in `.ai/plans/protocol-drift-5b95b2f.md`.
 
@@ -106,96 +222,3 @@ Old pin `787a730f` (verified 2026-09-25); the drift to `5b95b2f2` is 22 upstream
 | Credential revocation endpoint and `notifyCredentialRevoked` | Not used (follow-up); membership removal still relies on credential expiry |
 | Space host resolved from a `#atproto_space_host` service entry, falling back to the PDS | Not used: the app resolves the PDS only |
 | Strict-expiry patch no longer applied; upstream still allows 5 s skew | Patch re-based; see the overlay description above |
-
-## API and authorization mapping
-
-| Product operation | Pinned API and observed behavior |
-|---|---|
-| Create/update a space | `com.atproto.space.createSpace`, `updateSpace`; URI is anchored to the authenticated authority DID. Every Slack space is `com.atproto.memberspace.policy`; `publicRead` and `publicWrite` are independent flags, both false by default, and the DM inbox sets `publicWrite` for "everyone". `updateSpace` replaces the whole policy and `getSpace` is owner-only. `createSpace` requires `manage=create`; updates require `manage=update`. |
-| Set/remove membership | `com.atproto.memberspace.putMember` replaces both `read` and `write`; `removeMember` deletes the member. `removeMember` and `putMember` with `write: false` also evict the account from the writer set. Both require the space authority DID and `manage=update`, and are refused with `PolicyMismatch` on a space under another policy. |
-| Read membership state | `com.atproto.memberspace.listMembers` requires the owner session with `action=read_self`. A space credential and non-owner member cannot call it. The authority is implicitly admitted for reads and credentials but is not listed as a member. |
-| Discover spaces | `com.atproto.space.listSpaces` discovers spaces present in the caller's own repo. The invitee's `new.flock.acceptance` record supplies that index entry; it is not a membership check. |
-| Mint a read credential | The account PDS issues `com.atproto.space.getDelegationToken`; the space authority exchanges it through `com.atproto.space.getSpaceCredential`, with the token and the P-256 `did:key` to bind (`credentialKid`) in the request body and no authorization header. The member list (or `publicRead`) controls issuance; a user the policy does not authorize, and a missing space, both get `SpaceNotFound`, and a deleted space gets `SpaceDeleted` first. Credentials carry `cnf.kid` and a `jti`, are presented as `Atproto-Space-Credential` with a tagged HTTP message signature (no DPoP), and are valid for 600 seconds by default with a 3,600 second ceiling. |
-| Read records | `listRecords` and `listRepos` need only a credential. `getRecord`, `getLatestCommit` and `listRepoOps` also need `Atproto-Space-Want-Mac` and return `Atproto-Space-Mac`; the client verifies it for the two the app calls, `getRecord` and `getLatestCommit`. |
-| Write records | `com.atproto.space.createRecord`, `putRecord`, and `deleteRecord` address the author's own repo. OAuth scope checks distinguish create from update and match the target collection. Writes and read credentials are separate protocol permissions. |
-| Synchronize writers | `com.atproto.space.notifyWrite` (body `repoRev`, `data`) updates the authority's writer set; `com.atproto.space.listRepos` enumerates that set, not readers or all members, returning `repoRev` and `spaceRev` per repo in ascending `spaceRev` order. A repo updated while paginating reappears at a later `spaceRev`; `cursor` means "updated after this space revision". App-level notifications can be missed while `listRepos` still recovers the writer. If the writer's PDS-to-authority notification itself is dropped, the writer is absent from `listRepos`; owner-only `listMembers` enumerates inbox `write=true` candidates, and an admin's valid inbox credential can read a candidate repo directly. |
-
-## Slack split-policy conformance
-
-The retained multi-PDS inbox test creates an `new.flock.inbox` with a memberspace policy (member-list read and write). The requester and ordinary member are `read=false, write=true`; the admin is `read=true, write=true`. The requester writes a request to their own PDS. The requester's repo appears in `listRepos` when `notifyWrite` arrives, and an admin credential reads the record. The requester can read their own repo but cannot mint an inbox credential (the refusal is `SpaceNotFound`, which no longer confirms the inbox exists) or read another writer's repo. The authority owner has implicit access. An authority-authored `new.flock.admin` record does not let that human DID mutate the PDS member list.
-
-The conformance test also drops the requester's PDS-to-authority DID notification. `listRepos` then omits the requester, while authority `listMembers` still reports `write=true`; the admin credential can directly read that repo. This proves the recovery API must query owner-authorized membership candidates instead of claiming that a writer-set-only sweep recovers every dropped notification.
-
-Membership removal prevents a fresh space credential. A default credential claims `exp - iat = 600`; the ceiling is 3600. The unmodified pinned verifier uses `CLOCK_SKEW_SEC = 5` and accepts a credential after its `exp`. The checked-in overlay applies zero expiry skew only to space credentials; delegation tokens and client attestations retain their five-second clock allowance. Unit tests prove the credential is rejected at `exp` and delegation skew remains accepted; the two-PDS conformance test proves a short-lived credential is rejected at `exp + 2s` on both hosts. Neither expiry nor removal can erase copies already downloaded.
-
-## Direct-message conformance (DM plan M0)
-
-Verified 2026-10-30 on the pinned commit plus overlay, Node 22.17.0 (first verified 2026-09-26). `slack-dm-conformance.test.ts` has 5 tests, the inbox suite 3 and the authority OAuth suite 1; all 9 pass. Run with the other upstream space suites the result is 11 suites, 272 passed and 1 upstream `todo`; `@atproto/space` passes 179. The pnpm 11 build of the pinned checkout needs `npm_config_enable_pre_post_scripts=true` (otherwise package `prebuild` codegen is skipped) and `PUPPETEER_SKIP_DOWNLOAD=1`. `oauth-provider-ui`'s lingui codegen needs Node ≥ 24.2 (`import.meta.main`); on Node 22 it exits silently without generating locale files.
-
-| Check | Observed on the pinned PDS | Consequence for the DM design |
-|---|---|---|
-| Symmetric halves across hosts | Each participant's `memberList` half is readable by the others with a credential minted at the owner's host. `listRepos` shows only the owner | Confirmed |
-| Read-only member writes into a foreign half | `createRecord` **succeeds** (stored in the writer's own repo), but the authority never tracks it | Readers must reject half records whose repo is not the space owner |
-| Existence oracle | Non-member credential request: `SpaceNotFound` for an existing space and for a missing one (identical status and message), `SpaceDeleted` after deletion, even for a user the policy never admitted | **Closed for non-members** (it was open on `619c6e85` and before). A deleted space is still distinguishable. A conversation key is a TID (its creation time plus 10 random bits), so it gives little protection against someone who knows roughly when the conversation began (a one-second window is about a million candidates); the DM change stream behind it carries a change counter only, which shows timing and, because the counter is shared, app-wide notice volume. A DM sender can no longer probe an inbox, so a recipient publishes `new.flock.dm.declaration` in their own repo and the sender reads it |
-| Public-write inbox | A non-member on another host writes a request; the owner's `listRepos` lists them and the owner reads the record; the writer cannot get a read credential | Confirmed |
-| Policy switch `publicWrite` → member list (`updateSpace`) | New non-listed writers are not tracked. Writers tracked earlier **stay listed**: `updateSpace` does not re-evaluate the writer set | Clients must filter requests by the current mode/allowlist |
-| Removing an allowlisted writer | The writer is dropped from `listRepos` immediately (`removeMember`, and `putMember` with `write: false`, evict). Their later puts succeed on their own PDS but are not tracked again while unauthorized, and the owner can still read their records | Fixes the earlier gap (upstream request U1). A switch of the policy alone still leaves tracked writers listed, so the client keeps its filter |
-| Switch back to `publicWrite` | A previously ignored or evicted writer is tracked after their next write | Confirmed |
-| OAuth scopes (public client, `token_endpoint_auth_method: none`) | `space:new.flock.dm.inbox?authority=*&collection=new.flock.dm.request&action=create` allows request writes into another user's inbox and rejects other collections. `manage=create/update` on own conversation type allows `createSpace`/`putMember`. `authority=*&action=read` allows delegation tokens. A plain `atproto` token does none of these | Confirmed |
-| Space credential key | A fresh non-extractable WebCrypto P-256 key per credential (`generateSpaceKey`) is named in the request body as the credential's `cnf.kid` (a `did:key`) and signs the HTTP message signatures on every read made with that credential. The exchange itself is an unsigned body-only POST. OAuth access-token DPoP proofs use the key `oauth-client-browser` keeps for itself, not this one | Confirmed |
-| `removeMember` | Blocks new credentials for the revoker's half only; an already-minted credential keeps working until it expires (600 s by default) | Confirmed |
-| 100 participants (measured on `787a730f`; `pnpm test:performance` reruns it) | 100 halves × 99 members: setup 27.5 s (100 `createSpace`, 9,900 `putMember`, 100 writes). One reader minted 100 credentials and read 100 halves in 1.2 s at concurrency 8. `listMembers` returns 99 | Confirmed on the fixture (rate limits disabled; not a production result) |
-
-## OAuth scope proof
-
-The custom authority test uses a real PDS OAuth `TokenManager` to sign a DPoP-bound OAuth access token (OAuth keeps DPoP; only space requests moved to HTTP message signatures). The token calls the real `putMember` and authority record-write handlers successfully with `manage=update` plus the exact `new.flock.admin` collection actions. A correctly signed authority token with only `action=read` is denied the membership mutation. The same scoped session calls the real `com.atproto.server.getServiceAuth` endpoint with an RPC scope and receives a service JWT whose `iss`, service-reference `aud`, and `lxm` match the operator contract.
-
-This test uses a synthetic granted OAuth scope to reach the PDS verifier and handlers. It does not automate the browser authorization/consent interaction; production consent must still present the narrow scopes listed below.
-
-## Authority operator scopes
-
-The operator's workspace-DID OAuth session is limited to these scopes. In each template, `authority=self` resolves to the workspace DID and `skey=*` covers only spaces under that authority:
-
-```text
-space:new.flock.workspace?authority=self&skey=*&action=read_self
-space:new.flock.workspace?authority=self&skey=*&action=read
-space:new.flock.workspace?authority=self&skey=*&action=read_self&manage=create&manage=update
-space:new.flock.workspace?authority=self&skey=*&collection=new.flock.admin&collection=new.flock.directory&collection=new.flock.workspace.roster&action=create&action=update&action=delete
-
-space:new.flock.inbox?authority=self&skey=*&action=read_self
-space:new.flock.inbox?authority=self&skey=*&action=read
-space:new.flock.inbox?authority=self&skey=*&action=read_self&manage=create&manage=update
-space:new.flock.inbox?authority=self&skey=*&collection=new.flock.joinDecision&action=create&action=update&action=delete
-
-space:new.flock.channel?authority=self&skey=*&action=read_self
-space:new.flock.channel?authority=self&skey=*&action=read
-space:new.flock.channel?authority=self&skey=*&action=read_self&manage=create&manage=update
-space:new.flock.channel?authority=self&skey=*&collection=new.flock.channel.roster&action=create&action=update&action=delete
-
-space:new.flock.app.inbox?authority=self&skey=*&action=read_self&action=read&manage=create&manage=update
-```
-
-The operator has no message, reaction, or join-request write scope. Human admin clients request three exact RPC grants, replacing `OPERATOR_DID` with the DID that publishes `#atproto_flock_operator`:
-
-```text
-rpc:new.flock.operator.execute?aud=OPERATOR_DID%23atproto_flock_operator
-rpc:new.flock.operator.getOperation?aud=OPERATOR_DID%23atproto_flock_operator
-rpc:new.flock.operator.listInboxWriters?aud=OPERATOR_DID%23atproto_flock_operator
-```
-
-For each request, the client calls `com.atproto.server.getServiceAuth` with `aud=OPERATOR_DID#atproto_flock_operator` and `lxm` equal to that request's method NSID. The operator verifies the service JWT and takes the actor DID only from its verified `iss`. It rechecks the authority-authored admin record, workspace roster, and inbox `read=true` membership on every method. `listInboxWriters` returns only inbox member DIDs with `write=true`; the admin app fetches request data itself with its PDS-issued inbox credential.
-
-## Stable key encoding
-
-For each hashed rkey, calculate SHA-256 over UTF-8 bytes and encode the 32-byte digest with RFC 4648 base32 using lowercase alphabet `abcdefghijklmnopqrstuvwxyz234567` and no padding. Insert `:` between every adjacent base32 symbol before adding the key prefix. Prefix the delimited string with:
-
-| Key | Input |
-|---|---|
-| `d-` subject/roster | Canonical DID string |
-| `r-` request | Canonical channel URI, NUL byte, requester DID |
-| `a-` acceptance | Canonical workspace URI |
-| `x-` reaction | Canonical message URI, NUL byte, emoji, NUL byte, author DID |
-| `q-` decision | Canonical request URI |
-| `i-` app inbox skey | Workspace `skey`, NUL byte, canonical app DID |
-
-Each string is already required to be valid UTF-8 and contain no NUL. URI values are parsed and serialized to the canonical atproto URI form before hashing. The workspace directory uses the literal channel `skey`; a request generation remains a fresh TID in the record value. The full canonical rule is also in the [PRD](../prd/atproto-slack-clone.md#lexicons-and-current-record-rules).

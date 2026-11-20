@@ -172,11 +172,15 @@ function readVarintAt(bytes: Uint8Array, start: number): { value: number; next: 
 function splitSingleRecordStar(bytes: Uint8Array): { headerBytes: Uint8Array; valFrameBytes: Uint8Array } {
   const metaLen = readVarintAt(bytes, 4);
   const metaEnd = metaLen.next + metaLen.value;
-  const keyLen = readVarintAt(bytes, metaEnd);
+  assert.equal(bytes[metaEnd], 0x01, "expected STAR CONTROL_PAIR (0x01) after metadata frame");
+  const keyLen = readVarintAt(bytes, metaEnd + 1);
   const keyEnd = keyLen.next + keyLen.value;
+  const valLen = readVarintAt(bytes, keyEnd);
+  const valEnd = valLen.next + valLen.value;
+  assert.equal(bytes[valEnd], 0x00, "expected STAR CONTROL_END (0x00) after single record value frame");
   return {
     headerBytes: bytes.subarray(0, metaEnd),
-    valFrameBytes: bytes.subarray(keyEnd),
+    valFrameBytes: bytes.subarray(keyEnd, valEnd),
   };
 }
 
@@ -282,11 +286,16 @@ async function settled(
   const authorityDid = space.slice("at://".length).split("/")[0]!;
   const authority = credential.client(await transport.resolvePds(authorityDid));
   for (let attempt = 0; attempt < 400; attempt += 1) {
-    const listed = await authority.query<{ repos: Array<{ did: string; repoRev: string }> }>(
-      "com.atproto.space.listRepos",
+    const listed = await authority.query<{ repos: Array<{ $type?: string; repo: string; repoRev?: string }> }>(
+      "com.atproto.space.listWriters",
       { space, limit: 500 },
     );
-    const reported = new Map(listed.repos.map((entry) => [entry.did, entry.repoRev]));
+    const reported = new Map(
+      listed.repos
+        .filter((entry): entry is { $type: string; repo: string; repoRev: string } =>
+          entry.$type === "com.atproto.space.defs#repoWrite" && typeof entry.repoRev === "string")
+        .map((entry) => [entry.repo, entry.repoRev]),
+    );
     const checks = await mapLimited(writers, PER_ORIGIN_CONNECTIONS, async (writer) => {
       const host = credential.client(await transport.resolvePds(writer.did));
       const rev = await host
@@ -621,7 +630,7 @@ test("D11.13 frozen 50-writer / 1,000-task / 5,020-record Tasks performance enve
 
       const tasksCalls = measured.bySpace[tasksSpace]!;
       const wsCalls = measured.bySpace[workspace]!;
-      assert.equal(tasksCalls["com.atproto.space.listRepos"], 2, "Tasks space makes exact 2 listRepos calls");
+      assert.equal(tasksCalls["com.atproto.space.listWriters"], 1, "Tasks space makes exact 1 listWriters call");
       assert.equal(tasksCalls["com.atproto.space.getRepo"], WRITER_COUNT, "Tasks space makes exact 50 STAR getRepo calls");
       assert.equal(tasksCalls["com.atproto.space.getRecord"], undefined, "0 N+1 getRecord calls on Tasks space");
       assert.equal(tasksCalls["com.atproto.space.listRecords"], undefined, "0 listRecords calls on Tasks space");
@@ -654,7 +663,7 @@ test("D11.13 frozen 50-writer / 1,000-task / 5,020-record Tasks performance enve
 
       const tasksCalls = measured.bySpace[tasksSpace]!;
       const wsCalls = measured.bySpace[workspace]!;
-      assert.equal(tasksCalls["com.atproto.space.listRepos"], 2, "Warm reopen makes exact 2 listRepos calls on Tasks space");
+      assert.equal(tasksCalls["com.atproto.space.listWriters"], 1, "Warm reopen makes exact 1 listWriters call on Tasks space");
       assert.equal(tasksCalls["com.atproto.space.getRepo"], undefined, "0 getRepo writer calls on warm reopen");
       assert.equal(tasksCalls["com.atproto.space.listRepoOps"], undefined, "0 listRepoOps writer calls on warm reopen");
       assert.equal(tasksCalls["com.atproto.space.getLatestCommit"], undefined, "0 getLatestCommit writer calls on warm reopen");
@@ -717,7 +726,7 @@ test("D11.13 frozen 50-writer / 1,000-task / 5,020-record Tasks performance enve
       assert.equal(countComments(view), COMMENT_COUNT);
 
       const tasksCalls = measured.bySpace[tasksSpace]!;
-      assert.equal(tasksCalls["com.atproto.space.listRepos"], 2, "Incremental reopen makes 2 listRepos calls");
+      assert.equal(tasksCalls["com.atproto.space.listWriters"], 1, "Incremental reopen makes 1 listWriters call");
       assert.ok((tasksCalls["com.atproto.space.listRepoOps"] ?? 0) <= 5, "At most 5 listRepoOps pages");
       assert.equal(tasksCalls["com.atproto.space.listRepoOps"], 5, "Exact 5 listRepoOps pages for 5 moved writers");
       assert.equal(tasksCalls["com.atproto.space.getRepo"], undefined, "0 getRepo full downloads during incremental advance");
@@ -913,18 +922,24 @@ test("D11.13 frozen 50-writer / 1,000-task / 5,020-record Tasks performance enve
           const headers = new Headers(response.headers);
           headers.delete("content-length");
 
+          let ended = false;
           const stream = new ReadableStream<Uint8Array>({
             pull(controller) {
               while (queue.length === 0 && sent < targetTotalBytes) {
                 pairIndex += 1;
                 const synthKey = encoder.encode(`new.flock.ext.tasks.task/z${String(pairIndex).padStart(12, "0")}`);
                 const keyFrame = frameStarItem(synthKey);
+                queue.push(Uint8Array.of(0x01));
                 for (let off = 0; off < keyFrame.length; off += CHUNK_BYTES) {
                   queue.push(keyFrame.subarray(off, off + CHUNK_BYTES));
                 }
                 for (let off = 0; off < valFrameBytes.length; off += CHUNK_BYTES) {
                   queue.push(valFrameBytes.subarray(off, off + CHUNK_BYTES));
                 }
+              }
+              if (queue.length === 0 && !ended) {
+                ended = true;
+                queue.push(Uint8Array.of(0x00));
               }
               const chunk = queue.shift();
               if (!chunk) {
@@ -1033,20 +1048,20 @@ test("D11.13 frozen 50-writer / 1,000-task / 5,020-record Tasks performance enve
       seedMs,
       gate1ColdLoad: {
         ...gate1Stats,
-        tasksListReposCalls: 2,
+        tasksListWritersCalls: 1,
         tasksGetRepoCalls: WRITER_COUNT,
         tasksGetRecordCalls: 0,
         workspaceGetRepoCalls: 1,
       },
       gate2WarmReopen: {
         ...gate2Stats,
-        tasksListReposCalls: 2,
+        tasksListWritersCalls: 1,
         tasksWriterCalls: 0,
         workspaceCalls: 0,
       },
       gate3IncrementalAdvance: {
         ...gate3Stats,
-        tasksListReposCalls: 2,
+        tasksListWritersCalls: 1,
         tasksListRepoOpsCalls: 5,
         tasksGetRepoCalls: 0,
       },

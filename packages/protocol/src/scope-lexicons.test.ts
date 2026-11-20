@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { COLLECTION, SPACE_TYPE } from "./nsids";
-import { DM_BROWSER_SCOPES, memberGrantScopes, OPERATOR_METHODS, workspaceAuthorityScopes } from "./scopes";
+import { COLLECTION, OPERATOR_METHOD, SPACE_TYPE } from "./nsids";
+import { DM_BROWSER_SCOPES, LEGACY_OPERATOR_METHODS, legacyMemberGrantScopes, memberGrantScopes, OPERATOR_METHODS, workspaceAuthorityScopes } from "./scopes";
 
 type LexPermission = { type: "permission"; resource: "space" | "rpc"; spaceType?: string; authority?: string; skey?: string; collection?: string[]; action?: string[]; manage?: string[]; lxm?: string[] };
 
@@ -70,4 +70,16 @@ test("the published member permission set grants exactly the member part of the 
     .filter((scope) => scope.startsWith("space:") && !DM_BROWSER_SCOPES.includes(scope)).map(fromScopeString).sort();
   assert.deepEqual(published, requested);
   assert.deepEqual([...permissions.find((permission) => permission.resource === "rpc")!.lxm!].sort(), [...OPERATOR_METHODS].sort());
+});
+
+test("legacyMemberGrantScopes keeps the exact published space permissions and pre-R12 operator methods without getDmNotifyTarget", () => {
+  const serviceRef = "did:web:operator.test#atproto_flock_operator";
+  const legacySpaces = legacyMemberGrantScopes(serviceRef).filter((scope) => scope.startsWith("space:") && !DM_BROWSER_SCOPES.includes(scope)).map(fromScopeString).sort();
+  const currentSpaces = memberGrantScopes(serviceRef).filter((scope) => scope.startsWith("space:") && !DM_BROWSER_SCOPES.includes(scope)).map(fromScopeString).sort();
+  assert.deepEqual(legacySpaces, currentSpaces);
+  const publishedRpc = readPermissionSet("member").find((permission) => permission.resource === "rpc")!.lxm!;
+  assert.deepEqual(
+    publishedRpc.filter((method) => method !== OPERATOR_METHOD.getDmNotifyTarget).sort(),
+    [...LEGACY_OPERATOR_METHODS].sort(),
+  );
 });

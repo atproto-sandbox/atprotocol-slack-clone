@@ -1,8 +1,14 @@
 import { fromBase64 } from "@atproto/lex-data";
 import { jsonToLex } from "@atproto/lexicon";
-import { RepoCommit, RepoVerificationError, StarParseError, type Commit } from "@atproto/space";
-import { listBoundedRepos } from "@flock/protocol/atproto/record-pages";
-import { classifyVerifiedRepoFailure, MAX_LISTED_SET_ASIDE } from "@flock/protocol/atproto/repo-failure";
+import { RepoCommit, SpaceRepoVerificationError, type SpaceCommit } from "@atproto/space";
+import { StarParseError } from "@atproto/star";
+import { listBoundedWriters, type BoundedWriters } from "@flock/protocol/atproto/record-pages";
+import {
+  classifySpaceHostFailure,
+  classifyVerifiedRepoFailure,
+  isAuthoritySuspendedError,
+  MAX_LISTED_SET_ASIDE,
+} from "@flock/protocol/atproto/repo-failure";
 import {
   listVerifiedBoundedRecords,
   mintSpaceCredentialWith,
@@ -123,17 +129,28 @@ export async function readIndependentTasksSpace(
   }
 
   const tasksSpace = snapshot.tasksSpaceUri;
-  const tasksCredential = await mintSpaceCredentialWith(deps, tasksSpace);
-  const authorityPds = await resolveVerifiedPds(deps, snapshot.authorityDid);
-  const repoScan = await listBoundedRepos(tasksCredential.client(authorityPds), {
-    space: tasksSpace,
-    maxRepos: MAX_TASKS_WRITERS,
-  });
+  let tasksCredential: SpaceCredential;
+  let authorityPds: string;
+  let repoScan: BoundedWriters;
+  try {
+    tasksCredential = await mintSpaceCredentialWith(deps, tasksSpace);
+    authorityPds = await resolveVerifiedPds(deps, snapshot.authorityDid);
+    repoScan = await listBoundedWriters(tasksCredential.client(authorityPds), {
+      space: tasksSpace,
+      maxRepos: MAX_TASKS_WRITERS,
+    });
+  } catch (error) {
+    if (isAuthoritySuspendedError(error)) {
+      const failure = classifySpaceHostFailure(error)!;
+      return buildHostSuspendedTasksResult(snapshot, failure.reason);
+    }
+    throw error;
+  }
   if (repoScan.truncated) {
     throw new Error(`Tasks writer count exceeds the ${MAX_TASKS_WRITERS}-writer scan limit.`);
   }
 
-  const listedRepos = new Set(repoScan.repos.map((repo) => repo.did));
+  const listedRepos = new Set(repoScan.writers.map((writer) => writer.repo));
   const writerUniverseSet = new Set<string>([...listedRepos, ...snapshot.rosterMembers]);
   if (listedRepos.has(snapshot.authorityDid)) {
     writerUniverseSet.add(snapshot.authorityDid);
@@ -142,13 +159,18 @@ export async function readIndependentTasksSpace(
 
   const { perWriterRecords, writerSetAside } = await readTasksWriters(deps, tasksCredential, {
     tasksSpace,
+    authorityDid: snapshot.authorityDid,
     writerUniverse,
     listedRepos,
     maxBytes,
     maxRecords,
   });
 
-  const allSetAside = [...snapshot.setAside, ...writerSetAside].sort((left, right) => left.did.localeCompare(right.did));
+  const writerSetAsideDids = new Set(writerSetAside.map((entry) => entry.did));
+  const allSetAside = [
+    ...snapshot.setAside.filter((entry) => !writerSetAsideDids.has(entry.did)),
+    ...writerSetAside,
+  ].sort((left, right) => left.did.localeCompare(right.did));
   const validated = collectValidatedTasksRecords(snapshot.authorityDid, tasksSpace, writerUniverse, perWriterRecords);
 
   const complete = snapshot.workspaceSnapshotComplete && allSetAside.length === 0;
@@ -199,7 +221,27 @@ export async function readIndependentTasksWorkspaceSnapshot(
   const maxBytes = clampBound(options.maxStarArchiveBytes, WORKSPACE_ENVELOPE.maxStarArchiveBytes, 1);
   const maxRecords = clampBound(options.maxStarRecords, WORKSPACE_ENVELOPE.maxStarRecords, 0);
 
-  const wsCredential = await mintSpaceCredentialWith(deps, workspaceUri);
+  let wsCredential: SpaceCredential;
+  try {
+    wsCredential = await mintSpaceCredentialWith(deps, workspaceUri);
+  } catch (error) {
+    if (isAuthoritySuspendedError(error)) {
+      const failure = classifySpaceHostFailure(error)!;
+      return {
+        workspaceUri,
+        authorityDid,
+        workspaceSkey,
+        tasksSpaceUri: expectedTasksSpace,
+        enabled: false,
+        extInstall: null,
+        rosterMembers: [],
+        workspaceSnapshotComplete: false,
+        degradedReasons: [`Workspace snapshot from ${authorityDid} could not be verified: ${failure.reason}`],
+        setAside: [{ did: authorityDid, reason: failure.reason, permanent: failure.permanent }],
+      };
+    }
+    throw error;
+  }
 
   let authorityRecords: VerifiedRecordEntry[];
   try {
@@ -213,7 +255,11 @@ export async function readIndependentTasksWorkspaceSnapshot(
     });
   } catch (error) {
     if (error instanceof SpaceCredentialError) throw error;
-    const failure = classifyVerifiedRepoFailure(error);
+    const failure = classifyVerifiedRepoFailure(error, {
+      space: workspaceUri,
+      repo: authorityDid,
+      authorityDid,
+    });
     if (!failure) throw error;
     return {
       workspaceUri,
@@ -236,6 +282,41 @@ export async function readIndependentTasksWorkspaceSnapshot(
     expectedTasksSpace,
     authorityRecords,
   });
+}
+
+export function buildHostSuspendedTasksResult(
+  snapshot: IndependentTasksWorkspaceSnapshot,
+  reason: string,
+): IndependentTasksReadResult {
+  const setAside: IndependentTasksSetAside[] = [
+    ...snapshot.setAside.filter((entry) => entry.did !== snapshot.authorityDid),
+    { did: snapshot.authorityDid, reason, permanent: false },
+  ].sort((left, right) => left.did.localeCompare(right.did));
+  const degradedReasons = [
+    ...snapshot.degradedReasons,
+    `Tasks space host ${snapshot.authorityDid} is unavailable: ${reason}`,
+  ];
+  return {
+    workspaceUri: snapshot.workspaceUri,
+    tasksSpaceUri: snapshot.tasksSpaceUri,
+    enabled: true,
+    extInstall: snapshot.extInstall,
+    workspaceSnapshotComplete: snapshot.workspaceSnapshotComplete,
+    complete: false,
+    degraded: true,
+    degradedReasons,
+    hasUncertainAncestry: false,
+    setAside,
+    rosterMembers: snapshot.rosterMembers,
+    writerUniverse: [],
+    projects: [],
+    tasks: [],
+    commentsByTask: new Map(),
+    activities: [],
+    orphanedProjectEdits: 0,
+    orphanedTaskEdits: 0,
+    orphanedComments: 0,
+  };
 }
 
 function buildDisabledTasksResult(snapshot: IndependentTasksWorkspaceSnapshot): IndependentTasksReadResult {
@@ -408,6 +489,7 @@ async function readTasksWriters(
   tasksCredential: SpaceCredential,
   input: {
     tasksSpace: string;
+    authorityDid: string;
     writerUniverse: readonly string[];
     listedRepos: ReadonlySet<string>;
     maxBytes: number;
@@ -422,7 +504,11 @@ async function readTasksWriters(
       pdsUrl = await resolveVerifiedPds(deps, did);
       pdsResolved = true;
     } catch (error) {
-      const failure = classifyVerifiedRepoFailure(error);
+      const failure = classifyVerifiedRepoFailure(error, {
+        space: input.tasksSpace,
+        repo: did,
+        authorityDid: input.authorityDid,
+      });
       if (!failure) throw error;
       writerSetAside.push({ did, reason: failure.reason, permanent: failure.permanent });
       return [] as VerifiedRecordEntry[];
@@ -440,13 +526,17 @@ async function readTasksWriters(
       if (error instanceof SpaceCredentialError) throw error;
       if (error instanceof XrpcError && error.code === "RepoNotFound") {
         // D11.1 #4 trust boundary: intercept before classifying.
-        // Trusted empty (0 records, complete stays true) ONLY when the writer was NOT listed by listRepos
+        // Trusted empty (0 records, complete stays true) ONLY when the writer was NOT listed by listWriters
         // AND resolvePds succeeded with a valid HTTPS/loopback endpoint.
         if (!input.listedRepos.has(did) && pdsResolved) {
           return [] as VerifiedRecordEntry[];
         }
       }
-      const failure = classifyVerifiedRepoFailure(error);
+      const failure = classifyVerifiedRepoFailure(error, {
+        space: input.tasksSpace,
+        repo: did,
+        authorityDid: input.authorityDid,
+      });
       if (!failure) throw error;
       writerSetAside.push({ did, reason: failure.reason, permanent: failure.permanent });
       return [] as VerifiedRecordEntry[];
@@ -571,9 +661,9 @@ async function readVerifiedRepo(
         starUnsupported = true;
         break;
       }
-      // Mid-stream commit race on STAR can raise RepoVerificationError / StarParseError; retry bounded times.
+      // Mid-stream commit race on STAR can raise SpaceRepoVerificationError / StarParseError; retry bounded times.
       // Never fall back to listRecords on RepoStarLimitError, SpaceMacError, RepoNotFound, or verification errors.
-      if ((error instanceof RepoVerificationError || error instanceof StarParseError) && attempt + 1 < input.maxRetries) {
+      if ((error instanceof SpaceRepoVerificationError || error instanceof StarParseError) && attempt + 1 < input.maxRetries) {
         continue;
       }
       throw error;
@@ -581,7 +671,7 @@ async function readVerifiedRepo(
   }
 
   if (!starUnsupported) {
-    throw new RepoVerificationError("STAR verification failed.");
+    throw new SpaceRepoVerificationError("STAR verification failed.");
   }
 
   // Fallback path (only when getRepo endpoint is unsupported): bounded full-repo listRecords
@@ -603,7 +693,7 @@ async function readVerifiedRepo(
       });
     } catch (error) {
       if (error instanceof XrpcError && error.code === "RepoNotFound" && listed.records.length > 0) {
-        throw new RepoVerificationError("getLatestCommit returned RepoNotFound despite non-empty listRecords.");
+        throw new SpaceRepoVerificationError("getLatestCommit returned RepoNotFound despite non-empty listRecords.");
       }
       throw error;
     }
@@ -630,7 +720,7 @@ async function readVerifiedRepo(
     }
   }
 
-  throw new RepoVerificationError("Full-repo listRecords did not match MAC-verified getLatestCommit after bounded retries.");
+  throw new SpaceRepoVerificationError("Full-repo listRecords did not match MAC-verified getLatestCommit after bounded retries.");
 }
 
 function isGetRepoUnsupported(error: unknown): boolean {
@@ -645,9 +735,9 @@ function isGetRepoUnsupported(error: unknown): boolean {
   );
 }
 
-function parseCommit(raw: unknown, expectedSpace: string, expectedRepo: string): Commit {
+function parseCommit(raw: unknown, expectedSpace: string, expectedRepo: string): SpaceCommit {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    throw new RepoVerificationError("getLatestCommit returned a malformed commit.");
+    throw new SpaceRepoVerificationError("getLatestCommit returned a malformed commit.");
   }
   const candidate = raw as { ver?: unknown; repo?: unknown; space?: unknown; rev?: unknown; data?: unknown };
   if (
@@ -657,7 +747,7 @@ function parseCommit(raw: unknown, expectedSpace: string, expectedRepo: string):
     typeof candidate.rev !== "string" ||
     candidate.rev.length === 0
   ) {
-    throw new RepoVerificationError("getLatestCommit commit metadata mismatch.");
+    throw new SpaceRepoVerificationError("getLatestCommit commit metadata mismatch.");
   }
 
   let dataBytes: Uint8Array;
@@ -675,21 +765,21 @@ function parseCommit(raw: unknown, expectedSpace: string, expectedRepo: string):
         ? converted
         : fromBase64((candidate.data as { $bytes: string }).$bytes);
     } catch {
-      throw new RepoVerificationError("getLatestCommit returned invalid commit data bytes.");
+      throw new SpaceRepoVerificationError("getLatestCommit returned invalid commit data bytes.");
     }
   } else {
-    throw new RepoVerificationError("getLatestCommit returned missing commit data.");
+    throw new SpaceRepoVerificationError("getLatestCommit returned missing commit data.");
   }
 
   if (dataBytes.byteLength !== 32) {
-    throw new RepoVerificationError("getLatestCommit commit digest must be 32 bytes.");
+    throw new SpaceRepoVerificationError("getLatestCommit commit digest must be 32 bytes.");
   }
 
   return {
     ver: candidate.ver,
-    repo: candidate.repo as Commit["repo"],
-    space: candidate.space as Commit["space"],
-    rev: candidate.rev,
+    repo: candidate.repo as SpaceCommit["repo"],
+    space: candidate.space as SpaceCommit["space"],
+    rev: candidate.rev as SpaceCommit["rev"],
     data: dataBytes,
   };
 }

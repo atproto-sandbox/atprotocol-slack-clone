@@ -10,15 +10,14 @@ import {
   is$typed as _is$typed,
   type OmitKey,
 } from '../../../../util.js'
+import type * as ComAtprotoMemberspaceDefs from './defs.js'
 
 const is$typed = _is$typed,
   validate = _validate
 const id = 'com.atproto.memberspace.listMembers'
 
 export type QueryParams = {
-  /** Reference to the space. */
   space: string
-  /** Maximum number of members to return. */
   limit?: number
   cursor?: string
 }
@@ -26,7 +25,7 @@ export type InputSchema = undefined
 
 export interface OutputSchema {
   cursor?: string
-  members: Member[]
+  members: ComAtprotoMemberspaceDefs.Member[]
 }
 
 export interface CallOptions {
@@ -46,7 +45,19 @@ export class SpaceNotFoundError extends XRPCError {
   }
 }
 
+export class NotAuthorizedError extends XRPCError {
+  constructor(src: XRPCError) {
+    super(src.status, src.error, src.message, src.headers, { cause: src })
+  }
+}
+
 export class PolicyMismatchError extends XRPCError {
+  constructor(src: XRPCError) {
+    super(src.status, src.error, src.message, src.headers, { cause: src })
+  }
+}
+
+export class InvalidCursorError extends XRPCError {
   constructor(src: XRPCError) {
     super(src.status, src.error, src.message, src.headers, { cause: src })
   }
@@ -55,25 +66,10 @@ export class PolicyMismatchError extends XRPCError {
 export function toKnownErr(e: any) {
   if (e instanceof XRPCError) {
     if (e.error === 'SpaceNotFound') return new SpaceNotFoundError(e)
+    if (e.error === 'NotAuthorized') return new NotAuthorizedError(e)
     if (e.error === 'PolicyMismatch') return new PolicyMismatchError(e)
+    if (e.error === 'InvalidCursor') return new InvalidCursorError(e)
   }
 
   return e
-}
-
-export interface Member {
-  $type?: 'com.atproto.memberspace.listMembers#member'
-  did: string
-  read: boolean
-  write: boolean
-}
-
-const hashMember = 'member'
-
-export function isMember<V>(v: V) {
-  return is$typed(v, id, hashMember)
-}
-
-export function validateMember<V>(v: V) {
-  return validate<Member & V>(v, id, hashMember)
 }

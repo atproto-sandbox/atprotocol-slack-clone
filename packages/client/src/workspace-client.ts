@@ -1,4 +1,4 @@
-import { listAllSpaceUris, listBoundedRecords, listBoundedRepos } from "@flock/protocol/atproto/record-pages";
+import { listAllSpaceUris, listBoundedRecords, listBoundedWriters } from "@flock/protocol/atproto/record-pages";
 import { isAccessLost, isSpaceDeleted } from "@flock/protocol/atproto/space-credential-core";
 import { isMissingXrpcResource } from "@flock/protocol/atproto/xrpc";
 import { mapLimited } from "@flock/protocol/map-limited";
@@ -190,7 +190,7 @@ export class WorkspaceClient {
 
   /**
    * The open join requests an admin decides. Refused to anyone but an active admin and while the workspace is degraded. The
-   * writers read are the union of the operator's inbox-writer list and the authority's `listRepos`; a writer that cannot be
+   * writers read are the union of the operator's inbox-writer list and the authority's `listWriters`; a writer that cannot be
    * read is skipped and reported, and a request with a current decision is not shown.
    */
   async inboxRequests(workspace: string, operator: OperatorClient): Promise<{ requests: InboxJoinRequest[]; skipped: SkippedInboxWriter[] }> {
@@ -200,9 +200,9 @@ export class WorkspaceClient {
     const candidates = await operator.listInboxWriters(workspace);
     const inbox = inboxUri(summary.authorityDid, summary.skey);
     const authority = await this.deps.credentials.clientFor(inbox, summary.authorityDid);
-    const repoScan = await listBoundedRepos(authority, { space: inbox, maxRepos: MAX_INBOX_WRITERS });
+    const repoScan = await listBoundedWriters(authority, { space: inbox, maxRepos: MAX_INBOX_WRITERS });
     if (repoScan.truncated) throw new WorkspaceEnvelopeError(`Inbox writer set exceeds the ${MAX_INBOX_WRITERS}-repo scan limit; inbox results are incomplete.`);
-    const writers = new Set([...candidates.writers, ...repoScan.repos.map((repo) => repo.did)]);
+    const writers = new Set([...candidates.writers, ...repoScan.writers.map((writer) => writer.repo)]);
     const perWriter = await mapLimited([...writers], 8, (repoDid) => readWriterJoinRequests({
       clientFor: () => this.deps.credentials.clientFor(inbox, repoDid),
       inbox, repoDid, authorityDid: summary.authorityDid, channels: summary.channels,

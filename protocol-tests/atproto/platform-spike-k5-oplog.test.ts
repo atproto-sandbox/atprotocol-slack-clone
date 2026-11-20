@@ -70,6 +70,7 @@ const listAllOps = async (
       cursor,
       limit: 1000,
     })
+    expect(page.commit).toBeDefined()
     pages++
     ops.push(...page.ops)
     cursor = page.cursor
@@ -208,14 +209,14 @@ describe('platform spike K5: oplog resets and listing cost', () => {
       const emptySpace = await sc.createSpace(alice, { members: [dan], skey: 'emptied' })
       await sc.write(dan, emptySpace, { rkey: 'x' })
       await sc.del(dan, emptySpace, { rkey: 'x' })
-      const stateBefore = await sc.repoState(dan, emptySpace)
+      const stateBefore = await sc.latestCommit(dan, emptySpace)
 
       // when it is cleared
       await sc.clear(dan, emptySpace)
 
       // then nothing happens: the rev is unchanged and the oplog is NOT cleared,
       // despite the lexicon saying clearRecords clears it
-      const stateAfter = await sc.repoState(dan, emptySpace)
+      const stateAfter = await sc.latestCommit(dan, emptySpace)
       expect(stateAfter!.rev).toBe(stateBefore!.rev)
       const emptyCred = await sc.credentialFor(dan, emptySpace)
       const emptyOps = await listAllOps(emptyCred.clientFor(dan.pds), emptySpace, dan.did)
@@ -308,9 +309,10 @@ describe('platform spike K5: oplog resets and listing cost', () => {
       const gzipWireBytes = async (urls: string[]) => {
         let total = 0
         for (const url of urls) {
-          const headers = await createSpaceSigHeaders(cred.key, {
+          const { headers } = await createSpaceSigHeaders({
             authorization: `Atproto-Space-Credential ${cred.credential}`,
             audience: dan.did,
+            keypair: cred.key,
           })
           total += await new Promise<number>((resolve, reject) => {
             httpGet(url, { headers: { ...headers, 'accept-encoding': 'gzip' } }, (res) => {

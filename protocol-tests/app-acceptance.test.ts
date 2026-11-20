@@ -9,6 +9,7 @@ import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { isAccessLost, SPACE_CREDENTIAL_LIFETIME_MS } from "@flock/protocol/atproto/space-credential-core";
 import { createFixtureTempRoot } from "./fixture-temp";
+import { availablePort } from "./support/app-server";
 import { actorTransport, callOperatorMethod, expireStoredSession, inProcessOperator, storeAuthorityGrant, type TestPds as NetworkPds } from "./support/pds-network";
 
 type DidResolver = { resolve(did: string, ...args: unknown[]): Promise<unknown> };
@@ -34,11 +35,13 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
   }
   const directory = mkdtempSync(join(tmpdir(), "slack-app-acceptance-"));
   const databasePath = join(directory, "app.db");
+  const operatorPort = await availablePort();
   Object.assign(process.env, { NODE_ENV: "test" });
   process.env.ATPROTO_ACCEPTANCE_TEST = "true";
   process.env.APP_URL = "http://127.0.0.1:3000";
+  process.env.OPERATOR_URL = `http://127.0.0.1:${operatorPort}`;
   process.env.AUTH_ENCRYPTION_KEY = "4a".repeat(32);
-  const serviceRef = "did:web:localhost%3A3000#atproto_flock_operator";
+  const serviceRef = `did:web:localhost%3A${operatorPort}#atproto_flock_operator`;
   process.env.OPERATOR_SERVICE_REF = serviceRef;
   process.env.PLC_URL = network.plc.url;
   process.env.DATABASE_PATH = databasePath;
@@ -93,7 +96,8 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     assert.deepEqual(JSON.parse(bootstrapJournal.request_json), {
       workspace: bootstrap.workspace, request: { kind: "createWorkspace", name: "Pilot Workspace", creator: owner.did },
     });
-    getRawDb().prepare("INSERT INTO notification_registration (service_ref,space_uri,expires_at) VALUES (?,?,?)").run(serviceRef, bootstrap.workspace, Date.now() + 2 * 60 * 60 * 1000);
+    getRawDb().prepare("INSERT OR REPLACE INTO notification_registration (service_ref,space_uri,expires_at,token,renew_at) VALUES (?,?,?,?,?)")
+      .run(serviceRef, bootstrap.workspace, Date.now() + 2 * 60 * 60 * 1000, "seed-workspace-token", Date.now() + 60 * 60 * 1000);
     const workspace = parseWorkspaceRef(bootstrap.workspace);
     const operatorActor = { did: owner.did, session: ownerSession, workspace, canRecoverOperations: true };
 
@@ -197,7 +201,8 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     assert.deepEqual((await memberEngine.workspaces.discover()).workspaces[0]?.admins, [owner.did, admin.did].sort(), "the engine reads the admins from the authority's own repo");
 
     const messageSpace = channelUri(owner.did, `${workspace.skey}-team-lobby`);
-    getRawDb().prepare("INSERT INTO notification_registration (service_ref,space_uri,expires_at) VALUES (?,?,?)").run(serviceRef, messageSpace, Date.now() + 2 * 60 * 60 * 1000);
+    getRawDb().prepare("INSERT OR REPLACE INTO notification_registration (service_ref,space_uri,expires_at,token,renew_at) VALUES (?,?,?,?,?)")
+      .run(serviceRef, messageSpace, Date.now() + 2 * 60 * 60 * 1000, "seed-lobby-token", Date.now() + 60 * 60 * 1000);
     const oldMessageBase = Date.now() - 1000;
     for (let index = 0; index < 101; index += 1) {
       await writeRecord(sessionClient(memberSession as never), messageSpace, member.did, "new.flock.channel.message", tidNow(oldMessageBase + index), {
@@ -282,28 +287,59 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     assert.ok(restoredIndependent.messages.some((message) => message.value.text === "admin host message"), "the independent reader sees the writer again too");
     assert.ok(!restoredIndependent.degradedReasons.some((reason) => reason.includes(admin.did)), "and no longer reports it");
 
-    // The authority's space-deleted notice drops the space's notices and registration, through the real route with a token the authority's PDS signed.
-    const doomedSpace = channelUri(owner.did, "doomed-by-notice");
-    const registrations = () => (getRawDb().prepare("SELECT count(*) AS count FROM notification_registration WHERE space_uri=?").get(doomedSpace) as { count: number }).count;
-    getRawDb().prepare("INSERT INTO notification_registration (service_ref,space_uri,expires_at) VALUES (?,?,?)").run(serviceRef, doomedSpace, Date.now() + 2 * 60 * 60 * 1000);
-    const serviceToken = async (actor: TestActor, lxm = "com.atproto.space.notifySpaceDeleted"): Promise<string> => {
-      const response = await fetch(new URL(`/xrpc/com.atproto.server.getServiceAuth?aud=${encodeURIComponent(serviceRef)}&lxm=${lxm}`, actor.pds.url), {
-        headers: { authorization: `Bearer ${actor.accessJwt}` },
-      });
-      assert.equal(response.status, 200, "the PDS signs a service token for the app's service ref");
-      return ((await response.json()) as { token: string }).token;
-    };
+    // A space-deleted webhook (`notifySpaceUpdate` `#spaceDeleted`) authenticates the per-space registration token,
+    // refuses to purge while the authority has not confirmed `SpaceDeleted` via `authorizeSpaceSync`, and purges both
+    // notices and the registration once `deleteSpace` commits on the real PDS (`D12.3.3`).
+    const [{ ensureMemberListSpace }, { restoreAuthorityGrant }, { registerSpace }, { recordWriteNotification }] = await Promise.all([
+      import("@flock/operator/atproto/space-ops"),
+      import("@flock/operator/operator/authority-grant"),
+      import("@flock/operator/operator/registrations"),
+      import("@flock/operator/operator/notices"),
+    ]);
     const operatorOrigin = await inProcessOperator();
-    const notice = (token: string | null, space: string) => fetch(new URL("/xrpc/com.atproto.space.notifySpaceDeleted", operatorOrigin), {
-      method: "POST", headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify({ space }),
+    const doomedSpace = await ensureMemberListSpace(ownerSession as never, "new.flock.channel", "doomed-by-notice");
+    await storeAuthorityGrant(network.pds, owner.did, "doomed-space-grant-dpop");
+    assert.equal(
+      await registerSpace(await restoreAuthorityGrant(owner.did), bootstrap.workspace, doomedSpace),
+      true,
+      "the real PDS confirms and registers doomedSpace with the in-process operator",
+    );
+    recordWriteNotification({ space: doomedSpace, repo: owner.did, repoRev: tidNow() });
+    const registrations = () => (getRawDb().prepare("SELECT count(*) AS count FROM notification_registration WHERE space_uri=?").get(doomedSpace) as { count: number }).count;
+    const notices = () => (getRawDb().prepare("SELECT count(*) AS count FROM space_notification WHERE space_uri=?").get(doomedSpace) as { count: number }).count;
+    const storedToken = (getRawDb().prepare("SELECT token FROM notification_registration WHERE service_ref=? AND space_uri=?")
+      .get(serviceRef, doomedSpace) as { token: string }).token;
+    assert.ok(storedToken.length > 0);
+    assert.equal(registrations(), 1);
+    assert.equal(notices(), 1);
+
+    const sendSpaceDeletedNotice = (token: string | undefined, space: string) => fetch(new URL("/xrpc/com.atproto.space.notifySpaceUpdate", operatorOrigin), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        space,
+        ...(token !== undefined ? { token } : {}),
+        update: { $type: "com.atproto.space.notifySpaceUpdate#spaceDeleted" },
+      }),
     });
-    assert.equal((await notice(null, doomedSpace)).status, 403, "no token");
-    assert.equal((await notice(await serviceToken(member), doomedSpace)).status, 403, "a token from someone who is not the space's authority");
-    assert.equal((await notice(await serviceToken(owner), channelUri(owner.did, "never-registered"))).status, 403, "a space the app never registered");
-    assert.equal((await notice(await serviceToken(owner, "com.atproto.space.notifyWrite"), doomedSpace)).status, 403, "the authority's token, but minted for another method");
+    assert.equal((await sendSpaceDeletedNotice(undefined, doomedSpace)).status, 400, "missing webhook token");
+    assert.equal((await sendSpaceDeletedNotice("wrong-webhook-token", doomedSpace)).status, 400, "mismatched webhook token");
+    assert.equal((await sendSpaceDeletedNotice(storedToken, channelUri(owner.did, "never-registered"))).status, 400, "a space the app never registered");
     assert.equal(registrations(), 1, "nothing was dropped by a refused notice");
-    assert.equal((await notice(await serviceToken(owner), doomedSpace)).status, 200, "the authority's own token is accepted");
-    assert.equal(registrations(), 0, "the deleted space's notify registration is gone");
+    assert.equal(notices(), 1);
+
+    // Spoofed/premature `#spaceDeleted` with the real token while the space still exists at the authority must NOT purge!
+    assert.equal((await sendSpaceDeletedNotice(storedToken, doomedSpace)).status, 200, "valid webhook token answered 200");
+    assert.equal(registrations(), 1, "#spaceDeleted refuses to purge when authority authorizeSpaceSync does not confirm SpaceDeleted");
+    assert.equal(notices(), 1, "space notifications remain intact while space is still live");
+
+    // Real `deleteSpace` at the authority PDS triggers `#spaceDeleted`, which `authorizeSpaceSync` now confirms as `SpaceDeleted`.
+    await sessionClient(ownerSession as never).procedure("com.atproto.space.deleteSpace", { space: doomedSpace });
+    for (let attempt = 0; attempt < 40 && registrations() > 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.equal(registrations(), 0, "the confirmed deleted space's notify registration is purged");
+    assert.equal(notices(), 0, "the confirmed deleted space's notices are purged");
 
     const inbox = inboxUri(owner.did, workspace.skey);
     const privateSkey = `${workspace.skey}-team-private`;
@@ -329,8 +365,8 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
     await assert.rejects(mintSpaceCredential(memberSession as never, inbox), (error: unknown) => isAccessLost(error));
     await assert.rejects(mintSpaceCredential(outsiderSession as never, inbox), (error: unknown) => isAccessLost(error));
     const adminInbox = await mintSpaceCredential(adminSession as never, inbox);
-    const inboxRepos = await adminInbox.client(network.pds.url).query<{ repos: Array<{ did: string }> }>("com.atproto.space.listRepos", { space: inbox });
-    assert.ok(!inboxRepos.repos.some(({ did }) => did === member.did), "a dropped PDS notification leaves the writer absent from listRepos");
+    const inboxRepos = await adminInbox.client(network.pds.url).query<{ repos: Array<{ $type?: string; repo: string }> }>("com.atproto.space.listWriters", { space: inbox });
+    assert.ok(!inboxRepos.repos.some((entry) => entry.$type === "com.atproto.space.defs#repoWrite" && entry.repo === member.did), "a dropped PDS notification leaves the writer absent from listWriters");
     const candidates = await listInboxWriters(operatorActor as never);
     assert.ok(candidates.writers.includes(member.did), "operator returns the owner-authorized writer candidate");
     // The operator lists the inbox writers for an admin with the authority's own grant.
@@ -407,7 +443,7 @@ test("app acceptance across two real PDS hosts and journal restart", async () =>
       ...ownerSession,
       fetchHandler: async (path: string, init: RequestInit) => {
         const body = typeof init.body === "string" ? init.body : "";
-        if (injectedAttempts < 4 && path.includes("com.atproto.memberspace.removeMember") && body.includes("/space/new.flock.channel/")) {
+        if (injectedAttempts < 4 && path.includes("com.atproto.memberspace.removeMembers") && body.includes("/space/new.flock.channel/")) {
           injectedAttempts += 1;
           return new Response(JSON.stringify({ message: "injected crash window" }), { status: 503, headers: { "content-type": "application/json" } });
         }
@@ -639,9 +675,13 @@ async function runPhase5FailureMatrix(input: {
     try { return predicate(JSON.parse(init.body) as Record<string, unknown>); }
     catch { return false; }
   };
-  const memberMutation = (method: "putMember" | "removeMember", space: string, did: string, read?: boolean, write?: boolean) =>
-    isRequest(`com.atproto.memberspace.${method}`, (body) => body.space === space && body.did === did &&
-      (read === undefined || body.read === read) && (write === undefined || body.write === write));
+  const memberMutation = (method: "putMembers" | "removeMembers", space: string, did: string, read?: boolean, write?: boolean) =>
+    method === "putMembers"
+      ? isRequest("com.atproto.memberspace.putMembers", (body) =>
+          body.space === space && Array.isArray(body.members) && body.members.some((entry: Record<string, unknown>) =>
+            entry.did === did && (read === undefined || entry.read === read) && (write === undefined || entry.write === write)))
+      : isRequest("com.atproto.memberspace.removeMembers", (body) =>
+          body.space === space && Array.isArray(body.dids) && body.dids.includes(did));
   const recordMutation = (space: string, collection: string, rkey: string, predicate: (value: Record<string, unknown>) => boolean = () => true) =>
     isRequest("com.atproto.space.putRecord", (body) => body.space === space && body.collection === collection && body.rkey === rkey &&
       typeof body.record === "object" && body.record !== null && predicate(body.record as Record<string, unknown>));
@@ -664,7 +704,7 @@ async function runPhase5FailureMatrix(input: {
     const faultySession: Session = {
       ...originalSession,
       fetchHandler: async (path, init) => {
-        if (path.includes("com.atproto.memberspace.putMember") && typeof init.body === "string") observedMembershipWrites.push(init.body);
+        if (path.includes("com.atproto.memberspace.putMembers") && typeof init.body === "string") observedMembershipWrites.push(init.body);
         if (injected < 4 && matcher(path, init)) {
           injected += 1;
           if (failBeforeCommit) {
@@ -705,9 +745,9 @@ async function runPhase5FailureMatrix(input: {
 
   // Invite membership and roster fan-out.
   const inviteTargets = [
-    ["invite workspace member", workspace, "member-workspace", memberMutation("putMember", workspace, input.outsiderDid, true, true)],
-    ["invite inbox writer", inbox, "member-inbox-writer", memberMutation("putMember", inbox, input.outsiderDid, false, true)],
-    ["invite public-channel member", publicSpace, `member-public-channel-${input.publicSkey}`, memberMutation("putMember", publicSpace, input.outsiderDid, true, true)],
+    ["invite workspace member", workspace, "member-workspace", memberMutation("putMembers", workspace, input.outsiderDid, true, true)],
+    ["invite inbox writer", inbox, "member-inbox-writer", memberMutation("putMembers", inbox, input.outsiderDid, false, true)],
+    ["invite public-channel member", publicSpace, `member-public-channel-${input.publicSkey}`, memberMutation("putMembers", publicSpace, input.outsiderDid, true, true)],
     ["write workspace roster", workspace, "member-workspace-roster", recordMutation(workspace, "new.flock.workspace.roster", subjectKey(input.outsiderDid), (value) => value.active === true)],
   ] as const;
   for (const [label, , step, matcher] of inviteTargets) {
@@ -723,11 +763,11 @@ async function runPhase5FailureMatrix(input: {
 
   // Removal fans out through both channel kinds, all authority records, and the inbox.
   const removeTargets = [
-    ["remove inbox membership", "remove-inbox-membership", memberMutation("removeMember", inbox, input.adminDid)],
-    ["remove public-channel membership", `remove-channel-${input.publicSkey}`, memberMutation("removeMember", publicSpace, input.adminDid)],
-    ["remove private-channel membership", `remove-channel-${input.privateSkey}`, memberMutation("removeMember", privateSpace, input.adminDid)],
+    ["remove inbox membership", "remove-inbox-membership", memberMutation("removeMembers", inbox, input.adminDid)],
+    ["remove public-channel membership", `remove-channel-${input.publicSkey}`, memberMutation("removeMembers", publicSpace, input.adminDid)],
+    ["remove private-channel membership", `remove-channel-${input.privateSkey}`, memberMutation("removeMembers", privateSpace, input.adminDid)],
     ["deactivate private-channel roster", `remove-channel-${input.privateSkey}`, recordMutation(privateSpace, "new.flock.channel.roster", subjectKey(input.adminDid), (value) => value.active === false)],
-    ["remove workspace membership", "remove-workspace-membership", memberMutation("removeMember", workspace, input.adminDid)],
+    ["remove workspace membership", "remove-workspace-membership", memberMutation("removeMembers", workspace, input.adminDid)],
     ["deactivate workspace roster", "deactivate-workspace-roster", recordMutation(workspace, "new.flock.workspace.roster", subjectKey(input.adminDid), (value) => value.active === false)],
     ["deactivate admin record", "deactivate-admin", recordMutation(workspace, "new.flock.admin", subjectKey(input.adminDid), (value) => value.active === false)],
   ] as const;
@@ -745,8 +785,8 @@ async function runPhase5FailureMatrix(input: {
   // Promotion and demotion update the admin record and inbox read permission in safe order.
   const adminTargets = [
     ["promote admin record", true, "write-admin-active", recordMutation(workspace, "new.flock.admin", subjectKey(input.adminDid), (value) => value.active === true)],
-    ["grant admin inbox read", true, "grant-inbox-read", memberMutation("putMember", inbox, input.adminDid, true, true)],
-    ["remove admin inbox read", false, "remove-inbox-read", memberMutation("putMember", inbox, input.adminDid, false, true)],
+    ["grant admin inbox read", true, "grant-inbox-read", memberMutation("putMembers", inbox, input.adminDid, true, true)],
+    ["remove admin inbox read", false, "remove-inbox-read", memberMutation("putMembers", inbox, input.adminDid, false, true)],
     ["demote admin record", false, "write-admin-inactive", recordMutation(workspace, "new.flock.admin", subjectKey(input.adminDid), (value) => value.active === false)],
   ] as const;
   for (const [label, active, step, matcher] of adminTargets) {
@@ -776,7 +816,7 @@ async function runPhase5FailureMatrix(input: {
   // Channel creation writes the member list before publishing its directory entry.
   const createCases = [
     ["create channel space", "create-space", "channel-space", (space: string) => isRequest("com.atproto.space.createSpace", (body) => body.skey === space.split("/").at(-1))],
-    ["add private channel member", "create-private-member", `channel-member-${input.outsiderDid}`, (space: string) => memberMutation("putMember", space, input.outsiderDid, true, true)],
+    ["add private channel member", "create-private-member", `channel-member-${input.outsiderDid}`, (space: string) => memberMutation("putMembers", space, input.outsiderDid, true, true)],
     ["write private channel roster", "create-private-roster", `channel-roster-${input.outsiderDid}`, (space: string) => recordMutation(space, "new.flock.channel.roster", subjectKey(input.outsiderDid), (value) => value.active === true)],
     ["publish channel directory", "create-directory", "channel-directory", (space: string) => recordMutation(workspace, "new.flock.directory", space.split("/").at(-1) ?? "")],
   ] as const;
@@ -810,10 +850,10 @@ async function runPhase5FailureMatrix(input: {
   const memberPds = await resolvePds(input.memberDid);
   const transitionCases = [
     ["set channel transitioning", "public", [transitionMemberDid], [input.adminDid], "private", [transitionMemberDid], "channel-set-transitioning", recordMutation(workspace, "new.flock.directory", transitionSkey, (value) => value.visibility === "transitioning"), false],
-    ["add public channel member", "private", [], [transitionMemberDid], "public", [transitionMemberDid], `channel-public-add-${transitionMemberDid}`, memberMutation("putMember", transitionSpace, transitionMemberDid, true, true), false],
-    ["remove channel member", "public", [transitionMemberDid, input.adminDid], [input.adminDid], "private", [transitionMemberDid], `channel-remove-${input.adminDid}`, memberMutation("removeMember", transitionSpace, input.adminDid), true],
+    ["add public channel member", "private", [], [transitionMemberDid], "public", [transitionMemberDid], `channel-public-add-${transitionMemberDid}`, memberMutation("putMembers", transitionSpace, transitionMemberDid, true, true), false],
+    ["remove channel member", "public", [transitionMemberDid, input.adminDid], [input.adminDid], "private", [transitionMemberDid], `channel-remove-${input.adminDid}`, memberMutation("removeMembers", transitionSpace, input.adminDid), true],
     ["deactivate private roster", "public", [transitionMemberDid, input.adminDid], [input.adminDid], "private", [transitionMemberDid], `channel-roster-inactive-${input.adminDid}`, recordMutation(transitionSpace, "new.flock.channel.roster", subjectKey(input.adminDid), (value) => value.active === false), true],
-    ["add private channel member", "private", [], [], "private", [transitionMemberDid], `channel-private-add-${transitionMemberDid}`, memberMutation("putMember", transitionSpace, transitionMemberDid, true, true), false],
+    ["add private channel member", "private", [], [], "private", [transitionMemberDid], `channel-private-add-${transitionMemberDid}`, memberMutation("putMembers", transitionSpace, transitionMemberDid, true, true), false],
     ["activate private roster", "private", [], [], "private", [transitionMemberDid], `channel-roster-active-${transitionMemberDid}`, recordMutation(transitionSpace, "new.flock.channel.roster", subjectKey(transitionMemberDid), (value) => value.active === true), false],
     ["publish final channel visibility", "transitioning", [transitionMemberDid], [transitionMemberDid], "private", [transitionMemberDid], "channel-set-final-visibility", recordMutation(workspace, "new.flock.directory", transitionSkey, (value) => value.visibility === "private"), false],
   ] as const;
@@ -842,7 +882,7 @@ async function runPhase5FailureMatrix(input: {
   // Archive first marks the directory, removes members, deactivates private rosters, then publishes archived.
   const archiveCases = [
     ["mark channel transitioning for archive", "archive-transition", "channel-archive-transition", (skey: string) => recordMutation(workspace, "new.flock.directory", skey, (value) => value.visibility === "transitioning"), false],
-    ["remove channel member for archive", "archive-remove", `channel-archive-remove-${input.memberDid}`, (skey: string) => memberMutation("removeMember", channelUri(authorityDid, skey), input.memberDid), true],
+    ["remove channel member for archive", "archive-remove", `channel-archive-remove-${input.memberDid}`, (skey: string) => memberMutation("removeMembers", channelUri(authorityDid, skey), input.memberDid), true],
     ["deactivate private roster for archive", "archive-roster", `channel-archive-roster-${input.memberDid}`, (skey: string) => recordMutation(channelUri(authorityDid, skey), "new.flock.channel.roster", subjectKey(input.memberDid), (value) => value.active === false), true],
     ["publish archived channel", "archive-final", "channel-archive-final", (skey: string) => recordMutation(workspace, "new.flock.directory", skey, (value) => value.visibility === "archived"), true],
   ] as const;
@@ -893,7 +933,7 @@ async function runPhase5FailureMatrix(input: {
   for (const [label, decision, expectedStep, matchKind] of joinCases) {
     const requestId = tidNow();
     const matcher = matchKind === "membership"
-      ? memberMutation("putMember", joinSpace, input.memberDid, true, true)
+      ? memberMutation("putMembers", joinSpace, input.memberDid, true, true)
       : matchKind === "roster"
         ? recordMutation(joinSpace, "new.flock.channel.roster", subjectKey(input.memberDid), (value) => value.active === true)
         : recordMutation(inbox, "new.flock.joinDecision", decisionRecordKey(joinRequestUri), (value) => value.requestId === requestId && value.decision === matchKind);
@@ -917,10 +957,10 @@ async function runPhase5FailureMatrix(input: {
 
   // Self-leave goes through the same serialized fan-out and is recoverable under the requester's actor DID.
   const leaveCases = [
-    ["self-leave inbox membership", "remove-inbox-membership", memberMutation("removeMember", inbox, input.memberDid)],
-    ["self-leave public channel membership", `remove-channel-${input.publicSkey}`, memberMutation("removeMember", publicSpace, input.memberDid)],
-    ["self-leave private channel membership and roster", `remove-channel-${input.privateSkey}`, memberMutation("removeMember", privateSpace, input.memberDid)],
-    ["self-leave workspace membership", "remove-workspace-membership", memberMutation("removeMember", workspace, input.memberDid)],
+    ["self-leave inbox membership", "remove-inbox-membership", memberMutation("removeMembers", inbox, input.memberDid)],
+    ["self-leave public channel membership", `remove-channel-${input.publicSkey}`, memberMutation("removeMembers", publicSpace, input.memberDid)],
+    ["self-leave private channel membership and roster", `remove-channel-${input.privateSkey}`, memberMutation("removeMembers", privateSpace, input.memberDid)],
+    ["self-leave workspace membership", "remove-workspace-membership", memberMutation("removeMembers", workspace, input.memberDid)],
     ["self-leave workspace roster", "deactivate-workspace-roster", recordMutation(workspace, "new.flock.workspace.roster", subjectKey(input.memberDid), (value) => value.active === false)],
   ] as const;
   for (const [label, expectedStep, matcher] of leaveCases) {
@@ -938,7 +978,7 @@ async function runPhase5FailureMatrix(input: {
   const privateLeaveSkey = `${input.workspaceSkey}-fault-private-leave`;
   const privateLeaveSpace = channelUri(authorityDid, privateLeaveSkey);
   const privateLeaveCases = [
-    ["leave private channel membership", "leave-channel-membership", memberMutation("removeMember", privateLeaveSpace, input.memberDid)],
+    ["leave private channel membership", "leave-channel-membership", memberMutation("removeMembers", privateLeaveSpace, input.memberDid)],
     ["leave private channel roster", "leave-channel-roster", recordMutation(privateLeaveSpace, "new.flock.channel.roster", subjectKey(input.memberDid), (value) => value.active === false)],
   ] as const;
   for (const [label, expectedStep, matcher] of privateLeaveCases) {
@@ -955,31 +995,31 @@ async function runPhase5FailureMatrix(input: {
 
   // Reconciliation repairs each authoritative source against the PDS member list, including stale private and archived state.
   const reconcileCases = [
-    ["reconcile workspace membership", `workspace-set-${input.memberDid}`, memberMutation("putMember", workspace, input.memberDid, true, true), async () => {
+    ["reconcile workspace membership", `workspace-set-${input.memberDid}`, memberMutation("putMembers", workspace, input.memberDid, true, true), async () => {
       await seedMember(input.memberDid, false);
       await removeSpaceMember(input.ownerSession as never, workspace, input.memberDid);
     }],
-    ["remove unrostered workspace member", `workspace-remove-${input.outsiderDid}`, memberMutation("removeMember", workspace, input.outsiderDid), async () => {
+    ["remove unrostered workspace member", `workspace-remove-${input.outsiderDid}`, memberMutation("removeMembers", workspace, input.outsiderDid), async () => {
       await resetMember(input.outsiderDid);
       await putSpaceMember(input.ownerSession as never, workspace, input.outsiderDid, true, true);
     }],
-    ["repair inbox writer permissions", `inbox-set-${input.memberDid}`, memberMutation("putMember", inbox, input.memberDid, false, true), async () => {
+    ["repair inbox writer permissions", `inbox-set-${input.memberDid}`, memberMutation("putMembers", inbox, input.memberDid, false, true), async () => {
       await seedMember(input.memberDid, false);
       await putSpaceMember(input.ownerSession as never, inbox, input.memberDid, true, true);
     }],
-    ["remove unrostered inbox writer", `inbox-remove-${input.outsiderDid}`, memberMutation("removeMember", inbox, input.outsiderDid), async () => {
+    ["remove unrostered inbox writer", `inbox-remove-${input.outsiderDid}`, memberMutation("removeMembers", inbox, input.outsiderDid), async () => {
       await resetMember(input.outsiderDid);
       await putSpaceMember(input.ownerSession as never, inbox, input.outsiderDid, false, true);
     }],
-    ["reconcile public channel member", `channel-${input.publicSkey}-set-${input.memberDid}`, memberMutation("putMember", publicSpace, input.memberDid, true, true), async () => {
+    ["reconcile public channel member", `channel-${input.publicSkey}-set-${input.memberDid}`, memberMutation("putMembers", publicSpace, input.memberDid, true, true), async () => {
       await seedMember(input.memberDid, false);
       await removeSpaceMember(input.ownerSession as never, publicSpace, input.memberDid);
     }],
-    ["remove unrostered public channel member", `channel-${input.publicSkey}-remove-${input.outsiderDid}`, memberMutation("removeMember", publicSpace, input.outsiderDid), async () => {
+    ["remove unrostered public channel member", `channel-${input.publicSkey}-remove-${input.outsiderDid}`, memberMutation("removeMembers", publicSpace, input.outsiderDid), async () => {
       await resetMember(input.outsiderDid);
       await putSpaceMember(input.ownerSession as never, publicSpace, input.outsiderDid, true, true);
     }],
-    ["reconcile private channel member", `channel-${input.privateSkey}-set-${input.memberDid}`, memberMutation("putMember", privateSpace, input.memberDid, true, true), async () => {
+    ["reconcile private channel member", `channel-${input.privateSkey}-set-${input.memberDid}`, memberMutation("putMembers", privateSpace, input.memberDid, true, true), async () => {
       await seedMember(input.memberDid, false);
       await seedChannel(input.privateSkey, "private", [], [input.memberDid]);
     }],
@@ -987,7 +1027,7 @@ async function runPhase5FailureMatrix(input: {
       await resetMember(input.outsiderDid);
       await seedChannel(input.privateSkey, "private", [input.outsiderDid], [input.outsiderDid]);
     }],
-    ["remove stale private channel member", `channel-${input.privateSkey}-remove-${input.outsiderDid}`, memberMutation("removeMember", privateSpace, input.outsiderDid), async () => {
+    ["remove stale private channel member", `channel-${input.privateSkey}-remove-${input.outsiderDid}`, memberMutation("removeMembers", privateSpace, input.outsiderDid), async () => {
       await resetMember(input.outsiderDid);
       await seedChannel(input.privateSkey, "private", [input.outsiderDid], [input.outsiderDid]);
     }],
@@ -1006,7 +1046,7 @@ async function runPhase5FailureMatrix(input: {
   const archivedRepairSkey = `${input.workspaceSkey}-fault-reconcile-archived`;
   const archivedRepairSpace = channelUri(authorityDid, archivedRepairSkey);
   const archivedReconcileCases = [
-    ["remove archived channel member", `archived-${archivedRepairSkey}-remove-${input.memberDid}`, memberMutation("removeMember", archivedRepairSpace, input.memberDid)],
+    ["remove archived channel member", `archived-${archivedRepairSkey}-remove-${input.memberDid}`, memberMutation("removeMembers", archivedRepairSpace, input.memberDid)],
     ["deactivate archived channel roster", `archived-${archivedRepairSkey}-deactivate-roster-${input.memberDid}`, recordMutation(archivedRepairSpace, "new.flock.channel.roster", subjectKey(input.memberDid), (value) => value.active === false)],
   ] as const;
   for (const [label, expectedStep, matcher] of archivedReconcileCases) {

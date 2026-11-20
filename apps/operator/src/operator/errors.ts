@@ -3,12 +3,21 @@ import { isScopeMissingError, XrpcError } from "@flock/protocol/atproto/xrpc";
 import { UpstreamResponseTooLargeError } from "@flock/protocol/bounded-json";
 import { TokenRefreshError } from "@atproto/oauth-client-node";
 import { AuthorityReauthorizationRequiredError } from "./authority-grant";
+import { AuthoritySuspensionUnavailableError, isSuspensionError } from "./authority-suspension";
 import { isTransientOperationError } from "./journal";
 
 export class OperatorAuthError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "OperatorAuthError";
+  }
+}
+
+export class WebhookAuthError extends Error {
+  readonly status = 400;
+  constructor(message = "Invalid notification token.") {
+    super(message);
+    this.name = "WebhookAuthError";
   }
 }
 
@@ -21,6 +30,7 @@ export class OperatorInfrastructureError extends Error {
 
 export function isTransientOperatorInfrastructureError(error: unknown): boolean {
   return error instanceof OperatorInfrastructureError ||
+    error instanceof AuthoritySuspensionUnavailableError ||
     isTransientOperationError(error) ||
     isTransientOAuthInfrastructureError(error);
 }
@@ -42,6 +52,13 @@ export function operatorHttpFailure(error: unknown): { status: 502 | 503; name: 
       status: 502,
       name: "InvalidUpstreamResponse",
       message: "An upstream service returned a response larger than the configured limit.",
+    };
+  }
+  if (isSuspensionError(error) && !(error instanceof AuthoritySuspensionUnavailableError)) {
+    return {
+      status: 503,
+      name: "UpstreamUnavailable",
+      message: "The workspace authority account is currently suspended or deactivated.",
     };
   }
   if (isTransientOperatorInfrastructureError(error)) {

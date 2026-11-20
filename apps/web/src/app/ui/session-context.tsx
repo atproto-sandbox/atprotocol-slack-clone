@@ -17,7 +17,7 @@ const SessionBridge = dynamic(() => import("./dm-session-bridge").then((mod) => 
  */
 function restoring(did: string, config: BrowserSessionConfig, stopped: () => void): BrowserSessionState {
   return {
-    status: "connecting", client: null, store: null, engine: null, snapshots: null, live: null, error: "",
+    status: "connecting", client: null, store: null, engine: null, snapshots: null, live: null, needsNotifyScopeUpgrade: false, error: "",
     connect: () => {},
     signOut: async () => {
       stopped();

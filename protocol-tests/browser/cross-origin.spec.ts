@@ -93,7 +93,7 @@ async function steps(pds: PdsNetwork, input: {
   });
   results["lists writers at the authority"] = await outcome(async () => {
     const credential = await mintSpaceCredentialWith(deps(memberSide), input.channel);
-    await credential.client(input.authority.pds.url).query("com.atproto.space.listRepos", { space: input.channel });
+    await credential.client(input.authority.pds.url).query("com.atproto.space.listWriters", { space: input.channel });
   });
   results["writes a message to its own host with its DPoP-bound session"] = await outcome(() => sessionClient(memberSide.session).procedure("com.atproto.space.createRecord", {
     space: input.channel, repo: memberSide.actor.did, collection: "new.flock.channel.message", rkey: tidNow(),

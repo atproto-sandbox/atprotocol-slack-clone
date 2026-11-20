@@ -162,13 +162,23 @@ test("real browsers complete a DM round trip across two PDS hosts, then a leave 
     await bobPage.getByRole("button", { name: /Sync/ }).click();
     await bobPage.getByText(bobReply, { exact: true }).locator("xpath=ancestor::article").getByText("💜 1", { exact: true }).waitFor({ state: "visible" });
 
-    // The PDS exposes its MAC header to a page on another origin, and says the response varies on the request header: the DM client
-    // could not have verified a MAC it cannot read, so this is asserted from the responses themselves rather than assumed.
-    const macReads = (await Promise.all(macResponses)).filter((read) => read.headers["atproto-space-mac"]);
-    assert.ok(macReads.length > 0, "the browsers read MAC-bearing responses from the PDS");
+    // The PDS exposes its RFC 9421 signature and covered commit/record headers to a page on another origin, and says the
+    // response varies on `Accept-Signature`: the DM client could not have verified a signature it cannot read, so this is
+    // asserted from the responses themselves rather than assumed.
+    const macReads = (await Promise.all(macResponses)).filter(
+      (read) => Boolean(read.headers["atproto-space-commit"] || read.headers["atproto-space-record"]),
+    );
+    assert.ok(macReads.length > 0, "the browsers read RFC 9421 MAC-signed responses from the PDS");
     for (const { url, headers } of macReads) {
-      assert.match(headers["access-control-expose-headers"] ?? "", /atproto-space-mac/i, `${url} exposes the MAC header to the page`);
-      assert.match(headers.vary ?? "", /atproto-space-want-mac/i, `${url} varies on the MAC request header`);
+      const covered = headers["atproto-space-commit"] ? "atproto-space-commit" : "atproto-space-record";
+      const exposed = (headers["access-control-expose-headers"] ?? "")
+        .split(",")
+        .map((token) => token.trim().toLowerCase());
+      assert.ok(exposed.includes(covered), `${url} exposes ${covered} to the page (${exposed.join(", ")})`);
+      assert.ok(exposed.includes("signature-input"), `${url} exposes signature-input to the page (${exposed.join(", ")})`);
+      assert.ok(exposed.includes("signature"), `${url} exposes signature to the page (${exposed.join(", ")})`);
+      assert.ok(Boolean(headers["signature-input"]) && Boolean(headers["signature"]), `${url} carries RFC 9421 signature headers`);
+      assert.match(headers.vary ?? "", /accept-signature/i, `${url} varies on Accept-Signature`);
     }
 
     // Bob leaves the conversation.
@@ -197,11 +207,16 @@ test("real browsers complete a DM round trip across two PDS hosts, then a leave 
   }
 });
 
-/** Every credentialed record or commit read a page makes, with the response headers as they came off the wire. */
+/** Every credentialed record, commit, repo, or oplog read a page makes, with the response headers as they came off the wire. */
 function recordMacResponses(actor: string, page: Page): void {
   page.on("response", (response) => {
     const path = new URL(response.url()).pathname;
-    if (!path.endsWith("com.atproto.space.getRecord") && !path.endsWith("com.atproto.space.getLatestCommit")) return;
+    if (
+      !path.endsWith("com.atproto.space.getRecord")
+      && !path.endsWith("com.atproto.space.getLatestCommit")
+      && !path.endsWith("com.atproto.space.getRepo")
+      && !path.endsWith("com.atproto.space.listRepoOps")
+    ) return;
     macResponses.push(response.allHeaders().then((headers) => ({ actor, url: response.url(), headers })));
   });
 }

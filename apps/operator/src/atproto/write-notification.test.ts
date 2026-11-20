@@ -1,63 +1,170 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseSpaceDeletedNotification, parseWriteNotification } from "./write-notification";
+import { parseConfirmRegistration, parseSpaceUpdateNotification, UPDATE_TYPE } from "./write-notification";
 
-const valid = {
-  space: "at://did:plc:authority/space/new.flock.workspace/team",
-  repo: "did:plc:member",
-  repoRev: "3kabcdefghij2",
-  spaceRev: "3kabcdefghij3",
-  prevSpaceRev: "3kabcdefghij2",
-  // The commit digest, decoded from its lexicon `bytes` as the operator's XRPC server hands it over.
-  data: new Uint8Array(Buffer.from("q83vEjRWeJCrze8SNFZ4kKvN7xI0VniQq83vEjRWeJA", "base64")),
-};
+const SPACE = "at://did:plc:authority/space/new.flock.workspace/team";
+const TOKEN = "stable-webhook-token-0123456789abcdef";
+const REPO = "did:plc:member";
+const REPO_REV = "3kabcdefghij2";
+const SPACE_REV = "3kabcdefghij3";
+const PREV_SPACE_REV = "3kabcdefghij2";
+const COMMIT_DIGEST = new Uint8Array(Buffer.from("q83vEjRWeJCrze8SNFZ4kKvN7xI0VniQq83vEjRWeJA", "base64"));
 
-test("parseWriteNotification accepts the body the PDS sends, with data as decoded lexicon bytes", () => {
-  // #given #when
-  const parsed = parseWriteNotification(valid);
-
-  // #then
-  assert.deepEqual(parsed, { space: valid.space, repo: valid.repo, repoRev: valid.repoRev });
+test("parseConfirmRegistration validates { space, token, challenge } and rejects unexpected or malformed fields", () => {
+  assert.deepEqual(
+    parseConfirmRegistration({ space: SPACE, token: TOKEN, challenge: "challenge-nonce-123" }),
+    { space: SPACE, token: TOKEN, challenge: "challenge-nonce-123" },
+  );
+  assert.equal(parseConfirmRegistration({ space: SPACE, token: TOKEN }), null, "missing challenge");
+  assert.equal(parseConfirmRegistration({ space: SPACE, token: "", challenge: "c" }), null, "empty token");
+  assert.equal(parseConfirmRegistration({ space: SPACE, token: "x".repeat(513), challenge: "c" }), null, "overlong token");
+  assert.equal(parseConfirmRegistration({ space: SPACE, token: TOKEN, challenge: "" }), null, "empty challenge");
+  assert.equal(parseConfirmRegistration({ space: "at://not-a-space", token: TOKEN, challenge: "c" }), null, "invalid space");
+  assert.equal(parseConfirmRegistration({ space: SPACE, token: TOKEN, challenge: "c", extra: 1 }), null, "unexpected field");
+  assert.equal(parseConfirmRegistration(null), null);
+  assert.equal(parseConfirmRegistration([SPACE]), null);
 });
 
-test("parseWriteNotification rejects a data value that is not a commit digest's bytes", () => {
-  assert.equal(parseWriteNotification({ ...valid, data: "q83vEjRWeJCrze8SNFZ4kKvN7xI0VniQ" }), null);
-  assert.equal(parseWriteNotification({ ...valid, data: { $bytes: "q83vEjRWeJCrze8SNFZ4kKvN7xI0VniQq83vEjRWeJA" } }), null, "still in its JSON form");
-  assert.equal(parseWriteNotification({ ...valid, data: new Uint8Array(4) }), null, "too short for a digest");
-  assert.equal(parseWriteNotification({ ...valid, data: new Uint8Array(200) }), null, "too long for a digest");
-  assert.equal(parseWriteNotification({ ...valid, data: null }), null);
+test("parseSpaceUpdateNotification dispatches #repoWrite with decoded lexicon bytes and optional prevSpaceRev", () => {
+  const withPrev = parseSpaceUpdateNotification({
+    space: SPACE,
+    token: TOKEN,
+    update: {
+      $type: UPDATE_TYPE.repoWrite,
+      repo: REPO,
+      repoRev: REPO_REV,
+      spaceRev: SPACE_REV,
+      prevSpaceRev: PREV_SPACE_REV,
+      data: COMMIT_DIGEST,
+    },
+  });
+  assert.deepEqual(withPrev, {
+    space: SPACE,
+    token: TOKEN,
+    update: { kind: "repoWrite", repo: REPO, repoRev: REPO_REV, spaceRev: SPACE_REV, prevSpaceRev: PREV_SPACE_REV },
+  });
+
+  const withoutPrev = parseSpaceUpdateNotification({
+    space: SPACE,
+    token: TOKEN,
+    update: {
+      $type: UPDATE_TYPE.repoWrite,
+      repo: REPO,
+      repoRev: REPO_REV,
+      spaceRev: SPACE_REV,
+      data: COMMIT_DIGEST,
+    },
+  });
+  assert.deepEqual(withoutPrev, {
+    space: SPACE,
+    token: TOKEN,
+    update: { kind: "repoWrite", repo: REPO, repoRev: REPO_REV, spaceRev: SPACE_REV },
+  });
 });
 
-test("parseWriteNotification accepts the repo host's body without the forwarded space revisions", () => {
-  const fromRepoHost = { space: valid.space, repo: valid.repo, repoRev: valid.repoRev, data: valid.data };
-  assert.deepEqual(parseWriteNotification(fromRepoHost), { space: valid.space, repo: valid.repo, repoRev: valid.repoRev });
+test("parseSpaceUpdateNotification rejects malformed #repoWrite digests, DIDs, and TIDs", () => {
+  const baseUpdate = {
+    $type: UPDATE_TYPE.repoWrite,
+    repo: REPO,
+    repoRev: REPO_REV,
+    spaceRev: SPACE_REV,
+    data: COMMIT_DIGEST,
+  };
+  assert.equal(parseSpaceUpdateNotification({ space: SPACE, token: TOKEN, update: { ...baseUpdate, data: "base64string" } }), null);
+  assert.equal(parseSpaceUpdateNotification({ space: SPACE, token: TOKEN, update: { ...baseUpdate, data: { $bytes: "abc" } } }), null);
+  assert.equal(parseSpaceUpdateNotification({ space: SPACE, token: TOKEN, update: { ...baseUpdate, data: new Uint8Array(4) } }), null);
+  assert.equal(parseSpaceUpdateNotification({ space: SPACE, token: TOKEN, update: { ...baseUpdate, data: new Uint8Array(200) } }), null);
+  assert.equal(parseSpaceUpdateNotification({ space: SPACE, token: TOKEN, update: { ...baseUpdate, repo: "not-a-did" } }), null);
+  assert.equal(parseSpaceUpdateNotification({ space: SPACE, token: TOKEN, update: { ...baseUpdate, repoRev: "not-a-tid" } }), null);
+  assert.equal(parseSpaceUpdateNotification({ space: SPACE, token: TOKEN, update: { ...baseUpdate, spaceRev: "not-a-tid" } }), null);
+  assert.equal(parseSpaceUpdateNotification({ space: SPACE, token: TOKEN, update: { ...baseUpdate, prevSpaceRev: "bad-tid" } }), null);
 });
 
-test("parseWriteNotification rejects the old rev field and non-TID revisions", () => {
-  const { repoRev, ...withoutRepoRev } = valid;
-  assert.equal(parseWriteNotification({ ...withoutRepoRev, rev: repoRev }), null);
-  assert.equal(parseWriteNotification({ ...valid, spaceRev: "not-a-tid" }), null);
-  assert.equal(parseWriteNotification({ ...valid, prevSpaceRev: "x".repeat(129) }), null);
+test("parseSpaceUpdateNotification dispatches #repoRemoved, #registrationExpired, and #spaceDeleted", () => {
+  assert.deepEqual(
+    parseSpaceUpdateNotification({
+      space: SPACE,
+      token: TOKEN,
+      update: { $type: UPDATE_TYPE.repoRemoved, repo: REPO, spaceRev: SPACE_REV, prevSpaceRev: PREV_SPACE_REV },
+    }),
+    {
+      space: SPACE,
+      token: TOKEN,
+      update: { kind: "repoRemoved", repo: REPO, spaceRev: SPACE_REV, prevSpaceRev: PREV_SPACE_REV },
+    },
+  );
+  assert.equal(
+    parseSpaceUpdateNotification({
+      space: SPACE,
+      token: TOKEN,
+      update: { $type: UPDATE_TYPE.repoRemoved, repo: "not-a-did", spaceRev: SPACE_REV },
+    }),
+    null,
+  );
+
+  assert.deepEqual(
+    parseSpaceUpdateNotification({
+      space: SPACE,
+      token: TOKEN,
+      update: { $type: UPDATE_TYPE.registrationExpired, spaceRev: SPACE_REV },
+    }),
+    {
+      space: SPACE,
+      token: TOKEN,
+      update: { kind: "registrationExpired", spaceRev: SPACE_REV },
+    },
+  );
+  assert.equal(
+    parseSpaceUpdateNotification({
+      space: SPACE,
+      token: TOKEN,
+      update: { $type: UPDATE_TYPE.registrationExpired, spaceRev: "not-a-tid" },
+    }),
+    null,
+  );
+
+  assert.deepEqual(
+    parseSpaceUpdateNotification({
+      space: SPACE,
+      token: TOKEN,
+      update: { $type: UPDATE_TYPE.spaceDeleted },
+    }),
+    {
+      space: SPACE,
+      token: TOKEN,
+      update: { kind: "spaceDeleted" },
+    },
+  );
 });
 
-test("parseWriteNotification rejects unexpected fields, a bad repo DID, and a missing or malformed repoRev", () => {
-  assert.equal(parseWriteNotification({ ...valid, extra: 1 }), null);
-  assert.equal(parseWriteNotification({ ...valid, repo: "not-a-did" }), null);
-  assert.equal(parseWriteNotification({ ...valid, space: "not-a-space" }), null);
-  assert.equal(parseWriteNotification({ ...valid, repoRev: "" }), null);
-  assert.equal(parseWriteNotification({ ...valid, repoRev: "x".repeat(129) }), null);
-  assert.equal(parseWriteNotification([valid]), null);
-  assert.equal(parseWriteNotification(null), null);
-});
-
-test("parseSpaceDeletedNotification accepts the lexicon's one field and ignores a field a later revision adds", () => {
-  assert.deepEqual(parseSpaceDeletedNotification({ space: valid.space }), { space: valid.space });
-  assert.deepEqual(parseSpaceDeletedNotification({ space: valid.space, deletedAt: "later" }), { space: valid.space });
-});
-
-test("parseSpaceDeletedNotification rejects a body without a valid space", () => {
-  assert.equal(parseSpaceDeletedNotification(null), null);
-  assert.equal(parseSpaceDeletedNotification([valid.space]), null);
-  assert.equal(parseSpaceDeletedNotification({}), null);
-  assert.equal(parseSpaceDeletedNotification({ space: "at://not-a-space" }), null);
+test("parseSpaceUpdateNotification enforces outer envelope boundaries and rejects unknown $type or nested token/space", () => {
+  assert.equal(
+    parseSpaceUpdateNotification({
+      space: SPACE,
+      token: TOKEN,
+      update: { $type: UPDATE_TYPE.spaceDeleted, token: TOKEN },
+    }),
+    null,
+    "token must never appear inside update",
+  );
+  assert.equal(
+    parseSpaceUpdateNotification({
+      space: SPACE,
+      token: TOKEN,
+      update: { $type: UPDATE_TYPE.spaceDeleted, space: SPACE },
+    }),
+    null,
+    "space must never appear inside update",
+  );
+  assert.equal(
+    parseSpaceUpdateNotification({
+      space: SPACE,
+      token: TOKEN,
+      update: { $type: "com.atproto.space.notifySpaceUpdate#futureVariant" },
+    }),
+    null,
+  );
+  assert.equal(parseSpaceUpdateNotification({ space: SPACE, token: "", update: { $type: UPDATE_TYPE.spaceDeleted } }), null);
+  assert.equal(parseSpaceUpdateNotification({ space: SPACE, update: { $type: UPDATE_TYPE.spaceDeleted } }), null);
+  assert.equal(parseSpaceUpdateNotification({ space: SPACE, token: TOKEN, update: { $type: UPDATE_TYPE.spaceDeleted }, extra: true }), null);
 });

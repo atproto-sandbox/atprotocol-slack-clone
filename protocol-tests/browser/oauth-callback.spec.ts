@@ -104,7 +104,7 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
     await page.getByRole("button", { name: /Continue with atproto/i }).click();
 
     await page.locator("input[name=password]").waitFor({ state: "visible" });
-    assert.equal(await page.locator("input[name=username]").inputValue(), "browser-owner.test");
+    assert.equal(await page.locator("input[name=identifier]").inputValue(), "browser-owner.test");
     const rememberAccount = page.getByLabel("Remember this account on this device");
     if (await rememberAccount.isVisible().catch(() => false)) await rememberAccount.check();
     await page.locator("input[name=password]").fill(password);
@@ -118,7 +118,7 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
 
     await page.waitForURL(appUrl.origin, { timeout: 30_000 });
     await page.getByText("No workspaces yet").waitFor({ state: "visible" });
-    for (const expected of ["space:new.flock.channel?", "new.flock.channel.message", "lxm=new.flock.operator.getChanges", "lxm=new.flock.operator.listInboxWriters", "lxm=new.flock.operator.execute", "lxm=new.flock.operator.createWorkspace", "lxm=new.flock.operator.startAuthorityFlow", "lxm=new.flock.operator.listStalledOperations", "space:new.flock.dm.conversation"]) {
+    for (const expected of ["space:new.flock.channel?", "new.flock.channel.message", "lxm=new.flock.operator.getChanges", "lxm=new.flock.operator.listInboxWriters", "lxm=new.flock.operator.execute", "lxm=new.flock.operator.createWorkspace", "lxm=new.flock.operator.startAuthorityFlow", "lxm=new.flock.operator.listStalledOperations", "lxm=new.flock.operator.getDmNotifyTarget", "space:new.flock.dm.conversation"]) {
       assert.ok(browserScope.includes(expected), `the browser's grant includes ${expected}`);
     }
     await page.getByText("Create a shared workspace or accept an invitation.").waitFor({ state: "visible" });
@@ -325,7 +325,7 @@ async function signInIfPrompted(
   if (await rememberAccount.isVisible().catch(() => false) && !await rememberAccount.isChecked().catch(() => false)) {
     await rememberAccount.check();
   }
-  const usernameInput = page.locator("input[name=username]");
+  const usernameInput = page.locator("input[name=identifier]");
   if (await usernameInput.isVisible().catch(() => false) && !await usernameInput.inputValue()) await usernameInput.fill(handle);
   await passwordInput.fill(accountPassword);
   await page.getByRole("button", { name: "Sign in", exact: true }).click();

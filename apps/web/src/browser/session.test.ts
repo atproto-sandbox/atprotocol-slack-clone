@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
-import type { AtprotoDid } from "@atproto/oauth-client-browser";
+import type { AtprotoDid, OAuthSession } from "@atproto/oauth-client-browser";
 import { UpstreamResponseTooLargeError } from "@flock/protocol/bounded-json";
-import { SPACE_TYPE, type SpaceType } from "@flock/protocol/nsids";
+import { OPERATOR_METHOD, SPACE_TYPE, type SpaceType } from "@flock/protocol/nsids";
 import { spaceCollections } from "@flock/protocol/registry";
-import { memberGrantScopes } from "@flock/protocol/scopes";
-import { missingScopes, wellKnownHandleResolver } from "./session";
+import { legacyMemberGrantScopes, memberGrantScopes, operatorMethodsScope } from "@flock/protocol/scopes";
+import { assessSessionScopes, missingScopes, restoreSession, wellKnownHandleResolver, type BrowserSessionConfig } from "./session";
 
 const realFetch = globalThis.fetch;
 let responder: (url: string) => Response;
@@ -202,4 +202,116 @@ test("missingScopes refuses over-acceptance: missing collection, read for write,
     ),
     ["space:new.flock.app.inbox?authority=*&collection=new.flock.app.command&collection=new.flock.app.action&action=create&action=delete"],
   );
+});
+
+test("R12 D12.3b.1 (H5): restoreSession and assessSessionScopes admit legacy pre-R12 sessions lacking only getDmNotifyTarget while rejecting other missing RPC methods or wrong audience", async () => {
+  const accountDid = "did:plc:alice";
+  const serviceRef = "did:web:operator.example#atproto_flock_operator";
+  const fullRequired = memberGrantScopes(serviceRef);
+  const preR12Scopes = legacyMemberGrantScopes(serviceRef);
+
+  // Rewrite scopes as a real PDS issues them: expanded `space:` collections, resolved `authority=self`, and sorted `rpc?lxm=...`!
+  const rewriteAsPds = (tokens: readonly string[]) =>
+    tokens.map((token) => {
+      if (token.startsWith("space:")) {
+        const [head, query = ""] = token.split("?");
+        const spaceType = head!.slice("space:".length) as SpaceType;
+        const params = new URLSearchParams(query);
+        if (params.get("authority") === "self") params.set("authority", accountDid);
+        if (params.getAll("collection").length === 0) {
+          for (const collection of spaceCollections(spaceType)) params.append("collection", collection);
+        }
+        return `${head}?${params.toString()}`;
+      }
+      if (token.startsWith("rpc?")) {
+        const params = new URLSearchParams(token.slice("rpc?".length));
+        const sortedLxms = [...params.getAll("lxm")].sort();
+        const aud = params.get("aud")!;
+        const next = new URLSearchParams();
+        for (const lxm of sortedLxms) next.append("lxm", lxm);
+        next.set("aud", aud);
+        return `rpc?${next.toString()}`;
+      }
+      return token;
+    });
+
+  const config: BrowserSessionConfig = {
+    appUrl: "https://app.example",
+    plcUrl: "https://plc.example",
+    scope: fullRequired.join(" "),
+    serviceRef,
+    operatorUrl: "https://operator.example",
+    loopback: false,
+  };
+
+  class FakeOAuthSession {
+    constructor(private readonly grantedScope: string) {}
+    get did(): string {
+      return accountDid;
+    }
+    get sub(): string {
+      return accountDid;
+    }
+    async getTokenInfo(): Promise<{ scope: string }> {
+      return { scope: this.grantedScope };
+    }
+  }
+
+  const fakeSession = (grantedScope: string) => new FakeOAuthSession(grantedScope) as unknown as OAuthSession;
+
+  // 1. Current R12 session (PDS-rewritten with sorted lxm order): admitted with needsNotifyScopeUpgrade === false!
+  const r12Granted = rewriteAsPds(fullRequired).join(" ");
+  assert.deepEqual(assessSessionScopes(r12Granted, config.scope, accountDid), {
+    missing: [],
+    needsNotifyScopeUpgrade: false,
+  });
+  assert.deepEqual(missingScopes(r12Granted, config.scope, accountDid, { strict: true }), []);
+  const restoredR12 = await restoreSession(config, async () => fakeSession(r12Granted));
+  assert.ok(restoredR12);
+  assert.equal(restoredR12.did, accountDid, "prototype getter preserved");
+  assert.equal(restoredR12.needsNotifyScopeUpgrade, false);
+
+  // 2. Legacy pre-R12 session lacking ONLY new.flock.operator.getDmNotifyTarget (both raw and PDS-rewritten):
+  //    admitted in restoreSession with needsNotifyScopeUpgrade === true instead of logging the user out!
+  for (const legacyGranted of [preR12Scopes.join(" "), rewriteAsPds(preR12Scopes).join(" ")]) {
+    assert.deepEqual(assessSessionScopes(legacyGranted, config.scope, accountDid), {
+      missing: [],
+      needsNotifyScopeUpgrade: true,
+    });
+    assert.deepEqual(missingScopes(legacyGranted, config.scope, accountDid), []);
+    assert.deepEqual(
+      missingScopes(legacyGranted, config.scope, accountDid, { strict: true }),
+      fullRequired.filter((t) => t.startsWith("rpc?")),
+    );
+    const restoredLegacy = await restoreSession(config, async () => fakeSession(legacyGranted));
+    assert.ok(restoredLegacy, "pre-R12 session MUST be admitted instead of returning null");
+    assert.equal(restoredLegacy.did, accountDid, "OAuthSession prototype getter preserved");
+    assert.equal(restoredLegacy.needsNotifyScopeUpgrade, true);
+  }
+
+  // 3. Session lacking another operator method (e.g. getChanges or execute) OR wrong operator audience MUST be rejected (null)!
+  const missingExecute = fullRequired
+    .map((token) =>
+      token.startsWith("rpc?")
+        ? operatorMethodsScope(
+            [OPERATOR_METHOD.getChanges, OPERATOR_METHOD.getDmNotifyTarget],
+            serviceRef,
+          )
+        : token)
+    .join(" ");
+  assert.equal(await restoreSession(config, async () => fakeSession(missingExecute)), null);
+
+  const wrongAudience = fullRequired
+    .map((token) =>
+      token.startsWith("rpc?")
+        ? token.replace("operator.example", "other-operator.example")
+        : token)
+    .join(" ");
+  assert.equal(await restoreSession(config, async () => fakeSession(wrongAudience)), null);
+
+  // 4. Positional single-method `rpc:<lxm>?aud=...` and wildcard `rpc:*?aud=...` forms work cleanly.
+  const singleRequired = operatorMethodsScope([OPERATOR_METHOD.getChanges], serviceRef);
+  const positionalGranted = `rpc:${OPERATOR_METHOD.getChanges}?aud=${encodeURIComponent(serviceRef)}`;
+  assert.deepEqual(missingScopes(positionalGranted, singleRequired, accountDid, { strict: true }), []);
+  assert.deepEqual(missingScopes(`rpc:*?aud=${encodeURIComponent(serviceRef)}`, config.scope.split(" ").find((t) => t.startsWith("rpc?"))!, accountDid, { strict: true }), []);
 });

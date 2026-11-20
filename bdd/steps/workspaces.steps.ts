@@ -47,9 +47,9 @@ const workspaceSkey = (world: AppWorld): string => world.workspaceUri.split("/")
 
 /** The workspace spaces an account's own PDS lists, whatever the app says about them. */
 async function workspaceSpacesOn(world: AppWorld, as: Actor): Promise<string[]> {
-  const listed = await world.pdsGet<{ spaces: Array<{ uri: string }> }>(as, "com.atproto.space.listSpaces", { spaceType: "new.flock.workspace", limit: "100" });
+  const listed = await world.pdsGet<{ spaces: Array<{ space: string }> }>(as, "com.atproto.space.listSpaces", { spaceType: "new.flock.workspace", limit: "100" });
   assert.equal(listed.status, 200, JSON.stringify(listed.body));
-  return listed.body.spaces.map((space) => space.uri);
+  return listed.body.spaces.map((entry) => entry.space);
 }
 
 // --- Creating the first workspace -------------------------------------------------------------------
@@ -148,11 +148,11 @@ Then("the DID has write-only access to the admin inbox", async function (this: A
 });
 
 Then("the DID has read and write access to each public channel", async function (this: AppWorld) {
-  const spaces = await this.pdsGet<{ spaces: Array<{ uri: string }> }>(owner(this), "com.atproto.space.listSpaces", { spaceType: "new.flock.channel", limit: "100" });
+  const spaces = await this.pdsGet<{ spaces: Array<{ space: string }> }>(owner(this), "com.atproto.space.listSpaces", { spaceType: "new.flock.channel", limit: "100" });
   assert.equal(spaces.body.spaces.length, 2, "the workspace has exactly two public channels");
-  for (const space of spaces.body.spaces) {
-    const member = (await membersOf(this, owner(this), space.uri)).find((entry) => entry.did === actorNamed(this, "invitee").did);
-    assert.deepEqual(member && { read: member.read, write: member.write }, { read: true, write: true }, space.uri);
+  for (const entry of spaces.body.spaces) {
+    const member = (await membersOf(this, owner(this), entry.space)).find((candidate) => candidate.did === actorNamed(this, "invitee").did);
+    assert.deepEqual(member && { read: member.read, write: member.write }, { read: true, write: true }, entry.space);
   }
 });
 
@@ -243,7 +243,7 @@ Then("the workspace does not appear in that account's dashboard", async function
   const stranger = actorNamed(this, "stranger");
   const page = stranger.page;
   const listing = await eventually(() => workspaceListings(stranger).at(-1), { what: "the app to list this account's workspaces" });
-  assert.deepEqual((JSON.parse(listing.responseBody) as { spaces: Array<{ uri: string }> }).spaces.map((entry) => entry.uri), [], "the account's own PDS lists no workspace to the app");
+  assert.deepEqual((JSON.parse(listing.responseBody) as { spaces: Array<{ space: string }> }).spaces.map((entry) => entry.space), [], "the account's own PDS lists no workspace to the app");
   assert.equal(await page.getByRole("heading", { name: this.workspaceName, exact: true }).count(), 0);
   assert.equal(await page.locator(".sidebar").getByRole("button", { name: new RegExp(escapeRegExp(this.workspaceName)) }).count(), 0);
 });
@@ -252,8 +252,8 @@ Then("the DID is still absent from the member list and left no acceptance marker
   const stranger = actorNamed(this, "stranger");
   const members = await membersOf(this, owner(this), this.workspaceUri);
   assert.equal(members.some((entry) => entry.did === stranger.did), false);
-  const spaces = await this.pdsGet<{ spaces: Array<{ uri: string }> }>(stranger, "com.atproto.space.listSpaces", { spaceType: "new.flock.workspace", limit: "100" });
-  assert.equal(spaces.body.spaces.some((space) => space.uri === this.workspaceUri), false, "no acceptance marker was written for a non-member");
+  const spaces = await this.pdsGet<{ spaces: Array<{ space: string }> }>(stranger, "com.atproto.space.listSpaces", { spaceType: "new.flock.workspace", limit: "100" });
+  assert.equal(spaces.body.spaces.some((entry) => entry.space === this.workspaceUri), false, "no acceptance marker was written for a non-member");
 });
 
 Given("an invitee has been added to the workspace member list", async function (this: AppWorld) {
@@ -269,8 +269,8 @@ When("the invitee joins the workspace from its invite link", async function (thi
 });
 
 Then("the workspace appears in that account's spaces index", async function (this: AppWorld) {
-  const spaces = await this.pdsGet<{ spaces: Array<{ uri: string }> }>(actorNamed(this, "invitee"), "com.atproto.space.listSpaces", { spaceType: "new.flock.workspace", limit: "100" });
-  assert.ok(spaces.body.spaces.some((space) => space.uri === this.workspaceUri), "the acceptance marker makes the workspace discoverable from the invitee's own PDS");
+  const spaces = await this.pdsGet<{ spaces: Array<{ space: string }> }>(actorNamed(this, "invitee"), "com.atproto.space.listSpaces", { spaceType: "new.flock.workspace", limit: "100" });
+  assert.ok(spaces.body.spaces.some((entry) => entry.space === this.workspaceUri), "the acceptance marker makes the workspace discoverable from the invitee's own PDS");
 });
 
 Then("a second app reads the same directory and workspace roster", async function (this: AppWorld) {
@@ -397,8 +397,8 @@ Given("a user has an active authority-authored admin record", async function (th
 });
 
 When("that user calls a member-management operation without the authority session", async function (this: AppWorld) {
-  const result = await this.pdsPost(actorNamed(this, "member"), "com.atproto.memberspace.putMember", {
-    space: this.workspaceUri, did: actorNamed(this, "outsider").did, read: true, write: true,
+  const result = await this.pdsPost(actorNamed(this, "member"), "com.atproto.memberspace.putMembers", {
+    space: this.workspaceUri, members: [{ did: actorNamed(this, "outsider").did, read: true, write: true }],
   });
   this.scratch.set("managementAttempt", result);
 });
@@ -406,7 +406,7 @@ When("that user calls a member-management operation without the authority sessio
 Then("the PDS rejects the operation", async function (this: AppWorld) {
   const attempt = this.scratch.get("managementAttempt") as { status: number; body: { error?: string } };
   assert.ok(attempt.status >= 400, `expected a rejection, got ${attempt.status}`);
-  assert.equal(attempt.body.error, "NotSpaceOwner", "rejected because the caller is not the space owner, whatever admin records say");
+  assert.equal(attempt.body.error, "NotAuthorized", "rejected because the caller is not the space owner, whatever admin records say");
   const members = await membersOf(this, owner(this), this.workspaceUri);
   assert.equal(members.some((entry) => entry.did === actorNamed(this, "outsider").did), false, "the rejected operation changed nothing");
 });

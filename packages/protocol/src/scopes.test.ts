@@ -1,13 +1,24 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { appGrantScopes, DM_BROWSER_SCOPES, memberGrantScopes, OPERATOR_METHODS, operatorMethodsScope, workspaceAuthorityScopes } from "./scopes";
+import { OPERATOR_METHOD } from "./nsids";
+import { appGrantScopes, DM_BROWSER_SCOPES, LEGACY_OPERATOR_METHODS, legacyMemberGrantScopes, memberGrantScopes, OPERATOR_METHODS, operatorMethodsScope, workspaceAuthorityScopes } from "./scopes";
 
 const serviceRef = "did:web:slack.example#atproto_flock_operator";
 
 test("the operator scope lists exactly the published operator methods", () => {
   assert.equal(operatorMethodsScope(OPERATOR_METHODS, serviceRef), "rpc?lxm=new.flock.operator.execute&lxm=new.flock.operator.getOperation&lxm=new.flock.operator.listInboxWriters"
     + "&lxm=new.flock.operator.getChanges&lxm=new.flock.operator.createWorkspace&lxm=new.flock.operator.startAuthorityFlow"
-    + "&lxm=new.flock.operator.listStalledOperations&aud=did:web:slack.example%23atproto_flock_operator");
+    + "&lxm=new.flock.operator.listStalledOperations&lxm=new.flock.operator.getDmNotifyTarget&aud=did:web:slack.example%23atproto_flock_operator");
+});
+
+test("legacyMemberGrantScopes matches memberGrantScopes except omitting optional getDmNotifyTarget", () => {
+  assert.equal((LEGACY_OPERATOR_METHODS as readonly string[]).includes(OPERATOR_METHOD.getDmNotifyTarget), false);
+  assert.deepEqual([...LEGACY_OPERATOR_METHODS, OPERATOR_METHOD.getDmNotifyTarget], OPERATOR_METHODS);
+  const current = memberGrantScopes(serviceRef);
+  const legacy = legacyMemberGrantScopes(serviceRef);
+  assert.deepEqual(legacy.slice(0, -1), current.slice(0, -1));
+  assert.equal(legacy.at(-1), operatorMethodsScope(LEGACY_OPERATOR_METHODS, serviceRef));
+  assert.equal(legacy.at(-1)!.includes(OPERATOR_METHOD.getDmNotifyTarget), false);
 });
 
 test("operator RPC scopes preserve percent-encoded DID web ports", () => {

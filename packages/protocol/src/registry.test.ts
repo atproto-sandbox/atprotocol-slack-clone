@@ -206,10 +206,15 @@ test("every space lexicon lists exactly the collections registered for its space
   const { fileURLToPath } = await import("node:url");
   const root = fileURLToPath(new URL("../lexicons/new/flock", import.meta.url));
   const files = (readdirSync(root, { recursive: true }) as string[]).filter((file) => file.endsWith(".json"));
-  const docs = files.map((file) => JSON.parse(readFileSync(join(root, file), "utf8")) as { id: string; defs: { main?: { type?: string; collections?: string[] } } });
-  const spaceDocs = new Map(docs.filter((doc) => doc.defs.main?.type === "space").map((doc) => [doc.id, doc.defs.main!.collections ?? []]));
+  const docs = files.map((file) => JSON.parse(readFileSync(join(root, file), "utf8")) as { id: string; defs: { main?: { type?: string; title?: string; name?: string; collections?: string[] } } });
+  const spaceMains = docs.filter((doc) => doc.defs.main?.type === "space");
+  const spaceDocs = new Map(spaceMains.map((doc) => [doc.id, doc.defs.main!.collections ?? []]));
 
   assert.deepEqual([...spaceDocs.keys()].sort(), Object.values(SPACE_TYPE).sort(), "every space type has a space lexicon");
+  for (const doc of spaceMains) {
+    assert.equal(typeof doc.defs.main?.title, "string", `${doc.id} declares title`);
+    assert.equal(doc.defs.main?.name, undefined, `${doc.id} no longer declares deprecated name`);
+  }
   for (const spaceType of Object.values(SPACE_TYPE)) {
     assert.deepEqual([...(spaceDocs.get(spaceType) ?? [])].sort(), [...spaceCollections(spaceType)].sort(), spaceType);
   }

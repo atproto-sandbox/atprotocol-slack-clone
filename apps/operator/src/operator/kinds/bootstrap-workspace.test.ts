@@ -39,7 +39,7 @@ function sessionWith(createSpace: (type: SpaceType, skey: string) => Response): 
   } as unknown as OAuthSession;
 }
 
-const created = (type: SpaceType, skey: string) => Response.json({ uri: `at://${OWNER}/space/${type}/${skey}` });
+const created = (type: SpaceType, skey: string) => Response.json({ space: `at://${OWNER}/space/${type}/${skey}` });
 test("a bootstrap replayed into a workspace whose key its name does not derive fails instead of building there", async () => {
   // #given a journaled bootstrap for "Delta" being run against some other workspace key
   const actor: OperatorActor = {

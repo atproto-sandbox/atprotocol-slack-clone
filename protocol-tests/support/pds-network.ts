@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
+import { createServer as createHttpServer } from "node:http";
+import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -85,7 +87,8 @@ export function pinnedCheckout(): string {
  */
 export async function startPdsNetwork(label: string, options: { appPort?: number; operatorPort?: number } = {}): Promise<PdsNetwork> {
   const appPort = options.appPort ?? 3000;
-  const operatorPort = options.operatorPort ?? 3001;
+  const useInProcessOperator = options.operatorPort === undefined;
+  const operatorPort = options.operatorPort ?? await getSharedInProcessOperatorPort();
   const serviceRef = `did:web:localhost%3A${operatorPort}#atproto_flock_operator`;
   const { TestNetworkNoAppView } = await import(pathToFileURL(join(pinnedCheckout(), "packages/dev-env/src/index.ts")).href) as {
     TestNetworkNoAppView: { create(options: { extraPdses: number; lexiconAuthority: boolean }): Promise<TestNetwork> };
@@ -98,6 +101,7 @@ export async function startPdsNetwork(label: string, options: { appPort?: number
     fixtureTemp.cleanup();
     throw error;
   }
+  const envPlcUrl = useInProcessOperator ? await sharedPlcProxy(network.plc.url) : network.plc.url;
   const databaseDirectory = mkdtempSync(join(tmpdir(), `${label}-db-`));
   const databasePath = join(databaseDirectory, "app.db");
   const restoreEnvironment = setEnvironment({
@@ -107,7 +111,7 @@ export async function startPdsNetwork(label: string, options: { appPort?: number
     OPERATOR_URL: `http://127.0.0.1:${operatorPort}`,
     AUTH_ENCRYPTION_KEY: "4a".repeat(32),
     OPERATOR_SERVICE_REF: serviceRef,
-    PLC_URL: network.plc.url,
+    PLC_URL: envPlcUrl,
     DATABASE_PATH: databasePath,
   });
   const hosts = [network.pds, network.extraPdses[0]!] as const;
@@ -122,6 +126,7 @@ export async function startPdsNetwork(label: string, options: { appPort?: number
     }
   };
   try {
+    if (useInProcessOperator) await inProcessOperator();
     await publishAppLexicons(network, process.cwd());
   } catch (error) {
     await release();
@@ -335,23 +340,91 @@ export async function combinedMemberScopes(serviceRef: string): Promise<string[]
   return (await import("@flock/protocol/scopes")).memberGrantScopes(serviceRef).filter((scope) => scope !== "atproto");
 }
 
+let sharedInProcessOperatorPort: Promise<number> | undefined;
+let activePlcOrigin: string | undefined;
+let plcForwarderOrigin: Promise<string> | undefined;
 let operatorServed: Promise<string> | undefined;
 
-/**
- * The operator's app served in this process on a free port, so a test reaches its methods as a browser does (lexicon checks,
- * routing and error answers included) with the database and keys this process's environment names. Started once, after the
- * network has set that environment; it does not keep the process alive.
- */
-export function inProcessOperator(): Promise<string> {
-  operatorServed ??= (async () => {
-    const { createOperatorApp } = await import("@flock/operator/operator/server");
-    const server = createOperatorApp().listen(0, "127.0.0.1");
+async function freeLoopbackPort(): Promise<number> {
+  const probe = createNetServer();
+  await new Promise<void>((resolvePort, rejectPort) => {
+    probe.once("error", rejectPort);
+    probe.listen(0, "127.0.0.1", resolvePort);
+  });
+  const address = probe.address();
+  assert.ok(address && typeof address === "object");
+  const port = address.port;
+  await new Promise<void>((resolveClose, rejectClose) => probe.close((err) => err ? rejectClose(err) : resolveClose()));
+  return port;
+}
+
+function getSharedInProcessOperatorPort(): Promise<number> {
+  sharedInProcessOperatorPort ??= freeLoopbackPort();
+  return sharedInProcessOperatorPort;
+}
+
+function sharedPlcProxy(targetOrigin: string): Promise<string> {
+  activePlcOrigin = targetOrigin;
+  plcForwarderOrigin ??= (async () => {
+    const server = createHttpServer(async (req, res) => {
+      try {
+        const target = new URL(req.url ?? "/", activePlcOrigin!);
+        const chunks: Buffer[] = [];
+        for await (const chunk of req) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        const body = chunks.length > 0 ? Buffer.concat(chunks) : undefined;
+        const headers = new Headers();
+        for (const [name, value] of Object.entries(req.headers)) {
+          if (name.toLowerCase() === "host" || value === undefined) continue;
+          headers.set(name, Array.isArray(value) ? value.join(", ") : value);
+        }
+        const upstream = await fetch(target, {
+          method: req.method,
+          headers,
+          ...(body && req.method !== "GET" && req.method !== "HEAD" ? { body } : {}),
+        });
+        const outHeaders: Record<string, string> = {};
+        upstream.headers.forEach((value, name) => { outHeaders[name] = value; });
+        res.writeHead(upstream.status, outHeaders);
+        res.end(Buffer.from(await upstream.arrayBuffer()));
+      } catch (error) {
+        res.writeHead(502, { "content-type": "text/plain" }).end(String(error));
+      }
+    });
+    server.listen(0, "127.0.0.1");
     await once(server, "listening");
     server.unref();
     const address = server.address();
     assert.ok(address && typeof address === "object");
     return `http://127.0.0.1:${address.port}`;
   })();
+  return plcForwarderOrigin;
+}
+
+/**
+ * The operator's app served in this process on the configured `OPERATOR_URL` port (when set, else an ephemeral loopback port),
+ * so both browser-shaped XRPC calls and PDS synchronous `confirmRegistration` / `notifySpaceUpdate` webhooks reach it in-process.
+ * Started once, after the network has set that environment; fails fast if `OPERATOR_URL`'s port is already in use rather than
+ * silently binding another port, and does not keep the process alive.
+ */
+export function inProcessOperator(): Promise<string> {
+  operatorServed ??= (async () => {
+    const { createOperatorApp } = await import("@flock/operator/operator/server");
+    const app = createOperatorApp();
+    const preferredPort = process.env.OPERATOR_URL ? Number(new URL(process.env.OPERATOR_URL).port) : 0;
+    const listenPort = preferredPort > 0 ? preferredPort : 0;
+    const server = createHttpServer(app);
+    await new Promise<void>((resolveListen, rejectListen) => {
+      server.once("error", rejectListen);
+      server.listen(listenPort, "127.0.0.1", () => resolveListen());
+    });
+    server.unref();
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    return `http://127.0.0.1:${address.port}`;
+  })().catch((error) => {
+    operatorServed = undefined;
+    throw error;
+  });
   return operatorServed;
 }
 

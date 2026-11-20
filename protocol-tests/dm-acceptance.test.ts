@@ -196,7 +196,7 @@ test("DM acceptance: 1:1, group, dropped-notification recovery, all with the ser
     assert.deepEqual(groupPage.halves, { [carol.did]: "ok", [dave.did]: "ok", [erin.did]: "ok" });
     await assertDmParity(carol, groupPage, group.convKey, group.participants);
 
-    // --- Dormant allowlist members (nobody mode): real putMember(read:false,write:false) ---
+    // --- Dormant allowlist members (nobody mode): real putMembers(read:false,write:false) ---
     const heidi = await createActor(network.pds, "heidi", "test");
     const ivan = await createActor(network.extraPdses[0], "ivan", "test2");
     const heidiDm = dmFor(heidi);
@@ -207,11 +207,11 @@ test("DM acceptance: 1:1, group, dropped-notification recovery, all with the ser
 
     await heidiDm.setRequestMode("nobody");
     assert.deepEqual((await heidiDm.getInbox()).allowlist, [ivan.did],
-      "the real PDS accepts putMember(read:false,write:false) and still lists ivan as dormant, not removed");
+      "the real PDS accepts putMembers(read:false,write:false) and still lists ivan as dormant, not removed");
 
     const dormantAttempt = await ivanDm.startConversation([heidi.did]);
     assert.equal(dormantAttempt.delivery[heidi.did]?.status, "delivered", "the write itself succeeds even while dormant (M0 §6g)");
-    assert.deepEqual(await heidiDm.listRequests(), [], "a dormant member's new request is not tracked in listRepos");
+    assert.deepEqual(await heidiDm.listRequests(), [], "a dormant member's new request is not tracked in listWriters");
 
     await heidiDm.setRequestMode("allowlist");
     // Switching ivan off evicted him from the writer set and switching him back on does not list him again, but he is an active
@@ -219,6 +219,37 @@ test("DM acceptance: 1:1, group, dropped-notification recovery, all with the ser
     const nowVisible = await heidiDm.listRequests();
     assert.equal(nowVisible.length, 1, "ivan's request made while dormant is read once he is allowed again");
     assert.equal(nowVisible[0]!.convKey, dormantAttempt.convKey);
+
+    // --- D12.8.2 (H6): nobody -> everyone reactivates dormant allowlist members so their next request is tracked ---
+    // Upstream `space-policy/manager.ts` excludes explicit members with `write: false` even under `publicWrite: true`.
+    // Switching from `"nobody"` (where allowlist members are dormant `{ read: false, write: false }`) to `"everyone"`
+    // must reactivate those allowlist entries to `{ read: false, write: true }` so a new request from a previously
+    // dormant contact is tracked by the real PDS in `listWriters` and delivered through `listRequests()`.
+    const judy = await createActor(network.pds, "judy", "test");
+    const karl = await createActor(network.extraPdses[0], "karl", "test2");
+    const judyDm = dmFor(judy);
+    const karlDm = dmFor(karl);
+
+    await judyDm.enableDms("allowlist", [karl.did]);
+    await judyDm.setRequestMode("nobody");
+    assert.deepEqual((await judyDm.getInbox()).allowlist, [karl.did], "karl is held as a dormant allowlist entry in nobody mode");
+
+    await judyDm.setRequestMode("everyone");
+    const karlStarted = await karlDm.startConversation([judy.did]);
+    assert.equal(karlStarted.delivery[judy.did]?.status, "delivered");
+
+    let judyRequests = await judyDm.listRequests();
+    for (let attempt = 0; attempt < 30 && !judyRequests.some((req) => req.convKey === karlStarted.convKey); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      judyRequests = await judyDm.listRequests();
+    }
+    assert.equal(judyRequests.length, 1, "switching nobody -> everyone reactivates dormant karl so his new request arrives");
+    assert.equal(judyRequests[0]!.convKey, karlStarted.convKey);
+    await judyDm.accept(judyRequests[0]!);
+    await karlDm.send(karlStarted.convKey, "hello after nobody -> everyone");
+    const judyMerged = await judyDm.readConversation(karlStarted.convKey, karlStarted.participants);
+    assert.equal(judyMerged.messages[0]?.text, "hello after nobody -> everyone");
+    await assertDmParity(judy, judyMerged, karlStarted.convKey, karlStarted.participants);
 
     // --- Dropped notification, recovered by renotifyPending ---
     const frank = await createActor(network.pds, "frank", "test");

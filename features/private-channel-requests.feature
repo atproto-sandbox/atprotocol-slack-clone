@@ -12,15 +12,15 @@ Feature: Private channel requests
       But the requester cannot obtain an inbox read credential
       And an ordinary member cannot read the request repo
 
-    Scenario: A missed app notification is found by listRepos
+    Scenario: A missed app notification is found by listWriters
       Given a request write reached the authority PDS writer set
       And the app notification was dropped
       When the admin inbox performs its next 60 second reconciliation
-      Then it finds the request writer through listRepos
+      Then it finds the request writer through listWriters
 
     Scenario: A dropped PDS-to-authority notification is recovered
       Given a request write reached the requester's PDS
-      And the PDS-to-authority notifyWrite was dropped
+      And the PDS-to-authority notifyRepoUpdate was dropped
       When the admin inbox performs its next 60 second reconciliation
       Then the operator returns the current inbox write-member DID
       And the admin reads that repo with their inbox credential

@@ -146,7 +146,7 @@ export async function createChannelAs(actor: Actor, name: string, options: { vis
   await sidebarChannel(actor, name).waitFor({ state: "visible", timeout: 60_000 });
 }
 
-const SPACE_CREDENTIAL = "/xrpc/com.atproto.space.getSpaceCredential";
+const SPACE_CREDENTIAL = "/xrpc/com.atproto.space.authorizeSpaceSync";
 
 /** The space a recorded credential request asked for. */
 function credentialSpace(call: ApiCall): string | undefined {

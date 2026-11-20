@@ -16,7 +16,7 @@
         { "type": "permission", "resource": "space", "spaceType": "new.flock.ext.tasks", "authority": "*", "action": ["read"] },
         { "type": "permission", "resource": "space", "spaceType": "new.flock.ext.tasks", "authority": "*", "collection": ["new.flock.ext.tasks.project", "new.flock.ext.tasks.projectEdit", "new.flock.ext.tasks.task", "new.flock.ext.tasks.taskEdit", "new.flock.ext.tasks.comment"], "action": ["create", "update", "delete"] },
         { "type": "permission", "resource": "space", "spaceType": "new.flock.app.inbox", "authority": "*", "collection": ["new.flock.app.command", "new.flock.app.action"], "action": ["create", "delete"] },
-        { "type": "permission", "resource": "rpc", "inheritAud": true, "lxm": ["new.flock.operator.execute", "new.flock.operator.getOperation", "new.flock.operator.listInboxWriters", "new.flock.operator.getChanges", "new.flock.operator.createWorkspace", "new.flock.operator.startAuthorityFlow", "new.flock.operator.listStalledOperations"] }
+        { "type": "permission", "resource": "rpc", "inheritAud": true, "lxm": ["new.flock.operator.execute", "new.flock.operator.getOperation", "new.flock.operator.listInboxWriters", "new.flock.operator.getChanges", "new.flock.operator.createWorkspace", "new.flock.operator.startAuthorityFlow", "new.flock.operator.listStalledOperations", "new.flock.operator.getDmNotifyTarget"] }
       ]
     }
   }

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { DmClient, type DmDeps, type DmStore } from "./dm-client";
 import { FakeNetwork } from "@flock/testing/fake-network";
-import { applyAllowlistEdit, coMemberDids, conversationVisible, describeSkippedSenders, halfChip, parseParticipantInput, retainAfterRefresh, runDmCycle, sharesAnyWorkspace } from "./ui-logic";
+import { applyAllowlistEdit, coMemberDids, conversationVisible, createDmConversationWatch, describeSkippedSenders, halfChip, parseParticipantInput, retainAfterRefresh, runDmCycle, sharesAnyWorkspace } from "./ui-logic";
 
 function createStore(): DmStore {
   const map = new Map<string, string>();
@@ -207,4 +207,75 @@ test("a participant's half shows a note only for a state that is known, and noth
   assert.equal(halfChip("missing"), "hasn't replied or removed your access");
   assert.equal(halfChip("deleted"), "left");
   assert.equal(halfChip("revoked"), "revoked your access");
+});
+
+test("createDmConversationWatch retries client.watch and live.watch after transient initial failures, deduplicates steady-state refreshes, and cleans up on stop", async () => {
+  const watchCalls: Array<{ spaces: string[]; aborted: boolean }> = [];
+  const liveCalls: string[][] = [];
+  let unwatchCount = 0;
+  let failWatch = true;
+  let failLive = true;
+
+  const watcher = createDmConversationWatch({
+    did: "did:plc:alice",
+    convKey: "3kabcdefghij2",
+    serviceRef: "did:web:operator.test#atproto_flock_operator",
+    client: {
+      watch: async (spaces, opts) => {
+        const entry = { spaces: [...spaces], aborted: false };
+        if (typeof opts === "object" && opts?.signal) {
+          opts.signal.addEventListener("abort", () => {
+            entry.aborted = true;
+          }, { once: true });
+        }
+        watchCalls.push(entry);
+        if (failWatch) throw new Error("transient PDS 502");
+        return {};
+      },
+    },
+    live: {
+      watch: async (_key, spaces) => {
+        liveCalls.push([...spaces]);
+        if (failLive) throw new Error("transient operator 502");
+        return () => {
+          unwatchCount += 1;
+        };
+      },
+    },
+    onChanged: async () => {},
+  });
+
+  const halves = { "did:plc:alice": "ok", "did:plc:bob": "missing" } as const;
+
+  // Cycle 1: both client.watch and live.watch fail transiently -> neither leg caches success!
+  await watcher.sync(halves);
+  assert.equal(watchCalls.length, 1);
+  assert.equal(liveCalls.length, 1);
+
+  // Cycle 2: PDS recovers (client.watch succeeds), operator still offline -> client.watch commits, live.watch fails
+  failWatch = false;
+  await watcher.sync(halves);
+  assert.equal(watchCalls.length, 2, "retried client.watch after initial failure");
+  assert.equal(liveCalls.length, 2, "retried live.watch after initial failure");
+
+  // Cycle 3: operator recovers -> client.watch is NOT redundantly re-run, while live.watch retries and succeeds!
+  failLive = false;
+  await watcher.sync(halves);
+  assert.equal(watchCalls.length, 2, "did not re-run already-succeeded client.watch for identical space set");
+  assert.equal(liveCalls.length, 3, "retried live.watch until it succeeded");
+
+  // Cycle 4: steady-state 60s refresh with identical halves is a no-op
+  await watcher.sync(halves);
+  assert.equal(watchCalls.length, 2);
+  assert.equal(liveCalls.length, 3);
+
+  // Cycle 5: Bob replies (`status === "ok"`) -> aborts previous watch signal, unsubscribes previous live watcher, and subscribes both halves!
+  await watcher.sync({ "did:plc:alice": "ok", "did:plc:bob": "ok" });
+  assert.equal(watchCalls.length, 3);
+  assert.equal(watchCalls[1]!.aborted, true, "aborted previous watch controller when space set expanded");
+  assert.equal(unwatchCount, 1, "cleaned up previous live subscription when space set expanded");
+
+  watcher.stop();
+  assert.equal(watchCalls[2]!.aborted, true, "stop() aborts active watch controller");
+  assert.equal(unwatchCount, 2, "stop() unsubscribes active live watcher");
 });

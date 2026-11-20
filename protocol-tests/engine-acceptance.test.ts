@@ -80,12 +80,12 @@ async function settled(pds: PdsNetwork, reader: NetworkActor, space: string, wri
   const authorityDid = space.slice("at://".length).split("/")[0]!;
   const authority = credential.client(await transport.resolvePds(authorityDid));
   for (let attempt = 0; attempt < 200; attempt += 1) {
-    const listed = await authority.query<{ repos: Array<{ did: string; repoRev: string }> }>("com.atproto.space.listRepos", { space, limit: 1000 });
+    const listed = await authority.query<{ repos: Array<{ $type?: string; repo: string; repoRev?: string }> }>("com.atproto.space.listWriters", { space, limit: 1000 });
     let current = true;
     for (const writer of writers) {
       const host = credential.client(await transport.resolvePds(writer.did));
       const rev = await host.query<{ commit: { rev: string } }>("com.atproto.space.getLatestCommit", { space, repo: writer.did }).then((commit) => commit.commit.rev, () => null);
-      const reported = listed.repos.find((repo) => repo.did === writer.did)?.repoRev ?? null;
+      const reported = listed.repos.find((entry) => entry.$type === "com.atproto.space.defs#repoWrite" && entry.repo === writer.did)?.repoRev ?? null;
       if (rev !== null && reported !== null && reported < rev) current = false;
     }
     if (current) return;

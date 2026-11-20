@@ -1,0 +1,43 @@
+{
+  "lexicon": 1,
+  "id": "new.flock.operator.getDmNotifyTarget",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Issue a stateless per-caller PDS webhook notification target for a DM space after verifying the caller holds a valid space credential and key possession proof for that space.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["space", "credential", "proof"],
+          "properties": {
+            "space": { "type": "string", "format": "space-ref" },
+            "credential": { "type": "string", "maxLength": 8192 },
+            "proof": { "type": "ref", "ref": "#credentialProof" }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["endpoint", "token"],
+          "properties": {
+            "endpoint": { "type": "string", "format": "uri" },
+            "token": { "type": "string", "maxLength": 512 }
+          }
+        }
+      },
+      "errors": [{ "name": "Unauthorized" }, { "name": "InvalidRequest" }]
+    },
+    "credentialProof": {
+      "type": "object",
+      "required": ["authorization", "signatureInput", "signature"],
+      "properties": {
+        "authorization": { "type": "string", "maxLength": 16384 },
+        "signatureInput": { "type": "string", "maxLength": 2048 },
+        "signature": { "type": "string", "maxLength": 2048 }
+      }
+    }
+  }
+}

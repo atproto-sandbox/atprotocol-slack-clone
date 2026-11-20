@@ -5,6 +5,7 @@ import type { DmRequestMode } from "@flock/client/dm/dm-client";
 import { applyAllowlistEdit, coMemberDids, parseParticipantInput, participantLabel, type UiWorkspace } from "@flock/client/dm/ui-logic";
 import { messageOf } from "./client-api";
 import { useDmContext } from "./dm-context";
+import { useBrowserSessionContext } from "./session-context";
 
 const MODES: Array<{ value: DmRequestMode; label: string }> = [
   { value: "everyone", label: "Everyone" },
@@ -13,7 +14,8 @@ const MODES: Array<{ value: DmRequestMode; label: string }> = [
 ];
 
 export function DmSettings() {
-  const { did, client, inbox, workspaces, labels, refresh } = useDmContext();
+  const { did, client, inbox, workspaces, labels, needsNotifyScopeUpgrade, refresh } = useDmContext();
+  const { connect } = useBrowserSessionContext();
   const [modeOverride, setModeOverride] = useState<DmRequestMode | null>(null);
   const [addEntry, setAddEntry] = useState("");
   const [localError, setLocalError] = useState("");
@@ -77,6 +79,13 @@ export function DmSettings() {
       <div className="section-heading">
         <div><span className="eyebrow"><span className="eyebrow-line" /> DIRECT MESSAGE</span><h2>Request settings</h2></div>
       </div>
+      {needsNotifyScopeUpgrade && (
+        <div className="starter-card">
+          <h3>Live direct-message updates</h3>
+          <p className="status-note">Your current session checks direct messages automatically by polling. Reconnect once to grant the optional live push-notification permission.</p>
+          <button className="text-button" disabled={busy} onClick={connect}>Reconnect to enable live push →</button>
+        </div>
+      )}
       <div className="starter-card">
         <h3>Who can start a conversation with you</h3>
         <p>This setting is stored on your PDS, not in any app, so every client you sign into sees the same policy.</p>

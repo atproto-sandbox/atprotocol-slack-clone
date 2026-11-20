@@ -42,6 +42,14 @@ export const resolveKemKey = cacheKemKeys(async (did, forceRefresh) => {
   return kemKeyFromDidDocument(did, document);
 }, { ttlMs: DID_DOCUMENT_TTL_MS, maxEntries: MAX_CACHED_KEM_KEYS });
 
+/**
+ * The account's `#atproto` signing did:key, cached for ten minutes and bypassed on `forceRefresh` after key rotation.
+ */
+export const resolveSigningKey = cacheKemKeys(
+  (did, forceRefresh) => getIdResolver().did.resolveAtprotoKey(did, forceRefresh),
+  { ttlMs: DID_DOCUMENT_TTL_MS, maxEntries: MAX_CACHED_KEM_KEYS },
+);
+
 export async function assertSafePdsEndpoint(endpoint: string): Promise<void> {
   await assertSafeEndpoint(endpoint, loopbackDevelopment);
 }

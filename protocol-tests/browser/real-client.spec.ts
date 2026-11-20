@@ -66,9 +66,18 @@ test("the app's own browser client reaches the PDS hosts and the operator's own 
       "DID documents come from the PLC directory": member.seen.some((entry) => entry.url.origin === new URL(pds.plcUrl).origin && entry.status === 200),
       "a channel credential is minted at the authority's host": credentialAnswers(member, fixture.channel).some((entry) => entry.status === 200),
       "the workspace credential is minted again on refresh": credentialAnswers(member, fixture.workspace).filter((entry) => entry.status === 200).length >= 2,
-      "a getRecord after the renewal carries a MAC the page can read": member.seen.slice(renewedAt).some((entry) => entry.url.pathname.endsWith("/com.atproto.space.getRecord")
-        && entry.status === 200 && /atproto-space-mac/i.test(entry.headers["access-control-expose-headers"] ?? "") && Boolean(entry.headers["atproto-space-mac"])),
-      "the authority lists the channel's writers": member.seen.some((entry) => entry.url.pathname.endsWith("/com.atproto.space.listRepos") && entry.status === 200),
+      "a getRecord after the renewal carries a MAC the page can read": member.seen.slice(renewedAt).some((entry) => {
+        if (!entry.url.pathname.endsWith("/com.atproto.space.getRecord") || entry.status !== 200) return false;
+        const exposed = (entry.headers["access-control-expose-headers"] ?? "").split(",").map((token) => token.trim().toLowerCase());
+        return exposed.includes("atproto-space-record")
+          && exposed.includes("signature-input")
+          && exposed.includes("signature")
+          && Boolean(entry.headers["atproto-space-record"])
+          && Boolean(entry.headers["signature-input"])
+          && Boolean(entry.headers["signature"])
+          && /accept-signature/i.test(entry.headers.vary ?? "");
+      }),
+      "the authority lists the channel's writers": member.seen.some((entry) => entry.url.pathname.endsWith("/com.atproto.space.listWriters") && entry.status === 200),
       "the operator, at its own origin, is called with a service token": member.seen.some((entry) => entry.url.origin === operatorOrigin
         && entry.url.pathname === "/xrpc/new.flock.operator.getChanges" && entry.status === 200 && /^Bearer /.test(entry.requestHeaders.authorization ?? "")),
       "the page writes to its own host with its DPoP-bound session": member.seen.some((entry) => entry.url.origin === memberHost && entry.method === "POST"
@@ -186,7 +195,7 @@ async function signInFrom(browser: Browser, appUrl: string, operatorOrigin: stri
     if (request.resourceType() !== "fetch" && request.resourceType() !== "xhr") return;
     const url = new URL(response.url());
     // A refused credential exchange is read for its error code; nothing else needs a body.
-    const body = url.pathname === "/xrpc/com.atproto.space.getSpaceCredential" && response.status() !== 200 ? response.text() : Promise.resolve(undefined);
+    const body = url.pathname === "/xrpc/com.atproto.space.authorizeSpaceSync" && response.status() !== 200 ? response.text() : Promise.resolve(undefined);
     void Promise.all([response.allHeaders(), request.allHeaders(), body]).then(([headers, requestHeaders, text]) => {
       side.seen.push({ method: request.method(), url, status: response.status(), requestBody: request.postData() ?? "", headers, requestHeaders, body: text });
     }, (error: unknown) => side.failures.push(`unrecorded response ${url.href} (${String(error)})`));
@@ -197,7 +206,7 @@ async function signInFrom(browser: Browser, appUrl: string, operatorOrigin: stri
 
 /** The page's credential exchanges for one space, as the authority's host answered them. */
 function credentialAnswers(side: Side, space: string): Seen[] {
-  return side.seen.filter((entry) => entry.url.pathname === "/xrpc/com.atproto.space.getSpaceCredential" && spaceOf(entry.requestBody) === space);
+  return side.seen.filter((entry) => entry.url.pathname === "/xrpc/com.atproto.space.authorizeSpaceSync" && spaceOf(entry.requestBody) === space);
 }
 
 /** The PDS answers every credential refusal as HTTP 400 with an error code. */

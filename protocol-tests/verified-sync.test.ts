@@ -139,7 +139,7 @@ test("verified sync engine, workspace snapshot, listRepoOps, warm reopen, RepoNo
       assert.equal(snapshot.rosterMembers.has(did), true, `roster contains ${did}`);
     }
 
-    // 2. Cold verified space sync uses STAR for Alice/Bob and accepts unwritten Carol (RepoNotFound + valid PDS + omitted from listRepos).
+    // 2. Cold verified space sync uses STAR for Alice/Bob and accepts unwritten Carol (RepoNotFound + valid PDS + omitted from listWriters).
     const { result: coldSync, byMethod: coldCalls } = await coldHarness.count(() =>
       coldCore.syncVerifiedSpace({
         space: created.channel,
@@ -155,7 +155,7 @@ test("verified sync engine, workspace snapshot, listRepoOps, warm reopen, RepoNo
     assert.equal(coldCalls["com.atproto.space.getRecord"], undefined);
 
     // 3. Warm reopen on a fresh SyncCore over the same persisted SyncStore within truthIntervalMs:
-    // exact 2 listRepos calls (pinned listRepos pagination), 0 writer calls!
+    // exact 1 listWriters call, 0 writer calls!
     const warmHarness = trackedTransport(pds, reader);
     const warmCore = new SyncCore({
       transport: warmHarness.transport,
@@ -172,7 +172,7 @@ test("verified sync engine, workspace snapshot, listRepoOps, warm reopen, RepoNo
     );
     assert.equal(warmSync.complete, true);
     assert.equal(warmSync.records.length, 3);
-    assert.equal(warmCalls["com.atproto.space.listRepos"], 2);
+    assert.equal(warmCalls["com.atproto.space.listWriters"], 1);
     assert.equal(warmCalls["com.atproto.space.getRepo"], undefined);
     assert.equal(warmCalls["com.atproto.space.listRepoOps"], undefined);
     assert.equal(warmCalls["com.atproto.space.listRecords"], undefined);

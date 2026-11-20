@@ -423,3 +423,239 @@ test("the authority grant scope asks for authority records only, never message c
   assert.ok(scope.split(" ").includes("atproto"));
   assert.ok(!scope.includes("channel.message") && !scope.includes("channel.reaction") && !scope.includes("new.flock.dm"));
 });
+
+test("authorityOAuthFetch strips WWW-Authenticate invalid_token on 401 AccountTakedown/AccountDeactivated so OAuthSession preserves the stored grant", async () => {
+  for (const code of ["AccountTakedown", "AccountDeactivated"]) {
+    const res = await grant.authorityOAuthFetch(
+      "https://pds.example/xrpc/com.atproto.space.getSpace",
+      undefined,
+      async () =>
+        new Response(JSON.stringify({ error: code, message: "Suspended" }), {
+          status: 401,
+          headers: {
+            "content-type": "application/json",
+            "www-authenticate": 'DPoP error="invalid_token", error_description="Account suspended"',
+          },
+        }),
+    );
+    assert.equal(res.status, 401);
+    assert.equal(res.headers.get("www-authenticate"), null, `${code} must not trigger OAuthSession invalid_token deletion`);
+    assert.deepEqual(await res.json(), { error: code, message: "Suspended" });
+  }
+
+  // Genuine InvalidToken keeps WWW-Authenticate so OAuthSession refreshes or triggers reauthorization
+  const genuine = await grant.authorityOAuthFetch(
+    "https://pds.example/xrpc/com.atproto.space.getSpace",
+    undefined,
+    async () =>
+      new Response(JSON.stringify({ error: "InvalidToken", message: "Token expired" }), {
+        status: 401,
+        headers: {
+          "content-type": "application/json",
+          "www-authenticate": 'DPoP error="invalid_token"',
+        },
+      }),
+  );
+  assert.equal(genuine.headers.get("www-authenticate"), 'DPoP error="invalid_token"');
+});
+
+test("quarantined sessionStore + out-of-band probe preserve authority_grant across expired-token refresh during AccountDeactivated/AccountTakedown/5xx, recover after deactivation, and require reapproval only once active refresh is still invalid_grant", async () => {
+  const [{ JoseKey }, { operatorHttpFailure }, { AUTHORIZE_SUSP_BACKOFF, resetBreaker }] = await Promise.all([
+    import("@atproto/jwk-jose"),
+    import("./errors"),
+    import("./authority-suspension").then((m) => ({
+      AUTHORIZE_SUSP_BACKOFF: m.AUTHORITY_SUSPENDED_BACKOFF_MS,
+      resetBreaker: m.resetAuthoritySuspensionForTests,
+    })),
+  ]);
+  resetBreaker();
+
+  const pdsOrigin = "https://pds.quarantine.test";
+  const did = "did:web:pds.quarantine.test";
+  const dpopKey = await JoseKey.generate(["ES256"], "dpop-quarantine-1");
+  const dpopJwk = dpopKey.privateJwk!;
+  assert.ok(dpopJwk, "generated private DPoP JWK");
+
+  const expiredSession: NodeSavedSession = {
+    dpopJwk,
+    authMethod: { method: "none" },
+    tokenSet: {
+      iss: pdsOrigin,
+      sub: did,
+      aud: pdsOrigin,
+      scope: grant.authorityGrantScope() as NodeSavedSession["tokenSet"]["scope"],
+      access_token: "expired-access-token-1",
+      refresh_token: "refresh-token-1",
+      token_type: "DPoP",
+      expires_at: new Date(Date.now() - 120_000).toISOString(),
+    },
+  };
+  await grant.persistAuthorityGrant(did, expiredSession);
+  const initialCiphertext = (getRawDb().prepare("SELECT value FROM authority_grant WHERE key = ?").get(did) as { value: string }).value;
+
+  const clock = { now: Date.now() };
+  let tokenMode: "invalid_grant" | "ok" = "invalid_grant";
+  let probeMode: "deactivated" | "takendown" | "list_spaces_takendown" | "transient_503" | "active" = "deactivated";
+  let oauthTokenCalls = 0;
+  let probeCalls = 0;
+
+  const mockFetch = async (input: RequestInfo | URL): Promise<Response> => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    if (url.pathname === "/.well-known/did.json") {
+      return Response.json({
+        "@context": ["https://www.w3.org/ns/did/v1"],
+        id: did,
+        service: [{ id: "#atproto_pds", type: "AtprotoPersonalDataServer", serviceEndpoint: pdsOrigin }],
+      });
+    }
+    if (url.pathname === "/.well-known/oauth-protected-resource") {
+      return Response.json({
+        resource: pdsOrigin,
+        authorization_servers: [pdsOrigin],
+      });
+    }
+    if (url.pathname === "/.well-known/oauth-authorization-server") {
+      return Response.json({
+        issuer: pdsOrigin,
+        authorization_endpoint: `${pdsOrigin}/oauth/authorize`,
+        token_endpoint: `${pdsOrigin}/oauth/token`,
+        revocation_endpoint: `${pdsOrigin}/oauth/revoke`,
+        response_types_supported: ["code"],
+        grant_types_supported: ["authorization_code", "refresh_token"],
+        code_challenge_methods_supported: ["S256"],
+        token_endpoint_auth_methods_supported: ["none"],
+        dpop_signing_alg_values_supported: ["ES256"],
+        scopes_supported: ["atproto"],
+        client_id_metadata_document_supported: true,
+      });
+    }
+    if (url.pathname === "/oauth/token") {
+      oauthTokenCalls += 1;
+      if (tokenMode === "invalid_grant") {
+        return Response.json(
+          { error: "invalid_grant", error_description: "Token was revoked or account unavailable" },
+          { status: 400 },
+        );
+      }
+      return Response.json({
+        access_token: "refreshed-access-token-2",
+        refresh_token: "refresh-token-2",
+        token_type: "DPoP",
+        sub: did,
+        scope: grant.authorityGrantScope() as NodeSavedSession["tokenSet"]["scope"],
+        expires_in: 3600,
+      });
+    }
+    if (url.pathname === "/xrpc/com.atproto.sync.getRepoStatus") {
+      probeCalls += 1;
+      if (probeMode === "deactivated") {
+        return Response.json({ did, active: false, status: "deactivated" });
+      }
+      if (probeMode === "takendown") {
+        return Response.json({ did, active: false, status: "takendown" });
+      }
+      if (probeMode === "list_spaces_takendown") {
+        return Response.json({ error: "MethodNotImplemented", message: "Not implemented" }, { status: 501 });
+      }
+      if (probeMode === "transient_503") {
+        return Response.json({ error: "ServiceUnavailable", message: "PDS restarting" }, { status: 503 });
+      }
+      return Response.json({ did, active: true, rev: "3kabcdefghij2" });
+    }
+    if (url.pathname === "/xrpc/com.atproto.space.listSpaces") {
+      probeCalls += 1;
+      if (probeMode === "list_spaces_takendown") {
+        return Response.json({ error: "RepoTakendown", message: "Repo taken down" }, { status: 400 });
+      }
+      return Response.json({ spaces: [] });
+    }
+    throw new Error(`Unexpected fetch URL: ${url.toString()}`);
+  };
+
+  const restoreDeps = {
+    resolvePds: async () => pdsOrigin,
+    fetchEndpoint: mockFetch,
+    now: () => clock.now,
+  };
+
+  // 1. Expired access token during AccountDeactivated: NodeOAuthClient calls del(), which quarantines in memory ONLY;
+  //    probe classifies AccountDeactivated -> 503 UpstreamUnavailable, and canonical authority_grant row stays intact!
+  let caughtErr: unknown;
+  await assert.rejects(
+    async () => {
+      try {
+        await grant.restoreAuthorityGrant(did, restoreDeps);
+      } catch (err) {
+        caughtErr = err;
+        throw err;
+      }
+    },
+  );
+  assert.deepEqual(operatorHttpFailure(caughtErr)?.status, 503);
+  assert.deepEqual(operatorHttpFailure(caughtErr)?.name, "UpstreamUnavailable");
+  assert.equal(grant.hasAuthorityGrant(did), true, "canonical authority_grant row MUST stay in SQLite during AccountDeactivated");
+  assert.equal(
+    (getRawDb().prepare("SELECT value FROM authority_grant WHERE key = ?").get(did) as { value: string }).value,
+    initialCiphertext,
+  );
+  assert.equal(oauthTokenCalls, 1);
+  assert.equal(probeCalls, 1);
+
+  // Within the 15s authority circuit-breaker window, repeated calls make ZERO /oauth/token or probe requests!
+  await assert.rejects(grant.restoreAuthorityGrant(did, restoreDeps));
+  assert.equal(oauthTokenCalls, 1, "breaker blocks repeated /oauth/token calls within 15s");
+  assert.equal(probeCalls, 1, "breaker blocks repeated probe calls within 15s");
+
+  // 2. AccountDeactivated recovers once reactivated: refreshed tokens persist to SQLite via same-approval CAS!
+  clock.now += AUTHORIZE_SUSP_BACKOFF;
+  tokenMode = "ok";
+  probeMode = "active";
+  const recovered = await grant.restoreAuthorityGrant(did, restoreDeps);
+  assert.equal(recovered.did, did);
+  assert.equal((await storedGrant(did))?.tokenSet.access_token, "refreshed-access-token-2");
+
+  // Expire the stored access token again to test AccountTakedown, listSpaces fallback, and transient 503 probe
+  await grant.persistAuthorityGrant(did, {
+    ...expiredSession,
+    tokenSet: { ...expiredSession.tokenSet, access_token: "expired-after-recovery", refresh_token: "refresh-token-2" },
+  });
+  tokenMode = "invalid_grant";
+
+  for (const mode of ["takendown", "list_spaces_takendown", "transient_503"] as const) {
+    resetBreaker();
+    probeMode = mode;
+    let errForMode: unknown;
+    await assert.rejects(async () => {
+      try {
+        await grant.restoreAuthorityGrant(did, restoreDeps);
+      } catch (err) {
+        errForMode = err;
+        throw err;
+      }
+    });
+    assert.equal(operatorHttpFailure(errForMode)?.status, 503, `${mode} maps to 503 UpstreamUnavailable`);
+    assert.equal(operatorHttpFailure(errForMode)?.name, "UpstreamUnavailable");
+    assert.equal(grant.hasAuthorityGrant(did), true, `canonical authority_grant preserved across ${mode}`);
+  }
+
+  // 3. Moderation lifts takedown (account active === true), but server-side refresh token was destroyed at takedown time:
+  //    surfaces AuthorityReauthorizationRequiredError (502 AuthoritySessionUnavailable), STILL without auto-deleting the row!
+  resetBreaker();
+  probeMode = "active";
+  let postTakedownErr: unknown;
+  await assert.rejects(async () => {
+    try {
+      await grant.restoreAuthorityGrant(did, restoreDeps);
+    } catch (err) {
+      postTakedownErr = err;
+      throw err;
+    }
+  }, grant.AuthorityReauthorizationRequiredError);
+  assert.equal(operatorHttpFailure(postTakedownErr)?.status, 502);
+  assert.equal(operatorHttpFailure(postTakedownErr)?.name, "AuthoritySessionUnavailable");
+  assert.equal(grant.hasAuthorityGrant(did), true, "row remains in SQLite until explicit revokeAuthorityGrant or new approval");
+
+  // Explicit revokeAuthorityGrant deletes canonical storage
+  await grant.revokeAuthorityGrant(did).catch(() => undefined);
+  assert.equal(grant.hasAuthorityGrant(did), false);
+});

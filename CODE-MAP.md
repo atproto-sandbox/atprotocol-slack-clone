@@ -21,25 +21,26 @@ A Slack-style team workspace built directly on atproto (AT Protocol) permissione
   │  service tokens)                    │ token│ reconciles PDS membership;       │   │  only here, per participant) │
   │ DmClient: @flock/client/dm          │      │ the authority flow, did:web.     │   └──────────────────────────────┘
   │  (isomorphic; also runs in Node)    │ mint │ SQLite: authority grants,        │                 ▲
-  │                                     │ cred.│ journal, audit, notices. NO      │  register notify│ mint space credential,
-  │ Independent readers: @flock/reader  │──────┼▶ member session or record, NEVER │─────────────────┘ read/write records directly
-  │  (channels, DMs; proof of no        │ feed │ a DM table or DM content.        │
+  │                                     │ cred.│ journal, audit, notices (0 DM    │ authorizeSpaceSync (inline notify),
+  │ Independent readers: @flock/reader  │──────┼▶ rows; ephemeral dm-feed-wakes). │─────────────────┘ read/write records directly
+  │  (channels, DMs; proof of no        │ feed │ No member session or record.     │
   │  lock-in)                           │◀─────┼─ getChanges: cursors only        │
   └─────────────────────────────────────┘      └──────────────────────────────────┘
 ```
 
-Three independent-app proofs exist side by side: `packages/reader/src/independent.ts` (channels/workspaces), `packages/reader/src/independent-dm.ts` (DMs), and `packages/reader/src/independent-tasks.ts` (Tasks extension via STAR/oplog verification + pure `entity-merge`). All three talk only to PDSes through the published lexicons and space-credential protocol — never to this app's database — and the reader package depends only on `@flock/protocol` and `@atproto/{space,lex-data,lexicon}`, so it cannot quietly depend on `@flock/client`.
+Three independent-app proofs exist side by side: `packages/reader/src/independent.ts` (channels/workspaces), `packages/reader/src/independent-dm.ts` (DMs), and `packages/reader/src/independent-tasks.ts` (Tasks extension via STAR/oplog verification + pure `entity-merge`). All three talk only to PDSes through the published lexicons and space-credential protocol — never to this app's database — and the reader package depends only on `@flock/protocol` and `@atproto/{space,star,lex-data,lexicon}`, so it cannot quietly depend on `@flock/client`.
 
 ## DM data flow (read)
 
 ```
  browser DM session (per-user OAuth, DM scopes only)
         │
-        │ 1. mintSpaceCredentialWith(deps, half-uri)  — deps = { memberClient, resolvePds, fetchEndpoint, generateKey }
+        │ 1. mintSpaceCredentialWith(deps, half-uri, { notify? })
+        │    (watch optionally fetches stateless dm1 target via getDmNotifyTarget; falls back without notify)
         ▼
- getDelegationToken @ caller's own PDS  ──token──▶  getSpaceCredential @ half owner's PDS
+ getDelegationToken @ caller's own PDS  ──token──▶  authorizeSpaceSync @ half owner's PDS
         │
-        │ 2. key-bound space credential (10 min default, 1 h max)
+        │ 2. key-bound space credential (10 min default, 1 h max) + optional spaceRev
         ▼
  for each participant's conversation half (fan-out 8, packages/protocol/src/map-limited.ts):
    - read header, validate convKey + participant set match (validateDmHeaderMatchesRequest)
@@ -70,13 +71,16 @@ to its `package.json`, so the dependency lists are the boundaries.
 packages/                 Libraries. protocol and client run in a browser: they typecheck with no Node types
                            (`pnpm typecheck`) and may not import Node built-ins (lint).
   protocol/  @flock/protocol    Pure, isomorphic protocol logic; depends on no other workspace package.
-    lexicons/                Source lexicon JSON (new.flock.*, new.flock.dm.*), the published set; imported as
-                              `@flock/protocol/lexicons/<path>.json`.
+    lexicons/                Source lexicon JSON: `new.flock.*` (7 space schemas using `"title"`, operator methods
+                              including `getDmNotifyTarget`, `permissions/{member,workspaceAuthority}.json`) and synced
+                              `com.atproto.{space,memberspace,managedspace,personalspace}.*` from `../atproto-spaces-r12`;
+                              imported as `@flock/protocol/lexicons/<path>.json`.
     src/keys.ts              The one owner of URI and key syntax: parseSpaceUri / parseWorkspaceUri / parseChannelUri /
                               extSpaceSkey / extSpaceUri / tasksSpaceUri / parseExtSpaceUri / parseTasksSpaceUri /
                               requireSpaceAuthority, isDid / isSkey / isTid, canonical record keys, TID generation,
                               canonicalParticipants. No other module hand-writes an at:// regex.
-    src/nsids.ts             The one owner of NSIDs: NAMESPACE, SPACE_TYPE, COLLECTION, REPO_COLLECTION, OPERATOR_METHOD.
+    src/nsids.ts             The one owner of NSIDs: NAMESPACE, SPACE_TYPE, COLLECTION, REPO_COLLECTION, OPERATOR_METHOD
+                              (including `getDmNotifyTarget`), NOTICE_METHOD (`confirmRegistration`, `notifySpaceUpdate`).
                               No other source module spells an NSID (registry.test.ts enforces it).
     src/extensions.ts        Typed declarative first-party extension catalog (`EXTENSIONS`, `getExtension`, `isExtensionId`,
                               `extSpaceUriFor`), starting with `"tasks"` (`SPACE_TYPE.tasks`).
@@ -91,39 +95,48 @@ packages/                 Libraries. protocol and client run in a browser: they 
                               MAX_RECORD_BYTES bounds what a reader keeps.
     src/scopes.ts            Scope builders for member, authority and operator sessions, derived from the registry,
                               DM_BROWSER_SCOPES (asserted disjoint from every server scope), memberGrantScopes: the
-                              browser's one grant (member set including `SPACE_TYPE.tasks`, operator rpc, DM set), and
-                              appGrantScopes: an app's own grant (its declaration, channel reads and writes, getChanges only).
+                              browser's one grant (member set including `SPACE_TYPE.tasks`, operator rpc including
+                              `getDmNotifyTarget`, DM set), `LEGACY_OPERATOR_METHODS` / `legacyMemberGrantScopes` for
+                              pre-R12 browser session compatibility, and appGrantScopes: an app's own grant (its
+                              declaration, channel reads and writes, getChanges only).
     src/workspace-summary.ts What a workspace is, summarized from its authority's records (including `ext.install`), and
                               the v1 `WORKSPACE_ENVELOPE` check (including `extensions`, `taskProjects`, `tasks`,
                               `maxAncestorRefs`, `maxCommentsPerTask`, and STAR/oplog bounds); used by engine & operator.
     src/bounded-json.ts, src/map-limited.ts
                              Bounded JSON parsing of upstream answers; fixed fan-out concurrency.
-    src/lexicons/api/        Generated lexicon types (do not hand-edit; `pnpm codegen:lex`).
+    src/lexicons/api/        Generated lexicon types (do not hand-edit; `ATPROTO_PIN_CHECKOUT=../atproto-spaces-r12 pnpm codegen:lex`).
     src/atproto/             Protocol clients shared by the engine, the readers and the operator.
       xrpc.ts                  Minimal XRPC client (query/procedure) over an injected fetch handler.
       space-key.ts             SpaceKey (WebCrypto P-256 did:key) that binds one credential. Signing, KEM and MAC formats
                                 belong to @atproto/space (isomorphic).
       space-policy.ts          The one owner of the memberspace policy object the app sends and reads.
-      kem-key.ts               `#atproto_kem` did:key from a DID document (server and browser share it).
-      repo-failure.ts          The one classifier for "this one writer's repo cannot be read" (deactivated, taken down,
-                                unauthenticated, oversized, host down): the sync, the admin inbox, DM reads, the
-                                independent readers and the operator set the writer aside instead of failing for
-                                everyone. describeRepoFailure is also what the operator logs about a failure it did not name.
-      space-credential-core.ts Isomorphic space-credential mint/exchange (SpaceCredential, SpaceCredentialError,
-                                mintSpaceCredentialWith) and the single owner of MAC requests and verification for getRecord,
-                                getLatestCommit, listRepoOps (strict short-page/unwritten gating), and binary streaming
-                                `fetchVerifiedRepoStar` (mid-stream byte/record bounds + EOF `verifyRepoStar` before emit),
-                                plus `verifyRecordCid`; isAccessLost / isCredentialRefused / credentialLifetimeMs.
-      record-pages.ts          Bounded listRepos/listRecords/listMembers/listSpaces paging with cursor/duplicate/limit
-                                assertions (including optional `collection`, `excludeValues`, composite `${collection}/${rkey}`
-                                dedup); the one listBoundedSpaces and listAllSpaceUris (workspace discovery).
+      kem-key.ts               `#atproto_kem` did:key from a DID document and `SpaceKemError` (`isUnverifiableRepo`).
+      repo-failure.ts          The one classifier for "this one writer's repo cannot be read" (`RepoDeactivated`,
+                                `RepoTakendown`, `SpaceKemError`/`SpaceMacError`/`SpaceRepoVerificationError`, `StarParseError`,
+                                oversized, host down): classifies `RepoTakendown`/`RepoDeactivated` on `authorizeSpaceSync`/
+                                `listWriters` or `repo === authorityDid` as transient authority suspension (`isAuthoritySuspendedError`)
+                                while keeping `repo !== authorityDid` takedowns permanent.
+      space-credential-core.ts Isomorphic space-credential mint/exchange via `authorizeSpaceSync` (`credentialKey`,
+                                `{ credential, spaceRev? }`, inline `notify`), `CREDENTIAL_REFUSALS` (`AccountNotAuthorized`;
+                                excluding `RegistrationNotConfirmed`, `RepoTakendown`, `RepoDeactivated`), RFC 9421
+                                `createSpaceSigHeaders` / `verifyCredentialSig` (`tag="atproto-space-credential"`), and the
+                                single owner of ephemeral HPKE MAC requests (`Accept-Signature`, `info: "atproto-mac"`) and
+                                throwing verification (`Atproto-Space-Commit`/`Atproto-Space-Record` + `Signature-Input` +
+                                `Signature`) for `getRecord`, `getLatestCommit`, every page of `listRepoOps`, and binary
+                                streaming `fetchVerifiedRepoStar` (`application/vnd.dasl.star`, `@atproto/star`, `writeRepoStar`,
+                                CID-less `starEntryBytes`, derived `LTHASH_STATE_BYTES`), plus `verifyRecordCid`.
+      record-pages.ts          Bounded `listWriters` (`listBoundedWriters` latest-entry-wins per `repo` across pages;
+                                `listWritersSince` `#repoWrite`/`#repoRemoved` with `spaceRev` and >72h full reconciliation
+                                fallback), `listRecords` (default `uri desc`, optional `collection`, `excludeValues`),
+                                `listMembers`, and `listSpaces` (`spaceDid`, `.space`) paging with cursor/duplicate/limit assertions.
       valid-channel-messages.ts
   client/  @flock/client        The engine and the DM engine (isomorphic; the SDK). Depends on protocol.
     src/transport.ts         ClientTransport: what the engine needs from its host (own client, DID resolution, fetch, keys).
-    src/credentials.ts       CredentialCache: one space credential per space; a refused mint drops the space (onAccessLost).
+    src/credentials.ts       CredentialCache: one space credential per space (`get(space, { notify })` re-mints when adding
+                              or changing `notify` and strips `notify` on `RegistrationNotConfirmed`); refused mint drops the space.
     src/identity.ts          withIdentityCache: a DID's host and KEM key held in the store (across sessions) for
                               DID_DOCUMENT_TTL_MS, six resolutions at once per origin in the process, each given up after
-                              ten seconds; a failed MAC forces a fresh key. The ten-minute bound has one owner,
+                              ten seconds; a failed MAC (`SpaceMacError`) forces a fresh key. The ten-minute bound has one owner,
                               packages/protocol/src/atproto/kem-key.ts.
     src/store.ts             SyncStore contract: records (with CID), per-writer state (coverage, syncedRev, 2048B `LtHash` `setHash`
                               via BLAKE3 XOF lane expansion, 32B SHA-256 `commitDigest`, generation), atomic `clock` reservation, per-DID
@@ -132,11 +145,12 @@ packages/                 Libraries. protocol and client run in a browser: they 
                              The two stores: memory (DM spaces, tests) and IndexedDB (one database per account; `VERSION = 2`
                               guarded upgrade adding `clock` and `activity` while preserving v1 records and `meta` epochs).
     src/merge.ts             The merge order (newest key, then URI) and the opaque (key, uri) page cursor.
-    src/sync.ts              SyncCore: channel/DM `"window"` sync (preserving exact `sync-budget` call counts), plus
-                              `syncVerifiedWorkspaceSnapshot`, `syncVerifiedSpace` (union writer universe, `D11.1 #4`
-                              `RepoNotFound` trust boundary, `listRepoOps` staged `prev`-chain + materialized `LtHash`
-                              verification, STAR primary + bounded `listRecords` fallback), and `followRepoOps` (host-ordered
-                              oplog tailing, reset dedup, deferred cursor commit on ack).
+    src/sync.ts              SyncCore: channel/DM `"window"` sync (preserving exact `sync-budget` call counts), `listWriters`
+                              (`#repoWrite`/`#repoRemoved` + 72h full fallback), non-destructive authority suspension
+                              (`authorizeSpaceSync`/`listWriters` and `repo === authorityDid`) vs permanent per-writer takedown,
+                              plus `syncVerifiedWorkspaceSnapshot`, `syncVerifiedSpace` (union writer universe, every-page
+                              `listRepoOps` commit+MAC + `RepoNotFound`, staged `prev`-chain + materialized `LtHash` verification,
+                              STAR primary + bounded `listRecords` fallback), and `followRepoOps`.
     src/write-queue.ts       Account-wide atomic HLC+TID `reserveStamp` (queue + optional Web Locks), cross-device `rkey`
                               collision retry (`createWithTidRetry`), and per-`(accountDid, entityUri)` editing lock.
     src/ext/tasks/           `tasks-client.ts`, `index.ts`: Tasks extension client (`TasksClient`), isolated `formChainId`/
@@ -148,7 +162,8 @@ packages/                 Libraries. protocol and client run in a browser: they 
     src/channel-client.ts, src/workspace-client.ts, src/app-inbox-client.ts, src/operator-client.ts
                              The member's operations, each rule of the route table owned here; engine.ts wires them.
                               `workspace-client.ts` includes extension install discovery & `rosterComplete` metadata;
-                              `operator-client.ts` includes `enableExtension` / `disableExtension` and reuses one long-poll token for getChanges.
+                              `operator-client.ts` includes `enableExtension` / `disableExtension`, `getDmNotifyTarget`, and
+                              reuses one long-poll token for getChanges.
     src/blocks.ts, src/key-window.ts
                              Typed block constructors, synchronous validateMessageInput over the registry, and the shared
                               writer-key window used as fallback when `engine.sync` is absent.
@@ -177,14 +192,17 @@ packages/                 Libraries. protocol and client run in a browser: they 
     src/dm/                  The DM feature (see below).
     src/testing/             Test fixtures over the fake network: engine-fixture.ts (channels and workspaces on it),
                               store-contract.ts (the SyncStore contract both stores pass).
-  reader/  @flock/reader        Independent second-app readers; depends on `@flock/protocol` and `@atproto/{space,lex-data,lexicon}`.
+  reader/  @flock/reader        Independent second-app readers; depends on `@flock/protocol` and `@atproto/{space,star,lex-data,lexicon}`.
     src/independent.ts       Channels/workspaces; takes injected transports (sessionCredentialDeps builds them from a
                               session), so it runs on the fake network too.
     src/independent-dm.ts    DMs (M6 independence proof).
     src/independent-tasks.ts Tasks extension (`readIndependentTasksSpace`, `readIndependentTasksWorkspaceSnapshot`):
-                              stateless cold STAR/MAC/CID verified read + pure `@flock/protocol/entity-merge` (R11f proof).
+                              stateless cold STAR/MAC/CID verified read (`@atproto/star`) + pure `@flock/protocol/entity-merge` (R11f proof).
   testing/  @flock/testing      The in-memory multi-host PDS network every engine, Tasks, and DM test runs on (fake-network.ts),
-                              including `listRepoOps`, STAR `getRepo`, `clearRecords`/`importRepo`, and fault injection hooks.
+                              mirroring `#5187` @ `6747610566`: `authorizeSpaceSync` + sync `confirmRegistration` + `notifySpaceUpdate`,
+                              `listWriters` (`#repoWrite`/`#repoRemoved`), batched `putMembers`/`removeMembers`, every-page `listRepoOps`
+                              commit+MAC + `RepoNotFound`, `application/vnd.dasl.star` `getRepo`, RFC 9421 MACs + CORS headers,
+                              `ACCESS_FULL` app-password refusal, `managedspace.checkAccess`, and fault injection hooks.
   net/  @flock/net              Node only: how a server process reaches a host someone else named (safe-fetch.ts): https to a
                               public address only (loopback in loopback development), the address checked is the one
                               connected to, no redirect, a minute's timeout. The operator and a Node app both use it.
@@ -222,24 +240,28 @@ apps/
                               use-admin-views.ts; selection.ts derives what is shown. apps-panel.tsx is the admins' view
                               of the workspace's apps; channel-view.tsx marks an installed app's messages "APP", renders
                               app blocks and dispatches slash commands and button clicks through interactions.ts.
-    src/browser/             The account's browser session (R6a, R6c): one OAuth grant through
+    src/browser/             The account's browser session (R6a, R6c, R12): one OAuth grant through
                               @atproto/oauth-client-browser (session.ts: one client and one init per page, signIn,
-                              signOut), sign-out (sign-out.ts: deletes the account's store and DM state and revokes the
-                              session), the client metadata builder, and useBrowserSession (identities resolve through @flock/client/did-documents).
+                              signOut, and pre-R12 session compatibility when `getDmNotifyTarget` is absent), sign-out
+                              (sign-out.ts: deletes the account's store and DM state and revokes the session), the client
+                              metadata builder, and useBrowserSession (identities resolve through @flock/client/did-documents).
                               The page's and callback's config has one owner: src/app/browser-session-config.ts.
     src/lib/within.ts        A bounded wait, used by sign-out.
-  operator/  @flock/operator    The workspace-authority operator: its own process at OPERATOR_URL.
+  operator/  @flock/operator    The workspace-authority operator: its own process at OPERATOR_URL (public HTTPS in production per L7).
     src/config.ts            What only the operator reads: its database path, its encryption key, the authority client's
                               signing keys (the shared URLs come from @flock/deployment).
     src/operator/server.ts, main.ts, methods.ts
-                             The process: xrpc-server with the app's lexicons, CORS for any origin on the methods, the authority flow,
-                              did:web; the methods as transport-free functions and describeFailure.
-    src/operator/authority-grant.ts
+                             The process: xrpc-server with the app's lexicons (`getDmNotifyTarget`, `getChanges`, admin
+                              methods, plus `auth: undefined` inbound `confirmRegistration` and `notifySpaceUpdate`), CORS for any
+                              origin on the methods, the authority flow, did:web; main.ts runs the 60s SQL-first renewal loop
+                              (`.unref()`, heartbeated DB lease) + 30-min discovery sweep; methods.ts holds transport-free handlers.
+    src/operator/authority-grant.ts, authority-suspension.ts
                              The one owner of the workspace authority grant: its own OAuth client (confidential
                               private_key_jwt outside loopback), the ticket -> /authority/start -> PDS consent ->
                               /authority/callback flow (started by the account itself, or by someone creating a workspace
-                              under it, R8), and the `authority_grant` table. Each restore is a client over a view of one
-                              approval, so a session still in use after a new approval can neither use nor delete it.
+                              under it, R8), and the `authority_grant` table over a quarantined `sessionStore` (`del` never
+                              deletes canonical storage; only `revokeAuthorityGrant` deletes it) + out-of-band account-status
+                              probe (`getRepoStatus`/`listSpaces`) and shared `authority-suspension.ts` `15s` circuit breaker.
     src/operator/creation-authorization.ts
                              The one owner of the approval to create a workspace under an account other than one's own: a
                               completed flow's single-use, 15-minute approval of one name for one person, consumed as the
@@ -248,10 +270,12 @@ apps/
                               on it) is creationAdmission in kinds/create-workspace.ts.
     src/operator/journal.ts  runJournaledOperation: the workspace lock, the operation row (an admission that verifies under
                               the lock, then admits in the insert transaction, and restores what let the row in), declared
-                              step names, resume by name and request hash, "waiting for the authority's approval", and
-                              the three-minute limit after which a run starts no further step; operationView.
+                              step names, resume by name and request hash, "waiting for the authority's approval", graceful
+                              `401 AccountTakedown`/`AccountDeactivated` suspension handling without revoking `authority_grant`,
+                              and the three-minute limit after which a run starts no further step; operationView.
     src/operator/kinds/      One file per operation kind; kinds/index.ts is the table every request and journal row
-                              dispatches through, and kinds/kinds.test.ts pins all 17 persisted kinds, fields and step names.
+                              dispatches through, and kinds/kinds.test.ts pins all 17 persisted kinds, fields and step names
+                              (preserving Flock's `kind = "removeMember"` while underlying PDS calls use batched `putMembers`/`removeMembers`).
                               A kind whose request takes away its submitter's own role says so (endsOwnRole):
                               authorizeSubmittedOperation in src/operator/security.ts lets that submitter send the
                               journaled operation again after current state refuses them.
@@ -267,18 +291,35 @@ apps/
                               operation that moves a list, reconcile included, takes its expected list from here.
     src/operator/operations.ts, actor.ts, security.ts
                              Request validation and execution; who an operation runs for; service-auth verification with
-                              each method's token lifetime and authorizeOperationActor.
-    src/operator/feed.ts, member-access.ts, members.ts, notices.ts, registrations.ts
-                             getChanges and who may follow a space (members.ts is the only way the operator changes a member
-                              list, lint-enforced); the capped notice table; the notice registrations and their sweep.
+                              each method's token lifetime, `authorizeOperationActor`, and `getDmNotifyTarget` cryptographic
+                              `SpaceCredential` + RFC 9421 `verifyCredentialSig` PoP (mandatory signed `created` + canonical
+                              `pop:<hmac>` SQLite TTL replay lock) + epoch-bounded `dm1` HMAC.
+    src/operator/dm-feed-wakes.ts
+                             Caller-scoped `(callerDid, space)` ephemeral DM wake ring/cursor + `120/60s` rate limit, shared
+                              across local operator processes via an HMAC-authenticated `0o600` Unix domain socket hub and
+                              merged into `feed.ts` with restart `reset` — guaranteeing zero DM rows in any SQLite table.
+    src/operator/feed.ts, member-access.ts, members.ts, notices.ts, registrations.ts, space-notification.ts
+                             getChanges and who may follow a space (`member-access.ts` checks `authority-suspension.ts` so
+                              200-space polls stop after 1 suspended request; `members.ts` is the only way the operator changes
+                              a member list via batched `putMembers`/`removeMembers` `<= 100`, lint-enforced); `notices.ts` and
+                              `space-notification.ts` handle constant-time token-authenticated `confirmRegistration` and
+                              `notifySpaceUpdate` (epoch-bounded `dm1` `[epoch, epoch - 1]`, `#repoWrite`, `#repoRemoved`,
+                              `#registrationExpired` returning `400` on `dm1` tokens to trigger `abandonSyncerNotice`, and
+                              `#spaceDeleted` confirmed via authority `authorizeSpaceSync`); `registrations.ts` owns cross-process
+                              `BEGIN IMMEDIATE` 1-token-per-space claim + `(token, generation)` archive CAS, `spaceRev` gap
+                              catch-up, `15s -> 2m` bulk suspension backoff, 60s SQL-first renewal, and 30m discovery sweep.
     src/operator/workspace-state.ts, workspace-envelope.ts, stalled.ts, testing/fake-authority-pds.ts
     src/auth/                OAuth plumbing for the authority grant: the flow binding (oauth-flow.ts), the encrypted SQLite
                               stores (encrypted-store.ts, with a view that sees only the values it accepts), the
                               cross-process refresh lock, scope canonicalization.
     src/atproto/             Server-side atproto: identity.ts (DID→PDS resolution, every host reached through @flock/net), space-credential.ts (a
-                              server adapter over the core), space-ops.ts, write-notification.ts, client.ts.
+                              server adapter over the core exposing `spaceRev` and `notify`), space-ops.ts (`putMembers`/`removeMembers`,
+                              `.space`, `spaceDid`, `removeWriter`), write-notification.ts, client.ts.
     src/lib/db.ts, dm-subscription.ts
-                             The SQLite database and its migrations; DM change-notice subscriptions.
+                             The SQLite database and its migrations (`notification_registration.{token, renew_at, last_space_rev, generation}`,
+                              legacy `token = ''` reset to `expires_at = 0, renew_at = 0`, startup cleanup of historical pre-R12
+                              `new.flock.dm.*` notice rows, zero DM rows across all tables);
+                              `authorizeDmSubscription` gating DM inbox `getChanges` follows to the inbox owner.
     scripts/                 reconcile-workspaces.ts (`pnpm reconcile`), authority-grant.ts (`pnpm authority`).
 
 bdd/, features/           Executable Gherkin (below), including `features/{url-routing,tasks}.feature` and
@@ -294,8 +335,11 @@ scripts/                  codegen-lex.mjs, backup-db.mjs, playground.ts, render-
 
 ### `packages/client/src/dm` in detail
 
-- `dm-client.ts` — `DmClient`: the isomorphic DM engine (inbox/policy, discovery, start/accept,
-  messages/reactions, `readConversation`'s k-way merge, leave/delete, re-notify). Constructed
+- `dm-client.ts` — `DmClient`: the isomorphic DM engine (inbox/policy via batched `putMembers`/`removeMembers`,
+  `setRequestMode("everyone")` reactivating dormant allowlist members to `{ read: false, write: true }`, discovery,
+  start/accept, messages/reactions, `readConversation`'s k-way merge, `watch` with `getDmNotifyTarget` + `SpaceCredential`
+  PoP, immediate fallback to `authorizeSpaceSync` without `notify` so DM reads never block on the operator, `AbortSignal`-bound
+  renewal reusing the stable `dm1` token, leave/delete, re-notify). Constructed
   with injected transports (`memberClient`, `resolvePds`, `fetchEndpoint`, `generateKey`,
   `store`), so the same class runs in the browser and in Node tests/acceptance. `leave` removes
   the other participants from the caller's half and hides the conversation in the local store
@@ -321,11 +365,12 @@ operator or OAuth layers even by accident, and lint refuses a Node built-in in a
   and no secret.
 - `pnpm operator` (`apps/operator/src/operator/main.ts`) — the operator's own process at `OPERATOR_URL`: `apps/operator/src/operator/server.ts` serves its
   methods (`apps/operator/src/operator/methods.ts`: `execute`, `getOperation`, `listInboxWriters`, `getChanges`, `createWorkspace`,
-  `startAuthorityFlow`, `listStalledOperations`, each authenticated by a PDS-issued service token, and the two notices) on
+  `startAuthorityFlow`, `listStalledOperations`, `getDmNotifyTarget`, each authenticated by a PDS-issued service token, and the two
+  inbound PDS webhooks `com.atproto.space.confirmRegistration` and `com.atproto.space.notifySpaceUpdate`, authenticated in constant time by token) on
   `@atproto/xrpc-server` with the app's lexicons, CORS for any origin on the methods (none on the authority flow), the authority flow (`/authority/*`) and its
-  `did:web` document; it runs the notice-registration sweep at start.
+  `did:web` document; it runs the 60-second SQL-first renewal loop and the 30-minute discovery sweep.
 - `pnpm echo-bot` (`apps/echo-bot/src/main.ts`) and `pnpm webhooks` (`apps/webhooks/src/main.ts`) — first-party apps built on `@flock/client` alone (`sign-in <handle>`, then `run`).
-- `pnpm playground` (`scripts/playground.ts`) — a local copy of the whole stack with ready-made accounts, for trying the app by hand (`ATPROTO_PINNED_CHECKOUT` must point at the built pinned checkout).
+- `pnpm playground` (`scripts/playground.ts`) — a local copy of the whole stack with ready-made accounts, for trying the app by hand (`ATPROTO_PINNED_CHECKOUT` must point at the built pinned checkout `../atproto-spaces-r12`).
 - `pnpm reconcile` (`apps/operator/scripts/reconcile-workspaces.ts`) — the scheduled membership-reconciliation job (`docs/operations.md`).
 - `pnpm authority` (`apps/operator/scripts/authority-grant.ts`) — generate an authority client key, or revoke an authority grant.
 - `pnpm backup:db` (`scripts/backup-db.mjs`) — online SQLite backup.
@@ -373,7 +418,7 @@ Run: `pnpm test:bdd` (headless), `pnpm test:bdd:chrome` (visible Google Chrome),
 - Concurrency is `packages/protocol/src/map-limited.ts` (fixed fan-out, currently 8 for DM/channel fan-out),
   not ad hoc `Promise.all` over unbounded arrays.
 - Package boundaries are dependency lists: protocol and net depend on no workspace package; client on protocol and net (net
-  for its Node entry only); reader on `@flock/protocol` and `@atproto/{space,lex-data,lexicon}`; the operator on protocol, net and deployment; the web app on client,
+  for its Node entry only); reader on `@flock/protocol` and `@atproto/{space,star,lex-data,lexicon}`; the operator on protocol, net and deployment; the web app on client,
   protocol and deployment; the echo bot and the webhooks app on client only. No app imports another. Lint adds what a list cannot say: no Node
   built-ins or server configuration in browser code, no client Node entry or @flock/net in browser code or the web app,
   member lists changed only through `members.ts`, no DM engine in the web app's route handlers (`apps/web/src/app/**/route.ts`),

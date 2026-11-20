@@ -35,7 +35,7 @@ after(() => {
 
 const OUTAGE = () => Response.json({ error: "InternalServerError", message: "outage" }, { status: 500 });
 const SCOPE_MISSING = () => Response.json({ error: "ScopeMissingError", message: "Missing required scope for new.flock.app.install" }, { status: 403 });
-const WRITES = new Set(["com.atproto.space.createSpace", "com.atproto.space.putRecord", "com.atproto.memberspace.putMember", "com.atproto.memberspace.removeMember"]);
+const WRITES = new Set(["com.atproto.space.createSpace", "com.atproto.space.putRecord", "com.atproto.memberspace.putMembers", "com.atproto.memberspace.removeMembers"]);
 
 /** A workspace the account owns, with a person invited; `intercept` sees every request after it is set up. */
 async function workspace(name: string, intercept: FakeAuthorityPdsOptions["intercept"] = () => undefined) {
@@ -126,7 +126,7 @@ test("only an installed app's access changes or goes, and an installed app is ne
 });
 
 const RESUMED = [
-  { label: "install", installed: false, request: (general: string) => ({ kind: "installApp", subject: BOT, channels: [{ skey: general, write: true }] }), stops: 6, writes: 6, after: "rw" },
+  { label: "install", installed: false, request: (general: string) => ({ kind: "installApp", subject: BOT, channels: [{ skey: general, write: true }] }), stops: 5, writes: 6, after: "rw" },
   { label: "update", installed: true, request: (general: string) => ({ kind: "updateAppAccess", subject: BOT, channels: [{ skey: general, write: false }] }), stops: 3, writes: 2, after: "r" },
   { label: "uninstall", installed: true, request: () => ({ kind: "uninstallApp", subject: BOT }), stops: 5, writes: 5, after: "-" },
 ];
@@ -166,7 +166,7 @@ for (const scenario of RESUMED) {
 test("a reconcile while an uninstall is stopped after its record cannot restore the app, and it is gone once the host is back", async () => {
   // #given the app installed, and its uninstall stopped after its record by a host refusing removals
   let removals = true;
-  const { pds, owner, run, general } = await workspace("Apps Five", (method) => removals && method === "com.atproto.memberspace.removeMember" ? OUTAGE() : undefined);
+  const { pds, owner, run, general } = await workspace("Apps Five", (method) => removals && method === "com.atproto.memberspace.removeMembers" ? OUTAGE() : undefined);
   removals = false;
   await completes(run({ kind: "installApp", subject: BOT, channels: [{ skey: general, write: true }] }));
   removals = true;
@@ -262,7 +262,7 @@ test("a visibility change puts back a granted app's entry the channel lost, with
 test("an archive stopped after it ended an app's grant resumes, and the app is in no list of the channel", async () => {
   // #given the app granted a channel, and an archive of it stopped by a host refusing removals
   let removals = false;
-  const { pds, owner, run, general, channel } = await workspace("Apps Nine", (method) => removals && method === "com.atproto.memberspace.removeMember" ? OUTAGE() : undefined);
+  const { pds, owner, run, general, channel } = await workspace("Apps Nine", (method) => removals && method === "com.atproto.memberspace.removeMembers" ? OUTAGE() : undefined);
   await completes(run({ kind: "createChannel", skey: "old", name: "old", visibility: "public" }));
   await completes(run({ kind: "installApp", subject: BOT, channels: [{ skey: general, write: true }, { skey: channel("old"), write: true }] }));
   removals = true;
@@ -336,8 +336,8 @@ test("the self-owned workspace authority is never written into an app inbox, and
 
   const before = pds.writes.length;
   await completes(run({ kind: "uninstallApp", subject: BOT }));
-  const inboxRemovals = pds.writes.slice(before).filter((write) => write.startsWith(`removeMember ${inbox} `));
-  assert.deepEqual(inboxRemovals, [`removeMember ${inbox} ${BOT}`, `removeMember ${inbox} ${PERSON}`], "the app is removed from its inbox before writers");
+  const inboxRemovals = pds.writes.slice(before).filter((write) => write.startsWith(`removeMembers ${inbox} `));
+  assert.deepEqual(inboxRemovals, [`removeMembers ${inbox} ${BOT}`, `removeMembers ${inbox} ${PERSON}`], "the app is removed from its inbox before writers");
 });
 
 test("inviteMember, removeMember, leaveWorkspace and reconcileWorkspace resume after a stop at any write, repeating none", async () => {
@@ -383,7 +383,7 @@ test("inviteMember, removeMember, leaveWorkspace and reconcileWorkspace resume a
   }
 
   // reconcileWorkspace creating a missing inbox and emptying an inactive one, stopped mid-step at every write
-  for (let index = 0; index < 5; index += 1) {
+  for (let index = 0; index < 3; index += 1) {
     let armed = false;
     let succeeded = 0;
     const { pds, owner, run } = await workspace(`Apps Reconcile Resume ${index}`, (method) => {
@@ -417,8 +417,8 @@ test("inviteMember, removeMember, leaveWorkspace and reconcileWorkspace resume a
     const writes = pds.writes.slice(before);
     assert.equal(writes.length, 5, `reconcile ${index}: ${writes.join(", ")}`);
     assert.equal(new Set(writes).size, writes.length, `reconcile ${index}: no write repeated`);
-    const inactiveRemovals = writes.filter((write) => write.startsWith(`removeMember ${inactiveInbox} `));
-    assert.deepEqual(inactiveRemovals, [`removeMember ${inactiveInbox} ${inactiveBot}`, `removeMember ${inactiveInbox} ${PERSON}`], "reconcile removes the app before writers");
+    const inactiveRemovals = writes.filter((write) => write.startsWith(`removeMembers ${inactiveInbox} `));
+    assert.deepEqual(inactiveRemovals, [`removeMembers ${inactiveInbox} ${inactiveBot}`, `removeMembers ${inactiveInbox} ${PERSON}`], "reconcile removes the app before writers");
     const activeInbox = appInboxUri(OWNER, owner.workspace.skey, BOT);
     assert.equal(pds.membersOf(activeInbox).size, 2);
     assert.equal(pds.membersOf(inactiveInbox).size, 0);
@@ -506,7 +506,6 @@ test("pre-R10 installs without an inbox (active and inactive) work under both co
     const registered: string[] = [];
     const deps: RegistrationDeps = {
       register: async (_session, space) => { registered.push(space); return Date.now() + 86_400_000; },
-      unregister: async () => undefined,
       now: () => Date.now(),
     };
     const run = (request: Record<string, unknown>, operationId = tidNow(), withDeps = true) =>

@@ -5,7 +5,7 @@
     "main": {
       "type": "space",
       "key": "any",
-      "name": "Admin inbox",
+      "title": "Admin inbox",
       "collections": ["new.flock.joinRequest", "new.flock.joinDecision"],
       "description": "An inbox where workspace members can write requests and active admins can read them."
     }

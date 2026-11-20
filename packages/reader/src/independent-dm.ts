@@ -1,9 +1,9 @@
 import { listBoundedRecords } from "@flock/protocol/atproto/record-pages";
 import { mintSpaceCredentialWith, SpaceCredentialError, type SpaceCredential, type SpaceCredentialDeps } from "@flock/protocol/atproto/space-credential-core";
-import { XrpcError, type AtprotoClient } from "@flock/protocol/atproto/xrpc";
+import { isMissingXrpcResource, type AtprotoClient } from "@flock/protocol/atproto/xrpc";
 import { canonicalParticipants, dmConversationUri, spaceRecordUri } from "@flock/protocol/keys";
 import { validateDmHeaderMatchesRequest, validateSpaceRecord } from "@flock/protocol/registry";
-import { classifyRepoFailure } from "@flock/protocol/atproto/repo-failure";
+import { classifyRepoFailure, isAuthoritySuspendedError } from "@flock/protocol/atproto/repo-failure";
 import { COLLECTION } from "@flock/protocol/nsids";
 
 const DEFAULT_LIMIT = 100;
@@ -78,7 +78,7 @@ export async function readIndependentDmConversation(
       credentialByOwner.set(ownerDid, credential);
     } catch (error) {
       // A half whose repo cannot be read is shown as missing, like any other half that cannot be shown; the rest are still read.
-      if (!classifyRepoFailure(error)) throw error;
+      if (!classifyRepoFailure(error, { space: half, repo: ownerDid, authorityDid: ownerDid })) throw error;
       halves[ownerDid] = "missing";
     }
   }
@@ -142,7 +142,7 @@ async function readIndependentDmReactions(
         reactions.push({ uri: spaceRecordUri(half, ownerDid, COLLECTION.dmReaction, record.rkey), ownerDid, subject: value.subject, emoji: value.emoji, createdAt: value.createdAt });
       }
     } catch (error) {
-      if (!classifyRepoFailure(error)) throw error;
+      if (!classifyRepoFailure(error, { space: half, repo: ownerDid, authorityDid: ownerDid })) throw error;
       halves[ownerDid] = "missing";
     }
   }
@@ -154,7 +154,7 @@ async function getOptionalRecord(client: AtprotoClient, space: string, repo: str
     const record = await client.query<{ value: Record<string, unknown> }>("com.atproto.space.getRecord", { space, repo, collection, rkey });
     return record.value;
   } catch (error) {
-    if (error instanceof XrpcError && error.code === "RecordNotFound") return null;
+    if (isMissingXrpcResource(error)) return null;
     throw error;
   }
 }
@@ -165,5 +165,6 @@ function classifyHalfStatus(error: unknown): IndependentDmHalfStatus {
     if (error.code === "SpaceDeleted") return "deleted";
     return "revoked";
   }
+  if (isAuthoritySuspendedError(error)) return "missing";
   throw error;
 }

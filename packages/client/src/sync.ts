@@ -1,13 +1,28 @@
 import { KemKeyError } from "@flock/protocol/atproto/kem-key";
-import { assertBoundedRecordPage, listBoundedRecords, listBoundedRepos, listReposSince } from "@flock/protocol/atproto/record-pages";
-import { classifyRepoFailure, classifyVerifiedRepoFailure } from "@flock/protocol/atproto/repo-failure";
+import {
+  assertBoundedRecordPage,
+  fetchRepoOpsPages as fetchBoundedRepoOpsPages,
+  listBoundedRecords,
+  listBoundedWriters,
+  listWritersSince,
+  RepoOpsPageError,
+  tidTimestampMs,
+  WRITER_CURSOR_MAX_AGE_MS,
+} from "@flock/protocol/atproto/record-pages";
+import {
+  classifyRepoFailure,
+  classifySpaceHostFailure,
+  classifyVerifiedRepoFailure,
+  isAuthoritySuspendedError,
+} from "@flock/protocol/atproto/repo-failure";
 import {
   LTHASH_STATE_BYTES,
   RepoCommit,
   RepoStarLimitError,
-  RepoVerificationError,
   SpaceCredentialError,
+  SpaceKemError,
   SpaceMacError,
+  SpaceRepoVerificationError,
   StarParseError,
   isCredentialRefused,
   listVerifiedBoundedRecords,
@@ -18,7 +33,7 @@ import {
   verifyRecordCid,
   verifyRecordCidWithSize,
   type Cid,
-  type Commit,
+  type SpaceCommit,
   type SpaceCredential,
 } from "@flock/protocol/atproto/space-credential-core";
 import { XrpcError, type AtprotoClient } from "@flock/protocol/atproto/xrpc";
@@ -205,12 +220,11 @@ const WORKSPACE_AUTHORITY_COLLECTIONS = [
 ] as const;
 
 const MAX_OPS_SEEN_ENTRIES = 100_000;
-const MAX_REPO_OP_CURSOR_LENGTH = 1_024;
 const MAX_REPO_OP_REV_LENGTH = 64;
 const MAX_REPO_OP_COLLECTION_LENGTH = 317;
 const MAX_REPO_OP_RKEY_LENGTH = 512;
 const MAX_REPO_OP_CID_LENGTH = 256;
-const utf8Encoder = new TextEncoder();
+const MIN_PLAUSIBLE_TID_EPOCH_MS = 1_577_836_800_000;
 
 type RepoFollowAttempt = {
   uri: string;
@@ -298,13 +312,36 @@ export class SyncCore {
 
   /**
    * The writers of a space, most recently active first. The authority's full list is read when the space is first opened in
-   * this session and at each truth interval, and the records of anyone no longer listed are dropped (D14); between those, one
-   * `listRepos` since the stored space revision names the writers that moved. A writer whose reported revision is newer than
-   * what is held is marked for a check either way. The account's own writer is included while one of its writes is waiting
-   * for the authority to list it, so a member's own message is never missing from the next page.
+   * this session and at each truth interval (or when the checkpoint is older than 72 hours or rejected as an invalid cursor),
+   * and the records of anyone no longer listed are dropped (D14); between those, one `listWriters` since the stored space
+   * revision names the writers that wrote or were removed. A writer whose reported revision is newer than what is held is
+   * marked for a check either way. The account's own writer is included while one of its writes is waiting for the authority
+   * to list it, so a member's own message is never missing from the next page.
    */
   async writers(space: string, input: { workspace?: string | null } = {}): Promise<ListedWriter[]> {
     return (await this.resolveSpaceWriters(space, input)).writers;
+  }
+
+  private evictFollowerRepo(space: string, repo: string): void {
+    const spaceFollow = this.opsFollowers.get(space);
+    if (!spaceFollow) return;
+    spaceFollow.repos.delete(repo);
+    spaceFollow.reportedAside.delete(repo);
+  }
+
+  private async purgeRemovedWriterIfEligible(
+    space: string,
+    repo: string,
+    held: ReadonlyMap<string, WriterState>,
+    ownPending: boolean,
+    keepWriters?: ReadonlySet<string>,
+  ): Promise<void> {
+    if ((repo === this.did && ownPending) || keepWriters?.has(repo)) return;
+    const writer = held.get(repo);
+    if (writer && (writer.syncedRev !== null || Object.keys(writer.coverage).length > 0 || writer.setHash !== undefined)) {
+      await this.deps.store.purgeWriter(space, repo);
+    }
+    this.evictFollowerRepo(space, repo);
   }
 
   private async resolveSpaceWriters(
@@ -323,31 +360,61 @@ export class SyncCore {
     // that an account the authority still does not list (say, reduced to read-only) is out of view like anyone else (D14).
     const ownPending = state.ownWriteAt !== undefined && state.ownWriteAt !== null && now - state.ownWriteAt >= 0 && now - state.ownWriteAt < intervalMs;
     const sinceListing = state.writersListedAt === null ? Number.POSITIVE_INFINITY : now - state.writersListedAt;
+    const cursorStale = isStoredWriterCursorStale(state.spaceRev, state.writersListedAt, now);
     let reported: Array<{ did: string; repoRev: string }>;
     let fullScan = false;
-    if (input.fullScan || !this.opened.has(space) || sinceListing < 0 || sinceListing >= intervalMs) {
+    if (input.fullScan || !this.opened.has(space) || sinceListing < 0 || sinceListing >= intervalMs || cursorStale) {
       fullScan = true;
-      const scan = await listBoundedRepos(client, { space, maxRepos: this.options.maxWriters });
+      const scan = await listBoundedWriters(client, { space, maxRepos: this.options.maxWriters });
       if (scan.truncated) throw new Error(`The space has more than ${this.options.maxWriters} writers, more than this client reads.`);
-      const listed = new Set(scan.repos.map((repo) => repo.did));
+      const listed = new Set(scan.writers.map((writer) => writer.repo));
       for (const writer of held.values()) {
-        if (listed.has(writer.repo) || (writer.repo === this.did && ownPending) || input.keepWriters?.has(writer.repo)) continue;
-        if (writer.syncedRev !== null || Object.keys(writer.coverage).length > 0 || writer.setHash !== undefined) {
-          await this.deps.store.purgeWriter(space, writer.repo);
-        }
+        if (listed.has(writer.repo)) continue;
+        await this.purgeRemovedWriterIfEligible(space, writer.repo, held, ownPending, input.keepWriters);
       }
-      state.writers = scan.repos.map((repo) => ({ did: repo.did, repoRev: repo.repoRev }));
+      state.writers = scan.writers.map((writer) => ({ did: writer.repo, repoRev: writer.repoRev }));
       state.writersListedAt = now;
-      state.spaceRev = maxOf(state.spaceRev, scan.repos.map((repo) => repo.spaceRev));
+      state.spaceRev = scan.spaceRev;
       reported = state.writers;
       this.opened.add(space);
     } else {
-      const moved = await listReposSince(client, { space, since: state.spaceRev, maxRepos: this.options.maxWriters });
-      const byDid = new Map(state.writers.map((writer) => [writer.did, writer]));
-      for (const repo of moved.repos) byDid.set(repo.did, { did: repo.did, repoRev: repo.repoRev });
-      state.writers = [...byDid.values()];
-      state.spaceRev = maxOf(state.spaceRev, moved.spaceRev === null ? [] : [moved.spaceRev]);
-      reported = moved.repos.map((repo) => ({ did: repo.did, repoRev: repo.repoRev }));
+      const moved = await listWritersSince(client, {
+        space,
+        since: state.spaceRev,
+        maxRepos: this.options.maxWriters,
+        sinceListedAt: state.writersListedAt,
+        now,
+      });
+      if (moved.fullReconcile) {
+        fullScan = true;
+        const activeWriters = moved.writers ?? [];
+        const listed = new Set(activeWriters.map((writer) => writer.repo));
+        for (const writer of held.values()) {
+          if (listed.has(writer.repo)) continue;
+          await this.purgeRemovedWriterIfEligible(space, writer.repo, held, ownPending, input.keepWriters);
+        }
+        state.writers = activeWriters.map((writer) => ({ did: writer.repo, repoRev: writer.repoRev }));
+        state.writersListedAt = now;
+        state.spaceRev = moved.spaceRev;
+        reported = state.writers;
+        this.opened.add(space);
+      } else {
+        const byDid = new Map(state.writers.map((writer) => [writer.did, writer]));
+        const writes: Array<{ did: string; repoRev: string }> = [];
+        for (const update of moved.updates) {
+          if (update.kind === "write") {
+            byDid.set(update.repo, { did: update.repo, repoRev: update.repoRev });
+            writes.push({ did: update.repo, repoRev: update.repoRev });
+          } else {
+            byDid.delete(update.repo);
+            await this.purgeRemovedWriterIfEligible(space, update.repo, held, ownPending, input.keepWriters);
+          }
+        }
+        state.writers = [...byDid.values()];
+        state.writersListedAt = now;
+        state.spaceRev = maxOf(state.spaceRev, moved.spaceRev === null ? [] : [moved.spaceRev]);
+        reported = writes;
+      }
     }
     for (const repo of reported) {
       const writer = held.get(repo.did);
@@ -523,7 +590,7 @@ export class SyncCore {
 
   /**
    * Cryptographically verified complete sync for `"all"` spaces (`D11.1 #4`, `D11.3 #2-#4`).
-   * Writer universe is `union(listRepos(space), verifiedRosterMembers)` (+ `authorityDid` when listed or `includeAuthority`).
+   * Writer universe is `union(listWriters(space), verifiedRosterMembers)` (+ `authorityDid` when listed or `includeAuthority`).
    */
   async syncVerifiedSpace(input: VerifiedSpaceSyncInput): Promise<VerifiedSpaceSyncResult> {
     if (input.collections.length === 0) throw new RangeError("Verified space sync requires at least one collection.");
@@ -532,12 +599,42 @@ export class SyncCore {
     const keepWriters = new Set<string>(rosterSet);
     if (input.includeAuthority) keepWriters.add(authorityDid);
 
-    const { listed } = await this.resolveSpaceWriters(input.space, {
-      workspace: input.workspace,
-      truthIntervalMs: input.truthIntervalMs,
-      keepWriters: keepWriters.size > 0 ? keepWriters : undefined,
-      fullScan: input.fullWriterScan,
-    });
+    let listed: Set<string>;
+    try {
+      ({ listed } = await this.resolveSpaceWriters(input.space, {
+        workspace: input.workspace,
+        truthIntervalMs: input.truthIntervalMs,
+        keepWriters: keepWriters.size > 0 ? keepWriters : undefined,
+        fullScan: input.fullWriterScan,
+      }));
+    } catch (error) {
+      if (!isAuthoritySuspendedError(error)) throw error;
+      const failure = classifySpaceHostFailure(error)!;
+      const storedSpace = await this.deps.store.getSpace(input.space);
+      const cachedListed = new Set(storedSpace?.writers.map((writer) => writer.did) ?? []);
+      const fallbackUniverse = new Set<string>([...cachedListed, ...rosterSet]);
+      if (input.includeAuthority) fallbackUniverse.add(authorityDid);
+      const byCollection: Record<string, StoredRecord[]> = {};
+      const records: StoredRecord[] = [];
+      await Promise.all(input.collections.map(async (collection) => {
+        const held = (await this.deps.store.records(input.space, collection))
+          .filter((record) => fallbackUniverse.has(record.repo))
+          .sort((left, right) => (left.uri < right.uri ? -1 : left.uri > right.uri ? 1 : 0));
+        byCollection[collection] = held;
+      }));
+      for (const collection of input.collections) records.push(...(byCollection[collection] ?? []));
+      return {
+        records,
+        byCollection,
+        writers: storedSpace ? [...fallbackUniverse].sort() : [],
+        listedWriters: [...cachedListed].sort(),
+        complete: false,
+        setAside: [{ did: authorityDid, reason: failure.reason, permanent: false }],
+        changing: [],
+        emptyUnwrittenWriters: [],
+        emptyReasons: {},
+      };
+    }
     const universeSet = new Set<string>([...listed, ...rosterSet]);
     if (input.includeAuthority) universeSet.add(authorityDid);
     const writers = [...universeSet].sort();
@@ -627,12 +724,10 @@ export class SyncCore {
     let writersList: string[];
     let listedSet: Set<string>;
     let reportedSet: Set<string>;
-    let fullScan = false;
     if (input.writers !== undefined) {
       writersList = [...new Set(input.writers)];
       listedSet = input.listedWriters ? new Set(input.listedWriters) : new Set<string>();
       reportedSet = new Set(writersList);
-      fullScan = true;
     } else {
       const resolved = await this.resolveSpaceWriters(input.space, {
         workspace: input.workspace,
@@ -641,14 +736,11 @@ export class SyncCore {
       writersList = resolved.writers.map((writer) => writer.did);
       listedSet = resolved.listed;
       reportedSet = new Set(resolved.reported.map((repo) => repo.did));
-      fullScan = resolved.fullScan;
-      if (fullScan) {
-        const active = new Set(writersList);
-        for (const repo of spaceFollow.repos.keys()) {
-          if (!active.has(repo)) {
-            spaceFollow.repos.delete(repo);
-            spaceFollow.reportedAside.delete(repo);
-          }
+      const active = new Set(writersList);
+      for (const repo of spaceFollow.repos.keys()) {
+        if (!active.has(repo)) {
+          spaceFollow.repos.delete(repo);
+          spaceFollow.reportedAside.delete(repo);
         }
       }
     }
@@ -867,6 +959,8 @@ export class SyncCore {
         const failure = this.classifyRepoNotFoundOrFailure(error, {
           listed: listedSet.has(repo),
           hadSyncedRev: repoState.rev !== null,
+          space: input.space,
+          repo,
         });
         if (!failure) throw error;
         repoState.ackedStaleSeq = Math.max(repoState.ackedStaleSeq, seenStaleSeq);
@@ -1176,7 +1270,7 @@ export class SyncCore {
           return { repo: input.repo, setAside: { did: input.repo, reason: "its host has no repo for it", permanent: false } };
         }
         if (error instanceof ChangingWriterError) return { repo: input.repo, changing: true };
-        const failure = classifyVerifiedRepoFailure(error);
+        const failure = classifyVerifiedRepoFailure(error, { space: input.space, repo: input.repo });
         if (!failure) throw error;
         if (failure.permanent) {
           await this.dropRecordsOnPermanentFailure(
@@ -1274,7 +1368,7 @@ export class SyncCore {
     | { applied: false }
     | {
         applied: true;
-        commit: Commit;
+        commit: SpaceCommit;
         setHash: Uint8Array;
         coverage: Record<string, Coverage>;
         upsert: StoredRecord[];
@@ -1313,14 +1407,14 @@ export class SyncCore {
     ).setHash.state();
     if (!bytesEqual(persistedSetHash, state.setHash!)) return { applied: false };
 
-    let paged: { ops: RawRepoOp[]; commit: Commit };
+    let paged: { ops: RawRepoOp[]; commit: SpaceCommit };
     try {
       paged = await this.fetchRepoOpsPages(space, repo, syncedRev, false, input.signal, {
         maxOps: Math.max(1, input.maxRecords) * 2,
         maxPayloadBytes: input.maxBytes,
       });
     } catch (error) {
-      if (error instanceof DeltaFallbackError || error instanceof UnsignedEmptyRepoOpsError || isUnsupportedEndpointError(error)) {
+      if (error instanceof DeltaFallbackError || isUnsupportedEndpointError(error)) {
         return { applied: false };
       }
       throw error;
@@ -1417,87 +1511,34 @@ export class SyncCore {
     excludeValues: boolean,
     signal?: AbortSignal,
     bounds?: { maxOps?: number; maxPayloadBytes?: number },
-  ): Promise<{ ops: RawRepoOp[]; commit: Commit }> {
+  ): Promise<{ ops: RawRepoOp[]; commit: SpaceCommit }> {
     const maxPayloadBytes = bounds?.maxPayloadBytes ?? WORKSPACE_ENVELOPE.maxStarArchiveBytes;
     return this.withCredentialRetry(space, repo, async (_credential, client) => {
-      const ops: RawRepoOp[] = [];
-      const seenCursors = new Set<string>();
-      let stagedBytes = 0;
-      let cursor: string | undefined;
-      for (let pageIndex = 0; pageIndex < WORKSPACE_ENVELOPE.maxRepoOpsPages; pageIndex += 1) {
-        if (signal?.aborted) throw signal.reason ?? new Error("Aborted.");
-        const page = await client.query<{ ops?: unknown; cursor?: unknown; commit?: unknown }>("com.atproto.space.listRepoOps", {
+      try {
+        const result = await fetchBoundedRepoOpsPages(client, {
           space,
           repo,
-          ...(since !== undefined && cursor === undefined ? { since } : {}),
+          since,
+          excludeValues,
           limit: 500,
-          ...(excludeValues ? { excludeValues: true } : {}),
-          ...(cursor !== undefined ? { cursor } : {}),
+          maxPages: WORKSPACE_ENVELOPE.maxRepoOpsPages,
+          maxOps: bounds?.maxOps,
+          maxPayloadBytes,
+          signal,
         });
-        if (!page || typeof page !== "object" || !Array.isArray(page.ops) || page.ops.length > 500) {
-          throw new DeltaFallbackError("Malformed listRepoOps page.");
+        if (result.commit.data.byteLength !== COMMIT_DIGEST_BYTES) {
+          throw new DeltaFallbackError("Malformed listRepoOps commit digest.");
         }
-        if (
-          page.cursor !== undefined &&
-          (typeof page.cursor !== "string" || page.cursor.length > MAX_REPO_OP_CURSOR_LENGTH)
-        ) {
-          throw new DeltaFallbackError("Malformed or oversized listRepoOps cursor.");
+        return {
+          ops: result.ops,
+          commit: result.commit as SpaceCommit,
+        };
+      } catch (error) {
+        if (error instanceof RepoOpsPageError) {
+          throw new DeltaFallbackError(error.message);
         }
-        if (bounds?.maxOps !== undefined && ops.length + page.ops.length > bounds.maxOps) {
-          throw new DeltaFallbackError("listRepoOps exceeded cumulative op staging bound.");
-        }
-        if (typeof page.cursor === "string") {
-          stagedBytes += utf8Encoder.encode(page.cursor).byteLength;
-          if (stagedBytes > maxPayloadBytes) {
-            throw new DeltaFallbackError("listRepoOps exceeded cumulative payload byte staging bound.");
-          }
-        }
-        const projectedOps: RawRepoOp[] = [];
-        for (const rawOp of page.ops as unknown[]) {
-          if (!isValidRawOp(rawOp)) {
-            throw new DeltaFallbackError("Malformed or oversized op entry in listRepoOps.");
-          }
-          stagedBytes +=
-            utf8Encoder.encode(rawOp.rev).byteLength +
-            utf8Encoder.encode(rawOp.collection).byteLength +
-            utf8Encoder.encode(rawOp.rkey).byteLength +
-            (rawOp.cid !== null ? utf8Encoder.encode(rawOp.cid).byteLength : 0) +
-            (rawOp.prev !== null ? utf8Encoder.encode(rawOp.prev).byteLength : 0);
-          if (!excludeValues && rawOp.value !== undefined && rawOp.value !== null) {
-            stagedBytes += utf8Encoder.encode(JSON.stringify(rawOp.value)).byteLength;
-          }
-          if (stagedBytes > maxPayloadBytes) {
-            throw new DeltaFallbackError("listRepoOps exceeded cumulative payload byte staging bound.");
-          }
-          projectedOps.push({
-            rev: rawOp.rev,
-            collection: rawOp.collection,
-            rkey: rawOp.rkey,
-            cid: rawOp.cid,
-            prev: rawOp.prev,
-            ...(!excludeValues && rawOp.value !== undefined ? { value: rawOp.value } : {}),
-          });
-        }
-        ops.push(...projectedOps);
-        if (page.commit !== undefined) {
-          const commit = decodeCommitResponse(page.commit, space, repo);
-          if (!commit || page.cursor !== undefined) throw new DeltaFallbackError("Malformed final listRepoOps commit.");
-          return { ops, commit };
-        }
-        if (typeof page.cursor === "string" && page.cursor.length > 0 && page.ops.length > 0) {
-          if (page.cursor === cursor || seenCursors.has(page.cursor)) {
-            throw new DeltaFallbackError("listRepoOps cursor did not advance.");
-          }
-          seenCursors.add(page.cursor);
-          cursor = page.cursor;
-          continue;
-        }
-        if (page.ops.length === 0 && page.cursor === undefined) {
-          throw new UnsignedEmptyRepoOpsError();
-        }
-        throw new DeltaFallbackError("Missing commit or cursor on listRepoOps page.");
+        throw error;
       }
-      throw new DeltaFallbackError("listRepoOps exceeded maxRepoOpsPages.");
     });
   }
 
@@ -1508,7 +1549,7 @@ export class SyncCore {
     maxBytes: number;
     maxRecords: number;
     signal?: AbortSignal;
-  }): Promise<{ commit: Commit; setHash: Uint8Array; commitDigest: Uint8Array; records: Array<{ collection: string; rkey: string; cid: string; value: Record<string, unknown> }> }> {
+  }): Promise<{ commit: SpaceCommit; setHash: Uint8Array; commitDigest: Uint8Array; records: Array<{ collection: string; rkey: string; cid: string; value: Record<string, unknown> }> }> {
     let starUnsupported = false;
     for (let attempt = 0; attempt < WORKSPACE_ENVELOPE.maxListRecordsRetry; attempt += 1) {
       if (input.signal?.aborted) throw input.signal.reason ?? new Error("Aborted.");
@@ -1534,7 +1575,14 @@ export class SyncCore {
           })),
         };
       } catch (error) {
-        if (error instanceof RepoStarLimitError || error instanceof SpaceMacError || error instanceof KemKeyError || error instanceof SpaceCredentialError || error instanceof SyncStoreError) {
+        if (
+          error instanceof RepoStarLimitError
+          || error instanceof SpaceMacError
+          || error instanceof SpaceKemError
+          || error instanceof KemKeyError
+          || error instanceof SpaceCredentialError
+          || error instanceof SyncStoreError
+        ) {
           throw error;
         }
         if (error instanceof XrpcError && error.code === "RepoNotFound") throw error;
@@ -1542,7 +1590,7 @@ export class SyncCore {
           starUnsupported = true;
           break;
         }
-        if (error instanceof RepoVerificationError || error instanceof StarParseError) {
+        if (error instanceof SpaceRepoVerificationError || error instanceof StarParseError) {
           if (attempt + 1 < WORKSPACE_ENVELOPE.maxListRecordsRetry) continue;
           throw error;
         }
@@ -1550,7 +1598,7 @@ export class SyncCore {
       }
     }
 
-    if (!starUnsupported) throw new RepoVerificationError(`STAR verification failed for ${input.repo}.`);
+    if (!starUnsupported) throw new SpaceRepoVerificationError(`STAR verification failed for ${input.repo}.`);
 
     for (let attempt = 0; attempt < WORKSPACE_ENVELOPE.maxListRecordsRetry; attempt += 1) {
       const result = await this.withCredentialRetry(input.space, input.repo, async (_credential, client) => {
@@ -1662,26 +1710,13 @@ export class SyncCore {
       }
   > {
     const { space, repo, repoState } = input;
-    let paged: { ops: RawRepoOp[]; commit: Commit };
+    let paged: { ops: RawRepoOp[]; commit: SpaceCommit };
     try {
       paged = await this.fetchRepoOpsPages(space, repo, repoState.rev ?? undefined, false, input.signal, {
         maxOps: WORKSPACE_ENVELOPE.maxStarRecords * 2,
         maxPayloadBytes: WORKSPACE_ENVELOPE.maxStarArchiveBytes,
       });
     } catch (error) {
-      if (error instanceof UnsignedEmptyRepoOpsError) {
-        if (repoState.rev === null && !input.listed.has(repo)) {
-          return {
-            kind: "ops",
-            events: [],
-            commitRev: undefined,
-            nextSetHash: new Uint8Array(LTHASH_STATE_BYTES),
-            nextCids: new Map(),
-            silentSeenKeys: [],
-          };
-        }
-        throw new SpaceMacError(`Host returned unsigned empty listRepoOps for ${repo}.`);
-      }
       if (error instanceof DeltaFallbackError) {
         return { kind: "reset", reason: error.message };
       }
@@ -1741,13 +1776,13 @@ export class SyncCore {
 
   private classifyRepoNotFoundOrFailure(
     error: unknown,
-    ctx: { listed: boolean; hadSyncedRev: boolean },
+    ctx: { listed: boolean; hadSyncedRev: boolean; space: string; repo: string },
   ): ({ kind: "empty" } | { kind: "failure"; reason: string; permanent: boolean }) | null {
     if (error instanceof XrpcError && error.code === "RepoNotFound") {
       if (!ctx.listed && !ctx.hadSyncedRev) return { kind: "empty" };
       return { kind: "failure", reason: "its host has no repo for it", permanent: false };
     }
-    const failure = classifyVerifiedRepoFailure(error);
+    const failure = classifyVerifiedRepoFailure(error, { space: ctx.space, repo: ctx.repo });
     return failure ? { kind: "failure", ...failure } : null;
   }
 }
@@ -1931,7 +1966,8 @@ class ReadRun {
             continue;
           }
           const error = outcome.reason;
-          if (strategy !== "all" || error instanceof SyncStoreError || error instanceof SpaceCredentialError || !classifyRepoFailure(error)) throw error;
+          const repoFailure = classifyRepoFailure(error, { space: source.space, repo: source.repo });
+          if (strategy !== "all" || error instanceof SyncStoreError || error instanceof SpaceCredentialError || !repoFailure) throw error;
           if (this.input.required?.includes(source.repo)) throw error;
           if (isCredentialRefused(error)) this.core.credentials.drop(source.space);
           failed.push({ collection, error });
@@ -1949,7 +1985,7 @@ class ReadRun {
         if (!committed) continue;
         for (const [collection, records] of Object.entries(listed)) (await this.budget(source.space, collection)).set(source.repo, records.length);
         for (const { error } of failed) {
-          const failure = classifyRepoFailure(error)!;
+          const failure = classifyRepoFailure(error, { space: source.space, repo: source.repo })!;
           this.partial.set(source.repo, { did: source.repo, reason: failure.reason, permanent: failure.permanent });
         }
         this.core.markChecked(source);
@@ -2110,7 +2146,7 @@ class ReadRun {
       if (error instanceof SyncStoreError || error instanceof SpaceCredentialError) throw error;
       if (isCredentialRefused(error)) this.core.credentials.drop(source.space);
       if (this.input.required?.includes(source.repo)) throw error;
-      const failure = classifyRepoFailure(error);
+      const failure = classifyRepoFailure(error, { space: source.space, repo: source.repo });
       if (!failure) throw error;
       this.aside.set(source.repo, { did: source.repo, reason: failure.reason, permanent: failure.permanent });
       if (failure.permanent) await this.core.store.purgeWriter(source.space, source.repo);
@@ -2290,8 +2326,6 @@ type TouchedRepoPath = {
 
 class DeltaFallbackError extends Error {}
 
-class UnsignedEmptyRepoOpsError extends Error {}
-
 class ChangingWriterError extends Error {
   constructor(readonly repo: string) {
     super(`Writer ${repo} kept changing during verification bracket.`);
@@ -2302,7 +2336,7 @@ async function replayValidatedRepoOps(input: {
   space: string;
   repo: string;
   ops: readonly RawRepoOp[];
-  commit: Commit;
+  commit: SpaceCommit;
   baseRev: string | null;
   baseSetHash: Uint8Array;
   baseCids: ReadonlyMap<string, Cid>;
@@ -2448,14 +2482,14 @@ async function replayValidatedRepoOps(input: {
   return { ok: true, setHash: replayedState, stagedCids, touched };
 }
 
-async function latestCommit(client: AtprotoClient, space: string, repo: string): Promise<Commit> {
+async function latestCommit(client: AtprotoClient, space: string, repo: string): Promise<SpaceCommit> {
   const result = await client.query<{ commit?: unknown }>("com.atproto.space.getLatestCommit", { space, repo });
   const commit = decodeCommitResponse(result?.commit, space, repo);
   if (!commit) throw new XrpcError(502, "The host answered getLatestCommit without a valid commit.", "InvalidResponse");
   return commit;
 }
 
-function decodeCommitResponse(raw: unknown, expectedSpace: string, expectedRepo: string): Commit | null {
+function decodeCommitResponse(raw: unknown, expectedSpace: string, expectedRepo: string): SpaceCommit | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const candidate = raw as { ver?: unknown; repo?: unknown; space?: unknown; rev?: unknown; data?: unknown };
   if (typeof candidate.ver !== "number" || typeof candidate.repo !== "string" || typeof candidate.space !== "string" || typeof candidate.rev !== "string") {
@@ -2464,7 +2498,22 @@ function decodeCommitResponse(raw: unknown, expectedSpace: string, expectedRepo:
   if (candidate.space !== expectedSpace || candidate.repo !== expectedRepo) return null;
   const data = decodeBytes(candidate.data);
   if (!data || data.length !== COMMIT_DIGEST_BYTES) return null;
-  return { ver: candidate.ver, repo: candidate.repo, space: candidate.space, rev: candidate.rev, data } as Commit;
+  return { ver: candidate.ver, repo: candidate.repo, space: candidate.space, rev: candidate.rev, data } as SpaceCommit;
+}
+
+function isStoredWriterCursorStale(spaceRev: string | null, writersListedAt: number | null, now: number): boolean {
+  if (writersListedAt !== null) {
+    const age = now - writersListedAt;
+    if (age < 0 || age >= WRITER_CURSOR_MAX_AGE_MS) return true;
+  }
+  if (spaceRev === null) return false;
+  const tidMs = tidTimestampMs(spaceRev);
+  if (tidMs === null) return true;
+  if (tidMs >= MIN_PLAUSIBLE_TID_EPOCH_MS) {
+    const age = now - tidMs;
+    if (age < 0 || age >= WRITER_CURSOR_MAX_AGE_MS) return true;
+  }
+  return false;
 }
 
 function decodeBytes(raw: unknown): Uint8Array | null {

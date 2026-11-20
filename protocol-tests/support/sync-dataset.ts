@@ -40,8 +40,8 @@ export class Probe {
     const transport = actorTransport(this.pds, this.reader);
     const credential = await mintSpaceCredentialWith(transport, this.space);
     const authority = credential.client(await transport.resolvePds(this.space.slice("at://".length).split("/")[0]!));
-    const listed = await authority.query<{ repos: Array<{ did: string; repoRev: string }> }>("com.atproto.space.listRepos", { space: this.space, limit: 1000 });
-    return listed.repos.find((repo) => repo.did === did)?.repoRev ?? null;
+    const listed = await authority.query<{ repos: Array<{ $type?: string; repo: string; repoRev?: string }> }>("com.atproto.space.listWriters", { space: this.space, limit: 1000 });
+    return listed.repos.find((entry) => entry.$type === "com.atproto.space.defs#repoWrite" && entry.repo === did)?.repoRev ?? null;
   }
 }
 
@@ -54,11 +54,13 @@ export async function provision(pds: PdsNetwork, count: number): Promise<{ autho
 }
 
 export async function createChannel(pds: PdsNetwork, authority: NetworkActor, reader: NetworkActor, writers: NetworkActor[], skey: string): Promise<string> {
-  const [{ ensureMemberListSpace, putSpaceMember }, { mapLimited }] = await Promise.all([import("@flock/operator/atproto/space-ops"), import("@flock/protocol/map-limited")]);
+  const [{ ensureMemberListSpace, putSpaceMembers }, { mapLimited }] = await Promise.all([import("@flock/operator/atproto/space-ops"), import("@flock/protocol/map-limited")]);
   const owner = bearerSession(authority) as never;
   const space = await ensureMemberListSpace(owner, "new.flock.channel", skey);
-  await putSpaceMember(owner, space, reader.did, true, true);
-  await mapLimited(writers, 8, (writer) => putSpaceMember(owner, space, writer.did, true, true));
+  await putSpaceMembers(owner, space, [
+    { did: reader.did, read: true, write: true },
+    ...writers.map((writer) => ({ did: writer.did, read: true, write: true })),
+  ]);
   await mapLimited(writers, 8, async (writer) => {
     for (let index = 0; index < MESSAGES_PER_WRITER; index += 1) await writeMessage(writer, space, `seed ${index}`);
   });

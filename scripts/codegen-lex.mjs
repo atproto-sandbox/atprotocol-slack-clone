@@ -3,12 +3,12 @@ import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "no
 import { resolve } from "node:path";
 
 const root = process.cwd();
-const checkout = process.env.ATPROTO_PIN_CHECKOUT;
-const expectedCommit = "5d88b414a98de1ada22c94c78fa0667a7028163c";
+const checkout = process.env.ATPROTO_PIN_CHECKOUT ?? process.env.ATPROTO_PINNED_CHECKOUT;
+const expectedCommit = "6747610566eee1b6d743617bd8eb1136adccb362";
 
 if (!checkout) {
   throw new Error(
-    "Set ATPROTO_PIN_CHECKOUT to the atproto checkout at the protocol pin before regenerating Lexicon clients.",
+    "Set ATPROTO_PIN_CHECKOUT (or ATPROTO_PINNED_CHECKOUT) to the atproto checkout at the protocol pin before regenerating Lexicon clients.",
   );
 }
 

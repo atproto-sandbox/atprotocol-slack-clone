@@ -18,22 +18,16 @@ const id = 'com.atproto.space.putRecord'
 export type QueryParams = {}
 
 export interface InputSchema {
-  /** Reference to the space. */
   space: string
-  /** The DID of the repo to write to (the authenticated member). */
   repo: string
-  /** The NSID of the record collection. */
   collection: string
-  /** The Record Key. */
   rkey: string
   /** Can be set to 'false' to skip Lexicon schema validation of record data, 'true' to require it, or leave unset to validate only for known Lexicons. */
   validate?: boolean
-  /** The record to write. */
   record: { [_ in string]: unknown }
 }
 
 export interface OutputSchema {
-  /** URI of the written record. */
   uri: string
   cid: string
   validationStatus?: 'valid' | 'unknown' | (string & {})

@@ -1,4 +1,4 @@
-import { isDid } from "@flock/protocol/keys";
+import { dmConversationUri, dmInboxUri, isDid } from "@flock/protocol/keys";
 import type { DmClient, DmHalfStatus, DmRequestMode, DmSkippedSenders } from "./dm-client";
 
 /** The workspace surface the DM UI needs. */
@@ -105,7 +105,8 @@ export async function runDmCycle(input: {
   refresh: () => Promise<{ exists: boolean } | null>;
   client: Pick<DmClient, "renotifyPending" | "watch" | "ensureDeclaration">;
   inboxUri: string;
-  serviceRef: string;
+  serviceRef?: string;
+  signal?: AbortSignal;
   declarationChecked: { current: boolean };
   report: (error: unknown) => void;
 }): Promise<void> {
@@ -125,7 +126,12 @@ export async function runDmCycle(input: {
   };
   await step(() => input.client.renotifyPending());
   if (!inbox?.exists) return;
-  await step(() => input.client.watch([input.inboxUri], input.serviceRef));
+  await step(() =>
+    input.client.watch([input.inboxUri], {
+      ...(input.serviceRef ? { serviceRef: input.serviceRef } : {}),
+      ...(input.signal ? { signal: input.signal } : {}),
+    }),
+  );
   if (!input.declarationChecked.current) {
     await step(async () => {
       await input.client.ensureDeclaration();
@@ -140,6 +146,95 @@ const HALF_CHIPS: Record<DmHalfStatus, string | null> = {
   deleted: "left",
   revoked: "revoked your access",
 };
+
+/**
+ * Coordinates best-effort DM push registration (`client.watch`) and operator feed following (`live.watch`) for an open
+ * conversation. Each leg records the space set only once that leg succeeds, so a transient initial failure is retried on the
+ * next 60-second refresh instead of leaving live updates disabled until remount.
+ */
+export function createDmConversationWatch(input: {
+  did: string;
+  convKey: string;
+  serviceRef?: string;
+  client: Pick<DmClient, "watch">;
+  live?: { watch: (key: string, spaces: string[], onChanged: () => Promise<unknown>) => Promise<() => void> } | null;
+  onChanged: () => Promise<unknown>;
+}): { sync: (knownHalves: Readonly<Record<string, DmHalfStatus>>) => Promise<void>; stop: () => void } {
+  let cancelled = false;
+  let stopWatching: (() => void) | undefined;
+  let watchController: AbortController | undefined;
+  let inFlightSubscription = "";
+  let watchedSubscription = "";
+  let liveSubscription = "";
+
+  return {
+    async sync(knownHalves) {
+      if (cancelled) return;
+      const spaces = [
+        ...Object.entries(knownHalves)
+          .filter(([, status]) => status === "ok")
+          .map(([ownerDid]) => dmConversationUri(ownerDid, input.convKey)),
+        dmInboxUri(input.did),
+      ];
+      const subscription = spaces.join("|");
+      const needWatch = watchedSubscription !== subscription;
+      const needLive = Boolean(input.live) && liveSubscription !== subscription;
+      if (!needWatch && !needLive) return;
+      if (inFlightSubscription === subscription) return;
+
+      inFlightSubscription = subscription;
+      try {
+        let controller = watchController;
+        if (needWatch) {
+          watchController?.abort();
+          controller = new AbortController();
+          watchController = controller;
+          try {
+            await input.client.watch(spaces, {
+              ...(input.serviceRef ? { serviceRef: input.serviceRef } : {}),
+              signal: controller.signal,
+            });
+            if (!cancelled && !controller.signal.aborted && watchController === controller) {
+              watchedSubscription = subscription;
+            }
+          } catch {
+            if (watchController === controller) {
+              watchedSubscription = "";
+            }
+          }
+        }
+        if (cancelled || controller?.signal.aborted || !input.live || liveSubscription === subscription) return;
+        stopWatching?.();
+        stopWatching = undefined;
+        liveSubscription = "";
+        try {
+          const unwatch = await input.live.watch(`dm:conversation:${input.convKey}`, spaces, input.onChanged);
+          if (cancelled || controller?.signal.aborted || inFlightSubscription !== "" && inFlightSubscription !== subscription) {
+            unwatch();
+          } else {
+            stopWatching = unwatch;
+            liveSubscription = subscription;
+          }
+        } catch {
+          // Operator feed is optional for DMs; the 60-second poll keeps the view correct and retries next cycle.
+        }
+      } finally {
+        if (inFlightSubscription === subscription) {
+          inFlightSubscription = "";
+        }
+      }
+    },
+    stop() {
+      cancelled = true;
+      inFlightSubscription = "";
+      watchedSubscription = "";
+      liveSubscription = "";
+      watchController?.abort();
+      stopWatching?.();
+      stopWatching = undefined;
+    },
+  };
+}
 
 /**
  * The note shown beside a participant for the state of their half. A half whose state is not known yet (the first page has not

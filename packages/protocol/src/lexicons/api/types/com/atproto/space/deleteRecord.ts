@@ -18,13 +18,9 @@ const id = 'com.atproto.space.deleteRecord'
 export type QueryParams = {}
 
 export interface InputSchema {
-  /** Reference to the space. */
   space: string
-  /** The DID of the repo to delete from (the authenticated member). */
   repo: string
-  /** The NSID of the record collection. */
   collection: string
-  /** The Record Key. */
   rkey: string
 }
 

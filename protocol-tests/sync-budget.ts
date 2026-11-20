@@ -6,14 +6,14 @@ import { actorTransport, startPdsNetwork, type NetworkActor, type PdsNetwork } f
 import { createChannel, deleteMessage, MESSAGES_PER_WRITER, percentile, Probe, provision, writeMessage, WRITER_COUNTS } from "./support/sync-dataset";
 
 // K4 of `.ai/plans/platform-refactor.md`, rerun through the engine for R4's gate: the upstream cost of the sync core
-// (refresh a writer between two revision reads; `listRepos` with the stored `spaceRev` as the hint) for one reader, at 20,
+// (refresh a writer between two revision reads; `listWriters` with the stored `spaceRev` as the hint) for one reader, at 20,
 // 100 and 200 writers, measured in Node against the pinned PDS network. A browser over HTTP/1.1 opens at most
 // six connections per origin, so every request here waits for one of six slots per host to emulate that limit. Each run
 // writes one message, checks the reader read it, and deletes it again, so every first open reads the same dataset. The
 // delay before the authority lists a new write (what a change-feed tick waits on) is reported separately from the
 // reader's own cost.
 //
-// Run: ATPROTO_PINNED_CHECKOUT=../atproto-spaces-phase3 node --import tsx protocol-tests/sync-budget.ts [runs]
+// Run: ATPROTO_PINNED_CHECKOUT=../atproto-spaces-r12 node --import tsx protocol-tests/sync-budget.ts [runs]
 
 const PAGE = 100;
 const PER_ORIGIN_CONNECTIONS = 6;
