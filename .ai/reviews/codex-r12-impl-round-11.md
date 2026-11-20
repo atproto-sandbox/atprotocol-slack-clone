@@ -1,0 +1,24 @@
+| Finding | Status | Verification & file:line references |
+|---|---|---|
+| R7-M1 / R10-M1 | RESOLVED | Pinned upstream authorizes access before attempting registration confirmation ([authorizeSpaceSync.ts](/Users/mikestaub/code/peapods/bluesky/atproto-spaces/atproto-spaces-r12/packages/pds/src/api/com/atproto/space/authorizeSpaceSync.ts:76), [authorizeSpaceSync.ts](/Users/mikestaub/code/peapods/bluesky/atproto-spaces/atproto-spaces-r12/packages/pds/src/api/com/atproto/space/authorizeSpaceSync.ts:96)). Ordinary, fast-path reuse, fallback success, abort, and fallback-error exits now advance the settled fence ([credentials.ts](/Users/mikestaub/code/peapods/bluesky/atproto-spaces/atproto-slack-clone-r12/packages/client/src/credentials.ts:365), [credentials.ts](/Users/mikestaub/code/peapods/bluesky/atproto-spaces/atproto-slack-clone-r12/packages/client/src/credentials.ts:610), [credentials.ts](/Users/mikestaub/code/peapods/bluesky/atproto-spaces/atproto-slack-clone-r12/packages/client/src/credentials.ts:628)). The regression test verifies that an older 403 cannot purge the credential or invoke `onAccessLost` ([dm-client.test.ts](/Users/mikestaub/code/peapods/bluesky/atproto-spaces/atproto-slack-clone-r12/packages/client/src/dm/dm-client.test.ts:3418)). |
+| R10-M2 | RESOLVED | Fallback ownership is computed before advancing the settled fence, allowing the operation to cache its unnotified credential ([credentials.ts](/Users/mikestaub/code/peapods/bluesky/atproto-spaces/atproto-slack-clone-r12/packages/client/src/credentials.ts:637)). A subsequent lookup is asserted to return the same fallback token ([dm-client.test.ts](/Users/mikestaub/code/peapods/bluesky/atproto-spaces/atproto-slack-clone-r12/packages/client/src/dm/dm-client.test.ts:1128)). |
+| R10-M3 | RESOLVED | The full-bucket path revalidates ownership before raising the rate-limit error, and `recordDmWake` revalidates again before propagating it; failed ownership causes retry instead of a stale 429 ([dm-feed-wakes.ts](/Users/mikestaub/code/peapods/bluesky/atproto-spaces/atproto-slack-clone-r12/apps/operator/src/operator/dm-feed-wakes.ts:927), [dm-feed-wakes.ts](/Users/mikestaub/code/peapods/bluesky/atproto-spaces/atproto-slack-clone-r12/apps/operator/src/operator/dm-feed-wakes.ts:1789)). The takeover cases assert HTTP 200 and observation by Hub2 ([dm-multiprocess.test.ts](/Users/mikestaub/code/peapods/bluesky/atproto-spaces/atproto-slack-clone-r12/apps/operator/src/operator/dm-multiprocess.test.ts:1053), [dm-multiprocess.test.ts](/Users/mikestaub/code/peapods/bluesky/atproto-spaces/atproto-slack-clone-r12/apps/operator/src/operator/dm-multiprocess.test.ts:1121)). |
+| R9-L1 / R10-L1 | RESOLVED | The heartbeat interval is 4,000 ms ([dm-feed-wakes.ts](/Users/mikestaub/code/peapods/bluesky/atproto-spaces/atproto-slack-clone-r12/apps/operator/src/operator/dm-feed-wakes.ts:31)). Timing begins before election, the test proves zero prior trigger updates, completes under 3,500 ms, and asserts the exact CAS count ([dm-multiprocess.test.ts](/Users/mikestaub/code/peapods/bluesky/atproto-spaces/atproto-slack-clone-r12/apps/operator/src/operator/dm-multiprocess.test.ts:1061), [dm-multiprocess.test.ts](/Users/mikestaub/code/peapods/bluesky/atproto-spaces/atproto-slack-clone-r12/apps/operator/src/operator/dm-multiprocess.test.ts:1110), [dm-multiprocess.test.ts](/Users/mikestaub/code/peapods/bluesky/atproto-spaces/atproto-slack-clone-r12/apps/operator/src/operator/dm-multiprocess.test.ts:1117)). A passing run therefore cannot be explained by a heartbeat update. |
+
+### Remaining or newly introduced findings
+
+**Blocker — 0**
+
+**High — 0**
+
+**Medium — 0**
+
+**Low — 2**
+
+- **R11-L1 — Wall-clock flake risk.** The multiprocess regression must perform election, 120 webhook requests, takeover setup, and the contested request within 3.5 seconds. A sufficiently loaded CI worker can fail despite correct behavior ([dm-multiprocess.test.ts](/Users/mikestaub/code/peapods/bluesky/atproto-spaces/atproto-slack-clone-r12/apps/operator/src/operator/dm-multiprocess.test.ts:1061)). This is a false-negative risk, not a false green.
+
+- **R11-L2 — Incomplete rejection assertion.** The R10-M1 test catches `op2Promise` without asserting that it rejected; an unexpected resolution would leave `err2` undefined and still satisfy the non-authoritative-loss check ([dm-client.test.ts](/Users/mikestaub/code/peapods/bluesky/atproto-spaces/atproto-slack-clone-r12/packages/client/src/dm/dm-client.test.ts:3519)). It also exercises fast-path reuse, while concurrent fallback fencing remains established by static inspection rather than this regression scenario.
+
+No material implementation regression was found. This was a read-only static audit; no builds, tests, linters, typecheckers, servers, or browser runs were performed.
+
+VERDICT: READY

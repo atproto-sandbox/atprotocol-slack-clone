@@ -1,6 +1,6 @@
 # R12 Protocol Drift Plan & Progress (`bluesky-social/atproto#5187` @ `674761056`)
 
-**Status:** Waves `R12a`–`R12e` + Gates 1–6 complete and 100% green — running Round 1 Codex + Claude adversarial implementation reviews
+**Status:** Complete — Waves `R12a`–`R12f`, Gates 1–6, and Claude + Codex adversarial reviews `VERDICT: READY`
 **Branch:** `chore/protocol-drift-6747610` in worktree `../atproto-slack-clone-r12`
 **Baseline:** `origin/main` at `f4a4c16` (PRs #7 `feat/r10-interactions` -> `f7b7bdc` and #8 `feat/r11-tasks` -> `f4a4c16` merged cleanly; `908/908` unit/component tests green before drift)
 **Target Upstream Pin:** `bluesky-social/atproto#5187` HEAD `6747610566eee1b6d743617bd8eb1136adccb362` (88 commits past `5d88b414`, detached worktree `../atproto-spaces-r12` — unbuilt on creation, built and patched in Wave `R12a`; `../atproto-spaces-phase3` stays untouched at `5d88b414`)
@@ -296,17 +296,19 @@ Every gate runs **after** the final edit against built `../atproto-spaces-r12` (
 - [x] **Wave `R12c` (Complete):** `apps/operator` & `@flock/reader` aligned (`83bc8bd`, `40f1f31`, plus `operatorNotifyEndpoint` loopback `localhost` mapping for `@atproto/pds` `safeClient` `allowIpHost: false`); Wave `R12c` exit gate **100% green** (`263/263` combined tests: `237/237` operator + `26/26` reader, `0` ESLint/TS errors).
 - [x] **Wave `R12d` (Complete):** `@flock/client` & `apps/web` aligned (`40f1f31` + `session.ts` NSID JSDoc fix); Wave `R12d` exit gate **100% green** (`445/445` tests across `client` `368`, `web` `57`, `echo-bot` + `webhooks` `20`, `@types/node`-free `tsc -p packages/client --noEmit`, Next.js `pnpm build` green).
 - [x] **Wave `R12e` (Complete):** `protocol-tests` (`r12-protocol-tests`) & `features`/`bdd` (`r12-bdd`) aligned and verified against real pinned `@atproto/pds` (`6747610566`).
-- [ ] **Wave `R12f` (Gates 1–6 Green; Running Adversarial Reviews):**
+- [x] **Wave `R12f` (Complete):**
   - **Docs & R12 Regression Coverage:** Updated all 8 docs (`SPEC.md`, `ARCHITECTURE.md`, `CODE-MAP.md`, `docs/operations.md`, `docs/prd/atproto-slack-clone.md`, `docs/prd/atproto-slack-implementation-plan.md`, `docs/protocol/operator-contract.md`, `docs/protocol/atproto-spaces-pin.md`) and added full R12 security/regression suites across `protocol`, `testing`, `reader`, `operator`, `client`, `web`, `protocol-tests`, and `bdd`.
-  - **Gate 1 — Static & Unit/Component (`Node v22.17.0` ABI 127):** `ATPROTO_PIN_CHECKOUT=../atproto-spaces-r12 pnpm codegen:lex && pnpm typecheck && pnpm lint && pnpm test` -> **PASS (`917/917` tests, `0` failed, `0` skipped, `28,554.47 ms`)**.
-  - **Gate 2 — Protocol Acceptance:** `ATPROTO_PINNED_CHECKOUT=../atproto-spaces-r12 pnpm test:acceptance` -> **PASS (`13/13` suites, `44/44` tests, `153.71 s`)**.
-  - **Gate 3 — Browser Playwright:** `ATPROTO_PINNED_CHECKOUT=../atproto-spaces-r12 pnpm test:browser` -> **PASS (`8/8` specs, `10/10` tests, `179.79 s`)**.
+  - **Gate 1 — Static, Unit/Component & Build (`Node v22.17.0` ABI 127):** `ATPROTO_PIN_CHECKOUT=../atproto-spaces-r12 pnpm codegen:lex && pnpm typecheck && pnpm lint && pnpm test && pnpm build` -> **PASS (`938/938` tests post-review remediation, `0` failed, `0` skipped, `30,376.93 ms`; Next.js production build green)**.
+  - **Gate 2 — Protocol Acceptance:** `ATPROTO_PINNED_CHECKOUT=../atproto-spaces-r12 pnpm test:acceptance` -> **PASS (`13/13` suites, `44/44` tests, `134.21 s`)**.
+  - **Gate 3 — Browser Playwright:** `ATPROTO_PINNED_CHECKOUT=../atproto-spaces-r12 pnpm test:browser` -> **PASS (`8/8` specs, `10/10` tests, `174.52 s`)**.
   - **Gate 4 — Upstream `@atproto/space` + Real PDS Conformance:**
-    - `pnpm --config.runtimeOnFail=ignore --pm-on-fail=ignore -C ../atproto-spaces-r12 --filter @atproto/space test` -> **PASS (`9/9` files, `173/173` tests, `655 ms`)**.
-    - `NODE_OPTIONS=--experimental-vm-modules pnpm -C ../atproto-spaces-r12 --filter @atproto/pds exec jest --runInBand tests/space/{slack-*,platform-spike-k*}` -> **PASS (`5/5` suites, `12/12` tests, `128.77 s`; temporary copies removed cleanly)**.
+    - `pnpm --config.runtimeOnFail=ignore --pm-on-fail=ignore -C ../atproto-spaces-r12 --filter @atproto/space test` -> **PASS (`9/9` files, `173/173` tests, `563 ms`)**.
+    - `NODE_OPTIONS=--experimental-vm-modules pnpm -C ../atproto-spaces-r12 --filter @atproto/pds exec jest --runInBand tests/space/{slack-*,platform-spike-k*}` -> **PASS (`5/5` suites, `12/12` tests, `79.33 s`; temporary copies removed cleanly)**.
   - **Gate 5 — BDD:** `ATPROTO_PINNED_CHECKOUT=../atproto-spaces-r12 pnpm test:bdd` -> **PASS (`74/74` scenarios, `537/537` steps, `2/2` hooks, `18m 19.41s`)**.
   - **Gate 6 — Performance & Sync Budgets:**
     - `pnpm test:sync-budget` -> **PASS (`177 s`; warm reopen = `1` `listWriters` call across `20`/`100`/`200` writers)**.
     - `pnpm test:sync-budget:browser` -> **PASS (`288 s`; warm reopen = `2` requests across `20`/`100`/`200` writers)**.
-    - `pnpm test:performance` -> **PASS (`3/3` suites: `dm-performance` `77.24 s`, `performance-envelope` `1,752.49 s`, `tasks-performance` `23.27 s`; total `30m 54.25s`)**.
-  - **Adversarial Code Reviews:** Pending Round 1 Codex + Claude reviews.
+    - `pnpm test:performance` -> **PASS (`3/3` suites: `dm-performance` `67.55 s`, `performance-envelope` `1,752.49 s`, `tasks-performance` `20.85 s`; total `30m 54.25s`)**.
+  - **Adversarial Code Reviews (`VERDICT: READY`):**
+    - **Claude (`Claude Opus 5.5` Swarm Round 1 + `claude-fable-5[1m]` @ `max` effort Rounds 2 & 3):** `.ai/reviews/opus-r12-impl-round-{1..3}.md` -> **`VERDICT: READY`** (`0` Blocker, `0` High, `0` Medium).
+    - **Codex (`gpt-5.6-sol` @ `ultra` reasoning effort, Rounds 1–11):** `.ai/reviews/codex-r12-impl-round-{1..11}.md` -> **`VERDICT: READY`** (`0` Blocker, `0` High, `0` Medium).
