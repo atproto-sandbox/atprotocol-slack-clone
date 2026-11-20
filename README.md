@@ -85,6 +85,7 @@ GitHub’s README cannot run interactive HTML (no slide keyboard navigation in t
 
 ## Project notes
 
+- [`protocol-authors-feedback.md`](protocol-authors-feedback.md): synthesis for the atproto Spaces protocol authors—what we built, what worked well, and prioritized protocol recommendations.
 - [`PROGRESS.md`](PROGRESS.md) and [`.ai/plans/r12-protocol-drift-progress.md`](.ai/plans/r12-protocol-drift-progress.md): implementation waves, R12 protocol alignment and verification gate logs.
 - [`.ai/upstream/`](.ai/upstream): draft protocol feedback notes for the atproto core team.
 - [`.ai/reviews/`](.ai/reviews): adversarial architecture, security and protocol conformance reviews.
