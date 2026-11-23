@@ -79,9 +79,8 @@ export interface OperationRequest {
     | 'transitionChannel'
     | 'archiveChannel'
     | 'decideJoinRequest'
-    | 'leaveWorkspace'
+    | 'decideGroupJoinRequest'
     | 'leaveChannel'
-    | 'reconcileWorkspace'
     | 'installApp'
     | 'updateAppAccess'
     | 'uninstallApp'
@@ -89,6 +88,8 @@ export interface OperationRequest {
     | 'disableExtension'
     | (string & {})
   subject?: string
+  member?: string
+  roles?: string[]
   active?: boolean
   skey?: string
   extId?: string
@@ -99,6 +100,7 @@ export interface OperationRequest {
   request?: string
   requestId?: string
   decision?: 'approve' | 'deny' | (string & {})
+  expiresAt?: string
 }
 
 const hashOperationRequest = 'operationRequest'
@@ -140,8 +142,10 @@ export interface Operation {
     | 'completed'
     | 'failed'
     | 'paused'
+    | 'aborted_actor_revoked'
     | (string & {})
   completedSteps: string[]
+  takenOverBy?: string
   error?: string
   updatedAt: string
 }

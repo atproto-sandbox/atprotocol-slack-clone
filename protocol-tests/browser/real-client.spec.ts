@@ -4,12 +4,20 @@ import { chromium, type Browser, type BrowserContext, type Page } from "@playwri
 import { availablePort, startAppServer, startOperatorServer, type AppServer } from "../support/app-server";
 import { openChannel, signIn as signInPage } from "../support/browser-app";
 import { countByOrigin, watchPreflights, type Preflight } from "../support/browser-network";
-import { actorTransport, bearerSession, startPdsNetwork, type NetworkActor, type PdsNetwork } from "../support/pds-network";
+import {
+  acceptGroupMembership,
+  actorTransport,
+  bearerSession,
+  createOpenSocialGroup,
+  startPdsNetwork,
+  type NetworkActor,
+  type PdsNetwork,
+} from "../support/pds-network";
 
-// K9 of `.ai/plans/platform-refactor.md`, repeated in R6a with the real client: the app's own pages sign in through its
-// `BrowserOAuthClient`, and the engine in the page reads the protocol hosts itself. The operator still shares the web app's
-// origin (R7 moves it). Unlike R0's K9, nothing runs in Node on the client's behalf: the keys, the MAC checks and every
-// request are the page's.
+// K9 of `.ai/plans/platform-refactor.md`, repeated with the real browser client on R13 OpenSocial groups: the app's own pages
+// sign in through `BrowserOAuthClient`, and the engine in the page reads the personal PDS hosts, the OpenSocial Group Host,
+// PLC, and the operator directly. Nothing runs in Node on the client's behalf: the keys, the MAC checks and every request are
+// the page's.
 
 const WORKSPACE_NAME = "K9 Workspace";
 const AUTHORITY_NOTE = "k9 from the authority host";
@@ -21,7 +29,7 @@ type Seen = { method: string; url: URL; status: number; requestBody: string; hea
 type ToApp = { method: string; url: URL; headers: Record<string, string>; body: string };
 type Side = { actor: NetworkActor; context: BrowserContext; page: Page; preflights: Preflight[]; failures: string[]; seen: Seen[]; toApp: ToApp[]; toOperator: ToApp[] };
 
-test("the app's own browser client reaches the PDS hosts and the operator's own process directly (K9, R6a, R7)", { timeout: 600_000 }, async (t) => {
+test("the app's own browser client reaches the PDS hosts, Group Host, and the operator's own process directly (K9, R6a, R7, R13)", { timeout: 600_000 }, async (t) => {
   const appPort = await availablePort();
   const operatorPort = await availablePort();
   const pds = await startPdsNetwork("k9-real-client", { appPort, operatorPort });
@@ -32,6 +40,7 @@ test("the app's own browser client reaches the PDS hosts and the operator's own 
     operator = await startOperatorServer();
     app = await startAppServer(appPort);
     const operatorOrigin = new URL(operator.url).origin;
+    const groupHostOrigin = `http://localhost:${pds.groupHost.port}`;
     const fixture = await provision(pds);
     const unreachable = new URL(fixture.remote.pds.url).origin;
     browser = await chromium.launch({ headless: true });
@@ -43,16 +52,16 @@ test("the app's own browser client reaches the PDS hosts and the operator's own 
     await member.page.getByText(AUTHORITY_NOTE, { exact: true }).waitFor({ state: "visible" });
     await member.page.getByText(`Messages from ${fixture.remote.did} may be missing`).waitFor({ state: "visible" });
     const firstMints = credentialAnswers(member, fixture.workspace).length;
+    const renewedAt = member.seen.length;
     await member.page.getByRole("button", { name: /Refresh/ }).click();
     await waitFor(() => credentialAnswers(member, fixture.workspace).length > firstMints, "the workspace credential to be minted again");
-    const renewedAt = member.seen.length;
     await openChannel(member.page, "general");
     // and posts to the channel, which writes to its own host
     await member.page.getByPlaceholder("Write a message…").fill(BROWSER_NOTE);
     await member.page.getByRole("button", { name: "Send", exact: true }).click();
     await member.page.locator(".message-card > p").filter({ hasText: BROWSER_NOTE }).waitFor({ state: "visible" });
 
-    // and an outsider, a workspace member not on the private channel's member list, opens that channel
+    // and an outsider, a workspace member not on the private channel's role, opens that channel
     const outsider = await signInFrom(browser, app.url, operatorOrigin, fixture.outsider, {});
     await openChannel(outsider.page, "vault");
     await outsider.page.getByText("You are not on this channel’s active roster.").waitFor({ state: "visible" });
@@ -64,8 +73,8 @@ test("the app's own browser client reaches the PDS hosts and the operator's own 
       "PAR and the token exchange are the page's own requests to the member's host":
         fetched(member, memberHost, "/oauth/par").some((entry) => entry.status < 300) && fetched(member, memberHost, "/oauth/token").some((entry) => entry.status === 200),
       "DID documents come from the PLC directory": member.seen.some((entry) => entry.url.origin === new URL(pds.plcUrl).origin && entry.status === 200),
-      "a channel credential is minted at the authority's host": credentialAnswers(member, fixture.channel).some((entry) => entry.status === 200),
-      "the workspace credential is minted again on refresh": credentialAnswers(member, fixture.workspace).filter((entry) => entry.status === 200).length >= 2,
+      "a channel credential is minted at the Group Host": credentialAnswers(member, fixture.channel).some((entry) => entry.url.origin === groupHostOrigin && entry.status === 200),
+      "the workspace credential is minted again on refresh at the Group Host": credentialAnswers(member, fixture.workspace).filter((entry) => entry.url.origin === groupHostOrigin && entry.status === 200).length >= 2,
       "a getRecord after the renewal carries a MAC the page can read": member.seen.slice(renewedAt).some((entry) => {
         if (!entry.url.pathname.endsWith("/com.atproto.space.getRecord") || entry.status !== 200) return false;
         const exposed = (entry.headers["access-control-expose-headers"] ?? "").split(",").map((token) => token.trim().toLowerCase());
@@ -77,14 +86,14 @@ test("the app's own browser client reaches the PDS hosts and the operator's own 
           && Boolean(entry.headers["signature"])
           && /accept-signature/i.test(entry.headers.vary ?? "");
       }),
-      "the authority lists the channel's writers": member.seen.some((entry) => entry.url.pathname.endsWith("/com.atproto.space.listWriters") && entry.status === 200),
+      "the Group Host lists the channel's writers": member.seen.some((entry) => entry.url.origin === groupHostOrigin && entry.url.pathname.endsWith("/com.atproto.space.listWriters") && entry.status === 200),
       "the operator, at its own origin, is called with a service token": member.seen.some((entry) => entry.url.origin === operatorOrigin
         && entry.url.pathname === "/xrpc/new.flock.operator.getChanges" && entry.status === 200 && /^Bearer /.test(entry.requestHeaders.authorization ?? "")),
       "the page writes to its own host with its DPoP-bound session": member.seen.some((entry) => entry.url.origin === memberHost && entry.method === "POST"
         && entry.url.pathname === "/xrpc/com.atproto.space.createRecord" && entry.status === 200 && /^DPoP /.test(entry.requestHeaders.authorization ?? "")
         && entry.requestBody.includes(BROWSER_NOTE)),
-      "the outsider is refused, and the refusal is readable": credentialAnswers(outsider, fixture.vault).length > 0
-        && credentialAnswers(outsider, fixture.vault).every((entry) => entry.status === 400 && refusalCode(entry) === "SpaceNotFound")
+      "the outsider is refused at the Group Host, and the refusal is readable": credentialAnswers(outsider, fixture.vault).length > 0
+        && credentialAnswers(outsider, fixture.vault).every((entry) => entry.url.origin === groupHostOrigin && entry.status === 400 && refusalCode(entry) === "SpaceNotFound")
         && await outsider.page.locator(".form-error").count() === 0,
       "the unreachable writer host fails as a network error, and the rest of the channel is shown": member.failures.some((failure) => failure.includes(unreachable))
         && await member.page.getByText(AUTHORITY_NOTE, { exact: true }).isVisible(),
@@ -100,13 +109,15 @@ test("the app's own browser client reaches the PDS hosts and the operator's own 
     };
 
     const preflights = [...member.preflights, ...outsider.preflights];
+    const byOrigin = countByOrigin(preflights);
     const failedPreflights = preflights.filter((preflight) => !/^2\d\d$/.test(preflight.outcome) && new URL(preflight.url).origin !== unreachable);
     const failures = [...member.failures, ...outsider.failures].filter((failure) => !failure.includes(unreachable) && !isFixtureHandleCheck(failure) && !failure.endsWith("(net::ERR_ABORTED)"));
     for (const [step, ok] of Object.entries(results)) t.diagnostic(`${step}: ${ok ? "ok" : "FAILED"}`);
-    t.diagnostic(`preflights the browser sent: ${preflights.length}, per origin: ${JSON.stringify(countByOrigin(preflights))}`);
+    t.diagnostic(`preflights the browser sent: ${preflights.length}, per origin: ${JSON.stringify(byOrigin)}`);
     t.diagnostic(`requests per origin (member): ${JSON.stringify(countRequests(member))}`);
     t.diagnostic(`browser-level failures apart from the unreachable host, fixture handle checks and aborted polls: ${failures.join("; ") || "none"}`);
     assert.deepEqual(Object.entries(results).filter(([, ok]) => !ok).map(([step]) => step), []);
+    assert.ok((byOrigin[groupHostOrigin] ?? 0) > 0, "browser sent CORS preflights to Group Host");
     assert.deepEqual(failedPreflights, [], "every preflight the browser sent succeeded");
     assert.deepEqual(failures, [], "only the unreachable host fails in the browser");
 
@@ -120,7 +131,8 @@ test("the app's own browser client reaches the PDS hosts and the operator's own 
       databases: (await indexedDB.databases()).map((database) => database.name ?? ""),
       dmKeys: Object.keys(localStorage).filter((key) => key.startsWith(`dm:${did}:`)),
     }), fixture.member.did);
-    assert.ok(!kept.databases.includes(`flock-sync-${fixture.member.did}`), `the account's store is deleted: ${kept.databases.join(", ")}`);
+    assert.ok(!kept.databases.includes(`flock-sync-${fixture.member.did}`), `the account's sync store is deleted: ${kept.databases.join(", ")}`);
+    assert.ok(!kept.databases.includes(`flock-group-oauth:${fixture.member.did}`), `the account's group OAuth store is deleted: ${kept.databases.join(", ")}`);
     assert.deepEqual(kept.dmKeys, [], "its DM state is forgotten");
     await member.page.reload();
     await handleField.waitFor({ state: "visible" });
@@ -134,41 +146,87 @@ test("the app's own browser client reaches the PDS hosts and the operator's own 
 });
 
 /**
- * A workspace with a public channel and a private one. The member and the outsider (both on host 0) have accepted it; the
- * member is on both channels, the outsider on neither's member list but the public one's. A writer on host 1 and the
- * authority have each written to the public channel, and the authority lists both.
+ * An OpenSocial group workspace with `#general` (public) and `#vault` (private). `member` and `outsider` (both on host 0)
+ * have accepted membership; `member` holds the private channel role for `#vault` while `outsider` does not. Both `owner`
+ * (on host 0) and `remote` (on host 1) have written to `#general`, and the Group Host lists both writers.
  */
 async function provision(pds: PdsNetwork) {
-  const [{ createEngine }, { readIndependentChannelPage }, { ensureMemberListSpace, putAuthorityRecord, putSpaceMember }, keys, { COLLECTION, SPACE_TYPE }, { AtprotoClient }] = await Promise.all([
-    import("@flock/client/engine"), import("@flock/reader/independent"), import("@flock/operator/atproto/space-ops"), import("@flock/protocol/keys"), import("@flock/protocol/nsids"), import("@flock/protocol/atproto/xrpc"),
+  const [
+    { readIndependentChannelPage },
+    { restoreAuthorityGrant },
+    { grantCreationAuthorization },
+    { createWorkspace },
+    { registrationDeps },
+    { requireActiveWorkspaceAdmin },
+    { executeOperatorOperation },
+    { channelUri, tidNow },
+    { COLLECTION },
+    { AtprotoClient },
+  ] = await Promise.all([
+    import("@flock/reader/independent"),
+    import("@flock/operator/operator/authority-grant"),
+    import("@flock/operator/operator/creation-authorization"),
+    import("@flock/operator/operator/kinds/create-workspace"),
+    import("@flock/operator/operator/registrations"),
+    import("@flock/operator/operator/security"),
+    import("@flock/operator/operator/operations"),
+    import("@flock/protocol/keys"),
+    import("@flock/protocol/nsids"),
+    import("@flock/protocol/atproto/xrpc"),
   ]);
-  const authority = await pds.createActor("k9rowner", 0);
+  const owner = await pds.createActor("k9rowner", 0);
   const member = await pds.createActor("k9rmember", 0);
   const outsider = await pds.createActor("k9routsider", 0);
   const remote = await pds.createActor("k9rremote", 1);
-  const owner = bearerSession(authority) as never;
-  const updatedAt = new Date().toISOString();
-  const workspace = await ensureMemberListSpace(owner, SPACE_TYPE.workspace, "k9r");
-  const channel = await ensureMemberListSpace(owner, SPACE_TYPE.channel, "k9r-general");
-  const vault = await ensureMemberListSpace(owner, SPACE_TYPE.channel, "k9r-vault");
-  await putAuthorityRecord(owner, workspace, COLLECTION.workspaceProfile, "self", { name: WORKSPACE_NAME, createdAt: updatedAt });
-  await putAuthorityRecord(owner, workspace, COLLECTION.directory, "k9r-general", { skey: "k9r-general", name: "general", visibility: "public" });
-  await putAuthorityRecord(owner, workspace, COLLECTION.directory, "k9r-vault", { skey: "k9r-vault", name: "vault", visibility: "private" });
-  await putAuthorityRecord(owner, vault, COLLECTION.channelRoster, keys.subjectKey(member.did), { subject: member.did, active: true, updatedAt });
-  await putSpaceMember(owner, vault, member.did, true, true);
-  for (const account of [authority, member, outsider, remote]) {
-    await putAuthorityRecord(owner, workspace, COLLECTION.workspaceRoster, keys.subjectKey(account.did), { subject: account.did, active: true, updatedAt });
-    await putSpaceMember(owner, workspace, account.did, true, true);
-    await putSpaceMember(owner, channel, account.did, true, true);
+
+  const createdGroup = await createOpenSocialGroup(pds, owner, { name: WORKSPACE_NAME });
+  const groupDid = createdGroup.groupDid;
+  grantCreationAuthorization(
+    { authorityDid: groupDid, initiatorDid: owner.did, name: WORKSPACE_NAME },
+    Math.floor(Date.now() / 1000),
+  );
+  const createdWs = await createWorkspace(
+    await restoreAuthorityGrant(groupDid),
+    { creator: owner.did, name: WORKSPACE_NAME, operationId: tidNow() },
+    registrationDeps,
+  );
+  assert.equal(createdWs.state, "completed");
+  const workspace = createdWs.workspace;
+  const channel = createdWs.channel;
+  const vault = channelUri(groupDid, "vault");
+
+  const adminActor = await requireActiveWorkspaceAdmin(workspace, owner.did);
+  for (const account of [member, outsider, remote]) {
+    const invited = await executeOperatorOperation(
+      adminActor,
+      tidNow(),
+      { kind: "inviteMember", subject: account.did },
+      registrationDeps,
+    );
+    assert.equal(invited.state, "completed");
+    await acceptGroupMembership(pds, account, groupDid);
   }
-  for (const account of [member, outsider]) await createEngine(actorTransport(pds, account)).workspaces.accept(workspace);
-  for (const [writer, text] of [[authority, AUTHORITY_NOTE], [remote, REMOTE_NOTE]] as const) {
+  const createdVault = await executeOperatorOperation(
+    adminActor,
+    tidNow(),
+    { kind: "createChannel", skey: "vault", name: "vault", visibility: "private", members: [owner.did, member.did] },
+    registrationDeps,
+  );
+  assert.equal(createdVault.state, "completed");
+
+  for (const [writer, text] of [[owner, AUTHORITY_NOTE], [remote, REMOTE_NOTE]] as const) {
     await new AtprotoClient(bearerSession(writer).fetchHandler).procedure("com.atproto.space.createRecord", {
-      space: channel, repo: writer.did, collection: COLLECTION.message, rkey: keys.tidNow(),
+      space: channel,
+      repo: writer.did,
+      collection: COLLECTION.message,
+      rkey: tidNow(),
       record: { $type: COLLECTION.message, text, createdAt: new Date().toISOString() },
     });
   }
-  await waitFor(async () => (await readIndependentChannelPage(actorTransport(pds, member), workspace, "k9r-general")).messages.length === 2, "the authority to list both writers");
+  await waitFor(
+    async () => (await readIndependentChannelPage(actorTransport(pds, member), workspace, "general")).messages.length === 2,
+    "the Group Host to list both writers",
+  );
   return { member, outsider, remote, workspace, channel, vault };
 }
 
@@ -204,12 +262,12 @@ async function signInFrom(browser: Browser, appUrl: string, operatorOrigin: stri
   return side;
 }
 
-/** The page's credential exchanges for one space, as the authority's host answered them. */
+/** The page's credential exchanges for one space, as the Group Host answered them. */
 function credentialAnswers(side: Side, space: string): Seen[] {
   return side.seen.filter((entry) => entry.url.pathname === "/xrpc/com.atproto.space.authorizeSpaceSync" && spaceOf(entry.requestBody) === space);
 }
 
-/** The PDS answers every credential refusal as HTTP 400 with an error code. */
+/** The Group Host answers credential refusals for unlisted private spaces as HTTP 400 with `SpaceNotFound`. */
 function refusalCode(entry: Seen): string | undefined {
   return entry.body === undefined ? undefined : (JSON.parse(entry.body) as { error?: string }).error;
 }

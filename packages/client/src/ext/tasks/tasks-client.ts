@@ -28,7 +28,8 @@ import {
   type TaskStatus,
 } from "@flock/protocol/entity-merge";
 import { parseSpaceRecordUri, parseWorkspaceUri, spaceRecordUri, tasksSpaceUri } from "@flock/protocol/keys";
-import { COLLECTION } from "@flock/protocol/nsids";
+import { isHidden, isTakendown, labelsForResource, projectActiveLabels, type ActiveSpaceLabel } from "@flock/protocol/moderation";
+import { ATPROTO_SPACE_COLLECTION, COLLECTION } from "@flock/protocol/nsids";
 import { validateSpaceRecord } from "@flock/protocol/registry";
 import { WORKSPACE_ENVELOPE, type WorkspaceExtensionSummary } from "@flock/protocol/workspace-summary";
 import type { CredentialCache } from "../../credentials";
@@ -61,14 +62,23 @@ export type ForeignUpdatePolicy = "preserve-conflict" | "reject-stale";
 
 export type MergedProjectView = MergedProject & {
   readonly observedContext: ObservedEntityContext;
+  readonly hidden?: boolean;
+  readonly moderationLabels?: string[];
 };
 
 export type MergedTaskView = MergedTask & {
   readonly observedContext: ObservedEntityContext;
+  readonly hidden?: boolean;
+  readonly moderationLabels?: string[];
+};
+
+export type TaskCommentWithLabels = TaskCommentView & {
+  readonly hidden?: boolean;
+  readonly moderationLabels?: string[];
 };
 
 export type TaskDetailView = MergedTaskView & {
-  readonly comments: TaskCommentView[];
+  readonly comments: TaskCommentWithLabels[];
 };
 
 export type TaskActivityItem = TaskActivityEvent & {
@@ -100,7 +110,7 @@ export type TasksSpaceView = {
   writerUniverse: string[];
   projects: MergedProjectView[];
   tasks: MergedTaskView[];
-  commentsByTask: Map<string, TaskCommentView[]>;
+  commentsByTask: Map<string, TaskCommentWithLabels[]>;
   activities: TaskActivityItem[];
   unseenActivityCount: number;
   orphanedProjectEdits: number;
@@ -324,10 +334,23 @@ export class TasksClient {
     }
 
     const { authorityDid, tasksSpace, snapshot, extInstall, spaceSync } = synced;
+    const nowMs = transportNow(this.deps.transport);
+    const tasksLabels = projectActiveLabels(
+      (spaceSync.byCollection[ATPROTO_SPACE_COLLECTION.label] ?? []).map((r) => ({
+        repoDid: r.repo,
+        rkey: r.rkey,
+        value: r.value,
+      })),
+      { groupDid: authorityDid, spaceUri: tasksSpace, nowMs },
+    );
+    const accountLabels = snapshot.accountLabels ?? [];
+
     const validated = collectValidatedRecordsFromByCollection(
       authorityDid,
       tasksSpace,
       spaceSync.byCollection,
+      tasksLabels,
+      accountLabels,
     );
     const complete = snapshot.workspaceSnapshotComplete && spaceSync.complete;
     const merged = mergeTasksSpace({ ...validated, complete });
@@ -346,6 +369,27 @@ export class TasksClient {
       hasUncertainAncestry,
     );
 
+    const decoratedComments = new Map<string, TaskCommentWithLabels[]>();
+    for (const [taskUri, comments] of merged.commentsByTask.entries()) {
+      decoratedComments.set(
+        taskUri,
+        comments.map((comment) => {
+          const vals = [
+            ...new Set([
+              ...labelsForResource(tasksLabels, comment.uri).map((l) => l.val),
+              ...labelsForResource(accountLabels, comment.repo).map((l) => l.val),
+            ]),
+          ].sort();
+          const hidden = isHidden(tasksLabels, comment.uri) || isHidden(accountLabels, comment.repo);
+          return {
+            ...comment,
+            ...(hidden ? { hidden: true } : {}),
+            ...(vals.length > 0 ? { moderationLabels: vals } : {}),
+          };
+        }),
+      );
+    }
+
     return {
       workspaceUri,
       tasksSpaceUri: tasksSpace,
@@ -360,9 +404,9 @@ export class TasksClient {
       changing: [...spaceSync.changing].sort(),
       rosterMembers: [...snapshot.rosterMembers].sort(),
       writerUniverse: spaceSync.writers,
-      projects: merged.projects.map((project) => this.attachProjectContext(project)),
-      tasks: merged.tasks.map((task) => this.attachTaskContext(task)),
-      commentsByTask: merged.commentsByTask,
+      projects: merged.projects.map((project) => this.attachProjectContext(project, undefined, tasksLabels, accountLabels)),
+      tasks: merged.tasks.map((task) => this.attachTaskContext(task, undefined, tasksLabels, accountLabels)),
+      commentsByTask: decoratedComments,
       activities,
       unseenActivityCount,
       orphanedProjectEdits: merged.orphanedProjectEdits,
@@ -433,6 +477,7 @@ export class TasksClient {
     const synced = await this.ensureSyncedForWrite(workspaceUri);
     const did = this.deps.transport.did;
     await this.deps.credentials.fresh(tasksSpace);
+    const writeEpoch = await this.deps.sync.store.epoch(tasksSpace);
 
     const createdAt = new Date(transportNow(this.deps.transport)).toISOString();
     const { stamp, record, responseCid } = await this.createSpaceRecordWithRetry({
@@ -453,7 +498,7 @@ export class TasksClient {
 
     const cid = await this.verifyOrEmptyCid(COLLECTION.taskProject, stamp.tid, record, responseCid);
     const uri = spaceRecordUri(tasksSpace, did, COLLECTION.taskProject, stamp.tid);
-    await this.persistOwnUpsert(workspaceUri, tasksSpace, COLLECTION.taskProject, stamp.tid, uri, cid, record);
+    await this.persistOwnUpsert(workspaceUri, tasksSpace, COLLECTION.taskProject, stamp.tid, uri, cid, record, writeEpoch);
 
     const rootEntry: StoredEntityRecord<ProjectRecordValue> = {
       uri,
@@ -494,6 +539,7 @@ export class TasksClient {
     const synced = await this.ensureSyncedForWrite(workspaceUri);
     const did = this.deps.transport.did;
     await this.deps.credentials.fresh(tasksSpace);
+    const writeEpoch = await this.deps.sync.store.epoch(tasksSpace);
 
     const createdAt = new Date(transportNow(this.deps.transport)).toISOString();
     const status: TaskStatus = input.status ?? "todo";
@@ -523,7 +569,7 @@ export class TasksClient {
 
     const cid = await this.verifyOrEmptyCid(COLLECTION.task, stamp.tid, record, responseCid);
     const uri = spaceRecordUri(tasksSpace, did, COLLECTION.task, stamp.tid);
-    await this.persistOwnUpsert(workspaceUri, tasksSpace, COLLECTION.task, stamp.tid, uri, cid, record);
+    await this.persistOwnUpsert(workspaceUri, tasksSpace, COLLECTION.task, stamp.tid, uri, cid, record, writeEpoch);
 
     const rootEntry: StoredEntityRecord<TaskRecordValue> = {
       uri,
@@ -650,6 +696,7 @@ export class TasksClient {
       }
 
       await this.deps.credentials.fresh(tasksSpace);
+      const writeEpoch = await this.deps.sync.store.epoch(tasksSpace);
       const createdAt = new Date(transportNow(this.deps.transport)).toISOString();
       const { stamp, record, responseCid } = await this.createSpaceRecordWithRetry({
         tasksSpace,
@@ -667,7 +714,7 @@ export class TasksClient {
 
       const cid = await this.verifyOrEmptyCid(COLLECTION.taskComment, stamp.tid, record, responseCid);
       const uri = spaceRecordUri(tasksSpace, did, COLLECTION.taskComment, stamp.tid);
-      await this.persistOwnUpsert(workspaceUri, tasksSpace, COLLECTION.taskComment, stamp.tid, uri, cid, record);
+      await this.persistOwnUpsert(workspaceUri, tasksSpace, COLLECTION.taskComment, stamp.tid, uri, cid, record, writeEpoch);
 
       return {
         uri,
@@ -726,6 +773,7 @@ export class TasksClient {
       }
 
       await this.deps.credentials.fresh(tasksSpace);
+      const writeEpoch = await this.deps.sync.store.epoch(tasksSpace);
       let result: { uri: string; cid: string };
       try {
         result = await this.deps.transport.memberClient.procedure<unknown, { uri: string; cid: string }>(
@@ -738,7 +786,7 @@ export class TasksClient {
       }
 
       const cid = await this.verifyOrEmptyCid(COLLECTION.taskComment, target.rkey, record, result.cid);
-      await this.persistOwnUpsert(workspaceUri, tasksSpace, COLLECTION.taskComment, target.rkey, input.commentUri, cid, record);
+      await this.persistOwnUpsert(workspaceUri, tasksSpace, COLLECTION.taskComment, target.rkey, input.commentUri, cid, record, writeEpoch);
 
       return {
         uri: input.commentUri,
@@ -768,6 +816,7 @@ export class TasksClient {
     await this.writeQueue.withEntityLock(did, commentUri, async () => {
       await this.ensureSyncedForWrite(workspaceUri);
       await this.deps.credentials.fresh(tasksSpace);
+      const writeEpoch = await this.deps.sync.store.epoch(tasksSpace);
       try {
         await this.deps.transport.memberClient.procedure("com.atproto.space.deleteRecord", {
           space: tasksSpace,
@@ -785,7 +834,7 @@ export class TasksClient {
         await this.deps.sync.applyOwnWrite(
           { space: tasksSpace, repo: did },
           { remove: [{ collection: COLLECTION.taskComment, rkey: target.rkey }] },
-          { workspace: workspaceUri },
+          { workspace: workspaceUri, epoch: writeEpoch },
         );
       }
     });
@@ -925,6 +974,7 @@ export class TasksClient {
       });
 
       await this.deps.credentials.fresh(tasksSpace);
+      const writeEpoch = await this.deps.sync.store.epoch(tasksSpace);
       const { stamp, record, responseCid } = await this.createSpaceRecordWithRetry({
         tasksSpace,
         authorityDid,
@@ -943,7 +993,7 @@ export class TasksClient {
 
       const cid = await this.verifyOrEmptyCid(input.editCollection, stamp.tid, record, responseCid);
       const uri = spaceRecordUri(tasksSpace, did, input.editCollection, stamp.tid);
-      await this.persistOwnUpsert(input.workspaceUri, tasksSpace, input.editCollection, stamp.tid, uri, cid, record);
+      await this.persistOwnUpsert(input.workspaceUri, tasksSpace, input.editCollection, stamp.tid, uri, cid, record, writeEpoch);
 
       const newEditEntry: StoredEntityRecord<TEdit> = {
         uri,
@@ -1235,7 +1285,7 @@ export class TasksClient {
     try {
       spaceSync = await this.deps.sync.syncVerifiedSpace({
         space: tasksSpace,
-        collections: TASKS_COLLECTIONS,
+        collections: [...TASKS_COLLECTIONS, ATPROTO_SPACE_COLLECTION.label],
         verifiedRosterMembers: snapshot.rosterMembers,
         workspaceSnapshotComplete: snapshot.workspaceSnapshotComplete,
         includeAuthority: false,
@@ -1279,7 +1329,7 @@ export class TasksClient {
         }
         spaceSync = await this.deps.sync.syncVerifiedSpace({
           space: tasksSpace,
-          collections: TASKS_COLLECTIONS,
+          collections: [...TASKS_COLLECTIONS, ATPROTO_SPACE_COLLECTION.label],
           verifiedRosterMembers: snapshot.rosterMembers,
           workspaceSnapshotComplete: snapshot.workspaceSnapshotComplete,
           includeAuthority: false,
@@ -1331,6 +1381,17 @@ export class TasksClient {
   ): Promise<StoredEntityRecord<V> | null> {
     const record = await this.deps.sync.store.getRecord(tasksSpace, repo, collection, rkey);
     if (!record) return null;
+    const [spaceLabelRecords, accountLabels] = await Promise.all([
+      this.deps.sync.store.records(tasksSpace, ATPROTO_SPACE_COLLECTION.label, authorityDid),
+      this.deps.sync.cachedAccountLabels(authorityDid),
+    ]);
+    const tasksLabels = projectActiveLabels(
+      spaceLabelRecords.map((r) => ({ repoDid: r.repo, rkey: r.rkey, value: r.value })),
+      { groupDid: authorityDid, spaceUri: tasksSpace, nowMs: transportNow(this.deps.transport) },
+    );
+    if (isTakendown(accountLabels, repo) || isTakendown(tasksLabels, record.uri, record.cid || undefined)) {
+      return null;
+    }
     const validation = validateSpaceRecord(collection, record.value, {
       authorityDid,
       spaceUri: tasksSpace,
@@ -1347,10 +1408,21 @@ export class TasksClient {
     collection: string,
     subjectUri: string,
   ): Promise<StoredEntityRecord<V>[]> {
-    const records = await this.deps.sync.store.records(tasksSpace, collection);
+    const [records, spaceLabelRecords, accountLabels] = await Promise.all([
+      this.deps.sync.store.records(tasksSpace, collection),
+      this.deps.sync.store.records(tasksSpace, ATPROTO_SPACE_COLLECTION.label, authorityDid),
+      this.deps.sync.cachedAccountLabels(authorityDid),
+    ]);
+    const tasksLabels = projectActiveLabels(
+      spaceLabelRecords.map((r) => ({ repoDid: r.repo, rkey: r.rkey, value: r.value })),
+      { groupDid: authorityDid, spaceUri: tasksSpace, nowMs: transportNow(this.deps.transport) },
+    );
     const valid: StoredEntityRecord<V>[] = [];
     for (const record of records) {
       if (record.value.subject !== subjectUri) continue;
+      if (isTakendown(accountLabels, record.repo) || isTakendown(tasksLabels, record.uri, record.cid || undefined)) {
+        continue;
+      }
       const check = validateSpaceRecord(collection, record.value, {
         authorityDid,
         spaceUri: tasksSpace,
@@ -1385,6 +1457,7 @@ export class TasksClient {
     uri: string,
     cid: string,
     value: Record<string, unknown>,
+    epoch?: string,
   ): Promise<void> {
     if (!this.applyOwnWrites) return;
     await this.deps.sync.applyOwnWrite(
@@ -1402,13 +1475,27 @@ export class TasksClient {
           },
         ],
       },
-      { workspace: workspaceUri },
+      { workspace: workspaceUri, ...(epoch !== undefined ? { epoch } : {}) },
     );
   }
 
-  private attachProjectContext(project: MergedProject, ctx?: ObservedEntityContext): MergedProjectView {
+  private attachProjectContext(
+    project: MergedProject,
+    ctx?: ObservedEntityContext,
+    tasksLabels: readonly ActiveSpaceLabel[] = [],
+    accountLabels: readonly ActiveSpaceLabel[] = [],
+  ): MergedProjectView {
+    const vals = [
+      ...new Set([
+        ...labelsForResource(tasksLabels, project.uri).map((l) => l.val),
+        ...labelsForResource(accountLabels, project.repo).map((l) => l.val),
+      ]),
+    ].sort();
+    const hidden = isHidden(tasksLabels, project.uri) || isHidden(accountLabels, project.repo);
     return {
       ...project,
+      ...(hidden ? { hidden: true } : {}),
+      ...(vals.length > 0 ? { moderationLabels: vals } : {}),
       observedContext:
         ctx ??
         freezeContext({
@@ -1421,9 +1508,23 @@ export class TasksClient {
     };
   }
 
-  private attachTaskContext(task: MergedTask, ctx?: ObservedEntityContext): MergedTaskView {
+  private attachTaskContext(
+    task: MergedTask,
+    ctx?: ObservedEntityContext,
+    tasksLabels: readonly ActiveSpaceLabel[] = [],
+    accountLabels: readonly ActiveSpaceLabel[] = [],
+  ): MergedTaskView {
+    const vals = [
+      ...new Set([
+        ...labelsForResource(tasksLabels, task.uri).map((l) => l.val),
+        ...labelsForResource(accountLabels, task.repo).map((l) => l.val),
+      ]),
+    ].sort();
+    const hidden = isHidden(tasksLabels, task.uri) || isHidden(accountLabels, task.repo);
     return {
       ...task,
+      ...(hidden ? { hidden: true } : {}),
+      ...(vals.length > 0 ? { moderationLabels: vals } : {}),
       observedContext:
         ctx ??
         freezeContext({
@@ -1531,10 +1632,15 @@ function collectValidatedRecordsFromByCollection(
   authorityDid: string,
   tasksSpace: string,
   byCollection: Record<string, StoredRecord[]>,
+  tasksLabels: readonly ActiveSpaceLabel[] = [],
+  accountLabels: readonly ActiveSpaceLabel[] = [],
 ): ValidatedTasksRecords {
   const validOf = <T>(collection: string): StoredEntityRecord<T>[] => {
     const valid: StoredEntityRecord<T>[] = [];
     for (const record of byCollection[collection] ?? []) {
+      if (isTakendown(accountLabels, record.repo) || isTakendown(tasksLabels, record.uri, record.cid || undefined)) {
+        continue;
+      }
       const check = validateSpaceRecord(collection, record.value, {
         authorityDid,
         spaceUri: tasksSpace,

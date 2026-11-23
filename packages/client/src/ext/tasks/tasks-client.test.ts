@@ -1,16 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
-import { memberspacePolicy } from "@flock/protocol/atproto/space-policy";
 import { advanceHlc, buildEditClosure, formatHlc, MAX_ANCESTOR_REFS, opRef } from "@flock/protocol/entity-merge";
-import { spaceRecordUri, subjectKey, tasksSpaceUri } from "@flock/protocol/keys";
-import { COLLECTION, OPERATOR_METHOD, SPACE_TYPE } from "@flock/protocol/nsids";
+import { groupMembersUri, SELF_SKEY, spaceRecordUri, tasksSpaceUri, workspaceUri } from "@flock/protocol/keys";
+import { ATPROTO_SPACE_COLLECTION, COLLECTION, OPENSOCIAL_COLLECTION, OPENSOCIAL_POLICY, OPERATOR_METHOD, SPACE_TYPE } from "@flock/protocol/nsids";
 import { WORKSPACE_ENVELOPE } from "@flock/protocol/workspace-summary";
 import { FakeNetwork } from "@flock/testing/fake-network";
 import { createEngine } from "../../engine";
 import { IndexedDbStore } from "../../indexeddb-store";
 import type { OperatorService } from "../../operator-client";
-import { countCalls, transportFor } from "../../testing/engine-fixture";
+import { AUTHORITY, countCalls, key, plcDidForLabel, transportFor } from "../../testing/engine-fixture";
 import {
   EntityNotFoundError,
   StaleEntityContextError,
@@ -20,10 +19,9 @@ import {
 
 Object.assign(globalThis, { IDBKeyRange });
 
-const AUTHORITY = "did:plc:authority";
-const ALICE = "did:plc:alice";
-const BOB = "did:plc:bob2";
-const CAROL = "did:plc:carol";
+const ALICE = "did:plc:aliceaaaaaaaaaaaaaaaaaaa";
+const BOB = "did:plc:bob2aaaaaaaaaaaaaaaaaaaa";
+const CAROL = "did:plc:carolaaaaaaaaaaaaaaaaaaa";
 const TIMESTAMP = "2026-11-16T12:00:00.000Z";
 const BASE_MS = 1_700_000_000_000;
 
@@ -32,65 +30,93 @@ async function setupTasksWorkspace(
   options: { members?: readonly string[]; enableTasks?: boolean; skey?: string } = {},
 ) {
   const members = options.members ?? [ALICE, BOB, CAROL];
-  const skey = options.skey ?? "acme";
+  const label = options.skey ?? "acme";
+  const groupDid = label === "acme" ? AUTHORITY : plcDidForLabel(label);
   const enableTasks = options.enableTasks ?? true;
-  if (!network.hasAccount(AUTHORITY)) network.createAccount(AUTHORITY, "pds1");
-  const owner = network.clientFor(AUTHORITY);
 
-  const { space: workspace } = await owner.procedure<unknown, { space: string }>("com.atproto.space.createSpace", {
+  await network.createGroupAccount(groupDid, {
+    name: `Workspace ${label}`,
+    joinPolicy: "invite",
+    publicMeta: true,
+    sovereignRotationKeys: ["did:key:zDnaeTestSovereignKey"],
+  });
+  const owner = network.clientFor(groupDid);
+  const workspace = workspaceUri(groupDid);
+  const membersSpace = groupMembersUri(groupDid);
+
+  await owner.procedure("com.atproto.space.createSpace", {
     spaceType: SPACE_TYPE.workspace,
-    skey,
-    policy: memberspacePolicy(),
-  });
-  await network.writeAs(AUTHORITY, workspace, COLLECTION.workspaceProfile, "self", {
-    name: `Workspace ${skey}`,
-    createdAt: TIMESTAMP,
-  });
-  await network.writeAs(AUTHORITY, workspace, COLLECTION.admin, subjectKey(AUTHORITY), {
-    subject: AUTHORITY,
-    active: true,
-    updatedAt: TIMESTAMP,
+    skey: SELF_SKEY,
+    policy: {
+      $type: OPENSOCIAL_POLICY,
+      publicRead: false,
+      unlisted: false,
+      grants: [
+        { role: "admin", read: true, write: true },
+        { role: "moderator", read: true, write: true },
+        { role: "member", read: true },
+      ],
+    },
   });
 
-  const tasksSpace = tasksSpaceUri(AUTHORITY, skey);
+  const tasksSpace = tasksSpaceUri(groupDid, SELF_SKEY);
   if (enableTasks) {
     await owner.procedure("com.atproto.space.createSpace", {
       spaceType: SPACE_TYPE.tasks,
       skey: tasksSpace.split("/").at(-1)!,
-      policy: memberspacePolicy(),
+      policy: {
+        $type: OPENSOCIAL_POLICY,
+        publicRead: false,
+        unlisted: false,
+        grants: [
+          { role: "admin", read: true, write: true },
+          { role: "moderator", read: true, write: true },
+          { role: "member", read: true, write: true },
+        ],
+      },
     });
-    await network.writeAs(AUTHORITY, workspace, COLLECTION.extInstall, "tasks", {
+  }
+
+  const humanMembers = members.filter((did) => did !== groupDid);
+  for (const [idx, did] of humanMembers.entries()) {
+    if (!network.hasAccount(did)) network.createAccount(did, did.includes("bob2") ? "pds2" : "pds1");
+    await owner.procedure("com.atproto.space.putRecord", {
+      space: membersSpace,
+      repo: groupDid,
+      collection: OPENSOCIAL_COLLECTION.membership,
+      rkey: did,
+      record: {
+        $type: OPENSOCIAL_COLLECTION.membership,
+        roles: idx === 0 ? ["admin", "member"] : ["member"],
+        createdAt: TIMESTAMP,
+      },
+    });
+    const mem = await owner.query<{ value: Record<string, unknown> }>("com.atproto.space.getRecord", {
+      space: membersSpace,
+      repo: groupDid,
+      collection: OPENSOCIAL_COLLECTION.membership,
+      rkey: did,
+    });
+    const inc = mem.value["new.flock.incarnation"];
+    await network.writeAs(did, membersSpace, OPENSOCIAL_COLLECTION.acceptance, SELF_SKEY, {
+      createdAt: TIMESTAMP,
+      ...(typeof inc === "string" ? { "new.flock.incarnation": inc } : {}),
+    });
+  }
+
+  if (enableTasks) {
+    await network.writeAs(groupDid, workspace, COLLECTION.extInstall, "tasks", {
       extId: "tasks",
       active: true,
       space: tasksSpace,
       cleanupComplete: false,
-      enabledBy: AUTHORITY,
+      enabledBy: humanMembers[0] ?? ALICE,
       enabledAt: TIMESTAMP,
       updatedAt: TIMESTAMP,
     });
   }
 
-  for (const did of [AUTHORITY, ...members]) {
-    if (!network.hasAccount(did)) network.createAccount(did, did.endsWith("2") ? "pds2" : "pds1");
-    await network.writeAs(AUTHORITY, workspace, COLLECTION.workspaceRoster, subjectKey(did), {
-      subject: did,
-      active: true,
-      updatedAt: TIMESTAMP,
-    });
-    if (did === AUTHORITY) continue;
-    await owner.procedure("com.atproto.memberspace.putMembers", {
-      space: workspace,
-      members: [{ did, read: true, write: true }],
-    });
-    if (enableTasks) {
-      await owner.procedure("com.atproto.memberspace.putMembers", {
-        space: tasksSpace,
-        members: [{ did, read: true, write: true }],
-      });
-    }
-  }
-
-  return { workspace, tasksSpace, skey };
+  return { groupDid, workspace, membersSpace, tasksSpace, skey: SELF_SKEY };
 }
 
 test("D11.5 #2 (R2-H1): Form 1 / Form 2 + Bob regression prevents cross-view chaining leak while preserving same-form sequential chaining", async () => {
@@ -526,7 +552,7 @@ test("TasksClient recovers cleanly from ambiguous write timeout/drop on subseque
 
 test("TasksClient handles 256/257 saturation, D14 purged inherited refs, disabled workspace, and envelope caps", async () => {
   const network = new FakeNetwork();
-  const { workspace, tasksSpace } = await setupTasksWorkspace(network, { members: [ALICE, BOB] });
+  const { groupDid, workspace, membersSpace, tasksSpace } = await setupTasksWorkspace(network, { members: [ALICE, BOB] });
   const alice = createEngine(transportFor(network, ALICE));
   const bob = createEngine(transportFor(network, BOB));
 
@@ -619,12 +645,12 @@ test("TasksClient handles 256/257 saturation, D14 purged inherited refs, disable
   const aliceAfterBob = (await alice.tasks.getTask(workspace, d14Task.uri))!;
   const restoreOp = await alice.tasks.restoreTask(workspace, { context: aliceAfterBob.observedContext });
 
-  await network.writeAs(AUTHORITY, workspace, COLLECTION.workspaceRoster, subjectKey(BOB), {
-    subject: BOB,
-    active: false,
-    updatedAt: TIMESTAMP,
+  await network.clientFor(groupDid).procedure("com.atproto.space.deleteRecord", {
+    space: membersSpace,
+    repo: groupDid,
+    collection: OPENSOCIAL_COLLECTION.membership,
+    rkey: BOB,
   });
-  await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMembers", { space: tasksSpace, dids: [BOB] });
   network.advanceClock(alice.sync.options.truthIntervalMs);
 
   const postPurgeRead = (await alice.tasks.getTask(workspace, d14Task.uri))!;
@@ -680,7 +706,7 @@ test("own optimistic writes preserve listRepoOps LtHash delta continuity and dis
     serviceRef: "did:web:operator.test#atproto_flock_operator",
     endpoint: "https://operator.test",
   };
-  const ownerTransport = transportFor(network, AUTHORITY);
+  const ownerTransport = transportFor(network, ALICE);
   const ownerWithOperator = {
     ...ownerTransport,
     fetchEndpoint: async (request: Request) => {
@@ -693,7 +719,8 @@ test("own optimistic writes preserve listRepoOps LtHash delta continuity and dis
             extId: "tasks",
             space: tasksSpace,
             active: false,
-            enabledBy: AUTHORITY,
+            cleanupComplete: true,
+            enabledBy: ALICE,
             enabledAt: TIMESTAMP,
             updatedAt: TIMESTAMP,
             disabledAt: TIMESTAMP,
@@ -777,22 +804,26 @@ test("workspaces.summary invalidates workspace snapshot cleanly and cross-engine
   // Also test zero-writer-repo summary coherency on alice (never wrote to tasksSpace, read empty tasksSpace).
   assert.equal((await alice.tasks.readSpace(workspace)).enabled, true);
 
-  // 2. Disable Tasks out-of-band on PDS (simulating another admin/engine) and revoke non-authority members just like extension-access removeExtraMembers.
+  // 2. Disable Tasks out-of-band on PDS (simulating another admin/engine) and revoke non-authority members on tasksSpace.
   await network.writeAs(AUTHORITY, workspace, COLLECTION.extInstall, "tasks", {
     extId: "tasks",
     space: tasksSpace,
     active: false,
-    enabledBy: AUTHORITY,
+    cleanupComplete: true,
+    enabledBy: ALICE,
     enabledAt: TIMESTAMP,
     updatedAt: TIMESTAMP,
     disabledAt: TIMESTAMP,
   });
-  for (const did of [ALICE, BOB]) {
-    await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMembers", {
-      space: tasksSpace,
-      dids: [did],
-    });
-  }
+  await network.clientFor(AUTHORITY).procedure("com.atproto.space.updateSpace", {
+    space: tasksSpace,
+    policy: {
+      $type: OPENSOCIAL_POLICY,
+      publicRead: false,
+      unlisted: true,
+      grants: [],
+    },
+  });
 
   // Codex R2-#3: ordinary alice.workspaces.summary() (NO fresh: true) invalidates workspace snapshot so next readSpace sees enabled: false!
   const aliceSummary = await alice.workspaces.summary(workspace);
@@ -848,7 +879,8 @@ test("ensureSyncedForWrite refuses writes when live workspace snapshot verificat
     extId: "tasks",
     space: tasksSpace,
     active: false,
-    enabledBy: AUTHORITY,
+    cleanupComplete: true,
+    enabledBy: ALICE,
     enabledAt: TIMESTAMP,
     updatedAt: TIMESTAMP,
     disabledAt: TIMESTAMP,
@@ -886,7 +918,8 @@ test("ensureSyncedForWrite refuses writes when live workspace snapshot verificat
     extId: "tasks",
     space: tasksSpace,
     active: true,
-    enabledBy: AUTHORITY,
+    cleanupComplete: false,
+    enabledBy: ALICE,
     enabledAt: TIMESTAMP,
     updatedAt: TIMESTAMP,
   });
@@ -987,4 +1020,48 @@ test("concurrent readSpace coalescing onto forWrite resolves degraded TasksSpace
   assert.equal(coldView.complete, false);
   assert.equal(coldView.degraded, true);
   await coldWriteCheck;
+});
+
+test("TasksClient withholds !takedown tasks/projects/comments and marks !hide items hidden", async () => {
+  const network = new FakeNetwork();
+  const { groupDid, workspace, tasksSpace } = await setupTasksWorkspace(network, { members: [ALICE, BOB] });
+  const alice = createEngine(transportFor(network, ALICE));
+  const bob = createEngine(transportFor(network, BOB));
+
+  const p1 = await alice.tasks.createProject(workspace, { name: "Hidden project" });
+  const p2 = await bob.tasks.createProject(workspace, { name: "Takendown project" });
+  const t1 = await alice.tasks.createTask(workspace, { title: "Hidden task" });
+  const t2 = await bob.tasks.createTask(workspace, { title: "Takendown task" });
+  const c1 = await alice.tasks.addComment(workspace, { taskUri: t1.uri, body: "Hidden comment" });
+  const c2 = await bob.tasks.addComment(workspace, { taskUri: t1.uri, body: "Takendown comment" });
+
+  const owner = network.clientFor(groupDid);
+  for (const [idx, [uri, val]] of [
+    [p1.uri, "!hide"],
+    [p2.uri, "!takedown"],
+    [t1.uri, "!hide"],
+    [t2.uri, "!takedown"],
+    [c1.uri, "!hide"],
+    [c2.uri, "!takedown"],
+  ].entries()) {
+    await owner.procedure("com.atproto.space.putRecord", {
+      space: tasksSpace,
+      repo: groupDid,
+      collection: ATPROTO_SPACE_COLLECTION.label,
+      rkey: key(300 + idx),
+      record: { $type: ATPROTO_SPACE_COLLECTION.label, src: groupDid, uri, val, cts: TIMESTAMP },
+    });
+  }
+  await alice.sync.markSpaceStale(tasksSpace);
+
+  const view = await alice.tasks.readSpace(workspace);
+  assert.equal(view.projects.some((p) => p.uri === p2.uri), false, "takendown project withheld");
+  assert.equal(view.projects.find((p) => p.uri === p1.uri)?.hidden, true, "!hide project marked hidden");
+  assert.equal(view.tasks.some((t) => t.uri === t2.uri), false, "takendown task withheld");
+  assert.equal(view.tasks.find((t) => t.uri === t1.uri)?.hidden, true, "!hide task marked hidden");
+  assert.equal(await alice.tasks.getTask(workspace, t2.uri), null, "getTask returns null for takendown task");
+
+  const comments = view.commentsByTask.get(t1.uri) ?? [];
+  assert.equal(comments.some((c) => c.uri === c2.uri), false, "takendown comment withheld");
+  assert.equal(comments.find((c) => c.uri === c1.uri)?.hidden, true, "!hide comment marked hidden");
 });

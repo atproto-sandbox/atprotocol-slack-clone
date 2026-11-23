@@ -1,10 +1,19 @@
-import { parseWorkspaceUri as parseWorkspaceSpaceUri } from "@flock/protocol/keys";
+import { isDid, parseWorkspaceUri as parseWorkspaceSpaceUri, SELF_SKEY, workspaceUri } from "@flock/protocol/keys";
 import { SpaceCredentialError } from "@flock/protocol/atproto/space-credential-core";
 import { XrpcError } from "@flock/protocol/atproto/xrpc";
 import { ChannelUnavailableError } from "@flock/client/errors";
 import { OperatorRemoteError } from "@flock/client/operator-client";
 
-export type Message = { uri: string; rkey: string; repo: string; value: { text?: string; createdAt?: string; parent?: string; blocks?: unknown }; reactions?: Array<{ emoji: string; count: number; active: boolean }> };
+export type Message = {
+  uri: string;
+  rkey: string;
+  repo: string;
+  cid?: string;
+  hidden?: boolean;
+  labels?: string[];
+  value: { text?: string; createdAt?: string; parent?: string; blocks?: unknown };
+  reactions?: Array<{ emoji: string; count: number; active: boolean }>;
+};
 export type PermalinkResolution =
   | { uri: string; status: "loading" }
   | { uri: string; status: "resolved"; message: Message | null }
@@ -45,6 +54,17 @@ export function messageOf(error: unknown): string { return error instanceof Erro
 /** The protocol layer's `parseWorkspaceUri` for a link a person pasted: surrounding whitespace is ignored. */
 export function parsePastedWorkspaceUri(uri: string): { authorityDid: string; skey: string } | null {
   return parseWorkspaceSpaceUri(uri.trim());
+}
+
+/** Parses either a bare Group DID (`did:plc:...` / `did:web:...`) or a canonical workspace space URI. */
+export function parsePastedGroupOrWorkspace(raw: string): { groupDid: string; workspaceUri: string } | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  if (isDid(trimmed)) {
+    return { groupDid: trimmed, workspaceUri: workspaceUri(trimmed, SELF_SKEY) };
+  }
+  const parsed = parseWorkspaceSpaceUri(trimmed);
+  return parsed ? { groupDid: parsed.authorityDid, workspaceUri: trimmed } : null;
 }
 
 export function withReactions(messages: Array<Omit<Message, "reactions">>, reactions: Reaction[], viewerDid: string): Message[] {
@@ -135,26 +155,121 @@ export function captureInviteLink(search: string, storage: Pick<Storage, "setIte
 }
 
 export const WORKSPACE_OPERATION_KEY = "spaces.pendingWorkspaceOperation";
+export const PENDING_OPERATOR_OPERATION_KEY = "spaces.pendingOperatorOperation";
 
-/** A workspace being created: its name, and its workspace account's DID ("" for the person's own account). */
-export type WorkspaceCreationInput = { name: string; account: string };
-
-/**
- * The creation the form describes, as the operator keys it: the trimmed name, and no workspace account when the one typed
- * is the person's own, since that is a workspace they own rather than one they are a member of.
- */
-export function workspaceCreationFrom(form: WorkspaceCreationInput, did: string): WorkspaceCreationInput {
-  const account = form.account.trim();
-  return { name: form.name.trim(), account: account === did ? "" : account };
+function isPendingOperationShape(value: unknown): value is PendingOperation {
+  return (
+    Boolean(value) &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    typeof (value as { workspace?: unknown }).workspace === "string" &&
+    typeof (value as { operationId?: unknown }).operationId === "string" &&
+    Boolean((value as { request?: unknown }).request) &&
+    typeof (value as { request?: unknown }).request === "object" &&
+    !Array.isArray((value as { request?: unknown }).request)
+  );
 }
 
 /**
- * The operation ID for creating this workspace: the stored one only if it was issued for this exact name and account, so
- * fixing a typo in either never conflicts with it.
+ * Reads persisted pending Operator mutations (`spaces.pendingOperatorOperation`), supporting both
+ * the ordered multi-operation array format and legacy single-object entries.
+ */
+export function readPendingOperatorOperations(
+  storage: Pick<Storage, "getItem" | "removeItem">,
+): PendingOperation[] {
+  const raw = storage.getItem(PENDING_OPERATOR_OPERATION_KEY);
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      const valid = parsed.filter(isPendingOperationShape);
+      if (valid.length === 0) storage.removeItem(PENDING_OPERATOR_OPERATION_KEY);
+      return valid;
+    }
+    if (isPendingOperationShape(parsed)) {
+      return [parsed];
+    }
+    storage.removeItem(PENDING_OPERATOR_OPERATION_KEY);
+    return [];
+  } catch {
+    storage.removeItem(PENDING_OPERATOR_OPERATION_KEY);
+    return [];
+  }
+}
+
+/**
+ * Non-destructively records or promotes `entry` to the top of the pending Operator operation stack
+ * without erasing any earlier uncompleted operation's retry payload.
+ */
+export function upsertPendingOperatorOperation(
+  storage: Pick<Storage, "getItem" | "setItem" | "removeItem">,
+  entry: PendingOperation,
+): PendingOperation[] {
+  const existing = readPendingOperatorOperations(storage).filter(
+    (item) => item.operationId !== entry.operationId,
+  );
+  const next = [...existing, entry];
+  storage.setItem(PENDING_OPERATOR_OPERATION_KEY, JSON.stringify(next));
+  return next;
+}
+
+/**
+ * Compare-and-swap removal of a terminal Operator operation by `operationId`, leaving all other
+ * pending operations intact in storage.
+ */
+export function clearPendingOperatorOperation(
+  storage: Pick<Storage, "getItem" | "setItem" | "removeItem">,
+  operationId: string,
+): PendingOperation[] {
+  const next = readPendingOperatorOperations(storage).filter(
+    (item) => item.operationId !== operationId,
+  );
+  if (next.length === 0) {
+    storage.removeItem(PENDING_OPERATOR_OPERATION_KEY);
+  } else {
+    storage.setItem(PENDING_OPERATOR_OPERATION_KEY, JSON.stringify(next));
+  }
+  return next;
+}
+
+/** A workspace being created: its name, join policy, public metadata discovery toggle, and optional account override. */
+export type WorkspaceCreationInput = {
+  name: string;
+  account?: string;
+  joinPolicy?: "open" | "approval" | "invite";
+  publicMeta?: boolean;
+};
+
+/**
+ * The creation the form describes, as the operator keys it: trimmed name, normalized joinPolicy, and publicMeta.
+ */
+export function workspaceCreationFrom(form: WorkspaceCreationInput, did: string): WorkspaceCreationInput {
+  const account = (form.account ?? "").trim();
+  const joinPolicy =
+    form.joinPolicy === "open" || form.joinPolicy === "approval" || form.joinPolicy === "invite"
+      ? form.joinPolicy
+      : undefined;
+  return {
+    name: form.name.trim(),
+    account: account === did ? "" : account,
+    ...(joinPolicy !== undefined ? { joinPolicy } : {}),
+    ...(typeof form.publicMeta === "boolean" ? { publicMeta: form.publicMeta } : {}),
+  };
+}
+
+/**
+ * The operation ID for creating this workspace: the stored one only if it was issued for this exact creation intent, so
+ * fixing a typo or changing joinPolicy/publicMeta never conflicts with an earlier key.
  */
 export function workspaceOperationIdFor(creation: WorkspaceCreationInput, stored: string | null, mint: () => string = makeTid): string {
   const previous = parseStoredOperation(stored);
-  return previous && previous.name === creation.name && previous.account === creation.account ? previous.operationId : mint();
+  const matches =
+    previous !== null &&
+    previous.name === creation.name &&
+    (previous.account ?? "") === (creation.account ?? "") &&
+    (previous.joinPolicy ?? "invite") === (creation.joinPolicy ?? "invite") &&
+    (previous.publicMeta ?? true) === (creation.publicMeta ?? true);
+  return matches ? previous.operationId : mint();
 }
 
 function parseStoredOperation(stored: string | null): (WorkspaceCreationInput & { operationId: string }) | null {
@@ -163,7 +278,18 @@ function parseStoredOperation(stored: string | null): (WorkspaceCreationInput & 
     const value: unknown = JSON.parse(stored);
     if (value && typeof value === "object" && "name" in value && "account" in value && "operationId" in value
       && typeof value.name === "string" && typeof value.account === "string" && typeof value.operationId === "string") {
-      return { name: value.name, account: value.account, operationId: value.operationId };
+      const obj = value as Record<string, unknown>;
+      const joinPolicy =
+        obj.joinPolicy === "open" || obj.joinPolicy === "approval" || obj.joinPolicy === "invite"
+          ? obj.joinPolicy
+          : undefined;
+      return {
+        name: value.name,
+        account: value.account,
+        operationId: value.operationId,
+        ...(joinPolicy !== undefined ? { joinPolicy } : {}),
+        ...(typeof obj.publicMeta === "boolean" ? { publicMeta: obj.publicMeta } : {}),
+      };
     }
   } catch {
     return null;

@@ -24,6 +24,7 @@ import {
   SpaceMacError,
   SpaceRepoVerificationError,
   StarParseError,
+  isAccessLost,
   isCredentialRefused,
   listVerifiedBoundedRecords,
   parseCidSafe,
@@ -38,12 +39,34 @@ import {
 } from "@flock/protocol/atproto/space-credential-core";
 import { XrpcError, type AtprotoClient } from "@flock/protocol/atproto/xrpc";
 import { mapLimited } from "@flock/protocol/map-limited";
-import { isDid, parseSpaceUri, parseWorkspaceUri, spaceRecordUri, tidNow } from "@flock/protocol/keys";
-import { COLLECTION } from "@flock/protocol/nsids";
+import {
+  groupMembersUri,
+  groupMetaUri,
+  isDid,
+  parseSpaceUri,
+  parseWorkspaceUri,
+  spaceRecordUri,
+  tidNow,
+  workspaceUri,
+} from "@flock/protocol/keys";
+import { projectActiveLabels, type ActiveSpaceLabel } from "@flock/protocol/moderation";
+
+export type ActiveModerationLabels = ActiveSpaceLabel[];
+import {
+  ATPROTO_SPACE_COLLECTION,
+  COLLECTION,
+  OPENSOCIAL_COLLECTION,
+  OPENSOCIAL_SPACE_TYPE,
+  SPACE_TYPE,
+} from "@flock/protocol/nsids";
 import { validateSpaceRecord } from "@flock/protocol/registry";
+import type { GroupOpenSocialPolicy } from "@flock/protocol/scopes";
 import {
   WORKSPACE_ENVELOPE,
+  extractGroupSpacePolicyRecord,
   summarizeWorkspace,
+  type MemberAcceptanceEntry,
+  type MemberWriterRev,
   type ScannedRecords,
   type WorkspaceExtensionSummary,
   type WorkspaceSummary,
@@ -57,6 +80,7 @@ import {
   emptyWriterState,
   type Coverage,
   type ListedWriter,
+  type PurgeWriterOptions,
   type SpaceState,
   type StoredRecord,
   type SyncStore,
@@ -137,6 +161,7 @@ export type VerifiedWorkspaceSnapshot = {
   extensions: WorkspaceExtensionSummary[];
   workspaceSnapshotComplete: boolean;
   setAside: SetAside[];
+  accountLabels?: ActiveSpaceLabel[];
   reason?: string;
 };
 
@@ -210,13 +235,28 @@ export type RepoOpsFollowResult = {
   setAside: SetAside[];
 };
 
-const WORKSPACE_AUTHORITY_COLLECTIONS = [
-  COLLECTION.workspaceProfile,
+const GROUP_META_AUTHORITY_COLLECTIONS = [
+  OPENSOCIAL_COLLECTION.profile,
+  OPENSOCIAL_COLLECTION.rule,
+  OPENSOCIAL_COLLECTION.labeler,
+  ATPROTO_SPACE_COLLECTION.spacePolicy,
+  ATPROTO_SPACE_COLLECTION.label,
+] as const;
+
+const GROUP_MEMBERS_AUTHORITY_COLLECTIONS = [
+  OPENSOCIAL_COLLECTION.role,
+  OPENSOCIAL_COLLECTION.membership,
+  OPENSOCIAL_COLLECTION.space,
+  ATPROTO_SPACE_COLLECTION.spacePolicy,
+  ATPROTO_SPACE_COLLECTION.label,
+] as const;
+
+const WORKSPACE_MODALITY_AUTHORITY_COLLECTIONS = [
   COLLECTION.directory,
-  COLLECTION.workspaceRoster,
-  COLLECTION.admin,
   COLLECTION.appInstall,
   COLLECTION.extInstall,
+  ATPROTO_SPACE_COLLECTION.spacePolicy,
+  ATPROTO_SPACE_COLLECTION.label,
 ] as const;
 
 const MAX_OPS_SEEN_ENTRIES = 100_000;
@@ -271,6 +311,10 @@ export class SyncCore {
   private readonly floors = new Map<string, string>();
   /** Per-space host-ordered oplog tailing state used by `followRepoOps`. */
   private readonly opsFollowers = new Map<string, SpaceFollowState>();
+  /** Coalesces concurrent `syncSpaceActiveLabels` refreshes per space on this `SyncCore`. */
+  private readonly inflightLabelSync = new Map<string, Promise<void>>();
+  /** Serializes `resolveSpaceWriters` scans per space so older listings never interleave with or clobber newer ones. */
+  private readonly writerScanLocks = new Map<string, Promise<void>>();
 
   constructor(private readonly deps: { transport: ClientTransport; credentials: CredentialCache; store: SyncStore; options?: Partial<SyncOptions> }) {
     this.options = { ...DEFAULT_SYNC_OPTIONS, ...deps.options };
@@ -334,28 +378,69 @@ export class SyncCore {
     repo: string,
     held: ReadonlyMap<string, WriterState>,
     ownPending: boolean,
-    keepWriters?: ReadonlySet<string>,
+    keepWriters: ReadonlySet<string> | undefined,
+    guard: Pick<PurgeWriterOptions, "epoch" | "expectedInvalidationSeq" | "expectedSpaceRevision">,
   ): Promise<void> {
     if ((repo === this.did && ownPending) || keepWriters?.has(repo)) return;
     const writer = held.get(repo);
     if (writer && (writer.syncedRev !== null || Object.keys(writer.coverage).length > 0 || writer.setHash !== undefined)) {
-      await this.deps.store.purgeWriter(space, repo);
+      const purged = await this.deps.store.purgeWriter(space, repo, {
+        ...guard,
+        expectedGeneration: writer.generation,
+      });
+      if (!purged) return;
+    } else if (guard.expectedSpaceRevision !== undefined) {
+      const liveSpace = await this.deps.store.getSpace(space);
+      if ((liveSpace?.revision ?? 0) !== guard.expectedSpaceRevision) return;
     }
     this.evictFollowerRepo(space, repo);
+  }
+
+  private withWriterScanLock<T>(space: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.writerScanLocks.get(space) ?? Promise.resolve();
+    const next = prev.catch(() => undefined).then(fn);
+    const tracked = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.writerScanLocks.set(space, tracked);
+    void tracked.finally(() => {
+      if (this.writerScanLocks.get(space) === tracked) {
+        this.writerScanLocks.delete(space);
+      }
+    });
+    return next;
   }
 
   private async resolveSpaceWriters(
     space: string,
     input: { workspace?: string | null; truthIntervalMs?: number; keepWriters?: ReadonlySet<string>; fullScan?: boolean } = {},
   ): Promise<{ writers: ListedWriter[]; listed: Set<string>; reported: Array<{ did: string; repoRev: string }>; fullScan: boolean }> {
+    return this.withWriterScanLock(space, () => this.resolveSpaceWritersLocked(space, input, 0));
+  }
+
+  private async resolveSpaceWritersLocked(
+    space: string,
+    input: { workspace?: string | null; truthIntervalMs?: number; keepWriters?: ReadonlySet<string>; fullScan?: boolean },
+    retryAttempt: number,
+  ): Promise<{ writers: ListedWriter[]; listed: Set<string>; reported: Array<{ did: string; repoRev: string }>; fullScan: boolean }> {
     const authorityDid = authorityOf(space);
     const now = this.now();
     const intervalMs = input.truthIntervalMs ?? this.options.truthIntervalMs;
-    const stored = await this.deps.store.getSpace(space);
+    const [startEpoch, stored, heldList] = await Promise.all([
+      this.deps.store.epoch(space),
+      this.deps.store.getSpace(space),
+      this.deps.store.listWriters(space),
+    ]);
     const startInvalidationSeq = stored?.invalidationSeq ?? 0;
-    const state: SpaceState = stored ?? { space, spaceRev: null, writers: [], writersListedAt: null, workspace: input.workspace ?? null, lastOpenedAt: now };
+    const startSpaceRevision = stored?.revision ?? 0;
+    const startSpaceRev = stored?.spaceRev ?? null;
+    const startOwnWriteAt = stored?.ownWriteAt ?? Number.NEGATIVE_INFINITY;
+    const state: SpaceState = stored
+      ? { ...stored, writers: [...stored.writers] }
+      : { space, spaceRev: null, writers: [], writersListedAt: null, workspace: input.workspace ?? null, lastOpenedAt: now };
     const client = await this.deps.credentials.clientFor(space, authorityDid);
-    const held = new Map((await this.deps.store.listWriters(space)).map((writer) => [writer.repo, writer]));
+    const held = new Map(heldList.map((writer) => [writer.repo, writer]));
     // An own write the authority has not listed yet keeps the own writer a source, for at most one truth interval: after
     // that an account the authority still does not list (say, reduced to read-only) is out of view like anyone else (D14).
     const ownPending = state.ownWriteAt !== undefined && state.ownWriteAt !== null && now - state.ownWriteAt >= 0 && now - state.ownWriteAt < intervalMs;
@@ -363,20 +448,21 @@ export class SyncCore {
     const cursorStale = isStoredWriterCursorStale(state.spaceRev, state.writersListedAt, now);
     let reported: Array<{ did: string; repoRev: string }>;
     let fullScan = false;
+    let cursorReset = cursorStale;
+    const removedRepos: string[] = [];
+
     if (input.fullScan || !this.opened.has(space) || sinceListing < 0 || sinceListing >= intervalMs || cursorStale) {
       fullScan = true;
       const scan = await listBoundedWriters(client, { space, maxRepos: this.options.maxWriters });
       if (scan.truncated) throw new Error(`The space has more than ${this.options.maxWriters} writers, more than this client reads.`);
       const listed = new Set(scan.writers.map((writer) => writer.repo));
       for (const writer of held.values()) {
-        if (listed.has(writer.repo)) continue;
-        await this.purgeRemovedWriterIfEligible(space, writer.repo, held, ownPending, input.keepWriters);
+        if (!listed.has(writer.repo)) removedRepos.push(writer.repo);
       }
-      state.writers = scan.writers.map((writer) => ({ did: writer.repo, repoRev: writer.repoRev }));
+      state.writers = scan.writers.map((writer) => ({ did: writer.repo, repoRev: writer.repoRev, spaceRev: writer.spaceRev }));
       state.writersListedAt = now;
       state.spaceRev = scan.spaceRev;
       reported = state.writers;
-      this.opened.add(space);
     } else {
       const moved = await listWritersSince(client, {
         space,
@@ -387,27 +473,26 @@ export class SyncCore {
       });
       if (moved.fullReconcile) {
         fullScan = true;
+        cursorReset = true;
         const activeWriters = moved.writers ?? [];
         const listed = new Set(activeWriters.map((writer) => writer.repo));
         for (const writer of held.values()) {
-          if (listed.has(writer.repo)) continue;
-          await this.purgeRemovedWriterIfEligible(space, writer.repo, held, ownPending, input.keepWriters);
+          if (!listed.has(writer.repo)) removedRepos.push(writer.repo);
         }
-        state.writers = activeWriters.map((writer) => ({ did: writer.repo, repoRev: writer.repoRev }));
+        state.writers = activeWriters.map((writer) => ({ did: writer.repo, repoRev: writer.repoRev, spaceRev: writer.spaceRev }));
         state.writersListedAt = now;
         state.spaceRev = moved.spaceRev;
         reported = state.writers;
-        this.opened.add(space);
       } else {
         const byDid = new Map(state.writers.map((writer) => [writer.did, writer]));
         const writes: Array<{ did: string; repoRev: string }> = [];
         for (const update of moved.updates) {
           if (update.kind === "write") {
-            byDid.set(update.repo, { did: update.repo, repoRev: update.repoRev });
+            byDid.set(update.repo, { did: update.repo, repoRev: update.repoRev, spaceRev: update.spaceRev });
             writes.push({ did: update.repo, repoRev: update.repoRev });
           } else {
             byDid.delete(update.repo);
-            await this.purgeRemovedWriterIfEligible(space, update.repo, held, ownPending, input.keepWriters);
+            removedRepos.push(update.repo);
           }
         }
         state.writers = [...byDid.values()];
@@ -416,10 +501,62 @@ export class SyncCore {
         reported = writes;
       }
     }
+
+    const [afterScanEpoch, afterScanSpace] = await Promise.all([
+      this.deps.store.epoch(space),
+      this.deps.store.getSpace(space),
+    ]);
+    const afterInvalidationSeq = afterScanSpace?.invalidationSeq ?? 0;
+    const afterSpaceRevision = afterScanSpace?.revision ?? 0;
+    const scanSuperseded =
+      afterScanEpoch !== startEpoch ||
+      afterInvalidationSeq !== startInvalidationSeq ||
+      afterSpaceRevision !== startSpaceRevision ||
+      (!cursorReset &&
+        afterScanSpace?.spaceRev !== startSpaceRev &&
+        afterScanSpace?.spaceRev !== null &&
+        afterScanSpace?.spaceRev !== undefined &&
+        (state.spaceRev === null || state.spaceRev < afterScanSpace.spaceRev));
+
+    if (scanSuperseded) {
+      this.opened.delete(space);
+      if (retryAttempt < 1) {
+        return this.resolveSpaceWritersLocked(
+          space,
+          afterInvalidationSeq !== startInvalidationSeq ? { ...input, fullScan: true } : input,
+          retryAttempt + 1,
+        );
+      }
+      const fallbackWriters = afterScanSpace?.writers ?? state.writers;
+      const listed = new Set(fallbackWriters.map((writer) => writer.did));
+      const writers = [...fallbackWriters].sort((left, right) =>
+        left.repoRev < right.repoRev ? 1 : left.repoRev > right.repoRev ? -1 : 0,
+      );
+      return { writers, listed, reported, fullScan };
+    }
+
+    for (const removedRepo of removedRepos) {
+      await this.purgeRemovedWriterIfEligible(space, removedRepo, held, ownPending, input.keepWriters, {
+        epoch: startEpoch,
+        expectedInvalidationSeq: startInvalidationSeq,
+        expectedSpaceRevision: startSpaceRevision,
+      });
+    }
+    if (fullScan) {
+      this.opened.add(space);
+    }
+
     for (const repo of reported) {
       const writer = held.get(repo.did);
-      // A reported revision can lag the host; only one newer than what is held says the writer moved.
-      if (writer && (writer.syncedRev === null || repo.repoRev > writer.syncedRev)) await this.markStale(space, repo.did);
+      // A reported revision can lag the host; only one newer than what is held (or a cold writer that may have
+      // synced to an intermediate revision while the scan was in flight) needs a revision-guarded stale hint.
+      if (repo.repoRev && (!writer || writer.syncedRev === null || repo.repoRev > writer.syncedRev)) {
+        await this.markStale(space, repo.did, {
+          epoch: startEpoch,
+          expectedInvalidationSeq: startInvalidationSeq,
+          staleIfBehindRev: repo.repoRev,
+        });
+      }
     }
     const ownListed = state.writers.find((writer) => writer.did === this.did);
     const ownRev = held.get(this.did)?.syncedRev ?? null;
@@ -428,12 +565,35 @@ export class SyncCore {
     else if (!ownPending) state.ownWriteAt = null;
     state.lastOpenedAt = now;
     if (input.workspace !== undefined) state.workspace = input.workspace;
-    const latestInvalidationSeq = (await this.deps.store.getSpace(space))?.invalidationSeq ?? 0;
-    if (latestInvalidationSeq !== startInvalidationSeq) {
-      state.writersListedAt = null;
+
+    state.invalidationSeq = startInvalidationSeq;
+    const saved = await this.deps.store.putSpace(state, {
+      epoch: startEpoch,
+      expectedInvalidationSeq: startInvalidationSeq,
+      expectedRevision: startSpaceRevision,
+      disallowOlderSpaceRev: !cursorReset,
+      preserveNewerOwnWriteSince: startOwnWriteAt,
+    });
+    if (!saved) {
       this.opened.delete(space);
+      if (retryAttempt < 1) {
+        const latest = await this.deps.store.getSpace(space);
+        const invChanged = (latest?.invalidationSeq ?? 0) !== startInvalidationSeq;
+        return this.resolveSpaceWritersLocked(
+          space,
+          invChanged ? { ...input, fullScan: true } : input,
+          retryAttempt + 1,
+        );
+      }
+      const latest = await this.deps.store.getSpace(space);
+      const effectiveWriters = latest?.writers ?? state.writers;
+      const listed = new Set(effectiveWriters.map((writer) => writer.did));
+      const writers = [...effectiveWriters].sort((left, right) =>
+        left.repoRev < right.repoRev ? 1 : left.repoRev > right.repoRev ? -1 : 0,
+      );
+      return { writers, listed, reported, fullScan };
     }
-    await this.deps.store.putSpace(state);
+
     const listed = new Set(state.writers.map((writer) => writer.did));
     const writers = [...state.writers].sort((left, right) => (left.repoRev < right.repoRev ? 1 : left.repoRev > right.repoRev ? -1 : 0));
     if (state.ownWriteAt !== null && state.ownWriteAt !== undefined && !ownListed) writers.unshift({ did: this.did, repoRev: ownRev ?? "" });
@@ -441,20 +601,203 @@ export class SyncCore {
   }
 
   /** A hint that a writer moved: it is checked at its host before its records count as current again. */
-  async markStale(space: string, repo: string): Promise<void> {
-    await this.deps.store.commit({ space, repo, expectedGeneration: null, markStale: true });
+  async markStale(
+    space: string,
+    repo: string,
+    guards?: {
+      epoch?: string;
+      expectedInvalidationSeq?: number;
+      expectedGeneration?: number | null;
+      staleIfBehindRev?: string;
+    },
+  ): Promise<void> {
+    const applied = await this.deps.store.commit({
+      space,
+      repo,
+      expectedGeneration: guards?.expectedGeneration ?? null,
+      ...(guards?.epoch !== undefined ? { epoch: guards.epoch } : {}),
+      ...(guards?.expectedInvalidationSeq !== undefined
+        ? { expectedInvalidationSeq: guards.expectedInvalidationSeq }
+        : {}),
+      ...(guards?.staleIfBehindRev !== undefined ? { staleIfBehindRev: guards.staleIfBehindRev } : {}),
+      markStale: true,
+    });
+    if (!applied) return;
     const follower = this.opsFollowers.get(space)?.repos.get(repo);
     if (follower) follower.staleSeq += 1;
   }
 
   /** Marks every tracked writer (including unpersisted workspace authority / probes) in `space` stale and bumps `invalidationSeq`. */
   async markSpaceStale(space: string): Promise<void> {
-    const extraRepos = parseWorkspaceUri(space) ? [authorityOf(space)] : [];
+    const parsed = parseSpaceUri(space);
+    const extraRepos =
+      parsed &&
+      (parsed.type === SPACE_TYPE.workspace ||
+        parsed.type === OPENSOCIAL_SPACE_TYPE.meta ||
+        parsed.type === OPENSOCIAL_SPACE_TYPE.members ||
+        parsed.type === SPACE_TYPE.channel ||
+        parsed.type === SPACE_TYPE.appInbox ||
+        parsed.type === SPACE_TYPE.tasks)
+        ? [authorityOf(space)]
+        : [];
     await this.deps.store.invalidateSpace(space, extraRepos);
     this.opened.delete(space);
     const follower = this.opsFollowers.get(space);
     if (follower) {
       for (const repo of follower.repos.values()) repo.staleSeq += 1;
+    }
+  }
+
+  /**
+   * Syncs `<authorityDid>`'s `com.atproto.label.record` entries in `space` (incrementally, paying 0 XRPCs on warm
+   * reads when `<authorityDid>`'s `repoRev` has not changed) and returns active projected labels (`!takedown`, `!hide`, custom).
+   */
+  async syncSpaceActiveLabels(
+    space: string,
+    options: {
+      workspace?: string | null;
+      listedWriters?: ReadonlySet<string>;
+      truthIntervalMs?: number;
+      signal?: AbortSignal;
+    } = {},
+  ): Promise<ActiveSpaceLabel[]> {
+    const authorityDid = authorityOf(space);
+    const listed = options.listedWriters;
+    if (listed !== undefined && !listed.has(authorityDid)) {
+      return [];
+    }
+    const existingWriter = await this.deps.store.getWriter(space, authorityDid);
+    const intervalMs = options.truthIntervalMs ?? this.options.truthIntervalMs;
+    // If `listedWriters` came from a fresh `writers(space)` call and `existingWriter` is already synced & non-stale,
+    // `resolveSpaceWriters` already compared `repo.repoRev > writer.syncedRev` so 0 extra network calls are needed!
+    const needsSync =
+      !existingWriter ||
+      existingWriter.syncedRev === null ||
+      existingWriter.stale ||
+      existingWriter.coverage[ATPROTO_SPACE_COLLECTION.label]?.complete !== true ||
+      (listed === undefined && (existingWriter.checkedAt === null || this.now() - existingWriter.checkedAt >= intervalMs));
+
+    if (needsSync) {
+      let running = this.inflightLabelSync.get(space);
+      if (!running || options.signal) {
+        const runSync = (async () => {
+          const isMembersSpace = parseSpaceUri(space)?.type === OPENSOCIAL_SPACE_TYPE.members;
+          for (let outerAttempt = 0; outerAttempt < 3; outerAttempt += 1) {
+            const currentWriter = await this.deps.store.getWriter(space, authorityDid);
+            const epoch = await this.deps.store.epoch(space);
+            const collections = [
+              ...new Set([...Object.keys(currentWriter?.coverage ?? {}), ATPROTO_SPACE_COLLECTION.label]),
+            ];
+            const outcome = await this.syncVerifiedWriter({
+              space,
+              repo: authorityDid,
+              collections,
+              epoch,
+              intervalMs: listed !== undefined ? 0 : intervalMs,
+              listed: listed ?? new Set([authorityDid]),
+              allowTrustedEmpty: !isMembersSpace && listed === undefined,
+              maxStarBytes: WORKSPACE_ENVELOPE.maxStarArchiveBytes,
+              maxStarRecords: WORKSPACE_ENVELOPE.maxStarRecords,
+              signal: options.signal,
+            });
+            if (outcome.setAside) {
+              throw new Error(
+                `Moderation label state from ${authorityDid} in ${space} could not be verified: ${outcome.setAside.reason}`,
+              );
+            }
+            const afterAttempt = await this.deps.store.getWriter(space, authorityDid);
+            if (
+              !outcome.changing &&
+              afterAttempt &&
+              !afterAttempt.stale &&
+              afterAttempt.coverage[ATPROTO_SPACE_COLLECTION.label]?.complete === true
+            ) {
+              return;
+            }
+          }
+          const verifiedWriter = await this.deps.store.getWriter(space, authorityDid);
+          if (!verifiedWriter || verifiedWriter.coverage[ATPROTO_SPACE_COLLECTION.label]?.complete !== true) {
+            throw new Error(
+              `Moderation label state from ${authorityDid} in ${space} could not be verified concurrently.`,
+            );
+          }
+        })();
+        if (!options.signal) {
+          this.inflightLabelSync.set(space, runSync);
+          running = runSync.finally(() => {
+            if (this.inflightLabelSync.get(space) === runSync) {
+              this.inflightLabelSync.delete(space);
+            }
+          });
+        } else {
+          running = runSync;
+        }
+      }
+      await running;
+    }
+
+    const held = await this.deps.store.records(space, ATPROTO_SPACE_COLLECTION.label, authorityDid);
+    return projectActiveLabels(
+      held.map((rec) => ({ repoDid: rec.repo, rkey: rec.rkey, value: rec.value })),
+      { groupDid: authorityDid, spaceUri: space, nowMs: this.now() },
+    );
+  }
+
+  /** Returns active account-level labels (`uri === did`) from `group.opensocial.members/self` cached in `SyncStore`. */
+  async cachedAccountLabels(groupDid: string): Promise<ActiveModerationLabels> {
+    const membersSpace = groupMembersUri(groupDid);
+    const held = await this.deps.store.records(membersSpace, ATPROTO_SPACE_COLLECTION.label, groupDid);
+    return projectActiveLabels(
+      held.map((rec) => ({ repoDid: rec.repo, rkey: rec.rkey, value: rec.value })),
+      { groupDid, spaceUri: membersSpace, nowMs: this.now() },
+    );
+  }
+
+  /**
+   * Syncs `<groupDid>`'s `com.atproto.label.record` collection from `group.opensocial.members/self`
+   * (incrementally checking writer revisions first, falling back to `cachedAccountLabels` when the caller lacks
+   * `members/self` access) and returns active account-level moderation labels.
+   */
+  async syncAccountLabels(
+    groupDid: string,
+    options: { signal?: AbortSignal; forceCheck?: boolean; trustWatchedCache?: boolean } = {},
+  ): Promise<ActiveModerationLabels> {
+    const membersSpace = groupMembersUri(groupDid);
+    if (options.trustWatchedCache && !options.forceCheck) {
+      const [spaceState, writerState] = await Promise.all([
+        this.deps.store.getSpace(membersSpace),
+        this.deps.store.getWriter(membersSpace, groupDid),
+      ]);
+      const now = this.now();
+      if (
+        spaceState &&
+        spaceState.writersListedAt !== null &&
+        now - spaceState.writersListedAt >= 0 &&
+        now - spaceState.writersListedAt < this.options.truthIntervalMs &&
+        writerState &&
+        !writerState.stale &&
+        writerState.syncedRev !== null &&
+        writerState.coverage[ATPROTO_SPACE_COLLECTION.label]?.complete === true
+      ) {
+        return this.cachedAccountLabels(groupDid);
+      }
+    }
+    const wsUri = workspaceUri(groupDid);
+    try {
+      const resolved = await this.resolveSpaceWriters(membersSpace, {
+        workspace: wsUri,
+        keepWriters: new Set([groupDid]),
+      });
+      return await this.syncSpaceActiveLabels(membersSpace, {
+        workspace: wsUri,
+        listedWriters: new Set([...resolved.listed, groupDid]),
+        signal: options.signal,
+      });
+    } catch (error) {
+      if (isAccessLost(error)) {
+        return this.cachedAccountLabels(groupDid);
+      }
+      throw error;
     }
   }
 
@@ -467,19 +810,35 @@ export class SyncCore {
    * The account's own write, applied once its host accepted it; the own writer is checked again on the next read. The space
    * is recorded too, so the lifecycle rules find what a write left even when the space was never read.
    */
-  async applyOwnWrite(source: Source, change: { upsert?: StoredRecord[]; remove?: Array<{ collection: string; rkey: string }> }, input: { workspace?: string | null } = {}): Promise<void> {
-    const space = (await this.deps.store.getSpace(source.space))
-      ?? { space: source.space, spaceRev: null, writers: [], writersListedAt: null, workspace: input.workspace ?? null, lastOpenedAt: this.now() };
-    await this.deps.store.putSpace({ ...space, ownWriteAt: this.now() });
-    await this.deps.store.commit({
-      space: source.space,
-      repo: source.repo,
-      expectedGeneration: null,
-      markStale: true,
-      recordOptimistic: true,
-      upsert: change.upsert,
-      remove: change.remove,
-    });
+  async applyOwnWrite(
+    source: Source,
+    change: { upsert?: StoredRecord[]; remove?: Array<{ collection: string; rkey: string }> },
+    input: { workspace?: string | null; epoch?: string } = {},
+  ): Promise<void> {
+    const epoch = input.epoch ?? (await this.deps.store.epoch(source.space));
+    for (let attempt = 0; attempt < 16; attempt += 1) {
+      const currentWriter = await this.deps.store.getWriter(source.space, source.repo);
+      const now = this.now();
+      const applied = await this.deps.store.commit({
+        space: source.space,
+        repo: source.repo,
+        epoch,
+        expectedGeneration: currentWriter?.generation ?? 0,
+        markStale: true,
+        recordOptimistic: true,
+        touchOwnSpace: {
+          ownWriteAt: now,
+          workspace: input.workspace,
+          defaultLastOpenedAt: now,
+        },
+        upsert: change.upsert,
+        remove: change.remove,
+      });
+      if (applied) return;
+      if ((await this.deps.store.epoch(source.space)) !== epoch) {
+        return;
+      }
+    }
   }
 
   /** Reads one page of `window` across `sources`, refreshing and backfilling writers until the page is the true one. */
@@ -488,9 +847,9 @@ export class SyncCore {
   }
 
   /**
-   * Syncs and cryptographically verifies the authority's `workspace` space repo (STAR primary, bounded full `listRecords` +
-   * `getLatestCommit` fallback, or `listRepoOps` delta when seeded), validates every authority record against `REGISTRY` and
-   * `WORKSPACE_ENVELOPE`, and returns the verified snapshot and completeness status (`D11.3 #4`).
+   * Syncs and cryptographically verifies the OpenSocial group's `meta/self`, `members/self` (including member-authored
+   * `group.opensocial.acceptance/self` repos), and Flock `workspace/self` repos via STAR / `listRepoOps` / MAC fallback,
+   * validates every record against `REGISTRY` and `WORKSPACE_ENVELOPE`, and returns the verified snapshot.
    */
   async syncVerifiedWorkspaceSnapshot(
     workspaceUri: string,
@@ -499,84 +858,249 @@ export class SyncCore {
     const workspace = parseWorkspaceUri(workspaceUri);
     if (!workspace) throw new Error("Invalid workspace URI.");
     const { authorityDid } = workspace;
+    const metaUri = groupMetaUri(authorityDid);
+    const membersUri = groupMembersUri(authorityDid);
     const now = this.now();
-    const storedSpace = await this.deps.store.getSpace(workspaceUri);
-    await this.deps.store.putSpace(
-      storedSpace
-        ? { ...storedSpace, lastOpenedAt: now }
-        : { space: workspaceUri, spaceRev: null, writers: [], writersListedAt: null, workspace: null, lastOpenedAt: now },
-    );
-    const epoch = await this.deps.store.epoch(workspaceUri);
-    const syncOutcome = await this.syncVerifiedWriter({
-      space: workspaceUri,
-      repo: authorityDid,
-      collections: WORKSPACE_AUTHORITY_COLLECTIONS,
-      epoch,
-      intervalMs: options.fresh ? 0 : (options.truthIntervalMs ?? 0),
-      listed: new Set([authorityDid]),
-      allowTrustedEmpty: false,
-      maxStarBytes: WORKSPACE_ENVELOPE.maxStarArchiveBytes,
-      maxStarRecords: WORKSPACE_ENVELOPE.maxStarRecords,
-      signal: options.signal,
-    });
+    const intervalMs = options.fresh ? 0 : (options.truthIntervalMs ?? 0);
 
-    const setAside = syncOutcome.setAside ? [syncOutcome.setAside] : [];
-    const changing = syncOutcome.changing ? [authorityDid] : [];
-    if (syncOutcome.setAside?.permanent) {
+    const [metaEpoch, membersEpoch, wsEpoch] = await Promise.all([
+      this.deps.store.epoch(metaUri),
+      this.deps.store.epoch(membersUri),
+      this.deps.store.epoch(workspaceUri),
+    ]);
+
+    for (const [sp, parentWs, spEpoch] of [
+      [workspaceUri, null, wsEpoch],
+      [metaUri, workspaceUri, metaEpoch],
+      [membersUri, workspaceUri, membersEpoch],
+    ] as const) {
+      await this.deps.store.putSpace(
+        { space: sp, spaceRev: null, writers: [], writersListedAt: null, workspace: parentWs, lastOpenedAt: now },
+        { epoch: spEpoch, touchMetadataOnly: true },
+      );
+    }
+
+    const [metaOutcome, membersOutcome, wsOutcome] = await Promise.all([
+      this.syncVerifiedWriter({
+        space: metaUri,
+        repo: authorityDid,
+        collections: GROUP_META_AUTHORITY_COLLECTIONS,
+        epoch: metaEpoch,
+        intervalMs,
+        listed: new Set([authorityDid]),
+        allowTrustedEmpty: false,
+        maxStarBytes: WORKSPACE_ENVELOPE.maxStarArchiveBytes,
+        maxStarRecords: WORKSPACE_ENVELOPE.maxStarRecords,
+        signal: options.signal,
+      }),
+      this.syncVerifiedWriter({
+        space: membersUri,
+        repo: authorityDid,
+        collections: GROUP_MEMBERS_AUTHORITY_COLLECTIONS,
+        epoch: membersEpoch,
+        intervalMs,
+        listed: new Set([authorityDid]),
+        allowTrustedEmpty: false,
+        maxStarBytes: WORKSPACE_ENVELOPE.maxStarArchiveBytes,
+        maxStarRecords: WORKSPACE_ENVELOPE.maxStarRecords,
+        signal: options.signal,
+      }),
+      this.syncVerifiedWriter({
+        space: workspaceUri,
+        repo: authorityDid,
+        collections: WORKSPACE_MODALITY_AUTHORITY_COLLECTIONS,
+        epoch: wsEpoch,
+        intervalMs,
+        listed: new Set([authorityDid]),
+        allowTrustedEmpty: false,
+        maxStarBytes: WORKSPACE_ENVELOPE.maxStarArchiveBytes,
+        maxStarRecords: WORKSPACE_ENVELOPE.maxStarRecords,
+        signal: options.signal,
+      }),
+    ]);
+
+    const authorityOutcomes = [metaOutcome, membersOutcome, wsOutcome];
+    const setAsideMap = new Map<string, SetAside>();
+    for (const outcome of authorityOutcomes) {
+      if (outcome.setAside) {
+        const prev = setAsideMap.get(outcome.setAside.did);
+        if (!prev || (outcome.setAside.permanent && !prev.permanent)) {
+          setAsideMap.set(outcome.setAside.did, outcome.setAside);
+        }
+      }
+    }
+    const changing: string[] = authorityOutcomes.some((o) => o.changing) ? [authorityDid] : [];
+    const permanentAuthAside = authorityOutcomes.find((o) => o.setAside?.permanent)?.setAside;
+    if (permanentAuthAside) {
       return {
         summary: null,
         rosterMembers: new Set(),
         extensions: [],
         workspaceSnapshotComplete: false,
-        setAside,
-        reason: syncOutcome.setAside.reason,
+        setAside: [...setAsideMap.values()],
+        reason: permanentAuthAside.reason,
       };
     }
 
-    const byCollection = new Map<string, StoredRecord[]>();
-    await Promise.all(WORKSPACE_AUTHORITY_COLLECTIONS.map(async (collection) => {
-      byCollection.set(collection, await this.deps.store.records(workspaceUri, collection, authorityDid));
-    }));
+    // Resolve writers of `members/self` and sync `acceptance/self` for admitted human members
+    let membersListed = new Set<string>();
+    const memberWriters = new Map<string, MemberWriterRev>();
+    try {
+      const resolvedMembers = await this.resolveSpaceWriters(membersUri, {
+        workspace: workspaceUri,
+        truthIntervalMs: intervalMs,
+        keepWriters: new Set([authorityDid]),
+      });
+      membersListed = resolvedMembers.listed;
+      const storedMembersSpace = await this.deps.store.getSpace(membersUri);
+      for (const w of storedMembersSpace?.writers ?? resolvedMembers.writers) {
+        if (w.spaceRev) {
+          memberWriters.set(w.did, { repoRev: w.repoRev, spaceRev: w.spaceRev });
+        } else if (storedMembersSpace?.spaceRev) {
+          memberWriters.set(w.did, { repoRev: w.repoRev, spaceRev: storedMembersSpace.spaceRev });
+        }
+      }
+    } catch (error) {
+      if (!isAuthoritySuspendedError(error)) throw error;
+      const failure = classifySpaceHostFailure(error)!;
+      setAsideMap.set(authorityDid, { did: authorityDid, reason: failure.reason, permanent: false });
+    }
+
+    const heldMemberships = await this.deps.store.records(membersUri, OPENSOCIAL_COLLECTION.membership, authorityDid);
+    const heldAppInstalls = await this.deps.store.records(workspaceUri, COLLECTION.appInstall, authorityDid);
+    const knownApps = new Set<string>(
+      heldAppInstalls
+        .map((r) => (typeof r.value.subject === "string" ? r.value.subject : ""))
+        .filter((s) => s.length > 0),
+    );
+    const admittedHumans = heldMemberships
+      .map((r) => r.rkey)
+      .filter((did) => isDid(did) && did !== authorityDid && !knownApps.has(did));
+
+    const acceptanceWritersToSync = admittedHumans.filter(
+      (did) => membersListed.has(did) || did === (options.viewerDid ?? this.did),
+    );
+    const memberOutcomes = await mapLimited(acceptanceWritersToSync, this.options.concurrency, (memberDid) =>
+      this.syncVerifiedWriter({
+        space: membersUri,
+        repo: memberDid,
+        collections: [OPENSOCIAL_COLLECTION.acceptance],
+        epoch: membersEpoch,
+        intervalMs,
+        listed: membersListed,
+        allowTrustedEmpty: !membersListed.has(memberDid),
+        maxStarBytes: WORKSPACE_ENVELOPE.maxStarArchiveBytes,
+        maxStarRecords: WORKSPACE_ENVELOPE.maxStarRecords,
+        signal: options.signal,
+      }),
+    );
+
+    const permanentMemberAside = new Set<string>();
+    for (const outcome of memberOutcomes) {
+      if (outcome.setAside) {
+        setAsideMap.set(outcome.setAside.did, outcome.setAside);
+        if (outcome.setAside.permanent) permanentMemberAside.add(outcome.repo);
+      }
+      if (outcome.changing) changing.push(outcome.repo);
+    }
+
+    const [
+      heldProfiles,
+      heldRoles,
+      heldDirectory,
+      heldExtInstalls,
+      heldAcceptances,
+      heldMetaPolicy,
+      heldMembersPolicy,
+      heldWsPolicy,
+      heldAccountLabels,
+    ] = await Promise.all([
+      this.deps.store.records(metaUri, OPENSOCIAL_COLLECTION.profile, authorityDid),
+      this.deps.store.records(membersUri, OPENSOCIAL_COLLECTION.role, authorityDid),
+      this.deps.store.records(workspaceUri, COLLECTION.directory, authorityDid),
+      this.deps.store.records(workspaceUri, COLLECTION.extInstall, authorityDid),
+      this.deps.store.records(membersUri, OPENSOCIAL_COLLECTION.acceptance),
+      this.deps.store.records(metaUri, ATPROTO_SPACE_COLLECTION.spacePolicy, authorityDid),
+      this.deps.store.records(membersUri, ATPROTO_SPACE_COLLECTION.spacePolicy, authorityDid),
+      this.deps.store.records(workspaceUri, ATPROTO_SPACE_COLLECTION.spacePolicy, authorityDid),
+      this.deps.store.records(membersUri, ATPROTO_SPACE_COLLECTION.label, authorityDid),
+    ]);
 
     const invalidReasons: string[] = [];
-    const scannedOf = (collection: string, cap: number): ScannedRecords => {
-      const held = byCollection.get(collection) ?? [];
+    const scannedOf = (targetSpace: string, collection: string, held: StoredRecord[], cap: number): ScannedRecords => {
       for (const record of held) {
         const check = validateSpaceRecord(collection, record.value, {
           authorityDid,
-          spaceUri: workspaceUri,
+          spaceUri: targetSpace,
           repoDid: authorityDid,
           rkey: record.rkey,
         });
         if (!check.valid) invalidReasons.push(`Invalid ${collection}/${record.rkey}: ${check.reason}`);
       }
       return {
-        records: held.map((record) => ({ rkey: record.rkey, value: record.value })),
+        records: held.map((record) => ({
+          rkey: record.rkey,
+          ...(record.cid.length > 0 ? { cid: record.cid } : {}),
+          value: record.value,
+        })),
         truncated: held.length > cap,
       };
     };
 
+    const spacePolicies = new Map<string, GroupOpenSocialPolicy>();
+    for (const [spUri, polRecords] of [
+      [metaUri, heldMetaPolicy],
+      [membersUri, heldMembersPolicy],
+      [workspaceUri, heldWsPolicy],
+    ] as const) {
+      const polScanned = scannedOf(spUri, ATPROTO_SPACE_COLLECTION.spacePolicy, polRecords, 1);
+      const extracted = extractGroupSpacePolicyRecord(authorityDid, spUri, polScanned);
+      if (extracted.valid && extracted.policy) {
+        spacePolicies.set(spUri, extracted.policy);
+      } else {
+        invalidReasons.push(`Missing or invalid com.atproto.space.policy/self in ${spUri}.`);
+      }
+    }
+
+    const acceptances: MemberAcceptanceEntry[] = heldAcceptances
+      .filter((r) => r.repo !== authorityDid && !permanentMemberAside.has(r.repo))
+      .map((r) => ({ repoDid: r.repo, rkey: r.rkey, value: r.value }));
+
+    const accountLabels = projectActiveLabels(
+      heldAccountLabels.map((r) => ({ repoDid: r.repo, rkey: r.rkey, value: r.value })),
+      { groupDid: authorityDid, spaceUri: membersUri, nowMs: now },
+    );
+
     const scan = WORKSPACE_ENVELOPE.authorityRecordScan;
     const summary = summarizeWorkspace(workspaceUri, options.viewerDid ?? this.did, {
-      profiles: scannedOf(COLLECTION.workspaceProfile, 1),
-      directory: scannedOf(COLLECTION.directory, scan),
-      roster: scannedOf(COLLECTION.workspaceRoster, scan),
-      admins: scannedOf(COLLECTION.admin, scan),
-      installs: scannedOf(COLLECTION.appInstall, scan),
-      extInstalls: scannedOf(COLLECTION.extInstall, scan),
+      profiles: scannedOf(metaUri, OPENSOCIAL_COLLECTION.profile, heldProfiles, 1),
+      roles: scannedOf(membersUri, OPENSOCIAL_COLLECTION.role, heldRoles, scan),
+      memberships: scannedOf(membersUri, OPENSOCIAL_COLLECTION.membership, heldMemberships, scan),
+      directory: scannedOf(workspaceUri, COLLECTION.directory, heldDirectory, scan),
+      installs: scannedOf(workspaceUri, COLLECTION.appInstall, heldAppInstalls, scan),
+      extInstalls: scannedOf(workspaceUri, COLLECTION.extInstall, heldExtInstalls, scan),
+      acceptances,
+      memberWriters,
+      spacePolicies,
+      accountLabels,
     });
 
-    const failureReason = syncOutcome.setAside?.reason
-      ?? (changing.length > 0 ? "Authority workspace state is changing." : undefined)
-      ?? (!summary ? "Workspace profile is missing or invalid." : undefined)
+    const setAside = [...setAsideMap.values()].sort((a, b) => a.did.localeCompare(b.did));
+    const failureReason =
+      setAside.find((s) => s.did === authorityDid)?.reason
+      ?? (changing.includes(authorityDid) ? "Authority workspace state is changing." : undefined)
+      ?? (!summary ? "Group profile is missing or invalid." : undefined)
       ?? invalidReasons[0]
-      ?? summary?.degradedReasons[0];
+      ?? summary?.degradedReasons[0]
+      ?? setAside[0]?.reason
+      ?? (changing.length > 0 ? `Member acceptance state from ${changing[0]} is changing.` : undefined);
 
-    const workspaceSnapshotComplete = Boolean(summary)
-      && setAside.length === 0
-      && changing.length === 0
-      && invalidReasons.length === 0
-      && (summary?.degradedReasons.length ?? 1) === 0;
+    const workspaceSnapshotComplete =
+      Boolean(summary) &&
+      setAside.length === 0 &&
+      changing.length === 0 &&
+      invalidReasons.length === 0 &&
+      (summary?.degradedReasons.length ?? 1) === 0;
 
     return {
       summary,
@@ -584,6 +1108,7 @@ export class SyncCore {
       extensions: summary?.extensions ?? [],
       workspaceSnapshotComplete,
       setAside,
+      accountLabels,
       ...(failureReason ? { reason: failureReason } : {}),
     };
   }
@@ -2140,6 +2665,10 @@ class ReadRun {
    * A failure of this app's own store, or the authority refusing the reader a credential, still fails the read.
    */
   private async guard(source: Source, run: () => Promise<boolean>): Promise<boolean> {
+    const [epoch, writerBefore] = await Promise.all([
+      this.epochs.get(source.space),
+      this.core.store.getWriter(source.space, source.repo),
+    ]);
     try {
       return await run();
     } catch (error) {
@@ -2149,7 +2678,12 @@ class ReadRun {
       const failure = classifyRepoFailure(error, { space: source.space, repo: source.repo });
       if (!failure) throw error;
       this.aside.set(source.repo, { did: source.repo, reason: failure.reason, permanent: failure.permanent });
-      if (failure.permanent) await this.core.store.purgeWriter(source.space, source.repo);
+      if (failure.permanent) {
+        await this.core.store.purgeWriter(source.space, source.repo, {
+          epoch,
+          ...(writerBefore ? { expectedGeneration: writerBefore.generation } : {}),
+        });
+      }
       return false;
     }
   }

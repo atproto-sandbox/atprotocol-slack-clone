@@ -1,4 +1,5 @@
 import { DID_DOCUMENT_TTL_MS } from "@flock/protocol/atproto/kem-key";
+import { isDidTombstonedError } from "./errors";
 import type { IdentityKind, SyncStore } from "./store";
 import { transportNow, type ClientTransport } from "./transport";
 
@@ -22,7 +23,8 @@ export function withIdentityCache(transport: ClientTransport, store: SyncStore):
   const cache = new IdentityCache(transport, store);
   return {
     ...transport,
-    resolvePds: (did) => cache.resolve("pds", did, false, () => transport.resolvePds(did)),
+    resolvePds: (did, forceRefresh = false) =>
+      cache.resolve("pds", did, forceRefresh, () => transport.resolvePds(did, forceRefresh)),
     resolveKemKey: (did, forceRefresh) => cache.resolve("kem", did, forceRefresh, () => transport.resolveKemKey(did, forceRefresh)),
   };
 }
@@ -46,10 +48,20 @@ class IdentityCache {
     const pending = this.inFlight.get(key);
     // A forced resolution joins only another forced one: an unforced one may answer with the key a MAC just refused.
     if (pending && (pending.forced || !force)) return pending.answer;
-    const answer: Promise<string> = limited(originOf(did), resolve).then(async (value) => {
-      if (this.inFlight.get(key)?.answer === answer) await this.store.putIdentity({ kind, did, value, resolvedAt: transportNow(this.transport) });
-      return value;
-    });
+    const answer: Promise<string> = limited(originOf(did), resolve).then(
+      async (value) => {
+        if (this.inFlight.get(key)?.answer === answer) {
+          await this.store.putIdentity({ kind, did, value, resolvedAt: transportNow(this.transport) });
+        }
+        return value;
+      },
+      async (error: unknown) => {
+        if (isDidTombstonedError(error) && this.inFlight.get(key)?.answer === answer) {
+          await this.store.deleteIdentity(kind, did);
+        }
+        throw error;
+      },
+    );
     const resolution: Resolution = { forced: force, answer };
     this.inFlight.set(key, resolution);
     try {

@@ -1,4 +1,4 @@
-import { getConfig, type AppConfig } from "@flock/deployment/config";
+import { getConfig, resetConfigCacheForTest, type AppConfig } from "@flock/deployment/config";
 
 // What only the operator reads from the environment: its database, the key its stored grants are encrypted with, and the
 // authority client's signing keys. The URLs it shares with the web app come from `@flock/deployment/config`.
@@ -10,6 +10,12 @@ export type OperatorConfig = AppConfig & { databasePath: string; encryptionKey: 
 export type AuthorityClientKey = { kty: "EC"; crv: "P-256"; x: string; y: string; d: string; kid: string };
 
 let cachedOperator: OperatorConfig | undefined;
+
+export function resetOperatorConfigCacheForTest(): void {
+  cachedOperator = undefined;
+  authorityKeys = undefined;
+  resetConfigCacheForTest();
+}
 
 /** The operator's configuration: the shared one, its database and its encryption key. Only the operator process reads it. */
 export function getOperatorConfig(): OperatorConfig {

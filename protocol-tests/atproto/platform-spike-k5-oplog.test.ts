@@ -2,13 +2,22 @@ import { get as httpGet } from 'node:http'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { TestNetworkNoAppView } from '@atproto/dev-env'
-import { Client } from '@atproto/lex'
-import { parseCid } from '@atproto/lex-data'
 import { RepoCommit, createSpaceSigHeaders } from '@atproto/space'
 import type { SpaceRefString } from '@atproto/syntax'
-import { com } from '../../src/lexicons/index.js'
-import { type Actor, SpaceClient, TEST_COLLECTION } from '../_space.js'
+import {
+  type Actor,
+  afterAll,
+  com,
+  describe,
+  expect,
+  it,
+  LexClient as Client,
+  type LexClientInstance,
+  parseCid,
+  SpaceClient,
+  TEST_COLLECTION,
+  TestNetworkNoAppView,
+} from '../support/pinned-atproto-harness'
 
 // Platform spike K5: what the oplog does across a reset (importRepo, clearRecords),
 // and what listing 10,000 records of one writer costs. Everything asserted here was
@@ -27,9 +36,9 @@ afterAll(() => {
   }
 })
 
-type OpEntry = com.atproto.space.listRepoOps.$OutputBody['ops'][number]
+type OpEntry = { collection: string; rkey: string; cid: string | null; prev: string | null; rev: string; value?: unknown }
 type RecordsListing = {
-  records: com.atproto.space.listRecords.$OutputBody['records']
+  records: Array<{ rkey: string; cid: string; value?: unknown }>
   pages: number
 }
 type MeteredRun<T> = {
@@ -52,14 +61,14 @@ const applyOps = (local: RepoCommit, ops: OpEntry[]): RepoCommit =>
 
 /** Page the oplog to its head, as a syncer would, with `since` as its checkpoint. */
 const listAllOps = async (
-  asSyncer: Client,
+  asSyncer: LexClientInstance,
   space: SpaceRefString,
   repo: string,
   opts: { since?: string; excludeValues?: boolean } = {},
 ) => {
   const ops: OpEntry[] = []
   let cursor: string | undefined
-  let commit: com.atproto.space.listRepoOps.$OutputBody['commit']
+  let commit: { rev: string; data: unknown } | undefined
   let pages = 0
   do {
     const page = await asSyncer.call(com.atproto.space.listRepoOps, {
@@ -266,7 +275,7 @@ describe('platform spike K5: oplog resets and listing cost', () => {
 
       const cred = await sc.credentialFor(dan, space)
       const meterRun = async <T>(
-        run: (asSyncer: Client) => Promise<T>,
+        run: (asSyncer: LexClientInstance) => Promise<T>,
       ): Promise<MeteredRun<T>> => {
         const meter = { requests: 0, decodedBytes: 0, urls: [] as string[] }
         const asSyncer = new Client({
@@ -285,7 +294,7 @@ describe('platform spike K5: oplog resets and listing cost', () => {
       }
 
       const listAllRecords = async (
-        asSyncer: Client,
+        asSyncer: LexClientInstance,
         opts: { excludeValues: boolean; limit: number },
       ) => {
         const records: RecordsListing['records'] = []

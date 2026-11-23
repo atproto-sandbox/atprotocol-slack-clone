@@ -4,8 +4,8 @@ import { AtprotoClient, XrpcError } from "@flock/protocol/atproto/xrpc";
 import { channelUri, inboxUri, requestRecordKey } from "@flock/protocol/keys";
 import { readWriterJoinRequests } from "./inbox-requests";
 
-const AUTHORITY = "did:plc:authority";
-const INBOX = inboxUri(AUTHORITY, "team");
+const AUTHORITY = "did:plc:authorityaaaaaaaaaaaaaaa";
+const INBOX = inboxUri(AUTHORITY);
 const CHANNELS = [{ skey: "secret", name: "secret-plans", visibility: "private" }, { skey: "general", name: "general", visibility: "public" }];
 const COLLECTION = "new.flock.joinRequest";
 

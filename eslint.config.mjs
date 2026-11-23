@@ -13,7 +13,11 @@ const WEB_REACT_VERSION = JSON.parse(readFileSync(new URL("./apps/web/package.js
 /** Code that runs in a browser. */
 const BROWSER_CODE = ["packages/protocol/src/**/*.{ts,tsx}", "packages/client/src/**/*.{ts,tsx}", "apps/web/src/browser/**/*.{ts,tsx}"];
 /** Tests and test fixtures, which run under Node's test runner and may use a package's dev dependencies. */
-const NODE_TESTS = ["**/*.test.{ts,tsx}", "packages/client/src/testing/**"];
+const NODE_TESTS = [
+  "**/*.test.{ts,tsx}",
+  "packages/client/src/testing/**",
+  "apps/operator/src/operator/testing/**",
+];
 const BROWSER_TEST_FILES = [
   "packages/protocol/src/**/*.test.{ts,tsx}",
   "packages/client/src/**/*.test.{ts,tsx}",
@@ -49,6 +53,45 @@ const ALL_BOUNDARY_SOURCE = [
   "bdd/**/*.ts",
   "scripts/**/*.{ts,mjs}",
 ];
+const ALL_MEMBERSPACE_CHECKED_SOURCE = [
+  ...ALL_BOUNDARY_SOURCE,
+  "protocol-tests/**/*.ts",
+];
+/**
+ * R13 OpenSocial hard-cut allowlist: only personal-PDS DM spaces, protocol primitives,
+ * FakeNetwork, and explicit DM/negative-fixture tests may use `com.atproto.memberspace.{putMembers,removeMembers,listMembers}`.
+ */
+const MEMBERSPACE_FULL_ALLOWLIST = [
+  "packages/protocol/src/scopes.ts",
+  "packages/protocol/src/opensocial-lexicons.test.ts",
+  "packages/protocol/src/atproto/record-pages.ts",
+  "packages/protocol/src/atproto/record-pages.test.ts",
+  "packages/protocol/src/atproto/space-policy.ts",
+  "packages/protocol/src/atproto/space-policy.test.ts",
+  "packages/client/src/dm/**",
+  "packages/reader/src/independent-dm.ts",
+  "packages/reader/src/independent-dm.test.ts",
+  "packages/testing/src/fake-network.ts",
+  "packages/testing/src/fake-network.test.ts",
+  "packages/testing/src/space-credential-core.test.ts",
+  "protocol-tests/dm-acceptance.test.ts",
+  "protocol-tests/dm-performance.test.ts",
+  "protocol-tests/opensocial-groups.test.ts",
+  "protocol-tests/atproto/slack-dm-conformance.test.ts",
+  "bdd/steps/dm-conversations.steps.ts",
+  "bdd/steps/dm-policy.steps.ts",
+  "bdd/support/dm-conversations-ui.ts",
+  "bdd/support/dm-policy-ui.ts",
+];
+/**
+ * `WorkspaceClient.ensureInvitesSpace()` (and its unit test) may call `com.atproto.memberspace.listMembers`
+ * ONLY to verify zero members on personal `group.opensocial.invites/self`; `putMembers` and `removeMembers` remain forbidden.
+ */
+const MEMBERSPACE_LIST_ONLY_ALLOWLIST = [
+  "packages/client/src/workspace-client.ts",
+  "packages/client/src/workspace-client.test.ts",
+];
+
 const NO_NODE_BUILTINS = {
   group: ["node:*"],
   message: "This code runs in a browser and cannot import Node built-ins.",
@@ -60,11 +103,6 @@ const NO_SERVER_CONFIG = {
 const NO_APP_LAYER = {
   group: ["../app/*", "@flock/web/app/*"],
   message: "Browser code sits below the web app's UI: the UI imports it, not the other way round.",
-};
-const MEMBER_LIST_WRITES = {
-  group: ["**/atproto/space-ops"],
-  importNames: ["putSpaceMember", "putSpaceMembers", "removeSpaceMember", "removeSpaceMembers"],
-  message: "The operator changes member lists through apps/operator/src/operator/members.ts, which drops the change feed's cached list.",
 };
 const NO_CLIENT_NODE_ENTRY = {
   group: ["**/node/*", "@flock/client/node/*", "@flock/net", "@flock/net/*"],
@@ -97,6 +135,82 @@ const NO_COMPUTED_DYNAMIC_IMPORT = {
   message: "D11.11: non-static dynamic import() specifiers are forbidden in boundary-restricted modules.",
 };
 
+const ALL_THREE_DOTTED_RE = /com\.atproto\.memberspace\.(putMembers|removeMembers|listMembers)\b/;
+const MUTATE_ONLY_DOTTED_RE = /com\.atproto\.memberspace\.(putMembers|removeMembers)\b/;
+const ALL_THREE_PATH_RE = /com\/atproto\/memberspace\/(putMembers|removeMembers|listMembers)(?:[./]|$)/;
+const MUTATE_ONLY_PATH_RE = /com\/atproto\/memberspace\/(putMembers|removeMembers)(?:[./]|$)/;
+const RECORD_PAGES_PATH_RE = /(?:^|\/)record-pages(?:\.[jt]s)?$/;
+
+const flockBoundariesPlugin = {
+  rules: {
+    "no-legacy-memberspace": {
+      meta: {
+        type: "problem",
+        schema: [
+          {
+            type: "object",
+            properties: { allowListMembers: { type: "boolean" } },
+            additionalProperties: false,
+          },
+        ],
+      },
+      create(context) {
+        const allowListMembers = Boolean(context.options[0]?.allowListMembers);
+        const dottedRe = allowListMembers ? MUTATE_ONLY_DOTTED_RE : ALL_THREE_DOTTED_RE;
+        const pathRe = allowListMembers ? MUTATE_ONLY_PATH_RE : ALL_THREE_PATH_RE;
+        const message =
+          "R13 OpenSocial hard-cut: com.atproto.memberspace.{putMembers,removeMembers,listMembers} is forbidden outside personal-PDS DM and protocol boundaries; use group.opensocial.* governance.";
+
+        function checkSourceSpecifier(node, value) {
+          if (typeof value === "string" && pathRe.test(value)) {
+            context.report({ node, message });
+          }
+        }
+
+        return {
+          Literal(node) {
+            if (typeof node.value === "string" && (dottedRe.test(node.value) || pathRe.test(node.value))) {
+              context.report({ node, message });
+            }
+          },
+          TemplateElement(node) {
+            const raw = node.value?.raw ?? "";
+            const cooked = node.value?.cooked ?? "";
+            if (dottedRe.test(raw) || dottedRe.test(cooked) || pathRe.test(raw) || pathRe.test(cooked)) {
+              context.report({ node, message });
+            }
+          },
+          ImportDeclaration(node) {
+            const src = node.source?.value;
+            checkSourceSpecifier(node, src);
+            if (!allowListMembers && typeof src === "string" && RECORD_PAGES_PATH_RE.test(src)) {
+              for (const spec of node.specifiers ?? []) {
+                if (spec.type === "ImportSpecifier" && spec.imported?.name === "listMemberPages") {
+                  context.report({ node: spec, message });
+                }
+              }
+            }
+          },
+          ExportNamedDeclaration(node) {
+            const src = node.source?.value;
+            checkSourceSpecifier(node, src);
+            if (!allowListMembers && typeof src === "string" && RECORD_PAGES_PATH_RE.test(src)) {
+              for (const spec of node.specifiers ?? []) {
+                if (spec.local?.name === "listMemberPages") {
+                  context.report({ node: spec, message });
+                }
+              }
+            }
+          },
+          ExportAllDeclaration(node) {
+            checkSourceSpecifier(node, node.source?.value);
+          },
+        };
+      },
+    },
+  },
+};
+
 function restrictedBoundaryRules(patterns, syntax = []) {
   return {
     ...(patterns.length > 0 ? { "no-restricted-imports": ["error", { patterns }] } : {}),
@@ -123,6 +237,16 @@ export default defineConfig([
     },
   },
   {
+    files: [
+      "packages/protocol/src/pin-digest.test.ts",
+      "packages/protocol/src/verify-public-lexicons.test.ts",
+      "packages/testing/src/backup-db.test.ts",
+    ],
+    rules: {
+      "import/no-relative-packages": "off",
+    },
+  },
+  {
     // The root's own code (the suites and scripts) is held to the root's package.json, test code throughout.
     files: ["bdd/**/*.ts", "protocol-tests/**/*.ts", "scripts/**/*.{ts,mjs}"],
     ignores: ["protocol-tests/atproto/**"],
@@ -134,7 +258,12 @@ export default defineConfig([
     // D11.11 baseline: block entity-merge and ext/* everywhere outside their explicit allowlists.
     // Every more-specific block below spreads all applicable patterns rather than shadowing this baseline.
     files: ALL_BOUNDARY_SOURCE,
-    ignores: [...ENTITY_MERGE_ALLOWED, ...EXTENSION_IMPORT_ALLOWED, "apps/operator/src/**/*.test.{ts,tsx}"],
+    ignores: [
+      ...ENTITY_MERGE_ALLOWED,
+      ...EXTENSION_IMPORT_ALLOWED,
+      "apps/operator/src/**/*.test.{ts,tsx}",
+      "apps/operator/src/operator/testing/**",
+    ],
     rules: restrictedBoundaryRules(
       [NO_ENTITY_MERGE_IMPORT, NO_EXTENSION_IMPORT],
       [NO_ENTITY_MERGE_DYNAMIC_IMPORT, NO_EXTENSION_DYNAMIC_IMPORT, NO_COMPUTED_DYNAMIC_IMPORT],
@@ -208,16 +337,16 @@ export default defineConfig([
   },
   {
     files: ["apps/operator/src/**/*.{ts,tsx}"],
-    ignores: ["apps/operator/src/operator/members.ts", ...NODE_TESTS],
+    ignores: NODE_TESTS,
     rules: restrictedBoundaryRules(
-      [MEMBER_LIST_WRITES, NO_ENTITY_MERGE_IMPORT, NO_EXTENSION_IMPORT],
+      [NO_ENTITY_MERGE_IMPORT, NO_EXTENSION_IMPORT],
       [NO_ENTITY_MERGE_DYNAMIC_IMPORT, NO_EXTENSION_DYNAMIC_IMPORT, NO_COMPUTED_DYNAMIC_IMPORT],
     ),
   },
   {
-    files: ["apps/operator/src/**/*.test.{ts,tsx}"],
+    files: ["apps/operator/src/**/*.test.{ts,tsx}", "apps/operator/src/operator/testing/**"],
     rules: restrictedBoundaryRules(
-      [MEMBER_LIST_WRITES, NO_ENTITY_MERGE_IMPORT, NO_EXTENSION_IMPORT],
+      [NO_ENTITY_MERGE_IMPORT, NO_EXTENSION_IMPORT],
       [NO_ENTITY_MERGE_DYNAMIC_IMPORT, NO_EXTENSION_DYNAMIC_IMPORT],
     ),
   },
@@ -254,5 +383,26 @@ export default defineConfig([
       [NO_DM_IMPORT, NO_CLIENT_NODE_ENTRY, NO_ENTITY_MERGE_IMPORT, NO_EXTENSION_IMPORT],
       [NO_ENTITY_MERGE_DYNAMIC_IMPORT, NO_EXTENSION_DYNAMIC_IMPORT, NO_COMPUTED_DYNAMIC_IMPORT],
     ),
+  },
+  {
+    // R13 OpenSocial hard-cut: forbid com.atproto.memberspace.{putMembers,removeMembers,listMembers} outside DM/protocol/fixture allowlist.
+    plugins: { "flock-boundaries": flockBoundariesPlugin },
+    files: ALL_MEMBERSPACE_CHECKED_SOURCE,
+    ignores: [
+      ...MEMBERSPACE_FULL_ALLOWLIST,
+      ...MEMBERSPACE_LIST_ONLY_ALLOWLIST,
+      "packages/client/src/eslint-boundaries.test.ts",
+    ],
+    rules: {
+      "flock-boundaries/no-legacy-memberspace": ["error", { allowListMembers: false }],
+    },
+  },
+  {
+    // WorkspaceClient.ensureInvitesSpace() (and its test) may call `listMembers` ONLY; `putMembers`/`removeMembers` remain forbidden.
+    plugins: { "flock-boundaries": flockBoundariesPlugin },
+    files: MEMBERSPACE_LIST_ONLY_ALLOWLIST,
+    rules: {
+      "flock-boundaries/no-legacy-memberspace": ["error", { allowListMembers: true }],
+    },
   },
 ]);

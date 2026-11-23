@@ -1,5 +1,7 @@
 # Let a space authority evict a writer from the tracked writer set
 
+Status against `6747610566` + `opensocial.group` `8df0cc82` (R13, 2026-11-21): **Solved on Group Host (`apps/group-host`); narrow residual on personal-PDS `memberspace` DMs.** In R13, Flock's `opensocial.group` Group Host atomically evicts writers (`removeWriter` + `notifySpaceUpdate` `com.atproto.space.defs#repoRemoved`) whenever a member loses `write` on any group space—whether via `membership` deletion, role edit, `group.opensocial.policy` `updateSpace`, `leaveGroup`, or explicit `removeWriter`. On personal PDSes (`com.atproto.memberspace.policy`, used for sovereign DMs), `removeMembers` and `putMembers` (`write: false`) evict, while tightening `publicWrite: true -> false` via `updateSpace` still leaves prior `publicWrite` strangers tracked unless `removeWriter` is called explicitly.
+
 Status against `5d88b414` (2026-10-30): Mostly resolved. `com.atproto.space.removeWriter` removes an account from the writer set (idempotent; the account is tracked again if it later writes while still authorized), and `memberspace.removeMember` and `putMember` with `write: false` now evict too. What remains is narrow: `updateSpace` does not re-evaluate the writer set, so a switch from a public to a member-list write policy leaves already-tracked strangers listed, and a `publicWrite` space tracks an evicted writer again on its next write, so a blocklist still needs an app-side filter. Our app keeps its sender filter for those two cases and drops nothing else.
 
 Status against `5b95b2f2`: Still open. `simplespace.removeMember` only deletes the `simplespace_member` row; nothing removes a tracked writer, and `listRepos` (now keyed by `spaceRev`) keeps returning evicted writers. The only change is that a repo can reappear at a later `spaceRev`.
@@ -37,7 +39,7 @@ Additive. Existing spaces behave exactly as today until an owner calls `removeWr
 - Should `pruneWriters` be part of the first version?
 
 ## Related work: opensocial.group
-`ejectMember` and `leaveGroup` in the `opensocial.group` draft stop issuing new read credentials and say "existing space credentials expire normally"; ejection does not delete member-authored records. That matches the gap here: removal changes who may read from now on, but nothing tells the space host to stop tracking the removed account as a writer.
+Adopted in Flock R13 (`apps/group-host` @ `opensocial.group/proposal` `8df0cc82`): losing `write` on any `group.opensocial.policy` space—via `membership` deletion, role edit, `updateSpace` policy change, or `leaveGroup`—atomically evicts the writer (`removeWriter` + `#repoRemoved`) while keeping member-authored records intact in the member's personal PDS repo.
 
 ## Internal references (remove before filing)
-`protocol-tests/atproto/slack-dm-conformance.test.ts` (policy switch checks); `docs/protocol/atproto-spaces-pin.md`, "Direct-message conformance".
+`apps/group-host/src/methods.ts`, `protocol-tests/atproto/slack-dm-conformance.test.ts` (policy switch checks); `docs/protocol/atproto-spaces-pin.md`.

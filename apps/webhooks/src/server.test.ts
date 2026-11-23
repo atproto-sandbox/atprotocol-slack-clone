@@ -22,16 +22,19 @@ import {
 const directory = mkdtempSync(join(tmpdir(), "webhooks-server-test-"));
 after(() => rmSync(directory, { recursive: true, force: true }));
 
-const AUTHORITY = "did:plc:authority";
+const GROUP_DID = "did:plc:groupacme";
+const FOUNDER = "did:plc:founder";
 const ADMIN = "did:plc:admin";
 const OUTSIDER_ADMIN = "did:plc:outsideradmin";
 const APP_DID = "did:plc:webhooksapp";
-const WORKSPACE = `at://${AUTHORITY}/space/new.flock.workspace/acme`;
+const WORKSPACE = `at://${GROUP_DID}/space/new.flock.workspace/self`;
+
+type TestSummary = WorkspaceSummary & { takendownMembers?: string[] };
 
 let testCounter = 0;
 
 async function startTestHarness(overrides: Partial<WebhooksHandlerDeps> & {
-  initialSummary?: WorkspaceSummary;
+  initialSummary?: TestSummary;
   privateRosters?: Record<string, string[]>;
 } = {}) {
   testCounter += 1;
@@ -48,36 +51,43 @@ async function startTestHarness(overrides: Partial<WebhooksHandlerDeps> & {
     completeSignInCalls: 0,
     pendingCap: false,
     nextSignInDid: ADMIN,
-    summary: overrides.initialSummary ?? {
+    summary: (overrides.initialSummary ?? {
       uri: WORKSPACE,
-      authorityDid: AUTHORITY,
-      skey: "acme",
+      authorityDid: GROUP_DID,
+      groupDid: GROUP_DID,
+      skey: "self",
       name: "Acme",
+      joinPolicy: "invite",
+      publicMeta: true,
       isAdmin: true,
-      admins: [AUTHORITY, ADMIN, OUTSIDER_ADMIN],
+      isModerator: false,
+      admins: [FOUNDER, ADMIN, OUTSIDER_ADMIN],
+      moderators: [],
       members: [
-        { did: AUTHORITY, active: true },
-        { did: ADMIN, active: true },
-        { did: OUTSIDER_ADMIN, active: true },
+        { did: FOUNDER, active: true, roles: ["admin", "member", "channel-secret"] },
+        { did: ADMIN, active: true, roles: ["admin", "member", "channel-secret"] },
+        { did: OUTSIDER_ADMIN, active: true, roles: ["admin", "member"] },
       ],
+      pendingMembers: [],
+      roles: [],
       channels: [
-        { uri: `at://${AUTHORITY}/space/new.flock.channel/acme-general`, skey: "acme-general", name: "general", visibility: "public" },
-        { uri: `at://${AUTHORITY}/space/new.flock.channel/acme-secret`, skey: "acme-secret", name: "secret", visibility: "private" },
-        { uri: `at://${AUTHORITY}/space/new.flock.channel/acme-moving`, skey: "acme-moving", name: "moving", visibility: "transitioning" },
+        { uri: `at://${GROUP_DID}/space/new.flock.channel/general`, skey: "general", name: "general", visibility: "public" },
+        { uri: `at://${GROUP_DID}/space/new.flock.channel/secret`, skey: "secret", name: "secret", visibility: "private" },
+        { uri: `at://${GROUP_DID}/space/new.flock.channel/moving`, skey: "moving", name: "moving", visibility: "transitioning" },
       ],
       installs: [
         {
           did: APP_DID,
           channels: [
-            { skey: "acme-general", write: true },
-            { skey: "acme-secret", write: true },
-            { skey: "acme-moving", write: true },
+            { skey: "general", write: true },
+            { skey: "secret", write: true },
+            { skey: "moving", write: true },
           ],
         },
       ],
       degradedReasons: [],
-    } satisfies WorkspaceSummary,
-    privateRosters: new Map<string, string[]>(Object.entries(overrides.privateRosters ?? { "acme-secret": [ADMIN] })),
+    }) satisfies TestSummary,
+    privateRosters: new Map<string, string[]>(Object.entries(overrides.privateRosters ?? { secret: [FOUNDER, ADMIN] })),
   };
 
   let stateSeq = 0;
@@ -130,7 +140,7 @@ async function startTestHarness(overrides: Partial<WebhooksHandlerDeps> & {
       },
       send: async (ref: { workspace: string; skey: string }, text: string, _parent?: string, blocks?: unknown) => {
         state.sendCalls.push({ workspace: ref.workspace, skey: ref.skey, text, ...(blocks ? { blocks } : {}) });
-        return { uri: `at://${AUTHORITY}/space/new.flock.channel/${ref.skey}/${APP_DID}/new.flock.channel.message/2222222222222`, rkey: "2222222222222" };
+        return { uri: `at://${GROUP_DID}/space/new.flock.channel/${ref.skey}/${APP_DID}/new.flock.channel.message/2222222222222`, rkey: "2222222222222" };
       },
     } as never,
   };
@@ -302,21 +312,21 @@ test("admin security headers, browser-bound expiring/capped sign-in, CSRF and Or
     const badCsrf = await fetch(`${h.origin}/admin/hooks/create`, {
       method: "POST",
       headers: { origin: h.origin, cookie, "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ csrf: "wrong", workspace: WORKSPACE, channelSkey: "acme-general" }).toString(),
+      body: new URLSearchParams({ csrf: "wrong", workspace: WORKSPACE, channelSkey: "general" }).toString(),
     });
     assert.equal(badCsrf.status, 403);
 
     const badOriginCreate = await fetch(`${h.origin}/admin/hooks/create`, {
       method: "POST",
       headers: { origin: "null", cookie, "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ csrf, workspace: WORKSPACE, channelSkey: "acme-general" }).toString(),
+      body: new URLSearchParams({ csrf, workspace: WORKSPACE, channelSkey: "general" }).toString(),
     });
     assert.equal(badOriginCreate.status, 403);
 
     const createRes = await fetch(`${h.origin}/admin/hooks/create`, {
       method: "POST",
       headers: { origin: h.origin, cookie, "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ csrf, workspace: WORKSPACE, channelSkey: "acme-general" }).toString(),
+      body: new URLSearchParams({ csrf, workspace: WORKSPACE, channelSkey: "general" }).toString(),
     });
     assert.equal(createRes.status, 200);
     const createHtml = await createRes.text();
@@ -334,13 +344,13 @@ test("admin security headers, browser-bound expiring/capped sign-in, CSRF and Or
     const secondHookRes = await fetch(`${h.origin}/admin/hooks/create`, {
       method: "POST",
       headers: { origin: h.origin, cookie, "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ csrf, workspace: WORKSPACE, channelSkey: "acme-general" }).toString(),
+      body: new URLSearchParams({ csrf, workspace: WORKSPACE, channelSkey: "general" }).toString(),
     });
     assert.equal(secondHookRes.status, 200);
     const thirdHookRes = await fetch(`${h.origin}/admin/hooks/create`, {
       method: "POST",
       headers: { origin: h.origin, cookie, "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ csrf, workspace: WORKSPACE, channelSkey: "acme-general" }).toString(),
+      body: new URLSearchParams({ csrf, workspace: WORKSPACE, channelSkey: "general" }).toString(),
     });
     assert.equal(thirdHookRes.status, 400, "workspace active hook cap enforced");
   } finally {
@@ -348,7 +358,7 @@ test("admin security headers, browser-bound expiring/capped sign-in, CSRF and Or
   }
 });
 
-test("every request re-checks admin AND roster membership, private-channel rosters (admitting authority), transitioning channels, and unreadable private rosters", async () => {
+test("every request re-checks admin AND roster membership, takendownMembers denial, private-channel rosters, transitioning channels, and unreadable private rosters", async () => {
   const h = await startTestHarness();
   try {
     // 1. Admin record WITHOUT an active roster record is refused!
@@ -372,23 +382,23 @@ test("every request re-checks admin AND roster membership, private-channel roste
     });
     assert.equal(orphanCb.status, 403, "admin record without roster record is refused");
 
-    // 2. Workspace authority is admitted to private channel #secret even though not on channelRoster!
-    const authSession = await h.signInAs(AUTHORITY);
-    assert.equal(authSession.html.includes('value="acme-secret"'), true, "authority sees private channel #secret");
-    assert.equal(authSession.html.includes('value="acme-moving"'), false, "transitioning channel excluded");
+    // 2. Admitted admin (FOUNDER) sees private channel #secret; transitioning channel excluded.
+    const authSession = await h.signInAs(FOUNDER);
+    assert.equal(authSession.html.includes('value="secret"'), true, "admitted admin sees private channel #secret");
+    assert.equal(authSession.html.includes('value="moving"'), false, "transitioning channel excluded");
     // Transitioning channel creation attempt via forged POST is refused too.
     const movingCreate = await fetch(`${h.origin}/admin/hooks/create`, {
       method: "POST",
       headers: { origin: h.origin, cookie: authSession.cookie, "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ csrf: authSession.csrf, workspace: WORKSPACE, channelSkey: "acme-moving" }).toString(),
+      body: new URLSearchParams({ csrf: authSession.csrf, workspace: WORKSPACE, channelSkey: "moving" }).toString(),
     });
     assert.equal(movingCreate.status, 403);
 
-    // Authority creates a hook in #secret, and a valid POST to #secret delivers while active with write.
+    // Admitted admin creates a hook in #secret, and a valid POST to #secret delivers while active with write.
     const createSecret = await fetch(`${h.origin}/admin/hooks/create`, {
       method: "POST",
       headers: { origin: h.origin, cookie: authSession.cookie, "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ csrf: authSession.csrf, workspace: WORKSPACE, channelSkey: "acme-secret" }).toString(),
+      body: new URLSearchParams({ csrf: authSession.csrf, workspace: WORKSPACE, channelSkey: "secret" }).toString(),
     });
     assert.equal(createSecret.status, 200);
     const [, secretHookId, secretHookSecret] = /\/hooks\/([A-Za-z0-9_-]{22})\/([A-Za-z0-9_-]{43})/.exec(await createSecret.text())!;
@@ -398,16 +408,16 @@ test("every request re-checks admin AND roster membership, private-channel roste
       body: JSON.stringify({ text: "private alert" }),
     });
     assert.equal(privateDelivery.status, 200);
-    assert.equal(h.state.sendCalls.at(-1)?.skey, "acme-secret");
+    assert.equal(h.state.sendCalls.at(-1)?.skey, "secret");
 
     // 3. OUTSIDER_ADMIN (an admin NOT on #secret's roster) cannot see #secret, create in #secret, or rotate/revoke secretHookId!
     const outsiderSession = await h.signInAs(OUTSIDER_ADMIN);
-    assert.equal(outsiderSession.html.includes('value="acme-secret"'), false);
+    assert.equal(outsiderSession.html.includes('value="secret"'), false);
     assert.equal(outsiderSession.html.includes(secretHookId), false);
     const outsiderCreate = await fetch(`${h.origin}/admin/hooks/create`, {
       method: "POST",
       headers: { origin: h.origin, cookie: outsiderSession.cookie, "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ csrf: outsiderSession.csrf, workspace: WORKSPACE, channelSkey: "acme-secret" }).toString(),
+      body: new URLSearchParams({ csrf: outsiderSession.csrf, workspace: WORKSPACE, channelSkey: "secret" }).toString(),
     });
     assert.equal(outsiderCreate.status, 403);
     const outsiderRevoke = await fetch(`${h.origin}/admin/hooks/revoke`, {
@@ -423,8 +433,8 @@ test("every request re-checks admin AND roster membership, private-channel roste
     h.state.summary = {
       ...h.state.summary,
       channels: [
-        { uri: `at://${AUTHORITY}/space/new.flock.channel/acme-general`, skey: "acme-general", name: "general", visibility: "public" },
-        { uri: `at://${AUTHORITY}/space/new.flock.channel/acme-secret`, skey: "acme-secret", name: "secret", visibility: "transitioning" },
+        { uri: `at://${GROUP_DID}/space/new.flock.channel/general`, skey: "general", name: "general", visibility: "public" },
+        { uri: `at://${GROUP_DID}/space/new.flock.channel/secret`, skey: "secret", name: "secret", visibility: "transitioning" },
       ],
     };
     const transitioningPrivateHtml = await (await fetch(`${h.origin}/admin`, { headers: { cookie: authSession.cookie } })).text();
@@ -434,8 +444,8 @@ test("every request re-checks admin AND roster membership, private-channel roste
     h.state.summary = {
       ...h.state.summary,
       channels: [
-        { uri: `at://${AUTHORITY}/space/new.flock.channel/acme-general`, skey: "acme-general", name: "general", visibility: "public" },
-        { uri: `at://${AUTHORITY}/space/new.flock.channel/acme-secret`, skey: "acme-secret", name: "secret", visibility: "private" },
+        { uri: `at://${GROUP_DID}/space/new.flock.channel/general`, skey: "general", name: "general", visibility: "public" },
+        { uri: `at://${GROUP_DID}/space/new.flock.channel/secret`, skey: "secret", name: "secret", visibility: "private" },
       ],
     };
     h.state.rosterError = new WorkspaceEnvelopeError("private channel roster exceeds supported envelope");
@@ -447,7 +457,7 @@ test("every request re-checks admin AND roster membership, private-channel roste
     // 4b. When the app loses its grant on #secret (cannot read private roster), the hook is listed as unavailable and cannot be managed!
     h.state.summary = {
       ...h.state.summary,
-      installs: [{ did: APP_DID, channels: [{ skey: "acme-general", write: true }] }],
+      installs: [{ did: APP_DID, channels: [{ skey: "general", write: true }] }],
     };
     const unavailableHtml = await (await fetch(`${h.origin}/admin`, { headers: { cookie: authSession.cookie } })).text();
     assert.match(unavailableHtml, /unavailable · app cannot read private roster/);
@@ -461,8 +471,8 @@ test("every request re-checks admin AND roster membership, private-channel roste
     // Archiving #secret (removing it from directory) causes POST /hooks/<secretHookId>/<secretHookSecret> to return 404.
     h.state.summary = {
       ...h.state.summary,
-      channels: [{ uri: `at://${AUTHORITY}/space/new.flock.channel/acme-general`, skey: "acme-general", name: "general", visibility: "public" }],
-      installs: [{ did: APP_DID, channels: [{ skey: "acme-general", write: true }, { skey: "acme-secret", write: true }] }],
+      channels: [{ uri: `at://${GROUP_DID}/space/new.flock.channel/general`, skey: "general", name: "general", visibility: "public" }],
+      installs: [{ did: APP_DID, channels: [{ skey: "general", write: true }, { skey: "secret", write: true }] }],
     };
     const archivedPrivatePost = await fetch(`${h.origin}/hooks/${secretHookId}/${secretHookSecret}`, {
       method: "POST",
@@ -471,11 +481,24 @@ test("every request re-checks admin AND roster membership, private-channel roste
     });
     assert.equal(archivedPrivatePost.status, 404);
 
-    // 5. Demoting ADMIN takes effect on the very next request!
+    // 5. Moderation `!takedown` label on ADMIN (`takendownMembers: [ADMIN]`) immediately denies `/admin` access (`403`)!
     const adminSession = await h.signInAs(ADMIN);
     h.state.summary = {
       ...h.state.summary,
-      admins: [AUTHORITY],
+      takendownMembers: [ADMIN],
+    };
+    const afterTakedown = await fetch(`${h.origin}/admin`, { headers: { cookie: adminSession.cookie } });
+    assert.equal(afterTakedown.status, 403, "takendown admin loses /admin access immediately");
+    h.state.summary = {
+      ...h.state.summary,
+      takendownMembers: undefined,
+    };
+    assert.equal((await fetch(`${h.origin}/admin`, { headers: { cookie: adminSession.cookie } })).status, 200);
+
+    // 6. Demoting ADMIN takes effect on the very next request!
+    h.state.summary = {
+      ...h.state.summary,
+      admins: [FOUNDER],
     };
     const afterDemotion = await fetch(`${h.origin}/admin`, { headers: { cookie: adminSession.cookie } });
     assert.equal(afterDemotion.status, 403, "demoted admin loses access on the very next request");
@@ -494,14 +517,14 @@ test("hook endpoint enforces constant-time identical 404s, rate-limit order, syn
     const createOne = await fetch(`${h.origin}/admin/hooks/create`, {
       method: "POST",
       headers: { origin: h.origin, cookie, "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ csrf, workspace: WORKSPACE, channelSkey: "acme-general" }).toString(),
+      body: new URLSearchParams({ csrf, workspace: WORKSPACE, channelSkey: "general" }).toString(),
     });
     const [, id1, secret1] = /\/hooks\/([A-Za-z0-9_-]{22})\/([A-Za-z0-9_-]{43})/.exec(await createOne.text())!;
 
     const createTwo = await fetch(`${h.origin}/admin/hooks/create`, {
       method: "POST",
       headers: { origin: h.origin, cookie, "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ csrf, workspace: WORKSPACE, channelSkey: "acme-general" }).toString(),
+      body: new URLSearchParams({ csrf, workspace: WORKSPACE, channelSkey: "general" }).toString(),
     });
     const [, revokedId, revokedSecret] = /\/hooks\/([A-Za-z0-9_-]{22})\/([A-Za-z0-9_-]{43})/.exec(await createTwo.text())!;
     await fetch(`${h.origin}/admin/hooks/revoke`, {
@@ -636,7 +659,7 @@ test("hook endpoint enforces constant-time identical 404s, rate-limit order, syn
     h.advance(60_000);
     h.state.summary = {
       ...h.state.summary,
-      installs: [{ did: APP_DID, channels: [{ skey: "acme-general", write: false }] }],
+      installs: [{ did: APP_DID, channels: [{ skey: "general", write: false }] }],
     };
     const readOnlyRes = await fetch(`${h.origin}/hooks/${id1}/${secret1}`, {
       method: "POST",
@@ -649,8 +672,8 @@ test("hook endpoint enforces constant-time identical 404s, rate-limit order, syn
 
     h.state.summary = {
       ...h.state.summary,
-      channels: [{ uri: `at://${AUTHORITY}/space/new.flock.channel/acme-general`, skey: "acme-general", name: "general", visibility: "transitioning" }],
-      installs: [{ did: APP_DID, channels: [{ skey: "acme-general", write: true }] }],
+      channels: [{ uri: `at://${GROUP_DID}/space/new.flock.channel/general`, skey: "general", name: "general", visibility: "transitioning" }],
+      installs: [{ did: APP_DID, channels: [{ skey: "general", write: true }] }],
     };
     const transitioningRes = await fetch(`${h.origin}/hooks/${id1}/${secret1}`, {
       method: "POST",

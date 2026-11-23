@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
 import type { AtprotoDid, OAuthSession } from "@atproto/oauth-client-browser";
 import { UpstreamResponseTooLargeError } from "@flock/protocol/bounded-json";
-import { OPERATOR_METHOD, SPACE_TYPE, type SpaceType } from "@flock/protocol/nsids";
+import { OPERATOR_METHOD, SPACE_TYPE, type AnySpaceType } from "@flock/protocol/nsids";
 import { spaceCollections } from "@flock/protocol/registry";
 import { legacyMemberGrantScopes, memberGrantScopes, operatorMethodsScope } from "@flock/protocol/scopes";
 import { assessSessionScopes, missingScopes, restoreSession, wellKnownHandleResolver, type BrowserSessionConfig } from "./session";
@@ -96,7 +96,7 @@ test("missingScopes accepts the scope string a real PDS returns for the DM and f
   const pdsRewritten = fullRequired.map((token) => {
     if (!token.startsWith("space:")) return token;
     const [head, query = ""] = token.split("?");
-    const spaceType = head!.slice("space:".length) as SpaceType;
+    const spaceType = head!.slice("space:".length) as AnySpaceType;
     const params = new URLSearchParams(query);
     if (params.get("authority") === "self") params.set("authority", accountDid);
     if (params.getAll("collection").length === 0) {
@@ -121,7 +121,7 @@ test("missingScopes refuses over-acceptance: missing collection, read for write,
   // 1. Missing collection (workspace read missing new.flock.app.install, or app.inbox write missing new.flock.app.action).
   assert.deepEqual(
     missingScopes(
-      "space:new.flock.workspace?authority=*&collection=new.flock.workspace.profile&collection=new.flock.directory&collection=new.flock.workspace.roster&collection=new.flock.admin&collection=new.flock.acceptance&action=read",
+      "space:new.flock.workspace?authority=*&collection=new.flock.directory&collection=new.flock.ext.install&collection=com.atproto.label.record&action=read",
       "space:new.flock.workspace?authority=*&action=read",
       alice,
     ),
@@ -215,7 +215,7 @@ test("R12 D12.3b.1 (H5): restoreSession and assessSessionScopes admit legacy pre
     tokens.map((token) => {
       if (token.startsWith("space:")) {
         const [head, query = ""] = token.split("?");
-        const spaceType = head!.slice("space:".length) as SpaceType;
+        const spaceType = head!.slice("space:".length) as AnySpaceType;
         const params = new URLSearchParams(query);
         if (params.get("authority") === "self") params.set("authority", accountDid);
         if (params.getAll("collection").length === 0) {
@@ -281,7 +281,7 @@ test("R12 D12.3b.1 (H5): restoreSession and assessSessionScopes admit legacy pre
     assert.deepEqual(missingScopes(legacyGranted, config.scope, accountDid), []);
     assert.deepEqual(
       missingScopes(legacyGranted, config.scope, accountDid, { strict: true }),
-      fullRequired.filter((t) => t.startsWith("rpc?")),
+      fullRequired.filter((t) => t.startsWith("rpc?") && t.includes("new.flock.operator.")),
     );
     const restoredLegacy = await restoreSession(config, async () => fakeSession(legacyGranted));
     assert.ok(restoredLegacy, "pre-R12 session MUST be admitted instead of returning null");
@@ -292,7 +292,7 @@ test("R12 D12.3b.1 (H5): restoreSession and assessSessionScopes admit legacy pre
   // 3. Session lacking another operator method (e.g. getChanges or execute) OR wrong operator audience MUST be rejected (null)!
   const missingExecute = fullRequired
     .map((token) =>
-      token.startsWith("rpc?")
+      token.startsWith("rpc?") && token.includes("new.flock.operator.")
         ? operatorMethodsScope(
             [OPERATOR_METHOD.getChanges, OPERATOR_METHOD.getDmNotifyTarget],
             serviceRef,
@@ -303,7 +303,7 @@ test("R12 D12.3b.1 (H5): restoreSession and assessSessionScopes admit legacy pre
 
   const wrongAudience = fullRequired
     .map((token) =>
-      token.startsWith("rpc?")
+      token.startsWith("rpc?") && token.includes("new.flock.operator.")
         ? token.replace("operator.example", "other-operator.example")
         : token)
     .join(" ");
@@ -313,5 +313,5 @@ test("R12 D12.3b.1 (H5): restoreSession and assessSessionScopes admit legacy pre
   const singleRequired = operatorMethodsScope([OPERATOR_METHOD.getChanges], serviceRef);
   const positionalGranted = `rpc:${OPERATOR_METHOD.getChanges}?aud=${encodeURIComponent(serviceRef)}`;
   assert.deepEqual(missingScopes(positionalGranted, singleRequired, accountDid, { strict: true }), []);
-  assert.deepEqual(missingScopes(`rpc:*?aud=${encodeURIComponent(serviceRef)}`, config.scope.split(" ").find((t) => t.startsWith("rpc?"))!, accountDid, { strict: true }), []);
+  assert.deepEqual(missingScopes(`rpc:*?aud=${encodeURIComponent(serviceRef)}`, config.scope.split(" ").find((t) => t.startsWith("rpc?") && t.includes("new.flock.operator."))!, accountDid, { strict: true }), []);
 });

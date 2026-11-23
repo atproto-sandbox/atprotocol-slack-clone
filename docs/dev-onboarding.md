@@ -1,240 +1,159 @@
 # Developer onboarding
 
-This guide is for engineers who already understand **AT Protocol** (DIDs, repos, Lexicon, XRPC, OAuth, PDS) but are new to **permissioned spaces** (draft [proposal 0016](https://github.com/bluesky-social/proposals)) and to **Flock**, the Slack-style workspace in this repository.
+This guide is for engineers who already know **AT Protocol** (DIDs, repos, Lexicon, XRPC, OAuth, PDS) and are onboarding to **ATProto permissioned spaces** (draft [proposal 0016](https://github.com/bluesky-social/proposals)), **`opensocial.group` atmospheric groups** ([`opensocial.group/proposal`](https://tangled.org/opensocial.group/proposal)), and **Flock**.
 
-For runtime detail and file-level ownership, follow up with [`ARCHITECTURE.md`](../ARCHITECTURE.md), [`CODE-MAP.md`](../CODE-MAP.md), [`docs/protocol/atproto-spaces-pin.md`](protocol/atproto-spaces-pin.md), and [`docs/protocol/operator-contract.md`](protocol/operator-contract.md).
+For deeper module and wire-level references, follow up with [`ARCHITECTURE.md`](../ARCHITECTURE.md), [`CODE-MAP.md`](../CODE-MAP.md), [`docs/protocol/atproto-spaces-pin.md`](protocol/atproto-spaces-pin.md), [`docs/protocol/operator-contract.md`](protocol/operator-contract.md), and [`docs/operations.md`](operations.md).
 
 ---
 
 ## What you are building
 
-Flock is a **browser client** plus a small **operator service**. There is **no application database of record** for workspace or channel content. Durable state lives in **spaces on members’ PDSes**; **member lists** enforce who can read and write. The operator keeps a **SQLite journal** only for resumable admin mutations, OAuth material for the workspace authority, and **content-free** change notices—not for messages, roles, or membership truth.
+Flock combines a **stateless Next.js browser app** (`apps/web`), a **reference `opensocial.group` Group Host** (`apps/group-host`), and a **shared-session Operator** (`apps/operator`), plus personal PDSes where members hold their own accounts and repos:
 
-**Status:** alpha, pinned to a draft PDS implementation ([PR #5187](https://github.com/bluesky-social/atproto/pull/5187), commit `6747610566`, snapshot `0.0.0-spaces-alpha-20261117141222`). Expect breakage when upstream moves.
+- **Groups (`1 Group == 1 DID`):** Every workspace is an `opensocial.group` atmospheric group with its own `did:plc:...` identity hosted on `apps/group-host` (`GROUP_HOST_URL`). Its core governance spaces (`group.opensocial.meta/self` and `group.opensocial.members/self`) and Flock modality spaces (`new.flock.workspace/self`, `new.flock.inbox/self`, `new.flock.channel/<skey>`, `new.flock.app.inbox/<appSkey>`, `new.flock.ext.tasks/<tasksSkey>`) use **`group.opensocial.policy` flat union RBAC** (`role/*` + `membership/*`).
+- **Member-owned content:** Messages, reactions, Tasks operations, private-channel join requests, and bilateral `group.opensocial.acceptance/self` records live in **each member's personal PDS repo**; Group Host stores `<groupDid>`-authored governance/directory/label records and tracks authorized space writers (`space_writer`), never copying member message repos.
+- **Sovereign Direct Messages (`new.flock.dm.*`):** Hosted strictly on participants' personal PDSes using `com.atproto.memberspace.policy`. Neither Group Host nor Operator ever holds DM scopes or stores DM rows in SQLite.
+
+**Status:** alpha, pinned to `@atproto` Spaces [PR #5187](https://github.com/bluesky-social/atproto/pull/5187) (`6747610566eee1b6d743617bd8eb1136adccb362`, snapshot `0.0.0-spaces-alpha-20261117141222` + `strict-credential-expiry.patch`) and `opensocial.group/proposal` (`8df0cc82eb7708f090aa43522adf1d3ada3ed7e7`).
 
 ---
 
-## Classic atproto vs spaces (mental model)
+## Classic ATProto vs Spaces vs `opensocial.group`
 
-On classic atproto, your **repo on your PDS** is the natural unit: public records, OAuth `repo:` scopes, CAR/export semantics.
-
-**Spaces** add a second layer:
-
-| Concept | Classic repo | Space |
-|--------|----------------|-------|
-| Identity | `at://did/repo/collection/rkey` | `at://authority-did/space/<collection>/<skey>` |
-| Access control | Mostly public vs app passwords / OAuth | **Policy** on the space + **per-member list** on the PDS |
-| Reads/writes | Session or app password to your PDS | **Space credential** (short-lived), bound to a client key, often with **MAC** on sensitive XRPC |
-| Hosting | One repo per account | Space **records** still live in **participants’ repos**, coordinated by the space host (PDS) |
-
-Flock’s workspace is not “one big shared repo.” It is **one workspace authority DID**, several **space URIs** (workspace, inbox, each channel, extensions), and **many member repos** that hold the actual `new.flock.*` records the sync engine aggregates.
+| Concept | Classic ATProto Repo | Personal-PDS Memberspace (DMs & `invites/self`) | `opensocial.group` Atmospheric Group (Workspaces) |
+|---------|----------------------|-------------------------------------------------|---------------------------------------------------|
+| Identity | `at://<userDid>/<collection>/<rkey>` | `at://<userDid>/space/<spaceType>/<skey>` | `1 Group == 1 did:plc:...` (`at://<groupDid>/space/<spaceType>/<skey>`) |
+| Policy & ACL | Public repo + OAuth `repo:` scopes | `com.atproto.memberspace.policy` + per-space member list | `group.opensocial.policy` (`grants: [{ role, read, write, scopes? }]`) + `role/*` & `membership/*` in `members/self` |
+| Scaling across 100 spaces | N/A | Per-space `putMembers` / `removeMembers` | **`O(1)` single `putRecord(membership/<did>)` write** |
+| Hosting | Personal PDS | Each participant's personal PDS | Group Host (`#atproto_pds` + `#opensocial_group`), portable across Group Hosts via Standard or Coordinated v1 migration |
 
 ```mermaid
 flowchart TB
-  subgraph classic["Classic atproto"]
-    A[Actor DID] --> R[PDS repo]
-    R --> L[Lexicon records]
+  subgraph group["Group Host (apps/group-host — 1 Group == 1 DID)"]
+    GDID["Group DID (did:plc:...)"]
+    GDID --> PUB["Signed MST Public Repo (declaration/self)"]
+    GDID --> META["space: group.opensocial.meta/self (profile, rule, labeler)"]
+    GDID --> MEM["space: group.opensocial.members/self (role/*, membership/*, space/*)"]
+    GDID --> WS["space: new.flock.workspace/self (directory, app.install, ext.install)"]
+    GDID --> INB["space: new.flock.inbox/self (private-channel joinRequest/joinDecision)"]
+    GDID --> CH["space: new.flock.channel/<skey> × N (group.opensocial.policy)"]
   end
 
-  subgraph spaces["Spaces layer"]
-    AUTH[Workspace authority DID]
-    AUTH --> WS[space: new.flock.workspace]
-    AUTH --> IN[space: new.flock.inbox]
-    AUTH --> CH[space: new.flock.channel × N]
-    WS --> POL[policy + member lists]
-    IN --> POL
-    CH --> POL
-    M1[Member DID] --> PR1[Member repo on PDS]
-    M2[Member DID] --> PR2[Member repo on PDS]
-    PR1 -. putRecord in space .-> CH
-    PR2 -. putRecord in space .-> CH
+  subgraph pds["Personal PDSes (per member)"]
+    M1["Member DID"] --> R1["Personal space repos (messages, reactions, tasks, acceptance/self)"]
+    M1 --> INV["space: group.opensocial.invites/self (publicWrite inbox)"]
+    M1 --> DM["space: new.flock.dm.{inbox,conversation} (sovereign DMs)"]
   end
+
+  R1 -. "putRecord + notifyRepoUpdate" .-> CH
+  R1 -. "acceptance/self" .-> MEM
+  GDID -. "invite/<tid> + notifyRepoUpdate" .-> INV
 ```
 
 ---
 
-## Runtime boundaries (three processes, three trust zones)
+## Runtime boundaries (four processes, strict isolation)
 
 ```mermaid
 flowchart LR
   subgraph browser["Browser"]
-    UI[apps/web UI]
-    SESS[Member OAuth session\nIndexedDB + DPoP]
-    ENG[@flock/client engine\nIndexedDB cache per account]
-    UI --> SESS
+    UI["apps/web React UI"]
+    PSESS["Personal PDS OAuth (session.ts)\nIndexedDB + WebCrypto DPoP"]
+    GSESS["Group-DID OAuth (group-session.ts)\nflock-group-oauth:<viewerDid> IDB"]
+    ENG["@flock/client\nWorkspaceClient, GroupClient, DmClient"]
+    UI --> PSESS
+    UI --> GSESS
     UI --> ENG
   end
 
-  subgraph next["Next.js (APP_URL)"]
-    PAGES[App shell + static routes]
-    META["/oauth/client-metadata.json"]
+  subgraph next["Next.js (APP_URL :3000)"]
+    PAGES["App Router shell + nonce CSP"]
+    META["/oauth/{client-metadata.json,group-client-metadata.json}"]
   end
 
-  subgraph op["Operator (OPERATOR_URL)"]
-    XRPC[new.flock.operator.*\ncom.atproto.space.notify*]
-    AUTHF[Workspace authority OAuth\n/authority/*]
-    DB[(SQLite: journal,\ngrants, notices)]
+  subgraph gh["Group Host (GROUP_HOST_URL :3004)"]
+    GHX["com.atproto.* + group.opensocial.*\nTwo-sided OAuth 2.1 AS"]
+    GHDB[("SQLite (42 tables):\ngroups, repos, RBAC, mod, outbox")]
+    GHX --> GHDB
   end
 
-  subgraph pds["Member PDSes"]
-    STAR[com.atproto.space.*\ncom.atproto.memberspace.*]
+  subgraph op["Operator (OPERATOR_URL :3001)"]
+    OPX["new.flock.operator.*\n18 journaled kinds + getChanges"]
+    OPDB[("SQLite: shared grants,\njournal, audit, notices (0 DM rows)")]
+    OPX --> OPDB
   end
 
-  ENG -->|space credential| STAR
-  ENG -->|getServiceAuth JWT| XRPC
-  SESS -->|delegation token| STAR
-  op -->|authority session| STAR
-  STAR -->|notifyWrite| XRPC
-  XRPC --> DB
+  subgraph pds["Personal PDSes"]
+    MPDS["Member repos, invites/self, DMs"]
+  end
+
+  PSESS -->|delegation / writes / DMs| MPDS
+  GSESS -->|DPoP Group OAuth| GHX
+  ENG -->|Atproto-Space-Credential + HPKE MAC| GHX
+  ENG -->|Atproto-Space-Credential + HPKE MAC| MPDS
+  ENG -->|personal service JWT| GHX
+  ENG -->|personal service JWT| OPX
+  OPX -->|shared Group OAuth + notify| GHX
   browser --> PAGES
 ```
 
 **Rules of thumb:**
 
-- **Member OAuth** lives only in the **browser**. The Next server does not hold member tokens or serve member XRPC.
-- **Workspace authority OAuth** lives only on the **operator**. It performs owner-level membership changes the browser must not hold.
-- **Channel/workspace reads** are **client-direct** to each PDS with a space credential; the operator does not proxy record bodies.
+- **Next.js (`apps/web`)** holds **zero secrets, zero databases, and zero member tokens**.
+- **Two isolated browser OAuth clients** coexist cleanly: `session.ts` authenticates against the user's personal PDS (`@atproto/oauth-client-browser`), while `group-session.ts` (`GroupBrowserOAuthClient`) uses base `OAuthClient` with per-viewer IndexedDB `flock-group-oauth:${viewerDid}` so Group-DID sessions never overwrite the personal PDS session.
+- **Three complementary session modes** drive group operations: (1) personal PDS service-auth/repo calls for ordinary members (`requestJoin`, `leaveGroup`, `createReport`, `acceptance/self`, `invites/self`), (2) per-user Group-DID OAuth (`GroupClient`) for moderation, join-request review, profile/rules, invites, reactivation, step-up deletion, and migration, and (3) Operator's shared Group-DID application session for multi-space modality orchestration and 1-webhook-per-space `notify` fan-in.
 
 ---
 
-## Workspace anatomy
+## Group anatomy & bilateral membership
 
-A **workspace** is anchored at:
+A group/workspace is anchored at its `groupDid`:
+- Core metadata: `at://<groupDid>/space/group.opensocial.meta/self` (`profile/self`, `rule/*`, `labeler/self`)
+- Core membership & roles: `at://<groupDid>/space/group.opensocial.members/self` (`role/*`, `membership/<did>`, member-authored `acceptance/self`, host-maintained `space/<tid>` index of unlisted=false modality spaces)
+- Flock workspace modality: `at://<groupDid>/space/new.flock.workspace/self` (`directory/*`, `app.install/*`, `ext.install/*`)
 
-`at://<authority-did>/space/new.flock.workspace/<workspace-skey>`
-
-The authority DID authors **roster**, **admin**, **directory**, and **channel** metadata records. Each **channel** is its own space. The **inbox** space holds join-request traffic. **Apps** and **extensions** (e.g. tasks) get additional spaces and install records.
-
-```mermaid
-flowchart TD
-  W[new.flock.workspace space]
-  W --> R[new.flock.workspace.roster]
-  W --> A[new.flock.admin]
-  W --> D[new.flock.directory]
-  W --> I[new.flock.inbox]
-  D --> C1[channel space public]
-  D --> C2[channel space private]
-  C1 --> M[channel messages in member repos]
-  C2 --> M
-  I --> JR[join requests / decisions]
-```
-
-**Source of truth:**
-
-- **Who can read/write** → PDS `com.atproto.memberspace.*` for each space URI.
-- **Product metadata** (names, visibility, admin flags) → authority-authored records, reconciled with member lists on admin actions.
-- **Message text** → records in **members’ repos**, validated and merged by `@flock/client` (not stored in operator SQLite).
+**Authorization vs roster display (`WorkspaceSummary`):**
+- **Authorization** (`effectiveMemberPermissions`, Group Host RBAC, Operator capability checks) comes **strictly** from `<groupDid>`-authored `membership/<did>`, `role/*`, `group.opensocial.policy`, and `assignable` — never from personal-PDS `acceptance/self` (so `createWorkspace` succeeds before the creator writes `acceptance/self`).
+- **Roster display** pairs `<groupDid>`-authored `membership/<did>` (`"new.flock.incarnation"`) with `<did>`-authored `group.opensocial.acceptance/self` (`"new.flock.incarnation"`): matched bilateral pairs appear in `members`, while `membership`-only appears in `pendingMembers`.
 
 ---
 
-## Reading: delegation, space credential, MAC
+## Reading spaces: delegation, `authorizeSpaceSync`, and HPKE KEM-MAC
 
-You still use the member’s **OAuth access token** to obtain a **delegation token** from their PDS. You exchange that for a **space credential** tied to a **non-extractable browser signing key** (default ~10 minutes, max 1 hour). Requests present `Atproto-Space-Credential` message signatures.
-
-For methods that return authoritative data (`getRecord`, `getLatestCommit` on the pinned API), the client also performs a **KEM/MAC dance** (`Atproto-Space-Want-Mac` / `Atproto-Space-Mac`) so the response is bound to the author’s `#atproto_kem` key.
-
-```mermaid
-sequenceDiagram
-  participant B as Browser engine
-  participant MP as Member PDS
-  participant HP as Host PDS for space
-
-  B->>MP: OAuth delegation (member session)
-  MP-->>B: delegation token
-  B->>HP: com.atproto.space.getSpaceCredential
-  Note over B,HP: body: space, credentialKid, delegationToken
-  HP-->>B: space credential (short TTL)
-  B->>HP: getRecord / getLatestCommit + MAC headers
-  HP-->>B: record + MAC
-  B->>B: validate MAC, schema, author, references
-  B->>B: merge into IndexedDB store
-```
-
-The sync engine (`packages/client/src`) lists writers via space APIs, follows revisions, and **invalidates cache** when credentials fail with “access lost” or the space is deleted.
+1. The browser requests a short-lived delegation token (`com.atproto.space.getDelegationToken`) from the viewer's personal PDS.
+2. It calls `com.atproto.space.authorizeSpaceSync` on the space authority (Group Host for group spaces; participant PDS for DMs or `invites/self`), binding a 10-minute `Atproto-Space-Credential` to a non-extractable WebCrypto P-256 `SpaceKey`.
+3. Every read presents RFC 9421 `createSpaceSigHeaders` (`tag="atproto-space-credential"`), and authoritative reads (`getRecord`, `getLatestCommit`, every `listRepoOps` page, and `getRepo` `application/vnd.dasl.star`) verify ephemeral HPKE KEM-MACs (`Accept-Signature`, `info: "atproto-mac"`) against each writer's `#atproto_kem` key (`packages/protocol/src/atproto/space-credential-core.ts`).
 
 ---
 
-## Admin mutations: operator + service auth + journal
+## Multi-space Operator journal & demoted-actor takeover
 
-Members post messages and reactions with normal space writes. **Membership and structure changes** (invite, remove, promote, create channel, join decisions, app installs) go through the **operator** so they can be **journaled, idempotent, and resumable** across PDS steps.
+Multi-space modality changes (`createWorkspace`, `createChannel`, `transitionChannel`, `archiveChannel`, private-channel `decideJoinRequest`, group-admission `decideGroupJoinRequest`, `installApp`, `updateAppAccess`, `uninstallApp`, `enableExtension`, `disableExtension`, etc.) execute through `new.flock.operator.execute`:
 
-```mermaid
-sequenceDiagram
-  participant Adm as Admin browser
-  participant PDS as Admin PDS
-  participant Op as Operator
-  participant APDS as Authority / member PDSes
-
-  Adm->>PDS: getServiceAuth(aud=operator, lxm=execute)
-  PDS-->>Adm: service JWT
-  Adm->>Op: new.flock.operator.execute + JWT
-  Op->>Op: verify JWT, roster/admin, member lists
-  Op->>Op: journal row (pending steps)
-  loop Resumable steps
-    Op->>APDS: putMember / removeMember / putRecord (authority)
-  end
-  Op-->>Adm: operation status (pending | completed | failed)
-```
-
-The journal stores **operation identity, request hash, step progress, and errors**—never message bodies, join-request text, or credentials. See [`operator-contract.md`](protocol/operator-contract.md) for every `execute` variant and idempotency rules.
+- Before admission, before **every step**, and on crash recovery, Operator re-reads live `members/self` (`role/*`, `membership/*`) and all space `group.opensocial.policy` records to verify `effectiveMemberPermissions` and `assignable`.
+- If the submitting admin (`operation.actor`) is demoted or removed before completion (`OPERATION_TAKEOVER_MIGRATION = 4`):
+  - `0` completed steps → transitions terminally to `aborted_actor_revoked`.
+  - `>= 1` completed steps → another live effective human admin with `assignable` coverage can resume the operation to completion (`taken_over_by = executorActor.did`, audited via `operationAdminTakeover`).
 
 ---
 
-## Staying in sync: notices and getChanges
+## Cross-PDS invitations, notifications, and moderation
 
-The operator registers as a **notify sink** on spaces it creates. PDS calls `com.atproto.space.notifyWrite` (and `notifySpaceDeleted` when applicable). The browser polls `new.flock.operator.getChanges` with a **service JWT** to learn **which followed spaces moved** (cursors only—no record reads).
-
-```mermaid
-flowchart LR
-  PDS[Space PDS] -->|notifyWrite| Op[Operator]
-  Op --> N[(notice + cursor state)]
-  Br[Browser] -->|getChanges| Op
-  Op -->|space URI + cursor| Br
-  Br -->|re-sync space| PDS
-```
-
-Inbox join-request recovery also uses **`listInboxWriters`** (owner-only via authority) plus the admin’s **inbox credential** to read candidate repos—because writer index alone can miss a lost notify.
+- **Invitations (`group.opensocial.invites/self`):** On sign-in/discovery, `WorkspaceClient.ensureInvitesSpace()` idempotently creates `at://<viewerDid>/space/group.opensocial.invites/self` (`com.atproto.memberspace.policy` `{ publicRead: false, publicWrite: true }`, zero members) and registers a stateless 30-min `inv1` push-wake token via `new.flock.operator.getSpaceNotifyTarget`. Inviting groups write `group.opensocial.invite/<tid>` into `<groupDid>`'s repo in that space; invitees redeem via `group.opensocial.requestJoin`.
+- **Change feed (`new.flock.operator.getChanges`):** Operator registers 1 stable webhook per group space (`registrations.ts`) and merges group space cursors with `inv1` invite wakes and ephemeral in-memory `dm1` DM wakes (`getDmNotifyTarget`).
+- **Moderation (`packages/protocol/src/moderation.ts`):** Members report content/accounts via `group.opensocial.createReport`; moderators triage `listModSubjects` / `getModSubjectHistory` / `resolveModSubject` and write `com.atproto.label.record` (`!takedown`, `!hide`). `!takedown` records remain in the writer's repo so LtHash commit verification stays intact, while `moderation.ts` withholds them identically across `@flock/client`, `@flock/reader`, `apps/web`, `apps/echo-bot`, and `apps/webhooks`.
 
 ---
 
-## Direct messages (stricter boundary)
+## Lexicons and packages
 
-DMs are **person-scoped**, not workspace-owned. **No server component** reads DM record bodies. The same `@flock/client` `DmClient` runs in the browser (and in Node tests); the operator’s `getChanges` may return cursors for DM spaces but **never mints member credentials or reads DM content**.
+| Layer | NSID prefix | Count & Role |
+|-------|-------------|--------------|
+| Flock modality, DM & Operator | `new.flock.*` | **`36` schemas** under `packages/protocol/lexicons/new/flock/` (workspace, channel, inbox, app, tasks, sovereign DMs, operator XRPCs incl. `getSpaceNotifyTarget` & `getDmNotifyTarget`, `permissions/member`) |
+| Atmospheric groups | `group.opensocial.*` | **`27` vendored schemas** under `packages/protocol/lexicons/group/opensocial/` (`meta`, `members`, `invites`, `policy`, `declaration`, `profile`, `rule`, `labeler`, `space`, `role`, `membership`, `acceptance`, `invite`, 4 permission sets, 9 join/mod XRPCs) |
+| ATProto core & Spaces | `com.atproto.*` | **`72` vendored schemas** under `packages/protocol/lexicons/com/atproto/` (`space`, `memberspace`, `managedspace`, `personalspace`, `identity`, `label`, `repo`, `server`, `sync`) |
 
-Each participant owns **their half** of `new.flock.dm.conversation/<key>` on their PDS plus a **self inbox** space. Senders check **`new.flock.dm.declaration`** in the recipient’s **public repo** before requesting (spaces no longer allow probing a foreign inbox via credential exchange).
-
-```mermaid
-flowchart TB
-  subgraph server["Operator / Next"]
-    GC[getChanges cursors only]
-  end
-  subgraph dm["Browser DmClient"]
-    DC[read/write halves via credentials]
-  end
-  P1[PDS participant A]
-  P2[PDS participant B]
-  DC --> P1
-  DC --> P2
-  GC -. no record access .-> P1
-  GC -. no record access .-> P2
-```
-
-Details: `.ai/plans/direct-messages.md`, `ARCHITECTURE.md` (“Direct-message runtime boundary”), `packages/reader/src/independent-dm.ts` (parity proof).
-
----
-
-## Lexicons and protocol packages
-
-| Layer | NSID prefix | Role |
-|-------|-------------|------|
-| Flock product | `new.flock.*` | Workspace, channel, DM, app, operator methods (41 documents under `packages/protocol/lexicons/new/flock/`) |
-| Spaces platform | `com.atproto.space.*` | Space lifecycle, STAR reads, credentials, records (vendored/pinned) |
-| Membership | `com.atproto.memberspace.*` | Member lists, policies |
-| Service auth | `com.atproto.server.getServiceAuth` | Operator JWTs with `aud` + `lxm` |
-
-Generated types and validators live under `packages/protocol/src/`. **NSIDs are centralized** in `packages/protocol/src/nsids.ts`; do not hard-code new ones elsewhere.
-
-On the pinned PDS, third-party `new.flock.*` schemas are **not** dynamically validated server-side— the app runs `validateSpaceRecord` locally before writes.
+All `99` upstream-vendored schemas (`27` `group.opensocial.*` + `72` `com.atproto.*`) are SHA-256-locked in `packages/protocol/src/opensocial-lexicons.test.ts`, and all `63` public `new.flock.*` + `group.opensocial.*` schemas are checked against live DNS TXT + XRPC by `pnpm verify:lexicons`.
 
 ---
 
@@ -242,109 +161,47 @@ On the pinned PDS, third-party `new.flock.*` schemas are **not** dynamically val
 
 | Path | Purpose |
 |------|---------|
-| `apps/web/` | Next.js UI; **browser-only** OAuth (`apps/web/src/browser/`) |
-| `apps/operator/` | XRPC operator, authority grant flow, SQLite |
-| `packages/protocol/` | Lexicons, space adapter, scopes, credential core |
-| `packages/client/` | Sync engine, IndexedDB store, `DmClient` |
-| `packages/reader/` | Independent readers (proof of interoperability) |
-| `features/*.feature` | Executable behavior contract (Gherkin) |
-| `protocol-tests/` | Pinned PDS acceptance + app acceptance |
+| `apps/group-host/` | Reference `opensocial.group` Group Host (`:3004`): `42` SQLite tables, two-sided OAuth 2.1 AS, signed MST public repo, flat RBAC, moderation, Standard & Coordinated v1 host migration |
+| `apps/operator/` | Shared-session modality orchestrator (`:3001`), 18 journaled operation kinds, 1-webhook-per-space `notify` renewal, `dm1`/`inv1` wakes, `getChanges` |
+| `apps/web/` | Stateless Next.js UI (`:3000`); personal & Group-DID browser OAuth (`apps/web/src/browser/`) |
+| `apps/echo-bot/`, `apps/webhooks/` | First-party non-roster bot apps built strictly on `@flock/client` |
+| `packages/protocol/` | `135` Lexicons, keys, runtime `Lexicons` validator, `@atproto/oauth-scopes` `effectiveMemberPermissions`, moderation, HPKE MAC & STAR verification, Tasks `entity-merge` |
+| `packages/net/` | `boundedSafeFetch` SSRF-safe DNS-pinned HTTP fetch |
+| `packages/deployment/` | Shared `AppConfig` (`APP_URL`, `OPERATOR_URL`, `GROUP_HOST_URL`, `PLC_URL`, `OPERATOR_SERVICE_REF`) & CSP headers |
+| `packages/client/` | Isomorphic sync engine, `WorkspaceClient` (3/5/4-phase journals + `ensureInvitesSpace`), `GroupClient`, `TasksClient`, `DmClient` |
+| `packages/reader/` | Independent parity readers (`independent.ts`, `independent-dm.ts`, `independent-tasks.ts`) |
+| `packages/testing/` | In-memory `FakeNetwork` + `FakeGroupHost`, verified 1-for-1 against `apps/group-host` by `group-host-parity.test.ts` |
+| `scripts/` | `verify-pinned-checkout.mjs`, `codegen-lex.mjs`, `backup-db.mjs`, `verify-public-lexicons.mjs`, `playground.ts` |
+| `protocol-tests/`, `features/`, `bdd/` | Multi-PDS/multi-Group-Host acceptance, pinned conformance, Playwright specs, sync/perf budgets, and Gherkin BDD |
 
 ---
 
 ## Local development (short path)
 
-1. Pin and build atproto per [`docs/protocol/atproto-spaces-pin.md`](protocol/atproto-spaces-pin.md) (`atproto-spaces-r12` + `strict-credential-expiry.patch`).
+1. Set up the pinned `@atproto` checkout (`../atproto-spaces-r12` @ `6747610566` + `strict-credential-expiry.patch`) per [`docs/protocol/atproto-spaces-pin.md`](protocol/atproto-spaces-pin.md).
 2. `corepack pnpm install --frozen-lockfile && corepack pnpm build`
 3. `ATPROTO_PINNED_CHECKOUT=../atproto-spaces-r12 corepack pnpm playground`
 
-Playground spins up in-memory PDS hosts, PLC, and the app. Use the printed DIDs (not handles) to sign in. For deployment layout, see [`README.md`](../README.md) and [`docs/operations.md`](operations.md).
-
-Tests require the same `ATPROTO_PINNED_CHECKOUT`; see the test table in the README.
-
----
-
-## Further reading
-
-- [`ARCHITECTURE.md`](../ARCHITECTURE.md) — authoritative data-flow and storage rules
-- [`docs/protocol/atproto-spaces-pin.md`](protocol/atproto-spaces-pin.md) — pin, drift table, authority scopes
-- [`docs/protocol/operator-contract.md`](protocol/operator-contract.md) — execute variants, auth, idempotency
-- [`docs/presentation/r12-atproto-conference-deck.html`](presentation/r12-atproto-conference-deck.html) — narrative deck (GitHub Pages link in README)
+Playground starts two personal PDSes, an OpenSocial Group Host, a PLC directory, Operator, and Next.js, printing four personal DIDs with password `playground-pass`.
 
 ---
 
 ## FAQ
 
-### What is a “space” in one sentence?
+### How is a workspace represented in R13?
+Every workspace is an **`opensocial.group` atmospheric group** (`1 Group == 1 did:plc:...`) hosted on `apps/group-host`, containing `group.opensocial.meta/self`, `group.opensocial.members/self`, and Flock modality spaces (`new.flock.workspace/self`, `new.flock.inbox/self`, `new.flock.channel/<skey>`, etc.).
 
-A **named permissioned partition** on a PDS (`at://authority/space/collection/skey`) with a **policy** and **member list**, whose records are stored in **participants’ repos** and read through **space credentials**, not through classic unscoped repo OAuth alone.
+### Why was `pnpm reconcile` (`reconcile-workspaces.ts`) deleted in R13?
+In R12, adding or removing a member required `O(spaces)` `com.atproto.memberspace` fan-out calls across every channel, which could drift if interrupted. In R13, every group space uses `group.opensocial.policy` referencing roles in `group.opensocial.members/self`, so a single `putRecord` or `deleteRecord` on `membership/<did>` updates access across all 100 channels atomically in `O(1)` writes.
 
-### How is that different from making a private Bluesky list or a custom lexicon on my repo?
+### Why are there two OAuth clients in the browser?
+`apps/web/src/browser/session.ts` holds the user's **personal PDS session** (`@atproto/oauth-client-browser`). `apps/web/src/browser/group-session.ts` (`GroupBrowserOAuthClient`) uses base `OAuthClient` with an isolated IndexedDB (`flock-group-oauth:${viewerDid}`) to hold **per-group `<groupDid>` sessions** when acting as a moderator, profile editor, or admin directly against `apps/group-host` without clobbering the personal session.
 
-Your repo is still **yours**. A space adds **cross-repo coordination**: the host enforces **who** may read/write **which collection keys** in that space, and apps exchange **credentials** scoped to that space. Flock never relies on “one shared server database” for channel history.
+### Why are there two join-request decision operations on Operator?
+`decideJoinRequest` handles **private-channel** access requests stored in `at://<groupDid>/space/new.flock.inbox/self` (granting the `channel-<skey>` role on `membership/<did>` and writing `new.flock.joinDecision`). `decideGroupJoinRequest` handles **group-level** `joinPolicy: "approval"` requests on Group Host (`If-Join-Request-Present: true` atomic `membership/<member>` creation or `group.opensocial.denyJoinRequest`).
 
-### Who is the workspace “authority”?
+### Why does `!takedown` filter records in the sync/projection layer instead of omitting them from `getRepo` on Group Host?
+Because member messages live in signed, LtHash-verified writer repos on personal PDSes (and `<groupDid>` space repos are also LtHash-verified by readers), omitting a record on the wire would break cryptographic repo verification. Publishing `com.atproto.label.record` (`val: "!takedown"`) lets every compliant syncer/client (`packages/protocol/src/moderation.ts`) verify the repo integrity first and withhold taken-down content identically.
 
-A **dedicated DID** (the operator deployment’s workspace authority) that **owns** workspace/inbox/channel **space definitions** and authors **directory, roster, and admin** records. It is **not** the same as an individual member’s DID, though operators use its OAuth session server-side.
-
-### Where do channel messages actually live?
-
-In **each author’s repo** on their PDS, as `new.flock.channel.message` (and reaction) records **in the channel space**. Readers merge writers by listing repos / following sync rules in `@flock/client`. The operator does **not** store or relay message bodies.
-
-### Why does the operator have SQLite at all?
-
-For **(1)** encrypted workspace-authority OAuth state, **(2)** the **mutation journal** and audit trail, **(3)** notify registrations and **content-free** change cursors. It is explicitly **not** a cache of messages or a membership ACL of record.
-
-### What is the difference between my OAuth token and a space credential?
-
-**OAuth** proves the **member account** and delegates repo/space/scopes. A **space credential** is a **short-lived, space-scoped** token bound to a **client signing key**, minted by the PDS hosting that space, and presented with **HTTP message signatures** (and often MAC on reads).
-
-### What is STAR / `getRepo` and does Flock use it?
-
-STAR is the newer **space-tied repo export** shape on the pinned API. Flock primarily uses **incremental sync** (`listRepos`, per-record reads with MAC) rather than full STAR rebuilds—see the pin doc for the trust tradeoff on `listRecords` vs per-record MAC.
-
-### Why does history use `listRepos` if `removeMember` evicts writers?
-
-Writer eviction is **protocol behavior**: removed members may disappear from a **cold** history rebuild even though old records still exist in their repos. Flock documents this as an accepted product limit; see [`atproto-spaces-pin.md`](protocol/atproto-spaces-pin.md) (“Departed authors’ history”).
-
-### Can the Next.js server or operator read my DMs?
-
-**No record bodies.** DM reads/writes happen only in the **browser** (or test harness) via `DmClient`. The operator may learn **that a DM space had a write** (notify metadata) and expose **cursors**—see `docs/operations.md` for the precise residual signal.
-
-### Why two OAuth flows?
-
-**Members** use **browser public OAuth** (`/oauth/client-metadata.json` on the app origin) with `space:`, `repo:`, and `rpc:` scopes for workspaces and DMs.
-
-**Workspace authority** uses a **confidential client** on the **operator origin** (`/authority/*`) with scopes limited to **space management**—no DM, no member message access.
-
-### How do invites work without space discovery?
-
-Permissioned spaces do not yet offer “list all spaces I’m in.” An admin **adds a DID** via the operator and shares an **invite link**; the link is UX only—the **PDS member list** is the gate. Workspace discovery may use `read_self` on `new.flock.acceptance` / `listSpaces` patterns described in the operator contract.
-
-### What are `notifyWrite` and `getChanges` for?
-
-**notifyWrite** lets the PDS push **write hints** to registered sinks (the operator). **`getChanges`** lets the browser ask “which spaces I follow have new cursors?” without the operator reading records.
-
-### What breaks when we drift the atproto pin?
-
-Everything touching **credentials, MAC, policy shape, or error codes**. Treat pin drift as a **release blocker** until `protocol-tests/atproto` and app acceptance pass again. The drift table in [`atproto-spaces-pin.md`](protocol/atproto-spaces-pin.md) is the checklist.
-
-### Should I pass `validate: true` to PDS writes for `new.flock.*`?
-
-**Not on the current pin.** Validate locally with `validateSpaceRecord` before `putRecord` / `applyWrites`. The PDS built-in schema map does not include third-party Flock lexicons.
-
-### What is `@flock/reader` for?
-
-A **deliberately separate** package that reconstructs workspaces, DMs, or tasks using **only** published lexicons + PDS—no imports from `@flock/client` or operator code. If the reader works, the data model is not locked inside this app.
-
-### Where do operator RPC scopes come from?
-
-`packages/protocol/src/scopes.ts` (`memberGrantScopes`, admin `rpc:` scopes per method). Tests in `scopes.test.ts` guard separation between member and authority grants.
-
-### How do I debug a stuck admin operation?
-
-Check `new.flock.operator.getOperation` and journal semantics in [`operator-contract.md`](protocol/operator-contract.md). Operations can stay `pending` under lock/time limits and are **safe to retry** with the same `operationId` and request hash; conflicting hashes return **409**.
-
-### Is there another HTTP surface besides operator XRPC?
-
-The **web app** only adds **member OAuth metadata**. Optional **`apps/webhooks`** is a separate inbound integration (not on the hot path for the main UI). Member **data plane** traffic goes **browser → PDS**; **control plane** admin traffic goes **browser → operator** with **service auth**.
+### Why must `pnpm verify:lexicons` pass before launching against public ATProto PDSes?
+On pinned ATProto PDSes, `OAuthProvider.authorize()` calls `lexiconManager.getSpacesFromScope()`, which resolves every non-wildcard `space:<nsid>` token via `_lexicon.<authority>` DNS TXT → XRPC `com.atproto.lexicon.schema`. In local/CI tests, `publishAppLexicons` seeds `TestNetworkNoAppView`'s local `lexiconAuthority`; in production, both `_lexicon.opensocial.group` and `_lexicon.*.flock.new` must be live in public DNS before public PDS users can authorize `memberGrantScopes` or `appGrantScopes`.

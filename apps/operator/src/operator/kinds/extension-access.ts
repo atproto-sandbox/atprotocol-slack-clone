@@ -1,27 +1,17 @@
-import { listSpaceMembers } from "../../atproto/space-ops";
 import { extSpaceUriFor, getExtension } from "@flock/protocol/extensions";
 import { WORKSPACE_ENVELOPE } from "@flock/protocol/workspace-summary";
+import { getOpenSocialSpacePolicy, updateOpenSocialSpacePolicy } from "../../atproto/space-ops";
 import type { OperatorActor } from "../actor";
 import { OperationRejectedError, type OperationContext } from "../journal";
+import { dropMemberList } from "../member-access";
+import { allExtInstalls, readExtInstall, writeExtInstall, type ExtInstall } from "../membership";
+import { isSpaceNotFound } from "../workspace-state";
 import {
-  allExtInstalls,
-  diffMemberList,
-  expectedExtList,
-  listMatches,
-  putMissingMembers,
-  readExtInstall,
-  removeExtraMembers,
-  writeExtInstall,
-  type ExtInstall,
-} from "../membership";
-import { ensureExtensionSpace } from "../workspace-spaces";
-import { activeRoster, isSpaceNotFound } from "../workspace-state";
+  defaultExtensionSpacePolicy,
+  disabledExtensionSpacePolicy,
+  ensureExtensionSpace,
+} from "../workspace-spaces";
 import type { OperationKind } from "./kind";
-
-// Extension provisioning lifecycle: enabling creates the extension space first (so a legacy authority grant fails on step 1
-// with nothing written), records the install, and grants active roster people read/write access (never apps). Disabling
-// marks the install inactive with cleanup incomplete, removes all member access, verifies an empty list, and marks cleanup
-// complete so notice registrations can be dropped cleanly.
 
 export const enableExtensionKind: OperationKind = {
   kind: "enableExtension",
@@ -67,28 +57,40 @@ async function enableExtension(
 
   await context.step("ext-space", async () => {
     await ensureExtensionSpace(actor.session, actor.workspace.skey, manifest.id);
+    dropMemberList(space);
   });
 
   const now = new Date().toISOString();
   const install: ExtInstall = existing?.active
     ? { ...existing, space, cleanupComplete: false, updatedAt: now }
-    : { extId: manifest.id, active: true, space, cleanupComplete: false, enabledBy: actor.did, enabledAt: now, updatedAt: now };
+    : {
+        extId: manifest.id,
+        active: true,
+        space,
+        cleanupComplete: false,
+        enabledBy: actor.did,
+        enabledAt: now,
+        updatedAt: now,
+      };
   await context.step("ext-install-record", () => writeExtInstall(actor, install));
 
-  const desired = expectedExtList(await activeRoster(actor));
-  const authorityDid = actor.workspace.authorityDid;
-  const current = await listSpaceMembers(actor.session, space);
-  const { toPut, toRemove } = diffMemberList(desired, current, authorityDid);
-  if (toPut.length > 0) {
-    await context.step("ext-members-set", () => putMissingMembers(actor.session, space, desired, authorityDid));
+  await context.step("ext-members-set", async () => {
+    await updateOpenSocialSpacePolicy(actor.session, space, defaultExtensionSpacePolicy());
+    dropMemberList(space);
+  });
+
+  if (context.completedSteps.includes("ext-members-remove")) {
+    await context.step("ext-members-remove", async () => {});
   }
-  if (toRemove.length > 0) {
-    await context.step("ext-members-remove", () => removeExtraMembers(actor.session, space, desired, authorityDid));
-  }
+
   await context.step("ext-members-verified", async () => {
-    const finalList = toPut.length > 0 || toRemove.length > 0 ? await listSpaceMembers(actor.session, space) : current;
-    if (!listMatches(desired, finalList, authorityDid)) {
-      throw new Error(`Extension ${manifest.id} member list has not converged with the workspace roster.`);
+    const policy = await getOpenSocialSpacePolicy(actor.session, space);
+    if (
+      !policy ||
+      policy.unlisted === true ||
+      !policy.grants.some((g) => g.role === "member" && g.read === true && g.write === true)
+    ) {
+      throw new Error(`Extension ${manifest.id} OpenSocial policy has not converged.`);
     }
   });
 }
@@ -104,43 +106,35 @@ async function disableExtension(actor: OperatorActor, context: OperationContext,
 
   const space = existing.space;
   const disabledAt = existing.disabledAt ?? new Date().toISOString();
-  await context.step("ext-disable-record", () => writeExtInstall(actor, {
-    ...existing,
-    active: false,
-    cleanupComplete: false,
-    disabledAt,
-  }));
+  await context.step("ext-disable-record", () =>
+    writeExtInstall(actor, {
+      ...existing,
+      active: false,
+      cleanupComplete: false,
+      disabledAt,
+    }),
+  );
 
-  const authorityDid = actor.workspace.authorityDid;
-  let spaceMissing = false;
-  let current: Array<{ did: string; read: boolean; write: boolean }> = [];
-  try {
-    current = await listSpaceMembers(actor.session, space);
-  } catch (error) {
-    if (isSpaceNotFound(error)) spaceMissing = true;
-    else throw error;
-  }
-  if (!spaceMissing && current.some((member) => member.did !== authorityDid)) {
-    await context.step("ext-members-remove", async () => {
-      try {
-        await removeExtraMembers(actor.session, space, new Map(), authorityDid);
-      } catch (error) {
-        if (!isSpaceNotFound(error)) throw error;
+  await context.step("ext-members-remove", async () => {
+    try {
+      await updateOpenSocialSpacePolicy(actor.session, space, disabledExtensionSpacePolicy());
+      dropMemberList(space);
+    } catch (error) {
+      if (!isSpaceNotFound(error)) throw error;
+    }
+  });
+
+  await context.step("ext-members-cleared", async () => {
+    try {
+      const policy = await getOpenSocialSpacePolicy(actor.session, space);
+      if (policy && (policy.grants.some((g) => g.role !== "admin") || policy.unlisted !== true)) {
+        throw new Error(`Extension ${manifest.id} grants remain after disable.`);
       }
-    });
-  }
-  if (!spaceMissing) {
-    await context.step("ext-members-cleared", async () => {
-      try {
-        const remaining = await listSpaceMembers(actor.session, space);
-        if (!listMatches(new Map(), remaining, authorityDid)) {
-          throw new Error(`Extension ${manifest.id} members remain after disable.`);
-        }
-      } catch (error) {
-        if (!isSpaceNotFound(error)) throw error;
-      }
-    });
-  }
+    } catch (error) {
+      if (!isSpaceNotFound(error)) throw error;
+    }
+  });
+
   await context.step("ext-cleanup-complete", async () => {
     const latest = await readExtInstall(actor, manifest.id);
     if (!latest || latest.active) return;

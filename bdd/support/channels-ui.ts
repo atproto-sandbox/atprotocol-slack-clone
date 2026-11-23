@@ -4,10 +4,12 @@ import { expect, type Locator, type Page } from "@playwright/test";
 import { mintSpaceCredentialWith, SpaceCredentialError, type SpaceCredential } from "@flock/protocol/atproto/space-credential-core";
 import { AtprotoClient } from "@flock/protocol/atproto/xrpc";
 import { channelUri, spaceRecordUri } from "@flock/protocol/keys";
+import { COLLECTION } from "@flock/protocol/nsids";
 import { inviteLinkFor } from "@flock/web/app/ui/client-api";
 import type { SecondApp } from "../../protocol-tests/support/app-fixture";
 import { PAGE_TIMEOUT_MS, type Actor, type ApiCall, type AppWorld } from "./world";
 import { browserRecords } from "./browser-store";
+import { groupDidOf, groupSpaceMembers, groupSpaceRecords, resolvePdsOrigin } from "./group-state";
 import { waitForAdminControls, createWorkspaceAs, eventually, inviteMemberAs, signInFromLoginFormAt } from "./ui";
 
 export type ChannelRef = { skey: string; name: string; uri: string; visibility: string };
@@ -17,20 +19,22 @@ export type SpaceRecord = { uri: string; rkey: string; cid?: string; value: Reco
 export const messageCollection = "new.flock.channel.message";
 export const reactionCollection = "new.flock.channel.reaction";
 
-// --- PDS facts, read straight from the host with an account's own access token ------------------------
+// --- Group Host & PDS facts, read straight from the hosts --------------------------------------------
 
-export async function listMembers(world: AppWorld, as: Actor, space: string): Promise<Member[]> {
-  const result = await world.pdsGet<{ members?: Member[] }>(as, "com.atproto.memberspace.listMembers", { space, limit: "1000" });
-  assert.equal(result.status, 200, `listMembers ${space}: ${JSON.stringify(result.body)}`);
-  return result.body.members ?? [];
+export async function listMembers(world: AppWorld, _as: Actor, space: string): Promise<Member[]> {
+  return groupSpaceMembers(world, space);
 }
 
-export async function directoryOf(world: AppWorld, owner: Actor): Promise<ChannelRef[]> {
-  const result = await world.pdsGet<{ records?: Array<{ value: { skey: string; name: string; visibility: string } }> }>(
-    owner, "com.atproto.space.listRecords", { space: world.workspaceUri, repo: owner.did, collection: "new.flock.directory", limit: "100" },
-  );
-  assert.equal(result.status, 200, JSON.stringify(result.body));
-  return (result.body.records ?? []).map(({ value }) => ({ ...value, uri: channelUri(owner.did, value.skey) }));
+export async function directoryOf(world: AppWorld, _owner?: Actor): Promise<ChannelRef[]> {
+  void _owner;
+  const groupDid = groupDidOf(world);
+  const records = groupSpaceRecords(world, world.workspaceUri, COLLECTION.directory, groupDid);
+  return records.map(({ value }) => ({
+    skey: String(value.skey),
+    name: String(value.name),
+    visibility: String(value.visibility),
+    uri: channelUri(groupDid, String(value.skey)),
+  }));
 }
 
 export async function channelNamed(world: AppWorld, owner: Actor, name: string): Promise<ChannelRef> {
@@ -69,9 +73,7 @@ export async function writeOwnRecords(world: AppWorld, as: Actor, space: string,
 export type CredentialOutcome = { granted: true; credential: SpaceCredential } | { granted: false; status: number; code: string | undefined; message: string };
 
 function pdsOf(world: AppWorld, did: string): string {
-  const known = [...world.actors.values()].find((actor) => actor.did === did);
-  assert.ok(known, `no actor owns ${did}, so its PDS is unknown`);
-  return known.pdsUrl;
+  return resolvePdsOrigin(world, did);
 }
 
 export async function requestChannelCredential(world: AppWorld, as: Actor, space: string): Promise<CredentialOutcome> {

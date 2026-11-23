@@ -1,4 +1,4 @@
-import { channelUri, isDid, isSkey, isTid, spaceRecordUri, tasksSpaceUri, workspaceUri } from "@flock/protocol/keys";
+import { channelUri, isDid, isSkey, isTid, SELF_SKEY, spaceRecordUri, tasksSpaceUri, workspaceUri } from "@flock/protocol/keys";
 import { COLLECTION } from "@flock/protocol/nsids";
 
 export { captureReturnTo, consumeReturnTo, RETURN_TO_KEY, sanitizeReturnTo, validateReturnTo } from "../../lib/return-to";
@@ -168,7 +168,7 @@ export function parseDecodedSegments(segments: readonly string[], search = ""): 
   if (segments[0] !== "w" || segments.length < 3) return null;
   const authority = segments[1]!;
   const workspaceSkey = segments[2]!;
-  if (!isDid(authority) || !isSkey(workspaceSkey)) return null;
+  if (!isDid(authority) || workspaceSkey !== SELF_SKEY) return null;
   const wsUri = workspaceUri(authority, workspaceSkey);
 
   if (segments.length === 3) {

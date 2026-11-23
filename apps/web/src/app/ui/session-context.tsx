@@ -17,11 +17,15 @@ const SessionBridge = dynamic(() => import("./dm-session-bridge").then((mod) => 
  */
 function restoring(did: string, config: BrowserSessionConfig, stopped: () => void): BrowserSessionState {
   return {
-    status: "connecting", client: null, store: null, engine: null, snapshots: null, live: null, needsNotifyScopeUpgrade: false, error: "",
+    status: "connecting", client: null, store: null, engine: null, groupOAuth: null, snapshots: null, live: null, needsNotifyScopeUpgrade: false, error: "",
     connect: () => {},
     signOut: async () => {
       stopped();
-      return (await import("../../browser/sign-out")).signOutAccount(did, async () => (await import("../../browser/session")).signOut(config));
+      return (await import("../../browser/sign-out")).signOutAccount(
+        did,
+        async () => (await import("../../browser/session")).signOut(config),
+        { config },
+      );
     },
   };
 }

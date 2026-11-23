@@ -1,6 +1,7 @@
 import { DID_DOCUMENT_TTL_MS, kemKeyFromDidDocument } from "@flock/protocol/atproto/kem-key";
 import { readUpstreamJson } from "@flock/protocol/bounded-json";
 import { isDid } from "@flock/protocol/keys";
+import { DidNotFoundError } from "./errors";
 
 // DID documents fetched with no redirects and a bounded body, and cached: an account's PDS endpoint, its KEM key and its handle.
 // Fetch-only, so the browser and a Node app resolve identities the same way.
@@ -32,8 +33,13 @@ export function clearDidDocumentCache(): void {
  * host while the app itself runs on loopback development. Every fetch blocks
  * redirects and reads a bounded body.
  */
-export async function resolvePds(did: string, config: IdentityConfig): Promise<string> {
-  const document = await resolveDidDocument(did, config);
+export async function resolvePds(
+  did: string,
+  config: IdentityConfig,
+  forceRefresh: boolean | { forceRefresh?: boolean } = false,
+): Promise<string> {
+  const force = typeof forceRefresh === "boolean" ? forceRefresh : Boolean(forceRefresh?.forceRefresh);
+  const document = await resolveDidDocument(did, config, force);
   const service = findService(document, did, "#atproto_pds");
   if (typeof service.serviceEndpoint !== "string" || service.serviceEndpoint.length === 0) {
     throw new Error("The DID document has no usable #atproto_pds service endpoint.");
@@ -75,6 +81,10 @@ async function resolveDidDocument(did: string, config: IdentityConfig, forceRefr
   const response = config.fetch ? await config.fetch(new Request(url, init)) : await fetch(url, init);
   if (!response.ok) {
     await response.body?.cancel().catch(() => undefined);
+    if (response.status === 404 || response.status === 410) {
+      documentCache.delete(did);
+      throw new DidNotFoundError(did, `Could not resolve ${did} (${response.status}).`);
+    }
     throw new Error(`Could not resolve ${did} (${response.status}).`);
   }
   const document = await readUpstreamJson<DidDocument>(response, MAX_DID_DOCUMENT_BYTES);

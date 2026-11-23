@@ -1,5 +1,7 @@
 # Space credentials: expire exactly at `exp`
 
+Status against `6747610566` + `opensocial.group` `8df0cc82` (R13, 2026-11-21): **Narrowly open on upstream `@atproto/space`.** `com.atproto.space.notifyCredentialsRevoked` (`<= 100` JTIs) is upstream in `6747610566` and implemented in `apps/group-host`, while upstream `verifySpaceToken` (`packages/space/src/credential.ts:296`) still applies `CLOCK_SKEW_SEC = 5` to `credential` `exp`. Flock carries `protocol-tests/atproto/strict-credential-expiry.patch` for personal PDSes and enforces explicit zero-skew `Math.floor(Date.now() / 1000) >= payload.exp` in `apps/group-host` (`verifyGroupSpaceCredential`) and `apps/operator`.
+
 Status against `5d88b414` (2026-10-30): Unchanged. The credential exchange is no longer signed (the key to bind travels as `credentialKid` in the request body); credential use is signed under the `atproto-space-credential` label with a required tag. Only item 1 below remains.
 
 Status against `5b95b2f2`: revocation, a shorter default and a lifetime ceiling now exist upstream. Only item 1 below remains.

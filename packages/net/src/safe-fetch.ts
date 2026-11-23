@@ -12,6 +12,60 @@ export type SafeFetch = (input: RequestInfo | URL, init?: RequestInit) => Promis
 /** Whether loopback hosts (and plain http to them) are allowed: loopback development only. It is asked at every request. */
 export type LoopbackPolicy = () => boolean;
 
+export type BoundedSafeFetchOptions = {
+  deadlineMs: number;
+  maxResponseBytes: number;
+  allowedContentTypes?: readonly string[];
+};
+
+export class UpstreamContentTypeError extends Error {
+  readonly status = 502;
+  readonly code = "UpstreamContentTypeError";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "UpstreamContentTypeError";
+  }
+}
+
+export class UpstreamResponseTooLargeError extends Error {
+  readonly status = 502;
+  readonly code = "UpstreamResponseTooLargeError";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "UpstreamResponseTooLargeError";
+  }
+}
+
+export const BOUNDED_FETCH_PROFILES = {
+  oauthMetadata: {
+    deadlineMs: 5_000,
+    maxResponseBytes: 262_144,
+    allowedContentTypes: ["application/json"],
+  },
+  didAndJwks: {
+    deadlineMs: 5_000,
+    maxResponseBytes: 262_144,
+    allowedContentTypes: ["application/json", "application/did+ld+json", "application/jwk-set+json"],
+  },
+  xrpcNotice: {
+    deadlineMs: 10_000,
+    maxResponseBytes: 65_536,
+    allowedContentTypes: ["application/json", "text/plain"],
+  },
+  migrationInfo: {
+    deadlineMs: 10_000,
+    maxResponseBytes: 262_144,
+    allowedContentTypes: ["application/json"],
+  },
+  migrationManifest: {
+    deadlineMs: 15_000,
+    maxResponseBytes: 4_194_304,
+    allowedContentTypes: ["application/json"],
+  },
+} as const satisfies Record<string, BoundedSafeFetchOptions>;
+
 const SAFE_DNS_TTL_MS = 30_000;
 const MAX_CHECKED_HOSTS = 512;
 const MAX_PINNED_AGENTS = 128;
@@ -44,6 +98,159 @@ export function safeFetch(allowLoopback: LoopbackPolicy, deadlineMs = RESPONSE_T
       dispatcher: pinnedAgent(endpoint.url, endpoint.addresses),
     });
     return new Response(response.body as unknown as BodyInit, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers as unknown as HeadersInit,
+    });
+  };
+}
+
+function normalizeMimeType(headerValue: string | null): string {
+  if (!headerValue) return "";
+  return headerValue.split(";")[0]?.trim().toLowerCase() ?? "";
+}
+
+/**
+ * SSRF-safe fetch with end-to-end header+body deadline, MIME media-type gate before body read,
+ * Content-Length pre-check, and streaming decompressed byte-cap enforcement.
+ */
+export function boundedSafeFetch(
+  allowLoopback: LoopbackPolicy,
+  options: BoundedSafeFetchOptions,
+): SafeFetch {
+  const allowedSet =
+    options.allowedContentTypes && options.allowedContentTypes.length > 0
+      ? new Set(options.allowedContentTypes.map((ct) => ct.trim().toLowerCase()))
+      : null;
+
+  return async (input, init) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    const requestUrl = new URL(request.url);
+    if (requestUrl.username || requestUrl.password || requestUrl.hash) {
+      throw new Error("The request contains an unsafe remote endpoint.");
+    }
+    const endpoint = await resolveSafeEndpoint(requestUrl.origin, allowLoopback());
+    const body = request.body ? new Uint8Array(await request.arrayBuffer()) : undefined;
+    const deadlineSignal = AbortSignal.timeout(options.deadlineMs);
+    const combinedSignal = AbortSignal.any([request.signal, deadlineSignal]);
+
+    const response = await undiciFetch(request.url, {
+      method: request.method,
+      headers: request.headers as unknown as HeadersInit,
+      ...(body ? { body } : {}),
+      redirect: "error",
+      signal: combinedSignal,
+      dispatcher: pinnedAgent(endpoint.url, endpoint.addresses),
+    });
+
+    const contentLengthRaw = response.headers.get("content-length");
+    if (contentLengthRaw !== null && contentLengthRaw.trim() !== "") {
+      const contentLength = Number(contentLengthRaw);
+      if (Number.isFinite(contentLength) && contentLength > options.maxResponseBytes) {
+        void response.body?.cancel().catch(() => {});
+        throw new UpstreamResponseTooLargeError(
+          `Upstream response Content-Length (${contentLength}) exceeds maxResponseBytes (${options.maxResponseBytes}).`,
+        );
+      }
+    }
+
+    const isEmptyStatus =
+      response.status === 204 ||
+      response.status === 304 ||
+      contentLengthRaw?.trim() === "0";
+    const mime = normalizeMimeType(response.headers.get("content-type"));
+
+    if (allowedSet && response.ok && !isEmptyStatus) {
+      // Allow empty chunked 200 responses only when content-type is omitted AND first read yields EOF;
+      // reject immediately whenever a non-matching Content-Type is declared, or if content-type is missing on non-empty body.
+      if (mime !== "" && !allowedSet.has(mime)) {
+        void response.body?.cancel().catch(() => {});
+        throw new UpstreamContentTypeError(
+          `Upstream response Content-Type ${JSON.stringify(mime)} is not in allowed types [${[...allowedSet].join(", ")}].`,
+        );
+      }
+    }
+
+    if (!response.body) {
+      if (allowedSet && !isEmptyStatus && mime === "") {
+        return new Response(null, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: response.headers as unknown as HeadersInit,
+        });
+      }
+      return new Response(null, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers as unknown as HeadersInit,
+      });
+    }
+
+    const rawStream = response.body as unknown as ReadableStream<Uint8Array>;
+    const reader = rawStream.getReader();
+    let totalBytes = 0;
+    let sawNonEmptyChunk = false;
+
+    const boundedStream = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        if (combinedSignal.aborted) {
+          const reason = combinedSignal.reason ?? new DOMException("The operation timed out.", "TimeoutError");
+          await reader.cancel(reason).catch(() => {});
+          controller.error(reason);
+          return;
+        }
+        let onAbort: (() => void) | undefined;
+        try {
+          const readResult = await Promise.race([
+            reader.read(),
+            new Promise<never>((_resolve, reject) => {
+              onAbort = () => {
+                const reason = combinedSignal.reason ?? new DOMException("The operation timed out.", "TimeoutError");
+                void reader.cancel(reason).catch(() => {});
+                reject(reason);
+              };
+              combinedSignal.addEventListener("abort", onAbort, { once: true });
+            }),
+          ]);
+          if (readResult.done) {
+            controller.close();
+            return;
+          }
+          const chunk = readResult.value;
+          if (chunk.byteLength > 0 && !sawNonEmptyChunk) {
+            sawNonEmptyChunk = true;
+            if (allowedSet && mime === "") {
+              const err = new UpstreamContentTypeError(
+                `Upstream response with non-empty body is missing required Content-Type [${[...allowedSet].join(", ")}].`,
+              );
+              await reader.cancel(err).catch(() => {});
+              controller.error(err);
+              return;
+            }
+          }
+          totalBytes += chunk.byteLength;
+          if (totalBytes > options.maxResponseBytes) {
+            const err = new UpstreamResponseTooLargeError(
+              `Upstream response body exceeded maxResponseBytes (${options.maxResponseBytes}).`,
+            );
+            await reader.cancel(err).catch(() => {});
+            controller.error(err);
+            return;
+          }
+          controller.enqueue(chunk);
+        } catch (err) {
+          await reader.cancel(err).catch(() => {});
+          controller.error(err);
+        } finally {
+          if (onAbort) combinedSignal.removeEventListener("abort", onAbort);
+        }
+      },
+      async cancel(reason) {
+        await reader.cancel(reason).catch(() => {});
+      },
+    });
+
+    return new Response(boundedStream, {
       status: response.status,
       statusText: response.statusText,
       headers: response.headers as unknown as HeadersInit,

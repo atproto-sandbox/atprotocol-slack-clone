@@ -5,7 +5,13 @@ import type * as ListRecords from "../lexicons/api/types/com/atproto/space/listR
 import type * as ListSpaces from "../lexicons/api/types/com/atproto/space/listSpaces";
 import type * as ListWriters from "../lexicons/api/types/com/atproto/space/listWriters";
 import { isDid, parseSpaceUri, spaceRecordUri } from "../keys";
+import { validateSpaceTypeKey } from "../registry";
 import { isInvalidCursorError, type AtprotoClient } from "./xrpc";
+
+function isValidSpaceEntryUri(uri: string): boolean {
+  const parsed = parseSpaceUri(uri);
+  return parsed !== null && validateSpaceTypeKey(parsed.type, parsed.skey).valid;
+}
 
 const MAX_SCAN_PAGES = 128;
 const MAX_REPO_SCAN_PAGES = 512;
@@ -620,7 +626,7 @@ export async function listBoundedSpaces(
     }
     // A space whose URI this app cannot parse (for example a record key longer than it creates) is not one of its spaces. It is
     // skipped, not a reason to fail the listing: a space the account wrote into elsewhere could otherwise break discovery for good.
-    spaces.push(...page.spaces.filter((entry) => parseSpaceUri(entry.space) !== null));
+    spaces.push(...page.spaces.filter((entry) => isValidSpaceEntryUri(entry.space)));
     cursor = page.cursor;
     if (cursor) {
       if (cursor === requestedCursor || seenCursors.has(cursor)) throw new Error("PDS space pagination did not advance.");
@@ -642,7 +648,7 @@ export async function listBoundedSpaces(
     if (lookahead.spaces.some((entry) => seenSpaces.has(entry.space))) throw new Error("PDS space pagination returned a duplicate space URI.");
     if (lookahead.cursor && (lookahead.cursor === probe || seenCursors.has(lookahead.cursor))) throw new Error("PDS space pagination did not advance.");
     if (lookahead.spaces.length === 0 && lookahead.cursor) throw new Error("PDS space pagination returned an empty nonterminal page.");
-    truncated = lookahead.spaces.some((entry) => parseSpaceUri(entry.space) !== null);
+    truncated = lookahead.spaces.some((entry) => isValidSpaceEntryUri(entry.space));
     if (lookahead.cursor) seenCursors.add(lookahead.cursor);
     probe = lookahead.cursor;
   }
@@ -650,9 +656,9 @@ export async function listBoundedSpaces(
 }
 
 /** Every space URI of a type, or an error when there are more than `maxSpaces`: discovery must not silently hide some of an account's spaces. */
-export async function listAllSpaceUris(client: AtprotoClient, input: { spaceType: string; maxSpaces: number }): Promise<string[]> {
+export async function listAllSpaceUris(client: AtprotoClient, input: { spaceType?: string; maxSpaces: number }): Promise<string[]> {
   const scan = await listBoundedSpaces(client, input);
-  if (scan.truncated) throw new Error(`Account ${input.spaceType} list exceeds the ${input.maxSpaces}-space discovery limit.`);
+  if (scan.truncated) throw new Error(`Account ${input.spaceType ?? "spaces"} list exceeds the ${input.maxSpaces}-space discovery limit.`);
   return scan.spaces.map(({ space }) => space);
 }
 

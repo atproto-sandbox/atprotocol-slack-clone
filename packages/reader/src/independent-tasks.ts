@@ -34,11 +34,35 @@ import {
   type TaskRecordValue,
 } from "@flock/protocol/entity-merge";
 import { type ExtensionId } from "@flock/protocol/extensions";
-import { parseWorkspaceUri, spaceRecordUri, tasksSpaceUri } from "@flock/protocol/keys";
+import {
+  groupMembersUri,
+  groupMetaUri,
+  isDid,
+  parseWorkspaceUri,
+  SELF_SKEY,
+  spaceRecordUri,
+  tasksSpaceUri,
+} from "@flock/protocol/keys";
 import { mapLimited } from "@flock/protocol/map-limited";
-import { COLLECTION } from "@flock/protocol/nsids";
+import {
+  isHidden,
+  isTakendown,
+  labelsForResource,
+  projectActiveLabels,
+  type ActiveSpaceLabel,
+} from "@flock/protocol/moderation";
+import { ATPROTO_SPACE_COLLECTION, COLLECTION, OPENSOCIAL_COLLECTION } from "@flock/protocol/nsids";
 import { validateSpaceRecord } from "@flock/protocol/registry";
-import { WORKSPACE_ENVELOPE, type WorkspaceExtensionSummary } from "@flock/protocol/workspace-summary";
+import type { GroupOpenSocialPolicy } from "@flock/protocol/scopes";
+import {
+  extractGroupSpacePolicyRecord,
+  summarizeWorkspace,
+  WORKSPACE_ENVELOPE,
+  type MemberAcceptanceEntry,
+  type MemberWriterRev,
+  type ScannedRecords,
+  type WorkspaceExtensionSummary,
+} from "@flock/protocol/workspace-summary";
 
 const MAX_TASKS_WRITERS = WORKSPACE_ENVELOPE.maxStarRecords;
 const WRITER_READ_CONCURRENCY = 6;
@@ -70,6 +94,22 @@ export type IndependentTasksWorkspaceSnapshot = {
   workspaceSnapshotComplete: boolean;
   degradedReasons: string[];
   setAside: IndependentTasksSetAside[];
+  accountLabels?: ActiveSpaceLabel[];
+};
+
+export type IndependentMergedProject = MergedProject & {
+  hidden?: boolean;
+  moderationLabels?: string[];
+};
+
+export type IndependentMergedTask = MergedTask & {
+  hidden?: boolean;
+  moderationLabels?: string[];
+};
+
+export type IndependentTaskComment = TaskCommentView & {
+  hidden?: boolean;
+  moderationLabels?: string[];
 };
 
 export type IndependentTasksReadResult = {
@@ -85,9 +125,9 @@ export type IndependentTasksReadResult = {
   setAside: IndependentTasksSetAside[];
   rosterMembers: string[];
   writerUniverse: string[];
-  projects: MergedProject[];
-  tasks: MergedTask[];
-  commentsByTask: Map<string, TaskCommentView[]>;
+  projects: IndependentMergedProject[];
+  tasks: IndependentMergedTask[];
+  commentsByTask: Map<string, IndependentTaskComment[]>;
   activities: TaskActivityEvent[];
   orphanedProjectEdits: number;
   orphanedTaskEdits: number;
@@ -151,10 +191,7 @@ export async function readIndependentTasksSpace(
   }
 
   const listedRepos = new Set(repoScan.writers.map((writer) => writer.repo));
-  const writerUniverseSet = new Set<string>([...listedRepos, ...snapshot.rosterMembers]);
-  if (listedRepos.has(snapshot.authorityDid)) {
-    writerUniverseSet.add(snapshot.authorityDid);
-  }
+  const writerUniverseSet = new Set<string>([...listedRepos, ...snapshot.rosterMembers, snapshot.authorityDid]);
   const writerUniverse = [...writerUniverseSet].sort();
 
   const { perWriterRecords, writerSetAside } = await readTasksWriters(deps, tasksCredential, {
@@ -171,14 +208,102 @@ export async function readIndependentTasksSpace(
     ...snapshot.setAside.filter((entry) => !writerSetAsideDids.has(entry.did)),
     ...writerSetAside,
   ].sort((left, right) => left.did.localeCompare(right.did));
-  const validated = collectValidatedTasksRecords(snapshot.authorityDid, tasksSpace, writerUniverse, perWriterRecords);
 
-  const complete = snapshot.workspaceSnapshotComplete && allSetAside.length === 0;
+  const authorityIdx = writerUniverse.indexOf(snapshot.authorityDid);
+  const authorityTasksRecords = authorityIdx >= 0 ? perWriterRecords[authorityIdx]! : [];
+  const tasksPolicyRecords = authorityTasksRecords.filter(
+    (e) => e.collection === ATPROTO_SPACE_COLLECTION.spacePolicy,
+  );
+  const tasksPolicyCheck = extractGroupSpacePolicyRecord(snapshot.authorityDid, tasksSpace, {
+    records: tasksPolicyRecords.map((e) => ({
+      rkey: e.rkey,
+      ...(e.cid.length > 0 ? { cid: e.cid } : {}),
+      value: e.record,
+    })),
+    truncated: tasksPolicyRecords.length > 1,
+  });
+  const tasksPolicyInvalid = !writerSetAsideDids.has(snapshot.authorityDid) && !tasksPolicyCheck.valid;
+
+  const rawLabelEntries = authorityTasksRecords
+    .filter((e) => e.collection === ATPROTO_SPACE_COLLECTION.label)
+    .map((e) => ({ repoDid: snapshot.authorityDid, rkey: e.rkey, value: e.record }));
+  const tasksLabels = projectActiveLabels(rawLabelEntries, {
+    groupDid: snapshot.authorityDid,
+    spaceUri: tasksSpace,
+  });
+  const accountLabels = snapshot.accountLabels ?? [];
+
+  const validated = collectValidatedTasksRecords(
+    snapshot.authorityDid,
+    tasksSpace,
+    writerUniverse,
+    perWriterRecords,
+    tasksLabels,
+    accountLabels,
+  );
+
+  const complete = snapshot.workspaceSnapshotComplete && allSetAside.length === 0 && !tasksPolicyInvalid;
   const merged = mergeTasksSpace({ ...validated, complete });
   const hasUncertainAncestry =
     merged.projects.some((project) => project.uncertainAncestry) ||
     merged.tasks.some((task) => task.uncertainAncestry);
   const degradedReasons = collectTasksDegradedReasons(snapshot, writerSetAside, merged, hasUncertainAncestry);
+  if (tasksPolicyInvalid && !degradedReasons.some((r) => r.includes("Space policy records"))) {
+    degradedReasons.push(
+      "Space policy records contain malformed or missing entries; workspace access governance may be incomplete.",
+    );
+  }
+
+  const projects: IndependentMergedProject[] = merged.projects.map((p) => {
+    const vals = [
+      ...new Set([
+        ...labelsForResource(tasksLabels, p.uri).map((l) => l.val),
+        ...labelsForResource(accountLabels, p.repo).map((l) => l.val),
+      ]),
+    ].sort();
+    const hidden = isHidden(tasksLabels, p.uri) || isHidden(accountLabels, p.repo);
+    return {
+      ...p,
+      ...(hidden ? { hidden: true } : {}),
+      ...(vals.length > 0 ? { moderationLabels: vals } : {}),
+    };
+  });
+
+  const tasks: IndependentMergedTask[] = merged.tasks.map((t) => {
+    const vals = [
+      ...new Set([
+        ...labelsForResource(tasksLabels, t.uri).map((l) => l.val),
+        ...labelsForResource(accountLabels, t.repo).map((l) => l.val),
+      ]),
+    ].sort();
+    const hidden = isHidden(tasksLabels, t.uri) || isHidden(accountLabels, t.repo);
+    return {
+      ...t,
+      ...(hidden ? { hidden: true } : {}),
+      ...(vals.length > 0 ? { moderationLabels: vals } : {}),
+    };
+  });
+
+  const commentsByTask = new Map<string, IndependentTaskComment[]>();
+  for (const [taskUri, comments] of merged.commentsByTask.entries()) {
+    commentsByTask.set(
+      taskUri,
+      comments.map((c) => {
+        const vals = [
+          ...new Set([
+            ...labelsForResource(tasksLabels, c.uri).map((l) => l.val),
+            ...labelsForResource(accountLabels, c.repo).map((l) => l.val),
+          ]),
+        ].sort();
+        const hidden = isHidden(tasksLabels, c.uri) || isHidden(accountLabels, c.repo);
+        return {
+          ...c,
+          ...(hidden ? { hidden: true } : {}),
+          ...(vals.length > 0 ? { moderationLabels: vals } : {}),
+        };
+      }),
+    );
+  }
 
   return {
     workspaceUri: snapshot.workspaceUri,
@@ -193,9 +318,9 @@ export async function readIndependentTasksSpace(
     setAside: allSetAside,
     rosterMembers: snapshot.rosterMembers,
     writerUniverse,
-    projects: merged.projects,
-    tasks: merged.tasks,
-    commentsByTask: merged.commentsByTask,
+    projects,
+    tasks,
+    commentsByTask,
     activities: merged.activities,
     orphanedProjectEdits: merged.orphanedProjectEdits,
     orphanedTaskEdits: merged.orphanedTaskEdits,
@@ -217,13 +342,21 @@ export async function readIndependentTasksWorkspaceSnapshot(
     throw new Error("Invalid workspace URI.");
   }
   const { authorityDid, skey: workspaceSkey } = parsedWorkspace;
+  const metaUri = groupMetaUri(authorityDid);
+  const membersUri = groupMembersUri(authorityDid);
   const expectedTasksSpace = tasksSpaceUri(authorityDid, workspaceSkey);
   const maxBytes = clampBound(options.maxStarArchiveBytes, WORKSPACE_ENVELOPE.maxStarArchiveBytes, 1);
   const maxRecords = clampBound(options.maxStarRecords, WORKSPACE_ENVELOPE.maxStarRecords, 0);
 
+  let metaCred: SpaceCredential;
+  let membersCred: SpaceCredential;
   let wsCredential: SpaceCredential;
   try {
-    wsCredential = await mintSpaceCredentialWith(deps, workspaceUri);
+    [metaCred, membersCred, wsCredential] = await Promise.all([
+      mintSpaceCredentialWith(deps, metaUri),
+      mintSpaceCredentialWith(deps, membersUri),
+      mintSpaceCredentialWith(deps, workspaceUri),
+    ]);
   } catch (error) {
     if (isAuthoritySuspendedError(error)) {
       const failure = classifySpaceHostFailure(error)!;
@@ -243,16 +376,40 @@ export async function readIndependentTasksWorkspaceSnapshot(
     throw error;
   }
 
-  let authorityRecords: VerifiedRecordEntry[];
+  let authorityPds: string;
+  let metaRecords: VerifiedRecordEntry[];
+  let membersAuthorityRecords: VerifiedRecordEntry[];
+  let wsAuthorityRecords: VerifiedRecordEntry[];
+  let membersWriterScan: BoundedWriters;
   try {
-    const authorityPds = await resolveVerifiedPds(deps, authorityDid);
-    authorityRecords = await readVerifiedRepo(wsCredential, authorityPds, {
-      space: workspaceUri,
-      repo: authorityDid,
-      maxBytes,
-      maxRecords,
-      maxRetries: WORKSPACE_ENVELOPE.maxListRecordsRetry,
-    });
+    authorityPds = await resolveVerifiedPds(deps, authorityDid);
+    [metaRecords, membersAuthorityRecords, wsAuthorityRecords, membersWriterScan] = await Promise.all([
+      readVerifiedRepo(metaCred, authorityPds, {
+        space: metaUri,
+        repo: authorityDid,
+        maxBytes,
+        maxRecords,
+        maxRetries: WORKSPACE_ENVELOPE.maxListRecordsRetry,
+      }),
+      readVerifiedRepo(membersCred, authorityPds, {
+        space: membersUri,
+        repo: authorityDid,
+        maxBytes,
+        maxRecords,
+        maxRetries: WORKSPACE_ENVELOPE.maxListRecordsRetry,
+      }),
+      readVerifiedRepo(wsCredential, authorityPds, {
+        space: workspaceUri,
+        repo: authorityDid,
+        maxBytes,
+        maxRecords,
+        maxRetries: WORKSPACE_ENVELOPE.maxListRecordsRetry,
+      }),
+      listBoundedWriters(membersCred.client(authorityPds), {
+        space: membersUri,
+        maxRepos: MAX_TASKS_WRITERS,
+      }),
+    ]);
   } catch (error) {
     if (error instanceof SpaceCredentialError) throw error;
     const failure = classifyVerifiedRepoFailure(error, {
@@ -275,12 +432,67 @@ export async function readIndependentTasksWorkspaceSnapshot(
     };
   }
 
+  const memberWriters = new Map<string, MemberWriterRev>();
+  for (const w of membersWriterScan.writers) {
+    memberWriters.set(w.repo, { repoRev: w.repoRev, spaceRev: w.spaceRev });
+  }
+  const knownApps = new Set<string>(
+    wsAuthorityRecords
+      .filter((e) => e.collection === COLLECTION.appInstall && typeof e.record.subject === "string")
+      .map((e) => String(e.record.subject)),
+  );
+  const admittedHumans = membersAuthorityRecords
+    .filter((e) => e.collection === OPENSOCIAL_COLLECTION.membership)
+    .map((e) => e.rkey)
+    .filter((did) => isDid(did) && did !== authorityDid && !knownApps.has(did));
+
+  const memberSetAside: IndependentTasksSetAside[] = [];
+  const acceptances: MemberAcceptanceEntry[] = [];
+  await mapLimited(
+    admittedHumans.filter((did) => memberWriters.has(did)),
+    WRITER_READ_CONCURRENCY,
+    async (memberDid) => {
+      try {
+        const pdsUrl = await resolveVerifiedPds(deps, memberDid);
+        const entries = await readVerifiedRepo(membersCred, pdsUrl, {
+          space: membersUri,
+          repo: memberDid,
+          maxBytes,
+          maxRecords,
+          maxRetries: WORKSPACE_ENVELOPE.maxListRecordsRetry,
+        });
+        const acc = entries.find((e) => e.collection === OPENSOCIAL_COLLECTION.acceptance && e.rkey === SELF_SKEY);
+        if (acc) {
+          acceptances.push({ repoDid: memberDid, rkey: SELF_SKEY, value: acc.record });
+        }
+      } catch (error) {
+        if (error instanceof SpaceCredentialError) throw error;
+        const failure = classifyVerifiedRepoFailure(error, {
+          space: membersUri,
+          repo: memberDid,
+          authorityDid,
+        });
+        if (!failure) throw error;
+        memberSetAside.push({ did: memberDid, reason: failure.reason, permanent: failure.permanent });
+      }
+    },
+  );
+
   return summarizeVerifiedWorkspaceRecords({
     workspaceUri,
     authorityDid,
     workspaceSkey,
     expectedTasksSpace,
-    authorityRecords,
+    metaUri,
+    membersUri,
+    metaRecords,
+    membersAuthorityRecords,
+    wsAuthorityRecords,
+    acceptances,
+    memberWriters,
+    membersWriterScanTruncated: membersWriterScan.truncated,
+    memberSetAside,
+    nowMs: deps.now ? deps.now() : Date.now(),
   });
 }
 
@@ -345,69 +557,70 @@ function buildDisabledTasksResult(snapshot: IndependentTasksWorkspaceSnapshot): 
   };
 }
 
-function summarizeVerifiedWorkspaceRecords(input: {
+export function summarizeVerifiedWorkspaceRecords(input: {
   workspaceUri: string;
   authorityDid: string;
   workspaceSkey: string;
   expectedTasksSpace: string;
-  authorityRecords: readonly VerifiedRecordEntry[];
+  metaUri: string;
+  membersUri: string;
+  metaRecords: readonly VerifiedRecordEntry[];
+  membersAuthorityRecords: readonly VerifiedRecordEntry[];
+  wsAuthorityRecords: readonly VerifiedRecordEntry[];
+  acceptances: readonly MemberAcceptanceEntry[];
+  memberWriters: ReadonlyMap<string, MemberWriterRev>;
+  membersWriterScanTruncated: boolean;
+  memberSetAside: readonly IndependentTasksSetAside[];
+  nowMs?: number;
 }): IndependentTasksWorkspaceSnapshot {
-  const { workspaceUri, authorityDid, workspaceSkey, expectedTasksSpace, authorityRecords } = input;
-  const degradedReasons: string[] = [];
-  let workspaceSnapshotComplete = true;
-  let invalidRecordCount = 0;
+  const {
+    workspaceUri,
+    authorityDid,
+    workspaceSkey,
+    expectedTasksSpace,
+    metaUri,
+    membersUri,
+    metaRecords,
+    membersAuthorityRecords,
+    wsAuthorityRecords,
+    acceptances,
+    memberWriters,
+    membersWriterScanTruncated,
+    memberSetAside,
+    nowMs,
+  } = input;
 
-  const collectionCounts = new Map<string, number>();
-  let validProfileCount = 0;
-  const activeRosterMembers = new Set<string>();
-  const activeAdmins = new Set<string>();
-  const activeChannels = new Set<string>();
-  const activeAppInstalls = new Set<string>();
-  const activeExtensions = new Set<string>();
+  const degradedReasons: string[] = [];
+  let workspaceSnapshotComplete = memberSetAside.length === 0 && !membersWriterScanTruncated;
+  if (membersWriterScanTruncated) {
+    degradedReasons.push(
+      `Members space writer set exceeds the ${MAX_TASKS_WRITERS}-repo scan limit; member acceptance state may be incomplete.`,
+    );
+  }
+  let invalidRecordCount = 0;
   let tasksExtInstall: WorkspaceExtensionSummary | null = null;
 
-  for (const entry of authorityRecords) {
-    collectionCounts.set(entry.collection, (collectionCounts.get(entry.collection) ?? 0) + 1);
-    const validation = validateSpaceRecord(entry.collection, entry.record, {
-      authorityDid,
-      spaceUri: workspaceUri,
-      repoDid: authorityDid,
-      rkey: entry.rkey,
-    });
-    if (!validation.valid) {
-      workspaceSnapshotComplete = false;
-      invalidRecordCount += 1;
-      if (invalidRecordCount <= MAX_REPORTED_INVALID_RECORDS) {
-        degradedReasons.push(`Workspace snapshot contains an invalid ${entry.collection} record (${entry.rkey}): ${validation.reason}`);
+  const checkInSpace = (targetSpace: string, entries: readonly VerifiedRecordEntry[], collection: string) => {
+    const out: Array<{ rkey: string; cid?: string; value: Record<string, unknown> }> = [];
+    for (const entry of entries) {
+      if (entry.collection !== collection) continue;
+      const validation = validateSpaceRecord(collection, entry.record, {
+        authorityDid,
+        spaceUri: targetSpace,
+        repoDid: authorityDid,
+        rkey: entry.rkey,
+      });
+      if (!validation.valid) {
+        workspaceSnapshotComplete = false;
+        invalidRecordCount += 1;
+        if (invalidRecordCount <= MAX_REPORTED_INVALID_RECORDS) {
+          degradedReasons.push(
+            `Workspace snapshot contains an invalid ${collection} record (${entry.rkey}): ${validation.reason}`,
+          );
+        }
+        continue;
       }
-      continue;
-    }
-
-    switch (entry.collection) {
-      case COLLECTION.workspaceProfile:
-        validProfileCount += 1;
-        break;
-      case COLLECTION.workspaceRoster:
-        if (entry.record.active === true && typeof entry.record.subject === "string") {
-          activeRosterMembers.add(entry.record.subject);
-        }
-        break;
-      case COLLECTION.admin:
-        if (entry.record.active === true && typeof entry.record.subject === "string") {
-          activeAdmins.add(entry.record.subject);
-        }
-        break;
-      case COLLECTION.directory:
-        if (entry.record.visibility !== "archived" && typeof entry.record.skey === "string") {
-          activeChannels.add(entry.record.skey);
-        }
-        break;
-      case COLLECTION.appInstall:
-        if (entry.record.active === true && typeof entry.record.subject === "string") {
-          activeAppInstalls.add(entry.record.subject);
-        }
-        break;
-      case COLLECTION.extInstall: {
+      if (collection === COLLECTION.extInstall && entry.rkey === "tasks" && entry.record.extId === "tasks") {
         const extSummary: WorkspaceExtensionSummary = {
           extId: entry.record.extId as ExtensionId,
           active: entry.record.active === true,
@@ -418,57 +631,109 @@ function summarizeVerifiedWorkspaceRecords(input: {
           updatedAt: String(entry.record.updatedAt),
           ...(typeof entry.record.disabledAt === "string" ? { disabledAt: entry.record.disabledAt } : {}),
         };
-        if (extSummary.active) {
-          activeExtensions.add(extSummary.extId);
+        if (extSummary.space !== expectedTasksSpace) {
+          workspaceSnapshotComplete = false;
+          degradedReasons.push("Tasks ext.install space URI does not match canonical workspace tasks space.");
+        } else {
+          tasksExtInstall = extSummary;
         }
-        if (entry.rkey === "tasks" && extSummary.extId === "tasks") {
-          if (extSummary.space !== expectedTasksSpace) {
-            workspaceSnapshotComplete = false;
-            degradedReasons.push("Tasks ext.install space URI does not match canonical workspace tasks space.");
-          } else {
-            tasksExtInstall = extSummary;
-          }
-        }
-        break;
       }
-      default:
-        break;
+      out.push({
+        rkey: entry.rkey,
+        ...(entry.cid.length > 0 ? { cid: entry.cid } : {}),
+        value: entry.record,
+      });
     }
+    const cap = collection === OPENSOCIAL_COLLECTION.profile ? 1 : WORKSPACE_ENVELOPE.authorityRecordScan;
+    return { records: out, truncated: out.length > cap };
+  };
+
+  const spacePolicies = new Map<string, GroupOpenSocialPolicy>();
+  let invalidPolicyScan = false;
+  for (const [spUri, entries] of [
+    [metaUri, metaRecords],
+    [membersUri, membersAuthorityRecords],
+    [workspaceUri, wsAuthorityRecords],
+  ] as const) {
+    const polEntries = entries.filter((e) => e.collection === ATPROTO_SPACE_COLLECTION.spacePolicy);
+    const polScanned: ScannedRecords = {
+      records: polEntries.map((e) => ({
+        rkey: e.rkey,
+        ...(e.cid.length > 0 ? { cid: e.cid } : {}),
+        value: e.record,
+      })),
+      truncated: polEntries.length > 1,
+    };
+    const extracted = extractGroupSpacePolicyRecord(authorityDid, spUri, polScanned);
+    if (extracted.valid && extracted.policy) {
+      spacePolicies.set(spUri, extracted.policy);
+    } else {
+      invalidPolicyScan = true;
+    }
+  }
+
+  const profiles = checkInSpace(metaUri, metaRecords, OPENSOCIAL_COLLECTION.profile);
+  const roles = checkInSpace(membersUri, membersAuthorityRecords, OPENSOCIAL_COLLECTION.role);
+  const memberships = checkInSpace(membersUri, membersAuthorityRecords, OPENSOCIAL_COLLECTION.membership);
+  const accountLabelScan = checkInSpace(membersUri, membersAuthorityRecords, ATPROTO_SPACE_COLLECTION.label);
+  const directory = checkInSpace(workspaceUri, wsAuthorityRecords, COLLECTION.directory);
+  const installs = checkInSpace(workspaceUri, wsAuthorityRecords, COLLECTION.appInstall);
+  const extInstalls = checkInSpace(workspaceUri, wsAuthorityRecords, COLLECTION.extInstall);
+
+  if (invalidPolicyScan) {
+    workspaceSnapshotComplete = false;
+  }
+
+  if (accountLabelScan.truncated) {
+    workspaceSnapshotComplete = false;
+    degradedReasons.push(
+      `Account moderation label records exceed the ${WORKSPACE_ENVELOPE.authorityRecordScan}-record scan limit; the member list is withheld.`,
+    );
   }
 
   if (invalidRecordCount > MAX_REPORTED_INVALID_RECORDS) {
-    degradedReasons.push(`Workspace snapshot contains ${invalidRecordCount - MAX_REPORTED_INVALID_RECORDS} additional invalid authority records.`);
+    degradedReasons.push(
+      `Workspace snapshot contains ${invalidRecordCount - MAX_REPORTED_INVALID_RECORDS} additional invalid authority records.`,
+    );
   }
-  if (validProfileCount === 0) {
+
+  const accountLabels = projectActiveLabels(
+    accountLabelScan.records.map((e) => ({ repoDid: authorityDid, rkey: e.rkey, value: e.value })),
+    { groupDid: authorityDid, spaceUri: membersUri, ...(nowMs !== undefined ? { nowMs } : {}) },
+  );
+
+  const summary = summarizeWorkspace(workspaceUri, "", {
+    profiles,
+    roles,
+    memberships,
+    directory,
+    installs,
+    extInstalls,
+    acceptances,
+    memberWriters,
+    accountLabels,
+    spacePolicies,
+  });
+
+  if (!summary) {
     workspaceSnapshotComplete = false;
     degradedReasons.push("Workspace profile record is missing or invalid.");
-  }
-  if ((collectionCounts.get(COLLECTION.workspaceProfile) ?? 0) > 1) {
-    workspaceSnapshotComplete = false;
-    degradedReasons.push("Workspace profile records exceed the expected single-record limit.");
-  }
-  for (const [collection, count] of collectionCounts.entries()) {
-    if (collection !== COLLECTION.workspaceProfile && count > WORKSPACE_ENVELOPE.authorityRecordScan) {
+  } else {
+    for (const reason of summary.degradedReasons) {
       workspaceSnapshotComplete = false;
-      degradedReasons.push(`Workspace ${collection} records exceed the ${WORKSPACE_ENVELOPE.authorityRecordScan}-record scan limit.`);
+      if (!degradedReasons.includes(reason)) degradedReasons.push(reason);
     }
   }
-
-  const envelopeCaps: Array<[number, number, string]> = [
-    [activeRosterMembers.size, WORKSPACE_ENVELOPE.members, `The active workspace roster exceeds ${WORKSPACE_ENVELOPE.members} members.`],
-    [activeChannels.size, WORKSPACE_ENVELOPE.channels, `The active channel count exceeds ${WORKSPACE_ENVELOPE.channels} channels.`],
-    [activeAdmins.size, WORKSPACE_ENVELOPE.members, `The active admin count exceeds ${WORKSPACE_ENVELOPE.members} members.`],
-    [activeAppInstalls.size, WORKSPACE_ENVELOPE.apps, `The active app count exceeds ${WORKSPACE_ENVELOPE.apps}.`],
-    [activeExtensions.size, WORKSPACE_ENVELOPE.extensions, `The active extension count exceeds ${WORKSPACE_ENVELOPE.extensions}.`],
-  ];
-  for (const [actual, cap, message] of envelopeCaps) {
-    if (actual > cap) {
-      workspaceSnapshotComplete = false;
-      degradedReasons.push(message);
-    }
+  if (invalidPolicyScan && !degradedReasons.some((r) => r.includes("Space policy records"))) {
+    degradedReasons.push(
+      "Space policy records contain malformed or missing entries; workspace access governance may be incomplete.",
+    );
   }
 
-  const enabled = tasksExtInstall !== null && tasksExtInstall.active === true && tasksExtInstall.space === expectedTasksSpace;
+  const enabled =
+    tasksExtInstall !== null &&
+    (tasksExtInstall as WorkspaceExtensionSummary).active === true &&
+    (tasksExtInstall as WorkspaceExtensionSummary).space === expectedTasksSpace;
 
   return {
     workspaceUri,
@@ -477,10 +742,11 @@ function summarizeVerifiedWorkspaceRecords(input: {
     tasksSpaceUri: expectedTasksSpace,
     enabled,
     extInstall: tasksExtInstall,
-    rosterMembers: [...activeRosterMembers].sort(),
+    rosterMembers: summary && !accountLabelScan.truncated ? summary.members.map((m) => m.did).sort() : [],
     workspaceSnapshotComplete,
     degradedReasons,
-    setAside: [],
+    setAside: [...memberSetAside].sort((a, b) => a.did.localeCompare(b.did)),
+    accountLabels,
   };
 }
 
@@ -552,6 +818,8 @@ function collectValidatedTasksRecords(
   tasksSpace: string,
   writerUniverse: readonly string[],
   perWriterRecords: readonly (readonly VerifiedRecordEntry[])[],
+  tasksLabels: readonly ActiveSpaceLabel[] = [],
+  accountLabels: readonly ActiveSpaceLabel[] = [],
 ): ValidatedTasksRecords {
   const projects: StoredEntityRecord<ProjectRecordValue>[] = [];
   const projectEdits: StoredEntityRecord<ProjectEditRecordValue>[] = [];
@@ -561,7 +829,10 @@ function collectValidatedTasksRecords(
 
   for (let i = 0; i < writerUniverse.length; i += 1) {
     const repoDid = writerUniverse[i]!;
+    if (isTakendown(accountLabels, repoDid)) continue;
     for (const entry of perWriterRecords[i]!) {
+      const uri = spaceRecordUri(tasksSpace, repoDid, entry.collection, entry.rkey);
+      if (isTakendown(tasksLabels, uri, entry.cid || undefined)) continue;
       const validation = validateSpaceRecord(entry.collection, entry.record, {
         authorityDid,
         spaceUri: tasksSpace,
@@ -569,8 +840,6 @@ function collectValidatedTasksRecords(
         rkey: entry.rkey,
       });
       if (!validation.valid) continue;
-
-      const uri = spaceRecordUri(tasksSpace, repoDid, entry.collection, entry.rkey);
       switch (entry.collection) {
         case COLLECTION.taskProject:
           projects.push({ uri, repo: repoDid, rkey: entry.rkey, value: entry.record as ProjectRecordValue });

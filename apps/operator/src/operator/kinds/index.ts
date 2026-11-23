@@ -3,6 +3,7 @@ import { archiveChannelKind } from "./archive-channel";
 import { bootstrapWorkspaceKind } from "./bootstrap-workspace";
 import { createChannelKind } from "./create-channel";
 import { createWorkspaceKind } from "./create-workspace";
+import { decideGroupJoinRequestKind } from "./decide-group-join-request";
 import { decideJoinRequestKind } from "./decide-join-request";
 import { disableExtensionKind, enableExtensionKind } from "./extension-access";
 import { inviteMemberKind } from "./invite-member";
@@ -14,11 +15,28 @@ import { setAdminKind } from "./set-admin";
 import { transitionChannelKind } from "./transition-channel";
 
 /** Every persisted operation kind, by name. The journal replays rows through this table. */
-export const OPERATION_KINDS: Readonly<Record<string, OperationKind>> = Object.fromEntries([
-  bootstrapWorkspaceKind, createWorkspaceKind, inviteMemberKind, removeMemberKind, setAdminKind, createChannelKind, transitionChannelKind,
-  archiveChannelKind, decideJoinRequestKind, leaveWorkspaceKind, leaveChannelKind, reconcileWorkspaceKind, installAppKind, updateAppAccessKind,
-  uninstallAppKind, enableExtensionKind, disableExtensionKind,
-].map((kind) => [kind.kind, kind]));
+export const OPERATION_KINDS: Readonly<Record<string, OperationKind>> = Object.fromEntries(
+  [
+    bootstrapWorkspaceKind,
+    createWorkspaceKind,
+    inviteMemberKind,
+    removeMemberKind,
+    setAdminKind,
+    createChannelKind,
+    transitionChannelKind,
+    archiveChannelKind,
+    decideJoinRequestKind,
+    decideGroupJoinRequestKind,
+    leaveWorkspaceKind,
+    leaveChannelKind,
+    reconcileWorkspaceKind,
+    installAppKind,
+    updateAppAccessKind,
+    uninstallAppKind,
+    enableExtensionKind,
+    disableExtensionKind,
+  ].map((kind) => [kind.kind, kind]),
+);
 
 export function operationKind(name: unknown): OperationKind | undefined {
   return typeof name === "string" && Object.hasOwn(OPERATION_KINDS, name) ? OPERATION_KINDS[name] : undefined;

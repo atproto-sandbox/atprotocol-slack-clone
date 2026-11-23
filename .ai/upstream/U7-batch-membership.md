@@ -1,5 +1,7 @@
 # Add batch membership calls to `memberspace`
 
+Status against `6747610566` + `opensocial.group` `8df0cc82` (R13, 2026-11-21): **Resolved at both layers.** Upstream `6747610566` shipped batched `com.atproto.memberspace.putMembers` and `removeMembers` (`<= 100` entries per call, used by Flock's 100-participant sovereign group DMs), AND R13's `opensocial.group` flat union RBAC (`group.opensocial.policy` + `role/*` + `membership/*` in `members/self`) makes adding, removing, or changing roles across a 100-channel group workspace an **`O(1)` single `putRecord` / `deleteRecord` write** (`<= 250 ms` verified in `protocol-tests/performance-envelope.test.ts`).
+
 Status against `5d88b414` (2026-10-30): Not affected. The calls moved to `com.atproto.memberspace.putMember` and `removeMember` (`simplespace` is gone) and still take one DID per call. `removeMember` and `putMember` with `write: false` now also evict a tracked writer, which makes one more call per removal worth batching.
 
 Status against `5b95b2f2`: Not affected. `putMember` and `removeMember` still take one DID per call.

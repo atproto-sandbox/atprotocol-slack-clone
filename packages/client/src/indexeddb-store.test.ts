@@ -224,7 +224,7 @@ test("deleteAccount wipes persisted activity and clock state alongside spaces wi
   reopenedBob.close();
 });
 
-test("onversionchange closes existing IndexedDbStore cleanly so a v3 upgrade does not wedge", async () => {
+test("onversionchange closes existing IndexedDbStore cleanly so a v4 upgrade does not wedge", async () => {
   const factory = new IDBFactory();
   const did = "did:plc:versionchange";
   let closedCount = 0;
@@ -232,21 +232,21 @@ test("onversionchange closes existing IndexedDbStore cleanly so a v3 upgrade doe
     closedCount++;
   });
 
-  // Upgrade the same database to version 3 from a second connection; store1 must close and unblock cleanly.
+  // Upgrade the same database to version 4 from a second connection; store1 must close and unblock cleanly.
   const upgraded = new Promise<IDBDatabase>((resolve, reject) => {
-    const req = factory.open(`flock-sync-${did}`, 3);
+    const req = factory.open(`flock-sync-${did}`, 4);
     req.onupgradeneeded = () => {
-      // No-op v3 upgrade.
+      // No-op v4 upgrade.
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
 
-  const v3Db = await Promise.race([
+  const v4Db = await Promise.race([
     upgraded,
-    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("v3 upgrade wedged waiting on store1")), 1_000)),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("v4 upgrade wedged waiting on store1")), 1_000)),
   ]);
-  v3Db.close();
+  v4Db.close();
 
   assert.equal(closedCount, 1);
   await assert.rejects(() => store1.listSpaces(), SyncStoreError);

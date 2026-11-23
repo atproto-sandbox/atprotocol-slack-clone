@@ -21,9 +21,9 @@ export type DmSessionBridgeProps = {
  * reported up to `DmProvider` through `onSession`.
  */
 export function DmSessionBridge({ did, dmConfig, onSession }: DmSessionBridgeProps) {
-  const { status, client, store, engine, snapshots, live, needsNotifyScopeUpgrade, error, connect, signOut } = useBrowserSession(did, dmConfig);
+  const { status, client, store, engine, groupOAuth, snapshots, live, needsNotifyScopeUpgrade, error, connect, signOut } = useBrowserSession(did, dmConfig);
   useEffect(() => {
-    onSession({ status, client, store, engine, snapshots, live, needsNotifyScopeUpgrade, error, connect, signOut });
-  }, [status, client, store, engine, snapshots, live, needsNotifyScopeUpgrade, error, connect, signOut, onSession]);
+    onSession({ status, client, store, engine, groupOAuth, snapshots, live, needsNotifyScopeUpgrade, error, connect, signOut });
+  }, [status, client, store, engine, groupOAuth, snapshots, live, needsNotifyScopeUpgrade, error, connect, signOut, onSession]);
   return null;
 }

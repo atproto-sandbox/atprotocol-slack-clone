@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { COMMIT_DIGEST_BYTES, LTHASH_STATE_BYTES, SyncStoreError, type StoredRecord, type SyncStore, type WriterCommit } from "../store";
-import { channelUri } from "@flock/protocol/keys";
+import { channelUri, workspaceUri } from "@flock/protocol/keys";
 import { COLLECTION } from "@flock/protocol/nsids";
 
 // What every `SyncStore` must do, run against each implementation: compare-and-set commits by generation, revision and
@@ -213,8 +213,58 @@ export function storeContract(name: string, open: () => Promise<SyncStore>): voi
     assert.equal(await store.getRecord(SPACE, "did:plc:w", MESSAGE, "bad-digest"), undefined);
     assert.equal((await store.getWriter(SPACE, "did:plc:w"))!.syncedRev, "r1");
 
-    // purgeWriter and purgeSpace reset hashes back to undefined.
-    await store.purgeWriter(SPACE, "did:plc:w");
+    // purgeWriter and purgeSpace reset hashes back to undefined, and purgeWriter enforces epoch/invalidationSeq/generation CAS.
+    await store.putSpace({
+      space: SPACE,
+      spaceRev: "s1",
+      writers: [{ did: "did:plc:w", repoRev: "r1" }],
+      writersListedAt: 1,
+      workspace: null,
+      lastOpenedAt: 1,
+      invalidationSeq: 2,
+    });
+    const prePurgeWriter = (await store.getWriter(SPACE, "did:plc:w"))!;
+    const liveEpoch = await store.epoch(SPACE);
+    assert.equal(
+      await store.putSpace(
+        {
+          space: SPACE,
+          spaceRev: "s0-stale",
+          writers: [],
+          writersListedAt: 99,
+          workspace: null,
+          lastOpenedAt: 99,
+        },
+        { expectedInvalidationSeq: 1 },
+      ),
+      false,
+      "putSpace must refuse mismatched expectedInvalidationSeq without overwriting writers or writersListedAt",
+    );
+    assert.equal((await store.getSpace(SPACE))?.spaceRev, "s1");
+    assert.equal(
+      await store.purgeWriter(SPACE, "did:plc:w", { expectedGeneration: prePurgeWriter.generation + 99 }),
+      false,
+      "purgeWriter must refuse mismatched expectedGeneration",
+    );
+    assert.equal(
+      await store.purgeWriter(SPACE, "did:plc:w", { expectedInvalidationSeq: 1 }),
+      false,
+      "purgeWriter must refuse mismatched expectedInvalidationSeq",
+    );
+    assert.equal(
+      await store.purgeWriter(SPACE, "did:plc:w", { epoch: "stale:epoch" }),
+      false,
+      "purgeWriter must refuse mismatched epoch",
+    );
+    assert.equal((await store.getWriter(SPACE, "did:plc:w"))!.syncedRev, "r1", "refused CAS purgeWriter preserves writer");
+    assert.equal(
+      await store.purgeWriter(SPACE, "did:plc:w", {
+        epoch: liveEpoch,
+        expectedInvalidationSeq: 2,
+        expectedGeneration: prePurgeWriter.generation,
+      }),
+      true,
+    );
     const afterWriterPurge = (await store.getWriter(SPACE, "did:plc:w"))!;
     assert.equal(afterWriterPurge.setHash, undefined);
     assert.equal(afterWriterPurge.commitDigest, undefined);
@@ -391,5 +441,258 @@ export function storeContract(name: string, open: () => Promise<SyncStore>): voi
       },
     }), true);
     assert.equal((await store.getWriter(SPACE, alice))?.optimisticOverlay, undefined);
+  });
+
+  test(`${name}: OpenSocial leavingGroups, joiningGroups, reactivatingGroups, and deleteIdentity persist, clone defensively, reject empty keys, and clear`, async () => {
+    const store = await open();
+    const groupDid = "did:plc:222222222222222222222222";
+
+    await store.putIdentity({ kind: "pds", did: groupDid, value: "https://gh1.example", resolvedAt: 10 });
+    assert.equal((await store.getIdentity("pds", groupDid))?.value, "https://gh1.example");
+    await store.deleteIdentity("pds", groupDid);
+    assert.equal(await store.getIdentity("pds", groupDid), undefined);
+
+    const leaveInput = {
+      groupDid,
+      expectedIncarnation: "inc-1",
+      phase: "leaving_group" as const,
+      createdAt: 100,
+    };
+    await store.putLeavingGroup(leaveInput);
+    leaveInput.expectedIncarnation = "mutated";
+    const fetchedLeave = await store.getLeavingGroup(groupDid);
+    assert.deepEqual(fetchedLeave, {
+      groupDid,
+      expectedIncarnation: "inc-1",
+      phase: "leaving_group",
+      createdAt: 100,
+    });
+    assert.equal((await store.listLeavingGroups()).length, 1);
+    await assert.rejects(
+      () => store.putLeavingGroup({ groupDid: "", phase: "leaving_group", createdAt: 1 }),
+      SyncStoreError,
+    );
+
+    const joinInput = {
+      operationId: "op-join-1",
+      mode: "create" as const,
+      intentHash: "hash-1",
+      authorityEndpoint: "https://gh1.example",
+      createParams: { name: "Acme", joinPolicy: "approval" as const, publicMeta: true },
+      groupDid,
+      phase: "submitting" as const,
+      createdAt: 200,
+    };
+    await store.putJoiningGroup(joinInput);
+    joinInput.createParams.name = "Mutated";
+    const fetchedJoin = await store.getJoiningGroup("op-join-1");
+    assert.equal(fetchedJoin?.createParams?.name, "Acme");
+    fetchedJoin!.createParams!.name = "MutatedOut";
+    assert.equal((await store.getJoiningGroup("op-join-1"))?.createParams?.name, "Acme");
+    assert.equal((await store.listJoiningGroups()).length, 1);
+    await assert.rejects(
+      () => store.putJoiningGroup({ operationId: "", mode: "open", intentHash: "h", phase: "submitting", createdAt: 1 }),
+      SyncStoreError,
+    );
+
+    const reactInput = {
+      operationId: "op-react-1",
+      groupDid,
+      restoredIncarnation: "inc-2",
+      phase: "restoring_acceptance" as const,
+      createdAt: 300,
+    };
+    await store.putReactivatingGroup(reactInput);
+    assert.deepEqual(await store.getReactivatingGroup("op-react-1"), reactInput);
+    assert.equal((await store.listReactivatingGroups()).length, 1);
+    await assert.rejects(
+      () => store.putReactivatingGroup({ operationId: "", groupDid, phase: "activating", createdAt: 1 }),
+      SyncStoreError,
+    );
+
+    await store.deleteLeavingGroup(groupDid);
+    assert.equal(await store.getLeavingGroup(groupDid), undefined);
+    await store.putLeavingGroup({ groupDid, phase: "reconciling_post_delete", createdAt: 101 });
+
+    await store.deleteJoiningGroup("op-join-1");
+    assert.equal(await store.getJoiningGroup("op-join-1"), undefined);
+    await store.putJoiningGroup({
+      operationId: "op-join-2",
+      mode: "approval",
+      intentHash: "hash-2",
+      groupDid,
+      phase: "pending_approval",
+      createdAt: 201,
+    });
+
+    await store.deleteReactivatingGroup("op-react-1");
+    assert.equal(await store.getReactivatingGroup("op-react-1"), undefined);
+    await store.putReactivatingGroup({
+      operationId: "op-react-2",
+      groupDid,
+      phase: "activating",
+      createdAt: 301,
+    });
+
+    await store.clear();
+    assert.deepEqual(await store.listLeavingGroups(), []);
+    assert.deepEqual(await store.listJoiningGroups(), []);
+    assert.deepEqual(await store.listReactivatingGroups(), []);
+  });
+
+  test(`${name}: staleIfBehindRev marks intermediate writer revisions stale while ignoring caught-up or absent writers, and putSpace enforces expectedRevision / disallowOlderSpaceRev / touchMetadataOnly`, async () => {
+    const store = await open();
+    const writerDid = "did:plc:r19writer00000000001";
+
+    // 1. Cold/absent writer: `staleIfBehindRev` refuses without materializing a record.
+    assert.equal(
+      await store.commit({
+        space: SPACE,
+        repo: writerDid,
+        expectedGeneration: null,
+        markStale: true,
+        staleIfBehindRev: "3lblr19rev003",
+      }),
+      false,
+    );
+    assert.equal(await store.getWriter(SPACE, writerDid), undefined);
+
+    // 2. Concurrent refresh commits intermediate `r2` (`3lblr19rev002`, `stale: false`, `generation = 1`);
+    //    `staleIfBehindRev: "3lblr19rev003"` (`r2 < r3`) marks it `stale: true` even without `expectedGeneration`!
+    assert.equal(
+      await store.commit({
+        space: SPACE,
+        repo: writerDid,
+        expectedGeneration: 0,
+        rev: "3lblr19rev002",
+        next: { syncedRev: "3lblr19rev002", checkedAt: 100, stale: false, coverage: {} },
+      }),
+      true,
+    );
+    assert.equal(
+      await store.commit({
+        space: SPACE,
+        repo: writerDid,
+        expectedGeneration: null,
+        markStale: true,
+        staleIfBehindRev: "3lblr19rev002",
+      }),
+      false,
+      "writer already at >= staleIfBehindRev must remain clean",
+    );
+    assert.equal((await store.getWriter(SPACE, writerDid))?.stale, false);
+
+    assert.equal(
+      await store.commit({
+        space: SPACE,
+        repo: writerDid,
+        expectedGeneration: null,
+        markStale: true,
+        staleIfBehindRev: "3lblr19rev003",
+      }),
+      true,
+      "writer at r2 < r3 must be marked stale",
+    );
+    assert.equal((await store.getWriter(SPACE, writerDid))?.stale, true);
+
+    // 3. `putSpace` enforces `expectedRevision`, `disallowOlderSpaceRev`, and `touchMetadataOnly` atomically!
+    const parentWs = workspaceUri("did:plc:g");
+    assert.equal(
+      await store.putSpace(
+        {
+          space: SPACE,
+          spaceRev: null,
+          writers: [],
+          writersListedAt: null,
+          workspace: parentWs,
+          lastOpenedAt: 50,
+        },
+        { touchMetadataOnly: true },
+      ),
+      true,
+    );
+    assert.equal((await store.getSpace(SPACE))?.revision, 0, "touchMetadataOnly on cold space keeps revision 0");
+
+    assert.equal(
+      await store.putSpace(
+        {
+          space: SPACE,
+          spaceRev: "3lblspace0002",
+          writers: [{ did: writerDid, repoRev: "3lblr19rev003" }],
+          writersListedAt: 200,
+          workspace: parentWs,
+          lastOpenedAt: 200,
+        },
+        { expectedRevision: 0, disallowOlderSpaceRev: true },
+      ),
+      true,
+    );
+    assert.equal((await store.getSpace(SPACE))?.revision, 1);
+
+    // Stale cross-tab scan with `expectedRevision: 0` or older `spaceRev` is refused!
+    assert.equal(
+      await store.putSpace(
+        {
+          space: SPACE,
+          spaceRev: "3lblspace0001",
+          writers: [],
+          writersListedAt: 150,
+          workspace: null,
+          lastOpenedAt: 150,
+        },
+        { expectedRevision: 0, disallowOlderSpaceRev: true },
+      ),
+      false,
+    );
+    assert.equal(
+      await store.putSpace(
+        {
+          space: SPACE,
+          spaceRev: "3lblspace0001",
+          writers: [],
+          writersListedAt: 150,
+          workspace: null,
+          lastOpenedAt: 150,
+        },
+        { disallowOlderSpaceRev: true },
+      ),
+      false,
+    );
+
+    // `touchMetadataOnly` updates `lastOpenedAt` without clobbering `spaceRev`, `writers`, or `revision`!
+    assert.equal(
+      await store.putSpace(
+        {
+          space: SPACE,
+          spaceRev: null,
+          writers: [],
+          writersListedAt: null,
+          workspace: parentWs,
+          lastOpenedAt: 999,
+        },
+        { touchMetadataOnly: true },
+      ),
+      true,
+    );
+    const preserved = (await store.getSpace(SPACE))!;
+    assert.equal(preserved.spaceRev, "3lblspace0002");
+    assert.equal(preserved.writers.length, 1);
+    assert.equal(preserved.lastOpenedAt, 999);
+    assert.equal(preserved.revision, 1);
+
+    // 4. `purgeWriter` enforces `expectedSpaceRevision` atomically without deleting writer records!
+    await store.commit({
+      space: SPACE,
+      repo: writerDid,
+      expectedGeneration: null,
+      upsert: [record(SPACE, writerDid, MESSAGE, "keep-me")],
+      next: { syncedRev: "3lblr19rev003", checkedAt: 300, stale: false, coverage: {} },
+    });
+    assert.equal(
+      await store.purgeWriter(SPACE, writerDid, { expectedSpaceRevision: 0 }),
+      false,
+      "purgeWriter must refuse stale expectedSpaceRevision",
+    );
+    assert.equal((await store.records(SPACE, MESSAGE, writerDid)).length, 1);
   });
 }

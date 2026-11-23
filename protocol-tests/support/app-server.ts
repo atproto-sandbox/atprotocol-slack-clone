@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 
-// Running this app's servers from a test: the web app's production server and the operator's process, each on a free port,
-// with readiness and a clean stop. Both inherit the test process's environment, so they share its database and keys.
+// Running this app's servers from a test: the web app's production server, the operator's process, and optionally
+// a Group Host process, each on a free port with readiness and a clean stop.
 
 export type AppServer = { url: string; output(): string; stop(): Promise<void> };
 
@@ -11,7 +11,8 @@ export type AppServer = { url: string; output(): string; stop(): Promise<void> }
 export function startAppServer(port: number): Promise<AppServer> {
   return startServer(
     ["apps/web/node_modules/next/dist/bin/next", "start", "apps/web", "--hostname", "127.0.0.1", "--port", String(port)],
-    `http://127.0.0.1:${port}`, "/oauth/client-metadata.json",
+    `http://127.0.0.1:${port}`,
+    "/oauth/client-metadata.json",
   );
 }
 
@@ -20,6 +21,13 @@ export function startOperatorServer(env: NodeJS.ProcessEnv = process.env): Promi
   const url = env.OPERATOR_URL;
   assert.ok(url, "OPERATOR_URL says where the operator serves");
   return startServer(["--import", "tsx", "apps/operator/src/operator/main.ts"], new URL(url).origin, "/.well-known/did.json", env);
+}
+
+/** The Group Host's process at `GROUP_HOST_URL`, with `env`; resolves once it serves its did:web document. */
+export function startGroupHostProcess(env: NodeJS.ProcessEnv = process.env): Promise<AppServer> {
+  const url = env.GROUP_HOST_URL;
+  assert.ok(url, "GROUP_HOST_URL says where the Group Host serves");
+  return startServer(["--import", "tsx", "apps/group-host/src/main.ts"], new URL(url).origin, "/.well-known/did.json", env);
 }
 
 /** One app: the web app at `APP_URL` and its operator at `OPERATOR_URL`, each its own process and origin. */
@@ -37,23 +45,31 @@ export async function startStack(env: NodeJS.ProcessEnv): Promise<Stack> {
   try {
     web = await startServer(
       ["apps/web/node_modules/next/dist/bin/next", "start", "apps/web", "--hostname", appUrl.hostname, "--port", appUrl.port],
-      appUrl.origin, "/oauth/client-metadata.json", env,
+      appUrl.origin,
+      "/oauth/client-metadata.json",
+      env,
     );
   } catch (error) {
     await operator.stop();
     throw error;
   }
   return {
-    appUrl, operatorUrl: new URL(env.OPERATOR_URL),
+    appUrl,
+    operatorUrl: new URL(env.OPERATOR_URL),
     output: () => `${web.output()}\n--- operator ---\n${operator.output()}`,
-    stop: async () => { await web.stop(); await operator.stop(); },
+    stop: async () => {
+      await web.stop();
+      await operator.stop();
+    },
   };
 }
 
 async function startServer(args: string[], url: string, readyPath: string, env: NodeJS.ProcessEnv = process.env): Promise<AppServer> {
   const child = spawn(process.execPath, args, { cwd: process.cwd(), env: { ...env }, stdio: ["ignore", "pipe", "pipe"] });
   let output = "";
-  const capture = (chunk: string) => { output = `${output}${chunk}`.slice(-20_000); };
+  const capture = (chunk: string) => {
+    output = `${output}${chunk}`.slice(-20_000);
+  };
   child.stdout?.setEncoding("utf8").on("data", capture);
   child.stderr?.setEncoding("utf8").on("data", capture);
   const stop = async () => {
@@ -79,7 +95,7 @@ export async function availablePort(): Promise<number> {
   const address = server.address();
   assert.ok(address && typeof address === "object");
   const port = address.port;
-  await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
   return port;
 }
 

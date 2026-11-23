@@ -1,58 +1,153 @@
-import { appInboxState } from "../../atproto/space-ops";
-import { appInboxUri, channelUri, inboxUri } from "@flock/protocol/keys";
-import { OperationRejectedError, type OperationContext } from "../journal";
+import type * as GetRecord from "@flock/protocol/lexicons/api/types/com/atproto/space/getRecord";
+import { personalInvitesUri } from "@flock/protocol/keys";
+import { OPENSOCIAL_COLLECTION } from "@flock/protocol/nsids";
+import { WORKSPACE_ENVELOPE } from "@flock/protocol/workspace-summary";
+import { sessionClient } from "../../atproto/client";
+import { putAuthorityRecord } from "../../atproto/space-ops";
 import type { OperatorActor } from "../actor";
-import { activeRoster, assertMembership, directoryRecords, writeRoster } from "../workspace-state";
-import type { OperationKind } from "./kind";
-import { putListMember } from "../members";
-import { activeExtInstalls, activeInstalls, readInstall } from "../membership";
+import { OperationRejectedError, type OperationContext } from "../journal";
+import {
+  defaultRoleKeys,
+  humanMemberDids,
+  putMembershipRoles,
+  readGroupGovernanceState,
+} from "../workspace-state";
+import type { OperationKind, OperatorRequest } from "./kind";
+
+const ISO_DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 
 export const inviteMemberKind: OperationKind = {
   kind: "inviteMember",
   required: ["subject"],
+  optional: ["expiresAt"],
   actor: "admin",
   submittedThrough: "execute",
-  steps: ["member-workspace", "member-inbox-writer", "member-app-inbox-{app}", "member-public-channel-{skey}", "member-ext-{extId}", "member-workspace-roster", "member-state-verified"],
-  run: (actor, context, request) => inviteMember(actor, context, request.subject as string),
+  steps: [
+    "member-workspace",
+    "member-inbox-writer",
+    "member-app-inbox-{app}",
+    "member-public-channel-{skey}",
+    "member-ext-{extId}",
+    "member-workspace-roster",
+    "member-invite-record",
+    "member-state-verified",
+  ],
+  run: (actor, context, request) =>
+    inviteMember(actor, context, request as OperatorRequest & { subject: string; expiresAt?: string }),
 };
 
-async function inviteMember(actor: OperatorActor, context: OperationContext, subject: string): Promise<void> {
-  if (subject === actor.workspace.authorityDid) throw new OperationRejectedError("The workspace authority is already an implicit member.");
-  if ((await readInstall(actor, subject))?.active) throw new OperationRejectedError("An installed app is not invited as a person; change its access instead.");
-  const workspace = actor.workspace.uri;
-  const inbox = inboxUri(actor.workspace.authorityDid, actor.workspace.skey);
-  const channels = await directoryRecords(actor);
-  const publicChannels = channels.filter((record) => record.value.visibility === "public");
-  const current = await activeRoster(actor);
-  if (!current.has(subject) && current.size >= 200) throw new OperationRejectedError("Workspace member limit reached (200).");
-  const installs = await activeInstalls(actor);
-  const appInboxes: Array<{ app: string; space: string }> = [];
-  for (const install of [...installs.values()].sort((left, right) => left.subject.localeCompare(right.subject))) {
-    const space = appInboxUri(actor.workspace.authorityDid, actor.workspace.skey, install.subject);
-    if (await appInboxState(actor.session, space) === "present") appInboxes.push({ app: install.subject, space });
+async function inviteMember(
+  actor: OperatorActor,
+  context: OperationContext,
+  request: OperatorRequest & { subject: string; expiresAt?: string },
+): Promise<void> {
+  const groupDid = actor.workspace.authorityDid;
+  const subject = request.subject;
+  if (subject === groupDid) {
+    throw new OperationRejectedError("The group account cannot be invited as a human member.");
   }
-  const activeExts = [...(await activeExtInstalls(actor)).values()].sort((left, right) => left.extId.localeCompare(right.extId));
 
-  for (const ext of activeExts) {
-    await context.step(`member-ext-${ext.extId}`, () => putListMember(actor.session, ext.space, subject, true, true));
+  const isExpiringInvitation = request.expiresAt !== undefined;
+  if (isExpiringInvitation) {
+    const expMs =
+      typeof request.expiresAt === "string" && ISO_DATETIME_RE.test(request.expiresAt)
+        ? Date.parse(request.expiresAt)
+        : Number.NaN;
+    if (
+      typeof request.expiresAt !== "string" ||
+      !Number.isFinite(expMs) ||
+      (!context.completedSteps.includes("member-invite-record") && expMs <= Date.now())
+    ) {
+      throw new OperationRejectedError("Invitation expiresAt must be a valid future datetime.");
+    }
   }
-  await context.step("member-workspace", () => putListMember(actor.session, workspace, subject, true, true));
-  await context.step("member-inbox-writer", () => putListMember(actor.session, inbox, subject, false, true));
-  for (const appInbox of appInboxes) {
-    await context.step(`member-app-inbox-${appInbox.app}`, () => putListMember(actor.session, appInbox.space, subject, false, true));
+
+  const state = await readGroupGovernanceState(actor.session, groupDid);
+  if (state.knownAppSubjects.has(subject)) {
+    throw new OperationRejectedError("An installed app is not invited as a person; change its access instead.");
   }
-  for (const channel of publicChannels) {
-    const space = channelUri(actor.workspace.authorityDid, channel.value.skey);
-    await context.step(`member-public-channel-${channel.value.skey}`, () => putListMember(actor.session, space, subject, true, true));
+
+  if (
+    isExpiringInvitation &&
+    !context.completedSteps.includes("member-invite-record") &&
+    state.memberships.has(subject)
+  ) {
+    throw new OperationRejectedError("Account is already a member of this workspace.");
   }
-  await context.step("member-workspace-roster", async () => {
-    await writeRoster(actor, workspace, subject, true);
-  });
+
+  const currentHumans = humanMemberDids(state, groupDid);
+  if (!currentHumans.has(subject) && currentHumans.size >= WORKSPACE_ENVELOPE.members) {
+    throw new OperationRejectedError(`Workspace member limit reached (${WORKSPACE_ENVELOPE.members}).`);
+  }
+
+  const defaults = defaultRoleKeys(state);
+  if (defaults.length === 0) {
+    throw new OperationRejectedError("NoDefaultRole");
+  }
+
+  if (isExpiringInvitation) {
+    const expiresAt = request.expiresAt!;
+    await context.step("member-invite-record", async () => {
+      await putAuthorityRecord(
+        actor.session,
+        personalInvitesUri(subject),
+        OPENSOCIAL_COLLECTION.invite,
+        context.operationId,
+        {
+          createdAt: new Date().toISOString(),
+          expiresAt,
+        },
+      );
+    });
+  } else {
+    // Direct Membership Grant mode: single O(1) `putRecord(membership)` write in `members/self` grants access across all public channels & extensions!
+    await context.step("member-workspace", async () => {
+      const latest = await readGroupGovernanceState(actor.session, groupDid);
+      if (latest.memberships.has(subject)) return;
+      await putMembershipRoles(actor.session, groupDid, subject, defaults);
+    });
+  }
+
+  // Legacy step replay markers (no-ops under OpenSocial flat union RBAC):
+  if (context.completedSteps.includes("member-inbox-writer")) {
+    await context.step("member-inbox-writer", async () => {});
+  }
+  for (const prev of context.completedSteps) {
+    if (prev.startsWith("member-app-inbox-")) {
+      const app = prev.slice("member-app-inbox-".length);
+      await context.step(`member-app-inbox-${app}`, async () => {});
+    } else if (prev.startsWith("member-public-channel-")) {
+      const skey = prev.slice("member-public-channel-".length);
+      await context.step(`member-public-channel-${skey}`, async () => {});
+    } else if (prev.startsWith("member-ext-")) {
+      const extId = prev.slice("member-ext-".length);
+      await context.step(`member-ext-${extId}`, async () => {});
+    }
+  }
+  if (context.completedSteps.includes("member-workspace-roster")) {
+    await context.step("member-workspace-roster", async () => {});
+  }
+
   await context.step("member-state-verified", async () => {
-    for (const ext of activeExts) await assertMembership(actor, ext.space, subject, true, true);
-    await assertMembership(actor, workspace, subject, true, true);
-    await assertMembership(actor, inbox, subject, false, true);
-    for (const appInbox of appInboxes) await assertMembership(actor, appInbox.space, subject, false, true);
-    for (const channel of publicChannels) await assertMembership(actor, channelUri(actor.workspace.authorityDid, channel.value.skey), subject, true, true);
+    const latest = await readGroupGovernanceState(actor.session, groupDid);
+    if (isExpiringInvitation) {
+      const stored = await sessionClient(actor.session).query<GetRecord.OutputSchema>(
+        "com.atproto.space.getRecord",
+        {
+          space: personalInvitesUri(subject),
+          repo: groupDid,
+          collection: OPENSOCIAL_COLLECTION.invite,
+          rkey: context.operationId,
+        },
+      );
+      if (!stored.value) {
+        throw new Error("Group invitation record has not converged.");
+      }
+      if (latest.memberships.has(subject)) {
+        throw new OperationRejectedError("Expiring invitation must not grant immediate membership.");
+      }
+    } else if (!latest.memberships.has(subject)) {
+      throw new Error("Group membership record has not converged.");
+    }
   });
 }

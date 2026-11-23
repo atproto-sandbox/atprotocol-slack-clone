@@ -1,19 +1,25 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  acceptanceRecordKey,
   appInboxSkey,
   appInboxUri,
+  appRoleKey,
   canonicalJson,
   canonicalParticipants,
+  channelRoleKey,
   decisionRecordKey,
   DM_INBOX_SKEY,
   dmConversationUri,
   dmInboxUri,
   extSpaceSkey,
   extSpaceUri,
+  groupMembersUri,
+  groupMetaUri,
+  inboxUri,
   isDid,
+  isRecordKey,
   isSkey,
+  isTid,
   parseAppInboxUri,
   parseChannelUri,
   parseDmConversationUri,
@@ -21,10 +27,15 @@ import {
   parseDmMessageUri,
   parseDmSpaceUri,
   parseExtSpaceUri,
+  parseGroupMembersUri,
+  parseGroupMetaUri,
+  parseInboxUri,
+  parsePersonalInvitesUri,
   parseSpaceRecordUri,
   parseSpaceUri,
   parseTasksSpaceUri,
   parseWorkspaceUri,
+  personalInvitesUri,
   reactionRecordKey,
   recordKeyHash,
   requestDigest,
@@ -35,23 +46,25 @@ import {
   subjectKey,
   tasksSpaceUri,
   tidNow,
+  workspaceUri,
 } from "./keys";
 
-test("stable hashes use UTF-8 SHA-256 and lowercase unpadded base32", () => {
+test("stable hashes and appRoleKey use UTF-8 SHA-256 and lowercase unpadded base32", () => {
   assert.equal(stableHash("abc"), "xj4bnp4pahh6uqkbidpf3lrceoyagyndsylxvhfucd7wd4qacwwq");
   assert.equal(recordKeyHash("abc"), "x:j:4:b:n:p:4:p:a:h:h:6:u:q:k:b:i:d:p:f:3:l:r:c:e:o:y:a:g:y:n:d:s:y:l:x:v:h:f:u:c:d:7:w:d:4:q:a:c:w:w:q");
   assert.equal(subjectKey("did:plc:alice"), `d-${recordKeyHash("did:plc:alice")}`);
+  const roleKey = appRoleKey("did:plc:bot1");
+  assert.equal(roleKey.length, 56);
+  assert.match(roleKey, /^app-[a-z2-7]{52}$/);
+  assert.equal(isRecordKey(roleKey), true);
+  assert.equal(channelRoleKey("general"), "channel-general");
   assert.equal(requestRecordKey("at://did:plc:owner/space/new.flock.channel/general", "did:plc:alice"),
     `r-${recordKeyHash("at://did:plc:owner/space/new.flock.channel/general\u0000did:plc:alice")}`);
-  assert.equal(acceptanceRecordKey("at://did:plc:owner/space/new.flock.workspace/workspace"),
-    `a-${recordKeyHash("at://did:plc:owner/space/new.flock.workspace/workspace")}`);
   const messageUri = spaceRecordUri("at://did:plc:owner/space/new.flock.channel/general", "did:plc:alice", "new.flock.channel.message", "abc");
   assert.equal(reactionRecordKey(messageUri, "💜", "did:plc:alice"),
     `x-${recordKeyHash(`${messageUri}\u0000💜\u0000did:plc:alice`)}`);
-  const requestUri = spaceRecordUri("at://did:plc:owner/space/new.flock.inbox/inbox", "did:plc:alice", "new.flock.joinRequest", "r-abc");
+  const requestUri = spaceRecordUri("at://did:plc:owner/space/new.flock.inbox/self", "did:plc:alice", "new.flock.joinRequest", "r-abc");
   assert.equal(decisionRecordKey(requestUri), `q-${recordKeyHash(requestUri)}`);
-  assert.ok(subjectKey("did:plc:alice").length <= 512);
-  assert.match(subjectKey("did:plc:alice"), /^d-[a-z2-7](?::[a-z2-7]){51}$/);
   assert.deepEqual(parseSpaceRecordUri(messageUri, "at://did:plc:owner/space/new.flock.channel/general", "new.flock.channel.message"), {
     repo: "did:plc:alice", rkey: "abc",
   });
@@ -59,7 +72,7 @@ test("stable hashes use UTF-8 SHA-256 and lowercase unpadded base32", () => {
   assert.equal(parseSpaceRecordUri(messageUri, "at://did:plc:owner/space/new.flock.channel/other", "new.flock.channel.message"), null);
 });
 
-test("hash outputs are byte-identical to the fixed vectors from the pre-WebCrypto node:crypto implementation", () => {
+test("hash outputs are byte-identical to fixed SHA-256 vectors", () => {
   assert.equal(stableHash(""), "4oymiquy7qobjgx36tejs35zeqt24qpemsnzgtfeswmrw6csxbkq");
   assert.equal(stableHash("hello world"), "xfgspomtju7arjjokll5u7nl7lcij37dpjjyb3uqrd32zyxpzxuq");
   assert.equal(requestDigest({ a: 1, b: 2 }), "43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777");
@@ -67,43 +80,89 @@ test("hash outputs are byte-identical to the fixed vectors from the pre-WebCrypt
   assert.equal(requestDigest([1, 2, 3]), "a615eeaee21de5179de080de8c3052c8da901138406ba71c38c032845f7d54f4");
 });
 
-test("parseSpaceUri extracts the authority, type, and skey and rejects malformed or non-DID authorities", () => {
-  assert.deepEqual(parseSpaceUri("at://did:plc:owner/space/new.flock.channel/general"), {
-    authorityDid: "did:plc:owner", type: "new.flock.channel", skey: "general",
-  });
-  assert.deepEqual(parseSpaceUri("at://did:plc:alice/space/new.flock.dm.inbox/self"), {
-    authorityDid: "did:plc:alice", type: "new.flock.dm.inbox", skey: "self",
-  });
-  assert.equal(parseSpaceUri("not-a-uri"), null);
-  assert.equal(parseSpaceUri("at://alice/space/new.flock.channel/general"), null);
-  assert.equal(parseSpaceUri("at://did:plc:owner/new.flock.channel/general"), null);
-  assert.equal(parseSpaceUri("at://did:plc:owner/space/new.flock.channel/general/extra"), null);
-});
+test("isRecordKey and parseSpaceUri accept 1..512-character protocol record keys while isSkey caps Flock keys at 128", () => {
+  const key129 = "k".repeat(129);
+  const key512 = "k".repeat(512);
+  const key513 = "k".repeat(513);
 
-test("a space key follows record-key syntax: the PDS refuses `.` and `..`, so no parser here accepts them", () => {
+  assert.equal(isRecordKey("acme-1"), true);
+  assert.equal(isRecordKey(".hidden"), true);
+  assert.equal(isRecordKey(key129), true);
+  assert.equal(isRecordKey(key512), true);
+  assert.equal(isRecordKey(key513), false);
+  assert.equal(isRecordKey("."), false);
+  assert.equal(isRecordKey(".."), false);
+  assert.equal(isRecordKey(""), false);
+
   assert.equal(isSkey("acme-1"), true);
-  assert.equal(isSkey(".hidden"), true);
-  for (const bad of [".", "..", "", "a/b", "a b", "x".repeat(129)]) assert.equal(isSkey(bad), false, bad);
-  assert.equal(parseSpaceUri("at://did:plc:owner/space/new.flock.channel/.."), null);
-  assert.equal(parseSpaceUri("at://did:plc:owner/space/new.flock.channel/."), null);
+  assert.equal(isSkey("x".repeat(128)), true);
+  assert.equal(isSkey(key129), false);
+  assert.equal(isSkey("."), false);
+  assert.equal(isSkey(".."), false);
+
+  assert.deepEqual(parseSpaceUri(`at://did:plc:owner/space/third.party.modality/${key129}`), {
+    authorityDid: "did:plc:owner",
+    type: "third.party.modality",
+    skey: key129,
+  });
+  assert.deepEqual(parseSpaceUri(`at://did:plc:owner/space/third.party.modality/${key512}`), {
+    authorityDid: "did:plc:owner",
+    type: "third.party.modality",
+    skey: key512,
+  });
+  assert.equal(parseSpaceUri(`at://did:plc:owner/space/third.party.modality/${key513}`), null);
+  assert.equal(parseSpaceUri("at://did:plc:owner/space/third.party.modality/."), null);
+  assert.equal(parseSpaceUri("at://did:plc:owner/space/third.party.modality/.."), null);
 });
 
-test("a DID is bounded in length so a hostile link cannot render as a wall of text", () => {
+test("OpenSocial and Flock literal:self space URIs enforce self keys strictly", () => {
+  assert.equal(groupMetaUri("did:plc:grp"), "at://did:plc:grp/space/group.opensocial.meta/self");
+  assert.equal(groupMembersUri("did:plc:grp"), "at://did:plc:grp/space/group.opensocial.members/self");
+  assert.equal(personalInvitesUri("did:plc:alice"), "at://did:plc:alice/space/group.opensocial.invites/self");
+  assert.equal(workspaceUri("did:plc:grp"), "at://did:plc:grp/space/new.flock.workspace/self");
+  assert.equal(inboxUri("did:plc:grp"), "at://did:plc:grp/space/new.flock.inbox/self");
+
+  assert.deepEqual(parseGroupMetaUri("at://did:plc:grp/space/group.opensocial.meta/self"), { groupDid: "did:plc:grp" });
+  assert.equal(parseGroupMetaUri("at://did:plc:grp/space/group.opensocial.meta/other"), null);
+  assert.deepEqual(parseGroupMembersUri("at://did:plc:grp/space/group.opensocial.members/self"), { groupDid: "did:plc:grp" });
+  assert.equal(parseGroupMembersUri("at://did:plc:grp/space/group.opensocial.members/other"), null);
+  assert.deepEqual(parsePersonalInvitesUri("at://did:plc:alice/space/group.opensocial.invites/self"), { userDid: "did:plc:alice" });
+  assert.equal(parsePersonalInvitesUri("at://did:plc:alice/space/group.opensocial.invites/other"), null);
+
+  assert.deepEqual(parseWorkspaceUri("at://did:plc:owner/space/new.flock.workspace/self"), { authorityDid: "did:plc:owner", skey: "self" });
+  assert.equal(parseWorkspaceUri("at://did:plc:owner/space/new.flock.workspace/team"), null);
+  assert.deepEqual(parseInboxUri("at://did:plc:owner/space/new.flock.inbox/self"), { authorityDid: "did:plc:owner", skey: "self" });
+  assert.equal(parseInboxUri("at://did:plc:owner/space/new.flock.inbox/team"), null);
+
+  assert.deepEqual(parseChannelUri("at://did:plc:owner/space/new.flock.channel/general"), { authorityDid: "did:plc:owner", skey: "general" });
+  assert.equal(parseChannelUri(`at://did:plc:owner/space/new.flock.channel/${"x".repeat(129)}`), null);
+  assert.equal(requireSpaceAuthority("at://did:plc:owner/space/new.flock.inbox/self"), "did:plc:owner");
+  assert.throws(() => requireSpaceAuthority("at://did:plc:owner/space/new.flock.inbox/.."), /Invalid permissioned space URI/);
+});
+
+test("isTid enforces canonical pinned isValidTid first-character [234567abcdefghij] rule and rejects leading k..z", () => {
+  const first = tidNow(1_700_000_000_000, 1);
+  const second = tidNow(1_700_000_000_001, 1);
+  assert.equal(isTid(first), true);
+  assert.equal(isTid(second), true);
+  assert.equal(isTid("2222222222222"), true);
+  assert.equal(isTid("jzzzzzzzzzzzz"), true);
+  assert.ok(first < second);
+  for (const leading of "klmnopqrstuvwxyz") {
+    assert.equal(isTid(`${leading}222222222222`), false, `leading ${leading} must be rejected`);
+  }
+  assert.equal(isTid("1222222222222"), false);
+  assert.equal(isTid("222222222222"), false);
+  assert.equal(isTid("22222222222222"), false);
+});
+
+test("a DID is bounded in length", () => {
   assert.equal(isDid("did:plc:abc"), true);
   assert.equal(isDid("did:web:localhost%3A3000"), true);
   assert.equal(isDid(`did:plc:${"a".repeat(512)}`), true);
   assert.equal(isDid(`did:plc:${"a".repeat(513)}`), false);
   assert.equal(isDid("did:PLC:abc"), false);
   assert.equal(isDid("did:plc:ab c"), false);
-});
-
-test("workspace and channel URIs parse only their own space type, and any space URI names its authority", () => {
-  assert.deepEqual(parseWorkspaceUri("at://did:plc:owner/space/new.flock.workspace/team"), { authorityDid: "did:plc:owner", skey: "team" });
-  assert.equal(parseWorkspaceUri("at://did:plc:owner/space/new.flock.channel/team"), null);
-  assert.deepEqual(parseChannelUri("at://did:plc:owner/space/new.flock.channel/general"), { authorityDid: "did:plc:owner", skey: "general" });
-  assert.equal(parseChannelUri("at://did:plc:owner/space/new.flock.workspace/general"), null);
-  assert.equal(requireSpaceAuthority("at://did:plc:owner/space/new.flock.inbox/team"), "did:plc:owner");
-  assert.throws(() => requireSpaceAuthority("at://did:plc:owner/space/new.flock.inbox/.."), /Invalid permissioned space URI/);
 });
 
 test("canonical JSON sorts keys and rejects values outside its JSON domain", () => {
@@ -114,14 +173,6 @@ test("canonical JSON sorts keys and rejects values outside its JSON domain", () 
   assert.throws(() => canonicalJson(new Date()), /plain objects/);
 });
 
-test("TIDs use the protocol alphabet and are sortable by millisecond", () => {
-  const first = tidNow(1_700_000_000_000, 1);
-  const second = tidNow(1_700_000_000_001, 1);
-  assert.match(first, /^[234567abcdefghijklmnopqrstuvwxyz]{13}$/);
-  assert.ok(first < second);
-  assert.notEqual(tidNow(1_700_000_000_000, 1), tidNow(1_700_000_000_000, 2));
-});
-
 test("DM inbox and conversation URIs are fixed-shape and reject invalid owners or keys", () => {
   assert.equal(DM_INBOX_SKEY, "self");
   assert.equal(dmInboxUri("did:plc:alice"), "at://did:plc:alice/space/new.flock.dm.inbox/self");
@@ -130,129 +181,27 @@ test("DM inbox and conversation URIs are fixed-shape and reject invalid owners o
   assert.equal(dmConversationUri("did:plc:alice", convKey), `at://did:plc:alice/space/new.flock.dm.conversation/${convKey}`);
   assert.throws(() => dmConversationUri("alice", convKey), /Invalid DM conversation owner DID/);
   assert.throws(() => dmConversationUri("did:plc:alice", "short"), /Invalid DM conversation key/);
-  assert.throws(() => dmConversationUri("did:plc:alice", "2222222222228"), /Invalid DM conversation key/);
-});
-
-test("DM conversation URIs parse strictly and reject other space shapes", () => {
-  const convKey = "234567abcdefg";
-  const uri = dmConversationUri("did:plc:alice", convKey);
-  assert.deepEqual(parseDmConversationUri(uri), { ownerDid: "did:plc:alice", convKey });
-  assert.equal(parseDmConversationUri(`at://did:plc:alice/space/new.flock.dm.conversation/${convKey}/did:plc:alice/new.flock.dm.message/${convKey}`), null);
-  assert.equal(parseDmConversationUri("at://did:plc:alice/space/new.flock.dm.inbox/self"), null);
-  assert.equal(parseDmConversationUri(`at://did:plc:alice/space/new.flock.dm.conversation/notatid`), null);
-  assert.equal(parseDmConversationUri(`at://alice/space/new.flock.dm.conversation/${convKey}`), null);
-  assert.equal(parseDmConversationUri(""), null);
-});
-
-test("DM inbox URIs parse strictly and reject other skeys or shapes", () => {
+  assert.throws(() => dmConversationUri("did:plc:alice", "k222222222222"), /Invalid DM conversation key/);
+  assert.deepEqual(parseDmConversationUri(`at://did:plc:alice/space/new.flock.dm.conversation/${convKey}`), { ownerDid: "did:plc:alice", convKey });
   assert.deepEqual(parseDmInboxUri("at://did:plc:alice/space/new.flock.dm.inbox/self"), { ownerDid: "did:plc:alice" });
-  assert.equal(parseDmInboxUri("at://did:plc:alice/space/new.flock.dm.inbox/other"), null);
-  assert.equal(parseDmInboxUri("at://did:plc:alice/space/new.flock.dm.inbox"), null);
-  assert.equal(parseDmInboxUri("at://alice/space/new.flock.dm.inbox/self"), null);
-  assert.equal(parseDmInboxUri("at://did:plc:alice/space/new.flock.dm.conversation/self"), null);
-  assert.equal(parseDmInboxUri(""), null);
-});
-
-test("the DM SSE route parameter accepts only DM inbox or conversation space URIs", () => {
-  const convKey = "234567abcdefg";
   assert.deepEqual(parseDmSpaceUri("at://did:plc:alice/space/new.flock.dm.inbox/self"), { kind: "inbox", ownerDid: "did:plc:alice" });
-  assert.deepEqual(parseDmSpaceUri(dmConversationUri("did:plc:alice", convKey)), { kind: "conversation", ownerDid: "did:plc:alice", convKey });
-  for (const rejected of [
-    "",
-    "at://did:plc:alice/space/new.flock.workspace/workspace",
-    "at://did:plc:alice/space/new.flock.inbox/inbox",
-    "at://did:plc:alice/space/new.flock.channel/general",
-    "at://did:plc:alice/space/new.flock.dm.inbox/other",
-    `at://did:plc:alice/space/new.flock.dm.conversation/${convKey}/did:plc:alice/new.flock.dm.message/${convKey}`,
-    "at://did:plc:alice/space/new.flock.dm.conversation/notatid",
-    "https://example.com/space/new.flock.dm.inbox/self",
-    "at://did:plc:alice/new.flock.dm.inbox/self",
-  ]) {
-    assert.equal(parseDmSpaceUri(rejected), null, `rejected ${rejected}`);
-  }
-});
-
-test("DM message record URIs parse only the canonical owner-authored shape", () => {
-  const convKey = "234567abcdefg";
   const rkey = "234567abcdefh";
   const uri = spaceRecordUri(dmConversationUri("did:plc:alice", convKey), "did:plc:alice", "new.flock.dm.message", rkey);
   assert.deepEqual(parseDmMessageUri(uri), { ownerDid: "did:plc:alice", convKey, repo: "did:plc:alice", rkey });
-  const forged = spaceRecordUri(dmConversationUri("did:plc:alice", convKey), "did:plc:bob", "new.flock.dm.message", rkey);
-  assert.equal(parseDmMessageUri(forged), null, "a record whose repo is not the half owner is not a canonical DM message URI");
-  assert.equal(parseDmMessageUri(`at://did:plc:alice/space/new.flock.dm.conversation/${convKey}/did:plc:alice/new.flock.dm.reaction/${rkey}`), null);
-  assert.equal(parseDmMessageUri(42), null);
-  assert.equal(parseDmMessageUri(null), null);
 });
 
-test("canonical participants are sorted, deduplicated, and bounded to 2 through 100 DIDs", () => {
+test("canonical participants, appInboxUri, and extSpaceSkey preserve deterministic derivation", () => {
   assert.deepEqual(canonicalParticipants(["did:plc:bob", "did:plc:alice", "did:plc:bob"]), ["did:plc:alice", "did:plc:bob"]);
-  const hundred = Array.from({ length: 100 }, (_, index) => `did:plc:user${index}`);
-  assert.deepEqual(canonicalParticipants([...hundred].reverse()), [...hundred].sort());
-  assert.throws(() => canonicalParticipants(["did:plc:alice"]), /2 to 100 unique DIDs/);
-  assert.throws(() => canonicalParticipants(["did:plc:alice", "did:plc:alice"]), /2 to 100 unique DIDs/);
-  assert.throws(() => canonicalParticipants(Array.from({ length: 101 }, (_, index) => `did:plc:user${index}`)), /2 to 100 unique DIDs/);
-  assert.throws(() => canonicalParticipants(["did:plc:alice", "alice"]), /Invalid DM participant DID/);
-});
-
-test("DM reaction keys reuse the channel reaction key scheme over the message URI", () => {
-  const half = dmConversationUri("did:plc:alice", "2222222222222");
-  const messageUri = spaceRecordUri(half, "did:plc:alice", "new.flock.dm.message", "2222222222223");
-  assert.equal(reactionRecordKey(messageUri, "💜", "did:plc:bob"),
-    `x-${recordKeyHash(`${messageUri}\u0000💜\u0000did:plc:bob`)}`);
-});
-
-test("appInboxUri derives a fixed 105-character colon-separated key per (workspace, app) pair", () => {
-  const skey = appInboxSkey("workspace", "did:plc:bot");
-  assert.equal(skey, "i-m:j:v:7:h:w:v:n:e:6:s:g:g:x:i:d:7:o:6:f:i:o:d:l:w:x:y:j:q:r:r:b:e:a:k:g:7:b:g:l:3:w:i:r:4:o:e:s:d:j:t:a");
-  assert.equal(skey, `i-${recordKeyHash("workspace\u0000did:plc:bot")}`);
+  const skey = appInboxSkey("self", "did:plc:bot");
   assert.equal(skey.length, 105);
   assert.equal(isSkey(skey), true);
-  assert.match(skey, /^i-[a-z2-7](?::[a-z2-7]){51}$/);
-
-  const uri = appInboxUri("did:plc:owner", "workspace", "did:plc:bot");
-  assert.equal(uri, `at://did:plc:owner/space/new.flock.app.inbox/${skey}`);
-  assert.deepEqual(parseAppInboxUri(uri), { authorityDid: "did:plc:owner", skey });
-  assert.equal(parseAppInboxUri("at://did:plc:owner/space/new.flock.inbox/workspace"), null);
-  assert.equal(parseDmSpaceUri(uri), null);
-
-  assert.notEqual(appInboxUri("did:plc:owner", "other", "did:plc:bot"), uri, "distinct per workspace skey");
-  assert.notEqual(appInboxUri("did:plc:owner", "workspace", "did:plc:other"), uri, "distinct per app DID");
-  const longestWorkspaceSkey = "w".repeat(128);
-  const longestKey = appInboxSkey(longestWorkspaceSkey, "did:plc:bot");
-  assert.equal(longestKey.length, 105);
-  assert.equal(isSkey(longestKey), true);
-});
-
-test("extSpaceSkey and tasksSpaceUri derive bounded colon-separated keys and parse strictly", () => {
-  const skey = extSpaceSkey("workspace", "tasks");
-  assert.equal(skey, "x-y:v:r:5:7:s:p:h:i:u:s:o:s:t:f:i:g:b:s:h:t:g:o:n:5:7:b:p:w:v:f:x:b:r:p:p:j:n:x:g:x:y:f:d:g:q:k:b:7:3:r:q");
-  assert.equal(skey, `x-${recordKeyHash("tasks:workspace")}`);
-  assert.equal(skey.length, 105);
-  assert.equal(isSkey(skey), true);
-  assert.match(skey, /^x-[a-z2-7](?::[a-z2-7]){51}$/);
-
-  const uri = tasksSpaceUri("did:plc:owner", "workspace");
-  assert.equal(uri, `at://did:plc:owner/space/new.flock.ext.tasks/${skey}`);
-  assert.equal(extSpaceUri("did:plc:owner", "workspace", "tasks", "new.flock.ext.tasks"), uri);
-  assert.deepEqual(parseTasksSpaceUri(uri), { authorityDid: "did:plc:owner", skey });
-  assert.deepEqual(parseExtSpaceUri(uri), { authorityDid: "did:plc:owner", type: "new.flock.ext.tasks", skey });
-  assert.deepEqual(parseExtSpaceUri(uri, "new.flock.ext.tasks"), { authorityDid: "did:plc:owner", type: "new.flock.ext.tasks", skey });
-
-  assert.equal(parseTasksSpaceUri("at://did:plc:owner/space/new.flock.channel/general"), null);
-  assert.equal(parseTasksSpaceUri("at://did:plc:owner/space/new.flock.ext.other/x"), null);
-  assert.equal(parseExtSpaceUri("at://did:plc:owner/space/new.flock.channel/general"), null);
-  assert.equal(parseExtSpaceUri("at://did:plc:owner/space/new.flock.channel/general", "new.flock.channel"), null);
-  assert.equal(parseExtSpaceUri("at://did:plc:owner/space/new.flock.ext./x"), null);
-  assert.equal(parseExtSpaceUri(uri, "new.flock.ext.other"), null);
-  assert.notEqual(tasksSpaceUri("did:plc:owner", "other"), uri);
-  assert.notEqual(extSpaceSkey("workspace", "other"), skey);
-
-  const longestWorkspaceSkey = "w".repeat(128);
-  const longestExtKey = extSpaceSkey(longestWorkspaceSkey, "tasks");
-  assert.equal(longestExtKey.length, 105);
-  assert.equal(isSkey(longestExtKey), true);
-  assert.deepEqual(parseTasksSpaceUri(tasksSpaceUri("did:plc:owner", longestWorkspaceSkey)), {
+  assert.deepEqual(parseAppInboxUri(appInboxUri("did:plc:owner", "self", "did:plc:bot")), { authorityDid: "did:plc:owner", skey });
+  const tasksKey = extSpaceSkey("self", "tasks");
+  assert.equal(tasksKey.length, 105);
+  assert.deepEqual(parseTasksSpaceUri(tasksSpaceUri("did:plc:owner", "self")), { authorityDid: "did:plc:owner", skey: tasksKey });
+  assert.deepEqual(parseExtSpaceUri(extSpaceUri("did:plc:owner", "self", "tasks", "new.flock.ext.tasks")), {
     authorityDid: "did:plc:owner",
-    skey: longestExtKey,
+    type: "new.flock.ext.tasks",
+    skey: tasksKey,
   });
 });

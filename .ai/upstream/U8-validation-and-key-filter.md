@@ -1,5 +1,7 @@
 # Validate third-party space records, and document the record-key filter
 
+Status against `6747610566` + `opensocial.group` `8df0cc82` (R13, 2026-11-21): **Solved on `apps/group-host` for governance/moderation schemas; still open on personal PDSes.** In R13, Flock's `opensocial.group` Group Host (`apps/group-host`) unconditionally validates all `group.opensocial.*`, `com.atproto.label.record`, and `new.flock.app.install` schemas (plus `"new.flock.*"` open-object extensions) at write and import time without applying a slur filter to machine keys (`appRoleKey`). Personal PDSes (`TestPds` @ `6747610566`) still treat third-party `new.flock.*` records as `validationStatus: unknown` and still apply the explicit-slur filter to `rkey`s, so colon-delimited `recordKeyHash` remains in use for personal-PDS records.
+
 Status against `5d88b414` (2026-10-30): Not affected. The lexicon changes in this release (policies, `memberspace`, MACs, `data`) do not touch third-party schemas or the record-key filter.
 
 Status against `5b95b2f2`: Not affected. No lexicon or validation change touches third-party schemas or the record-key filter.

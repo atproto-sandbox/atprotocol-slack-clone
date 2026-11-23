@@ -186,7 +186,7 @@ export type ResolveKemKey = (did: string, forceRefresh: boolean) => Promise<stri
 
 export type SpaceCredentialDeps = {
   memberClient: AtprotoClient;
-  resolvePds(did: string): Promise<string>;
+  resolvePds(did: string, forceRefresh?: boolean): Promise<string>;
   resolveKemKey: ResolveKemKey;
   fetchEndpoint(request: Request): Promise<Response>;
   generateKey(): Promise<SpaceKey>;
@@ -875,6 +875,24 @@ export function credentialLifetimeMs(token: string): number | null {
   }
 }
 
+const STALE_MIGRATED_HOST_CODES: ReadonlySet<string> = new Set([
+  "RepoNotFound",
+  "GroupNotFound",
+  "SpaceNotFound",
+  "RepoTakendown",
+  "RepoDeactivated",
+]);
+
+function isPotentiallyMigratedHostError(error: unknown): boolean {
+  if (error instanceof SpaceCredentialError && error.code !== undefined && STALE_MIGRATED_HOST_CODES.has(error.code)) {
+    return true;
+  }
+  if (error instanceof XrpcError && STALE_MIGRATED_HOST_CODES.has(error.code)) {
+    return true;
+  }
+  return false;
+}
+
 export async function mintSpaceCredentialWith(
   deps: SpaceCredentialDeps,
   space: string,
@@ -893,16 +911,28 @@ export async function mintSpaceCredentialWith(
   if (opts?.signal?.aborted) throw abortReason(opts.signal);
   const key = await deps.generateKey();
   if (opts?.signal?.aborted) throw abortReason(opts.signal);
-  const { credential, spaceRev } = await exchangeSpaceCredential({
-    authorityPds,
-    delegationToken: delegation.token,
-    ...(opts?.clientAttestation !== undefined ? { clientAttestation: opts.clientAttestation } : {}),
-    ...(opts?.notify !== undefined ? { notify: opts.notify } : {}),
-    ...(opts?.signal !== undefined ? { signal: opts.signal } : {}),
-    space,
-    key,
-    fetchEndpoint: deps.fetchEndpoint,
-  });
+  const runExchange = (targetPds: string) =>
+    exchangeSpaceCredential({
+      authorityPds: targetPds,
+      delegationToken: delegation.token,
+      ...(opts?.clientAttestation !== undefined ? { clientAttestation: opts.clientAttestation } : {}),
+      ...(opts?.notify !== undefined ? { notify: opts.notify } : {}),
+      ...(opts?.signal !== undefined ? { signal: opts.signal } : {}),
+      space,
+      key,
+      fetchEndpoint: deps.fetchEndpoint,
+    });
+  let exchanged: SpaceCredentialExchangeResult;
+  try {
+    exchanged = await runExchange(authorityPds);
+  } catch (error) {
+    if (!isPotentiallyMigratedHostError(error)) throw error;
+    const freshPds = await deps.resolvePds(parsed.authorityDid, true);
+    if (freshPds === authorityPds) throw error;
+    if (opts?.signal?.aborted) throw abortReason(opts.signal);
+    exchanged = await runExchange(freshPds);
+  }
+  const { credential, spaceRev } = exchanged;
   const lifetime = credentialLifetimeMs(credential) ?? SPACE_CREDENTIAL_LIFETIME_MS;
   return new SpaceCredential({
     space,

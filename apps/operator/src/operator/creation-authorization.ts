@@ -46,6 +46,24 @@ export function hasCreationAuthorization(authorization: CreationAuthorization, o
 }
 
 /**
+ * Resolves the newly approved `groupDid` (`authority_did`) when `createWorkspace` is resumed after a `prompt=create`
+ * authority flow without an explicit `authority` DID in the request body.
+ */
+export function findCreationAuthorizationAuthority(
+  initiatorDid: string,
+  name: string,
+  operationId: string,
+  now: number,
+): string | null {
+  const row = getRawDb()
+    .prepare(`SELECT authority_did FROM creation_authorization
+      WHERE initiator_did = ? AND name = ? AND expires_at > ? AND (operation_id IS NULL OR operation_id = ?)
+      ORDER BY expires_at DESC LIMIT 1`)
+    .get(initiatorDid, name, now, operationId) as { authority_did: string } | undefined;
+  return row?.authority_did ?? null;
+}
+
+/**
  * Gives the authorization back for `operationId` only, for another 15 minutes: the creation's row was discarded because the
  * authority's grant lacked a scope for its first step, so the creator can reauthorize and retry without a second flow. It
  * runs in the transaction that discards the row.

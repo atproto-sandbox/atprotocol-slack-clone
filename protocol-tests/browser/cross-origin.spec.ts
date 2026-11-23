@@ -5,15 +5,26 @@ import test from "node:test";
 import { chromium, type Browser, type Page } from "@playwright/test";
 import { NodeOAuthClient, type NodeSavedSession, type NodeSavedState, type OAuthSession } from "@atproto/oauth-client-node";
 import { verifyJwt } from "@atproto/xrpc-server";
+import { Probe } from "../support/sync-dataset";
 import { countByOrigin, watchPreflights, type Preflight } from "../support/browser-network";
-import { combinedMemberScopes, outcome, startPdsNetwork, type NetworkActor, type Outcome, type PdsNetwork } from "../support/pds-network";
+import {
+  acceptGroupMembership,
+  bearerSession,
+  combinedMemberScopes,
+  createOpenSocialGroup,
+  outcome,
+  startPdsNetwork,
+  type NetworkActor,
+  type Outcome,
+  type PdsNetwork,
+} from "../support/pds-network";
 
-// K9 of `.ai/plans/platform-refactor.md`: can a page on the web app's origin talk to the protocol hosts directly? The web
-// origin, the two PDS hosts and a stand-in for the operator are four different origins. Each account signs in through the
-// real OAuth flow in the browser (PDS sign-in and consent pages) with the combined member grant, and every request the
-// client makes afterwards (PAR, token exchange, DPoP-bound XRPC, DID documents, credential exchange, MAC-bearing reads,
-// the operator call) is sent by the browser from the web origin. Node keeps the keys and verifies MACs; the browser decides
-// what is reachable, which preflights pass, and which response headers the page may read.
+// K9 of `.ai/plans/platform-refactor.md`, migrated to R13 OpenSocial groups: can a page on the web app's origin talk to
+// the protocol hosts directly? The web origin, the two personal PDS hosts, the OpenSocial Group Host (`pds.groupHostUrl`),
+// the PLC directory, and a stand-in for the operator are distinct origins. Each account signs in through the real OAuth flow
+// in the browser with the combined member grant, and every request the client makes afterwards (PAR, token exchange,
+// DPoP-bound XRPC, DID documents, Group Host credential exchange, MAC-bearing reads on both personal PDS and Group Host,
+// direct OpenSocial XRPC to Group Host, and the operator call) is sent by the browser from the web origin.
 
 const OPERATOR_METHOD = "new.flock.operator.getChanges";
 
@@ -22,7 +33,7 @@ type BrowserMember = {
   actor: NetworkActor; page: Page; session: OAuthSession; browserFetch(request: Request): Promise<Response>; failures: BrowserFailure[]; preflights: Preflight[];
 };
 
-test("a page on the web origin signs in, reaches PDS hosts and a separate operator origin directly (K9)", async (t) => {
+test("a page on the web origin signs in, reaches personal PDS hosts, Group Host, PLC, and operator origins directly (K9 / R13)", { timeout: 300_000 }, async (t) => {
   const pds = await startPdsNetwork("cross-origin");
   const servers: Server[] = [];
   let browser: Browser | undefined;
@@ -35,13 +46,13 @@ test("a page on the web origin signs in, reaches PDS hosts and a separate operat
     const unreachable = await closedOrigin();
     browser = await chromium.launch({ headless: true });
 
-    // given a channel with an authority-hosted writer, a member on the other host and an outsider, both signed in through the browser
-    const { authority, member, outsider, channel, rkey } = await provision(pds);
+    // given an OpenSocial group on Group Host with a writer on PDS 0, a member on PDS 1, and an outsider on PDS 1
+    const { groupDid, writer, member, outsider, channel, rkey } = await provision(pds);
     const memberSide = await signInThroughBrowser(browser, web.origin, pds, member);
     const outsiderSide = await signInThroughBrowser(browser, web.origin, pds, outsider);
 
-    // when the member's client runs each step through the browser
-    const results = await steps(pds, { authority, memberSide, outsiderSide, channel, rkey, operatorOrigin: operator.origin, unreachableOrigin: unreachable });
+    // when the member's and outsider's clients run each step through the browser
+    const results = await steps(pds, { groupDid, writer, memberSide, outsiderSide, channel, rkey, operatorOrigin: operator.origin, unreachableOrigin: unreachable });
 
     // then each capability holds, and only the unreachable host fails at the network level. The OAuth client also checks
     // each handle at https://<handle>/.well-known/atproto-did; the fixture's handles are not real domains, so those lookups
@@ -50,14 +61,19 @@ test("a page on the web origin signs in, reaches PDS hosts and a separate operat
     const handleChecks = all.filter((failure) => new URL(failure.url).pathname === "/.well-known/atproto-did" && /\.test2?$/.test(new URL(failure.url).hostname));
     const failures = all.filter((failure) => !handleChecks.includes(failure));
     const preflights = [...memberSide.preflights, ...outsiderSide.preflights];
+    const byOrigin = countByOrigin(preflights);
     const failedPreflights = preflights.filter((preflight) => !/^2\d\d$/.test(preflight.outcome) && new URL(preflight.url).origin !== unreachable);
     for (const [step, result] of Object.entries(results)) t.diagnostic(`${step}: ${result.ok ? "ok" : result.error}`);
-    t.diagnostic(`preflights the browser sent: ${preflights.length}, per origin: ${JSON.stringify(countByOrigin(preflights))}`);
+    t.diagnostic(`preflights the browser sent: ${preflights.length}, per origin: ${JSON.stringify(byOrigin)}`);
     t.diagnostic(`preflights that failed, apart from the unreachable host: ${failedPreflights.map((preflight) => `${preflight.url} (${preflight.outcome})`).join("; ") || "none"}`);
     t.diagnostic(`operator preflights: ${operatorPreflights.join(", ") || "none"}`);
     t.diagnostic(`fixture handle checks that cannot resolve: ${handleChecks.length}`);
     t.diagnostic(`browser-level fetch failures: ${failures.map((failure) => `${failure.method} ${failure.url} (${failure.error})`).join("; ") || "none"}`);
     assert.deepEqual(Object.entries(results).filter(([, result]) => !result.ok).map(([step]) => step), []);
+    assert.ok((byOrigin[new URL(pds.groupHostUrl).origin] ?? 0) > 0, "browser sent CORS preflights to Group Host origin");
+    assert.ok((byOrigin[new URL(writer.pds.url).origin] ?? 0) > 0, "browser sent CORS preflights to writer personal PDS origin");
+    assert.ok((byOrigin[new URL(member.pds.url).origin] ?? 0) > 0, "browser sent CORS preflights to member personal PDS origin");
+    assert.ok((byOrigin[operator.origin] ?? 0) > 0, "browser sent CORS preflights to operator origin");
     assert.deepEqual(failures.map((failure) => new URL(failure.url).origin), [unreachable], "only the unreachable host fails in the browser");
     assert.deepEqual(failedPreflights, [], "every preflight the browser sent succeeded");
   } finally {
@@ -68,10 +84,15 @@ test("a page on the web origin signs in, reaches PDS hosts and a separate operat
 });
 
 async function steps(pds: PdsNetwork, input: {
-  authority: NetworkActor; memberSide: BrowserMember; outsiderSide: BrowserMember; channel: string; rkey: string; operatorOrigin: string; unreachableOrigin: string;
+  groupDid: string; writer: NetworkActor; memberSide: BrowserMember; outsiderSide: BrowserMember; channel: string; rkey: string; operatorOrigin: string; unreachableOrigin: string;
 }): Promise<Record<string, Outcome>> {
-  const [{ mintSpaceCredentialWith, isAccessLost }, { generateSpaceKey }, { kemKeyFromDidDocument }, { sessionClient }, { tidNow }] = await Promise.all([
-    import("@flock/protocol/atproto/space-credential-core"), import("@flock/protocol/atproto/space-key"), import("@flock/protocol/atproto/kem-key"), import("@flock/operator/atproto/client"), import("@flock/protocol/keys"),
+  const [{ mintSpaceCredentialWith, isAccessLost }, { generateSpaceKey }, { kemKeyFromDidDocument }, { sessionClient }, { groupMetaUri, tidNow }, { COLLECTION, OPENSOCIAL_COLLECTION, OPENSOCIAL_METHOD }] = await Promise.all([
+    import("@flock/protocol/atproto/space-credential-core"),
+    import("@flock/protocol/atproto/space-key"),
+    import("@flock/protocol/atproto/kem-key"),
+    import("@flock/operator/atproto/client"),
+    import("@flock/protocol/keys"),
+    import("@flock/protocol/nsids"),
   ]);
   const deps = (side: BrowserMember) => ({
     memberClient: sessionClient(side.session),
@@ -82,23 +103,44 @@ async function steps(pds: PdsNetwork, input: {
   });
   const { memberSide, outsiderSide } = input;
   const results: Record<string, Outcome> = {};
-  results["mints a channel credential (member host, then authority host)"] = await outcome(() => mintSpaceCredentialWith(deps(memberSide), input.channel));
-  results["renews the credential and reads with the renewed one, verifying its MAC"] = await outcome(async () => {
+  results["mints a channel credential (member host, then Group Host)"] = await outcome(() => mintSpaceCredentialWith(deps(memberSide), input.channel));
+  results["renews the credential and reads writer's record with the renewed one, verifying its MAC"] = await outcome(async () => {
     await mintSpaceCredentialWith(deps(memberSide), input.channel);
     const renewed = await mintSpaceCredentialWith(deps(memberSide), input.channel);
-    const record = await renewed.client(input.authority.pds.url).query<{ value: { text?: string } }>("com.atproto.space.getRecord", {
-      space: input.channel, repo: input.authority.did, collection: "new.flock.channel.message", rkey: input.rkey,
+    const record = await renewed.client(input.writer.pds.url).query<{ value: { text?: string } }>("com.atproto.space.getRecord", {
+      space: input.channel, repo: input.writer.did, collection: COLLECTION.message, rkey: input.rkey,
     });
     assert.equal(record.value.text, "k9 from the authority host");
   });
-  results["lists writers at the authority"] = await outcome(async () => {
+  results["reads group profile directly from Group Host with RFC 9421 MAC verification"] = await outcome(async () => {
+    const metaSpace = groupMetaUri(input.groupDid);
+    const metaCred = await mintSpaceCredentialWith(deps(memberSide), metaSpace);
+    const profile = await metaCred.client(pds.groupHostUrl).query<{ value: { displayName?: string } }>("com.atproto.space.getRecord", {
+      space: metaSpace, repo: input.groupDid, collection: OPENSOCIAL_COLLECTION.profile, rkey: "self",
+    });
+    assert.equal(profile.value.displayName, "K9 Group");
+  });
+  results["lists writers at the Group Host authority"] = await outcome(async () => {
     const credential = await mintSpaceCredentialWith(deps(memberSide), input.channel);
-    await credential.client(input.authority.pds.url).query("com.atproto.space.listWriters", { space: input.channel });
+    await credential.client(pds.groupHostUrl).query("com.atproto.space.listWriters", { space: input.channel });
   });
   results["writes a message to its own host with its DPoP-bound session"] = await outcome(() => sessionClient(memberSide.session).procedure("com.atproto.space.createRecord", {
-    space: input.channel, repo: memberSide.actor.did, collection: "new.flock.channel.message", rkey: tidNow(),
-    record: { $type: "new.flock.channel.message", text: "k9 from the browser", createdAt: new Date().toISOString() },
+    space: input.channel, repo: memberSide.actor.did, collection: COLLECTION.message, rkey: tidNow(),
+    record: { $type: COLLECTION.message, text: "k9 from the browser", createdAt: new Date().toISOString() },
   }));
+  results["calls Group Host OpenSocial XRPC directly with a service token"] = await outcome(async () => {
+    const { token } = await sessionClient(outsiderSide.session).query<{ token: string }>("com.atproto.server.getServiceAuth", {
+      aud: `${input.groupDid}#atproto_pds`,
+      lxm: OPENSOCIAL_METHOD.requestJoin,
+    });
+    const response = await outsiderSide.browserFetch(new Request(new URL(`/xrpc/${OPENSOCIAL_METHOD.requestJoin}`, pds.groupHostUrl), {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify({ group: input.groupDid, message: "k9 cross-origin join request" }),
+    }));
+    assert.equal(response.status, 200, await response.clone().text());
+    assert.equal((await response.json() as { status?: string }).status, "pending");
+  });
   results["calls the operator origin with a service token"] = await outcome(async () => {
     const { token } = await sessionClient(memberSide.session).query<{ token: string }>("com.atproto.server.getServiceAuth", { aud: pds.serviceRef, lxm: OPERATOR_METHOD });
     const response = await memberSide.browserFetch(new Request(new URL(`/xrpc/${OPERATOR_METHOD}?space=${encodeURIComponent(input.channel)}`, input.operatorOrigin), {
@@ -107,14 +149,14 @@ async function steps(pds: PdsNetwork, input: {
     assert.equal(response.status, 200, await response.clone().text());
     assert.equal((await response.json() as { issuer?: string }).issuer, memberSide.actor.did);
   });
-  results["a non-member holding the same grant is refused, and the page can read why"] = await outcome(async () => {
+  results["a non-member holding the same grant is refused at Group Host, and the page can read why"] = await outcome(async () => {
     const refusal = await mintSpaceCredentialWith(deps(outsiderSide), input.channel).then(() => null, (error: unknown) => error);
     assert.ok(refusal && isAccessLost(refusal), String(refusal));
   });
   results["an unreachable writer host fails as a network error"] = await outcome(async () => {
     const credential = await mintSpaceCredentialWith(deps(memberSide), input.channel);
     const failure = await credential.client(input.unreachableOrigin).query("com.atproto.space.listRecords", {
-      space: input.channel, repo: memberSide.actor.did, collection: "new.flock.channel.message",
+      space: input.channel, repo: memberSide.actor.did, collection: COLLECTION.message,
     }).then(() => null, (error: unknown) => error);
     assert.ok(failure instanceof TypeError, `expected a network-level TypeError, got ${String(failure)}`);
   });
@@ -164,22 +206,48 @@ async function signInThroughBrowser(browser: Browser, webOrigin: string, pds: Pd
   return { actor, page, session, browserFetch, failures, preflights };
 }
 
-async function provision(pds: PdsNetwork): Promise<{ authority: NetworkActor; member: NetworkActor; outsider: NetworkActor; channel: string; rkey: string }> {
-  const [{ ensureMemberListSpace, putSpaceMember }, { bearerSession }, { AtprotoClient }, { tidNow }] = await Promise.all([
-    import("@flock/operator/atproto/space-ops"), import("../support/pds-network"), import("@flock/protocol/atproto/xrpc"), import("@flock/protocol/keys"),
+async function provision(pds: PdsNetwork): Promise<{ groupDid: string; writer: NetworkActor; member: NetworkActor; outsider: NetworkActor; channel: string; rkey: string }> {
+  const [
+    { restoreAuthorityGrant },
+    { ensureOpenSocialSpace, putAuthorityRecord },
+    { defaultPublicChannelPolicy },
+    { AtprotoClient },
+    { groupMembersUri, tidNow },
+    { COLLECTION, OPENSOCIAL_COLLECTION, SPACE_TYPE },
+  ] = await Promise.all([
+    import("@flock/operator/operator/authority-grant"),
+    import("@flock/operator/atproto/space-ops"),
+    import("@flock/operator/operator/workspace-spaces"),
+    import("@flock/protocol/atproto/xrpc"),
+    import("@flock/protocol/keys"),
+    import("@flock/protocol/nsids"),
   ]);
-  const authority = await pds.createActor("k9owner", 0);
+  const writer = await pds.createActor("k9owner", 0);
   const member = await pds.createActor("k9member", 1);
   const outsider = await pds.createActor("k9outsider", 1);
-  const owner = bearerSession(authority);
-  const channel = await ensureMemberListSpace(owner as never, "new.flock.channel", "k9");
-  await putSpaceMember(owner as never, channel, member.did, true, true);
-  const rkey = tidNow();
-  await new AtprotoClient(owner.fetchHandler).procedure("com.atproto.space.createRecord", {
-    space: channel, repo: authority.did, collection: "new.flock.channel.message", rkey,
-    record: { $type: "new.flock.channel.message", text: "k9 from the authority host", createdAt: new Date().toISOString() },
+
+  const createdGroup = await createOpenSocialGroup(pds, writer, {
+    name: "K9 Group",
+    joinPolicy: "approval",
   });
-  return { authority, member, outsider, channel, rkey };
+  const groupSession = await restoreAuthorityGrant(createdGroup.groupDid);
+  const channel = await ensureOpenSocialSpace(groupSession, SPACE_TYPE.channel, "general", defaultPublicChannelPolicy());
+  await putAuthorityRecord(groupSession, groupMembersUri(createdGroup.groupDid), OPENSOCIAL_COLLECTION.membership, member.did, {
+    roles: ["member"],
+    createdAt: new Date().toISOString(),
+  });
+  await acceptGroupMembership(pds, member, createdGroup.groupDid);
+
+  const rkey = tidNow();
+  await new AtprotoClient(bearerSession(writer).fetchHandler).procedure("com.atproto.space.createRecord", {
+    space: channel,
+    repo: writer.did,
+    collection: COLLECTION.message,
+    rkey,
+    record: { $type: COLLECTION.message, text: "k9 from the authority host", createdAt: new Date().toISOString() },
+  });
+  await new Probe(pds, member, channel).waitForCurrentRevision(writer.did);
+  return { groupDid: createdGroup.groupDid, writer, member, outsider, channel, rkey };
 }
 
 async function didDocument(side: BrowserMember, pds: PdsNetwork, did: string): Promise<{ service?: Array<{ id?: string; serviceEndpoint?: unknown }>; verificationMethod?: unknown }> {

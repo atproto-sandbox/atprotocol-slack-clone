@@ -9,7 +9,7 @@ import { loadConfiguration, loadSources, runCucumber } from "@cucumber/cucumber/
 // @unbound with a stated reason, and the number of unbound scenarios can only go down.
 
 // Lower this when a scenario gets step definitions. Raising it needs a reviewer to agree the new scenario cannot run yet.
-const MAX_UNBOUND_SCENARIOS = 1;
+const MAX_UNBOUND_SCENARIOS = 0;
 
 async function plan(tagExpression: string): Promise<string[]> {
   const { runConfiguration } = await loadConfiguration({ file: "cucumber.mjs" });

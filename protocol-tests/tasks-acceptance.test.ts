@@ -14,16 +14,34 @@ import { opRef } from "@flock/protocol/entity-merge";
 import { extSpaceUriFor } from "@flock/protocol/extensions";
 import { requestDigest, tidNow } from "@flock/protocol/keys";
 import { COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
+import { groupAdminScopes } from "@flock/protocol/scopes";
 import { readIndependentTasksSpace, type IndependentTasksReadResult } from "@flock/reader/independent-tasks";
 import { availablePort, startOperatorServer, type AppServer } from "./support/app-server";
 import {
   actorTransport,
   bearerSession,
+  createOpenSocialGroup,
   startPdsNetwork,
-  storeAuthorityGrant,
+  storeGroupAuthorityGrant,
   type NetworkActor,
   type PdsNetwork,
 } from "./support/pds-network";
+
+function buildLegacyAuthorityScopeWithoutTasks(groupDid?: string): string {
+  const coveredModalities = [
+    SPACE_TYPE.workspace,
+    SPACE_TYPE.inbox,
+    SPACE_TYPE.channel,
+    SPACE_TYPE.appInbox,
+  ];
+  return [
+    ...groupAdminScopes(groupDid).filter((token) => !token.startsWith("space:*?collection=*")),
+    ...coveredModalities.map(
+      (spaceType) =>
+        `space:${spaceType}?collection=*&action=read&action=create&action=update&action=delete&manage=create&manage=update&manage=delete`,
+    ),
+  ].join(" ");
+}
 
 function omitKeys<T extends Record<string, unknown>>(items: readonly T[], keys: readonly string[]) {
   return items.map((item) =>
@@ -149,7 +167,7 @@ async function settled(
   throw new Error(`Authority never settled listWriters for ${space}.`);
 }
 
-test("Tasks real-PDS acceptance & cold reader parity across two PDS hosts (R11f)", { timeout: 10 * 60_000 }, async (t) => {
+test("Tasks real-PDS acceptance & cold reader parity across two PDS hosts (R13 OpenSocial)", { timeout: 10 * 60_000 }, async (t) => {
   const port = await availablePort();
   const pds = await startPdsNetwork("tasks-acceptance", { operatorPort: port });
   let server: AppServer | undefined;
@@ -176,10 +194,7 @@ test("Tasks real-PDS acceptance & cold reader parity across two PDS hosts (R11f)
 
     const operatorService = { serviceRef: pds.serviceRef, endpoint: server.url };
     const fullAuthorityScope = authorityClientMetadata().scope;
-    const legacyAuthorityScope = fullAuthorityScope
-      .split(" ")
-      .filter((scope) => !scope.startsWith(`space:${SPACE_TYPE.tasks}?`))
-      .join(" ");
+    const legacyAuthorityScope = buildLegacyAuthorityScopeWithoutTasks();
     assert.notEqual(legacyAuthorityScope, fullAuthorityScope);
 
     const owner = await pds.createActor("taowner", 0);
@@ -187,8 +202,11 @@ test("Tasks real-PDS acceptance & cold reader parity across two PDS hosts (R11f)
     const bob = await pds.createActor("tabob", 1);
     const carol = await pds.createActor("tacarol", 1);
 
-    await storeAuthorityGrant(pds.hosts[0], owner.did, "ta-owner-grant");
-    const created = await createWorkspace(await restoreAuthorityGrant(owner.did), {
+    const group = await createOpenSocialGroup(pds, owner, {
+      name: "Tasks Acceptance",
+      keyLabel: "ta-owner-grant",
+    });
+    const created = await createWorkspace(await restoreAuthorityGrant(group.groupDid), {
       creator: owner.did,
       name: "Tasks Acceptance",
       operationId: tidNow(),
@@ -196,7 +214,7 @@ test("Tasks real-PDS acceptance & cold reader parity across two PDS hosts (R11f)
     assert.equal(created.state, "completed");
     const workspace = created.workspace;
     const workspaceRef = parseWorkspaceRef(workspace);
-    const tasksSpace = extSpaceUriFor(owner.did, workspaceRef.skey, "tasks");
+    const tasksSpace = extSpaceUriFor(group.groupDid, workspaceRef.skey, "tasks");
 
     const aliceClockOffset = 0;
     const aliceHarness = trackedTransport(pds, alice, { now: () => Date.now() + aliceClockOffset });
@@ -655,7 +673,7 @@ test("Tasks real-PDS acceptance & cold reader parity across two PDS hosts (R11f)
       );
       // truthIntervalMs: 0 recovers reset Bob via STAR (1) and re-probes unwritten owner (1, RepoNotFound per D11.1 #4), while Alice uses listRepoOps (0 getRepo).
       assert.equal(afterImportRun.spaceByMethod["com.atproto.space.getRepo"], 2, "importRepo reset recovers Bob via STAR (plus unwritten owner re-probe)");
-      assert.equal(afterImportRun.spaceByMethod["com.atproto.space.listRepoOps"], 2, "Alice and Bob attempt listRepoOps first; Bob falls back to STAR");
+      assert.equal(afterImportRun.spaceByMethod["com.atproto.space.listRepoOps"], 3, "groupDid, Alice, and Bob attempt listRepoOps first; Bob falls back to STAR");
       assert.equal(afterImportRun.result.tasks.some((entry) => entry.uri === bobPreImport.uri), false);
       assertTasksParity(
         afterImportRun.result,
@@ -700,8 +718,11 @@ test("Tasks real-PDS acceptance & cold reader parity across two PDS hosts (R11f)
     // 7. Legacy pre-R11 authority grant upgrade (AuthorityReauthorizationRequiredError -> re-authorize -> enableExtension).
     await t.test("legacy pre-R11 authority grant surfaces reauth error and enables Tasks cleanly after re-authorization", async () => {
       const legacyOwner = await pds.createActor("talegowner", 0);
-      await storeAuthorityGrant(pds.hosts[0], legacyOwner.did, "ta-leg-init");
-      const legacyCreated = await createWorkspace(await restoreAuthorityGrant(legacyOwner.did), {
+      const legacyGroup = await createOpenSocialGroup(pds, legacyOwner, {
+        name: "Legacy Tasks Upgrade",
+        keyLabel: "ta-leg-init",
+      });
+      const legacyCreated = await createWorkspace(await restoreAuthorityGrant(legacyGroup.groupDid), {
         creator: legacyOwner.did,
         name: "Legacy Tasks Upgrade",
         operationId: tidNow(),
@@ -709,7 +730,7 @@ test("Tasks real-PDS acceptance & cold reader parity across two PDS hosts (R11f)
       assert.equal(legacyCreated.state, "completed");
       const legacyWs = legacyCreated.workspace;
       const legacyRef = parseWorkspaceRef(legacyWs);
-      const legacyTasksSpace = extSpaceUriFor(legacyOwner.did, legacyRef.skey, "tasks");
+      const legacyTasksSpace = extSpaceUriFor(legacyGroup.groupDid, legacyRef.skey, "tasks");
       const legacyOwnerEngine = createEngine(actorTransport(pds, legacyOwner), { operator: operatorService });
 
       assert.equal((await legacyOwnerEngine.operator!.execute({
@@ -717,19 +738,22 @@ test("Tasks real-PDS acceptance & cold reader parity across two PDS hosts (R11f)
         operationId: tidNow(),
         request: { kind: "inviteMember", subject: alice.did },
       })).operation.state, "completed");
+      await aliceEngine.workspaces.accept(legacyWs);
 
       // Downgrade authority grant to legacy pre-R11 scope (missing Tasks space scope).
-      await storeAuthorityGrant(pds.hosts[0], legacyOwner.did, "ta-leg-downgraded", { scope: legacyAuthorityScope });
+      await storeGroupAuthorityGrant(pds, legacyOwner, legacyGroup.groupDid, "ta-leg-downgraded", {
+        scope: buildLegacyAuthorityScopeWithoutTasks(legacyGroup.groupDid),
+      });
       await assert.rejects(
         () => legacyOwnerEngine.operator!.enableExtension(legacyWs, "tasks"),
         (err: unknown) => err instanceof OperatorRemoteError && err.status === 502 && err.code === "AuthoritySessionUnavailable",
       );
 
-      // Simulate an uncleaned/active extension state with a pending operation blocked on missing Tasks scope ->
+      // Simulate an uncleaned disable state with a pending operation blocked on missing Tasks scope ->
       // recovery throws AuthorityReauthorizationRequiredError directly.
       const nowIso = new Date().toISOString();
-      const fullGrant = await restoreAuthorityGrant(legacyOwner.did);
-      await putAuthorityRecord(fullGrant, legacyWs, COLLECTION.extInstall, "tasks", {
+      const downgradedGrant = await restoreAuthorityGrant(legacyGroup.groupDid);
+      await putAuthorityRecord(downgradedGrant, legacyWs, COLLECTION.extInstall, "tasks", {
         extId: "tasks",
         active: false,
         space: legacyTasksSpace,
@@ -740,16 +764,16 @@ test("Tasks real-PDS acceptance & cold reader parity across two PDS hosts (R11f)
         disabledAt: nowIso,
       });
       const pendingOpId = tidNow();
-      const pendingReq = { kind: "removeMember", subject: alice.did };
+      const pendingReq = { kind: "disableExtension", extId: "tasks" };
       getRawDb().prepare(`INSERT INTO operation (workspace, workspace_uri, actor, operation_id, request_hash, request_json, state, steps_json, error, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, 'missing tasks scope', ?, ?)`).run(
-        legacyOwner.did,
+        legacyGroup.groupDid,
         legacyWs,
         legacyOwner.did,
         pendingOpId,
         requestDigest({ workspace: legacyWs, request: pendingReq }),
         JSON.stringify({ workspace: legacyWs, request: pendingReq }),
-        JSON.stringify(["remove-inbox-membership"]),
+        JSON.stringify(["ext-disable-record"]),
         Math.floor(Date.now() / 1000) - 60,
         Math.floor(Date.now() / 1000) - 60,
       );
@@ -757,7 +781,7 @@ test("Tasks real-PDS acceptance & cold reader parity across two PDS hosts (R11f)
         await assert.rejects(
           () => executeOperatorOperation({
             did: legacyOwner.did,
-            session: fullGrant,
+            session: downgradedGrant,
             workspace: legacyRef,
             canRecoverOperations: true,
           }, tidNow(), { kind: "reconcileWorkspace" }, registrationDeps),
@@ -767,8 +791,8 @@ test("Tasks real-PDS acceptance & cold reader parity across two PDS hosts (R11f)
         getRawDb().prepare("DELETE FROM operation WHERE operation_id = ?").run(pendingOpId);
       }
 
-      // Re-authorize with full R11 scope -> enableExtension("tasks") succeeds and Tasks CRUD matches cold reader.
-      await storeAuthorityGrant(pds.hosts[0], legacyOwner.did, "ta-leg-regranted");
+      // Re-authorize with full R13 scope -> enableExtension("tasks") succeeds and Tasks CRUD matches cold reader.
+      await storeGroupAuthorityGrant(pds, legacyOwner, legacyGroup.groupDid, "ta-leg-regranted");
       const enabled = await legacyOwnerEngine.operator!.enableExtension(legacyWs, "tasks");
       assert.equal(enabled.operation.state, "completed");
 

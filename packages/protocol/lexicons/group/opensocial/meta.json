@@ -1,0 +1,18 @@
+{
+  "lexicon": 1,
+  "id": "group.opensocial.meta",
+  "defs": {
+    "main": {
+      "type": "space",
+      "description": "Group profile, rules, and labeler settings. Often public, even when the rest of the group is not.",
+      "key": "literal:self",
+      "title": "Group info",
+      "collections": [
+        "group.opensocial.profile",
+        "group.opensocial.rule",
+        "group.opensocial.labeler",
+        "com.atproto.label.record"
+      ]
+    }
+  }
+}

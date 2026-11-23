@@ -5,18 +5,17 @@
     "main": {
       "type": "permission-set",
       "title": "Member workspace access",
-      "detail": "Read the workspaces, inboxes and channels this account is a member of, publish member-owned messages, reactions and requests, write an acceptance marker, and call the workspace operator.",
+      "detail": "Read the workspaces, inboxes and channels this account is a member of, publish member-owned messages, reactions and private-channel requests, and call the workspace operator.",
       "permissions": [
-        { "type": "permission", "resource": "space", "spaceType": "new.flock.workspace", "authority": "*", "action": ["read"] },
-        { "type": "permission", "resource": "space", "spaceType": "new.flock.workspace", "authority": "*", "collection": ["new.flock.acceptance"], "action": ["create", "update"] },
-        { "type": "permission", "resource": "space", "spaceType": "new.flock.inbox", "authority": "*", "action": ["read"] },
-        { "type": "permission", "resource": "space", "spaceType": "new.flock.inbox", "authority": "*", "collection": ["new.flock.joinRequest"], "action": ["create", "update", "delete"] },
+        { "type": "permission", "resource": "space", "spaceType": "new.flock.workspace", "authority": "*", "skey": "self", "action": ["read"] },
+        { "type": "permission", "resource": "space", "spaceType": "new.flock.inbox", "authority": "*", "skey": "self", "action": ["read"] },
+        { "type": "permission", "resource": "space", "spaceType": "new.flock.inbox", "authority": "*", "skey": "self", "collection": ["new.flock.joinRequest"], "action": ["create", "update", "delete"] },
         { "type": "permission", "resource": "space", "spaceType": "new.flock.channel", "authority": "*", "action": ["read"] },
         { "type": "permission", "resource": "space", "spaceType": "new.flock.channel", "authority": "*", "collection": ["new.flock.channel.message", "new.flock.channel.reaction"], "action": ["create", "update", "delete"] },
         { "type": "permission", "resource": "space", "spaceType": "new.flock.ext.tasks", "authority": "*", "action": ["read"] },
         { "type": "permission", "resource": "space", "spaceType": "new.flock.ext.tasks", "authority": "*", "collection": ["new.flock.ext.tasks.project", "new.flock.ext.tasks.projectEdit", "new.flock.ext.tasks.task", "new.flock.ext.tasks.taskEdit", "new.flock.ext.tasks.comment"], "action": ["create", "update", "delete"] },
         { "type": "permission", "resource": "space", "spaceType": "new.flock.app.inbox", "authority": "*", "collection": ["new.flock.app.command", "new.flock.app.action"], "action": ["create", "delete"] },
-        { "type": "permission", "resource": "rpc", "inheritAud": true, "lxm": ["new.flock.operator.execute", "new.flock.operator.getOperation", "new.flock.operator.listInboxWriters", "new.flock.operator.getChanges", "new.flock.operator.createWorkspace", "new.flock.operator.startAuthorityFlow", "new.flock.operator.listStalledOperations", "new.flock.operator.getDmNotifyTarget"] }
+        { "type": "permission", "resource": "rpc", "inheritAud": true, "lxm": ["new.flock.operator.execute", "new.flock.operator.getOperation", "new.flock.operator.getChanges", "new.flock.operator.createWorkspace", "new.flock.operator.startAuthorityFlow", "new.flock.operator.listStalledOperations", "new.flock.operator.getDmNotifyTarget", "new.flock.operator.getSpaceNotifyTarget"] }
       ]
     }
   }

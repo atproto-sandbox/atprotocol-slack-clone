@@ -1,5 +1,7 @@
 # Expose a host-assigned revision on every record, and let readers bound a listing
 
+Status against `6747610566` + `opensocial.group` `8df0cc82` (R13, 2026-11-21): **Unchanged / still open (orthogonal to `opensocial.group`).** Upstream `6747610566` signs and MACs every `listRepoOps` page and drops `reverse` on `listRecords`, while `listRecords` and `getRecord` still omit a per-record host-assigned `rev` and `listRecords` still lacks key/rev range bounds.
+
 Status against `5d88b414` (2026-10-30): Unchanged. The release renames `hash` to `data` and adds MACs on `getRecord` and `getLatestCommit`; neither gives a record a host-assigned rev, so the remaining ask below stands.
 
 Status against `5b95b2f2`: Partly resolved. `spaceRev` is now host-assigned by the space host per space update and returned by `listRepos` and forwarded in `notifyWrite` (with `prevSpaceRev` for gap detection), and `listRepos` takes it as an exclusive cursor. Still missing: a host-assigned rev on each record (`listRecords`/`getRecord` still return only `collection`, `rkey`, `cid`, `value`) and a range bound or seek on `listRecords` (parameters unchanged: `reverse`, `excludeValues`, `limit`, `cursor`). Rewrite the request around those two asks before filing.

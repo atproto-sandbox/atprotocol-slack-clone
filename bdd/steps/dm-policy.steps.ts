@@ -3,7 +3,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { Given, Then, When } from "@cucumber/cucumber";
 import { DM_RENOTIFY_BACKOFF_MS } from "@flock/client/dm/backoff";
 import { readIndependentDmConversation } from "@flock/reader/independent-dm";
-import { dmConversationUri, dmInboxUri, recordKeyHash, stableHash, tidNow } from "@flock/protocol/keys";
+import { dmConversationUri, dmInboxUri, isTid, parseWorkspaceUri, recordKeyHash, stableHash, tidNow } from "@flock/protocol/keys";
 import { validateDmHeaderMatchesRequest, validateSpaceRecord } from "@flock/protocol/registry";
 import type { SecondApp } from "../../protocol-tests/support/app-fixture";
 import { completeConsent, signIn, submitWorkspaceName, uniqueWorkspaceName } from "../support/ui";
@@ -451,7 +451,7 @@ function encodeBase32(bytes: Uint8Array, alphabet: string): string {
 }
 
 function sixtyFourBitTid(digest: Uint8Array): string {
-  let value = BigInt(`0x${Buffer.from(digest.subarray(0, 8)).toString("hex")}`) & ((1n << 65n) - 1n);
+  let value = BigInt(`0x${Buffer.from(digest.subarray(0, 8)).toString("hex")}`) & ((1n << 63n) - 1n);
   let encoded = "";
   for (let index = 0; index < 13; index += 1) {
     encoded = TID_ALPHABET[Number(value & 31n)] + encoded;
@@ -517,7 +517,8 @@ Then("no conversation key can be computed from participant DIDs", function (this
 
 Then("a party who cannot guess the key cannot confirm who talks to whom", { timeout: SETUP_TIMEOUT }, async function (this: AppWorld) {
   const { first, second } = this.scratch.get("crossed") as CrossedConversations;
-  const candidates = (this.scratch.get("candidates") as string[]).slice(0, 40);
+  const candidates = (this.scratch.get("candidates") as string[]).filter(isTid).slice(0, 40);
+  assert.equal(candidates.length, 40, "40 syntactically valid TID candidates are probed");
   const owners = [actorNamed(this, first.owner), actorNamed(this, second.owner)];
   const outsider = await this.actor("outsider", 0);
   const probe = probeFor(this, outsider);
@@ -771,7 +772,7 @@ Then("the other halves are read with freshly minted credentials", { timeout: SET
 
 const DM_SPACE_TYPE = "new.flock.dm";
 
-type AppUnderTest = { second: SecondApp; key: string; dmScopeShown: string[]; texts: string[] };
+type AppUnderTest = { second: SecondApp; key: string; groupDid: string; dmScopeShown: string[]; texts: string[] };
 
 Given("people sign in to an app with its own database and create a workspace there", { timeout: SETUP_TIMEOUT }, async function (this: AppWorld) {
   const key = randomBytes(32).toString("hex");
@@ -781,8 +782,11 @@ Given("people sign in to an app with its own database and create a workspace the
   await submitWorkspaceName(alice, uniqueWorkspaceName());
   await completeConsent(alice);
   await dmpWaitForOrigin(alice, second.appUrl.origin);
-  await alice.page.locator(".mono-note").filter({ hasText: "at://" }).first().waitFor({ state: "visible" });
-  this.scratch.set("appUnderTest", { second, key, dmScopeShown: aliceScopes, texts: [] } satisfies AppUnderTest);
+  const wsNote = alice.page.locator(".mono-note").filter({ hasText: "at://" }).first();
+  await wsNote.waitFor({ state: "visible" });
+  const parsedWs = parseWorkspaceUri((await wsNote.innerText()).trim());
+  assert.ok(parsedWs, "expected created workspace URI on page");
+  this.scratch.set("appUnderTest", { second, key, groupDid: parsedWs.authorityDid, dmScopeShown: aliceScopes, texts: [] } satisfies AppUnderTest);
 });
 
 When("direct messages are exchanged", { timeout: SETUP_TIMEOUT }, async function (this: AppWorld) {
@@ -815,11 +819,11 @@ Then("the app server holds no member session and no member token", async functio
       assert.deepEqual(await actor.context.cookies(origin), [], "neither the app nor its operator keeps a cookie: the browser holds the session");
     }
   }
-  // What the server does hold: the workspace authority's grant to its operator, which alice approved when she created a workspace.
+  // What the server does hold: the dedicated OpenSocial group DID's grant to its operator, created when alice created the workspace; neither alice nor bob has a personal grant stored.
   const grants = dmpAuthorityGrants(session.second.databasePath, session.key);
-  assert.deepEqual(grants.map((grant) => grant.did), [alice.did], "the only grant is the workspace authority's; bob, who only exchanged DMs, has none");
+  assert.deepEqual(grants.map((grant) => grant.did), [session.groupDid], "the only grant is the dedicated group DID's; neither alice nor bob has a personal grant on the server");
   for (const grant of grants) {
-    assert.ok(grant.scope.some((scope) => scope.startsWith(`space:new.flock.workspace?authority=${alice.did}`) && scope.includes("collection=new.flock.admin")), `it is the workspace-authority grant: ${grant.scope.join(" ")}`);
+    assert.ok(grant.scope.includes("include:group.opensocial.authManageGroup"), `it is the OpenSocial group-authority grant: ${grant.scope.join(" ")}`);
     assert.deepEqual(grant.scope.filter((scope) => scope.includes(DM_SPACE_TYPE)), [], `it names no DM space: ${grant.scope.join(" ")}`);
   }
   assert.ok(session.dmScopeShown.some((scope) => scope.includes(`space:${DM_SPACE_TYPE}.conversation`)), "the DM permission does exist: it was asked of, and approved at the PDS by, the browser's session");

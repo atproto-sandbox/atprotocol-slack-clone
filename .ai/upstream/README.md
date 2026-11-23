@@ -1,30 +1,24 @@
 # Upstream requests for atproto permissioned data
 
-Drafts for the atproto core team, written from what a Slack-style team app (channels, private channels, DMs, up to 200 members per workspace and 100 per group DM) hit while building on proposal 0016 and PDS PR #5187 (commit `787a730f`, re-checked against `5b95b2f2` on 2026-10-09 and `5d88b414` on 2026-10-30; each draft opens with a "Status against `5d88b414`" line, and an older status line below it is kept as history). Each file is a self-contained issue body.
+Drafts for the atproto core team, originally written while building Flock (workspaces, public/private channels, Tasks, and sovereign DMs) on proposal 0016 and PDS PR #5187 (`787a730f` → `5b95b2f2` → `619c6e85` → `5d88b414` → `6747610566`) and updated in **R13 (2026-11-21)** after Flock adopted **`opensocial.group` atmospheric groups** (`opensocial.group/proposal` @ `8df0cc82eb7708f090aa43522adf1d3ada3ed7e7`, implemented in `apps/group-host`).
 
-**Nothing here has been posted.** Filing needs an explicit go-ahead. Suggested venue: comments on PR #5187 and the proposal's discussion thread, one topic per issue.
+**Nothing here has been posted.** Filing needs an explicit go-ahead. Suggested venue: comments on PR #5187 and the `opensocial.group` proposal discussion thread, one topic per issue. For our synthesized feedback covering both core ATProto Spaces and R13 `opensocial.group` implementation findings, see [`protocol-authors-feedback.md`](../../protocol-authors-feedback.md).
 
-| # | Request | Priority | Removes from our app |
+| # | Request | R13 Status (`6747610566` + `opensocial.group` `8df0cc82`) | Remaining core Spaces scope |
 |---|---|---|---|
-| U1 | [Writer eviction](U1-writer-eviction.md) (mostly resolved upstream by `removeWriter`; `updateSpace` and public-write re-tracking remain) | Medium | A sender filter for two remaining cases |
-| U2 | [Client-direct change subscription](U2-client-direct-subscription.md) | High | A server relay that learns who follows which spaces |
-| U3 | [Member-readable roster (opt-in)](U3-member-readable-roster.md) (`publishMembers` covers read/write bits; roles remain) | Medium | Shadow roster records for roles and a reconciliation operator |
-| U4 | [Delegated space management](U4-delegated-management.md) | High | Custody of the workspace account's OAuth session |
-| U5 | [Host-assigned per-record rev and range bound](U5-record-rev.md) (`spaceRev` now exists; per-record rev and range bound remain) | Medium | Trust in author-chosen keys for ordering; no way to skip a hostile key range |
-| U6 | [Credential expiry at `exp`](U6-credential-revocation.md) (lifetime and revocation are now upstream) | Medium | A patch that makes credentials expire exactly at `exp` |
-| U7 | [Batch membership calls](U7-batch-membership.md) | Medium | Hundreds of sequential calls per invite or group |
-| U8 | [Third-party validation and key filter](U8-validation-and-key-filter.md) | Medium | Colon-delimited hash keys, local-only validation |
-| U9 | [Optional hidden spaces](U9-hidden-spaces.md) (resolved for non-members) | Done | Nothing; random unguessable space keys stay as defense in depth |
-| U10 | [Invitation discovery](U10-invitation-discovery.md) | High | Invite links as the only way a member learns they were added |
-| U11 | [Write-target existence](U11-write-target-existence.md) (now blocking: the credential workaround no longer works) | High | A public declaration record per recipient just to learn whether a request can land |
-| U12 | [Oplog reset signal](U12-oplog-reset-signal.md) | Medium | A full set-hash recomputation on every incremental read to detect a reset |
+| U1 | [Writer eviction](U1-writer-eviction.md) | **Solved on Group Host; narrow DM residual** — `apps/group-host` atomically evicts writers on any lost `write` grant (`membership`, `role`, `updateSpace`, `leaveGroup`); upstream `6747610566` added `removeWriter` | Optional `updateSpace` writer pruning on personal-PDS `memberspace` DMs |
+| U2 | [Client-direct change subscription](U2-client-direct-subscription.md) | **Open (orthogonal)** — `authorizeSpaceSync(notify)` still targets HTTPS endpoints; browsers relay wakes through Operator (`getChanges`, `dm1`, `inv1`) | `subscribeSpace` stream (HTTP SSE / WebSocket) for zero-relay browser/mobile clients |
+| U3 | [Member-readable roster (opt-in)](U3-member-readable-roster.md) | **Solved for groups by `opensocial.group`** — `group.opensocial.members/self` (`role/*`, `membership/*`, `acceptance/self`) eliminated Flock's shadow roster/admin records & `reconcile-workspaces` | Opt-in role/member visibility if plain `memberspace` hosts multi-role spaces |
+| U4 | [Delegated space management](U4-delegated-management.md) | **Solved for groups by `opensocial.group`** — two-sided Group-DID OAuth + live `effectiveMemberPermissions` & `assignable` narrowing in `apps/group-host` eliminated personal-account session custody | Optional manager delegation for plain `com.atproto.memberspace` spaces |
+| U5 | [Host-assigned per-record rev and range bound](U5-record-rev.md) | **Open (orthogonal)** — `spaceRev` & MAC-verified `listRepoOps` exist; `listRecords` still orders by writer-chosen `rkey` | Host-assigned record `rev` & key/rev range bounds on `listRecords` |
+| U6 | [Credential expiry at `exp`](U6-credential-revocation.md) | **Open (narrow)** — `notifyCredentialsRevoked` (`<= 100` JTIs) is upstream; `verifySpaceToken` still applies `5s` skew to `credential` `exp` | Set `expirationSkew = 0` for `type === 'credential'` (removing `strict-credential-expiry.patch`) |
+| U7 | [Batch membership calls](U7-batch-membership.md) | **Resolved** — `6747610566` shipped batched `putMembers`/`removeMembers` (`<= 100` for DMs) and `opensocial.group` makes 100-channel group membership `O(1)` (`1` `putRecord`) | None (resolved at both layers) |
+| U8 | [Third-party validation and key filter](U8-validation-and-key-filter.md) | **Solved on Group Host; open on personal PDSes** — `apps/group-host` validates `group.opensocial.*` + `label.record` schemas without slur-filtering hash keys; personal PDSes still skip dynamic third-party validation | Dynamic third-party schema validation & machine-key filter exemption on personal PDSes |
+| U9 | [Optional hidden spaces](U9-hidden-spaces.md) | **Done** — `SpaceNotFound` closed the non-member probe upstream; `opensocial.group` adds `publicMeta: false` & `policy.unlisted: true` | None |
+| U10 | [Invitation discovery](U10-invitation-discovery.md) | **Solved for groups by `opensocial.group`** — Flock provisions `group.opensocial.invites/self` (`ensureInvitesSpace`) + `inv1` wakes (`getSpaceNotifyTarget`) for cross-PDS/cross-app invite discovery | Optional PDS-native `listJoinedSpaces` for accounts that have never opened an OpenSocial app |
+| U11 | [Write-target existence](U11-write-target-existence.md) | **Open (orthogonal; mitigated on Group Host)** — `apps/group-host` tracks `notifyRepoUpdate` delivery (`pending`/`delivered`/`failed` + retry) for `invites/self`; DMs still need public `dm.declaration` | Optional `spaceStatus` hint on `putRecord` or write-scoped `getSpaceWriteStatus` |
+| U12 | [Oplog reset signal](U12-oplog-reset-signal.md) | **Open (orthogonal)** — `clearRecords` & `importRepo` wipe oplogs without a reset marker; `@flock/client` detects resets via full `LtHash` checks | `SinceUnavailable` error or `#repoReset` op in `listRepoOps` |
 
-**Related work.** The peer `opensocial.group` draft overlaps U1, U4, U9, U10 and U11; each of those drafts has a "Related work: opensocial.group" section, summarized in [upstream-protocol-requests.md](upstream-protocol-requests.md).
+**Relationship to `opensocial.group`:** In R13, Flock implemented `opensocial.group` end-to-end (`apps/group-host`, `packages/protocol`, `packages/client`, `apps/operator`, `apps/web`), resolving **U3, U4, U7, and U10** (plus Group-Host-side **U1, U8, and U9**) for group workspaces while keeping sovereign personal-PDS Direct Messages (`new.flock.dm.*`) on `com.atproto.memberspace.policy`. Summary and historical progression: [upstream-protocol-requests.md](upstream-protocol-requests.md).
 
-**Endorse only.** The proposal already lists an account and identity events endpoint for space-only syncers as future work and describes dynamic scope resolution like permission sets. Both would help us; a +1 is enough.
-
-Suggested order: U1 to U4 and U10 first, since they remove the most application-side machinery.
-
-Before filing: strip the "Internal references" footer from each file, and re-run the pinned-PDS reproduction against the then-current revision, because the protocol is still a draft.
-
-Context: `.ai/reviews/2026-09-28-app-and-protocol-review.md` maps each request to the app finding it would resolve.
+Before filing any remaining core Spaces issue: strip the "Internal references" footer from the draft and re-verify against the latest PR #5187 commit.

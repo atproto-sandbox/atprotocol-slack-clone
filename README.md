@@ -1,40 +1,42 @@
-# atproto Slack clone
+# atproto Slack clone (Flock)
 
-A Slack-style team workspace built directly on atproto permissioned data ("spaces"), with direct messages that the app server cannot read, gate or lose.
+A Slack-style collaborative workspace built on **`opensocial.group` atmospheric groups (`1 Group == 1 DID`)** over atproto permissioned data ("spaces"), alongside person-scoped Direct Messages (`new.flock.dm.*`) hosted directly on each participant's personal PDS so no app server can read, gate, or lose a DM.
 
-There is no app database of record. Each workspace, channel, extension space and conversation lives in spaces on the members' own PDSes, and the member lists on those PDSes decide who can read and write. The browser talks directly to PDS hosts with key-bound space credentials and RFC 9421 message authentication codes; a small separate-origin operator service handles journaled, resumable membership mutations and content-free change cursors.
+There is no proprietary application database of record for content or membership. Every group is its own `did:plc:...` account hosted on an **`opensocial.group` Group Host** (`apps/group-host`), publishing core governance spaces (`group.opensocial.meta/self`, `group.opensocial.members/self`) and Flock modality spaces (`new.flock.workspace/self`, `new.flock.inbox/self`, `new.flock.channel/<skey>`, `new.flock.app.inbox/<appSkey>`, `new.flock.ext.tasks/<tasksSkey>`) governed by flat union RBAC (`group.opensocial.policy`). Member-authored messages, reactions, Tasks operations, and bilateral `group.opensocial.acceptance/self` records live in each member's personal PDS repo; the browser reads and verifies spaces directly with key-bound `Atproto-Space-Credential` tokens and ephemeral HPKE KEM-MACs, while a separate-origin Operator (`apps/operator`) orchestrates multi-space modality mutations and content-free change cursors.
 
-**Links:** [**Interactive Presentation Slides**](https://atproto-sandbox.github.io/atprotocol-slack-clone/presentation/r12-atproto-conference-deck.html) · [**Full E2E Demo Video (MP4)**](https://atproto-sandbox.github.io/atprotocol-slack-clone/media/bdd-session.mp4) · [**Developer Onboarding**](docs/dev-onboarding.md) · [**Architecture**](ARCHITECTURE.md)
+**Links:** [**Interactive Presentation Slides (R12 Baseline)**](https://atproto-sandbox.github.io/atprotocol-slack-clone/presentation/r12-atproto-conference-deck.html) · [**Full E2E Demo Video (MP4)**](https://atproto-sandbox.github.io/atprotocol-slack-clone/media/bdd-session.mp4) · [**Developer Onboarding**](docs/dev-onboarding.md) · [**Architecture**](ARCHITECTURE.md)
 
-> **Status: alpha.** Targets proposal 0016 and the draft PDS implementation (PR [#5187](https://github.com/bluesky-social/atproto/pull/5187), commit `6747610566`, npm snapshot `0.0.0-spaces-alpha-20261117141222`), which is not a released protocol. Expect breaking changes when upstream moves. Nothing here has been deployed or load-tested beyond local fixtures.
+> **Status: alpha (R13 `opensocial.group` atmospheric groups).** Targets ATProto Spaces proposal 0016 ([PR #5187](https://github.com/bluesky-social/atproto/pull/5187), commit `6747610566eee1b6d743617bd8eb1136adccb362`, npm snapshot `0.0.0-spaces-alpha-20261117141222` + `strict-credential-expiry.patch`) and [`opensocial.group/proposal`](https://tangled.org/opensocial.group/proposal) (`8df0cc82eb7708f090aa43522adf1d3ada3ed7e7`). Both upstream specs are draft; expect breaking changes when upstream moves, and run `pnpm verify:lexicons` before serving public ATProto PDSes.
 
 ## End-to-end demo
 
-[![Watch the full 74-scenario end-to-end BDD session recording](docs/media/bdd-session-preview.gif)](https://atproto-sandbox.github.io/atprotocol-slack-clone/media/bdd-session.mp4)
+[![Watch the end-to-end BDD session recording](docs/media/bdd-session-preview.gif)](https://atproto-sandbox.github.io/atprotocol-slack-clone/media/bdd-session.mp4)
 
-Full 27.3-minute recording of all 74 default Chromium/Playwright Gherkin scenarios running against real in-memory PDSes: [**stream on GitHub Pages**](https://atproto-sandbox.github.io/atprotocol-slack-clone/media/bdd-session.mp4) or view [`docs/media/bdd-session.mp4`](docs/media/bdd-session.mp4) (Git LFS).
+Full 27.3-minute Chromium/Playwright Gherkin session recording captured on the R12 baseline prior to R13's adoption of `opensocial.group` atmospheric groups: [**stream on GitHub Pages**](https://atproto-sandbox.github.io/atprotocol-slack-clone/media/bdd-session.mp4) or view [`docs/media/bdd-session.mp4`](docs/media/bdd-session.mp4) (Git LFS). In R13, workspace governance, invitations, roles, moderation, and host portability are upgraded to `opensocial.group` (`1 Group == 1 DID`).
 
 ## What it does
 
-- **Workspaces and channels:** public and private channels, rich message blocks and interactive actions, one-level replies, one reaction per author, message and emoji, message permalinks, private-channel join requests with admin approval, dedicated workspace authority accounts, admin promote and demote, leave and remove, archive.
-- **Invitations:** an admin adds a member by DID and copies an invite link. The member opens it, signs in and sees a banner offering to join. The PDS member list is the only gate; the link grants nothing by itself.
-- **Direct messages:** one-to-one and groups of up to 100. Each participant owns only their own half of a conversation and their own inbox, with a write policy they set (everyone, only people I allow, nobody). Live updates use `authorizeSpaceSync` with stateless per-caller `dm1` webhook tokens gated by RFC 9421 space-credential proof-of-possession; the operator stores **zero DM rows** in SQLite and relays only ephemeral in-memory change cursors.
-- **Apps, slash commands and webhooks:** workspace-installed apps (`apps/echo-bot`, `apps/webhooks`) run under narrow app OAuth grants with per-app inboxes, `/command` dispatch, interactive block callbacks and HMAC-authenticated incoming webhooks.
-- **Collaborative Tasks extension:** first-party workspace extension (`new.flock.ext.tasks`) with projects, Kanban board, list and activity views, comments, verified STAR archive + oplog sync (`@atproto/star`), and a pure causal-DAG + HLC + OR-Set merge engine that surfaces and recovers concurrent edits without data loss.
-- **Independent readers:** `packages/reader/src` ships three standalone readers—workspaces/channels (`independent.ts`), DMs (`independent-dm.ts`) and Tasks (`independent-tasks.ts`)—built strictly on `@flock/protocol` and `@atproto/{space,star}` without this app's database or client engine, proving zero lock-in.
-- **Operator:** separate-origin XRPC service (`apps/operator`) with journaled, idempotent membership mutations, inline `authorizeSpaceSync` webhook registration with 60-second continuous renewal and `spaceRev` gap catch-up, `listWriters` (`#repoWrite` / `#repoRemoved`) reconciliation, quarantined authority OAuth handling across temporary host suspension, a pause switch and stalled-operation alerts.
+- **Atmospheric `opensocial.group` workspaces & channels:** Each workspace is an OpenSocial group (`did:plc:...`) with `admin`, `moderator`, `member`, and per-private-channel `channel-<skey>` roles (`O(1)` single-record `membership/<did>` updates across up to 100 channels), `open` / `approval` / `invite` join policies, public & private channels, rich message blocks, one-level replies, per-author emoji reactions, message permalinks, private-channel join requests (`decideJoinRequest`), group join requests (`requestJoin` / `cancelJoinRequest` / `listJoinRequests` / `decideGroupJoinRequest`), incarnation-guarded leave (`If-Match-Membership-Incarnation`), sole-member reversible deactivation & 4-phase reactivation, pre-tombstone zero-residue `deleteAccount`, and two-GroupHost Standard & Coordinated v1 migration.
+- **Cross-PDS invitations (`group.opensocial.invites/self`):** Clients idempotently provision `at://<viewerDid>/space/group.opensocial.invites/self` on each user's personal PDS (`WorkspaceClient.ensureInvitesSpace()`). Inviting groups write `group.opensocial.invite/<tid>` into `<groupDid>`'s repo inside the invitee's `invites/self` space with tracked `notifyRepoUpdate` delivery (`pending` / `delivered` / `failed` + retry) and real-time `inv1` push wakes (`new.flock.operator.getSpaceNotifyTarget`), alongside shareable invite links.
+- **ATProto-native moderation:** Members report messages, reactions, tasks, or accounts via `group.opensocial.createReport`; moderators review `listModSubjects` / `getModSubjectHistory` / `resolveModSubject` via per-user Group-DID OAuth (`GroupBrowserOAuthClient` / `GroupClient`) and publish `<groupDid>`-authored `com.atproto.label.record` (`!takedown`, `!hide`, custom `labeler/self` values) projected identically across web, reader, bots, and webhooks.
+- **Direct messages (`new.flock.dm.*`):** Sovereign 1:1 and group conversations (up to 100 participants) on each participant's personal PDS (`com.atproto.memberspace.policy`). Live updates use `authorizeSpaceSync` with stateless `dm1` webhook tokens (`getDmNotifyTarget`) gated by RFC 9421 space-credential proof-of-possession; both Operator and Group Host store **zero DM rows** in SQLite.
+- **Apps, slash commands & incoming webhooks:** Non-roster app service principals (`apps/echo-bot`, `apps/webhooks`, role `appRoleKey(appDid)`) run under narrow `appGrantScopes` with per-app inboxes, `/command` dispatch, interactive block actions, and secret-authenticated incoming webhooks.
+- **Collaborative Tasks extension (`new.flock.ext.tasks`):** Projects, Kanban board, list and activity views, comments, verified STAR archive + oplog sync (`@atproto/star`), and a pure causal-DAG + HLC + OR-Set merge engine (`packages/protocol/src/entity-merge.ts`).
+- **Independent readers (`packages/reader`):** Three standalone readers—groups/channels (`independent.ts`), DMs (`independent-dm.ts`), and Tasks (`independent-tasks.ts`)—consuming only `@flock/protocol` and `@atproto/{space,star,lex-data,lexicon}`, proving zero application lock-in.
 
 ## How it is built
 
-A pnpm TypeScript monorepo: Next.js 16 (App Router) in `apps/web` (stateless browser shell holding non-extractable OAuth keys in IndexedDB), `@flock/client` (isomorphic sync engine + `DmClient`), `@flock/protocol` (lexicons under `packages/protocol/lexicons/new/flock/`, record validation, entity merge, RFC 9421 MAC & STAR verification), `@flock/reader`, and `apps/operator` (Node + SQLite for authority grants, mutation journal and non-DM space notices).
+A `pnpm` TypeScript monorepo:
+- **Packages:** `@flock/protocol` (`135` JSON lexicons: `36` `new.flock.*` + `27` `group.opensocial.*` + `72` `com.atproto.*`; runtime validators, `@atproto/oauth-scopes` expansion & `effectiveMemberPermissions`, label moderation, entity merge, HPKE MAC & STAR verification), `@flock/net` (`boundedSafeFetch` SSRF-safe DNS-pinned HTTP), `@flock/deployment` (shared `AppConfig` & CSP headers), `@flock/client` (isomorphic sync engine, `WorkspaceClient`, `GroupClient`, `TasksClient`, `DmClient`), `@flock/reader` (independent parity readers), and `@flock/testing` (`FakeNetwork` + `group-host-parity.test.ts`).
+- **Apps:** `apps/web` (stateless Next.js 16 App Router + dual browser OAuth in IndexedDB), `apps/group-host` (reference `opensocial.group` Group Host with `42` SQLite tables, two-sided OAuth 2.1 AS, signed `@atproto/repo` MST public repo, flat RBAC, moderation, and host migration), `apps/operator` (shared-session modality orchestrator with `OPERATION_TAKEOVER_MIGRATION = 4` `aborted_actor_revoked` / `operationAdminTakeover`, 1-webhook-per-space `notify` renewal, and `getChanges`), `apps/echo-bot`, and `apps/webhooks`.
 
-New to **atproto Spaces**? Start with [`docs/dev-onboarding.md`](docs/dev-onboarding.md) (diagrams and FAQ). See [`ARCHITECTURE.md`](ARCHITECTURE.md) for runtime boundaries and data flow, [`CODE-MAP.md`](CODE-MAP.md) for the directory map and canonical module owners, and [`SPEC.md`](SPEC.md) for product scope.
+New to **atproto Spaces** and **`opensocial.group`**? Start with [`docs/dev-onboarding.md`](docs/dev-onboarding.md). See [`ARCHITECTURE.md`](ARCHITECTURE.md), [`CODE-MAP.md`](CODE-MAP.md), and [`SPEC.md`](SPEC.md).
 
 ## Run it locally
 
-You need Node 22.17 (`.nvmrc`) and pnpm 11 (`corepack pnpm`). The local stack runs two in-memory PDS hosts, a PLC directory, the operator and the web app from a pinned atproto checkout.
+Requires Node `22.17` (`.nvmrc`) and `pnpm@11.11.0` (`corepack pnpm`). The local playground spins up two in-memory personal PDS hosts, an `opensocial.group` Group Host, a PLC directory, the Operator, and the Next.js web app against the pinned `@atproto` checkout.
 
-1. Check out and build the pinned atproto revision (`6747610566`) next to this repo as `atproto-spaces-r12`, and apply `protocol-tests/atproto/strict-credential-expiry.patch`. Full instructions are in [`docs/protocol/atproto-spaces-pin.md`](docs/protocol/atproto-spaces-pin.md).
+1. Check out and build the pinned `@atproto` Spaces revision (`6747610566eee1b6d743617bd8eb1136adccb362`) next to this repo as `atproto-spaces-r12` and apply `protocol-tests/atproto/strict-credential-expiry.patch` (`scripts/verify-pinned-checkout.mjs` verifies the exact tree and `19,163` compiled `dist` files). Full steps: [`docs/protocol/atproto-spaces-pin.md`](docs/protocol/atproto-spaces-pin.md).
 2. Install and build:
 
    ```sh
@@ -48,32 +50,42 @@ You need Node 22.17 (`.nvmrc`) and pnpm 11 (`corepack pnpm`). The local stack ru
    ATPROTO_PINNED_CHECKOUT=../atproto-spaces-r12 corepack pnpm playground
    ```
 
-   It prints a local URL and four ready-made accounts, all with the password `playground-pass`. Type the account's DID (not the handle) into the sign-in box. Everything lives in memory and disappears when you stop it.
+   It prints the local web URL, PDS/Group-Host/PLC endpoints, and four ready-made personal accounts (`alice.test`, `bob.test2`, `carol.test2`, `dave.test`), all with password `playground-pass`. Enter the account's DID into the sign-in box. State lives in memory and a temporary folder that disappears on exit.
 
-For a real deployment, run the web app and the operator (`corepack pnpm operator`) as two processes on their own origins. Copy `.env.example` to `.env` at the repository root (or set the same variables in each process's environment): both need `APP_URL`, `OPERATOR_URL`, `PLC_URL` and `OPERATOR_SERVICE_REF`; the operator also needs `DATABASE_PATH`, `AUTH_ENCRYPTION_KEY` and `AUTHORITY_CLIENT_PRIVATE_JWKS`. The operator DID's `did:web` document is served by the operator at `OPERATOR_URL`, and public deployments require HTTPS (upstream PDS `safeClient` SSRF checks reject private IP webhook targets outside loopback development). See [`docs/operations.md`](docs/operations.md).
+### Multi-process deployment
 
-## Tests
+Run `apps/web` (`corepack pnpm start`), `apps/group-host` (`corepack pnpm group-host`), and `apps/operator` (`corepack pnpm operator`) as separate processes on their own origins. Copy `.env.example` to `.env` (or configure environment variables per service):
+
+- **Shared (`@flock/deployment`):** `APP_URL`, `OPERATOR_URL`, `GROUP_HOST_URL` (default `http://127.0.0.1:3004` in loopback dev; HTTPS in production), `PLC_URL`, and `OPERATOR_SERVICE_REF`.
+- **Group Host (`apps/group-host`):** `GROUP_HOST_DATABASE_PATH` (`./data/group-host.db`), `GROUP_HOST_ENCRYPTION_KEY` (`openssl rand -hex 32`), `GROUP_HOST_HANDLE_DOMAIN` (e.g. `groups.example.com`), and optional `GROUP_HOST_SERVICE_PRIVATE_JWKS` (`{"keys":[...]}` ES256 private JWKs for `#atproto-<kid>` overlap rotation).
+- **Operator (`apps/operator`):** `DATABASE_PATH` (`./data/flock.db`), `AUTH_ENCRYPTION_KEY` (`openssl rand -hex 32`), `AUTHORITY_CLIENT_PRIVATE_JWKS`, and optional `FLOCK_ADMIN_MUTATIONS_PAUSED`.
+
+Before serving users on public ATProto PDSes, publish `_lexicon.opensocial.group` and `_lexicon.*.flock.new` DNS TXT + `com.atproto.lexicon.schema` records and run the mandatory pre-launch gate `corepack pnpm verify:lexicons` (`scripts/verify-public-lexicons.mjs`). Online backups run via `corepack pnpm backup:db <dest>` and `corepack pnpm backup:group-host <dest>`. See [`docs/operations.md`](docs/operations.md).
+
+## Scripts & Verification Gates
 
 | Command | What it runs |
 |---|---|
-| `pnpm codegen:lex` | verifies pinned checkout (`ATPROTO_PIN_CHECKOUT`) and regenerates Lexicon types |
-| `pnpm typecheck`, `pnpm lint` | TypeScript (including Node-free browser boundary checks) and ESLint |
-| `pnpm test` | 939 unit/component tests and the Gherkin ratchet gate (`bdd/gate.test.ts`) |
-| `pnpm test:bdd` | 74 Gherkin scenarios through real Chromium against the local PDS stack |
-| `pnpm test:bdd:chrome` | the same in visible Google Chrome |
-| `pnpm test:bdd:video` | the same in Chrome, stitched into `test-results/videos/bdd-session.mp4` |
-| `pnpm test:bdd:slow` | the 2 `@slow` scenarios delegating to long protocol/envelope tests (~30 min) |
-| `pnpm test:acceptance`, `pnpm test:browser` | 13 backend acceptance suites and 8 Playwright browser specs |
-| `pnpm test:sync-budget`, `pnpm test:sync-budget:browser` | warm-reopen request budgets across 20 / 100 / 200 writers |
-| `pnpm test:performance` | 200-member, 2,000,000-record workspace envelope, 100-participant DM budget, and Tasks RSS envelope |
+| `pnpm codegen:lex` | Runs `scripts/verify-pinned-checkout.mjs` against `ATPROTO_PIN_CHECKOUT` and regenerates XRPC Lexicon types |
+| `pnpm typecheck`, `pnpm lint` | Strict TypeScript (including `@types/node`-free `protocol`/`client` checks) and ESLint (`no-legacy-memberspace` & module boundaries) |
+| `pnpm test` | Unit tests across all packages/apps, `42`-table Group Host introspection & parity suite, `suite-manifest.test.ts`, and `bdd/gate.test.ts` |
+| `pnpm test:acceptance` | Real multi-PDS + multi-Group-Host acceptance (`opensocial-groups.test.ts`, `dm-acceptance.test.ts`, etc.) + in-place `protocol-tests/atproto/{slack-dm-conformance,platform-spike-k2-confidential-client,platform-spike-k5-oplog}.test.ts` |
+| `pnpm test:browser` | Playwright real-browser specs (`opensocial-groups.spec.ts`, CORS preflight, dual-OAuth isolation, CSP, DMs, Tasks, webhooks) |
+| `pnpm test:bdd`, `pnpm test:bdd:chrome`, `pnpm test:bdd:video` | Executable Gherkin scenarios in [`features/*.feature`](features) against real Chromium/Chrome + local PDS & Group Host stack |
+| `pnpm test:bdd:slow` | `@slow` fault-injection and 200-member envelope Gherkin scenarios |
+| `pnpm test:sync-budget`, `pnpm test:sync-budget:browser` | Cold/warm/live-wake XRPC call-count and latency gates across 20 / 100 / 200 writers |
+| `pnpm test:performance` | 200-member / 100-channel `O(1)` membership write (`=== 1` XRPC), writer eviction, 100-participant DM, and Tasks SLO benchmarks |
+| `pnpm group-host`, `pnpm operator`, `pnpm echo-bot`, `pnpm webhooks` | Start Group Host (`:3004`), Operator (`:3001`), Echo Bot (`:3002`), or Webhooks (`:3003`) |
+| `pnpm backup:db`, `pnpm backup:group-host` | Online `0o600` SQLite backup for Operator or Group Host (`scripts/backup-db.mjs [--group-host] <dest>`) |
+| `pnpm verify:lexicons` | Fail-closed DNS TXT + XRPC `com.atproto.lexicon.schema` check across all `63` public `new.flock.*` & `group.opensocial.*` schemas |
 
-The behavior contract is [`features/*.feature`](features). 76 of 77 scenarios are executable (74 in the default run plus 2 `@slow` scenarios); the single `@unbound` scenario—that the final admin cannot leave—has no UI path and is covered by `protocol-tests/app-acceptance.test.ts`. The gate fails if that count grows or if any bound scenario lacks a step definition. A full recording of the 74-scenario run is in [`docs/media/bdd-session.mp4`](docs/media/bdd-session.mp4) (Git LFS).
+*(Note: R12's `pnpm reconcile` / `reconcile-workspaces.ts` was retired in R13 because `group.opensocial.policy` evaluates live `role/*` and `membership/*` records directly without per-space member-list fan-out drift.)*
 
-Set `ATPROTO_PINNED_CHECKOUT=../atproto-spaces-r12` (and `ATPROTO_PIN_CHECKOUT=../atproto-spaces-r12` for `codegen:lex`) when running the suites.
+Set `ATPROTO_PINNED_CHECKOUT=../atproto-spaces-r12` (and `ATPROTO_PIN_CHECKOUT=../atproto-spaces-r12` for `codegen:lex`) when running pinned suites.
 
-## Conference deck
+## Conference deck (R12 historical baseline)
 
-GitHub’s README cannot run interactive HTML (no slide keyboard navigation in the markdown view). Use **GitHub Pages** for the full deck, or open the HTML file locally.
+GitHub's README cannot run interactive HTML slides directly; use **GitHub Pages** or open the HTML file locally. Note that this deck captures the **R12 pre-`opensocial.group` architecture** (annotated in-deck with an R13 supersession banner).
 
 [![Conference deck overview](docs/presentation/overview.png)](https://atproto-sandbox.github.io/atprotocol-slack-clone/presentation/r12-atproto-conference-deck.html)
 
@@ -85,15 +97,14 @@ GitHub’s README cannot run interactive HTML (no slide keyboard navigation in t
 
 ## Project notes
 
-- [`protocol-authors-feedback.md`](protocol-authors-feedback.md): synthesis for the atproto Spaces protocol authors—what we built, what worked well, and prioritized protocol recommendations.
-- [`PROGRESS.md`](PROGRESS.md) and [`.ai/plans/r12-protocol-drift-progress.md`](.ai/plans/r12-protocol-drift-progress.md): implementation waves, R12 protocol alignment and verification gate logs.
-- [`.ai/upstream/`](.ai/upstream): draft protocol feedback notes for the atproto core team.
-- [`.ai/reviews/`](.ai/reviews): adversarial architecture, security and protocol conformance reviews.
-- [`docs/prd/`](docs/prd) and [`docs/protocol/`](docs/protocol): product requirements, operator contract and upstream pin documentation.
+- [`protocol-authors-feedback.md`](protocol-authors-feedback.md): synthesis for the ATProto Spaces and `opensocial.group` protocol authors—what worked well and concrete R13 spec recommendations.
+- [`PROGRESS.md`](PROGRESS.md) and [`.ai/plans/r13-opensocial-groups.md`](.ai/plans/r13-opensocial-groups.md): R13 `opensocial.group` architectural plan and verification logs.
+- [`.ai/upstream/`](.ai/upstream): upstream protocol requests (`U1`–`U12`), tracking which items `opensocial.group` resolved and which core Spaces items remain orthogonal.
+- [`docs/protocol/`](docs/protocol) and [`docs/prd/`](docs/prd): upstream pins, Operator contract, and historical R12 PRDs (superseded on workspace governance by R13).
 
 ## Known limits
 
-- The pinned PDS allows five seconds of credential expiry skew across token types. This repo carries `protocol-tests/atproto/strict-credential-expiry.patch` so space credentials expire strictly at `exp`; deployments must run with this patch or an equivalent upstream revision.
-- DM wakes live exclusively in operator memory (coordinated across local workers over a `0600` IPC socket with zero SQLite DM rows); an operator restart resets the ephemeral DM cursor and prompts connected clients to resync once from their PDSes.
-- While the operator quarantines authority OAuth state across temporary `AccountDeactivated` / `AccountTakedown` responses, upstream PDS currently revokes OAuth refresh tokens on account takedown, requiring authority re-approval after restoration if the access token expired during takedown (documented in [`docs/protocol/operator-contract.md`](docs/protocol/operator-contract.md)).
-- Permissioned spaces have no cross-PDS query for spaces an account was added to, so workspace invitations rely on out-of-band invite links until upstream adds discovery.
+- Upstream `@atproto/space` allows 5 seconds of clock skew on credential `exp`; this repo enforces strict zero-skew cutoff via `protocol-tests/atproto/strict-credential-expiry.patch` on personal PDSes and explicit `nowSec >= payload.exp` checking in `apps/group-host` (`verifyGroupSpaceCredential`).
+- Public ATProto PDSes resolve every non-wildcard `space:<nsid>` scope via `_lexicon.<authority>` DNS TXT during `OAuthProvider.authorize()`. Until upstream `opensocial.group` publishes official `_lexicon.opensocial.group` records alongside `_lexicon.*.flock.new`, `pnpm verify:lexicons` intentionally fails closed (`exit 1`) to block broken public OAuth launches.
+- Outbound host migration from `apps/group-host` in v1 requires target capability advertisement (`#opensocial_group` DID service or signed `/group-admin/migration-info` `capabilityProofJwt`), and inbound zero-extension Standard migration from unattested multi-key (`>= 2` `rotationKeys`) non-Flock hosts requires `X-Group-Migration-Key-Provenance` (`400 ProvenanceRequired`) until upstream standardizes host-rotation-key provenance.
+- DM push wakes live exclusively in Operator memory (`dm-feed-wakes.ts`); an Operator restart resets the ephemeral DM cursor and prompts clients to resync once directly from participant PDSes.

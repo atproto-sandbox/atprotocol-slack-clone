@@ -1,8 +1,16 @@
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { gzipSync } from "node:zlib";
 import test from "node:test";
-import { assertSafeEndpoint, safeFetch } from "./safe-fetch";
+import {
+  assertSafeEndpoint,
+  boundedSafeFetch,
+  BOUNDED_FETCH_PROFILES,
+  safeFetch,
+  UpstreamContentTypeError,
+  UpstreamResponseTooLargeError,
+} from "./safe-fetch";
 
 const production = () => false;
 const loopbackDevelopment = () => true;
@@ -91,6 +99,121 @@ test("a request whose host never answers ends at its deadline as a timeout, whic
 
     // #then it ends as a timeout, before any answer
     await assert.rejects(sent, { name: "TimeoutError" });
+  } finally {
+    server.closeAllConnections();
+    await close(server);
+  }
+});
+
+test("boundedSafeFetch enforces allowedContentTypes, gzip-bomb decompressed maxResponseBytes, slow-loris deadlineMs, and no redirects", async () => {
+  const gzipBomb = gzipSync(Buffer.alloc(128 * 1024, 0x41));
+  assert.ok(gzipBomb.byteLength < 2048, "compressed payload fits well under maxResponseBytes");
+
+  const { server, port } = await listen((req, res) => {
+    if (req.url === "/ok-json") {
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+    if (req.url === "/empty-ok") {
+      res.writeHead(200, { "content-length": "0" });
+      res.end();
+      return;
+    }
+    if (req.url === "/wrong-mime") {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end("<html>not json</html>");
+      return;
+    }
+    if (req.url === "/missing-mime") {
+      res.writeHead(200);
+      res.write('{"surprise":true}');
+      res.end();
+      return;
+    }
+    if (req.url === "/large-header") {
+      res.writeHead(200, { "content-type": "application/json", "content-length": "999999" });
+      res.end("{}");
+      return;
+    }
+    if (req.url === "/gzip-bomb") {
+      res.writeHead(200, {
+        "content-type": "application/json",
+        "content-encoding": "gzip",
+      });
+      res.end(gzipBomb);
+      return;
+    }
+    if (req.url === "/slow-loris") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.write('{"a":"');
+      const timer = setInterval(() => res.write("x"), 60);
+      res.on("close", () => clearInterval(timer));
+      return;
+    }
+    if (req.url === "/redirect") {
+      res.writeHead(302, { location: `http://127.0.0.1:${port}/ok-json` });
+      res.end();
+      return;
+    }
+    res.writeHead(404).end();
+  });
+
+  try {
+    const fetcher = boundedSafeFetch(loopbackDevelopment, {
+      deadlineMs: 250,
+      maxResponseBytes: 4096,
+      allowedContentTypes: ["application/json"],
+    });
+
+    // Valid JSON and empty 200 succeed
+    const okRes = await fetcher(`http://127.0.0.1:${port}/ok-json`);
+    assert.deepEqual(await okRes.json(), { ok: true });
+    const emptyRes = await fetcher(`http://127.0.0.1:${port}/empty-ok`);
+    assert.equal(await emptyRes.text(), "");
+
+    // Wrong MIME rejected before body read
+    await assert.rejects(
+      fetcher(`http://127.0.0.1:${port}/wrong-mime`),
+      (err: unknown) => err instanceof UpstreamContentTypeError,
+    );
+
+    // Missing Content-Type on non-empty chunked body rejected
+    await assert.rejects(
+      async () => {
+        const res = await fetcher(`http://127.0.0.1:${port}/missing-mime`);
+        await res.text();
+      },
+      (err: unknown) => err instanceof UpstreamContentTypeError,
+    );
+
+    // Oversized Content-Length rejected before body read
+    await assert.rejects(
+      fetcher(`http://127.0.0.1:${port}/large-header`),
+      (err: unknown) => err instanceof UpstreamResponseTooLargeError,
+    );
+
+    // Gzip bomb expanding past 4 KiB decompressed limit aborted mid-stream
+    await assert.rejects(
+      async () => {
+        const res = await fetcher(`http://127.0.0.1:${port}/gzip-bomb`);
+        await res.arrayBuffer();
+      },
+      (err: unknown) => err instanceof UpstreamResponseTooLargeError,
+    );
+
+    // Slow-loris chunked stream aborted at deadlineMs
+    await assert.rejects(async () => {
+      const res = await fetcher(`http://127.0.0.1:${port}/slow-loris`);
+      await res.text();
+    });
+
+    // Redirect rejected
+    await assert.rejects(fetcher(`http://127.0.0.1:${port}/redirect`));
+
+    // Named profiles match plan specification
+    assert.equal(BOUNDED_FETCH_PROFILES.oauthMetadata.maxResponseBytes, 262_144);
+    assert.equal(BOUNDED_FETCH_PROFILES.migrationManifest.maxResponseBytes, 4_194_304);
   } finally {
     server.closeAllConnections();
     await close(server);

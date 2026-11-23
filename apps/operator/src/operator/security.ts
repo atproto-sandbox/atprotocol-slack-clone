@@ -1,29 +1,39 @@
 import { createHmac, hkdfSync } from "node:crypto";
-import { cryptoVerifySignatureWithKey, verifyJwt } from "@atproto/xrpc-server";
 import type { OAuthSession } from "@atproto/oauth-client-node";
-import { getIdResolver, resolveSigningKey as cachedResolveSigningKey } from "../atproto/identity";
-import { sessionClient } from "../atproto/client";
-import { listBoundedMembers } from "@flock/protocol/atproto/record-pages";
-import { verifyCredentialSig } from "@flock/protocol/atproto/space-credential-core";
-import { listSpaceMembers } from "../atproto/space-ops";
+import { cryptoVerifySignatureWithKey, verifyJwt } from "@atproto/xrpc-server";
 import { getConfig } from "@flock/deployment/config";
-import { inboxUri, isDid, parseDmSpaceUri, parseSpaceUri, requireSpaceAuthority, subjectKey } from "@flock/protocol/keys";
-import { WorkspaceEnvelopeError } from "@flock/protocol/workspace-summary";
+import { verifyCredentialSig } from "@flock/protocol/atproto/space-credential-core";
+import {
+  groupMetaUri,
+  isDid,
+  parseDmSpaceUri,
+  parsePersonalInvitesUri,
+  parseSpaceUri,
+  personalInvitesUri,
+  requireSpaceAuthority,
+} from "@flock/protocol/keys";
+import { OPENSOCIAL_COLLECTION, OPERATOR_METHOD } from "@flock/protocol/nsids";
+import { effectiveMemberPermissions, isEffectiveAdminMember } from "@flock/protocol/scopes";
+import { getIdResolver, resolveSigningKey as cachedResolveSigningKey } from "../atproto/identity";
 import { getOperatorConfig } from "../config";
 import { getRawDb } from "../lib/db";
 import { authorizeDmSubscription } from "../lib/dm-subscription";
+import { parseWorkspaceRef, type OperatorActor, type WorkspaceRef } from "./actor";
 import { restoreAuthorityGrant } from "./authority-grant";
-import { OperatorAuthError, OperatorInfrastructureError, isTransientOperatorInfrastructureError } from "./errors";
+import {
+  isTransientOperatorInfrastructureError,
+  OperatorAuthError,
+  OperatorInfrastructureError,
+} from "./errors";
 import { hasJournaledOperation } from "./journal";
 import { operationKind } from "./kinds/index";
-import { assertMayStartKind, validateOperatorRequest } from "./operations";
-import { COLLECTION, OPERATOR_METHOD } from "@flock/protocol/nsids";
-import { parseWorkspaceRef, type OperatorActor, type WorkspaceRef } from "./actor";
-import { getOwnerRecord } from "./workspace-state";
+import type { OperatorRequest } from "./kinds/kind";
+import { assertActorAuthorizedForOperation, assertMayStartKind, validateOperatorRequest } from "./operations";
+import { getOwnerRecord, readGroupGovernanceState } from "./workspace-state";
 
-const MAX_READ_ONLY_MEMBER_SCAN = 1_000;
 const SPACE_CREDENTIAL_TYP = "atproto-space-credential+jwt";
 const SPACE_CREDENTIAL_MAX_AGE_SECONDS = 3_600;
+const INVITE_SPACE_CREDENTIAL_MAX_AGE_SECONDS = 600;
 const CREDENTIAL_IAT_CLOCK_SKEW_SECONDS = 5;
 const PROOF_CREATED_WINDOW_SECONDS = 60;
 const DM_REPLAY_KEY_INFO = "flock-dm-pop-replay-v1";
@@ -41,15 +51,10 @@ export function resetDmProofReplayCacheForTests(): void {
   }
 }
 
-/** The bearer token an `authorization` header value carries. */
 function bearerToken(authorization: string | undefined): string | undefined {
   return authorization?.match(/^Bearer ([A-Za-z0-9._~-]+)$/)?.[1];
 }
 
-/**
- * The `iss` a bearer service token claims, read without verifying it, or `null` when there is no well-formed token. It proves
- * nothing; it lets a caller refuse a token that names the wrong issuer before any DID is resolved for it.
- */
 export function unverifiedBearerIssuer(authorization: string | undefined): string | null {
   const payload = bearerToken(authorization)?.split(".")[1];
   if (!payload) return null;
@@ -61,10 +66,6 @@ export function unverifiedBearerIssuer(authorization: string | undefined): strin
   }
 }
 
-/**
- * How long a service token may live, from when it was issued, per method: a minute and a little more for one call,
- * fifteen minutes for the long poll, so a client reuses one token across polls.
- */
 const SERVICE_TOKEN_LIFETIME_SECONDS: Readonly<Record<string, number>> = { [OPERATOR_METHOD.getChanges]: 15 * 60 };
 const DEFAULT_SERVICE_TOKEN_LIFETIME_SECONDS = 75;
 
@@ -72,7 +73,6 @@ export function serviceTokenLifetimeSeconds(method: string): number {
   return SERVICE_TOKEN_LIFETIME_SECONDS[method] ?? DEFAULT_SERVICE_TOKEN_LIFETIME_SECONDS;
 }
 
-/** The caller's DID from a PDS-issued service token bound to this operator and to `method`, within that method's lifetime. */
 export async function authenticateOperatorRequest(
   authorization: string | undefined,
   method: string,
@@ -81,11 +81,8 @@ export async function authenticateOperatorRequest(
   const token = bearerToken(authorization);
   if (!token) throw new OperatorAuthError("Bearer service authorization is required.");
   const serviceRef = getConfig().operatorServiceRef;
-  const payload = await verifyJwt(
-    token,
-    serviceRef,
-    method,
-    async (issuer) => resolveSigningKey(issuer.split("#", 1)[0]!),
+  const payload = await verifyJwt(token, serviceRef, method, async (issuer) =>
+    resolveSigningKey(issuer.split("#", 1)[0]!),
   ).catch((error: unknown) => {
     if (isTransientOperatorInfrastructureError(error)) throw new OperatorInfrastructureError();
     throw new OperatorAuthError("Service authorization is invalid or expired.");
@@ -98,8 +95,6 @@ export async function authenticateOperatorRequest(
   const issuedAt = isPlainObject(decoded) ? decoded.iat : undefined;
   const now = Math.floor(Date.now() / 1000);
   const lifetime = serviceTokenLifetimeSeconds(method);
-  // The token's age, from the PDS's own iat, bounds when it is accepted; its exp is the client's ask, made on the client's
-  // clock, so it is only required to come after iat.
   if (typeof issuedAt !== "number" || issuedAt > now + 5 || payload.exp <= issuedAt || now - issuedAt > lifetime) {
     throw new OperatorAuthError("Service authorization is outside the accepted lifetime.");
   }
@@ -118,45 +113,33 @@ export type VerifyDmNotifyTargetDeps = {
   now?: () => number;
 };
 
-/**
- * Verifies that `callerDid` may watch `space` (a DM inbox or DM conversation) and holds both:
- * 1) an unexpired `SpaceCredential` JWT issued by `requireSpaceAuthority(space)` for `sub === space`, and
- * 2) a fresh RFC 9421 PoP signature (`tag="atproto-space-credential"`) bound to `payload.cnf.kid` and `operatorServiceRef`,
- *    checked against a bounded replay cache and optional `created` timestamp window.
- */
-export async function verifyDmNotifyCredentialAndProof(
+async function verifyCredentialJwtAndProof(
   input: {
     space: string;
-    callerDid: string;
+    expectedIssuer: string;
     credential: string;
     proof: DmCredentialProof;
+    maxAgeSeconds: number;
   },
-  deps: VerifyDmNotifyTargetDeps = {},
+  deps: VerifyDmNotifyTargetDeps,
 ): Promise<void> {
-  if (!parseSpaceUri(input.space)) {
-    throw new Error("Invalid permissioned space URI.");
-  }
-  if (!parseDmSpaceUri(input.space)) {
-    throw new OperatorAuthError("DM notification targets are available only for DM spaces.");
-  }
-  const subscription = authorizeDmSubscription(input.space, input.callerDid);
-  if (!subscription.allowed) {
-    if (subscription.status === 400) throw new Error(subscription.reason);
-    throw new OperatorAuthError(subscription.reason);
-  }
-
   const nowMs = (deps.now ?? Date.now)();
   const nowSec = Math.floor(nowMs / 1000);
-  const expectedIssuer = requireSpaceAuthority(input.space);
-  const parsed = parseCredentialJwt(input.credential, input.space, expectedIssuer, nowSec);
+  const parsed = parseCredentialJwt(
+    input.credential,
+    input.space,
+    input.expectedIssuer,
+    nowSec,
+    input.maxAgeSeconds,
+  );
 
   const resolveKey = deps.resolveSigningKey ?? cachedResolveSigningKey;
   let signatureValid = false;
   try {
-    const didKey = await resolveKey(expectedIssuer, false);
+    const didKey = await resolveKey(input.expectedIssuer, false);
     signatureValid = await cryptoVerifySignatureWithKey(didKey, parsed.signingInput, parsed.sig, parsed.alg);
     if (!signatureValid) {
-      const freshKey = await resolveKey(expectedIssuer, true);
+      const freshKey = await resolveKey(input.expectedIssuer, true);
       if (freshKey !== didKey) {
         signatureValid = await cryptoVerifySignatureWithKey(freshKey, parsed.signingInput, parsed.sig, parsed.alg);
       }
@@ -193,11 +176,80 @@ export async function verifyDmNotifyCredentialAndProof(
   consumeProofReplayLock(parsed.iss, parsed.jti, created, parsed.exp, nowMs);
 }
 
+export async function verifyDmNotifyCredentialAndProof(
+  input: {
+    space: string;
+    callerDid: string;
+    credential: string;
+    proof: DmCredentialProof;
+  },
+  deps: VerifyDmNotifyTargetDeps = {},
+): Promise<void> {
+  if (!parseSpaceUri(input.space)) {
+    throw new Error("Invalid permissioned space URI.");
+  }
+  if (!parseDmSpaceUri(input.space)) {
+    throw new OperatorAuthError("DM notification targets are available only for DM spaces.");
+  }
+  const subscription = authorizeDmSubscription(input.space, input.callerDid);
+  if (!subscription.allowed) {
+    if (subscription.status === 400) throw new Error(subscription.reason);
+    throw new OperatorAuthError(subscription.reason);
+  }
+
+  await verifyCredentialJwtAndProof(
+    {
+      space: input.space,
+      expectedIssuer: requireSpaceAuthority(input.space),
+      credential: input.credential,
+      proof: input.proof,
+      maxAgeSeconds: SPACE_CREDENTIAL_MAX_AGE_SECONDS,
+    },
+    deps,
+  );
+}
+
+/**
+ * Verifies `OPERATOR_METHOD.getSpaceNotifyTarget` for `at://<callerDid>/space/group.opensocial.invites/self`:
+ * - Rejects (`400 InvalidRequest` via plain `Error`) any space other than `personalInvitesUri(callerDid)`.
+ * - Verifies `SPACE_CREDENTIAL_TYP` (`iss === callerDid`, `sub === space`, `nowSec < exp`, `exp - iat <= 600`) against `callerDid` `#atproto`.
+ * - Verifies RFC 9421 PoP (`"atproto-space-audience": operatorServiceRef`) + single-use replay lock.
+ */
+export async function verifySpaceNotifyCredentialAndProof(
+  input: {
+    space: string;
+    callerDid: string;
+    credential: string;
+    proof: DmCredentialProof;
+  },
+  deps: VerifyDmNotifyTargetDeps = {},
+): Promise<void> {
+  if (!parseSpaceUri(input.space)) {
+    throw new Error("Invalid permissioned space URI.");
+  }
+  const parsedInvites = parsePersonalInvitesUri(input.space);
+  if (!parsedInvites || parsedInvites.userDid !== input.callerDid || input.space !== personalInvitesUri(input.callerDid)) {
+    throw new Error("getSpaceNotifyTarget only accepts the caller's own group.opensocial.invites/self space.");
+  }
+
+  await verifyCredentialJwtAndProof(
+    {
+      space: input.space,
+      expectedIssuer: input.callerDid,
+      credential: input.credential,
+      proof: input.proof,
+      maxAgeSeconds: INVITE_SPACE_CREDENTIAL_MAX_AGE_SECONDS,
+    },
+    deps,
+  );
+}
+
 function parseCredentialJwt(
   jwt: string,
   expectedSpace: string,
   expectedIssuer: string,
   nowSec: number,
+  maxAgeSeconds = SPACE_CREDENTIAL_MAX_AGE_SECONDS,
 ): {
   alg: string;
   iss: string;
@@ -223,10 +275,14 @@ function parseCredentialJwt(
     throw refusal();
   }
   if (!isPlainObject(header) || !isPlainObject(payload)) throw refusal();
-  if (header.typ !== SPACE_CREDENTIAL_TYP || header.kid !== "#atproto" || typeof header.alg !== "string" || header.alg.length === 0) {
+  if (
+    header.typ !== SPACE_CREDENTIAL_TYP ||
+    header.kid !== "#atproto" ||
+    typeof header.alg !== "string" ||
+    header.alg.length === 0
+  ) {
     throw refusal();
   }
-  // Check issuer and subject before resolving any DID document.
   if (payload.iss !== expectedIssuer || payload.sub !== expectedSpace) {
     throw refusal();
   }
@@ -234,19 +290,18 @@ function parseCredentialJwt(
     throw refusal();
   }
   if (
-    typeof payload.iat !== "number"
-    || !Number.isFinite(payload.iat)
-    || typeof payload.exp !== "number"
-    || !Number.isFinite(payload.exp)
-    || payload.exp <= payload.iat
-    || payload.exp - payload.iat > SPACE_CREDENTIAL_MAX_AGE_SECONDS
+    typeof payload.iat !== "number" ||
+    !Number.isFinite(payload.iat) ||
+    typeof payload.exp !== "number" ||
+    !Number.isFinite(payload.exp) ||
+    payload.exp <= payload.iat ||
+    payload.exp - payload.iat > maxAgeSeconds
   ) {
     throw refusal();
   }
   if (payload.iat > nowSec + CREDENTIAL_IAT_CLOCK_SKEW_SECONDS) {
     throw refusal();
   }
-  // Strict credential expiry cutoff (D12.2: zero clock-skew extension past exp).
   if (nowSec >= payload.exp) {
     throw refusal();
   }
@@ -282,10 +337,6 @@ type SfParameters = Map<string, SfBareItem>;
 type SfItem = { kind: "item"; bare: SfBareItem; parameters: SfParameters };
 type SfInnerList = { kind: "innerList"; items: SfItem[]; parameters: SfParameters };
 
-/**
- * Parses an RFC 8941 Structured Field Dictionary matching `structured-headers` `parseDictionary`,
- * while preserving exact `integer` vs `decimal` bare-item types so `1700000000.0` is never accepted as an integer.
- */
 function parseStructuredDictionary(input: string): Map<string, SfItem | SfInnerList> {
   let pos = 0;
   const eof = () => pos >= input.length;
@@ -495,13 +546,15 @@ function consumeProofReplayLock(
   const replayName = `pop:${createHmac("sha256", deriveDmReplayKey()).update(`${iss}\0${jti}`, "utf8").digest("hex")}`;
   const expiresAt = Math.max((created + 65) * 1000, credentialExp * 1000 + 5_000);
   const db = getRawDb();
-  const consumed = db.transaction(() => {
-    db.prepare("DELETE FROM oauth_request_lock WHERE name LIKE 'pop:%' AND expires_at <= ?").run(nowMs);
-    const res = db
-      .prepare("INSERT INTO oauth_request_lock (name, token, expires_at) VALUES (?, '1', ?) ON CONFLICT(name) DO NOTHING")
-      .run(replayName, expiresAt);
-    return res.changes === 1;
-  }).immediate();
+  const consumed = db
+    .transaction(() => {
+      db.prepare("DELETE FROM oauth_request_lock WHERE name LIKE 'pop:%' AND expires_at <= ?").run(nowMs);
+      const res = db
+        .prepare("INSERT INTO oauth_request_lock (name, token, expires_at) VALUES (?, '1', ?) ON CONFLICT(name) DO NOTHING")
+        .run(replayName, expiresAt);
+      return res.changes === 1;
+    })
+    .immediate();
   if (!consumed) {
     throw new OperatorAuthError("Credential proof has already been used.");
   }
@@ -512,60 +565,66 @@ export async function requireActiveWorkspaceAdmin(
   actorDid: string,
   options: { allowDegradedLookup?: boolean } = {},
 ): Promise<OperatorActor> {
+  void options;
   const workspace = parseWorkspaceRef(workspaceUri);
   const session = await restoreAuthorityGrant(workspace.authorityDid);
-  const [admin, roster] = await Promise.all([
-    getOwnerRecord(session, workspace.uri, COLLECTION.admin, subjectKey(actorDid)),
-    getOwnerRecord(session, workspace.uri, COLLECTION.workspaceRoster, subjectKey(actorDid)),
-  ]);
-  if (admin?.subject !== actorDid || admin.active !== true || roster?.subject !== actorDid || roster.active !== true) throw new OperatorAuthError("Actor is not an active workspace admin.");
-  const isAuthority = actorDid === workspace.authorityDid;
-  const inbox = inboxUri(workspace.authorityDid, workspace.skey);
-  const [hasWorkspaceAccess, hasInboxAccess] = isAuthority
-    ? [true, true]
-    : await Promise.all([
-      hasCurrentMembership(session, workspace.uri, actorDid, options.allowDegradedLookup === true),
-      hasCurrentMembership(session, inbox, actorDid, options.allowDegradedLookup === true),
-    ]);
-  if (!hasWorkspaceAccess || !hasInboxAccess) throw new OperatorAuthError("Actor lacks current workspace or inbox membership.");
+  const state = await readGroupGovernanceState(session, workspace.authorityDid);
+  if (
+    actorDid === workspace.authorityDid ||
+    state.knownAppSubjects.has(actorDid) ||
+    !isEffectiveAdminMember(actorDid, state, workspace.authorityDid)
+  ) {
+    throw new OperatorAuthError("Actor is not an active workspace admin.");
+  }
   return { did: actorDid, session, workspace, canRecoverOperations: true };
 }
 
-/**
- * The operator itself, for its scheduled reconcile job: the workspace authority's grant, with the authority as the journal and
- * audit principal. A workspace created under a dedicated account (R8) gives its authority no admin or roster record, so this
- * actor is not checked as an admin. It proves the grant reads the workspace (its profile), and the job runs `reconcileWorkspace`
- * with it, and the recovery an admin's operation would do, nothing else.
- */
+export async function requireWorkspaceOrLifecycleAdmin(
+  workspaceUri: string,
+  actorDid: string,
+): Promise<OperatorActor> {
+  const workspace = parseWorkspaceRef(workspaceUri);
+  const session = await restoreAuthorityGrant(workspace.authorityDid);
+  const state = await readGroupGovernanceState(session, workspace.authorityDid);
+  const isLifecycleAdmin =
+    actorDid !== workspace.authorityDid &&
+    !state.knownAppSubjects.has(actorDid) &&
+    state.memberships.has(actorDid) &&
+    (isEffectiveAdminMember(actorDid, state, workspace.authorityDid) ||
+      effectiveMemberPermissions(
+        state,
+        workspace.authorityDid as Parameters<typeof effectiveMemberPermissions>[1],
+        actorDid as Parameters<typeof effectiveMemberPermissions>[2],
+      ).allowsAccount({ attr: "status", action: "manage" }));
+  if (!isLifecycleAdmin) {
+    throw new OperatorAuthError("Actor is not an active workspace or lifecycle admin.");
+  }
+  return { did: actorDid, session, workspace, canRecoverOperations: true };
+}
+
 export async function requireWorkspaceOperator(workspaceUri: string): Promise<OperatorActor> {
   const workspace = parseWorkspaceRef(workspaceUri);
   const session = await restoreAuthorityGrant(workspace.authorityDid);
-  if (!(await getOwnerRecord(session, workspace.uri, COLLECTION.workspaceProfile, "self"))) throw new OperatorAuthError("The authority's grant does not read this workspace.");
+  const profile = await getOwnerRecord(
+    session,
+    groupMetaUri(workspace.authorityDid),
+    OPENSOCIAL_COLLECTION.profile,
+    "self",
+  );
+  if (!profile) throw new OperatorAuthError("The authority's grant does not read this group.");
   return { did: workspace.authorityDid, session, workspace, canRecoverOperations: true };
 }
 
-async function hasCurrentMembership(session: OAuthSession, space: string, did: string, allowDegradedLookup: boolean): Promise<boolean> {
-  if (!allowDegradedLookup) {
-    return (await listSpaceMembers(session, space)).some((member) => member.did === did && member.read && member.write);
-  }
-  const result = await listBoundedMembers(sessionClient(session), { space, maxMembers: MAX_READ_ONLY_MEMBER_SCAN });
-  const member = result.members.find((entry) => entry.did === did);
-  if (member) return member.read && member.write;
-  if (result.truncated) throw new WorkspaceEnvelopeError(`Could not verify this actor within the ${MAX_READ_ONLY_MEMBER_SCAN}-member read-only authorization scan.`);
-  return false;
-}
-
-export async function requireWorkspaceActorForOperation(workspaceUri: string, actorDid: string, operationId: string, request: unknown): Promise<OperatorActor> {
+export async function requireWorkspaceActorForOperation(
+  workspaceUri: string,
+  actorDid: string,
+  operationId: string,
+  request: unknown,
+): Promise<OperatorActor> {
   const workspace = parseWorkspaceRef(workspaceUri);
   return authorizeSubmittedOperation(await restoreAuthorityGrant(workspace.authorityDid), workspace, actorDid, operationId, request);
 }
 
-/**
- * Who `actorDid` is for a submission of `operationId`. The workspace's current state decides, with one exception: a request
- * that takes away the role that let its submitter start it (leaving, removing or demoting oneself) can stop part-way, after
- * which current state refuses the submitter. They may still send that same operation again when the journal holds it. The
- * journal then resumes it or returns its recorded result, and the submitter recovers nobody else's operations.
- */
 export async function authorizeSubmittedOperation(
   session: OAuthSession,
   workspace: WorkspaceRef,
@@ -579,36 +638,58 @@ export async function authorizeSubmittedOperation(
     if (!(error instanceof OperatorAuthError) || !isPlainObject(request)) throw error;
     const kind = operationKind(request.kind);
     const submitter: OperatorActor = { did: actorDid, session, workspace, canRecoverOperations: false };
-    if (kind?.endsOwnRole?.({ ...request, kind: kind.kind }, actorDid) && hasJournaledOperation(submitter, operationId, request)) return submitter;
+    if (kind?.endsOwnRole?.({ ...request, kind: kind.kind }, actorDid) && hasJournaledOperation(submitter, operationId, request)) {
+      return submitter;
+    }
     throw error;
   }
 }
 
-/**
- * Who `actorDid` is for `request`, read from the workspace's current state with the authority's session. An active admin may
- * run any kind but one only the authority may start; an active member may run only a kind that concerns their own membership,
- * once the request is valid and the kind's own check agrees.
- */
-export async function authorizeOperationActor(session: OAuthSession, workspace: WorkspaceRef, actorDid: string, request: unknown): Promise<OperatorActor> {
+export async function authorizeOperationActor(
+  session: OAuthSession,
+  workspace: WorkspaceRef,
+  actorDid: string,
+  request: unknown,
+): Promise<OperatorActor> {
   const kind = isPlainObject(request) ? operationKind(request.kind) : undefined;
   if (kind) assertMayStartKind(kind, actorDid, workspace);
-  const [admin, roster, workspaceMembers, inboxMembers] = await Promise.all([
-    getOwnerRecord(session, workspace.uri, COLLECTION.admin, subjectKey(actorDid)),
-    getOwnerRecord(session, workspace.uri, COLLECTION.workspaceRoster, subjectKey(actorDid)),
-    listSpaceMembers(session, workspace.uri),
-    listSpaceMembers(session, inboxUri(workspace.authorityDid, workspace.skey)),
-  ]);
-  const isAuthority = actorDid === workspace.authorityDid;
-  const isAdmin = admin?.subject === actorDid && admin.active === true && roster?.subject === actorDid && roster.active === true &&
-    (isAuthority || workspaceMembers.some((member) => member.did === actorDid && member.read && member.write)) &&
-    (isAuthority || inboxMembers.some((member) => member.did === actorDid && member.read && member.write));
-  if (isAdmin) return { did: actorDid, session, workspace, canRecoverOperations: true };
-  const isMember = roster?.subject === actorDid && roster.active === true && workspaceMembers.some((member) => member.did === actorDid && member.read && member.write) &&
-    inboxMembers.some((member) => member.did === actorDid && member.write);
-  if (!isMember || kind?.actor !== "member") throw new OperatorAuthError("Active workspace admin permission is required.");
-  const actor: OperatorActor = { did: actorDid, session, workspace, canRecoverOperations: false };
-  await kind.authorizeMember?.(actor, validateOperatorRequest(request, actor, "execute").request);
-  return actor;
+  const groupDid = workspace.authorityDid;
+
+  if (kind?.actor === "authority") {
+    return { did: actorDid, session, workspace, canRecoverOperations: true };
+  }
+
+  const probeActor: OperatorActor = { did: actorDid, session, workspace, canRecoverOperations: false };
+  if (!kind) {
+    // Malformed kind: check admin status first so outsiders get 403 before 400 validation errors!
+    const state = await readGroupGovernanceState(session, groupDid);
+    if (actorDid === groupDid || state.knownAppSubjects.has(actorDid) || !isEffectiveAdminMember(actorDid, state, groupDid)) {
+      throw new OperatorAuthError("Active workspace admin permission is required.");
+    }
+    return { did: actorDid, session, workspace, canRecoverOperations: true };
+  }
+
+  let validated: OperatorRequest;
+  try {
+    validated = validateOperatorRequest(request, probeActor, "execute").request;
+  } catch (valErr) {
+    // Still enforce auth first before exposing field validation errors to unauthorized callers.
+    const state = await readGroupGovernanceState(session, groupDid);
+    if (actorDid === groupDid || state.knownAppSubjects.has(actorDid) || !state.memberships.has(actorDid)) {
+      throw new OperatorAuthError("Active workspace admin permission is required.");
+    }
+    if (kind.actor === "admin" && !isEffectiveAdminMember(actorDid, state, groupDid)) {
+      throw new OperatorAuthError("Active workspace admin permission is required.");
+    }
+    throw valErr;
+  }
+
+  const state = await assertActorAuthorizedForOperation(session, workspace, actorDid, kind, validated);
+  const canRecover =
+    kind.actor === "admin" &&
+    actorDid !== groupDid &&
+    !state.knownAppSubjects.has(actorDid);
+  return { did: actorDid, session, workspace, canRecoverOperations: canRecover };
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

@@ -2,17 +2,50 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { COLLECTION, OPERATOR_METHOD, SPACE_TYPE } from "./nsids";
-import { DM_BROWSER_SCOPES, LEGACY_OPERATOR_METHODS, legacyMemberGrantScopes, memberGrantScopes, OPERATOR_METHODS, workspaceAuthorityScopes } from "./scopes";
+import {
+  DM_BROWSER_SCOPES,
+  FLOCK_MEMBER_MODALITY_SPACE_SCOPES,
+  LEGACY_OPERATOR_METHODS,
+  legacyMemberGrantScopes,
+  memberGrantScopes,
+  OPEN_SOCIAL_PARTICIPATE_SCOPES,
+  OPERATOR_METHODS,
+} from "./scopes";
 
-type LexPermission = { type: "permission"; resource: "space" | "rpc"; spaceType?: string; authority?: string; skey?: string; collection?: string[]; action?: string[]; manage?: string[]; lxm?: string[] };
+type LexPermission = {
+  type: "permission";
+  resource: "space" | "rpc";
+  spaceType?: string;
+  authority?: string;
+  skey?: string;
+  collection?: string[];
+  action?: string[];
+  manage?: string[];
+  lxm?: string[];
+};
 
-function readPermissionSet(name: string): LexPermission[] {
-  const document = JSON.parse(readFileSync(new URL(`../lexicons/new/flock/permissions/${name}.json`, import.meta.url), "utf8")) as { defs: { main: { permissions: LexPermission[] } } };
+function readFlockPermissionSet(name: string): LexPermission[] {
+  const document = JSON.parse(
+    readFileSync(new URL(`../lexicons/new/flock/permissions/${name}.json`, import.meta.url), "utf8"),
+  ) as { defs: { main: { permissions: LexPermission[] } } };
   return document.defs.main.permissions;
 }
 
-/** The pinned scope grammar's defaults: an omitted `authority` is `self`, an omitted `skey` is `*`. Parameters compare as sorted sets. */
-function normalized(parts: { type?: string; authority?: string; skey?: string; collection?: readonly string[]; action?: readonly string[]; manage?: readonly string[] }): string {
+function readOpenSocialPermissionSet(name: string): LexPermission[] {
+  const document = JSON.parse(
+    readFileSync(new URL(`../lexicons/group/opensocial/${name}.json`, import.meta.url), "utf8"),
+  ) as { defs: { main: { permissions: LexPermission[] } } };
+  return document.defs.main.permissions;
+}
+
+function normalized(parts: {
+  type?: string;
+  authority?: string;
+  skey?: string;
+  collection?: readonly string[];
+  action?: readonly string[];
+  manage?: readonly string[];
+}): string {
   return JSON.stringify({
     type: parts.type,
     authority: parts.authority ?? "self",
@@ -36,50 +69,60 @@ function fromScopeString(scope: string): string {
   });
 }
 
-test("the published workspaceAuthority permission set grants exactly the scopes the app requests for a workspace authority", () => {
-  // #given the space grants of the published permission set and the scopes the app builds at runtime
-  const published = readPermissionSet("workspaceAuthority").filter((permission) => permission.resource === "space")
-    .map((permission) => normalized({ ...permission, type: permission.spaceType })).sort();
-  const requested = workspaceAuthorityScopes().map(fromScopeString).sort();
+test("OPEN_SOCIAL_PARTICIPATE_SCOPES matches group.opensocial.authParticipate 1-for-1", () => {
+  const permissions = readOpenSocialPermissionSet("authParticipate");
+  const publishedSpaces = permissions
+    .filter((p) => p.resource === "space")
+    .map((p) => normalized({ ...p, type: p.spaceType }))
+    .sort();
+  const runtimeSpaces = OPEN_SOCIAL_PARTICIPATE_SCOPES.filter((s) => s.startsWith("space:"))
+    .map(fromScopeString)
+    .sort();
+  assert.deepEqual(publishedSpaces, runtimeSpaces);
 
-  // #then they are the same set, so a client that includes the published set asks for what the app does
-  assert.deepEqual(published, requested);
+  const publishedRpc = [...permissions.find((p) => p.resource === "rpc")!.lxm!].sort();
+  const runtimeRpcQuery = OPEN_SOCIAL_PARTICIPATE_SCOPES.find((s) => s.startsWith("rpc?"))!.split("?")[1]!;
+  const runtimeParams = new URLSearchParams(runtimeRpcQuery);
+  assert.equal(runtimeParams.get("aud"), "*");
+  assert.deepEqual(runtimeParams.getAll("lxm").sort(), publishedRpc);
 });
 
-test("the published workspaceAuthority permission set grants the operator methods the app calls, with the audience inherited", () => {
-  const rpc = readPermissionSet("workspaceAuthority").filter((permission) => permission.resource === "rpc");
-  assert.equal(rpc.length, 1);
-  assert.deepEqual([...rpc[0]!.lxm!].sort(), [...OPERATOR_METHODS].sort());
-});
-
-test("every space type and collection a published permission set names is one this app defines", () => {
+test("published new.flock.permissions.member matches FLOCK_MEMBER_MODALITY_SPACE_SCOPES and OPERATOR_METHODS", () => {
   const spaceTypes = new Set<string>(Object.values(SPACE_TYPE));
   const collections = new Set<string>(Object.values(COLLECTION));
-  for (const name of ["member", "workspaceAuthority"]) {
-    for (const permission of readPermissionSet(name).filter((entry) => entry.resource === "space")) {
-      assert.ok(spaceTypes.has(permission.spaceType!), `${name}: unknown space type ${permission.spaceType}`);
-      for (const collection of permission.collection ?? []) assert.ok(collections.has(collection), `${name}: unknown collection ${collection}`);
+  const permissions = readFlockPermissionSet("member");
+  for (const permission of permissions.filter((entry) => entry.resource === "space")) {
+    assert.ok(spaceTypes.has(permission.spaceType!), `unknown space type ${permission.spaceType}`);
+    for (const collection of permission.collection ?? []) {
+      assert.ok(collections.has(collection), `unknown collection ${collection}`);
     }
   }
-});
 
-test("the published member permission set grants exactly the member part of the browser grant, and the operator methods", () => {
-  const permissions = readPermissionSet("member");
-  const published = permissions.filter((permission) => permission.resource === "space").map((permission) => normalized({ ...permission, type: permission.spaceType })).sort();
-  const requested = memberGrantScopes("did:web:operator.test#atproto_flock_operator")
-    .filter((scope) => scope.startsWith("space:") && !DM_BROWSER_SCOPES.includes(scope)).map(fromScopeString).sort();
+  const published = permissions
+    .filter((p) => p.resource === "space")
+    .map((p) => normalized({ ...p, type: p.spaceType }))
+    .sort();
+  const requested = FLOCK_MEMBER_MODALITY_SPACE_SCOPES.map(fromScopeString).sort();
   assert.deepEqual(published, requested);
-  assert.deepEqual([...permissions.find((permission) => permission.resource === "rpc")!.lxm!].sort(), [...OPERATOR_METHODS].sort());
+  assert.deepEqual([...permissions.find((p) => p.resource === "rpc")!.lxm!].sort(), [...OPERATOR_METHODS].sort());
 });
 
-test("legacyMemberGrantScopes keeps the exact published space permissions and pre-R12 operator methods without getDmNotifyTarget", () => {
+test("legacyMemberGrantScopes keeps identical space permissions and omits notify-target RPC methods", () => {
   const serviceRef = "did:web:operator.test#atproto_flock_operator";
-  const legacySpaces = legacyMemberGrantScopes(serviceRef).filter((scope) => scope.startsWith("space:") && !DM_BROWSER_SCOPES.includes(scope)).map(fromScopeString).sort();
-  const currentSpaces = memberGrantScopes(serviceRef).filter((scope) => scope.startsWith("space:") && !DM_BROWSER_SCOPES.includes(scope)).map(fromScopeString).sort();
+  const legacySpaces = legacyMemberGrantScopes(serviceRef)
+    .filter((scope) => scope.startsWith("space:") && !DM_BROWSER_SCOPES.includes(scope))
+    .map(fromScopeString)
+    .sort();
+  const currentSpaces = memberGrantScopes(serviceRef)
+    .filter((scope) => scope.startsWith("space:") && !DM_BROWSER_SCOPES.includes(scope))
+    .map(fromScopeString)
+    .sort();
   assert.deepEqual(legacySpaces, currentSpaces);
-  const publishedRpc = readPermissionSet("member").find((permission) => permission.resource === "rpc")!.lxm!;
+  const publishedRpc = readFlockPermissionSet("member").find((p) => p.resource === "rpc")!.lxm!;
   assert.deepEqual(
-    publishedRpc.filter((method) => method !== OPERATOR_METHOD.getDmNotifyTarget).sort(),
+    publishedRpc
+      .filter((m) => m !== OPERATOR_METHOD.getDmNotifyTarget && m !== OPERATOR_METHOD.getSpaceNotifyTarget)
+      .sort(),
     [...LEGACY_OPERATOR_METHODS].sort(),
   );
 });

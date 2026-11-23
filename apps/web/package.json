@@ -11,7 +11,10 @@
     "./*": "./src/*.ts"
   },
   "dependencies": {
+    "@atproto/jwk-webcrypto": "0.3.4",
+    "@atproto/oauth-client": "0.8.7",
     "@atproto/oauth-client-browser": "0.5.7",
+    "@atproto/oauth-types": "0.7.6",
     "@flock/client": "workspace:*",
     "@flock/deployment": "workspace:*",
     "@flock/protocol": "workspace:*",

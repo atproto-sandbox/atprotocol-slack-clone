@@ -1,0 +1,50 @@
+All verification complete. Every citation in Rev 6 has been checked against the pins on disk; the pinned checkout's receipt (HEAD, exact two `M` files, all three file digests) still holds today. Writing up Round 6.
+
+---
+
+# R13 `opensocial.group` Plan — Adversarial Review, Round 6 (Claude)
+
+**Scope verified (read-only; no files created or edited):** plan Rev 6 (315 lines) checked against `opensocial-proposal` @ `8df0cc82` (HEAD reconfirmed), the pinned Spaces checkout @ `6747610566` (HEAD + exactly `M credential.ts` / `M credential.test.ts` reconfirmed today; all three pinned file digests `45b91e70…`, `5fd14a9d…`, `a519b311…` re-hashed and matching plan:8-9), the target repo @ `5ae1b7c`, and both Round 5 reviews. Every new Rev 6 API claim was verified on disk, not from prose.
+
+## Round 5 resolution audit — all 6 Opus items and all 7 Codex items genuinely resolved
+
+- **Genesis PLC op (Opus M1 / Codex M1a):** plan:197 now reproduces pinned `createPlcOp` exactly — verified byte-for-byte against `packages/pds/src/util/plc.ts:9-22` (`formatAtprotoOp({ …, prev: null })` → `unsigned.verificationMethods.atproto_kem = kemKey` → `signOperation` → `didForCreateOp`) and against `@did-plc/lib@0.0.4` `operations.ts` (`formatAtprotoOp` at :26 takes exactly `{signingKey, handle, pds, rotationKeys, prev: CID | null}` and returns a mutable `UnsignedOperation`; no bare `atprotoOp` reference survives anywhere in the plan). **Resolved.**
+- **Compensation CID path (Codex M1b):** plan:205's `GET ${PLC_URL}/${did}/log/last` → `cidForCbor(lastOp)` → `tombstoneOp(prevCid, rotationKey)` is exactly the pinned `Client.tombstone` pattern — verified at `@did-plc/lib/src/client.ts:138-143`, with `getLastOp` at :53-55 confirming the `/log/last` endpoint and `tombstoneOp(prev: CID, key)` at `operations.ts:165`. `@did-plc/lib@0.0.4` is in the direct-dependency list (plan:116), and `createUpdateOp`/`assureValidOp` (plan:133) are real exports (:73, :235). **Resolved** (one package-attribution residue, L1 below).
+- **Refresh/revoke DPoP split (Opus M2 / Codex H3):** plan:189 (body-only token, no `Authorization`, `ath` absent, `proof.jkt === oauth_session.dpop_jkt` + client auth against the stored grant/family) vs plan:190 (resource routes: `Authorization: DPoP`, mandatory `ath`, triple-jkt equality) — verified against `oauth-server-agent.ts:145-165` (refresh token in form body only), `fetch-dpop.ts:59-62` (`ath` produced only when an `Authorization: DPoP` header exists), and `oauth-provider.ts:1059-1090` (`refreshTokenGrant` → `compareClientAuth(client, clientAuth, dpopProof, data)` against stored grant data). Gate 3 adds the body-only refresh/revoke negatives (plan:298); Gate 5 adds **successful real-client refresh & revocation** (plan:302). **Resolved.**
+- **`effectiveHumanAdmins` (Codex H1):** `activeInstalledAppSubjects` subtraction defined transactionally (plan:224) over `<groupDid>`-authored `new.flock.app.install` `active === true` records — `subject`/`active` confirmed as required fields in the real lexicon. Applied in all four demanded places: `LastAdmin` guard incl. `new.flock.app.install` mutations (plan:225), `activateAccount` staged-state validation incl. recovery-restore ordering (plan:130), `signPlcOperation` token consumption (plan:133), `deleteAccount` (plan:132). Gate 5 tests a bot holding both built-in `admin` and a custom capability-equivalent role (plan:304). `[] → EmptyMemberRoles` ordering fixed (plan:225, Gate plan:304 — Opus L2). **Resolved.**
+- **Leave/reactivation recoverability (Codex H2 / Opus L3):** idempotent `200 OK {}` for `recovery_did` replays while `activated === 0` at the route layer (plan:149) and in `rbac` (plan:227); `RepoDeactivated` tolerated as completed leave client-side (plan:259); dedicated 4-phase `reactivatingGroups` machine (`activating → restoring_acceptance → reauthorizing_operator → refreshing_discovery`, plan:229-233) that never touches `requestJoin`, explicitly replaces the revoked Operator shared session (phase 3), and deletes the journal only after `discover()` confirms liveness; resume ordering `leaving → reactivating → joining` (plan:266); Gate 5 tests lost responses before/after the `activateAccount` commit plus crashes between every post-activation phase (plan:304). The upstream `leaveGroup` lexicon defines no output schema, so the empty-object idempotent response is conformant. **Resolved.**
+- **Recovery-session grounding (Opus L1):** plan:228 grounds narrowing in `group_recovery_admin.roles_json` and a strict 8-route allowlist (4 `server.*` + 3 `sync.*` + `exportSpaceMeta`). I swept every row of the auth matrix: rows 124/130/132/139 grant recovery exactly the allowlisted routes; rows 131/133 now explicitly exclude it (`deactivateAccount`/`getServiceAuth` "**not** recovery sessions"; identity routes omit it). Zero contradictions remain. **Resolved.**
+- **`allowedApps` (Codex M2):** enforcement removed; the only remaining mention is the accurate negative note (plan:211), matching `policy.json` on disk (`required: ["grants"]`; only `publicRead`/`unlisted`/`grants`). **Resolved.**
+- **DPoP parameters (Codex L1):** `maxTokenAge: 10`, `clockTolerance: 180` — verified `DPOP_NONCE_MAX_AGE = 3 * MINUTE` in `oauth-constants.ts:75` so `/1e3 = 180s` is exact; `parseHtu` → `normalizeHtuUrl` = `url.origin + url.pathname` with credential/scheme rejection and query/fragment normalized away, exactly as `dpop-manager.ts:160-205` on disk; `ath`-forbidden-without-access-token confirmed at the cited lines. **Resolved.**
+- **"or is clean" (Codex L2):** removed; plan:8 now demands the exact two-line `M` status, which is what the checkout shows today. **Resolved.**
+- **Test glob (Opus L4):** Wave 6 (plan:290) adds `protocol-tests/suite-manifest.test.ts` to the root `"test"` script — verified the real script is `node --import tsx --test '<globs>'`, so the stated edit is directly actionable (and the `"reconcile"` script it deletes exists today). **Resolved.**
+
+Supporting re-checks on unchanged load-bearing claims: `proposal.md:36` (host-maintained index, direct writes rejected, `unlisted` opt-out — grounding plan:82's precedence) and `proposal.md:50` (admin-as-convention — grounding the capability predicate) both read exactly as cited; aggregate digests at plan:10-11 are byte-identical to the values Round 5 recomputed from scratch, and the pin's git state is unchanged since.
+
+## Blocker
+
+None.
+
+## High
+
+None.
+
+## Medium
+
+None.
+
+## Low
+
+**L1. `cidForCbor` is not exported by `@atproto/lex-cbor`.** plan:205 attributes `await cidForCbor(lastOp)` to "`@atproto/lex-cbor` + `multiformats/cid`", but the pinned `packages/lex/lex-cbor/src/index.ts` exports only `encode`/`decode` aliases and `cidForLex(value)` (= `cidForCbor(encode(value))` via `@atproto/lex-data`, whose `cidForCbor` takes already-encoded bytes); the value-taking `cidForCbor` the cited `client.ts:138-143` pattern uses lives in `@atproto/common` (deprecated alias of `cidForCborLegacy`, `common/src/ipld.ts:54-57`). No silent-failure path exists: the stated import fails to compile, and all three correct spellings produce identical CIDs (dag-cbor `0x71` + SHA-256; the `CID.parse(...toString())` wrapper stays valid), with `lex-cbor`, `lex-data`, and `common` all already in the dependency list (plan:116). **Fix:** in plan:205, write `cidForLex(lastOp)` from `@atproto/lex-cbor` (or `cidForCbor(lastOp)` from `@atproto/common`, matching the cited pinned client).
+
+**L2. A stale `leavingGroups` journal on a second device can silently re-deactivate a reactivated group.** plan:259's step 2 replays `leaveGroup` unconditionally on resume. Sequence: device A's leave response is lost (journal persists) → the user reactivates via device B's 4-phase machine → device A comes online, replays `leaveGroup` against the now-active group it still holds membership in, and triggers a fresh sole-member deactivation. Outcome is reversible (the user is again `recovery_did`) and reflects an intent the user once expressed, but it undoes the later reactivation without any signal. **Fix:** mirror the `joiningGroups` resumer's probe (plan:264-265): before replaying step 2, check whether `<groupDid>`-authored `membership/<viewerDid>` is absent or the group is deactivated — only then replay; if membership is present and the leave journal predates a completed reactivation for the same group, surface a confirmation instead of silently re-leaving.
+
+**L3. An app whose install record is `active === false` but whose membership retains admin-capable roles counts as a *human* admin.** `activeInstalledAppSubjects` (plan:224) filters on `active === true`, so deactivating an install (without stripping the subject's roles) converts the bot into a "human" for `LastAdmin`/`effectiveHumanAdmins`/`WorkspaceSummary.admins` purposes, letting the last real human leave while governance rests on a dormant bot DID. Reachable only through deliberate admin action, and recoverable (the bot DID can still authenticate and re-admit humans), but it dulls the guard's intent. **Fix:** specify in the Operator `uninstallApp`/`updateAppAccess` choreography (plan:36) that deactivating or removing an install atomically strips the subject's memberships/roles down to non-admin-capable (or deletes the membership), keeping "ever-recorded install subjects with admin-capable roles" out of the human-admin count.
+
+---
+
+Every Round 5 Blocker-class, High, Medium, and Low item is genuinely and accurately resolved — all of the critical ones (`formatAtprotoOp`/`tombstoneOp` construction, the refresh/revoke DPoP split, `effectiveHumanAdmins`, the recovery allowlist, the 4-phase reactivation machine, the DPoP constants) now verify against the pinned sources on disk rather than merely reading plausibly. The three remaining Lows are a one-identifier naming fix, an edge-case replay guard, and an uninstall-choreography clarification; none is on the critical path or capable of silently misdirecting an implementer.
+
+*(The local voice/audio MCP tools are not present in this session's tool list, so the spoken summary was skipped.)*
+
+`VERDICT: READY`

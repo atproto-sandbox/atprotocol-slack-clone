@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import test from "node:test";
-import { assertSafePdsEndpoint, fetchIdResolverEndpoint } from "./identity";
+import { assertSafePdsEndpoint, fetchIdResolverEndpoint, resolvePds, setIdentityTestOverrides } from "./identity";
 import { UpstreamResponseTooLargeError } from "@flock/protocol/bounded-json";
 
 test("the operator's endpoint check refuses a private address outside loopback development", async () => {
@@ -38,5 +38,28 @@ test("identity resolver fetch preserves response metadata and caps actual stream
     await assert.rejects(oversized.text(), UpstreamResponseTooLargeError);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test("resolvePds forwards { forceRefresh: true } to resolver overrides", async () => {
+  const seen: Array<{ did: string; forceRefresh?: boolean }> = [];
+  setIdentityTestOverrides({
+    resolvePds: async (did, options) => {
+      seen.push({ did, ...(options?.forceRefresh !== undefined ? { forceRefresh: options.forceRefresh } : {}) });
+      return options?.forceRefresh ? "https://groups2.example" : "https://groups1.example";
+    },
+    resolveKemKey: async () => "did:key:zKem",
+    resolveSigningKey: async () => "did:key:zSig",
+    fetchEndpoint: async () => new Response("{}", { status: 200 }),
+  });
+  try {
+    assert.equal(await resolvePds("did:plc:group1"), "https://groups1.example");
+    assert.equal(await resolvePds("did:plc:group1", { forceRefresh: true }), "https://groups2.example");
+    assert.deepEqual(seen, [
+      { did: "did:plc:group1" },
+      { did: "did:plc:group1", forceRefresh: true },
+    ]);
+  } finally {
+    setIdentityTestOverrides(undefined);
   }
 });

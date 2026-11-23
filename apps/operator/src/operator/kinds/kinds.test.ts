@@ -18,15 +18,18 @@ const PERSISTED_KINDS = {
     steps: ["workspace-space", "inbox-space", "general-channel-space", "workspace-profile", "owner-roster", "owner-admin", "general-directory"],
   },
   createWorkspace: {
-    required: ["name", "creator"], optional: [], actor: "creator", submittedThrough: "createWorkspace",
+    required: ["name", "creator"], optional: ["joinPolicy", "publicMeta"], actor: "creator", submittedThrough: "createWorkspace",
     steps: [
       "workspace-space", "inbox-space", "general-channel-space", "workspace-profile",
       "creator-workspace", "creator-inbox", "creator-general", "creator-roster", "creator-admin", "general-directory",
     ],
   },
   inviteMember: {
-    required: ["subject"], optional: [], actor: "admin", submittedThrough: "execute",
-    steps: ["member-workspace", "member-inbox-writer", "member-app-inbox-{app}", "member-public-channel-{skey}", "member-ext-{extId}", "member-workspace-roster", "member-state-verified"],
+    required: ["subject"], optional: ["expiresAt"], actor: "admin", submittedThrough: "execute",
+    steps: [
+      "member-workspace", "member-inbox-writer", "member-app-inbox-{app}", "member-public-channel-{skey}",
+      "member-ext-{extId}", "member-workspace-roster", "member-invite-record", "member-state-verified",
+    ],
   },
   removeMember: {
     required: ["subject"], optional: [], actor: "admin", submittedThrough: "execute",
@@ -61,6 +64,10 @@ const PERSISTED_KINDS = {
       "join-request-private-roster", "join-request-decision", "join-request-approved-membership-verified", "join-request-stale-restore-membership",
       "join-request-stale-restore-roster",
     ],
+  },
+  decideGroupJoinRequest: {
+    required: ["member", "decision"], optional: ["roles"], actor: "admin", submittedThrough: "execute",
+    steps: ["group-join-approve-membership", "group-join-deny-request"],
   },
   leaveWorkspace: {
     required: [], optional: [], actor: "member", submittedThrough: "execute",
@@ -171,7 +178,7 @@ test("every step a kind's run body records is a step that kind declares", async 
     for (const name of names) assert.ok(declared.some((matches) => matches(name)), `${file}: step "${name}" is not declared`);
     checked += calls.length;
   }
-  assert.equal(checked, 107, "every context.step call in the kind modules was checked");
+  assert.equal(checked, 114, "every context.step call in the kind modules was checked");
 });
 
 function isKind(value: unknown): value is { kind: string; steps: readonly string[] } {
@@ -186,20 +193,28 @@ test("every request field a kind declares has a validation rule", () => {
 
 test("the kinds that create or archive spaces name them, so the operator registers or drops their change notices", () => {
   const owner = "did:plc:owner";
-  const actor = { did: owner, workspace: { uri: `at://${owner}/space/new.flock.workspace/acme`, authorityDid: owner, skey: "acme" } } as OperatorActor;
+  const actor = { did: owner, workspace: { uri: `at://${owner}/space/new.flock.workspace/self`, authorityDid: owner, skey: "self" } } as OperatorActor;
   assert.deepEqual(operationKind("bootstrapWorkspace")!.createsSpaces!(actor, { kind: "bootstrapWorkspace", name: "Acme" }), [
-    `at://${owner}/space/new.flock.workspace/acme`, `at://${owner}/space/new.flock.inbox/acme`, `at://${owner}/space/new.flock.channel/acme-general`,
+    `at://${owner}/space/group.opensocial.meta/self`,
+    `at://${owner}/space/group.opensocial.members/self`,
+    `at://${owner}/space/new.flock.workspace/self`,
+    `at://${owner}/space/new.flock.inbox/self`,
+    `at://${owner}/space/new.flock.channel/general`,
   ]);
   assert.deepEqual(operationKind("createWorkspace")!.createsSpaces!(actor, { kind: "createWorkspace", name: "Acme", creator: "did:plc:creator" }), [
-    `at://${owner}/space/new.flock.workspace/acme`, `at://${owner}/space/new.flock.inbox/acme`, `at://${owner}/space/new.flock.channel/acme-general`,
+    `at://${owner}/space/group.opensocial.meta/self`,
+    `at://${owner}/space/group.opensocial.members/self`,
+    `at://${owner}/space/new.flock.workspace/self`,
+    `at://${owner}/space/new.flock.inbox/self`,
+    `at://${owner}/space/new.flock.channel/general`,
   ]);
-  assert.deepEqual(operationKind("createChannel")!.createsSpaces!(actor, { kind: "createChannel", skey: "design" }), [`at://${owner}/space/new.flock.channel/acme-design`]);
-  assert.deepEqual(operationKind("archiveChannel")!.archivesSpaces!(actor, { kind: "archiveChannel", skey: "acme-design" }), [`at://${owner}/space/new.flock.channel/acme-design`]);
-  assert.deepEqual(operationKind("installApp")!.createsSpaces!(actor, { kind: "installApp", subject: "did:plc:bot", channels: [] }), [appInboxUri(owner, "acme", "did:plc:bot")]);
-  assert.deepEqual(operationKind("updateAppAccess")!.createsSpaces!(actor, { kind: "updateAppAccess", subject: "did:plc:bot", channels: [] }), [appInboxUri(owner, "acme", "did:plc:bot")]);
-  assert.deepEqual(operationKind("uninstallApp")!.archivesSpaces!(actor, { kind: "uninstallApp", subject: "did:plc:bot" }), [appInboxUri(owner, "acme", "did:plc:bot")]);
-  assert.deepEqual(operationKind("enableExtension")!.createsSpaces!(actor, { kind: "enableExtension", extId: "tasks" }), [extSpaceUriFor(owner, "acme", "tasks")]);
-  assert.deepEqual(operationKind("disableExtension")!.archivesSpaces!(actor, { kind: "disableExtension", extId: "tasks" }), [extSpaceUriFor(owner, "acme", "tasks")]);
+  assert.deepEqual(operationKind("createChannel")!.createsSpaces!(actor, { kind: "createChannel", skey: "design" }), [`at://${owner}/space/new.flock.channel/design`]);
+  assert.deepEqual(operationKind("archiveChannel")!.archivesSpaces!(actor, { kind: "archiveChannel", skey: "design" }), [`at://${owner}/space/new.flock.channel/design`]);
+  assert.deepEqual(operationKind("installApp")!.createsSpaces!(actor, { kind: "installApp", subject: "did:plc:bot", channels: [] }), [appInboxUri(owner, "self", "did:plc:bot")]);
+  assert.deepEqual(operationKind("updateAppAccess")!.createsSpaces!(actor, { kind: "updateAppAccess", subject: "did:plc:bot", channels: [] }), [appInboxUri(owner, "self", "did:plc:bot")]);
+  assert.deepEqual(operationKind("uninstallApp")!.archivesSpaces!(actor, { kind: "uninstallApp", subject: "did:plc:bot" }), [appInboxUri(owner, "self", "did:plc:bot")]);
+  assert.deepEqual(operationKind("enableExtension")!.createsSpaces!(actor, { kind: "enableExtension", extId: "tasks" }), [extSpaceUriFor(owner, "self", "tasks")]);
+  assert.deepEqual(operationKind("disableExtension")!.archivesSpaces!(actor, { kind: "disableExtension", extId: "tasks" }), [extSpaceUriFor(owner, "self", "tasks")]);
   for (const kind of Object.values(OPERATION_KINDS).filter((entry) => ![
     "bootstrapWorkspace", "createWorkspace", "createChannel", "archiveChannel", "installApp", "updateAppAccess", "uninstallApp", "enableExtension", "disableExtension",
   ].includes(entry.kind))) {

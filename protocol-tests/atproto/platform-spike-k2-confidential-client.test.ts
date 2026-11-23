@@ -2,11 +2,17 @@ import { randomUUID } from 'node:crypto'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { TestNetworkNoAppView } from '@atproto/dev-env'
-import { JoseKey } from '@atproto/oauth-provider/provider'
 import { calculateJwkThumbprint } from 'jose'
-import { generateCode } from '../../../oauth/oauth-provider/src/request/code.js'
-import { SpaceClient } from '../_space.js'
+import {
+  afterAll,
+  describe,
+  expect,
+  generateCode,
+  it,
+  JoseKey,
+  SpaceClient,
+  TestNetworkNoAppView,
+} from '../support/pinned-atproto-harness'
 
 // Platform spike K2: can the pinned test network serve a confidential
 // (`private_key_jwt`) OAuth client, so that its two-year session lifetime can be

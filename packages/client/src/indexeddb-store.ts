@@ -1,10 +1,38 @@
-import { cloneActivityState, cloneWriterState, commitAllowed, emptyWriterState, mergeMonotonicClock, mergeOptimisticOverlay, missingOptimisticKeys, nextWriterState, SyncStoreError, type ActivityState, type ClockPatch, type ClockState, type IdentityEntry, type IdentityKind, type SpaceState, type StoredRecord, type SyncStore, type WriterCommit, type WriterState } from "./store";
+import {
+  cloneActivityState,
+  cloneJoiningGroupEntry,
+  cloneLeavingGroupEntry,
+  cloneReactivatingGroupEntry,
+  cloneWriterState,
+  commitAllowed,
+  emptyWriterState,
+  mergeMonotonicClock,
+  mergeOptimisticOverlay,
+  missingOptimisticKeys,
+  nextWriterState,
+  SyncStoreError,
+  type ActivityState,
+  type ClockPatch,
+  type ClockState,
+  type IdentityEntry,
+  type IdentityKind,
+  type JoiningGroupEntry,
+  type LeavingGroupEntry,
+  type PurgeWriterOptions,
+  type PutSpaceOptions,
+  type ReactivatingGroupEntry,
+  type SpaceState,
+  type StoredRecord,
+  type SyncStore,
+  type WriterCommit,
+  type WriterState,
+} from "./store";
 
 // The browser's store for workspace, inbox and channel spaces (D10): one IndexedDB database per account, so a sign-out
 // deletes one database and a different account's start deletes databases that are not its own.
 
 const DATABASE_PREFIX = "flock-sync-";
-const VERSION = 2;
+const VERSION = 3;
 const LAST = "￿";
 
 type Factory = Pick<IDBFactory, "open" | "deleteDatabase" | "databases">;
@@ -46,6 +74,9 @@ export class IndexedDbStore implements SyncStore {
         ? upgradeTx?.objectStore("clock")
         : db.createObjectStore("clock", { keyPath: ["accountDid", "scope"] });
       if (clock && !clock.indexNames.contains("scope")) clock.createIndex("scope", "scope");
+      if (!db.objectStoreNames.contains("leavingGroups")) db.createObjectStore("leavingGroups", { keyPath: "groupDid" });
+      if (!db.objectStoreNames.contains("joiningGroups")) db.createObjectStore("joiningGroups", { keyPath: "operationId" });
+      if (!db.objectStoreNames.contains("reactivatingGroups")) db.createObjectStore("reactivatingGroups", { keyPath: "operationId" });
     };
     const db = await settle(opening);
     const store = new IndexedDbStore(db);
@@ -84,12 +115,55 @@ export class IndexedDbStore implements SyncStore {
     return this.read("spaces", (stores) => settle<SpaceState | undefined>(stores.spaces!.get(space)));
   }
 
-  async putSpace(state: SpaceState): Promise<void> {
-    await this.write(["spaces"], async (stores) => {
+  async putSpace(state: SpaceState, options?: PutSpaceOptions): Promise<boolean> {
+    const storeNames: StoreName[] = ["spaces"];
+    if (options?.epoch !== undefined) storeNames.push("meta");
+    return this.write(storeNames, async (stores) => {
+      if (options?.epoch !== undefined && options.epoch !== (await epochOf(stores.meta!, state.space))) {
+        return false;
+      }
       const existing = await settle<SpaceState | undefined>(stores.spaces!.get(state.space));
+      if (options?.touchMetadataOnly) {
+        const touched: SpaceState = existing
+          ? {
+              ...existing,
+              workspace: state.workspace,
+              lastOpenedAt: Math.max(existing.lastOpenedAt, state.lastOpenedAt),
+            }
+          : { ...state, revision: 0 };
+        await settle(stores.spaces!.put(touched));
+        return true;
+      }
+      if (
+        options?.expectedInvalidationSeq !== undefined &&
+        (existing?.invalidationSeq ?? 0) !== options.expectedInvalidationSeq
+      ) {
+        return false;
+      }
+      if (options?.expectedRevision !== undefined && (existing?.revision ?? 0) !== options.expectedRevision) {
+        return false;
+      }
+      if (
+        options?.disallowOlderSpaceRev &&
+        existing?.spaceRev !== null &&
+        existing?.spaceRev !== undefined &&
+        (state.spaceRev === null || state.spaceRev < existing.spaceRev)
+      ) {
+        return false;
+      }
       const nextSeq = Math.max(existing?.invalidationSeq ?? 0, state.invalidationSeq ?? 0);
-      const next = nextSeq > 0 ? { ...state, invalidationSeq: nextSeq } : state;
+      const next: SpaceState = { ...state, revision: (existing?.revision ?? 0) + 1 };
+      if (
+        options?.preserveNewerOwnWriteSince !== undefined &&
+        existing?.ownWriteAt !== undefined &&
+        existing.ownWriteAt !== null &&
+        existing.ownWriteAt > options.preserveNewerOwnWriteSince
+      ) {
+        next.ownWriteAt = existing.ownWriteAt;
+      }
+      if (nextSeq > 0) next.invalidationSeq = nextSeq;
       await settle(stores.spaces!.put(next));
+      return true;
     });
   }
 
@@ -192,12 +266,22 @@ export class IndexedDbStore implements SyncStore {
   async commit(change: WriterCommit): Promise<boolean> {
     const storeNames: StoreName[] = ["writers", "records", "meta"];
     if (change.clock) storeNames.push("clock");
-    if (change.expectedInvalidationSeq !== undefined) storeNames.push("spaces");
+    if (change.expectedInvalidationSeq !== undefined || change.touchOwnSpace !== undefined) {
+      storeNames.push("spaces");
+    }
     return this.write(storeNames, async (stores) => {
       if (change.epoch !== undefined && change.epoch !== await epochOf(stores.meta!, change.space)) return false;
-      if (change.expectedInvalidationSeq !== undefined) {
-        const spaceState = await settle<SpaceState | undefined>(stores.spaces!.get(change.space));
-        if ((spaceState?.invalidationSeq ?? 0) !== change.expectedInvalidationSeq) return false;
+      let spaceStateLoaded = false;
+      let spaceState: SpaceState | undefined;
+      if (change.expectedInvalidationSeq !== undefined || change.touchOwnSpace !== undefined) {
+        spaceState = await settle<SpaceState | undefined>(stores.spaces!.get(change.space));
+        spaceStateLoaded = true;
+      }
+      if (
+        change.expectedInvalidationSeq !== undefined &&
+        (spaceState?.invalidationSeq ?? 0) !== change.expectedInvalidationSeq
+      ) {
+        return false;
       }
       const current = await settle<WriterState | undefined>(stores.writers!.get([change.space, change.repo]));
       if (!commitAllowed(current, change)) return false;
@@ -232,6 +316,27 @@ export class IndexedDbStore implements SyncStore {
       for (const { collection, rkey } of change.remove ?? []) pending.push(settle(stores.records!.delete([change.space, collection, change.repo, rkey])));
       pending.push(settle(stores.writers!.put(next)));
       if (nextClock) pending.push(settle(stores.clock!.put(nextClock)));
+      if (change.touchOwnSpace && spaceStateLoaded) {
+        const touch = change.touchOwnSpace;
+        const nextSpace: SpaceState = spaceState
+          ? {
+              ...spaceState,
+              ownWriteAt: Math.max(spaceState.ownWriteAt ?? 0, touch.ownWriteAt),
+              ...(touch.workspace !== undefined && spaceState.workspace === null
+                ? { workspace: touch.workspace }
+                : {}),
+            }
+          : {
+              space: change.space,
+              spaceRev: null,
+              writers: [],
+              writersListedAt: null,
+              workspace: touch.workspace ?? null,
+              lastOpenedAt: touch.defaultLastOpenedAt,
+              ownWriteAt: touch.ownWriteAt,
+            };
+        pending.push(settle(stores.spaces!.put(nextSpace)));
+      }
       await Promise.all(pending);
       return true;
     });
@@ -244,8 +349,22 @@ export class IndexedDbStore implements SyncStore {
         settle<WriterState[]>(stores.writers!.index("space").getAll(space)),
       ]);
       const nextSpace: SpaceState = currentSpace
-        ? { ...currentSpace, writersListedAt: null, invalidationSeq: (currentSpace.invalidationSeq ?? 0) + 1 }
-        : { space, spaceRev: null, writers: [], writersListedAt: null, workspace: null, lastOpenedAt: 0, invalidationSeq: 1 };
+        ? {
+            ...currentSpace,
+            writersListedAt: null,
+            invalidationSeq: (currentSpace.invalidationSeq ?? 0) + 1,
+            revision: (currentSpace.revision ?? 0) + 1,
+          }
+        : {
+            space,
+            spaceRev: null,
+            writers: [],
+            writersListedAt: null,
+            workspace: null,
+            lastOpenedAt: 0,
+            invalidationSeq: 1,
+            revision: 1,
+          };
       const byRepo = new Map(existingWriters.map((writer) => [writer.repo, writer]));
       const repos = new Set<string>([...byRepo.keys(), ...extraRepos]);
       const pending: Array<Promise<unknown>> = [settle(stores.spaces!.put(nextSpace))];
@@ -259,11 +378,40 @@ export class IndexedDbStore implements SyncStore {
     });
   }
 
-  async purgeWriter(space: string, repo: string): Promise<void> {
-    await this.write(["writers", "records"], async (stores) => {
-      for (const key of await settle<IDBValidKey[]>(stores.records!.index("writer").getAllKeys([space, repo]))) await settle(stores.records!.delete(key));
+  async purgeWriter(space: string, repo: string, options?: PurgeWriterOptions): Promise<boolean> {
+    const storeNames: StoreName[] = ["writers", "records"];
+    if (options?.epoch !== undefined) storeNames.push("meta");
+    if (options?.expectedInvalidationSeq !== undefined || options?.expectedSpaceRevision !== undefined) {
+      storeNames.push("spaces");
+    }
+    return this.write(storeNames, async (stores) => {
+      if (options?.epoch !== undefined && options.epoch !== (await epochOf(stores.meta!, space))) {
+        return false;
+      }
+      if (options?.expectedInvalidationSeq !== undefined || options?.expectedSpaceRevision !== undefined) {
+        const spaceState = await settle<SpaceState | undefined>(stores.spaces!.get(space));
+        if (
+          options?.expectedInvalidationSeq !== undefined &&
+          (spaceState?.invalidationSeq ?? 0) !== options.expectedInvalidationSeq
+        ) {
+          return false;
+        }
+        if (
+          options?.expectedSpaceRevision !== undefined &&
+          (spaceState?.revision ?? 0) !== options.expectedSpaceRevision
+        ) {
+          return false;
+        }
+      }
       const current = await settle<WriterState | undefined>(stores.writers!.get([space, repo]));
+      if (options?.expectedGeneration !== undefined && (current?.generation ?? 0) !== options.expectedGeneration) {
+        return false;
+      }
+      for (const key of await settle<IDBValidKey[]>(stores.records!.index("writer").getAllKeys([space, repo]))) {
+        await settle(stores.records!.delete(key));
+      }
       await settle(stores.writers!.put(emptyWriterState(space, repo, (current?.generation ?? 0) + 1)));
+      return true;
     });
   }
 
@@ -295,9 +443,91 @@ export class IndexedDbStore implements SyncStore {
     await this.write(["identities"], async (stores) => { await settle(stores.identities!.put(entry)); });
   }
 
+  async deleteIdentity(kind: IdentityKind, did: string): Promise<void> {
+    await this.write(["identities"], async (stores) => { await settle(stores.identities!.delete([kind, did])); });
+  }
+
+  async getLeavingGroup(groupDid: string): Promise<LeavingGroupEntry | undefined> {
+    const entry = await this.read("leavingGroups", (stores) => settle<LeavingGroupEntry | undefined>(stores.leavingGroups!.get(groupDid)));
+    return entry ? cloneLeavingGroupEntry(entry) : undefined;
+  }
+
+  async putLeavingGroup(entry: LeavingGroupEntry): Promise<void> {
+    await this.write(["leavingGroups"], (stores) => settle(stores.leavingGroups!.put(cloneLeavingGroupEntry(entry))));
+  }
+
+  async deleteLeavingGroup(groupDid: string): Promise<void> {
+    await this.write(["leavingGroups"], (stores) => settle(stores.leavingGroups!.delete(groupDid)));
+  }
+
+  async listLeavingGroups(): Promise<LeavingGroupEntry[]> {
+    const entries = await this.read("leavingGroups", (stores) => settle<LeavingGroupEntry[]>(stores.leavingGroups!.getAll()));
+    return entries.map((entry) => cloneLeavingGroupEntry(entry));
+  }
+
+  async getJoiningGroup(operationId: string): Promise<JoiningGroupEntry | undefined> {
+    const entry = await this.read("joiningGroups", (stores) => settle<JoiningGroupEntry | undefined>(stores.joiningGroups!.get(operationId)));
+    return entry ? cloneJoiningGroupEntry(entry) : undefined;
+  }
+
+  async putJoiningGroup(entry: JoiningGroupEntry): Promise<void> {
+    await this.write(["joiningGroups"], (stores) => settle(stores.joiningGroups!.put(cloneJoiningGroupEntry(entry))));
+  }
+
+  async deleteJoiningGroup(operationId: string): Promise<void> {
+    await this.write(["joiningGroups"], (stores) => settle(stores.joiningGroups!.delete(operationId)));
+  }
+
+  async listJoiningGroups(): Promise<JoiningGroupEntry[]> {
+    const entries = await this.read("joiningGroups", (stores) => settle<JoiningGroupEntry[]>(stores.joiningGroups!.getAll()));
+    return entries.map((entry) => cloneJoiningGroupEntry(entry));
+  }
+
+  async getReactivatingGroup(operationId: string): Promise<ReactivatingGroupEntry | undefined> {
+    const entry = await this.read("reactivatingGroups", (stores) => settle<ReactivatingGroupEntry | undefined>(stores.reactivatingGroups!.get(operationId)));
+    return entry ? cloneReactivatingGroupEntry(entry) : undefined;
+  }
+
+  async putReactivatingGroup(entry: ReactivatingGroupEntry): Promise<void> {
+    await this.write(["reactivatingGroups"], (stores) => settle(stores.reactivatingGroups!.put(cloneReactivatingGroupEntry(entry))));
+  }
+
+  async deleteReactivatingGroup(operationId: string): Promise<void> {
+    await this.write(["reactivatingGroups"], (stores) => settle(stores.reactivatingGroups!.delete(operationId)));
+  }
+
+  async listReactivatingGroups(): Promise<ReactivatingGroupEntry[]> {
+    const entries = await this.read("reactivatingGroups", (stores) => settle<ReactivatingGroupEntry[]>(stores.reactivatingGroups!.getAll()));
+    return entries.map((entry) => cloneReactivatingGroupEntry(entry));
+  }
+
   async clear(): Promise<void> {
-    await this.write(["spaces", "writers", "records", "meta", "identities", "activity", "clock"], async (stores) => {
-      for (const name of ["spaces", "writers", "records", "identities", "activity", "clock"] as const) await settle(stores[name]!.clear());
+    const allStores: StoreName[] = [
+      "spaces",
+      "writers",
+      "records",
+      "meta",
+      "identities",
+      "activity",
+      "clock",
+      "leavingGroups",
+      "joiningGroups",
+      "reactivatingGroups",
+    ];
+    await this.write(allStores, async (stores) => {
+      for (const name of [
+        "spaces",
+        "writers",
+        "records",
+        "identities",
+        "activity",
+        "clock",
+        "leavingGroups",
+        "joiningGroups",
+        "reactivatingGroups",
+      ] as const) {
+        await settle(stores[name]!.clear());
+      }
       const clears = await settle<{ key: string; value: number } | undefined>(stores.meta!.get("clears"));
       await settle(stores.meta!.put({ key: "clears", value: (clears?.value ?? 0) + 1 }));
     });
@@ -342,7 +572,17 @@ export class IndexedDbStore implements SyncStore {
   }
 }
 
-type StoreName = "spaces" | "writers" | "records" | "meta" | "identities" | "activity" | "clock";
+type StoreName =
+  | "spaces"
+  | "writers"
+  | "records"
+  | "meta"
+  | "identities"
+  | "activity"
+  | "clock"
+  | "leavingGroups"
+  | "joiningGroups"
+  | "reactivatingGroups";
 type Stores = Partial<Record<StoreName, IDBObjectStore>>;
 
 /** The account's database name on this device. */

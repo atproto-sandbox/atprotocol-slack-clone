@@ -1,6 +1,7 @@
 import { isAccessLost, SpaceCredentialError } from "@flock/protocol/atproto/space-credential-core";
 import { isMissingXrpcResource } from "@flock/protocol/atproto/xrpc";
 import { appInboxUri, channelUri, parseSpaceRecordUri, parseWorkspaceUri } from "@flock/protocol/keys";
+import { isHidden, isTakendown, labelsForResource, type ActiveSpaceLabel } from "@flock/protocol/moderation";
 import { COLLECTION, REPO_COLLECTION } from "@flock/protocol/nsids";
 import { isCommandName, validateAppDeclaration, validateSpaceRecord } from "@flock/protocol/registry";
 import { appGrantScopes } from "@flock/protocol/scopes";
@@ -191,6 +192,8 @@ export class AppRuntime {
   private readonly apps = new Map<string, ReadonlySet<string>>();
   /** Each workspace's people (its active roster) as last read: with `apps`, who an author is known to be. */
   private readonly people = new Map<string, ReadonlySet<string>>();
+  /** Accounts carrying an active `!takedown` label in `members/self`, withheld from message/command/action handlers. */
+  private readonly takendown = new Map<string, ReadonlySet<string>>();
   /** When the runtime may next try to follow each space it does not follow, and how many passing failures in a row it met. */
   private readonly nextAttempt = new Map<string, number>();
   private readonly failures = new Map<string, number>();
@@ -344,10 +347,26 @@ export class AppRuntime {
     this.applySummary(workspace, summary);
   }
 
-  private applySummary(workspace: string, summary: Pick<WorkspaceSummary, "installs" | "members"> | null): void {
+  private applySummary(
+    workspace: string,
+    summary: (Pick<WorkspaceSummary, "installs" | "members"> & {
+      pendingMembers?: ReadonlyArray<{ did: string }>;
+      takendownMembers?: readonly string[];
+    }) | null,
+  ): void {
     const installs = summary?.installs ?? [];
+    const takendownSet = new Set(summary?.takendownMembers ?? []);
+    this.takendown.set(workspace, takendownSet);
     this.apps.set(workspace, new Set(installs.map((install) => install.did)));
-    this.people.set(workspace, new Set((summary?.members ?? []).map((member) => member.did)));
+    this.people.set(
+      workspace,
+      new Set(
+        [
+          ...(summary?.members ?? []).map((member) => member.did),
+          ...(summary?.pendingMembers ?? []).map((member) => member.did),
+        ].filter((did) => !takendownSet.has(did)),
+      ),
+    );
     const parsed = parseWorkspaceUri(workspace)!;
     const ownInstall = installs.find((install) => install.did === this.input.did);
 
@@ -388,6 +407,9 @@ export class AppRuntime {
     if (this.input.engine.sync) {
       let currentCanWrite = grant.write;
       const workspace = grant.channel.workspace;
+      const parsedWs = parseWorkspaceUri(workspace);
+      let channelLabels: ActiveSpaceLabel[] = [];
+      let accountLabels: ActiveSpaceLabel[] = [];
       await this.input.engine.sync.followRepoOps({
         space,
         collections: [COLLECTION.message],
@@ -406,17 +428,42 @@ export class AppRuntime {
             const current = this.grants.get(space);
             if (current) currentCanWrite = current.write;
           }
+          if (events.length > 0 && this.input.engine.sync && parsedWs) {
+            [channelLabels, accountLabels] = await Promise.all([
+              this.input.engine.sync.syncSpaceActiveLabels(space, { workspace }),
+              this.input.engine.sync.syncAccountLabels(parsedWs.authorityDid, { forceCheck: true }),
+            ]);
+          }
           return true;
         },
         onEvent: async (event) => {
           const apps = this.apps.get(workspace) ?? new Set<string>();
           if (apps.has(event.repo)) return;
+          if (
+            this.takendown.get(workspace)?.has(event.repo) ||
+            isTakendown(accountLabels, event.repo) ||
+            isTakendown(channelLabels, event.uri, event.cid)
+          ) {
+            return;
+          }
           const valid = await this.validateChannelEvent(space, grant.channel, event.repo, event.rkey, event.value);
           if (!valid) return;
+          const recLabels = labelsForResource(channelLabels, event.uri, event.cid);
+          const accLabels = labelsForResource(accountLabels, event.repo);
+          const allVals = [...new Set([...recLabels.map((l) => l.val), ...accLabels.map((l) => l.val)])].sort();
+          const hidden = isHidden(channelLabels, event.uri, event.cid) || isHidden(accountLabels, event.repo);
           await onMessage({
             channel: grant.channel,
             canWrite: currentCanWrite,
-            message: { uri: event.uri, repo: event.repo, rkey: event.rkey, value: event.value },
+            message: {
+              uri: event.uri,
+              repo: event.repo,
+              rkey: event.rkey,
+              cid: event.cid,
+              value: event.value,
+              ...(hidden ? { hidden: true } : {}),
+              ...(allVals.length > 0 ? { labels: allVals } : {}),
+            },
           });
         },
         onReset: (notice) => this.handleReset(notice),
@@ -448,8 +495,11 @@ export class AppRuntime {
           canWrite = current.write;
         }
         const apps = this.apps.get(workspace) ?? new Set<string>();
+        const takendown = this.takendown.get(workspace) ?? new Set<string>();
         return async (message) => {
-          if (!apps.has(message.repo)) await onMessage({ channel: grant.channel, canWrite, message });
+          if (!apps.has(message.repo) && !takendown.has(message.repo)) {
+            await onMessage({ channel: grant.channel, canWrite, message });
+          }
         };
       },
     });
@@ -457,7 +507,10 @@ export class AppRuntime {
 
   private async readInbox(space: string, workspace: string, deliver: boolean): Promise<void> {
     if (this.input.engine.sync) {
+      const parsedWs = parseWorkspaceUri(workspace);
       let inboxContext: Awaited<ReturnType<AppRuntime["buildInboxContext"]>> = null;
+      let inboxLabels: ActiveSpaceLabel[] = [];
+      let accountLabels: ActiveSpaceLabel[] = [];
       await this.input.engine.sync.followRepoOps({
         space,
         collections: [COLLECTION.appCommand, COLLECTION.appAction],
@@ -468,14 +521,30 @@ export class AppRuntime {
         prepare: async (events) => {
           if (events.length === 0) {
             inboxContext = null;
+            inboxLabels = [];
+            accountLabels = [];
             return true;
           }
-          inboxContext = await this.buildInboxContext(space, workspace);
+          [inboxContext, inboxLabels, accountLabels] = await Promise.all([
+            this.buildInboxContext(space, workspace),
+            this.input.engine.sync!.syncSpaceActiveLabels(space, { workspace }),
+            parsedWs
+              ? this.input.engine.sync!.syncAccountLabels(parsedWs.authorityDid, { forceCheck: true })
+              : Promise.resolve([]),
+          ]);
           return inboxContext !== null;
         },
         onEvent: async (event) => {
           if (!inboxContext) return;
           if (event.collection !== COLLECTION.appCommand && event.collection !== COLLECTION.appAction) return;
+          if (
+            this.takendown.get(workspace)?.has(event.repo) ||
+            isTakendown(accountLabels, event.repo) ||
+            isTakendown(inboxLabels, event.uri, event.cid)
+          ) {
+            this.dropInboxRecord(event.uri, "record is taken down by group moderation");
+            return;
+          }
           const validation = validateSpaceRecord(event.collection, event.value, {
             authorityDid: inboxContext.authorityDid,
             spaceUri: space,
@@ -526,14 +595,20 @@ export class AppRuntime {
         if (fresh.length === 0) return async () => undefined;
         const context = await this.buildInboxContext(space, workspace);
         if (!context) return null;
-        return (record) =>
-          this.deliverInboxRecord(
+        const takendown = this.takendown.get(workspace) ?? new Set<string>();
+        return async (record) => {
+          if (takendown.has(record.repo)) {
+            this.dropInboxRecord(record.uri, "record is taken down by group moderation");
+            return;
+          }
+          await this.deliverInboxRecord(
             space,
             workspace,
             context.authorityDid,
             context,
             record,
           );
+        };
       },
     });
   }
@@ -552,7 +627,13 @@ export class AppRuntime {
     const install = summary.installs.find((entry) => entry.did === this.input.did);
     if (!install) return null;
 
-    const roster = new Set(summary.members.map((member) => member.did));
+    const takendownSet = new Set(summary.takendownMembers ?? []);
+    const roster = new Set(
+      [
+        ...summary.members.map((member) => member.did),
+        ...(summary.pendingMembers ?? []).map((member) => member.did),
+      ].filter((did) => !takendownSet.has(did)),
+    );
     const apps = new Set(summary.installs.map((entry) => entry.did));
     const directoryByUri = new Map(summary.channels.map((channel) => [channel.uri, channel]));
     const appGrants = new Map(install.channels.map((grant) => [grant.skey, grant.write]));
@@ -662,7 +743,7 @@ export class AppRuntime {
     }
     const ref: ChannelRef = { workspace, skey: directoryEntry.skey };
 
-    if (directoryEntry.visibility === "private" && record.repo !== authorityDid) {
+    if (directoryEntry.visibility === "private") {
       let privateMembers: ReadonlySet<string>;
       try {
         privateMembers = await context.privateRosterOf(ref);

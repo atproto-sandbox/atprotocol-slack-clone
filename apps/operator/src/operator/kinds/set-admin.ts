@@ -1,12 +1,8 @@
-import { listSpaceMembers } from "../../atproto/space-ops";
-import { inboxUri, subjectKey } from "@flock/protocol/keys";
-import { COLLECTION } from "@flock/protocol/nsids";
-import { OperationRejectedError, type OperationContext } from "../journal";
+import { effectiveHumanAdmins, isEffectiveAdminMember } from "@flock/protocol/scopes";
 import type { OperatorActor } from "../actor";
-import { activeAdmins, getOwnerRecord, writeRoster } from "../workspace-state";
+import { OperationRejectedError, type OperationContext } from "../journal";
+import { defaultRoleKeys, putMembershipRoles, readGroupGovernanceState } from "../workspace-state";
 import type { OperationKind } from "./kind";
-import { putListMember } from "../members";
-import { readInstall } from "../membership";
 
 export const setAdminKind: OperationKind = {
   kind: "setAdmin",
@@ -19,31 +15,66 @@ export const setAdminKind: OperationKind = {
 };
 
 async function setAdmin(actor: OperatorActor, context: OperationContext, subject: string, active: boolean): Promise<void> {
-  if (subject === actor.workspace.authorityDid) throw new OperationRejectedError("The workspace authority's bootstrap admin state cannot be changed.");
-  if ((await readInstall(actor, subject))?.active) throw new OperationRejectedError("An installed app is not an admin.");
-  const roster = await getOwnerRecord(actor.session, actor.workspace.uri, COLLECTION.workspaceRoster, subjectKey(subject));
+  const groupDid = actor.workspace.authorityDid;
+  if (subject === groupDid) {
+    throw new OperationRejectedError("The group account's bootstrap admin state cannot be changed.");
+  }
+
+  const state = await readGroupGovernanceState(actor.session, groupDid);
+  if (state.knownAppSubjects.has(subject)) {
+    throw new OperationRejectedError("An installed app is not an admin.");
+  }
+
+  const membership = state.memberships.get(subject);
   if (active) {
-    const workspaceMember = (await listSpaceMembers(actor.session, actor.workspace.uri)).some((member) =>
-      member.did === subject && member.read && member.write);
-    if (roster?.active !== true || !workspaceMember) {
+    if (!membership || membership.roles.length === 0) {
       throw new OperationRejectedError("Only an active workspace member can become an admin.");
     }
-  }
-  const admins = await activeAdmins(actor);
-  if (!active && admins.has(subject) && admins.size <= 1) throw new OperationRejectedError("The last active admin cannot be demoted.");
-  const inbox = inboxUri(actor.workspace.authorityDid, actor.workspace.skey);
-  if (active) {
-    await context.step("write-admin-active", () => writeRoster(actor, actor.workspace.uri, subject, true, COLLECTION.admin));
-    await context.step("grant-inbox-read", () => putListMember(actor.session, inbox, subject, true, true));
+    if (!state.roles.has("admin")) {
+      throw new OperationRejectedError("Role 'admin' does not exist in group.opensocial.members/self.");
+    }
   } else {
-    await context.step("remove-inbox-read", () => putListMember(actor.session, inbox, subject, false, true));
-    await context.step("write-admin-inactive", () => writeRoster(actor, actor.workspace.uri, subject, false, COLLECTION.admin));
+    const admins = effectiveHumanAdmins(state, groupDid);
+    if (admins.includes(subject) && admins.length <= 1) {
+      throw new OperationRejectedError("The last active admin cannot be demoted.");
+    }
   }
+
+  if (active) {
+    await context.step("write-admin-active", async () => {
+      const latest = await readGroupGovernanceState(actor.session, groupDid);
+      const cur = latest.memberships.get(subject);
+      if (!cur) throw new OperationRejectedError("Target member is no longer in the group.");
+      if (cur.roles.includes("admin")) return;
+      await putMembershipRoles(actor.session, groupDid, subject, [...cur.roles, "admin"]);
+    });
+    if (context.completedSteps.includes("grant-inbox-read")) {
+      await context.step("grant-inbox-read", async () => {});
+    }
+  } else {
+    if (context.completedSteps.includes("remove-inbox-read")) {
+      await context.step("remove-inbox-read", async () => {});
+    }
+    await context.step("write-admin-inactive", async () => {
+      const latest = await readGroupGovernanceState(actor.session, groupDid);
+      const cur = latest.memberships.get(subject);
+      if (!cur || !cur.roles.includes("admin")) return;
+      const remaining = cur.roles.filter((r) => r !== "admin");
+      const fallback = defaultRoleKeys(latest);
+      const nextRoles = remaining.length > 0 ? remaining : fallback.length > 0 ? fallback : ["member"];
+      await putMembershipRoles(actor.session, groupDid, subject, nextRoles);
+    });
+  }
+
   await context.step("admin-state-verified", async () => {
-    const current = await getOwnerRecord(actor.session, actor.workspace.uri, COLLECTION.admin, subjectKey(subject));
-    const member = (await listSpaceMembers(actor.session, inbox)).find((entry) => entry.did === subject);
-    if (current?.active !== active || (active && (!member?.read || !member.write)) || (!active && member?.read)) {
-      throw new Error("Admin state has not converged with inbox membership.");
+    const latest = await readGroupGovernanceState(actor.session, groupDid);
+    const hasAdmin = Boolean(latest.memberships.get(subject)?.roles.includes("admin"));
+    const isAdmin = isEffectiveAdminMember(subject, latest, groupDid);
+    if (active && (!hasAdmin || !isAdmin)) {
+      throw new Error("Admin promotion has not converged.");
+    }
+    if (!active && hasAdmin) {
+      throw new Error("Admin demotion has not converged.");
     }
   });
 }

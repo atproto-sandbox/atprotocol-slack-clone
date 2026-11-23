@@ -14,6 +14,10 @@
           "workspace": {
             "type": "string",
             "format": "space-ref"
+          },
+          "refreshRegistrations": {
+            "type": "boolean",
+            "description": "When true, refreshes change-notice registrations across all active spaces of the workspace before reporting stalled work."
           }
         }
       },

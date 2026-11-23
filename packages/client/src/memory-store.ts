@@ -1,5 +1,8 @@
 import {
   cloneActivityState,
+  cloneJoiningGroupEntry,
+  cloneLeavingGroupEntry,
+  cloneReactivatingGroupEntry,
   cloneWriterState,
   commitAllowed,
   dedupeIds,
@@ -14,6 +17,11 @@ import {
   type ClockState,
   type IdentityEntry,
   type IdentityKind,
+  type JoiningGroupEntry,
+  type LeavingGroupEntry,
+  type PurgeWriterOptions,
+  type PutSpaceOptions,
+  type ReactivatingGroupEntry,
   type SpaceState,
   type StoredRecord,
   type SyncStore,
@@ -31,18 +39,62 @@ export class MemoryStore implements SyncStore {
   private readonly identities = new Map<string, IdentityEntry>();
   private readonly clocks = new Map<string, ClockState>();
   private readonly activities = new Map<string, ActivityState>();
+  private readonly leavingGroups = new Map<string, LeavingGroupEntry>();
+  private readonly joiningGroups = new Map<string, JoiningGroupEntry>();
+  private readonly reactivatingGroups = new Map<string, ReactivatingGroupEntry>();
   private clears = 0;
 
   async getSpace(space: string): Promise<SpaceState | undefined> {
     return clone(this.spaces.get(space));
   }
 
-  async putSpace(state: SpaceState): Promise<void> {
+  async putSpace(state: SpaceState, options?: PutSpaceOptions): Promise<boolean> {
+    if (options?.epoch !== undefined && options.epoch !== this.epochOf(state.space)) {
+      return false;
+    }
     const existing = this.spaces.get(state.space);
+    if (options?.touchMetadataOnly) {
+      const touched: SpaceState = existing
+        ? {
+            ...clone(existing),
+            workspace: state.workspace,
+            lastOpenedAt: Math.max(existing.lastOpenedAt, state.lastOpenedAt),
+          }
+        : { ...clone(state), revision: 0 };
+      this.spaces.set(state.space, touched);
+      return true;
+    }
+    if (
+      options?.expectedInvalidationSeq !== undefined &&
+      (existing?.invalidationSeq ?? 0) !== options.expectedInvalidationSeq
+    ) {
+      return false;
+    }
+    if (options?.expectedRevision !== undefined && (existing?.revision ?? 0) !== options.expectedRevision) {
+      return false;
+    }
+    if (
+      options?.disallowOlderSpaceRev &&
+      existing?.spaceRev !== null &&
+      existing?.spaceRev !== undefined &&
+      (state.spaceRev === null || state.spaceRev < existing.spaceRev)
+    ) {
+      return false;
+    }
     const nextSeq = Math.max(existing?.invalidationSeq ?? 0, state.invalidationSeq ?? 0);
     const next = clone(state);
+    next.revision = (existing?.revision ?? 0) + 1;
+    if (
+      options?.preserveNewerOwnWriteSince !== undefined &&
+      existing?.ownWriteAt !== undefined &&
+      existing.ownWriteAt !== null &&
+      existing.ownWriteAt > options.preserveNewerOwnWriteSince
+    ) {
+      next.ownWriteAt = existing.ownWriteAt;
+    }
     if (nextSeq > 0) next.invalidationSeq = nextSeq;
     this.spaces.set(state.space, next);
+    return true;
   }
 
   async listSpaces(): Promise<SpaceState[]> {
@@ -130,14 +182,50 @@ export class MemoryStore implements SyncStore {
     for (const { collection, rkey } of change.remove ?? []) this.bucket(change.space, collection).delete(recordKey(change.repo, rkey));
     this.writers.set(key, next);
     if (nextClock) this.clocks.set(nextClock.key, nextClock.state);
+    if (change.touchOwnSpace) {
+      const existingSpace = this.spaces.get(change.space);
+      const touch = change.touchOwnSpace;
+      const nextSpace: SpaceState = existingSpace
+        ? {
+            ...clone(existingSpace),
+            ownWriteAt: Math.max(existingSpace.ownWriteAt ?? 0, touch.ownWriteAt),
+            ...(touch.workspace !== undefined && existingSpace.workspace === null
+              ? { workspace: touch.workspace }
+              : {}),
+          }
+        : {
+            space: change.space,
+            spaceRev: null,
+            writers: [],
+            writersListedAt: null,
+            workspace: touch.workspace ?? null,
+            lastOpenedAt: touch.defaultLastOpenedAt,
+            ownWriteAt: touch.ownWriteAt,
+          };
+      this.spaces.set(change.space, nextSpace);
+    }
     return true;
   }
 
   async invalidateSpace(space: string, extraRepos: readonly string[] = []): Promise<void> {
     const currentSpace = this.spaces.get(space);
     const nextSpace: SpaceState = currentSpace
-      ? { ...clone(currentSpace), writersListedAt: null, invalidationSeq: (currentSpace.invalidationSeq ?? 0) + 1 }
-      : { space, spaceRev: null, writers: [], writersListedAt: null, workspace: null, lastOpenedAt: 0, invalidationSeq: 1 };
+      ? {
+          ...clone(currentSpace),
+          writersListedAt: null,
+          invalidationSeq: (currentSpace.invalidationSeq ?? 0) + 1,
+          revision: (currentSpace.revision ?? 0) + 1,
+        }
+      : {
+          space,
+          spaceRev: null,
+          writers: [],
+          writersListedAt: null,
+          workspace: null,
+          lastOpenedAt: 0,
+          invalidationSeq: 1,
+          revision: 1,
+        };
     this.spaces.set(space, nextSpace);
     const repos = new Set<string>(extraRepos);
     for (const writer of this.writers.values()) {
@@ -155,13 +243,33 @@ export class MemoryStore implements SyncStore {
     return `${this.clears}:${this.purges.get(space) ?? 0}`;
   }
 
-  async purgeWriter(space: string, repo: string): Promise<void> {
+  async purgeWriter(space: string, repo: string, options?: PurgeWriterOptions): Promise<boolean> {
+    if (options?.epoch !== undefined && options.epoch !== this.epochOf(space)) {
+      return false;
+    }
+    const existingSpace = this.spaces.get(space);
+    if (
+      options?.expectedInvalidationSeq !== undefined &&
+      (existingSpace?.invalidationSeq ?? 0) !== options.expectedInvalidationSeq
+    ) {
+      return false;
+    }
+    if (
+      options?.expectedSpaceRevision !== undefined &&
+      (existingSpace?.revision ?? 0) !== options.expectedSpaceRevision
+    ) {
+      return false;
+    }
+    const current = this.writers.get(writerKey(space, repo));
+    if (options?.expectedGeneration !== undefined && (current?.generation ?? 0) !== options.expectedGeneration) {
+      return false;
+    }
     for (const [key, bucket] of this.held) {
       if (!key.startsWith(`${space} `)) continue;
       for (const [held, record] of bucket) if (record.repo === repo) bucket.delete(held);
     }
-    const current = this.writers.get(writerKey(space, repo));
     this.writers.set(writerKey(space, repo), emptyWriterState(space, repo, (current?.generation ?? 0) + 1));
+    return true;
   }
 
   async purgeSpace(space: string): Promise<void> {
@@ -179,6 +287,10 @@ export class MemoryStore implements SyncStore {
 
   async putIdentity(entry: IdentityEntry): Promise<void> {
     this.identities.set(`${entry.kind} ${entry.did}`, clone(entry));
+  }
+
+  async deleteIdentity(kind: IdentityKind, did: string): Promise<void> {
+    this.identities.delete(`${kind} ${did}`);
   }
 
   async getClock(accountDid: string, scope = ""): Promise<ClockState | undefined> {
@@ -247,6 +359,72 @@ export class MemoryStore implements SyncStore {
     }
   }
 
+  async getLeavingGroup(groupDid: string): Promise<LeavingGroupEntry | undefined> {
+    const entry = this.leavingGroups.get(groupDid);
+    return entry ? cloneLeavingGroupEntry(entry) : undefined;
+  }
+
+  async putLeavingGroup(entry: LeavingGroupEntry): Promise<void> {
+    try {
+      const next = cloneLeavingGroupEntry(entry);
+      this.leavingGroups.set(next.groupDid, next);
+    } catch (error) {
+      throw asStoreError(error);
+    }
+  }
+
+  async deleteLeavingGroup(groupDid: string): Promise<void> {
+    this.leavingGroups.delete(groupDid);
+  }
+
+  async listLeavingGroups(): Promise<LeavingGroupEntry[]> {
+    return [...this.leavingGroups.values()].map((entry) => cloneLeavingGroupEntry(entry));
+  }
+
+  async getJoiningGroup(operationId: string): Promise<JoiningGroupEntry | undefined> {
+    const entry = this.joiningGroups.get(operationId);
+    return entry ? cloneJoiningGroupEntry(entry) : undefined;
+  }
+
+  async putJoiningGroup(entry: JoiningGroupEntry): Promise<void> {
+    try {
+      const next = cloneJoiningGroupEntry(entry);
+      this.joiningGroups.set(next.operationId, next);
+    } catch (error) {
+      throw asStoreError(error);
+    }
+  }
+
+  async deleteJoiningGroup(operationId: string): Promise<void> {
+    this.joiningGroups.delete(operationId);
+  }
+
+  async listJoiningGroups(): Promise<JoiningGroupEntry[]> {
+    return [...this.joiningGroups.values()].map((entry) => cloneJoiningGroupEntry(entry));
+  }
+
+  async getReactivatingGroup(operationId: string): Promise<ReactivatingGroupEntry | undefined> {
+    const entry = this.reactivatingGroups.get(operationId);
+    return entry ? cloneReactivatingGroupEntry(entry) : undefined;
+  }
+
+  async putReactivatingGroup(entry: ReactivatingGroupEntry): Promise<void> {
+    try {
+      const next = cloneReactivatingGroupEntry(entry);
+      this.reactivatingGroups.set(next.operationId, next);
+    } catch (error) {
+      throw asStoreError(error);
+    }
+  }
+
+  async deleteReactivatingGroup(operationId: string): Promise<void> {
+    this.reactivatingGroups.delete(operationId);
+  }
+
+  async listReactivatingGroups(): Promise<ReactivatingGroupEntry[]> {
+    return [...this.reactivatingGroups.values()].map((entry) => cloneReactivatingGroupEntry(entry));
+  }
+
   async clear(): Promise<void> {
     this.clears += 1;
     this.spaces.clear();
@@ -255,6 +433,9 @@ export class MemoryStore implements SyncStore {
     this.identities.clear();
     this.clocks.clear();
     this.activities.clear();
+    this.leavingGroups.clear();
+    this.joiningGroups.clear();
+    this.reactivatingGroups.clear();
   }
 
   private bucket(space: string, collection: string): Map<string, StoredRecord> {

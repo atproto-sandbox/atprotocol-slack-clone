@@ -13,6 +13,7 @@ import { NodeOAuthClient, type NodeSavedSession, type NodeSavedState } from "@at
 const [newest, older] = await Promise.all([JoseKey.generate(["ES256"], "authority-2026-11"), JoseKey.generate(["ES256"], "authority-2026-08")]);
 process.env.APP_URL = "https://spaces.example.com";
 process.env.OPERATOR_URL = "https://operator.spaces.example.com";
+process.env.GROUP_HOST_URL = "https://groups.spaces.example.com";
 process.env.AUTH_ENCRYPTION_KEY = "5d".repeat(32);
 process.env.OPERATOR_SERVICE_REF = "did:web:operator.spaces.example.com#atproto_flock_operator";
 process.env.DATABASE_PATH = join(mkdtempSync(join(tmpdir(), "authority-confidential-test-")), "app.db");

@@ -1,7 +1,7 @@
 import { readUpstreamJson } from "../bounded-json";
 
 export type XrpcParams = Record<string, string | number | boolean | readonly string[] | undefined>;
-export type XrpcRequestOptions = { signal?: AbortSignal };
+export type XrpcRequestOptions = { signal?: AbortSignal; headers?: Readonly<Record<string, string>> };
 export type AtprotoFetchHandler = (path: string, init: RequestInit) => Promise<Response>;
 export const MAX_XRPC_RESPONSE_BYTES = 8 * 1024 * 1024;
 
@@ -25,6 +25,7 @@ export class AtprotoClient {
     const suffix = query.size ? `?${query.toString()}` : "";
     return this.request<TOutput>(`/xrpc/${method}${suffix}`, {
       method: "GET",
+      ...(options?.headers ? { headers: { ...options.headers } } : {}),
       ...(options?.signal ? { signal: options.signal } : {}),
     });
   }
@@ -42,7 +43,11 @@ export class AtprotoClient {
     const suffix = query.size ? `?${query.toString()}` : "";
     return this.request<TOutput>(`/xrpc/${method}${suffix}`, {
       method: "POST",
-      headers: { accept: "application/json", "content-type": "application/json" },
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+        ...(options?.headers ?? {}),
+      },
       body: JSON.stringify(input),
       ...(options?.signal ? { signal: options.signal } : {}),
     });

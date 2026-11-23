@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { BLOCK_TYPE } from "@flock/client/blocks";
 import { messageOf, splitDids, threadMessages, TRANSITIONING_STATUS, type ChannelSelection, type Message, type PermalinkResolution, type RunOperation } from "./client-api";
 import { channelCommandContext, matchingCommands, renderableBlocks, type WorkspaceDeclarations } from "./interactions";
+import { ReportSubjectButton, type ReportRuleOption, type SubmitReportFn } from "./report-subject-modal";
 import type { WorkspaceSummary } from "@flock/protocol/workspace-summary";
 import type { Snapshot } from "@flock/client/views";
 import type { ChannelContent } from "./use-channel-content";
@@ -40,14 +41,18 @@ type ChannelViewProps = {
   toggleReaction: (subject: string, emoji: string, active: boolean) => Promise<void>;
   editMessage: (message: Message) => Promise<void>;
   deleteMessage: (uri: string) => Promise<void>;
+  onReportSubject?: SubmitReportFn;
+  reportRules?: readonly ReportRuleOption[];
+  onReported?: () => void;
   setError: (message: string) => void;
 };
 
 export function ChannelView(props: ChannelViewProps) {
   const { did, activeChannel, activeWorkspace, declarations, busy, workspaceDegraded, requestSubmitted, content, loadOlder, reload } = props;
   const { messageText, setMessageText, chosenCommandApp, setChosenCommandApp, composerStatus, pendingActions, replyTo, setReplyTo, highlightedMessageUri = null, permalinkResolution = null, onOpenPermalink } = props;
-  const { runOperation, leaveChannel, requestPrivateAccess, sendMessage, sendAction, toggleReaction, editMessage, deleteMessage, setError } = props;
+  const { runOperation, leaveChannel, requestPrivateAccess, sendMessage, sendAction, toggleReaction, editMessage, deleteMessage, onReportSubject, reportRules = [], onReported, setError } = props;
   const [transitionMembers, setTransitionMembers] = useState("");
+  const [revealedHiddenUris, setRevealedHiddenUris] = useState<ReadonlySet<string>>(() => new Set());
   const messages = useMemo(() => content.value?.messages ?? [], [content.value?.messages]);
   const privateRoster = content.value?.roster ?? [];
 
@@ -97,55 +102,85 @@ export function ChannelView(props: ChannelViewProps) {
     }
   }
 
+  function toggleHiddenMessage(uri: string) {
+    setRevealedHiddenUris((prev) => {
+      const next = new Set(prev);
+      if (next.has(uri)) next.delete(uri);
+      else next.add(uri);
+      return next;
+    });
+  }
+
   function renderMessageCard(message: Message, isReply: boolean) {
     const blocks = renderableBlocks(message, appDids);
     const isHighlighted = highlightedMessageUri === message.uri;
+    const isCollapsedHidden = Boolean(message.hidden) && !revealedHiddenUris.has(message.uri);
     return (
       <article
         className={`${isReply ? "message-card reply-card" : "message-card"}${isHighlighted ? " highlighted-message" : ""}`}
         key={message.uri}
         data-message-uri={message.uri}
         data-highlighted={isHighlighted ? "true" : undefined}
+        data-hidden={message.hidden ? "true" : undefined}
       >
-        <div className="message-meta"><strong>{message.repo.slice(0, 20)}…</strong>{appDids.has(message.repo) && <span className="eyebrow app-marker">APP</span>}<time>{message.value.createdAt}</time></div>
-        {blocks ? (
-          <div className="message-blocks">
-            {blocks.map((block, index) => {
-              if (block.$type === BLOCK_TYPE.section) return <p className="block-section" key={index}>{block.text}</p>;
-              if (block.$type === BLOCK_TYPE.context) return <div className="block-context" key={index}>{block.elements.map((item, itemIndex) => <span key={itemIndex}>{item}</span>)}</div>;
-              if (block.$type === BLOCK_TYPE.divider) return <hr className="block-divider" key={index} />;
-              return (
-                <div className="block-actions" key={index}>
-                  {block.elements.map((btn) => {
-                    const actionKey = `${message.uri} ${btn.actionId}`;
-                    const buttonClass = btn.style === "primary" ? "block-button primary" : btn.style === "danger" ? "block-button danger" : "block-button";
-                    return (
-                      <button
-                        type="button"
-                        key={btn.actionId}
-                        className={buttonClass}
-                        disabled={pendingActions.has(actionKey) || activeChannel.visibility === "transitioning"}
-                        onClick={() => void sendAction(message, btn.actionId)}
-                      >
-                        {btn.label}
-                      </button>
-                    );
-                  })}
-                </div>
-              );
-            })}
-          </div>
+        <div className="message-meta"><strong>{message.repo.slice(0, 20)}…</strong>{appDids.has(message.repo) && <span className="eyebrow app-marker">APP</span>}{message.hidden && <span className="eyebrow">!hide</span>}<time>{message.value.createdAt}</time></div>
+        {isCollapsedHidden ? (
+          <p className="status-note">
+            Hidden by group moderation —{" "}
+            <button type="button" className="text-button" onClick={() => toggleHiddenMessage(message.uri)}>
+              Show
+            </button>
+          </p>
         ) : (
-          <p>{message.value.text}</p>
+          <>
+            {message.hidden && (
+              <p className="status-note">
+                Hidden by group moderation —{" "}
+                <button type="button" className="text-button" onClick={() => toggleHiddenMessage(message.uri)}>
+                  Hide
+                </button>
+              </p>
+            )}
+            {blocks ? (
+              <div className="message-blocks">
+                {blocks.map((block, index) => {
+                  if (block.$type === BLOCK_TYPE.section) return <p className="block-section" key={index}>{block.text}</p>;
+                  if (block.$type === BLOCK_TYPE.context) return <div className="block-context" key={index}>{block.elements.map((item, itemIndex) => <span key={itemIndex}>{item}</span>)}</div>;
+                  if (block.$type === BLOCK_TYPE.divider) return <hr className="block-divider" key={index} />;
+                  return (
+                    <div className="block-actions" key={index}>
+                      {block.elements.map((btn) => {
+                        const actionKey = `${message.uri} ${btn.actionId}`;
+                        const buttonClass = btn.style === "primary" ? "block-button primary" : btn.style === "danger" ? "block-button danger" : "block-button";
+                        return (
+                          <button
+                            type="button"
+                            key={btn.actionId}
+                            className={buttonClass}
+                            disabled={pendingActions.has(actionKey) || activeChannel.visibility === "transitioning"}
+                            onClick={() => void sendAction(message, btn.actionId)}
+                          >
+                            {btn.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <p>{message.value.text}</p>
+            )}
+          </>
         )}
         {message.value.parent && <small>Reply to {message.value.parent}</small>}
-        <div className="message-actions"><button onClick={() => setReplyTo(message.uri)}>Reply</button>{onOpenPermalink && <button type="button" onClick={() => onOpenPermalink(message)}>Link</button>}{(message.reactions ?? []).map((reaction) => <button className={reaction.active ? "reaction-active" : ""} key={reaction.emoji} onClick={() => void toggleReaction(message.uri, reaction.emoji, reaction.active)}>{reaction.emoji} {reaction.count}</button>)}{!(message.reactions ?? []).some((reaction) => reaction.emoji === "💜") && <button onClick={() => void toggleReaction(message.uri, "💜", false)}>💜 0</button>}{message.repo === did && <><button onClick={() => void editMessage(message)}>Edit</button><button onClick={() => void deleteMessage(message.uri)}>Delete</button></>}</div>
+        <div className="message-actions"><button onClick={() => setReplyTo(message.uri)}>Reply</button>{onOpenPermalink && <button type="button" onClick={() => onOpenPermalink(message)}>Link</button>}{(message.reactions ?? []).map((reaction) => <button className={reaction.active ? "reaction-active" : ""} key={reaction.emoji} onClick={() => void toggleReaction(message.uri, reaction.emoji, reaction.active)}>{reaction.emoji} {reaction.count}</button>)}{!(message.reactions ?? []).some((reaction) => reaction.emoji === "💜") && <button onClick={() => void toggleReaction(message.uri, "💜", false)}>💜 0</button>}{message.repo === did && <><button onClick={() => void editMessage(message)}>Edit</button><button onClick={() => void deleteMessage(message.uri)}>Delete</button></>}{onReportSubject && <ReportSubjectButton subject={message.uri} cid={message.cid} rules={reportRules} onSubmitReport={onReportSubject} onReported={onReported} onError={setError} />}</div>
       </article>
     );
   }
 
   return <>
-    <div className="section-heading"><div><span className="eyebrow">{activeChannel.visibility === "transitioning" ? "CHANNEL TRANSITION" : activeChannel.visibility === "private" ? "PRIVATE CHANNEL" : "PUBLIC CHANNEL"}</span><h2>{activeChannel.visibility === "private" ? "▣" : "#"} {activeChannel.name}</h2></div><div><button className="text-button" disabled={activeChannel.visibility === "transitioning"} onClick={() => void reload().catch((caught: unknown) => setError(messageOf(caught)))}>Sync ↻</button>{activeWorkspace?.isAdmin && activeChannel.visibility !== "transitioning" && <><button className="text-button" disabled={workspaceDegraded} onClick={() => { const members = splitDids(transitionMembers); void runOperation({ kind: "transitionChannel", skey: activeChannel.skey, visibility: activeChannel.visibility === "public" ? "private" : "public", ...(activeChannel.visibility === "public" ? { members: members.length ? members : activeWorkspace.members.map((member) => member.did) } : {}) }); }}>{activeChannel.visibility === "public" ? "Make private" : "Make public"}</button><button className="text-button danger" disabled={workspaceDegraded} onClick={() => void runOperation({ kind: "archiveChannel", skey: activeChannel.skey })}>Archive</button></>}</div></div>
+    <div className="section-heading"><div><span className="eyebrow">{activeChannel.visibility === "transitioning" ? "CHANNEL TRANSITION" : activeChannel.visibility === "private" ? "PRIVATE CHANNEL" : "PUBLIC CHANNEL"}</span><h2>{activeChannel.visibility === "private" ? "▣" : "#"} {activeChannel.name}</h2></div><div><button className="text-button" disabled={activeChannel.visibility === "transitioning"} onClick={() => void reload().catch((caught: unknown) => setError(messageOf(caught)))}>Sync ↻</button>{activeWorkspace?.isAdmin && activeChannel.visibility !== "transitioning" && <><button className="text-button" disabled={busy || workspaceDegraded} onClick={() => { const members = splitDids(transitionMembers); void runOperation({ kind: "transitionChannel", skey: activeChannel.skey, visibility: activeChannel.visibility === "public" ? "private" : "public", ...(activeChannel.visibility === "public" ? { members: members.length ? members : activeWorkspace.members.map((member) => member.did) } : {}) }); }}>{activeChannel.visibility === "public" ? "Make private" : "Make public"}</button><button className="text-button danger" disabled={busy || workspaceDegraded} onClick={() => void runOperation({ kind: "archiveChannel", skey: activeChannel.skey })}>Archive</button></>}</div></div>
     {activeChannel.visibility === "transitioning" && <p className="status-note">{TRANSITIONING_STATUS}</p>}
     {activeChannel.visibility === "private" && privateRoster.length > 0 && <div className="starter-card private-roster"><strong>Active private channel members</strong><p>{privateRoster.join(" · ")}</p></div>}
     {activeWorkspace?.isAdmin && <label className="transition-members">Selected members when making this channel private<input value={transitionMembers} onChange={(event) => setTransitionMembers(event.target.value)} placeholder="DIDs separated by spaces or commas (blank keeps all)" /></label>}

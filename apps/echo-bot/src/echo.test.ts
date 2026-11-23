@@ -3,8 +3,8 @@ import test from "node:test";
 import { validateMessageInput } from "@flock/client/blocks";
 import { ECHO_BOT_COMMANDS, echoActionReply, echoCommandReply, echoReply } from "./echo";
 
-const channel = { workspace: "at://did:plc:a/space/new.flock.workspace/acme", skey: "acme-general" };
-const uri = "at://did:plc:a/space/new.flock.channel/acme-general/did:plc:p/new.flock.channel.message/3m2222222222a";
+const channel = { workspace: "at://did:plc:a/space/new.flock.workspace/self", skey: "general" };
+const uri = "at://did:plc:a/space/new.flock.channel/general/did:plc:p/new.flock.channel.message/3m2222222222a";
 
 test("the echo bot answers a message with its text, in its thread", () => {
   assert.deepEqual(echoReply({ channel, canWrite: true, message: { uri, repo: "did:plc:p", rkey: "3m2222222222a", value: { text: " hello " } } }), { text: "echo: hello", parent: uri });
@@ -12,9 +12,10 @@ test("the echo bot answers a message with its text, in its thread", () => {
   assert.deepEqual(echoReply({ channel, canWrite: true, message: { uri, repo: "did:plc:p", rkey: "3m2222222222a", value: { text: "hi", parent } } })?.parent, parent, "a reply's thread is its parent's");
 });
 
-test("the echo bot is silent where it reads only, and for a message with no text", () => {
+test("the echo bot is silent where it reads only, for a message with no text, and for a moderation-hidden message", () => {
   assert.equal(echoReply({ channel, canWrite: false, message: { uri, repo: "did:plc:p", rkey: "3m2222222222a", value: { text: "hello" } } }), null);
   assert.equal(echoReply({ channel, canWrite: true, message: { uri, repo: "did:plc:p", rkey: "3m2222222222a", value: { text: "   " } } }), null);
+  assert.equal(echoReply({ channel, canWrite: true, message: { uri, repo: "did:plc:p", rkey: "3m2222222222a", hidden: true, labels: ["!hide"], value: { text: "hello" } } }), null);
 });
 
 test("the echo bot's answer stays within a message's length", () => {

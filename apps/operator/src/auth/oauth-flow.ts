@@ -3,17 +3,25 @@ import type { NodeOAuthClient } from "@atproto/oauth-client-node";
 import { isDid } from "@flock/protocol/keys";
 import { canonicalOAuthScope } from "./oauth-scope";
 
-/** Why a workspace-authority flow runs: to create a named workspace, or only to renew the grant. */
-export type AuthorityFlowPurpose = { kind: "createWorkspace"; name: string } | { kind: "reauthorize" };
+/** Why a workspace-authority flow runs: to create a named workspace/group, or to reauthorize the shared group-DID grant. */
+export type AuthorityFlowPurpose =
+  | {
+      kind: "createWorkspace";
+      name: string;
+      joinPolicy?: "open" | "approval" | "invite";
+      publicMeta?: boolean;
+      creationKey?: string;
+    }
+  | { kind: "reauthorize" };
 
 export type OAuthFlowBinding =
   | { kind: "login"; appState: string }
   | { kind: "permission"; expectedDid: string; appState: string; flowLockToken: string }
-  | { kind: "authority"; expectedDid: string; initiatorDid: string; purpose: AuthorityFlowPurpose; expiresAt: number; appState: string };
+  | { kind: "authority"; expectedDid: string | null; initiatorDid: string; purpose: AuthorityFlowPurpose; expiresAt: number; appState: string };
 type OAuthFlowIntent =
   | { kind: "login"; clientScope: string }
   | { kind: "permission"; expectedDid: string; clientScope: string; flowLockToken: string }
-  | { kind: "authority"; expectedDid: string; initiatorDid: string; purpose: AuthorityFlowPurpose; expiresAt: number; clientScope: string };
+  | { kind: "authority"; expectedDid: string | null; initiatorDid: string; purpose: AuthorityFlowPurpose; expiresAt: number; clientScope: string };
 
 const APP_STATE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const OAUTH_STATE_PATTERN = /^[A-Za-z0-9_-]{22,128}$/;
@@ -142,9 +150,16 @@ function isBinding(value: unknown): value is OAuthFlowBinding {
   const binding = value as Record<string, unknown>;
   if (binding.kind === "login") return Object.keys(binding).length === 2 && typeof binding.appState === "string" && APP_STATE_PATTERN.test(binding.appState);
   if (binding.kind === "authority") {
-    return Object.keys(binding).length === 6 && isDid(binding.expectedDid) && isDid(binding.initiatorDid) &&
-      isAuthorityFlowPurpose(binding.purpose) && Number.isSafeInteger(binding.expiresAt) &&
-      typeof binding.appState === "string" && APP_STATE_PATTERN.test(binding.appState);
+    return (
+      Object.keys(binding).length === 6 &&
+      (binding.expectedDid === null || isDid(binding.expectedDid)) &&
+      isDid(binding.initiatorDid) &&
+      isAuthorityFlowPurpose(binding.purpose) &&
+      (binding.expectedDid !== null || binding.purpose.kind === "createWorkspace") &&
+      Number.isSafeInteger(binding.expiresAt) &&
+      typeof binding.appState === "string" &&
+      APP_STATE_PATTERN.test(binding.appState)
+    );
   }
   return binding.kind === "permission" && Object.keys(binding).length === 4 &&
     isDid(binding.expectedDid) &&
@@ -152,10 +167,42 @@ function isBinding(value: unknown): value is OAuthFlowBinding {
     typeof binding.flowLockToken === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(binding.flowLockToken);
 }
 
+const graphemeSegmenter = new Intl.Segmenter("en", { granularity: "grapheme" });
+function countGraphemes(text: string): number {
+  return [...graphemeSegmenter.segment(text)].length;
+}
+
 export function isAuthorityFlowPurpose(value: unknown): value is AuthorityFlowPurpose {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const purpose = value as Record<string, unknown>;
   if (purpose.kind === "reauthorize") return Object.keys(purpose).length === 1;
-  return purpose.kind === "createWorkspace" && Object.keys(purpose).length === 2 &&
-    typeof purpose.name === "string" && purpose.name.length >= 1 && purpose.name.length <= 60;
+  if (purpose.kind !== "createWorkspace") return false;
+  const allowedKeys = new Set(["kind", "name", "joinPolicy", "publicMeta", "creationKey"]);
+  if (Object.keys(purpose).some((key) => !allowedKeys.has(key))) return false;
+  if (
+    typeof purpose.name !== "string" ||
+    purpose.name.trim().length < 1 ||
+    Buffer.byteLength(purpose.name, "utf8") > 640 ||
+    countGraphemes(purpose.name) > 64
+  ) {
+    return false;
+  }
+  if (
+    purpose.joinPolicy !== undefined &&
+    purpose.joinPolicy !== "open" &&
+    purpose.joinPolicy !== "approval" &&
+    purpose.joinPolicy !== "invite"
+  ) {
+    return false;
+  }
+  if (purpose.publicMeta !== undefined && typeof purpose.publicMeta !== "boolean") {
+    return false;
+  }
+  if (
+    purpose.creationKey !== undefined &&
+    (typeof purpose.creationKey !== "string" || purpose.creationKey.length < 1 || purpose.creationKey.length > 128)
+  ) {
+    return false;
+  }
+  return true;
 }

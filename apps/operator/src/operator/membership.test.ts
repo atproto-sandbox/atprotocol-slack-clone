@@ -13,8 +13,12 @@ const install = (channels: Record<string, boolean>): AppInstall => ({
 const INSTALLS = new Map([[BOT, install({ "acme-general": true, "acme-secret": false })]]);
 const RW = { read: true, write: true };
 
-test("the workspace space holds every person, reading and writing, and every active app, reading only", () => {
-  assert.deepEqual(expectedWorkspaceList(ROSTER, INSTALLS), new Map([[BOT, { read: true, write: false }], [AUTHORITY, RW], [ADMIN, RW], [PERSON, RW]]));
+test("the workspace space grants every person read access and every active app read access", () => {
+  const RO = { read: true, write: false };
+  assert.deepEqual(
+    expectedWorkspaceList(ROSTER, INSTALLS),
+    new Map([[BOT, RO], [AUTHORITY, RO], [ADMIN, RO], [PERSON, RO]]),
+  );
 });
 
 test("the inbox holds every person as a writer and the admins as readers too, and no app", () => {
@@ -63,14 +67,15 @@ test("an app inbox holds every roster person as a writer and the app as its only
 });
 
 test("a member list matches when it holds exactly the expected entries and bits, the authority and bitless entries aside", () => {
+  const RO = { read: true, write: false };
   const expected = expectedWorkspaceList(ROSTER, INSTALLS);
-  const listed = [{ did: BOT, read: true, write: false }, { did: ADMIN, ...RW }, { did: PERSON, ...RW }];
+  const listed = [{ did: BOT, ...RO }, { did: ADMIN, ...RO }, { did: PERSON, ...RO }];
   assert.equal(listMatches(expected, listed, AUTHORITY), true, "the authority owns the space and is not listed");
   assert.equal(listMatches(expected, [...listed, { did: AUTHORITY, ...RW }, { did: "did:plc:left", read: false, write: false }], AUTHORITY), true);
   assert.equal(listMatches(expected, listed.filter((member) => member.did !== BOT), AUTHORITY), false, "an app missing");
   assert.equal(listMatches(expected, [...listed.filter((member) => member.did !== BOT), { did: BOT, ...RW }], AUTHORITY), false, "an app with write it was not granted");
-  assert.equal(listMatches(expected, [...listed, { did: "did:plc:stranger", ...RW }], AUTHORITY), false, "someone unexpected");
-  assert.equal(listMatches(expected, [...listed.filter((member) => member.did !== PERSON), { did: PERSON, read: true, write: false }], AUTHORITY), false, "a person who cannot write");
+  assert.equal(listMatches(expected, [...listed, { did: "did:plc:stranger", ...RO }], AUTHORITY), false, "someone unexpected");
+  assert.equal(listMatches(expected, [...listed.filter((member) => member.did !== PERSON), { did: PERSON, ...RW }], AUTHORITY), false, "a person with unexpected write");
 });
 
 test("an extension space grants read and write to every roster person and excludes apps and the authority", () => {

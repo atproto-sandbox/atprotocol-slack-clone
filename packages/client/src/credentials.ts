@@ -1,10 +1,12 @@
 import {
+  isCredentialRefused,
   mintSpaceCredentialWith,
   SpaceCredentialError,
   type SpaceCredential,
+  type SpaceCredentialDeps,
   type SpaceNotifyTarget,
 } from "@flock/protocol/atproto/space-credential-core";
-import { XrpcError, type AtprotoClient } from "@flock/protocol/atproto/xrpc";
+import { AtprotoClient, XrpcError, type XrpcParams, type XrpcRequestOptions } from "@flock/protocol/atproto/xrpc";
 import { raceWithSignal } from "./operator-client";
 import { transportNow, type ClientTransport } from "./transport";
 
@@ -64,6 +66,13 @@ export class CredentialCache {
     private readonly transport: ClientTransport,
     private readonly onAccessLost?: (space: string, error: SpaceCredentialError) => Promise<void>,
   ) {}
+
+  private credentialDeps(): SpaceCredentialDeps {
+    return {
+      ...this.transport,
+      resolvePds: (did, forceRefresh) => this.transport.resolvePds(did, Boolean(forceRefresh)),
+    };
+  }
 
   private allocateOpSeq(space: string): number {
     const next = (this.nextOpSeq.get(space) ?? 0) + 1;
@@ -268,7 +277,7 @@ export class CredentialCache {
     signal?.addEventListener("abort", onAbort, { once: true });
     try {
       const credential = await raceWithSignal(
-        mintSpaceCredentialWith(this.transport, space, signal ? { signal } : undefined),
+        mintSpaceCredentialWith(this.credentialDeps(), space, signal ? { signal } : undefined),
         signal,
       );
       if (signal?.aborted) throw abortReason(signal);
@@ -303,8 +312,13 @@ export class CredentialCache {
 
   /** A client for `did`'s host (a writer, or the space's authority), signed with the space's credential. */
   async clientFor(space: string, did: string): Promise<AtprotoClient> {
-    const credential = await this.get(space);
-    return credential.client(await this.transport.resolvePds(did));
+    const pdsUrl = await this.transport.resolvePds(did);
+    const initial = await this.get(space);
+    return new RetryingSpaceClient(initial.client(pdsUrl), async () => {
+      this.drop(space);
+      const renewed = await this.fresh(space);
+      return renewed.client(pdsUrl);
+    });
   }
 
   /** Stops re-registering `notify` on future renewals for `space` without dropping valid cached read credentials. */
@@ -576,7 +590,7 @@ export class CredentialCache {
     if (signal?.aborted) throw abortReason(signal);
     try {
       const credential = await raceWithSignal(
-        mintSpaceCredentialWith(this.transport, space, {
+        mintSpaceCredentialWith(this.credentialDeps(), space, {
           notify,
           ...(signal ? { signal } : {}),
         }),
@@ -627,7 +641,7 @@ export class CredentialCache {
       }
       try {
         const fallback = await raceWithSignal(
-          mintSpaceCredentialWith(this.transport, space, signal ? { signal } : undefined),
+          mintSpaceCredentialWith(this.credentialDeps(), space, signal ? { signal } : undefined),
           signal,
         );
         if (signal?.aborted) {
@@ -669,7 +683,7 @@ export class CredentialCache {
     if (notify) {
       try {
         const credential = await raceWithSignal(
-          mintSpaceCredentialWith(this.transport, space, {
+          mintSpaceCredentialWith(this.credentialDeps(), space, {
             notify,
             ...(signal ? { signal } : {}),
           }),
@@ -683,9 +697,48 @@ export class CredentialCache {
       }
     }
     const credential = await raceWithSignal(
-      mintSpaceCredentialWith(this.transport, space, signal ? { signal } : undefined),
+      mintSpaceCredentialWith(this.credentialDeps(), space, signal ? { signal } : undefined),
       signal,
     );
     return { credential, notifyConfirmed: false };
+  }
+}
+
+class RetryingSpaceClient extends AtprotoClient {
+  private activeClient: AtprotoClient;
+
+  constructor(
+    initialClient: AtprotoClient,
+    private readonly renewClient: () => Promise<AtprotoClient>,
+  ) {
+    super(() => Promise.reject(new Error("Unreachable base handler")));
+    this.activeClient = initialClient;
+  }
+
+  override async query<TOutput>(
+    method: string,
+    params?: XrpcParams,
+    options?: XrpcRequestOptions,
+  ): Promise<TOutput> {
+    return this.withRetry((client) => client.query<TOutput>(method, params, options));
+  }
+
+  override async procedure<TInput, TOutput>(
+    method: string,
+    input: TInput,
+    params?: XrpcParams,
+    options?: XrpcRequestOptions,
+  ): Promise<TOutput> {
+    return this.withRetry((client) => client.procedure<TInput, TOutput>(method, input, params, options));
+  }
+
+  private async withRetry<T>(invoke: (client: AtprotoClient) => Promise<T>): Promise<T> {
+    try {
+      return await invoke(this.activeClient);
+    } catch (error) {
+      if (!isCredentialRefused(error)) throw error;
+      this.activeClient = await this.renewClient();
+      return invoke(this.activeClient);
+    }
   }
 }

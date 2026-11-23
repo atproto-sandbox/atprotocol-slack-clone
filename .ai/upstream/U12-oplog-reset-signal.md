@@ -1,5 +1,7 @@
 # Tell an incremental syncer that its `since` revision is gone
 
+Status against `6747610566` + `opensocial.group` `8df0cc82` (R13, 2026-11-21): **Open (orthogonal to `opensocial.group`).** Upstream `6747610566` signs and MACs `commit` on every `listRepoOps` page and returns `400 RepoNotFound` for unwritten repos, while `clearRecords` and `importRepo` still delete oplog rows without recording a reset entry or returning `SinceUnavailable`; `@flock/client` (`packages/client/src/sync.ts`) continues verifying materialized `LtHash` commits against `commit.data` (`protocol-tests/atproto/platform-spike-k5-oplog.test.ts`).
+
 Status against `5d88b414` (2026-11-09): Open. Measured by spike K5 of `.ai/plans/platform-refactor.md` (`protocol-tests/atproto/platform-spike-k5-oplog.test.ts`).
 
 ## Summary

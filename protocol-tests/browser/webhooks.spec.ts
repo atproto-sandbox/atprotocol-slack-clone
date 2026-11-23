@@ -7,14 +7,14 @@ import test from "node:test";
 import { chromium, type Browser } from "@playwright/test";
 import { availablePort, startAppServer, startOperatorServer, type AppServer } from "../support/app-server";
 import { consent, openChannel, signIn } from "../support/browser-app";
-import { actorTransport, mintAppSession, startPdsNetwork, storeAuthorityGrant } from "../support/pds-network";
+import { actorTransport, createOpenSocialGroup, mintAppSession, startPdsNetwork } from "../support/pds-network";
 
-// R10c's gate (`.ai/plans/r10-interactions-progress.md`, "### R10c"): in a real Chromium browser under the webhooks admin
-// page's own CSP (`default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'`),
-// `Referrer-Policy: same-origin` and `SameSite=Lax` cookies, a workspace admin signs in via the identity-only OAuth client,
-// creates a hook for #general and sees its URL once; a non-admin member is refused the page; a POST to the URL appears in
-// #general as the app's message; a wrong secret and a revoked hook get the exact same answer; and after the admin changes
-// the app to read-only in #general the hook is refused and nothing is written.
+// R10c's gate (`.ai/plans/r10-interactions-progress.md`, "### R10c"), migrated to R13 OpenSocial groups: in a real Chromium
+// browser under the webhooks admin page's own CSP (`default-src 'none'; style-src 'unsafe-inline'; form-action 'self';
+// frame-ancestors 'none'`), `Referrer-Policy: same-origin` and `SameSite=Lax` cookies, a workspace admin signs in via the
+// identity-only OAuth client, creates a hook for #general and sees its URL once; a non-admin member is refused the page; a
+// POST to the URL appears in #general as the app's message; a wrong secret and a revoked hook get the exact same answer; and
+// after the admin changes the app to read-only in #general the hook is refused and nothing is written.
 
 const WORKSPACE_NAME = "Webhooks Gate";
 
@@ -35,6 +35,7 @@ test("an admin manages webhooks in a real browser, non-admins are refused, valid
 
     const [
       { restoreAuthorityGrant },
+      { grantCreationAuthorization },
       { createWorkspace },
       { registrationDeps },
       { requireActiveWorkspaceAdmin },
@@ -51,6 +52,7 @@ test("an admin manages webhooks in a real browser, non-admins are refused, valid
       { ADMIN_CSP, listenWebhooksServer },
     ] = await Promise.all([
       import("@flock/operator/operator/authority-grant"),
+      import("@flock/operator/operator/creation-authorization"),
       import("@flock/operator/operator/kinds/create-workspace"),
       import("@flock/operator/operator/registrations"),
       import("@flock/operator/operator/security"),
@@ -67,13 +69,21 @@ test("an admin manages webhooks in a real browser, non-admins are refused, valid
       import("@flock/webhooks/server"),
     ]);
 
-    // 1. Provision a workspace on PDS 0, invite a non-admin member on PDS 1, and install the webhooks app (on PDS 1) with write in #general.
+    // 1. Provision an OpenSocial group workspace on Group Host with admin on PDS 0, invite a non-admin member on PDS 1,
+    //    and install the webhooks app (on PDS 1) with write in #general.
     const authority = await pds.createActor("whowner", 0);
     const member = await pds.createActor("whmember", 1);
     const bot = await pds.createActor("whbot", 1);
-    await storeAuthorityGrant(pds.hosts[0], authority.did, "webhooks-authority-dpop");
+    const createdGroup = await createOpenSocialGroup(pds, authority, {
+      name: WORKSPACE_NAME,
+      keyLabel: "webhooks-authority-dpop",
+    });
+    grantCreationAuthorization(
+      { authorityDid: createdGroup.groupDid, initiatorDid: authority.did, name: WORKSPACE_NAME },
+      Math.floor(Date.now() / 1000),
+    );
     const created = await createWorkspace(
-      await restoreAuthorityGrant(authority.did),
+      await restoreAuthorityGrant(createdGroup.groupDid),
       { creator: authority.did, name: WORKSPACE_NAME, operationId: tidNow() },
       registrationDeps,
     );

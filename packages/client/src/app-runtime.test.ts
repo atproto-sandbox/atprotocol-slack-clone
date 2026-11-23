@@ -1,23 +1,31 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { SpaceCredentialError } from "@flock/protocol/atproto/space-credential-core";
-import { memberspacePolicy } from "@flock/protocol/atproto/space-policy";
-import { appInboxSkey, appInboxUri, channelUri, spaceRecordUri, tidNow } from "@flock/protocol/keys";
-import { COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
+import {
+  appInboxSkey,
+  appInboxUri,
+  appRoleKey,
+  channelRoleKey,
+  channelUri,
+  SELF_SKEY,
+  spaceRecordUri,
+  subjectKey,
+  tidNow,
+} from "@flock/protocol/keys";
+import { ATPROTO_SPACE_COLLECTION, COLLECTION, OPENSOCIAL_COLLECTION, OPENSOCIAL_POLICY, SPACE_TYPE } from "@flock/protocol/nsids";
 import { FakeNetwork } from "@flock/testing/fake-network";
 import { AppAccessLostError, AppRuntime, publishAppDeclaration, type AppAction, type AppCommand, type AppMessage } from "./app-runtime";
 import { actionsBlock, button, sectionBlock } from "./blocks";
 import type { ChannelMessage, ChannelPage, ChannelRef } from "./channel-client";
 import { createEngine } from "./engine";
-import { createWorkspace, key, transportFor, writeMessage } from "./testing/engine-fixture";
+import { AUTHORITY, createWorkspace, key, transportFor, writeMessage } from "./testing/engine-fixture";
 
-const AUTHORITY = "did:plc:authority";
-const APP = "did:plc:app";
-const OTHER_APP = "did:plc:otherapp";
-const PERSON = "did:plc:person";
-const WORKSPACE = `at://${AUTHORITY}/space/new.flock.workspace/acme`;
-const GENERAL = `at://${AUTHORITY}/space/new.flock.channel/acme-general`;
-const SECRET = `at://${AUTHORITY}/space/new.flock.channel/acme-secret`;
+const APP = "did:plc:appaaaaaaaaaaaaaaaaaaaaa";
+const OTHER_APP = "did:plc:otherappaaaaaaaaaaaaaaaa";
+const PERSON = "did:plc:personaaaaaaaaaaaaaaaaaa";
+const WORKSPACE = `at://${AUTHORITY}/space/new.flock.workspace/self`;
+const GENERAL = `at://${AUTHORITY}/space/new.flock.channel/general`;
+const SECRET = `at://${AUTHORITY}/space/new.flock.channel/secret`;
 const PAGE = 3;
 
 let clock = 0;
@@ -36,15 +44,13 @@ type Installs = Array<{ did: string; channels: Array<{ skey: string; write: bool
 function fakeApp(installs: Installs, delays: { refollowDelayMs?: number; retryDelayMs?: number; clock?: { now(): number; elapsed(): number } } = {}) {
   const state = {
     installs,
-    channels: new Map<string, ChannelMessage[]>([["acme-general", []], ["acme-secret", []]]),
+    channels: new Map<string, ChannelMessage[]>([["general", []], ["secret", []]]),
     failingReads: new Set<string>(),
     incomplete: false,
     setAside: [] as Array<{ did: string; reason: string; permanent: boolean }>,
     refusal: null as unknown,
-    /** How many of the next workspace reads fail as a passing failure. */
     failingSummaries: 0,
     summaries: 0,
-    /** The workspace's people (its active roster). */
     members: [PERSON],
     denied: [] as string[],
     lost: new Set<string>(),
@@ -70,13 +76,16 @@ function fakeApp(installs: Installs, delays: { refollowDelayMs?: number; retryDe
             state.failingSummaries -= 1;
             throw new Error("the workspace could not be read");
           }
-          return { installs: state.installs, members: state.members.map((did) => ({ did, active: true })) };
+          return {
+            installs: state.installs,
+            members: state.members.map((did) => ({ did, active: true, roles: ["member"] })),
+            pendingMembers: [],
+          };
         },
       } as never,
       channels: {
         readPage: async (ref: ChannelRef, options: { before?: string } = {}) => {
           if (state.failingReads.has(ref.skey)) throw new Error(`${ref.skey} could not be read`);
-          // Newest key first, from a (key, uri) cursor, as the engine reads a channel.
           const bound = options.before?.split(" ")[0];
           const older = [...(state.channels.get(ref.skey) ?? [])].sort((left, right) => left.rkey.localeCompare(right.rkey))
             .filter((entry) => bound === undefined || entry.rkey < bound);
@@ -89,7 +98,6 @@ function fakeApp(installs: Installs, delays: { refollowDelayMs?: number; retryDe
       operator: {
         getChanges: async (follow) => {
           state.getChanges += 1;
-          // A follow reads the head with nothing followed; only a poll takes the next scripted answer.
           if (follow.length === 0) return { head: "9", changed: [], denied: [], reset: [] };
           const changed = answers.shift() ?? [];
           const following = (space: string) => follow.some((entry) => entry.space === space);
@@ -113,85 +121,71 @@ function fakeApp(installs: Installs, delays: { refollowDelayMs?: number; retryDe
 }
 
 test("an app is given each message from a person once, oldest first, and nothing that was there when it started", async () => {
-  // #given the app granted #general with write, which already holds a message
-  const app = fakeApp([{ did: APP, channels: [{ skey: "acme-general", write: true }] }]);
-  app.post("acme-general", past(PERSON, "before"));
+  const app = fakeApp([{ did: APP, channels: [{ skey: "general", write: true }] }]);
+  app.post("general", past(PERSON, "before"));
   await app.runtime.poll();
 
-  // #when a person writes twice, and the channel is reported changed twice
-  app.post("acme-general", message(PERSON, "one"), message(PERSON, "two"));
+  app.post("general", message(PERSON, "one"), message(PERSON, "two"));
   app.change(GENERAL);
   await app.runtime.poll();
   app.change(GENERAL);
   await app.runtime.poll();
 
-  // #then the app was given the two new messages, once each, in the order they were written, where it may write
   assert.deepEqual(app.texts(), ["one", "two"]);
   assert.equal(app.given[0]!.canWrite, true);
 });
 
 test("an app is given no app's message, its own or another's", async () => {
-  const app = fakeApp([{ did: APP, channels: [{ skey: "acme-general", write: true }] }, { did: OTHER_APP, channels: [{ skey: "acme-general", write: true }] }]);
+  const app = fakeApp([{ did: APP, channels: [{ skey: "general", write: true }] }, { did: OTHER_APP, channels: [{ skey: "general", write: true }] }]);
   await app.runtime.poll();
-  app.post("acme-general", message(APP, "echo: hello"), message(OTHER_APP, "beep"), message(PERSON, "hi"));
+  app.post("general", message(APP, "echo: hello"), message(OTHER_APP, "beep"), message(PERSON, "hi"));
   app.change(GENERAL);
   await app.runtime.poll();
   assert.deepEqual(app.texts(), ["hi"]);
 });
 
 test("an app installed since the grants were read is not given for a person, though the workspace's read failed in that poll", async () => {
-  // #given the app following #general, then another app installed there that posts at once, beside a person
-  const app = fakeApp([{ did: APP, channels: [{ skey: "acme-general", write: true }] }]);
+  const app = fakeApp([{ did: APP, channels: [{ skey: "general", write: true }] }]);
   await app.runtime.poll();
-  app.state.installs = [...app.state.installs, { did: OTHER_APP, channels: [{ skey: "acme-general", write: true }] }];
-  app.post("acme-general", message(OTHER_APP, "beep"), message(PERSON, "hi"));
+  app.state.installs = [...app.state.installs, { did: OTHER_APP, channels: [{ skey: "general", write: true }] }];
+  app.post("general", message(OTHER_APP, "beep"), message(PERSON, "hi"));
 
-  // #when the feed reports both spaces changed and the workspace's own read fails
   app.state.failingSummaries = 1;
   app.change(WORKSPACE, GENERAL);
   await app.runtime.poll();
 
-  // #then the new app's message is not given: the unknown author made the runtime read the grants again first
   assert.deepEqual(app.texts(), ["hi"]);
 });
 
 test("an app installed since the grants were read is not given for a person when its channel is read before its workspace", async () => {
-  // #given the app following #general, then another app installed there that posts at once
-  const app = fakeApp([{ did: APP, channels: [{ skey: "acme-general", write: true }] }]);
+  const app = fakeApp([{ did: APP, channels: [{ skey: "general", write: true }] }]);
   await app.runtime.poll();
-  app.state.installs = [...app.state.installs, { did: OTHER_APP, channels: [{ skey: "acme-general", write: true }] }];
-  app.post("acme-general", message(OTHER_APP, "beep"));
+  app.state.installs = [...app.state.installs, { did: OTHER_APP, channels: [{ skey: "general", write: true }] }];
+  app.post("general", message(OTHER_APP, "beep"));
 
-  // #when the feed reports the channel before the workspace
   app.change(GENERAL, WORKSPACE);
   await app.runtime.poll();
 
-  // #then nothing is given
   assert.deepEqual(app.texts(), []);
 });
 
 test("a known author costs no extra read of the workspace, and a read the refresh cannot make gives nothing until the next change", async () => {
-  // #given the app following #general
-  const app = fakeApp([{ did: APP, channels: [{ skey: "acme-general", write: true }] }]);
+  const app = fakeApp([{ did: APP, channels: [{ skey: "general", write: true }] }]);
   await app.runtime.poll();
   const reads = app.state.summaries;
 
-  // #when a person of the workspace writes
-  app.post("acme-general", message(PERSON, "hi"));
+  app.post("general", message(PERSON, "hi"));
   app.change(GENERAL);
   await app.runtime.poll();
 
-  // #then it is given without reading the workspace again
   assert.deepEqual([app.texts(), app.state.summaries], [["hi"], reads]);
 
-  // #when someone not yet known writes and the workspace cannot be read
-  app.state.members = [PERSON, "did:plc:newperson"];
-  app.post("acme-general", message("did:plc:newperson", "hello all"));
+  app.state.members = [PERSON, "did:plc:newpersonaaaaaaaaaaaaaaa"];
+  app.post("general", message("did:plc:newpersonaaaaaaaaaaaaaaa", "hello all"));
   app.state.failingSummaries = 1;
   app.change(GENERAL);
   await app.runtime.poll();
 
-  // #then nothing is given yet, and the next change gives it
   assert.deepEqual(app.texts(), ["hi"]);
   app.change(GENERAL);
   await app.runtime.poll();
@@ -199,21 +193,17 @@ test("a known author costs no extra read of the workspace, and a read the refres
 });
 
 test("a burst bigger than a page is given whole, and one beyond the pages followed back is reported", async () => {
-  // #given the app following #general, which shows three messages a page
-  const app = fakeApp([{ did: APP, channels: [{ skey: "acme-general", write: true }] }]);
-  app.post("acme-general", past(PERSON, "before"));
+  const app = fakeApp([{ did: APP, channels: [{ skey: "general", write: true }] }]);
+  app.post("general", past(PERSON, "before"));
   await app.runtime.poll();
 
-  // #when seven messages arrive at once
-  app.post("acme-general", ...Array.from({ length: 7 }, (_, index) => message(PERSON, `m${index}`)));
+  app.post("general", ...Array.from({ length: 7 }, (_, index) => message(PERSON, `m${index}`)));
   app.change(GENERAL);
   await app.runtime.poll();
 
-  // #then all seven are given, oldest first
   assert.deepEqual(app.texts(), ["m0", "m1", "m2", "m3", "m4", "m5", "m6"]);
 
-  // #and a burst of more than five pages gives the newest five pages and reports the rest
-  app.post("acme-general", ...Array.from({ length: 17 }, (_, index) => message(PERSON, `b${index}`)));
+  app.post("general", ...Array.from({ length: 17 }, (_, index) => message(PERSON, `b${index}`)));
   app.change(GENERAL);
   await app.runtime.poll();
   assert.equal(app.texts().filter((text) => text.startsWith("b")).length, 15);
@@ -221,10 +211,10 @@ test("a burst bigger than a page is given whole, and one beyond the pages follow
 });
 
 test("a message the app fails on is reported, does not hold back the next, and is given again on the next change", async () => {
-  const app = fakeApp([{ did: APP, channels: [{ skey: "acme-general", write: true }] }]);
+  const app = fakeApp([{ did: APP, channels: [{ skey: "general", write: true }] }]);
   await app.runtime.poll();
   app.failing.add("poison");
-  app.post("acme-general", message(PERSON, "poison"), message(PERSON, "later"));
+  app.post("general", message(PERSON, "poison"), message(PERSON, "later"));
   app.change(GENERAL);
   await app.runtime.poll();
   assert.deepEqual(app.texts(), ["later"]);
@@ -236,61 +226,52 @@ test("a message the app fails on is reported, does not hold back the next, and i
 });
 
 test("an app follows a channel granted later, stops following one whose grant ended, and keeps a changed write bit", async () => {
-  // #given the app granted #general with write
-  const app = fakeApp([{ did: APP, channels: [{ skey: "acme-general", write: true }] }]);
+  const app = fakeApp([{ did: APP, channels: [{ skey: "general", write: true }] }]);
   await app.runtime.poll();
   assert.deepEqual(app.runtime.following.sort(), [GENERAL, WORKSPACE].sort());
 
-  // #when its install grants #general read only and #secret, and the workspace space changes
-  app.state.installs = [{ did: APP, channels: [{ skey: "acme-general", write: false }, { skey: "acme-secret", write: true }] }];
+  app.state.installs = [{ did: APP, channels: [{ skey: "general", write: false }, { skey: "secret", write: true }] }];
   app.change(WORKSPACE);
   await app.runtime.poll();
-  app.post("acme-general", message(PERSON, "now read only"));
+  app.post("general", message(PERSON, "now read only"));
   app.change(GENERAL);
   await app.runtime.poll();
 
-  // #then it follows both, and #general's message is given to it as read only
   assert.deepEqual(app.runtime.following.sort(), [GENERAL, SECRET, WORKSPACE].sort());
   assert.deepEqual(app.given.map((entry) => [String(entry.message.value.text), entry.canWrite]), [["now read only", false]]);
 
-  // #and once #general's grant ends it is followed no more
-  app.state.installs = [{ did: APP, channels: [{ skey: "acme-secret", write: true }] }];
+  app.state.installs = [{ did: APP, channels: [{ skey: "secret", write: true }] }];
   app.change(WORKSPACE);
   await app.runtime.poll();
   assert.deepEqual(app.runtime.following.sort(), [SECRET, WORKSPACE].sort());
 });
 
 test("a granted channel that could not be read when it was granted holds back no other, and is followed once it can be read", async () => {
-  // #given #general and #secret granted while #secret cannot be read
   const app = fakeApp([{ did: APP, channels: [] }]);
   await app.runtime.poll();
-  app.state.installs = [{ did: APP, channels: [{ skey: "acme-general", write: true }, { skey: "acme-secret", write: true }] }];
-  app.state.failingReads.add("acme-secret");
+  app.state.installs = [{ did: APP, channels: [{ skey: "general", write: true }, { skey: "secret", write: true }] }];
+  app.state.failingReads.add("secret");
   app.change(WORKSPACE);
   await app.runtime.poll();
   await app.runtime.poll();
   assert.deepEqual(app.runtime.following.sort(), [GENERAL, WORKSPACE].sort(), "#general is followed all the same");
-  assert.match(String(app.errors.at(-1)), /acme-secret could not be read/);
+  assert.match(String(app.errors.at(-1)), /secret could not be read/);
 
-  // #when it can be read, and the retry is due
   app.state.failingReads.clear();
   await new Promise((resolve) => setTimeout(resolve, 15));
   await app.runtime.poll();
 
-  // #then it is followed, and a message there is given
   assert.equal(app.runtime.following.includes(SECRET), true);
-  app.post("acme-secret", message(PERSON, "secret"));
+  app.post("secret", message(PERSON, "secret"));
   app.change(SECRET);
   await app.runtime.poll();
   assert.deepEqual(app.texts(), ["secret"]);
 });
 
 test("an app that loses its workspace reports it, waits instead of asking the feed again at once, and follows it again when it can", async () => {
-  // #given the app following its workspace and #general
-  const app = fakeApp([{ did: APP, channels: [{ skey: "acme-general", write: true }] }]);
+  const app = fakeApp([{ did: APP, channels: [{ skey: "general", write: true }] }]);
   await app.runtime.poll();
 
-  // #when the feed denies both and the authority refuses them (an uninstall)
   app.state.denied = [WORKSPACE, GENERAL];
   app.state.lost = new Set([WORKSPACE, GENERAL]);
   await app.runtime.poll();
@@ -298,13 +279,11 @@ test("an app that loses its workspace reports it, waits instead of asking the fe
   const started = Date.now();
   await app.runtime.poll();
 
-  // #then it follows nothing, has said so, and its next round waited without asking the feed
   assert.deepEqual(app.runtime.following, []);
   assert.ok(app.errors.some((error) => error instanceof AppAccessLostError && error.space === WORKSPACE));
   assert.equal(app.state.getChanges, asked);
   assert.ok(Date.now() - started >= 15);
 
-  // #and once it may read the workspace again (installed again), it follows it and its channel
   app.state.denied = [];
   app.state.lost.clear();
   await new Promise((resolve) => setTimeout(resolve, 25));
@@ -313,7 +292,7 @@ test("an app that loses its workspace reports it, waits instead of asking the fe
 });
 
 test("a read without some writer is reported", async () => {
-  const app = fakeApp([{ did: APP, channels: [{ skey: "acme-general", write: true }] }]);
+  const app = fakeApp([{ did: APP, channels: [{ skey: "general", write: true }] }]);
   await app.runtime.poll();
   app.state.incomplete = true;
   app.change(GENERAL);
@@ -352,46 +331,40 @@ test("an app's declaration is published when it has none or it differs, keeping 
 });
 
 test("a deleted message lets no older one slide onto the page and be answered", async () => {
-  // #given a channel of five messages, followed (its newest page holds the last three)
-  const app = fakeApp([{ did: APP, channels: [{ skey: "acme-general", write: true }] }]);
+  const app = fakeApp([{ did: APP, channels: [{ skey: "general", write: true }] }]);
   const old = Array.from({ length: 5 }, (_, index) => past(PERSON, `old${index}`));
-  app.post("acme-general", ...old);
+  app.post("general", ...old);
   await app.runtime.poll();
 
-  // #when the newest is deleted and the channel changes
-  app.remove("acme-general", old[4]!.uri);
+  app.remove("general", old[4]!.uri);
   app.change(GENERAL);
   await app.runtime.poll();
 
-  // #then nothing is given: the message that slid onto the page was there before the app
   assert.deepEqual(app.texts(), []);
 });
 
 test("a burst whose newest page the app fails on is not given twice, nor anything from before it", async () => {
-  // #given the app following #general, then a burst of six whose newest three it fails on
-  const app = fakeApp([{ did: APP, channels: [{ skey: "acme-general", write: true }] }]);
-  app.post("acme-general", past(PERSON, "old-before"));
+  const app = fakeApp([{ did: APP, channels: [{ skey: "general", write: true }] }]);
+  app.post("general", past(PERSON, "old-before"));
   await app.runtime.poll();
   for (const text of ["m3", "m4", "m5"]) app.failing.add(text);
-  app.post("acme-general", ...Array.from({ length: 6 }, (_, index) => message(PERSON, `m${index}`)));
+  app.post("general", ...Array.from({ length: 6 }, (_, index) => message(PERSON, `m${index}`)));
   app.change(GENERAL);
   await app.runtime.poll();
 
-  // #when the app recovers, and the channel changes again
   app.failing.clear();
   app.change(GENERAL);
   await app.runtime.poll();
 
-  // #then each of the six was given once, and nothing older
   assert.deepEqual(app.texts().sort(), ["m0", "m1", "m2", "m3", "m4", "m5"]);
 });
 
 test("a message the app keeps failing on is given up after three attempts, and said so", async () => {
-  const app = fakeApp([{ did: APP, channels: [{ skey: "acme-general", write: true }] }]);
+  const app = fakeApp([{ did: APP, channels: [{ skey: "general", write: true }] }]);
   await app.runtime.poll();
   let attempts = 0;
   app.failing.add("poison");
-  app.post("acme-general", message(PERSON, "poison"));
+  app.post("general", message(PERSON, "poison"));
   for (let round = 0; round < 5; round += 1) {
     app.change(GENERAL);
     await app.runtime.poll();
@@ -402,11 +375,9 @@ test("a message the app keeps failing on is given up after three attempts, and s
 });
 
 test("losing the workspace takes its channels with it, and each loss is reported once", async () => {
-  // #given the app following its workspace and #general
-  const app = fakeApp([{ did: APP, channels: [{ skey: "acme-general", write: true }] }]);
+  const app = fakeApp([{ did: APP, channels: [{ skey: "general", write: true }] }]);
   await app.runtime.poll();
 
-  // #when the feed denies the workspace alone, and the authority refuses it, for several rounds
   app.state.denied = [WORKSPACE];
   app.state.lost = new Set([WORKSPACE]);
   for (let round = 0; round < 4; round += 1) {
@@ -414,7 +385,6 @@ test("losing the workspace takes its channels with it, and each loss is reported
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
 
-  // #then it follows nothing of the workspace, and said so once
   assert.deepEqual(app.runtime.following, []);
   assert.deepEqual(app.errors.filter((error) => error instanceof AppAccessLostError).map((error) => (error as AppAccessLostError).space), [WORKSPACE]);
 });
@@ -428,26 +398,24 @@ test("a refusal that is not the authority refusing a space is reported as it is,
 });
 
 test("a writer whose host may come back is reported at each read; one set aside for good is reported once", async () => {
-  const app = fakeApp([{ did: APP, channels: [{ skey: "acme-general", write: true }] }]);
+  const app = fakeApp([{ did: APP, channels: [{ skey: "general", write: true }] }]);
   await app.runtime.poll();
-  app.state.setAside = [{ did: "did:plc:down", reason: "host unreachable", permanent: false }, { did: "did:plc:gone", reason: "repo taken down", permanent: true }];
+  app.state.setAside = [{ did: "did:plc:downaaaaaaaaaaaaaaaaaaaa", reason: "host unreachable", permanent: false }, { did: "did:plc:goneaaaaaaaaaaaaaaaaaaaa", reason: "repo taken down", permanent: true }];
   for (let round = 0; round < 2; round += 1) {
     app.change(GENERAL);
     await app.runtime.poll();
   }
   assert.equal(app.errors.filter((error) => /read without 1 writer/.test(String(error))).length, 2);
-  assert.equal(app.errors.filter((error) => /did:plc:gone's messages cannot be read/.test(String(error))).length, 1);
+  assert.equal(app.errors.filter((error) => /did:plc:goneaaaaaaaaaaaaaaaaaaaa's messages cannot be read/.test(String(error))).length, 1);
 });
 
 test("an app that stays lost waits each round instead of asking again at once", async () => {
-  // #given the app's workspace and channel both denied and refused for good
-  const app = fakeApp([{ did: APP, channels: [{ skey: "acme-general", write: true }] }]);
+  const app = fakeApp([{ did: APP, channels: [{ skey: "general", write: true }] }]);
   await app.runtime.poll();
   app.state.denied = [WORKSPACE, GENERAL];
   app.state.lost = new Set([WORKSPACE, GENERAL]);
   for (let round = 0; round < 4; round += 1) await app.runtime.poll();
 
-  // #when it goes on, long past two of its re-follow delays
   const rounds: number[] = [];
   for (let round = 0; round < 3; round += 1) {
     const started = Date.now();
@@ -455,108 +423,96 @@ test("an app that stays lost waits each round instead of asking again at once", 
     rounds.push(Date.now() - started);
   }
 
-  // #then every round waited
   assert.ok(rounds.every((elapsed) => elapsed >= 90), rounds.join(", "));
 });
 
 test("a deleted message lets no older one in, however often the channel changes after", async () => {
-  // #given five messages, followed, and then the newest and a middle one deleted
-  const app = fakeApp([{ did: APP, channels: [{ skey: "acme-general", write: true }] }]);
+  const app = fakeApp([{ did: APP, channels: [{ skey: "general", write: true }] }]);
   const old = Array.from({ length: 5 }, (_, index) => past(PERSON, `old${index}`));
-  app.post("acme-general", ...old);
+  app.post("general", ...old);
   await app.runtime.poll();
-  app.remove("acme-general", old[4]!.uri);
+  app.remove("general", old[4]!.uri);
   app.change(GENERAL);
   await app.runtime.poll();
-  app.remove("acme-general", old[3]!.uri);
+  app.remove("general", old[3]!.uri);
   for (let round = 0; round < 2; round += 1) {
     app.change(GENERAL);
     await app.runtime.poll();
   }
 
-  // #then nothing old was given, and a new message still is
   assert.deepEqual(app.texts(), []);
-  app.post("acme-general", message(PERSON, "new"));
+  app.post("general", message(PERSON, "new"));
   app.change(GENERAL);
   await app.runtime.poll();
   assert.deepEqual(app.texts(), ["new"]);
 });
 
 test("a first read without a writer takes none of that writer's history for new when its host comes back", async () => {
-  // #given a writer whose older messages fall between two others on the page, and whose host is down at the app's start
-  const app = fakeApp([{ did: APP, channels: [{ skey: "acme-general", write: true }] }]);
+  const app = fakeApp([{ did: APP, channels: [{ skey: "general", write: true }] }]);
   const first = past(PERSON, "first");
-  const history = Array.from({ length: 3 }, (_, index) => past("did:plc:downwriter", `history${index}`));
+  const history = Array.from({ length: 3 }, (_, index) => past("did:plc:downwriteraaaaaaaaaaaaaa", `history${index}`));
   const second = past(PERSON, "second");
-  app.post("acme-general", first, second);
+  app.post("general", first, second);
   app.state.incomplete = true;
   await app.runtime.poll();
 
-  // #when its host comes back with that history, and a person then writes
   app.state.incomplete = false;
-  app.state.channels.set("acme-general", [first, ...history, second]);
+  app.state.channels.set("general", [first, ...history, second]);
   app.change(GENERAL);
   await app.runtime.poll();
-  app.post("acme-general", message(PERSON, "after"));
+  app.post("general", message(PERSON, "after"));
   app.change(GENERAL);
   await app.runtime.poll();
 
-  // #then only the new message is given
   assert.deepEqual(app.texts(), ["after"]);
 });
 
 test("a first read of an empty channel without a writer takes none of that writer's history for new either", async () => {
-  const app = fakeApp([{ did: APP, channels: [{ skey: "acme-general", write: true }] }]);
+  const app = fakeApp([{ did: APP, channels: [{ skey: "general", write: true }] }]);
   app.state.incomplete = true;
   await app.runtime.poll();
   app.state.incomplete = false;
-  app.post("acme-general", past("did:plc:downwriter", "history"));
+  app.post("general", past("did:plc:downwriteraaaaaaaaaaaaaa", "history"));
   app.change(GENERAL);
   await app.runtime.poll();
-  app.post("acme-general", message(PERSON, "after"));
+  app.post("general", message(PERSON, "after"));
   app.change(GENERAL);
   await app.runtime.poll();
   assert.deepEqual(app.texts(), ["after"]);
 });
 
 test("a message keyed in the future, even deleted again, does not silence the channel", async () => {
-  // #given a member who wrote messages keyed an hour ahead, seen by the app, and then deleted them
-  const app = fakeApp([{ did: APP, channels: [{ skey: "acme-general", write: true }] }]);
+  const app = fakeApp([{ did: APP, channels: [{ skey: "general", write: true }] }]);
   await app.runtime.poll();
   const ahead = Array.from({ length: 3 }, (_, index) => message(PERSON, `ahead${index}`, Date.now() + 3_600_000));
-  app.post("acme-general", ...ahead);
+  app.post("general", ...ahead);
   app.change(GENERAL);
   await app.runtime.poll();
-  for (const entry of ahead) app.remove("acme-general", entry.uri);
+  for (const entry of ahead) app.remove("general", entry.uri);
 
-  // #when people write after that
-  app.post("acme-general", message(PERSON, "later"));
+  app.post("general", message(PERSON, "later"));
   app.change(GENERAL);
   await app.runtime.poll();
 
-  // #then their messages are given all the same, and those keyed ahead only when their time comes
   assert.deepEqual(app.texts(), ["later"]);
 });
 
 test("a channel the app cannot follow is tried again less and less often", async () => {
-  // #given a granted channel that cannot be read, a retry of 10 ms that doubles, and a cap of a second
-  const app = fakeApp([{ did: APP, channels: [{ skey: "acme-general", write: true }] }], { retryDelayMs: 10, refollowDelayMs: 1_000 });
-  app.state.failingReads.add("acme-general");
+  const app = fakeApp([{ did: APP, channels: [{ skey: "general", write: true }] }], { retryDelayMs: 10, refollowDelayMs: 1_000 });
+  app.state.failingReads.add("general");
 
-  // #when the app runs for 300 ms
   const started = Date.now();
   while (Date.now() - started < 300) await app.runtime.poll();
 
-  // #then it tried at about 0, 10, 30, 70 and 150 ms, not every 10 ms
-  const tries = app.errors.filter((error) => /acme-general could not be read/.test(String(error))).length;
+  const tries = app.errors.filter((error) => /general could not be read/.test(String(error))).length;
   assert.ok(tries >= 4 && tries <= 6, `${tries} tries`);
 });
 
 test("a new message in a long channel is read from its newest page alone", async () => {
-  const app = fakeApp([{ did: APP, channels: [{ skey: "acme-general", write: true }] }]);
-  app.post("acme-general", ...Array.from({ length: 20 }, (_, index) => past(PERSON, `old${index}`)));
+  const app = fakeApp([{ did: APP, channels: [{ skey: "general", write: true }] }]);
+  app.post("general", ...Array.from({ length: 20 }, (_, index) => past(PERSON, `old${index}`)));
   await app.runtime.poll();
-  app.post("acme-general", message(PERSON, "new"));
+  app.post("general", message(PERSON, "new"));
   app.change(GENERAL);
   await app.runtime.poll();
   assert.deepEqual(app.texts(), ["new"]);
@@ -580,10 +536,10 @@ test("an app that loses its workspace, gets it back and loses it again is told b
 });
 
 test("a flood of messages keyed in the future hides no message a person writes now, and none of them is given before its time", async () => {
-  const app = fakeApp([{ did: APP, channels: [{ skey: "acme-general", write: true }] }]);
+  const app = fakeApp([{ did: APP, channels: [{ skey: "general", write: true }] }]);
   await app.runtime.poll();
-  app.post("acme-general", ...Array.from({ length: 30 }, (_, index) => message(PERSON, `ahead${index}`, Date.now() + 3_600_000)));
-  app.post("acme-general", message(PERSON, "now"));
+  app.post("general", ...Array.from({ length: 30 }, (_, index) => message(PERSON, `ahead${index}`, Date.now() + 3_600_000)));
+  app.post("general", message(PERSON, "now"));
   app.change(GENERAL);
   await app.runtime.poll();
   assert.deepEqual(app.texts(), ["now"]);
@@ -591,123 +547,109 @@ test("a flood of messages keyed in the future hides no message a person writes n
 });
 
 test("a burst written just before the app followed is not answered", async () => {
-  const app = fakeApp([{ did: APP, channels: [{ skey: "acme-general", write: true }] }]);
-  app.post("acme-general", ...Array.from({ length: 8 }, (_, index) => message(PERSON, `recent${index}`, Date.now() - 2_000)));
+  const app = fakeApp([{ did: APP, channels: [{ skey: "general", write: true }] }]);
+  app.post("general", ...Array.from({ length: 8 }, (_, index) => message(PERSON, `recent${index}`, Date.now() - 2_000)));
   await app.runtime.poll();
-  app.post("acme-general", message(PERSON, "after"));
+  app.post("general", message(PERSON, "after"));
   app.change(GENERAL);
   await app.runtime.poll();
   assert.deepEqual(app.texts(), ["after"]);
 });
 
 test("a writer whose host was down has what it wrote meanwhile given when it comes back", async () => {
-  // #given the app following #general, and then, a little later, a read without one writer
-  const app = fakeApp([{ did: APP, channels: [{ skey: "acme-general", write: true }] }]);
+  const app = fakeApp([{ did: APP, channels: [{ skey: "general", write: true }] }]);
   const followedAt = Date.now();
   await app.runtime.poll();
   await new Promise((resolve) => setTimeout(resolve, 200));
   app.state.incomplete = true;
-  app.post("acme-general", message(PERSON, "while down"));
+  app.post("general", message(PERSON, "while down"));
   app.change(GENERAL);
   await app.runtime.poll();
 
-  // #when that writer's host is back with a message it wrote while the app was following, just inside the window's edge as it
-  // stood before the read without it (a read that moved the edge on would have left it behind)
-  const meanwhile = message("did:plc:downwriter", "written while its host was down", followedAt - 5_000 + 100);
+  const meanwhile = message("did:plc:downwriteraaaaaaaaaaaaaa", "written while its host was down", followedAt - 5_000 + 100);
   app.state.incomplete = false;
-  app.post("acme-general", meanwhile);
+  app.post("general", meanwhile);
   app.change(GENERAL);
   await app.runtime.poll();
 
-  // #then it is given, after the message the app was given on the incomplete read
   assert.deepEqual(app.texts(), ["while down", "written while its host was down"]);
 });
 
-/** A clock a test moves: the wall clock (which can jump) and the time that really passed. */
 function testClock() {
   const clock = { wall: Date.now(), passed: 0, now: () => clock.wall, elapsed: () => clock.passed };
   return { clock, advance: (ms: number) => { clock.wall += ms; clock.passed += ms; } };
 }
 
 test("a message the app failed on and that is then deleted holds the window for ten minutes at most", async () => {
-  // #given the app failing once on a message that is then deleted
   const { clock, advance } = testClock();
-  const app = fakeApp([{ did: APP, channels: [{ skey: "acme-general", write: true }] }], { clock });
+  const app = fakeApp([{ did: APP, channels: [{ skey: "general", write: true }] }], { clock });
   await app.runtime.poll();
   app.failing.add("poison");
   const poison = message(PERSON, "poison", clock.wall);
-  app.post("acme-general", poison);
+  app.post("general", poison);
   app.change(GENERAL);
   await app.runtime.poll();
-  app.remove("acme-general", poison.uri);
+  app.remove("general", poison.uri);
 
-  // #when people write once a minute for an hour
   for (let minute = 1; minute <= 60; minute += 1) {
     advance(60_000);
-    app.post("acme-general", message(PERSON, `m${minute}`, clock.wall));
+    app.post("general", message(PERSON, `m${minute}`, clock.wall));
     app.change(GENERAL);
     await app.runtime.poll();
   }
 
-  // #then every message was given, the failed one was given up and said so, and no read went past its pages
   assert.equal(app.texts().length, 60);
   assert.ok(app.errors.some((error) => /has not been read again for 10 minutes/.test(String(error))));
   assert.equal(app.errors.filter((error) => /More than 5 pages/.test(String(error))).length, 0);
 });
 
 test("a jump of the app's clock carries the window no further than the time that passed", async () => {
-  // #given the app following #general
   const { clock, advance } = testClock();
-  const app = fakeApp([{ did: APP, channels: [{ skey: "acme-general", write: true }] }], { clock });
+  const app = fakeApp([{ did: APP, channels: [{ skey: "general", write: true }] }], { clock });
   await app.runtime.poll();
 
-  // #when its wall clock jumps an hour ahead for one read, and is then set right
   advance(1_000);
   clock.wall += 3_600_000;
   app.change(GENERAL);
   await app.runtime.poll();
   clock.wall -= 3_600_000;
   advance(60_000);
-  app.post("acme-general", message(PERSON, "a minute later", clock.wall));
+  app.post("general", message(PERSON, "a minute later", clock.wall));
   app.change(GENERAL);
   await app.runtime.poll();
 
-  // #then the message written after the clock was set right is given
   assert.deepEqual(app.texts(), ["a minute later"]);
 });
 
 test("a read without some writer is reported once, however many pages it reads", async () => {
   const { clock } = testClock();
-  const app = fakeApp([{ did: APP, channels: [{ skey: "acme-general", write: true }] }], { clock });
+  const app = fakeApp([{ did: APP, channels: [{ skey: "general", write: true }] }], { clock });
   await app.runtime.poll();
-  app.post("acme-general", ...Array.from({ length: 10 }, (_, index) => message(PERSON, `burst${index}`, clock.wall)));
-  app.state.setAside = [{ did: "did:plc:down", reason: "host unreachable", permanent: false }];
+  app.post("general", ...Array.from({ length: 10 }, (_, index) => message(PERSON, `burst${index}`, clock.wall)));
+  app.state.setAside = [{ did: "did:plc:downaaaaaaaaaaaaaaaaaaaa", reason: "host unreachable", permanent: false }];
   app.change(GENERAL);
   await app.runtime.poll();
   assert.equal(app.errors.filter((error) => /read without 1 writer/.test(String(error))).length, 1);
 });
 
 test("a writer set aside for good does not hold the window", async () => {
-  // #given a writer set aside for good, and a message from a person kept off the page until well after it was written
   const { clock, advance } = testClock();
-  const app = fakeApp([{ did: APP, channels: [{ skey: "acme-general", write: true }] }], { clock });
-  app.state.setAside = [{ did: "did:plc:gone", reason: "repo taken down", permanent: true }];
+  const app = fakeApp([{ did: APP, channels: [{ skey: "general", write: true }] }], { clock });
+  app.state.setAside = [{ did: "did:plc:goneaaaaaaaaaaaaaaaaaaaa", reason: "repo taken down", permanent: true }];
   await app.runtime.poll();
   advance(60_000);
   app.change(GENERAL);
   await app.runtime.poll();
   const late = message(PERSON, "late", clock.wall - 30_000);
 
-  // #when it appears
-  app.post("acme-general", late);
+  app.post("general", late);
   app.change(GENERAL);
   await app.runtime.poll();
 
-  // #then it is old, as the window moved on: the writer set aside for good held nothing back
   assert.deepEqual(app.texts(), []);
 });
 
-// --- R10b: App inbox following, optional handlers, command/action checks, and per-author throttle ----------------
+// --- R10b + R13: App inbox following, OpenSocial RBAC, moderation label filtering, and per-author throttle ----------
 
 async function inboxFixture(options: {
   onMessage?: boolean;
@@ -722,22 +664,24 @@ async function inboxFixture(options: {
     network.advanceClock(ms);
     passed += ms;
   };
-  const alice = "did:plc:alice";
-  const bob = "did:plc:bob2";
-  const appDid = "did:plc:app2";
-  const otherAppDid = "did:plc:otherapp";
+  const founder = "did:plc:founderaaaaaaaaaaaaaaaaa";
+  const alice = "did:plc:aliceaaaaaaaaaaaaaaaaaaa";
+  const bob = "did:plc:bob2aaaaaaaaaaaaaaaaaaaa";
+  const appDid = "did:plc:app2aaaaaaaaaaaaaaaaaaaa";
+  const otherAppDid = "did:plc:otherappaaaaaaaaaaaaaaaa";
   const fixture = await createWorkspace(network, {
     authority: AUTHORITY,
-    members: [alice, bob],
+    admins: [founder],
+    members: [founder, alice, bob],
     channels: [
       { skey: "general", visibility: "public" },
-      { skey: "secret", visibility: "private", members: [alice] },
+      { skey: "secret", visibility: "private", members: [founder, alice] },
       { skey: "moving", visibility: "transitioning" },
     ],
   });
   const otherWorkspace = await createWorkspace(network, {
-    authority: AUTHORITY,
     skey: "beta",
+    admins: [alice],
     members: [alice],
     channels: [{ skey: "general", visibility: "public" }],
   });
@@ -745,41 +689,146 @@ async function inboxFixture(options: {
   network.createAccount(appDid, "pds2");
   network.createAccount(otherAppDid, "pds1");
   const owner = network.clientFor(AUTHORITY);
-  const inbox = appInboxUri(AUTHORITY, "acme", appDid);
-  await owner.procedure("com.atproto.space.createSpace", { spaceType: SPACE_TYPE.appInbox, skey: appInboxSkey("acme", appDid), policy: memberspacePolicy() });
-  for (const space of [fixture.workspace, fixture.channels.general!, fixture.channels.secret!, otherWorkspace.workspace, otherWorkspace.channels.general!]) {
-    await owner.procedure("com.atproto.memberspace.putMembers", {
-      space,
-      members: [
-        { did: appDid, read: true, write: true },
-        { did: otherAppDid, read: true, write: true },
-      ],
+  const appRole = appRoleKey(appDid);
+  const otherAppRole = appRoleKey(otherAppDid);
+  const secretRole = channelRoleKey("secret");
+
+  for (const [did, role] of [[appDid, appRole], [otherAppDid, otherAppRole]] as const) {
+    await owner.procedure("com.atproto.space.putRecord", {
+      space: fixture.members,
+      repo: AUTHORITY,
+      collection: OPENSOCIAL_COLLECTION.role,
+      rkey: role,
+      record: {
+        $type: OPENSOCIAL_COLLECTION.role,
+        displayName: `Bot ${did}`,
+        scopes: [
+          "space:group.opensocial.meta?authority=self&skey=self&action=read",
+          "space:group.opensocial.members?authority=self&skey=self&action=read",
+          "space:new.flock.workspace?authority=self&skey=self&action=read",
+        ],
+      },
     });
   }
-  await owner.procedure("com.atproto.memberspace.putMembers", {
-    space: inbox,
-    members: [
-      { did: appDid, read: true, write: false },
-      { did: alice, read: false, write: true },
-      { did: bob, read: false, write: true },
-    ],
-  });
-  const { subjectKey } = await import("@flock/protocol/keys");
+
   const writeInstall = (did: string, active: boolean, channels: Array<{ skey: string; write: boolean }>) =>
     network.writeAs(AUTHORITY, fixture.workspace, COLLECTION.appInstall, subjectKey(did), {
       subject: did,
       active,
       channels,
-      installedBy: AUTHORITY,
+      installedBy: founder,
       installedAt: "2026-11-10T12:00:00.000Z",
       updatedAt: "2026-11-10T12:00:00.000Z",
     });
   await writeInstall(appDid, true, [
-    { skey: "acme-general", write: true },
-    { skey: "acme-secret", write: true },
-    { skey: "acme-moving", write: true },
+    { skey: "general", write: true },
+    { skey: "secret", write: true },
+    { skey: "moving", write: true },
   ]);
-  await writeInstall(otherAppDid, true, [{ skey: "acme-general", write: true }]);
+  await writeInstall(otherAppDid, true, [{ skey: "general", write: true }]);
+
+  for (const [did, role] of [[appDid, appRole], [otherAppDid, otherAppRole]] as const) {
+    await owner.procedure("com.atproto.space.putRecord", {
+      space: fixture.members,
+      repo: AUTHORITY,
+      collection: OPENSOCIAL_COLLECTION.membership,
+      rkey: did,
+      record: { $type: OPENSOCIAL_COLLECTION.membership, roles: [role], createdAt: "2026-11-10T12:00:00.000Z" },
+    });
+  }
+
+  // Grant app roles read access on meta/self, members/self, and workspace/self (matching Operator installApp)
+  await owner.procedure("com.atproto.space.updateSpace", {
+    space: fixture.meta,
+    policy: {
+      $type: OPENSOCIAL_POLICY,
+      publicRead: true,
+      unlisted: false,
+      grants: [
+        { role: "admin", read: true, write: true },
+        { role: "moderator", read: true, write: true },
+        { role: "member", read: true },
+        { role: appRole, read: true },
+        { role: otherAppRole, read: true },
+      ],
+    },
+  });
+  await owner.procedure("com.atproto.space.updateSpace", {
+    space: fixture.members,
+    policy: {
+      $type: OPENSOCIAL_POLICY,
+      publicRead: false,
+      unlisted: false,
+      grants: [
+        { role: "admin", read: true, write: true },
+        { role: "moderator", read: true, write: true },
+        { role: "member", read: true, write: true },
+        { role: appRole, read: true },
+        { role: otherAppRole, read: true },
+      ],
+    },
+  });
+  await owner.procedure("com.atproto.space.updateSpace", {
+    space: fixture.workspace,
+    policy: {
+      $type: OPENSOCIAL_POLICY,
+      publicRead: false,
+      unlisted: false,
+      grants: [
+        { role: "admin", read: true, write: true },
+        { role: "moderator", read: true, write: true },
+        { role: "member", read: true },
+        { role: appRole, read: true },
+        { role: otherAppRole, read: true },
+      ],
+    },
+  });
+
+  // Grant app roles on #general and #secret policies via updateSpace
+  await owner.procedure("com.atproto.space.updateSpace", {
+    space: fixture.channels.general!,
+    policy: {
+      $type: OPENSOCIAL_POLICY,
+      publicRead: false,
+      unlisted: false,
+      grants: [
+        { role: "admin", read: true, write: true },
+        { role: "moderator", read: true, write: true },
+        { role: "member", read: true, write: true },
+        { role: appRole, read: true, write: true },
+        { role: otherAppRole, read: true, write: true },
+      ],
+    },
+  });
+  await owner.procedure("com.atproto.space.updateSpace", {
+    space: fixture.channels.secret!,
+    policy: {
+      $type: OPENSOCIAL_POLICY,
+      publicRead: false,
+      unlisted: true,
+      grants: [
+        { role: secretRole, read: true, write: true },
+        { role: appRole, read: true, write: true },
+      ],
+    },
+  });
+
+  const inbox = appInboxUri(AUTHORITY, SELF_SKEY, appDid);
+  await owner.procedure("com.atproto.space.createSpace", {
+    spaceType: SPACE_TYPE.appInbox,
+    skey: appInboxSkey(SELF_SKEY, appDid),
+    policy: {
+      $type: OPENSOCIAL_POLICY,
+      publicRead: false,
+      unlisted: true,
+      grants: [
+        { role: appRole, read: true },
+        { role: "admin", write: true },
+        { role: "moderator", write: true },
+        { role: "member", write: true },
+      ],
+    },
+  });
 
   const answers: string[][] = [];
   const commands: AppCommand[] = [];
@@ -815,6 +864,7 @@ async function inboxFixture(options: {
     network,
     clock,
     advance,
+    founder,
     alice,
     bob,
     appDid,
@@ -843,32 +893,37 @@ test("optional handlers decide what is followed: no inbox without command/action
   await withoutMessage.runtime.poll();
   assert.deepEqual(withoutMessage.runtime.following.sort(), [withoutMessage.fixture.workspace, withoutMessage.inbox].sort(), "no channels followed without onMessage");
 
-  // App's own writes are kept out of its local store automatically by AppRuntime.
   await withoutMessage.appEngine.channels.send(
-    { workspace: withoutMessage.fixture.workspace, skey: "acme-general" },
+    { workspace: withoutMessage.fixture.workspace, skey: "general" },
     "posted only",
   );
   assert.deepEqual(await withoutMessage.appEngine.sync.store.records(withoutMessage.fixture.channels.general!, COLLECTION.message), []);
 
-  // When uninstalled, the inbox is unfollowed immediately on the workspace poll.
+  // Full OpenSocial uninstall: remove role grants, delete membership/<appDid>, set app.install active: false -> unfollows inbox & workspace.
+  const owner = withoutMessage.network.clientFor(AUTHORITY);
+  await owner.procedure("com.atproto.space.deleteRecord", {
+    space: withoutMessage.fixture.members,
+    repo: AUTHORITY,
+    collection: OPENSOCIAL_COLLECTION.membership,
+    rkey: withoutMessage.appDid,
+  });
   await withoutMessage.writeInstall(withoutMessage.appDid, false, []);
   withoutMessage.change(withoutMessage.fixture.workspace);
   await withoutMessage.runtime.poll();
-  assert.deepEqual(withoutMessage.runtime.following, [withoutMessage.fixture.workspace]);
+  assert.deepEqual(withoutMessage.runtime.following, []);
 });
 
-test("onCommand checks declared name, fresh roster, same-workspace channel, visibility, private roster (admitting the authority), and top-level parent", async () => {
+test("onCommand checks declared name, fresh roster, same-workspace channel, visibility, private roster, top-level parent, and !takedown withholding", async () => {
   const env = await inboxFixture({ onMessage: false });
   await env.runtime.poll();
 
   const aliceEngine = createEngine(transportFor(env.network, env.alice));
   const bobEngine = createEngine(transportFor(env.network, env.bob));
-  const authorityEngine = createEngine(transportFor(env.network, AUTHORITY));
-  const generalRef = { workspace: env.fixture.workspace, skey: "acme-general" };
-  const secretRef = { workspace: env.fixture.workspace, skey: "acme-secret" };
-  const movingRef = { workspace: env.fixture.workspace, skey: "acme-moving" };
+  const founderEngine = createEngine(transportFor(env.network, env.founder));
+  const generalRef = { workspace: env.fixture.workspace, skey: "general" };
+  const secretRef = { workspace: env.fixture.workspace, skey: "secret" };
+  const movingRef = { workspace: env.fixture.workspace, skey: "moving" };
 
-  // Create a top-level message and a reply in #general for parent checks.
   const topMsg = await aliceEngine.channels.send(generalRef, "top");
   env.advance(5);
   const replyMsg = await aliceEngine.channels.send(generalRef, "reply", topMsg.uri);
@@ -881,12 +936,12 @@ test("onCommand checks declared name, fresh roster, same-workspace channel, visi
   env.advance(5);
   await bobEngine.appInboxes.sendCommand(secretRef, env.appDid, "echo", "sneak");
 
-  // 3. Channel of another workspace of the same authority -> dropped.
+  // 3. Channel of another workspace -> dropped.
   env.advance(5);
   await env.network.writeAs(env.alice, env.inbox, COLLECTION.appCommand, tidNow(env.clock.now()), {
     command: "echo",
     text: "cross-workspace",
-    channel: channelUri(AUTHORITY, "beta-general"),
+    channel: channelUri(env.otherWorkspace.groupDid, "general"),
     createdAt: new Date(env.clock.now()).toISOString(),
   });
 
@@ -900,13 +955,24 @@ test("onCommand checks declared name, fresh roster, same-workspace channel, visi
   env.advance(5);
   await aliceEngine.appInboxes.sendCommand(generalRef, env.appDid, "echo", "nested-parent", replyMsg.uri);
 
-  // 6. Valid command in #general on a top-level parent -> delivered!
+  // 6. `!takedown`-labeled command in inbox -> dropped!
+  env.advance(5);
+  const takedownCmd = await aliceEngine.appInboxes.sendCommand(generalRef, env.appDid, "echo", "takendown-cmd");
+  await env.network.clientFor(AUTHORITY).procedure("com.atproto.space.putRecord", {
+    space: env.inbox,
+    repo: AUTHORITY,
+    collection: ATPROTO_SPACE_COLLECTION.label,
+    rkey: key(77),
+    record: { $type: ATPROTO_SPACE_COLLECTION.label, src: AUTHORITY, uri: takedownCmd.uri, val: "!takedown", cts: "2026-11-10T12:01:00.000Z" },
+  });
+
+  // 7. Valid command in #general on a top-level parent -> delivered!
   env.advance(5);
   await aliceEngine.appInboxes.sendCommand(generalRef, env.appDid, "echo", "in-thread", topMsg.uri);
 
-  // 7. Workspace authority in a private channel it owns (never written to channelRoster) -> admitted!
+  // 8. Admitted private-channel admin (founder) in #secret -> delivered!
   env.advance(5);
-  await authorityEngine.appInboxes.sendCommand(secretRef, env.appDid, "echo", "from-authority");
+  await founderEngine.appInboxes.sendCommand(secretRef, env.appDid, "echo", "from-founder");
 
   env.change(env.inbox);
   await env.runtime.poll();
@@ -914,26 +980,25 @@ test("onCommand checks declared name, fresh roster, same-workspace channel, visi
   assert.deepEqual(
     env.commands.map((entry) => ({ repo: entry.repo, skey: entry.channel.skey, text: entry.text, parent: entry.parent, canWrite: entry.canWrite })),
     [
-      { repo: env.alice, skey: "acme-general", text: "in-thread", parent: topMsg.uri, canWrite: true },
-      { repo: AUTHORITY, skey: "acme-secret", text: "from-authority", parent: undefined, canWrite: true },
+      { repo: env.alice, skey: "general", text: "in-thread", parent: topMsg.uri, canWrite: true },
+      { repo: env.founder, skey: "secret", text: "from-founder", parent: undefined, canWrite: true },
     ],
     `errors: ${env.errors.map(String).join(" || ")}`,
   );
-  assert.equal(env.errors.length, 6, `all six invalid commands were dropped and reported: ${env.errors.map(String).join(" | ")}`);
+  assert.equal(env.errors.length, 7, `all seven invalid/takendown commands were dropped and reported: ${env.errors.map(String).join(" | ")}`);
 
-  // 8. A removed author still in the runtime's earlier cached summary is caught by the fresh summary read!
+  // 9. A removed author still in the runtime's earlier cached summary is caught by the fresh summary read!
   env.advance(10);
   await bobEngine.appInboxes.sendCommand(generalRef, env.appDid, "echo", "after-removal");
-  await env.network.writeAs(AUTHORITY, env.fixture.workspace, COLLECTION.workspaceRoster, env.subjectKey(env.bob), {
-    subject: env.bob,
-    active: false,
-    updatedAt: "2026-11-10T12:02:00.000Z",
+  await env.network.clientFor(AUTHORITY).procedure("com.atproto.space.deleteRecord", {
+    space: env.fixture.members,
+    repo: AUTHORITY,
+    collection: OPENSOCIAL_COLLECTION.membership,
+    rkey: env.bob,
   });
-  // Only the inbox changes in this poll (workspace has not been re-read by readGrants yet).
   env.change(env.inbox);
   await env.runtime.poll();
   assert.equal(env.commands.length, 2, "removed member's command was dropped via fresh workspace summary");
-  assert.match(String(env.errors.at(-1)), /not on .* active roster/);
 });
 
 test("onAction checks message authorship, fresh grant, private roster, old messages beyond any page, button presence, and ignores forged action values", async () => {
@@ -942,12 +1007,11 @@ test("onAction checks message authorship, fresh grant, private roster, old messa
 
   const aliceEngine = createEngine(transportFor(env.network, env.alice));
   const bobEngine = createEngine(transportFor(env.network, env.bob));
-  const authorityEngine = createEngine(transportFor(env.network, AUTHORITY));
+  const founderEngine = createEngine(transportFor(env.network, env.founder));
   const generalSpace = env.fixture.channels.general!;
-  const generalRef = { workspace: env.fixture.workspace, skey: "acme-general" };
-  const secretRef = { workspace: env.fixture.workspace, skey: "acme-secret" };
+  const generalRef = { workspace: env.fixture.workspace, skey: "general" };
+  const secretRef = { workspace: env.fixture.workspace, skey: "secret" };
 
-  // Write an old app message with a button, then 120 newer messages so it is older than any 100-message page.
   const ancientAppRkey = key(1);
   const ancientAppUri = spaceRecordUri(generalSpace, env.appDid, COLLECTION.message, ancientAppRkey);
   await env.network.writeAs(env.appDid, generalSpace, COLLECTION.message, ancientAppRkey, {
@@ -957,7 +1021,6 @@ test("onAction checks message authorship, fresh grant, private roster, old messa
   });
   for (let index = 2; index <= 122; index += 1) await writeMessage(env.network, env.alice, generalSpace, index);
 
-  // Also write an app message in #secret, and a person's message + another app's message with buttons.
   const secretAppMsg = await env.appEngine.channels.send(
     secretRef,
     "secret card",
@@ -978,7 +1041,6 @@ test("onAction checks message authorship, fresh grant, private roster, old messa
     undefined,
     [actionsBlock([button({ actionId: "once", label: "Once", value: "1" })])],
   );
-  // Edit editableAppMsg to clear its blocks before the click is processed.
   await env.appEngine.channels.edit(generalRef, editableAppMsg.uri, "done", null);
 
   // 1. Click on someone else's message -> dropped.
@@ -1003,9 +1065,9 @@ test("onAction checks message authorship, fresh grant, private roster, old messa
     createdAt: new Date(env.clock.now()).toISOString(),
   });
 
-  // 5. Workspace authority clicking a button in private channel #secret -> admitted!
+  // 5. Admitted private-channel member clicking a button in #secret -> admitted!
   env.advance(5);
-  await authorityEngine.appInboxes.sendAction(secretRef, env.appDid, secretAppMsg.uri, "confirm");
+  await founderEngine.appInboxes.sendAction(secretRef, env.appDid, secretAppMsg.uri, "confirm");
 
   env.change(env.inbox);
   await env.runtime.poll();
@@ -1014,17 +1076,17 @@ test("onAction checks message authorship, fresh grant, private roster, old messa
     env.actions.map((entry) => ({ repo: entry.repo, message: entry.message.uri, actionId: entry.actionId, value: entry.value, canWrite: entry.canWrite })),
     [
       { repo: env.alice, message: ancientAppUri, actionId: "again", value: "trusted-button-value", canWrite: true },
-      { repo: AUTHORITY, message: secretAppMsg.uri, actionId: "confirm", value: "secret-ok", canWrite: true },
+      { repo: env.founder, message: secretAppMsg.uri, actionId: "confirm", value: "secret-ok", canWrite: true },
     ],
   );
   assert.equal(env.errors.length, 3, `three invalid actions dropped: ${env.errors.map(String).join(" | ")}`);
 
   // 6. Grant changed to read-only -> canWrite is false; grant removed -> dropped even though app still holds a cached credential!
-  await env.writeInstall(env.appDid, true, [{ skey: "acme-general", write: false }]);
+  await env.writeInstall(env.appDid, true, [{ skey: "general", write: false }]);
   env.advance(5);
   await aliceEngine.appInboxes.sendAction(generalRef, env.appDid, ancientAppUri, "again");
   env.advance(5);
-  await authorityEngine.appInboxes.sendAction(secretRef, env.appDid, secretAppMsg.uri, "confirm");
+  await founderEngine.appInboxes.sendAction(secretRef, env.appDid, secretAppMsg.uri, "confirm");
   env.change(env.inbox);
   await env.runtime.poll();
 
@@ -1039,9 +1101,8 @@ test("per-author inbox throttle caps each author per minute, reports excess once
 
   const aliceEngine = createEngine(transportFor(env.network, env.alice));
   const bobEngine = createEngine(transportFor(env.network, env.bob));
-  const generalRef = { workspace: env.fixture.workspace, skey: "acme-general" };
+  const generalRef = { workspace: env.fixture.workspace, skey: "general" };
 
-  // Alice writes 5 commands in one minute; Bob writes 1.
   for (let index = 0; index < 5; index += 1) {
     env.advance(10);
     await aliceEngine.appInboxes.sendCommand(generalRef, env.appDid, "echo", `a${index}`);
@@ -1056,7 +1117,6 @@ test("per-author inbox throttle caps each author per minute, reports excess once
   const throttleErrors = env.errors.filter((error) => /exceeded 3 inbox records per minute/.test(String(error)));
   assert.equal(throttleErrors.length, 1, "excess records reported once per minute per author");
 
-  // After a minute passes, Alice's budget resets and a Dropped record is NOT re-delivered.
   env.advance(60_000);
   await aliceEngine.appInboxes.sendCommand(generalRef, env.appDid, "echo", "after-minute");
   env.change(env.inbox);
@@ -1064,19 +1124,18 @@ test("per-author inbox throttle caps each author per minute, reports excess once
   assert.deepEqual(env.commands.map((entry) => entry.text), ["a0", "a1", "a2", "b0", "after-minute"]);
 });
 
-test("AppRuntime with followRepoOps delivers same-rev applyWrites in host order, handles oplog reset without redelivery, and retries without duplicating", async () => {
+test("AppRuntime with followRepoOps delivers same-rev applyWrites in host order, withholds !takedown messages, handles oplog reset without redelivery, and retries without duplicating", async () => {
   const resets: Array<{ space: string; repo: string }> = [];
   const env = await inboxFixture({ onMessage: true, onCommand: false, onAction: false });
   const channel = env.fixture.channels.general!;
-  // Baseline existing message before polling so it is never delivered as new.
   await writeMessage(env.network, env.alice, channel, 1, "before-follow");
   await env.runtime.poll();
   assert.equal(env.messages.length, 0);
 
-  // Single applyWrites commit writes reverse-TID keys ("zzz" then "aaa"): AppRuntime delivers in host (rev, idx) order!
+  // Note valid TID rkeys (`234567abcdefghij` leading char, `[2-7a-z]{13}`):
   await env.network.applyWritesAs(env.alice, channel, [
-    { action: "create", collection: COLLECTION.message, rkey: "zzzzzzzzzzzzz", value: { text: "host-first", createdAt: "2026-11-10T12:00:00.000Z" } },
-    { action: "create", collection: COLLECTION.message, rkey: "aaaaaaaaaaaaa", value: { text: "host-second", createdAt: "2026-11-10T12:00:00.000Z" } },
+    { action: "create", collection: COLLECTION.message, rkey: "jzzzzzzzzzzzz", value: { text: "host-first", createdAt: "2026-11-10T12:00:00.000Z" } },
+    { action: "create", collection: COLLECTION.message, rkey: "2aaaaaaaaaaaa", value: { text: "host-second", createdAt: "2026-11-10T12:00:00.000Z" } },
   ]);
   env.change(channel);
   await env.runtime.poll();
@@ -1085,6 +1144,21 @@ test("AppRuntime with followRepoOps delivers same-rev applyWrites in host order,
     ["host-first", "host-second"],
     "AppRuntime delivers same-rev applyWrites in PDS host order",
   );
+
+  // Moderation `!takedown` label on a new channel message withholds it from AppRuntime delivery!
+  const takedownMsgRkey = key(97);
+  const takedownMsgUri = spaceRecordUri(channel, env.alice, COLLECTION.message, takedownMsgRkey);
+  await writeMessage(env.network, env.alice, channel, 97, "takendown-msg");
+  await env.network.clientFor(AUTHORITY).procedure("com.atproto.space.putRecord", {
+    space: channel,
+    repo: AUTHORITY,
+    collection: ATPROTO_SPACE_COLLECTION.label,
+    rkey: key(96),
+    record: { $type: ATPROTO_SPACE_COLLECTION.label, src: AUTHORITY, uri: takedownMsgUri, val: "!takedown", cts: "2026-11-10T12:01:00.000Z" },
+  });
+  env.change(channel);
+  await env.runtime.poll();
+  assert.equal(env.messages.some((m) => m.message.value.text === "takendown-msg"), false, "!takedown message withheld from bot");
 
   // Pruned oplog hole: write msg A (unsynced), prune oplog so msg A's op disappears, write msg B -> AppRuntime detects reset without delivering A/B or historical records!
   await writeMessage(env.network, env.alice, channel, 98, "lost-during-prune");
@@ -1095,7 +1169,6 @@ test("AppRuntime with followRepoOps delivers same-rev applyWrites in host order,
   assert.equal(env.messages.length, 2, "no duplicate deliveries or pre-reset historical replay");
   assert.equal(env.errors.some((error) => /Repo oplog reset/.test(String(error))), true, "reset diagnostic emitted via onError");
 
-  // New write after reset is delivered cleanly, and handler failure retries without duplicating sibling messages!
   let failMessage = true;
   const deliveredRetry: string[] = [];
   const retryRuntime = new AppRuntime({
@@ -1135,34 +1208,29 @@ test("AppRuntime with followRepoOps delivers same-rev applyWrites in host order,
   await retryRuntime.poll();
   assert.deepEqual(deliveredRetry, ["m2", "m1"], "m1 retried on next poll without duplicating m2");
 
-  // Verify onReset callback works independently on reset:
   env.network.clearRecordsAs(env.bob, channel);
   await retryRuntime.poll();
   assert.deepEqual(resets, [{ space: channel, repo: env.bob }]);
 });
 
-test("AppRuntime with followRepoOps isolates failed initial writers, preserves floor on hold expiry, and prevents post-baseline genesis replay (Codex R2-#4/#5 + Carbon R2-H2)", async () => {
-  // 1. Alice baselines + Bob fails permanently (RepoDeactivated) -> Carol joins on deliver:true and her first command executes immediately without hammering Bob.
+test("AppRuntime with followRepoOps isolates failed initial writers, admits pendingMembers without acceptance/self, preserves floor on hold expiry, and prevents post-baseline genesis replay", async () => {
+  // 1. Alice baselines + Bob fails permanently (RepoDeactivated) -> Carol joins via membership/<carol> (even before writing acceptance/self!) and her first command executes immediately without hammering Bob.
   {
     const env = await inboxFixture({ onMessage: false, onCommand: true, onAction: false });
-    const generalRef = { workspace: env.fixture.workspace, skey: "acme-general" };
-    const aliceEngine = createEngine(transportFor(env.network, env.alice));
-    const { subjectKey } = await import("@flock/protocol/keys");
+    const generalRef = { workspace: env.fixture.workspace, skey: "general" };
 
     env.network.setAccountState(env.bob, "deactivated");
     await env.runtime.poll();
     assert.equal(env.commands.length, 0);
 
-    const carol = "did:plc:carol";
+    const carol = "did:plc:carolaaaaaaaaaaaaaaaaaaa";
     env.network.createAccount(carol, "pds2");
-    await env.network.writeAs(AUTHORITY, env.fixture.workspace, COLLECTION.workspaceRoster, subjectKey(carol), {
-      subject: carol,
-      active: true,
-      updatedAt: "2026-11-10T12:00:00.000Z",
-    });
-    await env.network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.putMembers", {
-      space: env.inbox,
-      members: [{ did: carol, read: false, write: true }],
+    await env.network.clientFor(AUTHORITY).procedure("com.atproto.space.putRecord", {
+      space: env.fixture.members,
+      repo: AUTHORITY,
+      collection: OPENSOCIAL_COLLECTION.membership,
+      rkey: carol,
+      record: { $type: OPENSOCIAL_COLLECTION.membership, roles: ["member"], createdAt: "2026-11-10T12:00:00.000Z" },
     });
     const carolEngine = createEngine(transportFor(env.network, carol));
     await carolEngine.appInboxes.sendCommand(generalRef, env.appDid, "echo", "carol-immediate-cmd");
@@ -1184,21 +1252,19 @@ test("AppRuntime with followRepoOps isolates failed initial writers, preserves f
     }
     assert.deepEqual(env.commands.map((c) => c.text), ["carol-immediate-cmd"]);
     assert.equal(bobInboxCalls, 0, "unrelated deliver:true tick must not hammer deactivated writer");
-    void aliceEngine;
   }
 
   // 2. Hold expiry at minute 11.1 records floor so recovery at minute 12 drops minute-1 command and delivers minute-11.5 command,
   //    and post-baseline RepoTakendown at minute 1 -> restored at minute 21 never replays genesis oplog or minute-1 commands.
   {
     const env = await inboxFixture({ onMessage: false, onCommand: true, onAction: false });
-    const generalRef = { workspace: env.fixture.workspace, skey: "acme-general" };
+    const generalRef = { workspace: env.fixture.workspace, skey: "general" };
     const aliceEngine = createEngine(transportFor(env.network, env.alice));
     const bobEngine = createEngine(transportFor(env.network, env.bob));
 
     await env.runtime.poll();
     assert.equal(env.commands.length, 0);
 
-    // Minute 1: Alice fails 503 with cmd-m1; Bob enters RepoTakendown with bob-cmd-m1.
     env.advance(60_000);
     await aliceEngine.appInboxes.sendCommand(generalRef, env.appDid, "echo", "alice-cmd-m1");
     await bobEngine.appInboxes.sendCommand(generalRef, env.appDid, "echo", "bob-suspended-m1");
@@ -1208,24 +1274,20 @@ test("AppRuntime with followRepoOps isolates failed initial writers, preserves f
     await env.runtime.poll();
     assert.equal(env.commands.length, 0);
 
-    // Minute 11.1: Alice's 10m hold expires while still down.
     env.advance(10 * 60_000 + 6_000);
     env.change(env.inbox);
     await env.runtime.poll();
     assert.equal(env.commands.length, 0);
 
-    // Minute 11.5: Alice writes post-expiry command.
     env.advance(24_000);
     await aliceEngine.appInboxes.sendCommand(generalRef, env.appDid, "echo", "alice-cmd-m11-5");
 
-    // Minute 12: Alice recovers -> delivers alice-cmd-m11-5, drops alice-cmd-m1.
     env.advance(30_000);
     env.network.setHostReachable(env.alice, true);
     env.change(env.inbox);
     await env.runtime.poll();
     assert.deepEqual(env.commands.map((c) => c.text), ["alice-cmd-m11-5"]);
 
-    // Minute 21: Bob is unsuspended -> must NOT replay genesis oplog or deliver bob-suspended-m1.
     env.advance(9 * 60_000 + 60 * 60_000);
     let genesisOps = false;
     env.network.beforeListRepoOps = ({ since }) => {
@@ -1237,4 +1299,71 @@ test("AppRuntime with followRepoOps isolates failed initial writers, preserves f
     assert.equal(genesisOps, false, "must not replay genesis oplog on post-baseline permanent recovery");
     assert.deepEqual(env.commands.map((c) => c.text), ["alice-cmd-m11-5"]);
   }
+});
+
+test("AppRuntime syncs account-level !takedown and !hide labels from members/self and never fires bot handlers for !takedown-labeled authors", async () => {
+  const env = await inboxFixture({ onMessage: true, onCommand: true, onAction: true });
+  const general = env.fixture.channels.general!;
+  const generalRef = { workspace: env.fixture.workspace, skey: "general" };
+  const owner = env.network.clientFor(AUTHORITY);
+  const aliceEngine = createEngine(transportFor(env.network, env.alice));
+  const bobEngine = createEngine(transportFor(env.network, env.bob));
+  const appEngine = createEngine(transportFor(env.network, env.appDid), { applyOwnWrites: false });
+
+  const botMsg = await appEngine.channels.send(generalRef, "click here", undefined, [
+    actionsBlock([button({ actionId: "go", label: "Go" })]),
+  ]);
+
+  await env.runtime.poll();
+  assert.equal(env.messages.length, 0);
+  assert.equal(env.commands.length, 0);
+  assert.equal(env.actions.length, 0);
+
+  // Publish account-level `!takedown` on Bob and `!hide` on Alice in `members/self` WITHOUT signalling `members/self` on the feed!
+  await owner.procedure("com.atproto.space.putRecord", {
+    space: env.fixture.members,
+    repo: AUTHORITY,
+    collection: ATPROTO_SPACE_COLLECTION.label,
+    rkey: key(90),
+    record: {
+      $type: ATPROTO_SPACE_COLLECTION.label,
+      src: AUTHORITY,
+      uri: env.bob,
+      val: "!takedown",
+      cts: "2026-11-10T12:10:00.000Z",
+    },
+  });
+  await owner.procedure("com.atproto.space.putRecord", {
+    space: env.fixture.members,
+    repo: AUTHORITY,
+    collection: ATPROTO_SPACE_COLLECTION.label,
+    rkey: key(91),
+    record: {
+      $type: ATPROTO_SPACE_COLLECTION.label,
+      src: AUTHORITY,
+      uri: env.alice,
+      val: "!hide",
+      cts: "2026-11-10T12:10:01.000Z",
+    },
+  });
+
+  env.advance(5_000);
+  await bobEngine.channels.send(generalRef, "bob-takendown-msg");
+  await bobEngine.appInboxes.sendCommand(generalRef, env.appDid, "echo", "bob-takendown-cmd");
+  await bobEngine.appInboxes.sendAction(generalRef, env.appDid, botMsg.uri, "go");
+
+  await aliceEngine.channels.send(generalRef, "alice-hidden-msg");
+  await aliceEngine.appInboxes.sendCommand(generalRef, env.appDid, "echo", "alice-cmd");
+  await aliceEngine.appInboxes.sendAction(generalRef, env.appDid, botMsg.uri, "go");
+
+  env.change(general, env.inbox);
+  await env.runtime.poll();
+
+  assert.deepEqual(
+    env.messages.map((m) => ({ author: m.message.repo, text: m.message.value.text, hidden: m.message.hidden })),
+    [{ author: env.alice, text: "alice-hidden-msg", hidden: true }],
+    "takendown Bob's message is withheld while hidden Alice's message carries hidden: true",
+  );
+  assert.deepEqual(env.commands.map((c) => c.repo), [env.alice], "onCommand never fires for !takedown author");
+  assert.deepEqual(env.actions.map((a) => a.repo), [env.alice], "onAction never fires for !takedown author");
 });

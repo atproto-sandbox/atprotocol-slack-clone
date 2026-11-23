@@ -3,7 +3,7 @@ import net from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createHash, createHmac, hkdfSync, randomBytes, timingSafeEqual } from "node:crypto";
-import { isDid, parseDmSpaceUri } from "@flock/protocol/keys";
+import { isDid, parseDmSpaceUri, parsePersonalInvitesUri } from "@flock/protocol/keys";
 import { getOperatorConfig } from "../config";
 import { getRawDb, onDbClose } from "../lib/db";
 
@@ -1061,7 +1061,7 @@ function tryListenAsHub(
             peerSocket.destroy();
             return;
           }
-          if (!isDid(frame.callerDid) || !parseDmSpaceUri(frame.space)) {
+          if (!isDid(frame.callerDid) || (!parseDmSpaceUri(frame.space) && !parsePersonalInvitesUri(frame.space))) {
             peerSocket.write(
               encodeIpcFrame(ipcKey, {
                 type: "record_ok",
@@ -1747,7 +1747,7 @@ function sendRecordWakeToHub(
  * before resolving. Never writes DM URIs, DIDs, or user activity to SQLite.
  */
 export async function recordDmWake(callerDid: string, space: string, nowMs = Date.now()): Promise<void> {
-  if (!isDid(callerDid) || !parseDmSpaceUri(space)) return;
+  if (!isDid(callerDid) || (!parseDmSpaceUri(space) && !parsePersonalInvitesUri(space))) return;
   const opId = randomBytes(12).toString("hex");
 
   const req = configuredIpcRequirements();

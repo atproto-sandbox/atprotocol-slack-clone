@@ -4,20 +4,18 @@
   "defs": {
     "main": {
       "type": "procedure",
-      "description": "Creates a workspace under a workspace account (its authority: the caller's own, or the account named by authority) with the grant its authority flow left, for the caller: the workspace, inbox and general channel spaces, the profile, the caller in their member lists, the caller's roster and admin records and the directory entry, as one journaled operation that a retry with the same operation id resumes. A caller other than the workspace account needs that account's approval of this workspace (a createWorkspace authority flow they started), which this operation uses up; without a grant or that approval it answers AuthorizationRequired.",
+      "description": "Provisions Flock workspace modality spaces (new.flock.workspace/self, new.flock.inbox/self, and general new.flock.channel) inside an opensocial.group account using the operator's shared group-DID grant.",
       "input": {
         "encoding": "application/json",
         "schema": {
           "type": "object",
-          "required": [
-            "name",
-            "operationId"
-          ],
+          "required": ["name", "operationId"],
           "properties": {
             "name": {
               "type": "string",
               "minLength": 1,
-              "maxLength": 60
+              "maxLength": 640,
+              "maxGraphemes": 64
             },
             "operationId": {
               "type": "string",
@@ -26,7 +24,14 @@
             "authority": {
               "type": "string",
               "format": "did",
-              "description": "The workspace account: its DID is in every URI of the workspace. Omitted, the caller's own."
+              "description": "The opensocial.group DID created or reauthorized through startAuthorityFlow."
+            },
+            "joinPolicy": {
+              "type": "string",
+              "knownValues": ["open", "approval", "invite"]
+            },
+            "publicMeta": {
+              "type": "boolean"
             }
           }
         }
@@ -35,75 +40,35 @@
         "encoding": "application/json",
         "schema": {
           "type": "object",
-          "required": [
-            "operationId",
-            "workspace",
-            "channel",
-            "state",
-            "completedSteps"
-          ],
+          "required": ["operationId", "workspace", "channel", "state", "completedSteps"],
           "properties": {
-            "operationId": {
-              "type": "string",
-              "format": "tid"
-            },
-            "workspace": {
-              "type": "string",
-              "format": "space-ref"
-            },
-            "channel": {
-              "type": "string",
-              "format": "space-ref",
-              "description": "The workspace's general channel."
-            },
+            "operationId": { "type": "string", "format": "tid" },
+            "groupDid": { "type": "string", "format": "did" },
+            "workspace": { "type": "string", "format": "space-ref" },
+            "channel": { "type": "string", "format": "space-ref", "description": "The workspace's general channel." },
             "state": {
               "type": "string",
-              "knownValues": [
-                "queued",
-                "running",
-                "pending",
-                "completed",
-                "failed",
-                "paused"
-              ]
+              "knownValues": ["queued", "running", "pending", "completed", "failed", "paused", "aborted_actor_revoked"]
             },
             "completedSteps": {
               "type": "array",
-              "items": {
-                "type": "string",
-                "maxLength": 128
-              }
+              "items": { "type": "string", "maxLength": 128 }
             },
-            "error": {
-              "type": "string",
-              "maxLength": 1000
-            }
+            "takenOverBy": { "type": "string", "format": "did" },
+            "error": { "type": "string", "maxLength": 1000 }
           }
         }
       },
       "errors": [
-        {
-          "name": "Unauthorized"
-        },
+        { "name": "Unauthorized" },
         {
           "name": "AuthorizationRequired",
-          "description": "The operator holds no usable grant for the caller as an authority: start the authority flow with purpose reauthorize, then retry with the same operation id."
+          "description": "The operator holds no usable shared session for this group DID: start the authority flow, then retry with the same operation id."
         },
-        {
-          "name": "OperationIdConflict"
-        },
-        {
-          "name": "WorkspaceExists",
-          "description": "A workspace of this name exists under the workspace account, or someone else is creating it there: it is joined through its admins, or its creator, not created again."
-        },
-        {
-          "name": "Paused",
-          "description": "Workspace admin mutations are paused by the operator."
-        },
-        {
-          "name": "Busy",
-          "description": "Another operation holds this authority's workspaces; retry with the same operation id."
-        }
+        { "name": "OperationIdConflict" },
+        { "name": "WorkspaceExists" },
+        { "name": "Paused" },
+        { "name": "Busy" }
       ]
     }
   }

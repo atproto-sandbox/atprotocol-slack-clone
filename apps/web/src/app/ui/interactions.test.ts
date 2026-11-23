@@ -15,17 +15,27 @@ const ALICE = "did:plc:alice";
 const BOB = "did:plc:bob";
 const APP_ONE = "did:plc:appone";
 const APP_TWO = "did:plc:apptwo";
-const WORKSPACE_URI = `at://${AUTHORITY}/space/new.flock.workspace/acme`;
+const WORKSPACE_URI = `at://${AUTHORITY}/space/new.flock.workspace/self`;
 
 function makeWorkspace(installs: WorkspaceSummary["installs"]): WorkspaceSummary {
   return {
     uri: WORKSPACE_URI,
     authorityDid: AUTHORITY,
-    skey: "acme",
+    groupDid: AUTHORITY,
+    skey: "self",
     name: "Acme",
+    joinPolicy: "invite",
+    publicMeta: true,
     isAdmin: true,
-    admins: [AUTHORITY],
-    members: [{ did: ALICE, active: true }, { did: BOB, active: true }],
+    isModerator: false,
+    admins: [ALICE],
+    moderators: [],
+    members: [
+      { did: ALICE, active: true, roles: ["admin", "member"] },
+      { did: BOB, active: true, roles: ["member"] },
+    ],
+    pendingMembers: [],
+    roles: [],
     channels: [
       { uri: `at://${AUTHORITY}/space/new.flock.channel/acme-general`, skey: "acme-general", name: "general", visibility: "public" },
       { uri: `at://${AUTHORITY}/space/new.flock.channel/acme-secret`, skey: "acme-secret", name: "secret", visibility: "private" },

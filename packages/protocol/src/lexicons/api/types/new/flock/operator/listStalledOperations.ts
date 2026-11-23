@@ -17,6 +17,8 @@ const id = 'new.flock.operator.listStalledOperations'
 
 export type QueryParams = {
   workspace: string
+  /** When true, refreshes change-notice registrations across all active spaces of the workspace before reporting stalled work. */
+  refreshRegistrations?: boolean
 }
 export type InputSchema = undefined
 

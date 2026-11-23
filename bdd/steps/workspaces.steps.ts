@@ -1,21 +1,30 @@
 import assert from "node:assert/strict";
 import { Given, Then, When } from "@cucumber/cucumber";
-import { inboxUri } from "@flock/protocol/keys";
+import { groupMembersUri, groupMetaUri, inboxUri, isDid } from "@flock/protocol/keys";
+import { OPENSOCIAL_COLLECTION } from "@flock/protocol/nsids";
 import { withIndependentReader } from "../support/independent-app-ui";
 import { credentialCalls, credentialOutcome, workspaceChannels } from "../support/channels-ui";
+import {
+  groupDidOf,
+  groupEffectiveAdmins,
+  groupHasHumanMember,
+  groupSpaceMembers,
+  groupSpaceRecord,
+  groupSpaceUris,
+} from "../support/group-state";
 import type { AppWorld, Actor } from "../support/world";
 import {
-  approveConsentAs, waitForAdminControls, completeConsent, copyInviteLink, createWorkspaceAs, escapeRegExp, eventually, inviteMemberAs,
+  waitForAdminControls, completeConsent, copyInviteLink, createWorkspaceAs, escapeRegExp, eventually, inviteMemberAs,
   joinFromInvitation, openInviteLinkAndSignIn, ownerInvites, signIn, signOutAs, submitWorkspaceName, uniqueWorkspaceName, waitForApp, workspaceUriOnPage,
 } from "../support/ui";
 import { createChannelAs } from "../support/lifecycle-ui";
-import { OPERATOR_AUTHORITY_FLOW, OPERATOR_CREATE_WORKSPACE, operatorCalls } from "../support/operator-calls";
+import { OPERATOR_AUTHORITY_FLOW, OPERATOR_CREATE_WORKSPACE, operatorCalls, submitAndWait, type Executed } from "../support/operator-calls";
 
 type Member = { did: string; read: boolean; write: boolean };
 
-/** The browser's own listings of the account's workspaces, from its PDS. */
+/** The browser's own listings of the account's group memberships, from its own PDS. */
 const workspaceListings = (actor: Actor) => actor.xrpc.filter((call) => call.path === "/xrpc/com.atproto.space.listSpaces" && call.status === 200
-  && new URLSearchParams(call.query).get("spaceType") === "new.flock.workspace");
+  && new URLSearchParams(call.query).get("spaceType") === "group.opensocial.members");
 
 const owner = (world: AppWorld): Actor => {
   const actor = world.actors.get("owner");
@@ -29,25 +38,15 @@ const actorNamed = (world: AppWorld, role: string): Actor => {
   return actor;
 };
 
-async function membersOf(world: AppWorld, as: Actor, space: string): Promise<Member[]> {
-  const result = await world.pdsGet<{ members?: Member[] }>(as, "com.atproto.memberspace.listMembers", { space, limit: "1000" });
-  assert.equal(result.status, 200, `listMembers ${space}: ${JSON.stringify(result.body)}`);
-  return result.body.members ?? [];
-}
-
-async function adminRecords(world: AppWorld, as: Actor): Promise<Array<{ subject: string; active: boolean }>> {
-  const result = await world.pdsGet<{ records?: Array<{ value: { subject: string; active: boolean } }> }>(
-    as, "com.atproto.space.listRecords", { space: world.workspaceUri, repo: as.did, collection: "new.flock.admin", limit: "100" },
-  );
-  assert.equal(result.status, 200, JSON.stringify(result.body));
-  return (result.body.records ?? []).map((record) => record.value);
+async function membersOf(world: AppWorld, _as: Actor, space: string): Promise<Member[]> {
+  return groupSpaceMembers(world, space);
 }
 
 const workspaceSkey = (world: AppWorld): string => world.workspaceUri.split("/").at(-1)!;
 
-/** The workspace spaces an account's own PDS lists, whatever the app says about them. */
-async function workspaceSpacesOn(world: AppWorld, as: Actor): Promise<string[]> {
-  const listed = await world.pdsGet<{ spaces: Array<{ space: string }> }>(as, "com.atproto.space.listSpaces", { spaceType: "new.flock.workspace", limit: "100" });
+/** The `group.opensocial.members` spaces an account's own PDS lists (from own-authored `acceptance/self` records). */
+async function memberSpacesOn(world: AppWorld, as: Actor): Promise<string[]> {
+  const listed = await world.pdsGet<{ spaces: Array<{ space: string }> }>(as, "com.atproto.space.listSpaces", { spaceType: "group.opensocial.members", limit: "100" });
   assert.equal(listed.status, 200, JSON.stringify(listed.body));
   return listed.body.spaces.map((entry) => entry.space);
 }
@@ -136,34 +135,37 @@ When("an admin invites a DID that is not a workspace member", async function (th
   await inviteMemberAs(owner(this), invitee.did);
 });
 
-Then("the DID has read and write access to the workspace", async function (this: AppWorld) {
-  const member = (await membersOf(this, owner(this), this.workspaceUri)).find((entry) => entry.did === actorNamed(this, "invitee").did);
-  assert.deepEqual(member && { read: member.read, write: member.write }, { read: true, write: true });
+Then("the DID has read access to the workspace and read and write access to group members", async function (this: AppWorld) {
+  const inviteeDid = actorNamed(this, "invitee").did;
+  const wsMember = (await membersOf(this, owner(this), this.workspaceUri)).find((entry) => entry.did === inviteeDid);
+  assert.deepEqual(wsMember && { read: wsMember.read, write: wsMember.write }, { read: true, write: false });
+  const groupMember = (await membersOf(this, owner(this), groupMembersUri(groupDidOf(this)))).find((entry) => entry.did === inviteeDid);
+  assert.deepEqual(groupMember && { read: groupMember.read, write: groupMember.write }, { read: true, write: true });
 });
 
 Then("the DID has write-only access to the admin inbox", async function (this: AppWorld) {
-  const inbox = inboxUri(owner(this).did, workspaceSkey(this));
+  const inbox = inboxUri(groupDidOf(this), workspaceSkey(this));
   const member = (await membersOf(this, owner(this), inbox)).find((entry) => entry.did === actorNamed(this, "invitee").did);
   assert.deepEqual(member && { read: member.read, write: member.write }, { read: false, write: true });
 });
 
 Then("the DID has read and write access to each public channel", async function (this: AppWorld) {
-  const spaces = await this.pdsGet<{ spaces: Array<{ space: string }> }>(owner(this), "com.atproto.space.listSpaces", { spaceType: "new.flock.channel", limit: "100" });
-  assert.equal(spaces.body.spaces.length, 2, "the workspace has exactly two public channels");
-  for (const entry of spaces.body.spaces) {
-    const member = (await membersOf(this, owner(this), entry.space)).find((candidate) => candidate.did === actorNamed(this, "invitee").did);
-    assert.deepEqual(member && { read: member.read, write: member.write }, { read: true, write: true }, entry.space);
+  const channels = groupSpaceUris(this, groupDidOf(this), "new.flock.channel");
+  assert.equal(channels.length, 2, "the workspace has exactly two public channels");
+  for (const space of channels) {
+    const member = (await membersOf(this, owner(this), space)).find((candidate) => candidate.did === actorNamed(this, "invitee").did);
+    assert.deepEqual(member && { read: member.read, write: member.write }, { read: true, write: true }, space);
   }
 });
 
-Then("the invite is reported complete only after every member list matches", function (this: AppWorld) {
+Then("the invite is reported complete only after Group Host membership and invite delivery succeed", function (this: AppWorld) {
   const invitee = actorNamed(this, "invitee");
   const steps = this.withAppDatabase((db) => db.prepare(
     "SELECT steps_json FROM operation WHERE request_json LIKE ? AND request_json LIKE '%inviteMember%' AND state = 'completed'",
   ).get(`%${invitee.did}%`) as { steps_json: string } | undefined);
   assert.ok(steps, "the invite was recorded as completed");
   const recorded = JSON.parse(steps.steps_json) as string[];
-  assert.equal(recorded.at(-1), "member-state-verified", "the last recorded step is the check that every member list matches");
+  assert.equal(recorded.at(-1), "member-state-verified", "the last recorded step verifies Group Host membership and invite state");
   const trail = this.withAppDatabase((db) => db.prepare(
     "SELECT event FROM audit_event WHERE operation_id = (SELECT operation_id FROM operation WHERE request_json LIKE ? AND request_json LIKE '%inviteMember%' AND state = 'completed') ORDER BY id",
   ).all(`%${invitee.did}%`) as Array<{ event: string }>).map((row) => row.event);
@@ -189,7 +191,8 @@ Then("the owner can copy an invite link that names the workspace", async functio
   const link = new URL(await copyInviteLink(owner(this)));
   assert.equal(link.origin, this.appOrigin, "the link opens the app the owner is using");
   assert.deepEqual([...link.searchParams.keys()], ["invite"], "the link carries the workspace and nothing else");
-  assert.deepEqual([link.searchParams.get("invite")], await workspaceSpacesOn(this, owner(this)), "the invite parameter is the workspace space the owner's PDS holds");
+  assert.equal(link.searchParams.get("invite"), this.workspaceUri, "the invite parameter is the workspace URI");
+  assert.ok((await memberSpacesOn(this, owner(this))).includes(groupMembersUri(groupDidOf(this))), "the owner's own PDS indexes the group's members space");
 });
 
 Given("a member has been invited to a workspace and given its invite link", async function (this: AppWorld) {
@@ -218,7 +221,7 @@ Then("the workspace appears in the member's dashboard with {int} active members"
   await page.locator(".sidebar").getByRole("button", { name: new RegExp(escapeRegExp(this.workspaceName)) }).waitFor({ state: "visible" });
 });
 
-Given("a DID is absent from a workspace member list", async function (this: AppWorld) {
+Given("a DID has no Group Host workspace membership", async function (this: AppWorld) {
   const actor = await this.actor("owner");
   await createWorkspaceAs(this, actor);
   this.inviteLink = await copyInviteLink(actor);
@@ -233,30 +236,30 @@ When("that DID opens a forwarded invite link and tries to join", async function 
 
 Then("the app says the account has not been added to the workspace", async function (this: AppWorld) {
   const stranger = actorNamed(this, "stranger");
-  await stranger.page.getByRole("alert").filter({ hasText: /may not have been added to it yet/ }).waitFor({ state: "visible" });
-  const asked = credentialCalls(stranger, this.workspaceUri);
-  assert.ok(asked.length > 0, "joining asked the authority for the workspace's credential");
-  assert.deepEqual([...new Set(asked.map(credentialOutcome))], ["SpaceNotFound"], "the authority gives an account it never added the same answer it gives for a missing workspace");
+  await stranger.page.getByRole("alert").filter({ hasText: /invite-only|may not have been added to it yet/i }).waitFor({ state: "visible" });
+  const asked = credentialCalls(stranger, groupMembersUri(groupDidOf(this)));
+  assert.ok(asked.length > 0, "joining asked the group host for the group members credential");
+  assert.deepEqual([...new Set(asked.map(credentialOutcome))], ["SpaceNotFound"], "the authority gives an account it never added the same answer it gives for a missing space");
 });
 
 Then("the workspace does not appear in that account's dashboard", async function (this: AppWorld) {
   const stranger = actorNamed(this, "stranger");
   const page = stranger.page;
-  const listing = await eventually(() => workspaceListings(stranger).at(-1), { what: "the app to list this account's workspaces" });
-  assert.deepEqual((JSON.parse(listing.responseBody) as { spaces: Array<{ space: string }> }).spaces.map((entry) => entry.space), [], "the account's own PDS lists no workspace to the app");
+  const listing = await eventually(() => workspaceListings(stranger).at(-1), { what: "the app to list this account's group memberships" });
+  assert.deepEqual((JSON.parse(listing.responseBody) as { spaces: Array<{ space: string }> }).spaces.map((entry) => entry.space), [], "the account's own PDS lists no group membership to the app");
   assert.equal(await page.getByRole("heading", { name: this.workspaceName, exact: true }).count(), 0);
   assert.equal(await page.locator(".sidebar").getByRole("button", { name: new RegExp(escapeRegExp(this.workspaceName)) }).count(), 0);
 });
 
-Then("the DID is still absent from the member list and left no acceptance marker", async function (this: AppWorld) {
+Then("the DID still has no Group Host workspace membership and left no acceptance marker", async function (this: AppWorld) {
   const stranger = actorNamed(this, "stranger");
   const members = await membersOf(this, owner(this), this.workspaceUri);
   assert.equal(members.some((entry) => entry.did === stranger.did), false);
-  const spaces = await this.pdsGet<{ spaces: Array<{ space: string }> }>(stranger, "com.atproto.space.listSpaces", { spaceType: "new.flock.workspace", limit: "100" });
-  assert.equal(spaces.body.spaces.some((entry) => entry.space === this.workspaceUri), false, "no acceptance marker was written for a non-member");
+  const spaces = await memberSpacesOn(this, stranger);
+  assert.equal(spaces.includes(groupMembersUri(groupDidOf(this))), false, "no acceptance marker was written for a non-member");
 });
 
-Given("an invitee has been added to the workspace member list", async function (this: AppWorld) {
+Given("an invitee has been added to Group Host workspace membership", async function (this: AppWorld) {
   const { owner: actor } = await ownerInvites(this, "invitee");
   this.inviteLink = await copyInviteLink(actor);
 });
@@ -269,8 +272,8 @@ When("the invitee joins the workspace from its invite link", async function (thi
 });
 
 Then("the workspace appears in that account's spaces index", async function (this: AppWorld) {
-  const spaces = await this.pdsGet<{ spaces: Array<{ space: string }> }>(actorNamed(this, "invitee"), "com.atproto.space.listSpaces", { spaceType: "new.flock.workspace", limit: "100" });
-  assert.ok(spaces.body.spaces.some((entry) => entry.space === this.workspaceUri), "the acceptance marker makes the workspace discoverable from the invitee's own PDS");
+  const spaces = await memberSpacesOn(this, actorNamed(this, "invitee"));
+  assert.ok(spaces.includes(groupMembersUri(groupDidOf(this))), "the acceptance marker makes the workspace discoverable from the invitee's own PDS");
 });
 
 Then("a second app reads the same directory and workspace roster", async function (this: AppWorld) {
@@ -282,49 +285,38 @@ Then("a second app reads the same directory and workspace roster", async functio
   const summary = (await invitee.page.locator(".welcome-banner p").first().innerText()).trim();
   const directory = (await workspaceChannels(invitee.page).allInnerTexts()).map((entry) => entry.slice(1).trim()).sort();
   assert.ok(directory.length > 0, "the first app shows a directory to compare with");
-  assert.equal(summary, `${seen.members.length} active members · ${seen.channels.length} channels`, "the second app's roster is the one the first app shows");
+  assert.equal(summary, `${seen.members.length} active members · ${seen.channels.length} channels · join policy: ${seen.joinPolicy}`, "the second app's roster is the one the first app shows");
   assert.deepEqual(seen.channels.map((channel) => channel.name).sort(), directory, "the second app's directory is the first app's");
 });
 
-// --- Administration ---------------------------------------------------------------------------------
+// --- Administration (R13 OpenSocial Groups) ----------------------------------------------------------
 
-// --- A workspace owned by a dedicated account (R8) -------------------------------------------------------------------
-
-Given("a person is signed in, and a workspace account exists that has never signed in to the app", async function (this: AppWorld) {
+Given("a person is signed in to create a workspace", async function (this: AppWorld) {
   const person = await this.actor("owner", 0);
-  await this.actor("account", 0);
   await signIn(this, person);
 });
 
-When("the person creates a workspace owned by that account, approved by signing in as the account", async function (this: AppWorld) {
+When("the person creates a workspace approved through the group host", async function (this: AppWorld) {
   const person = owner(this);
-  const account = actorNamed(this, "account");
   const name = uniqueWorkspaceName();
-  await person.page.getByLabel("Workspace account (optional DID)").fill(account.did);
   await submitWorkspaceName(person, name);
-  await approveConsentAs(person, account);
+  await completeConsent(person);
   await waitForApp(this, person);
   await person.page.getByRole("heading", { name, exact: true }).waitFor({ state: "visible", timeout: 90_000 }).catch(async (error: unknown) => {
-    throw new Error(`The workspace did not appear after the account's approval. Page: ${(await person.page.locator("body").innerText()).slice(0, 2_000)}`, { cause: error });
+    throw new Error(`The workspace did not appear after group host approval. Page: ${(await person.page.locator("body").innerText()).slice(0, 2_000)}`, { cause: error });
   });
   this.workspaceName = name;
   this.workspaceUri = await workspaceUriOnPage(person);
 });
 
-Then("the workspace belongs to the account, and the person is its first admin while the account is not an admin", async function (this: AppWorld) {
+Then("the workspace belongs to a dedicated group DID, and the person is its first admin while the group DID is not a member", async function (this: AppWorld) {
   const person = owner(this);
-  const account = actorNamed(this, "account");
-  assert.equal(this.workspaceUri.split("/")[2], account.did, "the workspace's URIs name the account");
+  const groupDid = groupDidOf(this);
+  assert.ok(isDid(groupDid) && groupDid !== person.did, "the workspace belongs to a dedicated group DID");
   await waitForAdminControls(this, person);
-  // Read at the account's own host, where its records live (a read by the test, not a sign-in to the app).
-  const admins = await this.pdsGet<{ records?: Array<{ value: { subject: string; active: boolean } }> }>(
-    account, "com.atproto.space.listRecords", { space: this.workspaceUri, repo: account.did, collection: "new.flock.admin", limit: "100" },
-  );
-  assert.equal(admins.status, 200, JSON.stringify(admins.body));
-  assert.deepEqual(admins.body.records?.map(({ value }) => ({ subject: value.subject, active: value.active })), [{ subject: person.did, active: true }],
-    "the one admin record is the person's, none is the account's");
-  // A member list is the owner's to read.
-  assert.equal((await membersOf(this, account, this.workspaceUri)).some((entry) => entry.did === person.did && entry.read && entry.write), true, "the person is a member");
+  assert.deepEqual(groupEffectiveAdmins(this, groupDid), [person.did], "the creator is the sole effective human admin");
+  assert.equal(groupSpaceRecord(this, groupMembersUri(groupDid), OPENSOCIAL_COLLECTION.membership, groupDid), undefined, "the group DID has no membership record");
+  assert.equal((await membersOf(this, person, groupMembersUri(groupDid))).some((entry) => entry.did === person.did && entry.read && entry.write), true, "the creator is a member");
 });
 
 When("the person makes a second member an admin", async function (this: AppWorld) {
@@ -347,13 +339,12 @@ Then("an admin who signs in again still administers the workspace", async functi
   await createChannelAs(this, second, "after sign out", "public");
 });
 
-Then("the workspace account never signed in to the app", function (this: AppWorld) {
-  const account = actorNamed(this, "account");
-  assert.equal(account.page.url(), "about:blank", "the account's own browser never opened the app");
-  assert.deepEqual(account.xrpc, [], "and made no call");
+Then("the group DID never signed in to the app", function (this: AppWorld) {
+  const groupDid = groupDidOf(this);
+  assert.equal([...this.actors.values()].some((actor) => actor.did === groupDid), false, "the group DID has no personal browser session");
 });
 
-Given("a workspace authority DID owns the workspace", async function (this: AppWorld) {
+Given("a signed-in person creates a workspace", async function (this: AppWorld) {
   const actor = await this.actor("owner");
   await signIn(this, actor);
 });
@@ -368,19 +359,20 @@ When("the workspace is created", async function (this: AppWorld) {
   this.workspaceUri = await workspaceUriOnPage(actor);
 });
 
-Then("an authority-authored active admin record exists for that DID", async function (this: AppWorld) {
-  const records = await adminRecords(this, owner(this));
-  assert.ok(records.some((record) => record.subject === owner(this).did && record.active));
+Then("a group-authored membership record grants the creator the admin role", function (this: AppWorld) {
+  const groupDid = groupDidOf(this);
+  const person = owner(this);
+  const membership = groupSpaceRecord(this, groupMembersUri(groupDid), OPENSOCIAL_COLLECTION.membership, person.did);
+  assert.ok(membership, "the group host stores a membership record for the creator");
+  assert.ok(Array.isArray(membership.roles) && (membership.roles as string[]).includes("admin"), "the creator holds the admin role");
+  assert.ok(groupEffectiveAdmins(this, groupDid).includes(person.did));
 });
 
-Then("the authority can read the workspace without a member-list entry", async function (this: AppWorld) {
-  const actor = owner(this);
-  assert.equal((await membersOf(this, actor, this.workspaceUri)).some((entry) => entry.did === actor.did), false, "the authority is not on its own member list");
-  const profile = await this.pdsGet<{ records?: Array<{ value: { name?: string } }> }>(actor, "com.atproto.space.listRecords", {
-    space: this.workspaceUri, repo: actor.did, collection: "new.flock.workspace.profile", limit: "10",
-  });
-  assert.equal(profile.status, 200, `the authority's PDS lets it read its workspace: ${JSON.stringify(profile.body)}`);
-  assert.deepEqual(profile.body.records?.map((record) => record.value.name), [this.workspaceName], "what it reads is the workspace it just created");
+Then("the group authority holds the workspace profile while having no membership record of its own", function (this: AppWorld) {
+  const groupDid = groupDidOf(this);
+  assert.equal(groupSpaceRecord(this, groupMembersUri(groupDid), OPENSOCIAL_COLLECTION.membership, groupDid), undefined, "the group DID is not on its own member list");
+  const profile = groupSpaceRecord(this, groupMetaUri(groupDid), OPENSOCIAL_COLLECTION.profile, "self");
+  assert.equal(profile?.displayName, this.workspaceName, "the group's meta/self space holds the workspace profile");
 });
 
 async function promote(world: AppWorld, member: Actor): Promise<void> {
@@ -389,27 +381,100 @@ async function promote(world: AppWorld, member: Actor): Promise<void> {
   await row.getByRole("button", { name: "Demote admin", exact: true }).waitFor({ state: "visible", timeout: 60_000 });
 }
 
-Given("a user has an active authority-authored admin record", async function (this: AppWorld) {
+Given("a user holds the group-authored admin role", async function (this: AppWorld) {
   const { invitee } = await ownerInvites(this, "member", { inviteeHost: 0 });
   await promote(this, invitee);
-  assert.ok((await adminRecords(this, owner(this))).some((record) => record.subject === invitee.did && record.active));
+  assert.ok(groupEffectiveAdmins(this, groupDidOf(this)).includes(invitee.did));
   await this.actor("outsider", 0);
 });
 
-When("that user calls a member-management operation without the authority session", async function (this: AppWorld) {
-  const result = await this.pdsPost(actorNamed(this, "member"), "com.atproto.memberspace.putMembers", {
-    space: this.workspaceUri, members: [{ did: actorNamed(this, "outsider").did, read: true, write: true }],
+When("that user calls a group space mutation with only their personal PDS token", async function (this: AppWorld) {
+  const groupDid = groupDidOf(this);
+  const member = actorNamed(this, "member");
+  const outsider = actorNamed(this, "outsider");
+  const response = await fetch(new URL("/xrpc/com.atproto.space.putRecord", this.fixture.groupHostUrl), {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${member.accessJwt}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      space: groupMembersUri(groupDid),
+      repo: groupDid,
+      collection: OPENSOCIAL_COLLECTION.membership,
+      rkey: outsider.did,
+      record: {
+        $type: OPENSOCIAL_COLLECTION.membership,
+        roles: ["member"],
+        createdAt: new Date().toISOString(),
+      },
+    }),
   });
-  this.scratch.set("managementAttempt", result);
+  const text = await response.text();
+  this.scratch.set("managementAttempt", { status: response.status, body: text ? (JSON.parse(text) as { error?: string }) : {} });
 });
 
-Then("the PDS rejects the operation", async function (this: AppWorld) {
+Then("the group host rejects the operation", function (this: AppWorld) {
   const attempt = this.scratch.get("managementAttempt") as { status: number; body: { error?: string } };
-  assert.ok(attempt.status >= 400, `expected a rejection, got ${attempt.status}`);
-  assert.equal(attempt.body.error, "NotAuthorized", "rejected because the caller is not the space owner, whatever admin records say");
-  const members = await membersOf(this, owner(this), this.workspaceUri);
-  assert.equal(members.some((entry) => entry.did === actorNamed(this, "outsider").did), false, "the rejected operation changed nothing");
+  assert.ok(attempt.status === 401 || attempt.status === 403, `expected 401/403 rejection, got ${attempt.status} ${JSON.stringify(attempt.body)}`);
+  assert.equal(groupHasHumanMember(this, groupDidOf(this), actorNamed(this, "outsider").did), false, "the rejected operation changed nothing");
 });
+
+// --- The final admin cannot leave or be demoted (bound against real UI + AppFixture) -----------------
+
+Given("a workspace has one active admin", async function (this: AppWorld) {
+  const { owner: admin, invitee: member } = await ownerInvites(this, "member");
+  await openInviteLinkAndSignIn(this, member, await copyInviteLink(admin));
+  await joinFromInvitation(member);
+  await member.page.getByRole("heading", { name: this.workspaceName, exact: true }).waitFor({ state: "visible" });
+  await admin.page.getByRole("button", { name: /Refresh/ }).click();
+  await admin.page.getByText(/(^|\D)2 active members/).waitFor({ state: "visible" });
+  assert.deepEqual(groupEffectiveAdmins(this, groupDidOf(this)), [admin.did]);
+});
+
+When("that admin leaves, is removed, or is demoted", async function (this: AppWorld) {
+  const admin = owner(this);
+  const ownRow = admin.page.locator(".roster-row").filter({ hasText: admin.did });
+
+  // 1) Leave workspace via the UI's "Leave this workspace" button (calls Group Host `group.opensocial.leaveGroup` -> `LastAdmin`).
+  await admin.page.getByRole("button", { name: "Leave this workspace", exact: true }).click();
+  const leaveAlert = admin.page.locator("p.form-error[role=alert]");
+  await leaveAlert.waitFor({ state: "visible", timeout: 60_000 });
+  const leaveError = (await leaveAlert.innerText()).trim();
+
+  // 2) Remove self via the UI's "Remove" button on the admin's own roster row.
+  const removeAttempt = await submitAndWait(this, admin, async () => {
+    await ownRow.getByRole("button", { name: "Remove", exact: true }).click();
+  });
+
+  // 3) Demote self via the UI's "Demote admin" button on the admin's own roster row.
+  const demoteAttempt = await submitAndWait(this, admin, async () => {
+    await ownRow.getByRole("button", { name: "Demote admin", exact: true }).click();
+  });
+
+  this.scratch.set("finalAdminAttempts", { leaveError, removeAttempt, demoteAttempt });
+});
+
+Then("the operation is rejected", async function (this: AppWorld) {
+  const admin = owner(this);
+  const { leaveError, removeAttempt, demoteAttempt } = this.scratch.get("finalAdminAttempts") as {
+    leaveError: string;
+    removeAttempt: Executed;
+    demoteAttempt: Executed;
+  };
+
+  assert.match(leaveError, /last.*admin|sole.*admin|cannot leave|LastAdmin/i, `leaving as the sole admin with another member present was rejected: ${leaveError}`);
+  assert.equal(removeAttempt.operation?.state, "failed", JSON.stringify(removeAttempt));
+  assert.match(removeAttempt.operation?.error ?? "", /last active admin cannot leave or be removed/i);
+  assert.equal(demoteAttempt.operation?.state, "failed", JSON.stringify(demoteAttempt));
+  assert.match(demoteAttempt.operation?.error ?? "", /last active admin cannot be demoted/i);
+
+  assert.deepEqual(groupEffectiveAdmins(this, groupDidOf(this)), [admin.did], "the sole admin remains an active admin");
+  assert.equal(groupHasHumanMember(this, groupDidOf(this), admin.did), true, "the sole admin remains a member");
+  await admin.page.getByRole("heading", { name: this.workspaceName, exact: true }).waitFor({ state: "visible" });
+});
+
+// --- Promote and demote an admin ---------------------------------------------------------------------
 
 Given("a current workspace member is not an admin", async function (this: AppWorld) {
   await ownerInvites(this, "member");
@@ -419,11 +484,12 @@ When("an admin promotes that member", async function (this: AppWorld) {
   await promote(this, actorNamed(this, "member"));
 });
 
-Then("the member receives inbox read access and an active admin record", async function (this: AppWorld) {
+Then("the member receives inbox read access and the admin role", async function (this: AppWorld) {
   const member = actorNamed(this, "member");
-  const inbox = await membersOf(this, owner(this), inboxUri(owner(this).did, workspaceSkey(this)));
+  const groupDid = groupDidOf(this);
+  const inbox = await membersOf(this, owner(this), inboxUri(groupDid, workspaceSkey(this)));
   assert.equal(inbox.find((entry) => entry.did === member.did)?.read, true);
-  assert.ok((await adminRecords(this, owner(this))).some((record) => record.subject === member.did && record.active));
+  assert.ok(groupEffectiveAdmins(this, groupDid).includes(member.did));
 });
 
 When("the member is demoted", async function (this: AppWorld) {
@@ -432,16 +498,20 @@ When("the member is demoted", async function (this: AppWorld) {
   await row.getByRole("button", { name: "Make admin", exact: true }).waitFor({ state: "visible", timeout: 60_000 });
 });
 
-Then("inbox read access is removed before the admin record becomes inactive", async function (this: AppWorld) {
+Then("inbox read access is removed with the admin role", async function (this: AppWorld) {
   const member = actorNamed(this, "member");
-  const inbox = await membersOf(this, owner(this), inboxUri(owner(this).did, workspaceSkey(this)));
+  const groupDid = groupDidOf(this);
+  const inbox = await membersOf(this, owner(this), inboxUri(groupDid, workspaceSkey(this)));
   assert.equal(inbox.find((entry) => entry.did === member.did)?.read, false);
-  assert.equal((await adminRecords(this, owner(this))).find((record) => record.subject === member.did)?.active, false);
-  const row = this.withAppDatabase((db) => db.prepare(
-    "SELECT steps_json FROM operation WHERE request_json LIKE '%\"kind\":\"setAdmin\"%' AND request_json LIKE '%\"active\":false%' AND request_json LIKE ? AND state = 'completed'",
-  ).get(`%${member.did}%`) as { steps_json: string } | undefined);
+  assert.equal(groupEffectiveAdmins(this, groupDid).includes(member.did), false);
+  let row: { steps_json: string } | undefined;
+  await eventually(() => {
+    row = this.withAppDatabase((db) => db.prepare(
+      "SELECT steps_json FROM operation WHERE request_json LIKE '%\"kind\":\"setAdmin\"%' AND request_json LIKE '%\"active\":false%' AND request_json LIKE ? AND state = 'completed'",
+    ).get(`%${member.did}%`) as { steps_json: string } | undefined);
+    return row !== undefined;
+  }, { what: "the demotion operation to finish committing" });
   assert.ok(row, "the demotion was journaled");
   const steps = JSON.parse(row.steps_json) as string[];
-  assert.ok(steps.indexOf("remove-inbox-read") >= 0 && steps.indexOf("remove-inbox-read") < steps.indexOf("write-admin-inactive"), `step order was ${steps.join(", ")}`);
+  assert.deepEqual(steps, ["write-admin-inactive", "admin-state-verified"]);
 });
-

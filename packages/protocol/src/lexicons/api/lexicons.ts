@@ -10,6 +10,352 @@ import {
 import { type $Typed, is$typed, maybe$typed } from './util.js'
 
 export const schemaDict = {
+  ComAtprotoIdentityGetRecommendedDidCredentials: {
+    lexicon: 1,
+    id: 'com.atproto.identity.getRecommendedDidCredentials',
+    defs: {
+      main: {
+        type: 'query',
+        description:
+          'Describe the credentials that should be included in the DID doc of an account that is migrating to this service.',
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            properties: {
+              rotationKeys: {
+                description:
+                  'Recommended rotation keys for PLC dids. Should be undefined (or ignored) for did:webs.',
+                type: 'array',
+                items: {
+                  type: 'string',
+                },
+              },
+              alsoKnownAs: {
+                type: 'array',
+                items: {
+                  type: 'string',
+                },
+              },
+              verificationMethods: {
+                type: 'unknown',
+              },
+              services: {
+                type: 'unknown',
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+  ComAtprotoIdentityRequestPlcOperationSignature: {
+    lexicon: 1,
+    id: 'com.atproto.identity.requestPlcOperationSignature',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          'Request an email with a code to in order to request a signed PLC operation. Requires Auth.',
+      },
+    },
+  },
+  ComAtprotoIdentityResolveHandle: {
+    lexicon: 1,
+    id: 'com.atproto.identity.resolveHandle',
+    defs: {
+      main: {
+        type: 'query',
+        description:
+          'Resolves an atproto handle (hostname) to a DID. Does not necessarily bi-directionally verify against the the DID document.',
+        parameters: {
+          type: 'params',
+          required: ['handle'],
+          properties: {
+            handle: {
+              type: 'string',
+              format: 'handle',
+              description: 'The handle to resolve.',
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['did'],
+            properties: {
+              did: {
+                type: 'string',
+                format: 'did',
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'HandleNotFound',
+            description:
+              'The resolution process confirmed that the handle does not resolve to any DID.',
+          },
+        ],
+      },
+    },
+  },
+  ComAtprotoIdentitySignPlcOperation: {
+    lexicon: 1,
+    id: 'com.atproto.identity.signPlcOperation',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          "Signs a PLC operation to update some value(s) in the requesting DID's document.",
+        input: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            properties: {
+              token: {
+                description:
+                  'A token received through com.atproto.identity.requestPlcOperationSignature',
+                type: 'string',
+              },
+              rotationKeys: {
+                type: 'array',
+                items: {
+                  type: 'string',
+                },
+              },
+              alsoKnownAs: {
+                type: 'array',
+                items: {
+                  type: 'string',
+                },
+              },
+              verificationMethods: {
+                type: 'unknown',
+              },
+              services: {
+                type: 'unknown',
+              },
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['operation'],
+            properties: {
+              operation: {
+                type: 'unknown',
+                description: 'A signed DID PLC operation.',
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+  ComAtprotoIdentitySubmitPlcOperation: {
+    lexicon: 1,
+    id: 'com.atproto.identity.submitPlcOperation',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          "Validates a PLC operation to ensure that it doesn't violate a service's constraints or get the identity into a bad state, then submits it to the PLC registry",
+        input: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['operation'],
+            properties: {
+              operation: {
+                type: 'unknown',
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+  ComAtprotoLabelDefs: {
+    lexicon: 1,
+    id: 'com.atproto.label.defs',
+    defs: {
+      label: {
+        type: 'object',
+        description:
+          'Metadata tag on an atproto resource (eg, repo or record).',
+        required: ['src', 'uri', 'val', 'cts'],
+        properties: {
+          ver: {
+            type: 'integer',
+            description: 'The AT Protocol version of the label object.',
+          },
+          src: {
+            type: 'string',
+            format: 'did',
+            description: 'DID of the actor who created this label.',
+          },
+          uri: {
+            type: 'string',
+            format: 'uri',
+            description:
+              'AT URI of the record, repository (account), or other resource that this label applies to.',
+          },
+          cid: {
+            type: 'string',
+            format: 'cid',
+            description:
+              "Optionally, CID specifying the specific version of 'uri' resource this label applies to.",
+          },
+          val: {
+            type: 'string',
+            maxLength: 128,
+            description:
+              'The short string name of the value or type of this label.',
+          },
+          neg: {
+            type: 'boolean',
+            description:
+              'If true, this is a negation label, overwriting a previous label.',
+          },
+          cts: {
+            type: 'string',
+            format: 'datetime',
+            description: 'Timestamp when this label was created.',
+          },
+          exp: {
+            type: 'string',
+            format: 'datetime',
+            description:
+              'Timestamp at which this label expires (no longer applies).',
+          },
+          sig: {
+            type: 'bytes',
+            description: 'Signature of dag-cbor encoded label.',
+          },
+        },
+      },
+      selfLabels: {
+        type: 'object',
+        description:
+          'Metadata tags on an atproto record, published by the author within the record.',
+        required: ['values'],
+        properties: {
+          values: {
+            type: 'array',
+            items: {
+              type: 'ref',
+              ref: 'lex:com.atproto.label.defs#selfLabel',
+            },
+            maxLength: 10,
+          },
+        },
+      },
+      selfLabel: {
+        type: 'object',
+        description:
+          'Metadata tag on an atproto record, published by the author within the record. Note that schemas should use #selfLabels, not #selfLabel.',
+        required: ['val'],
+        properties: {
+          val: {
+            type: 'string',
+            maxLength: 128,
+            description:
+              'The short string name of the value or type of this label.',
+          },
+        },
+      },
+      labelValueDefinition: {
+        type: 'object',
+        description:
+          'Declares a label value and its expected interpretations and behaviors.',
+        required: ['identifier', 'severity', 'blurs', 'locales'],
+        properties: {
+          identifier: {
+            type: 'string',
+            description:
+              "The value of the label being defined. Must only include lowercase ascii and the '-' character ([a-z-]+).",
+            maxLength: 100,
+            maxGraphemes: 100,
+          },
+          severity: {
+            type: 'string',
+            description:
+              "How should a client visually convey this label? 'inform' means neutral and informational; 'alert' means negative and warning; 'none' means show nothing.",
+            knownValues: ['inform', 'alert', 'none'],
+          },
+          blurs: {
+            type: 'string',
+            description:
+              "What should this label hide in the UI, if applied? 'content' hides all of the target; 'media' hides the images/video/audio; 'none' hides nothing.",
+            knownValues: ['content', 'media', 'none'],
+          },
+          defaultSetting: {
+            type: 'string',
+            description: 'The default setting for this label.',
+            knownValues: ['ignore', 'warn', 'hide'],
+            default: 'warn',
+          },
+          adultOnly: {
+            type: 'boolean',
+            description:
+              'Does the user need to have adult content enabled in order to configure this label?',
+          },
+          locales: {
+            type: 'array',
+            items: {
+              type: 'ref',
+              ref: 'lex:com.atproto.label.defs#labelValueDefinitionStrings',
+            },
+          },
+        },
+      },
+      labelValueDefinitionStrings: {
+        type: 'object',
+        description:
+          'Strings which describe the label in the UI, localized into a specific language.',
+        required: ['lang', 'name', 'description'],
+        properties: {
+          lang: {
+            type: 'string',
+            description:
+              'The code of the language these strings are written in.',
+            format: 'language',
+          },
+          name: {
+            type: 'string',
+            description: 'A short human-readable name for the label.',
+            maxGraphemes: 64,
+            maxLength: 640,
+          },
+          description: {
+            type: 'string',
+            description:
+              'A longer description of what the label means and why it might be applied.',
+            maxGraphemes: 10000,
+            maxLength: 100000,
+          },
+        },
+      },
+      labelValue: {
+        type: 'string',
+        knownValues: [
+          '!hide',
+          '!warn',
+          '!no-unauthenticated',
+          'porn',
+          'sexual',
+          'nudity',
+          'graphic-media',
+          'bot',
+        ],
+      },
+    },
+  },
   ComAtprotoManagedspaceCheckAccess: {
     lexicon: 1,
     id: 'com.atproto.managedspace.checkAccess',
@@ -311,6 +657,1082 @@ export const schemaDict = {
       },
     },
   },
+  ComAtprotoRepoApplyWrites: {
+    lexicon: 1,
+    id: 'com.atproto.repo.applyWrites',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          'Apply a batch transaction of repository creates, updates, and deletes. Requires auth, implemented by PDS.',
+        input: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['repo', 'writes'],
+            properties: {
+              repo: {
+                type: 'string',
+                format: 'at-identifier',
+                description:
+                  'The handle or DID of the repo (aka, current account).',
+              },
+              validate: {
+                type: 'boolean',
+                description:
+                  "Can be set to 'false' to skip Lexicon schema validation of record data across all operations, 'true' to require it, or leave unset to validate only for known Lexicons.",
+              },
+              writes: {
+                type: 'array',
+                items: {
+                  type: 'union',
+                  refs: [
+                    'lex:com.atproto.repo.applyWrites#create',
+                    'lex:com.atproto.repo.applyWrites#update',
+                    'lex:com.atproto.repo.applyWrites#delete',
+                  ],
+                  closed: true,
+                },
+              },
+              swapCommit: {
+                type: 'string',
+                description:
+                  'If provided, the entire operation will fail if the current repo commit CID does not match this value. Used to prevent conflicting repo mutations.',
+                format: 'cid',
+              },
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: [],
+            properties: {
+              commit: {
+                type: 'ref',
+                ref: 'lex:com.atproto.repo.defs#commitMeta',
+              },
+              results: {
+                type: 'array',
+                items: {
+                  type: 'union',
+                  refs: [
+                    'lex:com.atproto.repo.applyWrites#createResult',
+                    'lex:com.atproto.repo.applyWrites#updateResult',
+                    'lex:com.atproto.repo.applyWrites#deleteResult',
+                  ],
+                  closed: true,
+                },
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'InvalidSwap',
+            description:
+              "Indicates that the 'swapCommit' parameter did not match current commit.",
+          },
+        ],
+      },
+      create: {
+        type: 'object',
+        description: 'Operation which creates a new record.',
+        required: ['collection', 'value'],
+        properties: {
+          collection: {
+            type: 'string',
+            format: 'nsid',
+          },
+          rkey: {
+            type: 'string',
+            maxLength: 512,
+            format: 'record-key',
+            description:
+              'NOTE: maxLength is redundant with record-key format. Keeping it temporarily to ensure backwards compatibility.',
+          },
+          value: {
+            type: 'unknown',
+          },
+        },
+      },
+      update: {
+        type: 'object',
+        description: 'Operation which updates an existing record.',
+        required: ['collection', 'rkey', 'value'],
+        properties: {
+          collection: {
+            type: 'string',
+            format: 'nsid',
+          },
+          rkey: {
+            type: 'string',
+            format: 'record-key',
+          },
+          value: {
+            type: 'unknown',
+          },
+        },
+      },
+      delete: {
+        type: 'object',
+        description: 'Operation which deletes an existing record.',
+        required: ['collection', 'rkey'],
+        properties: {
+          collection: {
+            type: 'string',
+            format: 'nsid',
+          },
+          rkey: {
+            type: 'string',
+            format: 'record-key',
+          },
+        },
+      },
+      createResult: {
+        type: 'object',
+        required: ['uri', 'cid'],
+        properties: {
+          uri: {
+            type: 'string',
+            format: 'at-uri',
+          },
+          cid: {
+            type: 'string',
+            format: 'cid',
+          },
+          validationStatus: {
+            type: 'string',
+            knownValues: ['valid', 'unknown'],
+          },
+        },
+      },
+      updateResult: {
+        type: 'object',
+        required: ['uri', 'cid'],
+        properties: {
+          uri: {
+            type: 'string',
+            format: 'at-uri',
+          },
+          cid: {
+            type: 'string',
+            format: 'cid',
+          },
+          validationStatus: {
+            type: 'string',
+            knownValues: ['valid', 'unknown'],
+          },
+        },
+      },
+      deleteResult: {
+        type: 'object',
+        required: [],
+        properties: {},
+      },
+    },
+  },
+  ComAtprotoRepoCreateRecord: {
+    lexicon: 1,
+    id: 'com.atproto.repo.createRecord',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          'Create a single new repository record. Requires auth, implemented by PDS.',
+        input: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['repo', 'collection', 'record'],
+            properties: {
+              repo: {
+                type: 'string',
+                format: 'at-identifier',
+                description:
+                  'The handle or DID of the repo (aka, current account).',
+              },
+              collection: {
+                type: 'string',
+                format: 'nsid',
+                description: 'The NSID of the record collection.',
+              },
+              rkey: {
+                type: 'string',
+                format: 'record-key',
+                description: 'The Record Key.',
+                maxLength: 512,
+              },
+              validate: {
+                type: 'boolean',
+                description:
+                  "Can be set to 'false' to skip Lexicon schema validation of record data, 'true' to require it, or leave unset to validate only for known Lexicons.",
+              },
+              record: {
+                type: 'unknown',
+                description: 'The record itself. Must contain a $type field.',
+              },
+              swapCommit: {
+                type: 'string',
+                format: 'cid',
+                description:
+                  'Compare and swap with the previous commit by CID.',
+              },
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['uri', 'cid'],
+            properties: {
+              uri: {
+                type: 'string',
+                format: 'at-uri',
+              },
+              cid: {
+                type: 'string',
+                format: 'cid',
+              },
+              commit: {
+                type: 'ref',
+                ref: 'lex:com.atproto.repo.defs#commitMeta',
+              },
+              validationStatus: {
+                type: 'string',
+                knownValues: ['valid', 'unknown'],
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'InvalidSwap',
+            description:
+              "Indicates that 'swapCommit' didn't match current repo commit.",
+          },
+        ],
+      },
+    },
+  },
+  ComAtprotoRepoDefs: {
+    lexicon: 1,
+    id: 'com.atproto.repo.defs',
+    defs: {
+      commitMeta: {
+        type: 'object',
+        required: ['cid', 'rev'],
+        properties: {
+          cid: {
+            type: 'string',
+            format: 'cid',
+          },
+          rev: {
+            type: 'string',
+            format: 'tid',
+          },
+        },
+      },
+    },
+  },
+  ComAtprotoRepoDeleteRecord: {
+    lexicon: 1,
+    id: 'com.atproto.repo.deleteRecord',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          "Delete a repository record, or ensure it doesn't exist. Requires auth, implemented by PDS.",
+        input: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['repo', 'collection', 'rkey'],
+            properties: {
+              repo: {
+                type: 'string',
+                format: 'at-identifier',
+                description:
+                  'The handle or DID of the repo (aka, current account).',
+              },
+              collection: {
+                type: 'string',
+                format: 'nsid',
+                description: 'The NSID of the record collection.',
+              },
+              rkey: {
+                type: 'string',
+                format: 'record-key',
+                description: 'The Record Key.',
+              },
+              swapRecord: {
+                type: 'string',
+                format: 'cid',
+                description:
+                  'Compare and swap with the previous record by CID.',
+              },
+              swapCommit: {
+                type: 'string',
+                format: 'cid',
+                description:
+                  'Compare and swap with the previous commit by CID.',
+              },
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            properties: {
+              commit: {
+                type: 'ref',
+                ref: 'lex:com.atproto.repo.defs#commitMeta',
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'InvalidSwap',
+          },
+        ],
+      },
+    },
+  },
+  ComAtprotoRepoDescribeRepo: {
+    lexicon: 1,
+    id: 'com.atproto.repo.describeRepo',
+    defs: {
+      main: {
+        type: 'query',
+        description:
+          'Get information about an account and repository, including the list of collections. Does not require auth.',
+        parameters: {
+          type: 'params',
+          required: ['repo'],
+          properties: {
+            repo: {
+              type: 'string',
+              format: 'at-identifier',
+              description: 'The handle or DID of the repo.',
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: [
+              'handle',
+              'did',
+              'didDoc',
+              'collections',
+              'handleIsCorrect',
+            ],
+            properties: {
+              handle: {
+                type: 'string',
+                format: 'handle',
+              },
+              did: {
+                type: 'string',
+                format: 'did',
+              },
+              didDoc: {
+                type: 'unknown',
+                description: 'The complete DID document for this account.',
+              },
+              collections: {
+                type: 'array',
+                description:
+                  'List of all the collections (NSIDs) for which this repo contains at least one record.',
+                items: {
+                  type: 'string',
+                  format: 'nsid',
+                },
+              },
+              handleIsCorrect: {
+                type: 'boolean',
+                description:
+                  'Indicates if handle is currently valid (resolves bi-directionally)',
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+  ComAtprotoRepoGetRecord: {
+    lexicon: 1,
+    id: 'com.atproto.repo.getRecord',
+    defs: {
+      main: {
+        type: 'query',
+        description:
+          'Get a single record from a repository. Does not require auth.',
+        parameters: {
+          type: 'params',
+          required: ['repo', 'collection', 'rkey'],
+          properties: {
+            repo: {
+              type: 'string',
+              format: 'at-identifier',
+              description: 'The handle or DID of the repo.',
+            },
+            collection: {
+              type: 'string',
+              format: 'nsid',
+              description: 'The NSID of the record collection.',
+            },
+            rkey: {
+              type: 'string',
+              description: 'The Record Key.',
+              format: 'record-key',
+            },
+            cid: {
+              type: 'string',
+              format: 'cid',
+              description:
+                'The CID of the version of the record. If not specified, then return the most recent version.',
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['uri', 'value'],
+            properties: {
+              uri: {
+                type: 'string',
+                format: 'at-uri',
+              },
+              cid: {
+                type: 'string',
+                format: 'cid',
+              },
+              value: {
+                type: 'unknown',
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'RecordNotFound',
+          },
+        ],
+      },
+    },
+  },
+  ComAtprotoRepoImportRepo: {
+    lexicon: 1,
+    id: 'com.atproto.repo.importRepo',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          'Import a repo in the form of a CAR file. Requires Content-Length HTTP header to be set.',
+        input: {
+          encoding: 'application/vnd.ipld.car',
+        },
+      },
+    },
+  },
+  ComAtprotoRepoListMissingBlobs: {
+    lexicon: 1,
+    id: 'com.atproto.repo.listMissingBlobs',
+    defs: {
+      main: {
+        type: 'query',
+        description:
+          'Returns a list of missing blobs for the requesting account. Intended to be used in the account migration flow.',
+        parameters: {
+          type: 'params',
+          properties: {
+            limit: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 1000,
+              default: 500,
+            },
+            cursor: {
+              type: 'string',
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['blobs'],
+            properties: {
+              cursor: {
+                type: 'string',
+              },
+              blobs: {
+                type: 'array',
+                items: {
+                  type: 'ref',
+                  ref: 'lex:com.atproto.repo.listMissingBlobs#recordBlob',
+                },
+              },
+            },
+          },
+        },
+      },
+      recordBlob: {
+        type: 'object',
+        required: ['cid', 'recordUri'],
+        properties: {
+          cid: {
+            type: 'string',
+            format: 'cid',
+          },
+          recordUri: {
+            type: 'string',
+            format: 'at-uri',
+          },
+        },
+      },
+    },
+  },
+  ComAtprotoRepoListRecords: {
+    lexicon: 1,
+    id: 'com.atproto.repo.listRecords',
+    defs: {
+      main: {
+        type: 'query',
+        description:
+          'List a range of records in a repository, matching a specific collection. Does not require auth.',
+        parameters: {
+          type: 'params',
+          required: ['repo', 'collection'],
+          properties: {
+            repo: {
+              type: 'string',
+              format: 'at-identifier',
+              description: 'The handle or DID of the repo.',
+            },
+            collection: {
+              type: 'string',
+              format: 'nsid',
+              description: 'The NSID of the record type.',
+            },
+            limit: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 100,
+              default: 50,
+              description: 'The number of records to return.',
+            },
+            cursor: {
+              type: 'string',
+            },
+            reverse: {
+              type: 'boolean',
+              description: 'Flag to reverse the order of the returned records.',
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['records'],
+            properties: {
+              cursor: {
+                type: 'string',
+              },
+              records: {
+                type: 'array',
+                items: {
+                  type: 'ref',
+                  ref: 'lex:com.atproto.repo.listRecords#record',
+                },
+              },
+            },
+          },
+        },
+      },
+      record: {
+        type: 'object',
+        required: ['uri', 'cid', 'value'],
+        properties: {
+          uri: {
+            type: 'string',
+            format: 'at-uri',
+          },
+          cid: {
+            type: 'string',
+            format: 'cid',
+          },
+          value: {
+            type: 'unknown',
+          },
+        },
+      },
+    },
+  },
+  ComAtprotoRepoPutRecord: {
+    lexicon: 1,
+    id: 'com.atproto.repo.putRecord',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          'Write a repository record, creating or updating it as needed. Requires auth, implemented by PDS.',
+        input: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['repo', 'collection', 'rkey', 'record'],
+            nullable: ['swapRecord'],
+            properties: {
+              repo: {
+                type: 'string',
+                format: 'at-identifier',
+                description:
+                  'The handle or DID of the repo (aka, current account).',
+              },
+              collection: {
+                type: 'string',
+                format: 'nsid',
+                description: 'The NSID of the record collection.',
+              },
+              rkey: {
+                type: 'string',
+                format: 'record-key',
+                description: 'The Record Key.',
+                maxLength: 512,
+              },
+              validate: {
+                type: 'boolean',
+                description:
+                  "Can be set to 'false' to skip Lexicon schema validation of record data, 'true' to require it, or leave unset to validate only for known Lexicons.",
+              },
+              record: {
+                type: 'unknown',
+                description: 'The record to write.',
+              },
+              swapRecord: {
+                type: 'string',
+                format: 'cid',
+                description:
+                  'Compare and swap with the previous record by CID. WARNING: nullable and optional field; may cause problems with golang implementation',
+              },
+              swapCommit: {
+                type: 'string',
+                format: 'cid',
+                description:
+                  'Compare and swap with the previous commit by CID.',
+              },
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['uri', 'cid'],
+            properties: {
+              uri: {
+                type: 'string',
+                format: 'at-uri',
+              },
+              cid: {
+                type: 'string',
+                format: 'cid',
+              },
+              commit: {
+                type: 'ref',
+                ref: 'lex:com.atproto.repo.defs#commitMeta',
+              },
+              validationStatus: {
+                type: 'string',
+                knownValues: ['valid', 'unknown'],
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'InvalidSwap',
+          },
+        ],
+      },
+    },
+  },
+  ComAtprotoRepoStrongRef: {
+    lexicon: 1,
+    id: 'com.atproto.repo.strongRef',
+    description: 'A URI with a content-hash fingerprint.',
+    defs: {
+      main: {
+        type: 'object',
+        required: ['uri', 'cid'],
+        properties: {
+          uri: {
+            type: 'string',
+            format: 'at-uri',
+          },
+          cid: {
+            type: 'string',
+            format: 'cid',
+          },
+        },
+      },
+    },
+  },
+  ComAtprotoRepoUploadBlob: {
+    lexicon: 1,
+    id: 'com.atproto.repo.uploadBlob',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          'Upload a new blob, to be referenced from a repository record. The blob will be deleted if it is not referenced within a time window (eg, minutes). Blob restrictions (mimetype, size, etc) are enforced when the reference is created. Requires auth, implemented by PDS.',
+        input: {
+          encoding: '*/*',
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['blob'],
+            properties: {
+              blob: {
+                type: 'blob',
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+  ComAtprotoServerActivateAccount: {
+    lexicon: 1,
+    id: 'com.atproto.server.activateAccount',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          "Activates a currently deactivated account. Used to finalize account migration after the account's repo is imported and identity is setup.",
+      },
+    },
+  },
+  ComAtprotoServerCheckAccountStatus: {
+    lexicon: 1,
+    id: 'com.atproto.server.checkAccountStatus',
+    defs: {
+      main: {
+        type: 'query',
+        description:
+          'Returns the status of an account, especially as pertaining to import or recovery. Can be called many times over the course of an account migration. Requires auth and can only be called pertaining to oneself.',
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: [
+              'activated',
+              'validDid',
+              'repoCommit',
+              'repoRev',
+              'repoBlocks',
+              'indexedRecords',
+              'privateStateValues',
+              'expectedBlobs',
+              'importedBlobs',
+            ],
+            properties: {
+              activated: {
+                type: 'boolean',
+              },
+              validDid: {
+                type: 'boolean',
+              },
+              repoCommit: {
+                type: 'string',
+                format: 'cid',
+              },
+              repoRev: {
+                type: 'string',
+              },
+              repoBlocks: {
+                type: 'integer',
+              },
+              indexedRecords: {
+                type: 'integer',
+              },
+              privateStateValues: {
+                type: 'integer',
+              },
+              expectedBlobs: {
+                type: 'integer',
+              },
+              importedBlobs: {
+                type: 'integer',
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+  ComAtprotoServerCreateAccount: {
+    lexicon: 1,
+    id: 'com.atproto.server.createAccount',
+    defs: {
+      main: {
+        type: 'procedure',
+        description: 'Create an account. Implemented by PDS.',
+        input: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['handle'],
+            properties: {
+              email: {
+                type: 'string',
+              },
+              handle: {
+                type: 'string',
+                format: 'handle',
+                description: 'Requested handle for the account.',
+              },
+              did: {
+                type: 'string',
+                format: 'did',
+                description:
+                  'Pre-existing atproto DID, being imported to a new account.',
+              },
+              inviteCode: {
+                type: 'string',
+              },
+              verificationCode: {
+                type: 'string',
+              },
+              verificationPhone: {
+                type: 'string',
+              },
+              password: {
+                type: 'string',
+                description:
+                  'Initial account password. May need to meet instance-specific password strength requirements.',
+              },
+              recoveryKey: {
+                type: 'string',
+                description:
+                  'DID PLC rotation key (aka, recovery key) to be included in PLC creation operation.',
+              },
+              plcOp: {
+                type: 'unknown',
+                description:
+                  'A signed DID PLC operation to be submitted as part of importing an existing account to this instance. NOTE: this optional field may be updated when full account migration is implemented.',
+              },
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            description:
+              'Account login session returned on successful account creation.',
+            required: ['accessJwt', 'refreshJwt', 'handle', 'did'],
+            properties: {
+              accessJwt: {
+                type: 'string',
+              },
+              refreshJwt: {
+                type: 'string',
+              },
+              handle: {
+                type: 'string',
+                format: 'handle',
+              },
+              did: {
+                type: 'string',
+                format: 'did',
+                description: 'The DID of the new account.',
+              },
+              didDoc: {
+                type: 'unknown',
+                description: 'Complete DID document.',
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'InvalidHandle',
+          },
+          {
+            name: 'InvalidPassword',
+          },
+          {
+            name: 'InvalidInviteCode',
+          },
+          {
+            name: 'HandleNotAvailable',
+          },
+          {
+            name: 'UnsupportedDomain',
+          },
+          {
+            name: 'UnresolvableDid',
+          },
+          {
+            name: 'IncompatibleDidDoc',
+          },
+        ],
+      },
+    },
+  },
+  ComAtprotoServerDeactivateAccount: {
+    lexicon: 1,
+    id: 'com.atproto.server.deactivateAccount',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          'Deactivates a currently active account. Stops serving of repo, and future writes to repo until reactivated. Used to finalize account migration with the old host after the account has been activated on the new host.',
+        input: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            properties: {
+              deleteAfter: {
+                type: 'string',
+                format: 'datetime',
+                description:
+                  'A recommendation to server as to how long they should hold onto the deactivated account before deleting.',
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+  ComAtprotoServerDeleteAccount: {
+    lexicon: 1,
+    id: 'com.atproto.server.deleteAccount',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          "Delete an actor's account with a token and password. Can only be called after requesting a deletion token. Requires auth.",
+        input: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['did', 'password', 'token'],
+            properties: {
+              did: {
+                type: 'string',
+                format: 'did',
+              },
+              password: {
+                type: 'string',
+              },
+              token: {
+                type: 'string',
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'ExpiredToken',
+          },
+          {
+            name: 'InvalidToken',
+          },
+        ],
+      },
+    },
+  },
+  ComAtprotoServerDescribeServer: {
+    lexicon: 1,
+    id: 'com.atproto.server.describeServer',
+    defs: {
+      main: {
+        type: 'query',
+        description:
+          "Describes the server's account creation requirements and capabilities. Implemented by PDS.",
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['did', 'availableUserDomains'],
+            properties: {
+              inviteCodeRequired: {
+                type: 'boolean',
+                description:
+                  'If true, an invite code must be supplied to create an account on this instance.',
+              },
+              phoneVerificationRequired: {
+                type: 'boolean',
+                description:
+                  'If true, a phone verification token must be supplied to create an account on this instance.',
+              },
+              blobUploadLimit: {
+                type: 'integer',
+                description:
+                  'Maximum size of a blob that can be uploaded via com.atproto.repo.uploadBlob, in bytes.',
+              },
+              availableUserDomains: {
+                type: 'array',
+                description:
+                  'List of domain suffixes that can be used in account handles.',
+                items: {
+                  type: 'string',
+                },
+              },
+              links: {
+                type: 'ref',
+                description: 'URLs of service policy documents.',
+                ref: 'lex:com.atproto.server.describeServer#links',
+              },
+              contact: {
+                type: 'ref',
+                description: 'Contact information',
+                ref: 'lex:com.atproto.server.describeServer#contact',
+              },
+              did: {
+                type: 'string',
+                format: 'did',
+              },
+            },
+          },
+        },
+      },
+      links: {
+        type: 'object',
+        properties: {
+          privacyPolicy: {
+            type: 'string',
+            format: 'uri',
+          },
+          termsOfService: {
+            type: 'string',
+            format: 'uri',
+          },
+        },
+      },
+      contact: {
+        type: 'object',
+        properties: {
+          email: {
+            type: 'string',
+          },
+        },
+      },
+    },
+  },
   ComAtprotoServerGetServiceAuth: {
     lexicon: 1,
     id: 'com.atproto.server.getServiceAuth',
@@ -361,6 +1783,82 @@ export const schemaDict = {
               'Indicates that the requested expiration date is not a valid. May be in the past or may be reliant on the requested scopes.',
           },
         ],
+      },
+    },
+  },
+  ComAtprotoServerRefreshSession: {
+    lexicon: 1,
+    id: 'com.atproto.server.refreshSession',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          "Refresh an authentication session. Requires auth using the 'refreshJwt' (not the 'accessJwt').",
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['accessJwt', 'refreshJwt', 'handle', 'did'],
+            properties: {
+              accessJwt: {
+                type: 'string',
+              },
+              refreshJwt: {
+                type: 'string',
+              },
+              handle: {
+                type: 'string',
+                format: 'handle',
+              },
+              did: {
+                type: 'string',
+                format: 'did',
+              },
+              didDoc: {
+                type: 'unknown',
+              },
+              email: {
+                type: 'string',
+              },
+              emailConfirmed: {
+                type: 'boolean',
+              },
+              emailAuthFactor: {
+                type: 'boolean',
+              },
+              active: {
+                type: 'boolean',
+              },
+              status: {
+                type: 'string',
+                description:
+                  "Hosting status of the account. If not specified, then assume 'active'.",
+                knownValues: ['takendown', 'suspended', 'deactivated'],
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'AccountTakedown',
+          },
+          {
+            name: 'InvalidToken',
+          },
+          {
+            name: 'ExpiredToken',
+          },
+        ],
+      },
+    },
+  },
+  ComAtprotoServerRequestAccountDelete: {
+    lexicon: 1,
+    id: 'com.atproto.server.requestAccountDelete',
+    defs: {
+      main: {
+        type: 'procedure',
+        description: 'Initiate a user account deletion via email.',
       },
     },
   },
@@ -2185,6 +3683,981 @@ export const schemaDict = {
       },
     },
   },
+  ComAtprotoSyncGetBlob: {
+    lexicon: 1,
+    id: 'com.atproto.sync.getBlob',
+    defs: {
+      main: {
+        type: 'query',
+        description:
+          'Get a blob associated with a given account. Returns the full blob as originally uploaded. Does not require auth; implemented by PDS.',
+        parameters: {
+          type: 'params',
+          required: ['did', 'cid'],
+          properties: {
+            did: {
+              type: 'string',
+              format: 'did',
+              description: 'The DID of the account.',
+            },
+            cid: {
+              type: 'string',
+              format: 'cid',
+              description: 'The CID of the blob to fetch',
+            },
+          },
+        },
+        output: {
+          encoding: '*/*',
+        },
+        errors: [
+          {
+            name: 'BlobNotFound',
+          },
+          {
+            name: 'RepoNotFound',
+          },
+          {
+            name: 'RepoTakendown',
+          },
+          {
+            name: 'RepoSuspended',
+          },
+          {
+            name: 'RepoDeactivated',
+          },
+        ],
+      },
+    },
+  },
+  ComAtprotoSyncGetLatestCommit: {
+    lexicon: 1,
+    id: 'com.atproto.sync.getLatestCommit',
+    defs: {
+      main: {
+        type: 'query',
+        description:
+          'Get the current commit CID & revision of the specified repo. Does not require auth.',
+        parameters: {
+          type: 'params',
+          required: ['did'],
+          properties: {
+            did: {
+              type: 'string',
+              format: 'did',
+              description: 'The DID of the repo.',
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['cid', 'rev'],
+            properties: {
+              cid: {
+                type: 'string',
+                format: 'cid',
+              },
+              rev: {
+                type: 'string',
+                format: 'tid',
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'RepoNotFound',
+          },
+          {
+            name: 'RepoTakendown',
+          },
+          {
+            name: 'RepoSuspended',
+          },
+          {
+            name: 'RepoDeactivated',
+          },
+        ],
+      },
+    },
+  },
+  ComAtprotoSyncGetRepo: {
+    lexicon: 1,
+    id: 'com.atproto.sync.getRepo',
+    defs: {
+      main: {
+        type: 'query',
+        description:
+          "Download a repository export as CAR file. Optionally only a 'diff' since a previous revision. Does not require auth; implemented by PDS.",
+        parameters: {
+          type: 'params',
+          required: ['did'],
+          properties: {
+            did: {
+              type: 'string',
+              format: 'did',
+              description: 'The DID of the repo.',
+            },
+            since: {
+              type: 'string',
+              format: 'tid',
+              description:
+                "The revision ('rev') of the repo to create a diff from.",
+            },
+          },
+        },
+        output: {
+          encoding: 'application/vnd.ipld.car',
+        },
+        errors: [
+          {
+            name: 'RepoNotFound',
+          },
+          {
+            name: 'RepoTakendown',
+          },
+          {
+            name: 'RepoSuspended',
+          },
+          {
+            name: 'RepoDeactivated',
+          },
+        ],
+      },
+    },
+  },
+  ComAtprotoSyncGetRepoStatus: {
+    lexicon: 1,
+    id: 'com.atproto.sync.getRepoStatus',
+    defs: {
+      main: {
+        type: 'query',
+        description:
+          'Get the hosting status for a repository, on this server. Expected to be implemented by PDS and Relay.',
+        parameters: {
+          type: 'params',
+          required: ['did'],
+          properties: {
+            did: {
+              type: 'string',
+              format: 'did',
+              description: 'The DID of the repo.',
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['did', 'active'],
+            properties: {
+              did: {
+                type: 'string',
+                format: 'did',
+              },
+              active: {
+                type: 'boolean',
+              },
+              status: {
+                type: 'string',
+                description:
+                  'If active=false, this optional field indicates a possible reason for why the account is not active. If active=false and no status is supplied, then the host makes no claim for why the repository is no longer being hosted.',
+                knownValues: [
+                  'takendown',
+                  'suspended',
+                  'deleted',
+                  'deactivated',
+                  'desynchronized',
+                  'throttled',
+                ],
+              },
+              rev: {
+                type: 'string',
+                format: 'tid',
+                description:
+                  'Optional field, the current rev of the repo, if active=true',
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'RepoNotFound',
+          },
+        ],
+      },
+    },
+  },
+  ComAtprotoSyncListBlobs: {
+    lexicon: 1,
+    id: 'com.atproto.sync.listBlobs',
+    defs: {
+      main: {
+        type: 'query',
+        description:
+          'List blob CIDs for an account, since some repo revision. Does not require auth; implemented by PDS.',
+        parameters: {
+          type: 'params',
+          required: ['did'],
+          properties: {
+            did: {
+              type: 'string',
+              format: 'did',
+              description: 'The DID of the repo.',
+            },
+            since: {
+              type: 'string',
+              format: 'tid',
+              description: 'Optional revision of the repo to list blobs since.',
+            },
+            limit: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 1000,
+              default: 500,
+            },
+            cursor: {
+              type: 'string',
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['cids'],
+            properties: {
+              cursor: {
+                type: 'string',
+              },
+              cids: {
+                type: 'array',
+                items: {
+                  type: 'string',
+                  format: 'cid',
+                },
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'RepoNotFound',
+          },
+          {
+            name: 'RepoTakendown',
+          },
+          {
+            name: 'RepoSuspended',
+          },
+          {
+            name: 'RepoDeactivated',
+          },
+        ],
+      },
+    },
+  },
+  GroupOpensocialCancelJoinRequest: {
+    lexicon: 1,
+    id: 'group.opensocial.cancelJoinRequest',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          "Withdraw the caller's pending join request. Requires service auth.",
+        input: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['group'],
+            properties: {
+              group: {
+                type: 'string',
+                format: 'did',
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'GroupNotFound',
+          },
+          {
+            name: 'JoinRequestNotFound',
+          },
+        ],
+      },
+    },
+  },
+  GroupOpensocialCreateReport: {
+    lexicon: 1,
+    id: 'group.opensocial.createReport',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          "Report an account or record in a group, opening or reopening it in the moderation queue. The caller must be able to read the subject's space. Requires service auth.",
+        input: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['group', 'subject', 'reasonType'],
+            properties: {
+              group: {
+                type: 'string',
+                format: 'did',
+              },
+              subject: {
+                type: 'string',
+                format: 'uri',
+                description: 'An account DID or record URI.',
+              },
+              cid: {
+                type: 'string',
+                format: 'cid',
+                description: 'If set, a specific version of the record.',
+              },
+              reasonType: {
+                type: 'string',
+                knownValues: [
+                  'spam',
+                  'violation',
+                  'misleading',
+                  'nsfw',
+                  'rude',
+                  'other',
+                ],
+                description: 'For violation, cite the broken rule in rule.',
+              },
+              reason: {
+                type: 'string',
+                maxGraphemes: 2000,
+                maxLength: 20000,
+              },
+              rule: {
+                type: 'string',
+                format: 'at-uri',
+                description: 'The group rule the subject breaks.',
+              },
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['id', 'createdAt'],
+            properties: {
+              id: {
+                type: 'string',
+                minLength: 1,
+                maxLength: 512,
+              },
+              createdAt: {
+                type: 'string',
+                format: 'datetime',
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'GroupNotFound',
+          },
+          {
+            name: 'InvalidSubject',
+            description: "The subject isn't in this group.",
+          },
+        ],
+      },
+    },
+  },
+  GroupOpensocialDefs: {
+    lexicon: 1,
+    id: 'group.opensocial.defs',
+    defs: {
+      modSubjectView: {
+        type: 'object',
+        description: 'A subject in the moderation queue.',
+        required: [
+          'subject',
+          'status',
+          'createdAt',
+          'updatedAt',
+          'reportCount',
+        ],
+        properties: {
+          subject: {
+            type: 'string',
+            format: 'uri',
+            description: 'An account DID or record URI.',
+          },
+          cid: {
+            type: 'string',
+            format: 'cid',
+            description: 'If set, a specific version of the record.',
+          },
+          status: {
+            type: 'string',
+            enum: ['open', 'escalated', 'resolved'],
+          },
+          createdAt: {
+            type: 'string',
+            format: 'datetime',
+          },
+          updatedAt: {
+            type: 'string',
+            format: 'datetime',
+          },
+          reportCount: {
+            type: 'integer',
+            minimum: 0,
+          },
+        },
+      },
+      moderationEvent: {
+        type: 'object',
+        description: "An event in a subject's moderation history.",
+        required: ['id', 'createdAt', 'event'],
+        properties: {
+          id: {
+            type: 'string',
+            minLength: 1,
+            maxLength: 512,
+          },
+          createdAt: {
+            type: 'string',
+            format: 'datetime',
+          },
+          createdBy: {
+            type: 'string',
+            format: 'did',
+            description: 'May be withheld to protect reporters and moderators.',
+          },
+          event: {
+            type: 'union',
+            refs: [
+              'lex:group.opensocial.defs#reportEvent',
+              'lex:group.opensocial.defs#statusEvent',
+              'lex:group.opensocial.defs#labelEvent',
+              'lex:group.opensocial.defs#ejectEvent',
+            ],
+          },
+        },
+      },
+      reportEvent: {
+        type: 'object',
+        description: 'A report was filed.',
+        required: ['reasonType'],
+        properties: {
+          reasonType: {
+            type: 'string',
+            knownValues: [
+              'spam',
+              'violation',
+              'misleading',
+              'nsfw',
+              'rude',
+              'other',
+            ],
+          },
+          reason: {
+            type: 'string',
+            maxGraphemes: 2000,
+            maxLength: 20000,
+          },
+          rule: {
+            type: 'string',
+            format: 'at-uri',
+          },
+        },
+      },
+      statusEvent: {
+        type: 'object',
+        description:
+          "A moderator changed the subject's status or added a note.",
+        required: ['status'],
+        properties: {
+          status: {
+            type: 'string',
+            enum: ['open', 'escalated', 'resolved'],
+          },
+          note: {
+            type: 'string',
+            maxGraphemes: 2000,
+            maxLength: 20000,
+          },
+        },
+      },
+      labelEvent: {
+        type: 'object',
+        description: 'A label record was written or deleted.',
+        required: ['uri', 'val'],
+        properties: {
+          uri: {
+            type: 'string',
+            format: 'at-uri',
+            description: 'The label record.',
+          },
+          val: {
+            type: 'string',
+            minLength: 1,
+            maxLength: 128,
+          },
+          deleted: {
+            type: 'boolean',
+            default: false,
+          },
+        },
+      },
+      ejectEvent: {
+        type: 'object',
+        description: 'The subject was ejected from the group.',
+        properties: {},
+      },
+      joinRequest: {
+        type: 'object',
+        description: 'A pending join request.',
+        required: ['member', 'createdAt'],
+        properties: {
+          member: {
+            type: 'string',
+            format: 'did',
+          },
+          createdAt: {
+            type: 'string',
+            format: 'datetime',
+          },
+          message: {
+            type: 'string',
+            maxGraphemes: 2000,
+            maxLength: 20000,
+          },
+        },
+      },
+    },
+  },
+  GroupOpensocialDenyJoinRequest: {
+    lexicon: 1,
+    id: 'group.opensocial.denyJoinRequest',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          "Deny a pending join request. To approve one, write the requester's membership instead. Requires auth as the group.",
+        input: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['member'],
+            properties: {
+              member: {
+                type: 'string',
+                format: 'did',
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'JoinRequestNotFound',
+          },
+        ],
+      },
+    },
+  },
+  GroupOpensocialGetModSubjectHistory: {
+    lexicon: 1,
+    id: 'group.opensocial.getModSubjectHistory',
+    defs: {
+      main: {
+        type: 'query',
+        description:
+          "Get a subject's moderation history, oldest first. Requires auth as the group.",
+        parameters: {
+          type: 'params',
+          required: ['subject'],
+          properties: {
+            subject: {
+              type: 'string',
+              format: 'uri',
+              description: 'An account DID or record URI.',
+            },
+            cid: {
+              type: 'string',
+              format: 'cid',
+              description: 'If set, only this version of the record.',
+            },
+            limit: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 100,
+              default: 50,
+            },
+            cursor: {
+              type: 'string',
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['events'],
+            properties: {
+              cursor: {
+                type: 'string',
+              },
+              events: {
+                type: 'array',
+                items: {
+                  type: 'ref',
+                  ref: 'lex:group.opensocial.defs#moderationEvent',
+                },
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'InvalidSubject',
+            description: "The subject isn't in this group.",
+          },
+          {
+            name: 'InvalidCursor',
+          },
+        ],
+      },
+    },
+  },
+  GroupOpensocialLeaveGroup: {
+    lexicon: 1,
+    id: 'group.opensocial.leaveGroup',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          "Leave a group, deleting the caller's membership, which the group authored. Requires service auth.",
+        input: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['group'],
+            properties: {
+              group: {
+                type: 'string',
+                format: 'did',
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'GroupNotFound',
+          },
+        ],
+      },
+    },
+  },
+  GroupOpensocialListJoinRequests: {
+    lexicon: 1,
+    id: 'group.opensocial.listJoinRequests',
+    defs: {
+      main: {
+        type: 'query',
+        description:
+          "List pending join requests, which the host stores privately. Approve one by writing the requester's membership. Requires auth as the group.",
+        parameters: {
+          type: 'params',
+          properties: {
+            limit: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 100,
+              default: 50,
+            },
+            cursor: {
+              type: 'string',
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['requests'],
+            properties: {
+              cursor: {
+                type: 'string',
+              },
+              requests: {
+                type: 'array',
+                items: {
+                  type: 'ref',
+                  ref: 'lex:group.opensocial.defs#joinRequest',
+                },
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'InvalidCursor',
+          },
+        ],
+      },
+    },
+  },
+  GroupOpensocialListModSubjects: {
+    lexicon: 1,
+    id: 'group.opensocial.listModSubjects',
+    defs: {
+      main: {
+        type: 'query',
+        description:
+          'List subjects in the moderation queue. Requires auth as the group.',
+        parameters: {
+          type: 'params',
+          properties: {
+            status: {
+              type: 'string',
+              enum: ['open', 'escalated', 'resolved'],
+              default: 'open',
+            },
+            limit: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 100,
+              default: 50,
+            },
+            cursor: {
+              type: 'string',
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['subjects'],
+            properties: {
+              cursor: {
+                type: 'string',
+              },
+              subjects: {
+                type: 'array',
+                items: {
+                  type: 'ref',
+                  ref: 'lex:group.opensocial.defs#modSubjectView',
+                },
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'InvalidCursor',
+          },
+        ],
+      },
+    },
+  },
+  GroupOpensocialPolicy: {
+    lexicon: 1,
+    id: 'group.opensocial.policy',
+    defs: {
+      main: {
+        type: 'object',
+        description:
+          "Space policy for group spaces: each role's access and scopes in the space, whether it is public, and whether it is listed in the space index. The host always publishes it in the space as a com.atproto.space.policy record.",
+        required: ['grants'],
+        properties: {
+          publicRead: {
+            type: 'boolean',
+            default: false,
+            description: 'If true, anyone may read the space.',
+          },
+          unlisted: {
+            type: 'boolean',
+            default: false,
+            description:
+              "If true, the host leaves the space out of the group's space index.",
+          },
+          grants: {
+            type: 'array',
+            maxLength: 100,
+            description: 'At most one entry per role.',
+            items: {
+              type: 'ref',
+              ref: 'lex:group.opensocial.policy#grant',
+            },
+          },
+        },
+      },
+      grant: {
+        type: 'object',
+        description:
+          "A role's grants in one space. read and write apply to members acting as themselves; scopes apply to acting as the group.",
+        required: ['role'],
+        properties: {
+          role: {
+            type: 'string',
+            format: 'record-key',
+            description: "A role record's key.",
+          },
+          read: {
+            type: 'boolean',
+            default: false,
+            description: 'If true, members with this role may read the space.',
+          },
+          write: {
+            type: 'boolean',
+            default: false,
+            description:
+              "If true, members with this role are in the space's writer set, so their own records sync to readers.",
+          },
+          scopes: {
+            type: 'array',
+            maxLength: 100,
+            description:
+              'OAuth scopes for acting as the group in this space, one per item.',
+            items: {
+              type: 'string',
+              minLength: 1,
+              maxLength: 2000,
+            },
+          },
+        },
+      },
+    },
+  },
+  GroupOpensocialRequestJoin: {
+    lexicon: 1,
+    id: 'group.opensocial.requestJoin',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          'Request to join a group, optionally redeeming an invite. Admits the caller right away when the join policy is open or with a valid invite, and otherwise queues a request. Requires service auth.',
+        input: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['group'],
+            properties: {
+              group: {
+                type: 'string',
+                format: 'did',
+              },
+              invite: {
+                type: 'string',
+                format: 'at-uri',
+                description: "An invite in the caller's invites space.",
+              },
+              message: {
+                type: 'string',
+                maxGraphemes: 2000,
+                maxLength: 20000,
+              },
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['status'],
+            properties: {
+              status: {
+                type: 'string',
+                knownValues: ['pending', 'admitted'],
+              },
+              request: {
+                type: 'ref',
+                ref: 'lex:group.opensocial.defs#joinRequest',
+                description: 'Present when pending.',
+              },
+              membership: {
+                type: 'ref',
+                ref: 'lex:com.atproto.repo.strongRef#main',
+                description: 'Present when admitted.',
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'GroupNotFound',
+          },
+          {
+            name: 'InvalidInvite',
+          },
+          {
+            name: 'JoinClosed',
+            description: 'The group is invite-only.',
+          },
+        ],
+      },
+    },
+  },
+  GroupOpensocialResolveModSubject: {
+    lexicon: 1,
+    id: 'group.opensocial.resolveModSubject',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          'Resolve or escalate a subject. Setting the current status again just adds the note. Requires auth as the group.',
+        input: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['subject', 'status'],
+            properties: {
+              subject: {
+                type: 'string',
+                format: 'uri',
+                description: 'An account DID or record URI.',
+              },
+              cid: {
+                type: 'string',
+                format: 'cid',
+                description: 'If set, a specific version of the record.',
+              },
+              status: {
+                type: 'string',
+                enum: ['resolved', 'escalated'],
+              },
+              note: {
+                type: 'string',
+                maxGraphemes: 2000,
+                maxLength: 20000,
+              },
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'ref',
+            ref: 'lex:group.opensocial.defs#modSubjectView',
+          },
+        },
+        errors: [
+          {
+            name: 'InvalidSubject',
+            description: "The subject isn't in this group.",
+          },
+          {
+            name: 'SubjectNotFound',
+            description: 'The subject has never been reported.',
+          },
+        ],
+      },
+    },
+  },
   NewFlockOperatorCreateWorkspace: {
     lexicon: 1,
     id: 'new.flock.operator.createWorkspace',
@@ -2192,7 +4665,7 @@ export const schemaDict = {
       main: {
         type: 'procedure',
         description:
-          "Creates a workspace under a workspace account (its authority: the caller's own, or the account named by authority) with the grant its authority flow left, for the caller: the workspace, inbox and general channel spaces, the profile, the caller in their member lists, the caller's roster and admin records and the directory entry, as one journaled operation that a retry with the same operation id resumes. A caller other than the workspace account needs that account's approval of this workspace (a createWorkspace authority flow they started), which this operation uses up; without a grant or that approval it answers AuthorizationRequired.",
+          "Provisions Flock workspace modality spaces (new.flock.workspace/self, new.flock.inbox/self, and general new.flock.channel) inside an opensocial.group account using the operator's shared group-DID grant.",
         input: {
           encoding: 'application/json',
           schema: {
@@ -2202,7 +4675,8 @@ export const schemaDict = {
               name: {
                 type: 'string',
                 minLength: 1,
-                maxLength: 60,
+                maxLength: 640,
+                maxGraphemes: 64,
               },
               operationId: {
                 type: 'string',
@@ -2212,7 +4686,14 @@ export const schemaDict = {
                 type: 'string',
                 format: 'did',
                 description:
-                  "The workspace account: its DID is in every URI of the workspace. Omitted, the caller's own.",
+                  'The opensocial.group DID created or reauthorized through startAuthorityFlow.',
+              },
+              joinPolicy: {
+                type: 'string',
+                knownValues: ['open', 'approval', 'invite'],
+              },
+              publicMeta: {
+                type: 'boolean',
               },
             },
           },
@@ -2233,6 +4714,10 @@ export const schemaDict = {
                 type: 'string',
                 format: 'tid',
               },
+              groupDid: {
+                type: 'string',
+                format: 'did',
+              },
               workspace: {
                 type: 'string',
                 format: 'space-ref',
@@ -2251,6 +4736,7 @@ export const schemaDict = {
                   'completed',
                   'failed',
                   'paused',
+                  'aborted_actor_revoked',
                 ],
               },
               completedSteps: {
@@ -2259,6 +4745,10 @@ export const schemaDict = {
                   type: 'string',
                   maxLength: 128,
                 },
+              },
+              takenOverBy: {
+                type: 'string',
+                format: 'did',
               },
               error: {
                 type: 'string',
@@ -2274,25 +4764,19 @@ export const schemaDict = {
           {
             name: 'AuthorizationRequired',
             description:
-              'The operator holds no usable grant for the caller as an authority: start the authority flow with purpose reauthorize, then retry with the same operation id.',
+              'The operator holds no usable shared session for this group DID: start the authority flow, then retry with the same operation id.',
           },
           {
             name: 'OperationIdConflict',
           },
           {
             name: 'WorkspaceExists',
-            description:
-              'A workspace of this name exists under the workspace account, or someone else is creating it there: it is joined through its admins, or its creator, not created again.',
           },
           {
             name: 'Paused',
-            description:
-              'Workspace admin mutations are paused by the operator.',
           },
           {
             name: 'Busy',
-            description:
-              "Another operation holds this authority's workspaces; retry with the same operation id.",
           },
         ],
       },
@@ -2368,9 +4852,8 @@ export const schemaDict = {
               'transitionChannel',
               'archiveChannel',
               'decideJoinRequest',
-              'leaveWorkspace',
+              'decideGroupJoinRequest',
               'leaveChannel',
-              'reconcileWorkspace',
               'installApp',
               'updateAppAccess',
               'uninstallApp',
@@ -2381,6 +4864,19 @@ export const schemaDict = {
           subject: {
             type: 'string',
             format: 'did',
+          },
+          member: {
+            type: 'string',
+            format: 'did',
+          },
+          roles: {
+            type: 'array',
+            items: {
+              type: 'string',
+              format: 'record-key',
+            },
+            minLength: 1,
+            maxLength: 64,
           },
           active: {
             type: 'boolean',
@@ -2433,6 +4929,10 @@ export const schemaDict = {
             type: 'string',
             knownValues: ['approve', 'deny'],
           },
+          expiresAt: {
+            type: 'string',
+            format: 'datetime',
+          },
         },
       },
       channelGrant: {
@@ -2481,6 +4981,7 @@ export const schemaDict = {
               'completed',
               'failed',
               'paused',
+              'aborted_actor_revoked',
             ],
           },
           completedSteps: {
@@ -2491,6 +4992,10 @@ export const schemaDict = {
               description:
                 "A step the operation finished. A step about one member names its space key and the member's DID, so the bound allows the longest DID AT Protocol permits.",
             },
+          },
+          takenOverBy: {
+            type: 'string',
+            format: 'did',
           },
           error: {
             type: 'string',
@@ -2726,21 +5231,32 @@ export const schemaDict = {
       },
     },
   },
-  NewFlockOperatorListInboxWriters: {
+  NewFlockOperatorGetSpaceNotifyTarget: {
     lexicon: 1,
-    id: 'new.flock.operator.listInboxWriters',
+    id: 'new.flock.operator.getSpaceNotifyTarget',
     defs: {
       main: {
-        type: 'query',
+        type: 'procedure',
         description:
-          'Return DIDs in the current inbox member list with write=true. It never returns request records or request contents.',
-        parameters: {
-          type: 'params',
-          required: ['workspace'],
-          properties: {
-            workspace: {
-              type: 'string',
-              format: 'space-ref',
+          "Issue a stateless per-caller PDS webhook notification target for the caller's personal group.opensocial.invites/self space after verifying a valid space credential and RFC 9421 key possession proof.",
+        input: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['space', 'credential', 'proof'],
+            properties: {
+              space: {
+                type: 'string',
+                format: 'space-ref',
+              },
+              credential: {
+                type: 'string',
+                maxLength: 8192,
+              },
+              proof: {
+                type: 'ref',
+                ref: 'lex:new.flock.operator.getSpaceNotifyTarget#credentialProof',
+              },
             },
           },
         },
@@ -2748,23 +5264,15 @@ export const schemaDict = {
           encoding: 'application/json',
           schema: {
             type: 'object',
-            required: ['inbox', 'writers', 'checkedAt'],
+            required: ['endpoint', 'token'],
             properties: {
-              inbox: {
+              endpoint: {
                 type: 'string',
-                format: 'space-ref',
+                format: 'uri',
               },
-              writers: {
-                type: 'array',
-                items: {
-                  type: 'string',
-                  format: 'did',
-                },
-                maxLength: 200,
-              },
-              checkedAt: {
+              token: {
                 type: 'string',
-                format: 'datetime',
+                maxLength: 512,
               },
             },
           },
@@ -2773,7 +5281,28 @@ export const schemaDict = {
           {
             name: 'Unauthorized',
           },
+          {
+            name: 'InvalidRequest',
+          },
         ],
+      },
+      credentialProof: {
+        type: 'object',
+        required: ['authorization', 'signatureInput', 'signature'],
+        properties: {
+          authorization: {
+            type: 'string',
+            maxLength: 16384,
+          },
+          signatureInput: {
+            type: 'string',
+            maxLength: 2048,
+          },
+          signature: {
+            type: 'string',
+            maxLength: 2048,
+          },
+        },
       },
     },
   },
@@ -2792,6 +5321,11 @@ export const schemaDict = {
             workspace: {
               type: 'string',
               format: 'space-ref',
+            },
+            refreshRegistrations: {
+              type: 'boolean',
+              description:
+                'When true, refreshes change-notice registrations across all active spaces of the workspace before reporting stalled work.',
             },
           },
         },
@@ -2893,7 +5427,7 @@ export const schemaDict = {
       main: {
         type: 'procedure',
         description:
-          "Issues a single-use, two-minute ticket for the caller to grant the operator authority over a workspace account's workspaces (the caller's own account, or the one named by authority), and returns the operator URL that starts the flow. The caller opens it as a top-level navigation; the flow succeeds only for someone who signs in as that account. For createWorkspace with another account, it also leaves the caller an approval to create that one workspace.",
+          "Issues a single-use, two-minute ticket for the caller to create a new opensocial.group account (prompt=create) or reauthorize the operator's shared group-DID session as an active effective human admin.",
         input: {
           encoding: 'application/json',
           schema: {
@@ -2907,15 +5441,28 @@ export const schemaDict = {
               name: {
                 type: 'string',
                 minLength: 1,
-                maxLength: 60,
+                maxLength: 640,
+                maxGraphemes: 64,
                 description:
-                  'The workspace to create, for purpose createWorkspace.',
+                  'The group display name, for purpose createWorkspace.',
               },
               authority: {
                 type: 'string',
                 format: 'did',
                 description:
-                  "The workspace account to approve for. Omitted, the caller's own.",
+                  'Existing group DID to reauthorize or complete workspace provisioning on.',
+              },
+              joinPolicy: {
+                type: 'string',
+                knownValues: ['open', 'approval', 'invite'],
+              },
+              publicMeta: {
+                type: 'boolean',
+              },
+              creationKey: {
+                type: 'string',
+                minLength: 1,
+                maxLength: 128,
               },
             },
           },
@@ -2974,6 +5521,15 @@ export function validate(
 }
 
 export const ids = {
+  ComAtprotoIdentityGetRecommendedDidCredentials:
+    'com.atproto.identity.getRecommendedDidCredentials',
+  ComAtprotoIdentityRequestPlcOperationSignature:
+    'com.atproto.identity.requestPlcOperationSignature',
+  ComAtprotoIdentityResolveHandle: 'com.atproto.identity.resolveHandle',
+  ComAtprotoIdentitySignPlcOperation: 'com.atproto.identity.signPlcOperation',
+  ComAtprotoIdentitySubmitPlcOperation:
+    'com.atproto.identity.submitPlcOperation',
+  ComAtprotoLabelDefs: 'com.atproto.label.defs',
   ComAtprotoManagedspaceCheckAccess: 'com.atproto.managedspace.checkAccess',
   ComAtprotoManagedspacePolicy: 'com.atproto.managedspace.policy',
   ComAtprotoMemberspaceDefs: 'com.atproto.memberspace.defs',
@@ -2982,7 +5538,28 @@ export const ids = {
   ComAtprotoMemberspacePutMembers: 'com.atproto.memberspace.putMembers',
   ComAtprotoMemberspaceRemoveMembers: 'com.atproto.memberspace.removeMembers',
   ComAtprotoPersonalspacePolicy: 'com.atproto.personalspace.policy',
+  ComAtprotoRepoApplyWrites: 'com.atproto.repo.applyWrites',
+  ComAtprotoRepoCreateRecord: 'com.atproto.repo.createRecord',
+  ComAtprotoRepoDefs: 'com.atproto.repo.defs',
+  ComAtprotoRepoDeleteRecord: 'com.atproto.repo.deleteRecord',
+  ComAtprotoRepoDescribeRepo: 'com.atproto.repo.describeRepo',
+  ComAtprotoRepoGetRecord: 'com.atproto.repo.getRecord',
+  ComAtprotoRepoImportRepo: 'com.atproto.repo.importRepo',
+  ComAtprotoRepoListMissingBlobs: 'com.atproto.repo.listMissingBlobs',
+  ComAtprotoRepoListRecords: 'com.atproto.repo.listRecords',
+  ComAtprotoRepoPutRecord: 'com.atproto.repo.putRecord',
+  ComAtprotoRepoStrongRef: 'com.atproto.repo.strongRef',
+  ComAtprotoRepoUploadBlob: 'com.atproto.repo.uploadBlob',
+  ComAtprotoServerActivateAccount: 'com.atproto.server.activateAccount',
+  ComAtprotoServerCheckAccountStatus: 'com.atproto.server.checkAccountStatus',
+  ComAtprotoServerCreateAccount: 'com.atproto.server.createAccount',
+  ComAtprotoServerDeactivateAccount: 'com.atproto.server.deactivateAccount',
+  ComAtprotoServerDeleteAccount: 'com.atproto.server.deleteAccount',
+  ComAtprotoServerDescribeServer: 'com.atproto.server.describeServer',
   ComAtprotoServerGetServiceAuth: 'com.atproto.server.getServiceAuth',
+  ComAtprotoServerRefreshSession: 'com.atproto.server.refreshSession',
+  ComAtprotoServerRequestAccountDelete:
+    'com.atproto.server.requestAccountDelete',
   ComAtprotoSpaceApplyWrites: 'com.atproto.space.applyWrites',
   ComAtprotoSpaceAuthorizeSpaceSync: 'com.atproto.space.authorizeSpaceSync',
   ComAtprotoSpaceClearRecords: 'com.atproto.space.clearRecords',
@@ -3013,12 +5590,29 @@ export const ids = {
   ComAtprotoSpacePutRecord: 'com.atproto.space.putRecord',
   ComAtprotoSpaceRemoveWriter: 'com.atproto.space.removeWriter',
   ComAtprotoSpaceUpdateSpace: 'com.atproto.space.updateSpace',
+  ComAtprotoSyncGetBlob: 'com.atproto.sync.getBlob',
+  ComAtprotoSyncGetLatestCommit: 'com.atproto.sync.getLatestCommit',
+  ComAtprotoSyncGetRepo: 'com.atproto.sync.getRepo',
+  ComAtprotoSyncGetRepoStatus: 'com.atproto.sync.getRepoStatus',
+  ComAtprotoSyncListBlobs: 'com.atproto.sync.listBlobs',
+  GroupOpensocialCancelJoinRequest: 'group.opensocial.cancelJoinRequest',
+  GroupOpensocialCreateReport: 'group.opensocial.createReport',
+  GroupOpensocialDefs: 'group.opensocial.defs',
+  GroupOpensocialDenyJoinRequest: 'group.opensocial.denyJoinRequest',
+  GroupOpensocialGetModSubjectHistory: 'group.opensocial.getModSubjectHistory',
+  GroupOpensocialLeaveGroup: 'group.opensocial.leaveGroup',
+  GroupOpensocialListJoinRequests: 'group.opensocial.listJoinRequests',
+  GroupOpensocialListModSubjects: 'group.opensocial.listModSubjects',
+  GroupOpensocialPolicy: 'group.opensocial.policy',
+  GroupOpensocialRequestJoin: 'group.opensocial.requestJoin',
+  GroupOpensocialResolveModSubject: 'group.opensocial.resolveModSubject',
   NewFlockOperatorCreateWorkspace: 'new.flock.operator.createWorkspace',
   NewFlockOperatorExecute: 'new.flock.operator.execute',
   NewFlockOperatorGetChanges: 'new.flock.operator.getChanges',
   NewFlockOperatorGetDmNotifyTarget: 'new.flock.operator.getDmNotifyTarget',
   NewFlockOperatorGetOperation: 'new.flock.operator.getOperation',
-  NewFlockOperatorListInboxWriters: 'new.flock.operator.listInboxWriters',
+  NewFlockOperatorGetSpaceNotifyTarget:
+    'new.flock.operator.getSpaceNotifyTarget',
   NewFlockOperatorListStalledOperations:
     'new.flock.operator.listStalledOperations',
   NewFlockOperatorStartAuthorityFlow: 'new.flock.operator.startAuthorityFlow',

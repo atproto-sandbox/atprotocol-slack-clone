@@ -1,26 +1,129 @@
+import { listBoundedRecords, listBoundedWriters } from "@flock/protocol/atproto/record-pages";
+import { groupMembersUri, groupMetaUri } from "@flock/protocol/keys";
+import { mapLimited } from "@flock/protocol/map-limited";
+import { ATPROTO_SPACE_COLLECTION, COLLECTION, OPENSOCIAL_COLLECTION } from "@flock/protocol/nsids";
+import { canonicalOpenSocialPolicyKey } from "@flock/protocol/registry";
+import {
+  assertWorkspaceWithinEnvelope,
+  extractGroupSpacePolicyRecord,
+  summarizeWorkspace,
+  WORKSPACE_ENVELOPE,
+} from "@flock/protocol/workspace-summary";
 import { sessionClient } from "../atproto/client";
-import { listBoundedRecords } from "@flock/protocol/atproto/record-pages";
-import { COLLECTION } from "@flock/protocol/nsids";
-import { assertWorkspaceWithinEnvelope, summarizeWorkspace, WORKSPACE_ENVELOPE } from "@flock/protocol/workspace-summary";
+import { resolvePds } from "../atproto/identity";
+import { mintSpaceCredential } from "../atproto/space-credential";
 import type { OperatorActor } from "./actor";
+import { readGroupGovernanceState } from "./workspace-state";
+
+const MAX_MEMBERS_SPACE_WRITERS = 2_000;
 
 /**
- * Refuses admin changes while the workspace is outside the supported envelope, judged from the authority's own records,
- * read with the authority grant: the same records and the same rule as the member's view of the workspace.
+ * Refuses admin changes while the group/workspace is outside the supported v1 envelope or has truncated/malformed
+ * authority records, judged from the group's own OpenSocial (`meta/self`, `members/self`, space policies, labels,
+ * writer set) and Flock (`workspace/self`) records.
  */
 export async function assertOperatorWorkspaceWithinEnvelope(actor: OperatorActor): Promise<void> {
-  const { uri, authorityDid } = actor.workspace;
+  const { uri, authorityDid: groupDid } = actor.workspace;
   const client = sessionClient(actor.session);
-  const scan = (collection: string, maxRecords: number) => listBoundedRecords(client, { space: uri, repo: authorityDid, collection, maxRecords });
-  const [profiles, directory, roster, admins, installs, extInstalls] = await Promise.all([
-    scan(COLLECTION.workspaceProfile, 1),
-    scan(COLLECTION.directory, WORKSPACE_ENVELOPE.authorityRecordScan),
-    scan(COLLECTION.workspaceRoster, WORKSPACE_ENVELOPE.authorityRecordScan),
-    scan(COLLECTION.admin, WORKSPACE_ENVELOPE.authorityRecordScan),
-    scan(COLLECTION.appInstall, WORKSPACE_ENVELOPE.authorityRecordScan),
-    scan(COLLECTION.extInstall, WORKSPACE_ENVELOPE.authorityRecordScan),
+  const metaSpace = groupMetaUri(groupDid);
+  const membersSpace = groupMembersUri(groupDid);
+  const scan = (space: string, collection: string, maxRecords: number) =>
+    listBoundedRecords(client, { space, repo: groupDid, collection, maxRecords });
+
+  const [
+    profiles,
+    metaPolicyScan,
+    roles,
+    memberships,
+    membersPolicyScan,
+    accountLabelScan,
+    membersWriterScan,
+    directory,
+    installs,
+    extInstalls,
+    wsPolicyScan,
+    governance,
+  ] = await Promise.all([
+    scan(metaSpace, OPENSOCIAL_COLLECTION.profile, 1),
+    scan(metaSpace, ATPROTO_SPACE_COLLECTION.spacePolicy, 1),
+    scan(membersSpace, OPENSOCIAL_COLLECTION.role, WORKSPACE_ENVELOPE.authorityRecordScan),
+    scan(membersSpace, OPENSOCIAL_COLLECTION.membership, WORKSPACE_ENVELOPE.authorityRecordScan),
+    scan(membersSpace, ATPROTO_SPACE_COLLECTION.spacePolicy, 1),
+    scan(membersSpace, ATPROTO_SPACE_COLLECTION.label, WORKSPACE_ENVELOPE.authorityRecordScan),
+    (async () => {
+      const [membersCred, groupPds] = await Promise.all([
+        mintSpaceCredential(actor.session, membersSpace),
+        resolvePds(groupDid),
+      ]);
+      return listBoundedWriters(membersCred.client(groupPds), {
+        space: membersSpace,
+        maxRepos: MAX_MEMBERS_SPACE_WRITERS,
+      });
+    })(),
+    scan(uri, COLLECTION.directory, WORKSPACE_ENVELOPE.authorityRecordScan),
+    scan(uri, COLLECTION.appInstall, WORKSPACE_ENVELOPE.authorityRecordScan),
+    scan(uri, COLLECTION.extInstall, WORKSPACE_ENVELOPE.authorityRecordScan),
+    scan(uri, ATPROTO_SPACE_COLLECTION.spacePolicy, 1),
+    readGroupGovernanceState(actor.session, groupDid),
   ]);
-  const summary = summarizeWorkspace(uri, authorityDid, { profiles, directory, roster, admins, installs, extInstalls });
-  if (!summary) throw new Error("Workspace could not be read or contains invalid authority records.");
-  assertWorkspaceWithinEnvelope(summary);
+
+  const corePolicyScans = new Map([
+    [metaSpace, metaPolicyScan],
+    [membersSpace, membersPolicyScan],
+    [uri, wsPolicyScan],
+  ]);
+  const otherOwnSpaces = [...governance.spacePolicies.keys()].filter((spUri) => !corePolicyScans.has(spUri));
+  const otherPolicyScans = await mapLimited(otherOwnSpaces, 8, async (spUri) => ({
+    spUri,
+    polScan: await scan(spUri, ATPROTO_SPACE_COLLECTION.spacePolicy, 1),
+  }));
+  for (const { spUri, polScan } of otherPolicyScans) {
+    corePolicyScans.set(spUri, polScan);
+  }
+
+  const combinedSpacePolicies = new Map(governance.spacePolicies);
+  let invalidPolicyScan = governance.invalidSpacePolicyUris.length > 0;
+  for (const [spUri, polScan] of corePolicyScans.entries()) {
+    const extracted = extractGroupSpacePolicyRecord(groupDid, spUri, polScan);
+    const livePolicy = governance.spacePolicies.get(spUri);
+    if (
+      !extracted.valid ||
+      !extracted.policy ||
+      !livePolicy ||
+      canonicalOpenSocialPolicyKey(extracted.policy) !== canonicalOpenSocialPolicyKey(livePolicy)
+    ) {
+      invalidPolicyScan = true;
+    } else {
+      combinedSpacePolicies.set(spUri, extracted.policy);
+    }
+  }
+
+  const summary = summarizeWorkspace(uri, groupDid, {
+    profiles,
+    roles,
+    memberships,
+    directory,
+    installs,
+    extInstalls,
+    spacePolicies: combinedSpacePolicies,
+  });
+  if (!summary) throw new Error("Workspace could not be read or contains invalid group records.");
+
+  const degradedReasons = [
+    ...summary.degradedReasons,
+    ...(invalidPolicyScan && !summary.degradedReasons.some((r) => r.includes("Space policy records"))
+      ? ["Space policy records contain malformed or missing entries; workspace access governance may be incomplete."]
+      : []),
+    ...(membersWriterScan.truncated
+      ? [
+          `Members space writer set exceeds the ${MAX_MEMBERS_SPACE_WRITERS}-repo scan limit; member acceptance state may be incomplete.`,
+        ]
+      : []),
+    ...(accountLabelScan.truncated
+      ? [
+          `Account moderation label records exceed the ${WORKSPACE_ENVELOPE.authorityRecordScan}-record scan limit; the member list is withheld.`,
+        ]
+      : []),
+  ];
+  assertWorkspaceWithinEnvelope({ degradedReasons });
 }

@@ -249,7 +249,7 @@ test("bounded space lookahead distinguishes an exact limit from actual overflow"
   const owner = "did:plc:a";
   const uri = (skey: string) => `at://${owner}/space/new.flock.dm.conversation/${skey}`;
   const exact = fakeClient([
-    { spaces: [spaceEntry(uri("2222222222221"), 1), spaceEntry(uri("2222222222222"), 2)], cursor: "page-two" },
+    { spaces: [spaceEntry(uri("2222222222222"), 1), spaceEntry(uri("2222222222223"), 2)], cursor: "page-two" },
     { spaces: [] },
   ]);
   const exactResult = await listBoundedSpaces(exact.client, { spaceType: "new.flock.dm.conversation", maxSpaces: 2 });
@@ -257,8 +257,8 @@ test("bounded space lookahead distinguishes an exact limit from actual overflow"
   assert.equal(exactResult.truncated, false);
 
   const overflow = fakeClient([
-    { spaces: [spaceEntry(uri("2222222222221"), 1), spaceEntry(uri("2222222222222"), 2)], cursor: "page-two" },
-    { spaces: [spaceEntry(uri("2222222222223"), 3)] },
+    { spaces: [spaceEntry(uri("2222222222222"), 1), spaceEntry(uri("2222222222223"), 2)], cursor: "page-two" },
+    { spaces: [spaceEntry(uri("2222222222224"), 3)] },
   ]);
   const overflowResult = await listBoundedSpaces(overflow.client, { spaceType: "new.flock.dm.conversation", maxSpaces: 2 });
   assert.equal(overflowResult.spaces.length, 2);
@@ -409,30 +409,35 @@ function fakeClient(pages: Array<Record<string, unknown>>) {
 }
 
 test("workspace discovery returns every space URI at the exact limit and refuses to hide some when there are more", async () => {
-  // #given an account with exactly as many workspaces as the limit, and another with one more
-  const uri = (skey: string) => `at://did:plc:a/space/new.flock.workspace/${skey}`;
+  // #given an account with exactly as many channels as the limit, and another with one more
+  const uri = (skey: string) => `at://did:plc:a/space/new.flock.channel/${skey}`;
   const exact = fakeClient([{ spaces: [spaceEntry(uri("a"), 1), spaceEntry(uri("b"), 2)], cursor: "next" }, { spaces: [] }]);
   const overflow = fakeClient([{ spaces: [spaceEntry(uri("a"), 1), spaceEntry(uri("b"), 2)], cursor: "next" }, { spaces: [spaceEntry(uri("c"), 3)] }]);
 
   // #when each is listed with a limit of two
-  const listed = await listAllSpaceUris(exact.client, { spaceType: "new.flock.workspace", maxSpaces: 2 });
+  const listed = await listAllSpaceUris(exact.client, { spaceType: "new.flock.channel", maxSpaces: 2 });
 
   // #then the exact list is returned whole and the overflowing one is an error, not a silent truncation
   assert.deepEqual(listed, [uri("a"), uri("b")]);
-  await assert.rejects(listAllSpaceUris(overflow.client, { spaceType: "new.flock.workspace", maxSpaces: 2 }), /exceeds the 2-space discovery limit/);
+  await assert.rejects(listAllSpaceUris(overflow.client, { spaceType: "new.flock.channel", maxSpaces: 2 }), /exceeds the 2-space discovery limit/);
 });
 
-test("a space whose URI this app cannot parse is skipped, not a reason to fail the whole listing", async () => {
-  // #given an account whose store holds a workspace with a record key longer than this app creates, between two ordinary ones
-  const uri = (skey: string) => `at://did:plc:a/space/new.flock.workspace/${skey}`;
+test("a space whose URI exceeds record-key limits or fails literal:self is skipped, not a reason to fail the whole listing", async () => {
+  const uri = (skey: string) => `at://did:plc:a/space/new.flock.channel/${skey}`;
   const page = fakeClient([
-    { spaces: [spaceEntry(uri("a"), 1), spaceEntry(uri("k".repeat(200)), 2), spaceEntry("not-a-space-uri", 3), spaceEntry(uri("b"), 4)] },
+    {
+      spaces: [
+        spaceEntry(uri("a"), 1),
+        spaceEntry(uri("k".repeat(513)), 2),
+        spaceEntry("at://did:plc:a/space/new.flock.workspace/not-self", 3),
+        spaceEntry("not-a-space-uri", 4),
+        spaceEntry(uri("b"), 5),
+      ],
+    },
   ]);
 
-  // #when workspaces are discovered
-  const listed = await listAllSpaceUris(page.client, { spaceType: "new.flock.workspace", maxSpaces: 10 });
+  const listed = await listAllSpaceUris(page.client, { spaceType: "new.flock.channel", maxSpaces: 10 });
 
-  // #then the usable ones are returned and the rest are ignored
   assert.deepEqual(listed, [uri("a"), uri("b")]);
 });
 
@@ -442,14 +447,14 @@ test("an unparseable space past the limit is not overflow, and a usable one behi
 
   // #given exactly two usable spaces, then an entry the app cannot parse and nothing after it
   const exact = fakeClient([
-    { spaces: [spaceEntry(uri("2222222222221"), 1), spaceEntry(uri("2222222222222"), 2)], cursor: "more" },
+    { spaces: [spaceEntry(uri("2222222222222"), 1), spaceEntry(uri("2222222222223"), 2)], cursor: "more" },
     { spaces: [junk] },
   ]);
   // #and the same, but with a usable space behind the unparseable one
   const behind = fakeClient([
-    { spaces: [spaceEntry(uri("2222222222221"), 1), spaceEntry(uri("2222222222222"), 2)], cursor: "more" },
+    { spaces: [spaceEntry(uri("2222222222222"), 1), spaceEntry(uri("2222222222223"), 2)], cursor: "more" },
     { spaces: [junk], cursor: "later" },
-    { spaces: [spaceEntry(uri("2222222222223"), 3)] },
+    { spaces: [spaceEntry(uri("2222222222224"), 3)] },
   ]);
 
   // #when each is listed with a limit of two
@@ -463,13 +468,13 @@ test("an unparseable space past the limit is not overflow, and a usable one behi
 });
 
 test("skipped spaces do not count toward the limit, across pages", async () => {
-  const uri = (skey: string) => `at://did:plc:a/space/new.flock.workspace/${skey}`;
+  const uri = (skey: string) => `at://did:plc:a/space/new.flock.channel/${skey}`;
   const pages = fakeClient([
     { spaces: [spaceEntry(uri("a"), 1), spaceEntry("not-a-space-uri", 2)], cursor: "p2" },
     { spaces: [spaceEntry(uri("b"), 3)] },
   ]);
 
-  const result = await listBoundedSpaces(pages.client, { spaceType: "new.flock.workspace", maxSpaces: 2 });
+  const result = await listBoundedSpaces(pages.client, { spaceType: "new.flock.channel", maxSpaces: 2 });
 
   assert.deepEqual(result.spaces.map((space) => space.space), [uri("a"), uri("b")]);
   assert.equal(result.truncated, false);

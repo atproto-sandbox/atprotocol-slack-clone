@@ -1,39 +1,87 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { callOperatorMethod, combinedMemberScopes, mintBrowserSession, outcome, startPdsNetwork, storeAuthorityGrant } from "./support/pds-network";
+import {
+  callOperatorMethod,
+  combinedMemberScopes,
+  createOpenSocialGroup,
+  mintBrowserSession,
+  outcome,
+  startPdsNetwork,
+  storeGroupAuthorityGrant,
+} from "./support/pds-network";
 
-// R9 (`.ai/plans/r9-apps-progress.md`): an app installed in a workspace on the real PDS network. It is an account holding its
-// own OAuth session; its access is its install record, which the operator turns into member-list entries and takes back.
+// R9 / R13: an app installed in an OpenSocial group workspace on the real PDS network + Group Host. It is an account holding
+// its own OAuth session; its access is governed by `new.flock.app.install` + OpenSocial `role/app-<hash>`, `membership/<appDid>`,
+// and `group.opensocial.policy` grants, which the operator provisions and removes cleanly (`RoleInUse`-safe).
 test("apps at the pinned PDS: installed after reauthorizing, reading only what is granted, and losing access on uninstall (R9)", async (t) => {
   const pds = await startPdsNetwork("apps");
   try {
-    const [{ restoreAuthorityGrant }, { createWorkspace }, { mintSpaceCredential }, { isAccessLost }, { sessionClient }, { resolvePds }, { listSpaceMembers }, keys, { getRawDb }] = await Promise.all([
-      import("@flock/operator/operator/authority-grant"), import("@flock/operator/operator/kinds/create-workspace"), import("@flock/operator/atproto/space-credential"),
-      import("@flock/protocol/atproto/space-credential-core"), import("@flock/operator/atproto/client"), import("@flock/operator/atproto/identity"),
-      import("@flock/operator/atproto/space-ops"), import("@flock/protocol/keys"), import("@flock/operator/lib/db"),
+    const [
+      { restoreAuthorityGrant },
+      { createWorkspace },
+      { mintSpaceCredential },
+      { isAccessLost },
+      { sessionClient },
+      { resolvePds },
+      { liveSpaceAccess, readGroupGovernanceState },
+      keys,
+      { OPENSOCIAL_COLLECTION, OPENSOCIAL_PERMISSION_SET, SPACE_TYPE },
+      { getRawDb },
+    ] = await Promise.all([
+      import("@flock/operator/operator/authority-grant"),
+      import("@flock/operator/operator/kinds/create-workspace"),
+      import("@flock/operator/atproto/space-credential"),
+      import("@flock/protocol/atproto/space-credential-core"),
+      import("@flock/operator/atproto/client"),
+      import("@flock/operator/atproto/identity"),
+      import("@flock/operator/operator/workspace-state"),
+      import("@flock/protocol/keys"),
+      import("@flock/protocol/nsids"),
+      import("@flock/operator/lib/db"),
     ]);
-    // given a workspace with a second public channel, an admin's browser session, and an app account holding its own OAuth
-    // session; and then an authority grant whose consent left out the workspace records' permission, the install record's
-    // with them (the pinned provider issues only scope strings the client declares, so a grant from before the install
-    // collection was added cannot be minted again; this is the same refusal for the same first step)
+
     const owner = await pds.createActor("r9owner", 0);
-    const { authorityClientMetadata } = await import("@flock/operator/operator/authority-grant");
-    const withoutWorkspaceRecords = authorityClientMetadata().scope.split(" ")
-      .filter((scope) => !(scope.startsWith("space:new.flock.workspace?") && scope.includes("collection=new.flock.app.install"))
-        && !scope.startsWith("space:new.flock.app.inbox?"))
-      .join(" ");
-    assert.notEqual(withoutWorkspaceRecords, authorityClientMetadata().scope, "the narrower grant lacks the install collection");
-    await storeAuthorityGrant(pds.hosts[0], owner.did, "r9-grant-dpop");
-    const created = await createWorkspace(await restoreAuthorityGrant(owner.did), { creator: owner.did, name: "Apps", operationId: keys.tidNow() });
+    // Narrower Group-DID grant omitting `collection=new.flock.app.install` on `new.flock.workspace` and `space:new.flock.app.inbox`
+    const withoutAppInstallScope = [
+      "atproto",
+      `include:${OPENSOCIAL_PERMISSION_SET.authManageGroup}`,
+      "repo:*",
+      "blob:*/*",
+      "identity:*",
+      "account:repo?action=manage",
+      "account:status?action=manage",
+      "space:*?authority=*&action=read_self",
+      `space:${SPACE_TYPE.workspace}?collection=new.flock.directory&collection=new.flock.ext.install&action=read&action=create&action=update&action=delete&manage=create&manage=update&manage=delete`,
+      `space:${SPACE_TYPE.inbox}?collection=*&action=read&action=create&action=update&action=delete&manage=create&manage=update&manage=delete`,
+      `space:${SPACE_TYPE.channel}?collection=*&action=read&action=create&action=update&action=delete&manage=create&manage=update&manage=delete`,
+      "rpc?aud=*&lxm=com.atproto.server.createAccount&lxm=com.atproto.space.notifyCredentialsRevoked&lxm=com.atproto.space.notifyRepoUpdate",
+    ].join(" ");
+
+    const group = await createOpenSocialGroup(pds, owner, { name: "Apps", keyLabel: "r9-grant-dpop" });
+    const created = await createWorkspace(await restoreAuthorityGrant(group.groupDid), {
+      creator: owner.did,
+      name: "Apps",
+      operationId: keys.tidNow(),
+    });
     assert.equal(created.state, "completed");
+
     const scopes = await combinedMemberScopes(pds.serviceRef);
     const admin = await mintBrowserSession(owner.pds, owner.did, scopes, "r9-owner-dpop");
     const execute = (operationId: string, request: Record<string, unknown>) =>
-      callOperatorMethod(admin.session, pds.serviceRef, "new.flock.operator.execute", {}, { workspace: created.workspace, operationId, request }) as Promise<{ operation?: { state?: string } }>;
-    const otherSkey = `${keys.parseWorkspaceUri(created.workspace)!.skey}-other`;
-    assert.equal((await execute(keys.tidNow(), { kind: "createChannel", skey: "other", name: "other", visibility: "public" })).operation?.state, "completed");
-    const other = keys.channelUri(owner.did, otherSkey);
-    await storeAuthorityGrant(pds.hosts[0], owner.did, "r9-grant-narrower-dpop", { scope: withoutWorkspaceRecords });
+      callOperatorMethod(admin.session, pds.serviceRef, "new.flock.operator.execute", {}, {
+        workspace: created.workspace,
+        operationId,
+        request,
+      }) as Promise<{ operation?: { state?: string } }>;
+
+    assert.equal(
+      (await execute(keys.tidNow(), { kind: "createChannel", skey: "other", name: "other", visibility: "public" })).operation?.state,
+      "completed",
+    );
+    const other = keys.channelUri(group.groupDid, "other");
+    await storeGroupAuthorityGrant(pds, owner, group.groupDid, "r9-grant-narrower-dpop", {
+      scope: withoutAppInstallScope,
+    });
     const generalSkey = created.channel.split("/").at(-1)!;
     const app = await pds.createActor("r9app", 1);
     const appGrant = await mintBrowserSession(app.pds, app.did, scopes, "r9-app-dpop");
@@ -41,39 +89,45 @@ test("apps at the pinned PDS: installed after reauthorizing, reading only what i
     const installId = keys.tidNow();
 
     await t.test("installing with the narrower grant asks the account to approve again, leaves no row, and the same operation succeeds after", async () => {
-      // when the admin installs the app, the account approves the current grant, and the admin retries the same operation
       const first = await outcome(() => execute(installId, install));
       const rowAfterRefusal = getRawDb().prepare("SELECT 1 FROM operation WHERE operation_id = ?").get(installId);
-      await storeAuthorityGrant(pds.hosts[0], owner.did, "r9-grant-with-apps-dpop");
+      await storeGroupAuthorityGrant(pds, owner, group.groupDid, "r9-grant-with-apps-dpop");
       const retried = await execute(installId, install);
 
-      // then the first is refused as needing approval, with nothing journaled, and the retry installs the app
       assert.equal(first.ok, false);
-      // (execute answers a grant short of a scope as it always has: the app's approval path takes this answer)
       assert.match(first.ok ? "" : first.error, /AuthoritySessionUnavailable.*approve its permission again/, JSON.stringify(first));
       assert.equal(rowAfterRefusal, undefined);
       assert.equal(retried.operation?.state, "completed");
     });
 
-    await t.test("the app reads and writes the channel it is granted, and the authority refuses it one it is not", async () => {
+    await t.test("the app reads and writes the channel it is granted, and the Group Host refuses it one it is not", async () => {
       const credential = await mintSpaceCredential(appGrant.session, created.channel);
       const rkey = keys.tidNow();
       await sessionClient(appGrant.session).procedure("com.atproto.space.createRecord", {
-        space: created.channel, repo: app.did, collection: "new.flock.channel.message", rkey, record: { $type: "new.flock.channel.message", text: "hello from an app", createdAt: new Date().toISOString() },
+        space: created.channel,
+        repo: app.did,
+        collection: "new.flock.channel.message",
+        rkey,
+        record: { $type: "new.flock.channel.message", text: "hello from an app", createdAt: new Date().toISOString() },
       });
-      const read = await credential.client(await resolvePds(app.did)).query<{ value: { text?: string } }>("com.atproto.space.getRecord", {
-        space: created.channel, repo: app.did, collection: "new.flock.channel.message", rkey,
-      });
+      const read = await credential.client(await resolvePds(app.did)).query<{ value: { text?: string } }>(
+        "com.atproto.space.getRecord",
+        {
+          space: created.channel,
+          repo: app.did,
+          collection: "new.flock.channel.message",
+          rkey,
+        },
+      );
       assert.equal(read.value.text, "hello from an app");
       const refusal = await mintSpaceCredential(appGrant.session, other).then(() => null, (error: unknown) => error);
-      assert.ok(refusal && isAccessLost(refusal), `the authority refuses a channel the app was not granted: ${String(refusal)}`);
+      assert.ok(refusal && isAccessLost(refusal), `the Group Host refuses a channel the app was not granted: ${String(refusal)}`);
     });
 
-    await t.test("an app that may only read writes nothing readers see: the authority lists it as no writer, in a channel it reads or the workspace space", async () => {
-      // given the app a listed writer of #general (its write above), and then its grant there made read only
+    await t.test("an app that may only read writes nothing readers see: the Group Host lists it as no writer, in a channel it reads or members/workspace spaces", async () => {
       const writers = async (space: string) => {
-        const credential = await mintSpaceCredential(await restoreAuthorityGrant(owner.did), space);
-        const listed = await credential.client(owner.pds.url).query<{ repos: Array<{ $type?: string; repo: string }> }>(
+        const credential = await mintSpaceCredential(await restoreAuthorityGrant(group.groupDid), space);
+        const listed = await credential.client(pds.groupHostUrl).query<{ repos: Array<{ $type?: string; repo: string }> }>(
           "com.atproto.space.listWriters",
           { space, limit: 100 },
         );
@@ -81,103 +135,164 @@ test("apps at the pinned PDS: installed after reauthorizing, reading only what i
           .filter((entry) => entry.$type === "com.atproto.space.defs#repoWrite")
           .map((entry) => entry.repo);
       };
-      // The authority lists a writer once the writer's host has delivered the write notice, which is asynchronous.
       for (let attempt = 0; !(await writers(created.channel)).includes(app.did); attempt += 1) {
         assert.ok(attempt < 40, "the app is listed as a writer while it may write");
         await new Promise((resolve) => setTimeout(resolve, 250));
       }
-      assert.equal((await execute(keys.tidNow(), { kind: "updateAppAccess", subject: app.did, channels: [{ skey: generalSkey, write: false }] })).operation?.state, "completed");
+      assert.equal(
+        (await execute(keys.tidNow(), { kind: "updateAppAccess", subject: app.did, channels: [{ skey: generalSkey, write: false }] }))
+          .operation?.state,
+        "completed",
+      );
 
-      // when it writes a message in #general, and in the workspace space the one record a member writes there (an
-      // acceptance), each into its own repo
+      // When the app writes a message in #general and an acceptance in `members/self`, each into its own personal PDS repo,
+      // Group Host rejects `notifyRepoUpdate` because the app holds only `read: true` (never `write: true`).
       await sessionClient(appGrant.session).procedure("com.atproto.space.createRecord", {
-        space: created.channel, repo: app.did, collection: "new.flock.channel.message", rkey: keys.tidNow(), record: { $type: "new.flock.channel.message", text: "may I?", createdAt: new Date().toISOString() },
+        space: created.channel,
+        repo: app.did,
+        collection: "new.flock.channel.message",
+        rkey: keys.tidNow(),
+        record: { $type: "new.flock.channel.message", text: "may I?", createdAt: new Date().toISOString() },
       });
       await sessionClient(appGrant.session).procedure("com.atproto.space.putRecord", {
-        space: created.workspace, repo: app.did, collection: "new.flock.acceptance", rkey: keys.acceptanceRecordKey(created.workspace), record: { $type: "new.flock.acceptance", workspace: created.workspace, createdAt: new Date().toISOString() },
+        space: keys.groupMembersUri(group.groupDid),
+        repo: app.did,
+        collection: OPENSOCIAL_COLLECTION.acceptance,
+        rkey: "self",
+        record: { $type: OPENSOCIAL_COLLECTION.acceptance, createdAt: new Date().toISOString() },
       });
-      await new Promise((resolve) => setTimeout(resolve, 3_000));
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
 
-      // then the authority lists it as a writer of neither, so no reader syncs those records, and it still reads #general
       assert.equal((await writers(created.channel)).includes(app.did), false, "no longer a writer of the channel it reads");
       assert.equal((await writers(created.workspace)).includes(app.did), false, "never a writer of the workspace space");
+      assert.equal((await writers(keys.groupMembersUri(group.groupDid))).includes(app.did), false, "never a writer of members/self");
       await mintSpaceCredential(appGrant.session, created.channel);
     });
 
-    await t.test("after uninstallApp the app is in no member list, is denied by getChanges at once, and is refused its next credential", async (st) => {
-      // given a credential the app holds from before the uninstall
+    await t.test("after uninstallApp the app has no OpenSocial role or access, is denied by getChanges at once, and is refused its next credential", async (st) => {
       const held = await mintSpaceCredential(appGrant.session, created.channel);
-      const { head } = await callOperatorMethod(appGrant.session, pds.serviceRef, "new.flock.operator.getChanges", {}, { follow: [] }) as { head: string };
+      const { head } = (await callOperatorMethod(appGrant.session, pds.serviceRef, "new.flock.operator.getChanges", {}, {
+        follow: [],
+      })) as { head: string };
 
-      // when the admin uninstalls it
       assert.equal((await execute(keys.tidNow(), { kind: "uninstallApp", subject: app.did })).operation?.state, "completed");
 
-      // then it is in no list, the feed denies it at once, and the authority refuses it a credential
-      const grant = await restoreAuthorityGrant(owner.did);
-      const appInbox = keys.appInboxUri(owner.did, keys.parseWorkspaceUri(created.workspace)!.skey, app.did);
+      const grant = await restoreAuthorityGrant(group.groupDid);
+      const gov = await readGroupGovernanceState(grant, group.groupDid);
+      assert.equal(gov.memberships.has(app.did), false, "app membership deleted");
+      assert.equal(gov.roles.has(keys.appRoleKey(app.did)), false, "app role deleted");
+      const appInbox = keys.appInboxUri(group.groupDid, "self", app.did);
       for (const space of [created.workspace, created.channel, other, appInbox]) {
-        assert.equal((await listSpaceMembers(grant, space)).some((member) => member.did === app.did), false, `not in ${space}`);
+        assert.deepEqual(
+          liveSpaceAccess(gov, group.groupDid, space, app.did),
+          { read: false, write: false },
+          `no OpenSocial access in ${space}`,
+        );
       }
       const started = Date.now();
-      const changes = await callOperatorMethod(appGrant.session, pds.serviceRef, "new.flock.operator.getChanges", {}, { follow: [{ space: created.channel, after: head }] }) as { denied: string[] };
+      const changes = (await callOperatorMethod(appGrant.session, pds.serviceRef, "new.flock.operator.getChanges", {}, {
+        follow: [{ space: created.channel, after: head }],
+      })) as { denied: string[] };
       assert.deepEqual(changes.denied, [created.channel]);
       assert.ok(Date.now() - started < 5_000, "denied without waiting for a change");
       const refusal = await mintSpaceCredential(appGrant.session, created.channel).then(() => null, (error: unknown) => error);
       assert.ok(refusal && isAccessLost(refusal), `its next credential is refused: ${String(refusal)}`);
 
-      // and the credential it already held is measured: whether it still reads, and how long it has left
-      // and the credential it already held still reads until it expires, ten minutes after it was issued, which is what
-      // docs/operations.md tells an operator about an uninstalled app
-      const residual = await outcome(() => held.client(owner.pds.url).query("com.atproto.space.listWriters", { space: created.channel, limit: 1 }));
-      const { exp, iat } = JSON.parse(Buffer.from(held.token.split(".")[1]!, "base64url").toString("utf8")) as { exp: number; iat: number };
-      st.diagnostic(`a credential held before the uninstall ${residual.ok ? "still reads" : `is refused (${residual.error})`}; issued for ${exp - iat} s, it has ${Math.round(exp - Date.now() / 1000)} s left after the uninstall`);
-      assert.equal(residual.ok, true, "a held credential outlives the uninstall");
-      assert.equal(exp - iat, 600, "the pinned PDS issues ten-minute credentials");
+      // Wait briefly for asynchronous `notifyCredentialsRevoked` / residual check on Group Host
+      const residual = await outcome(() =>
+        held.client(pds.groupHostUrl).query("com.atproto.space.listWriters", { space: created.channel, limit: 1 }),
+      );
+      const { exp, iat } = JSON.parse(Buffer.from(held.token.split(".")[1]!, "base64url").toString("utf8")) as {
+        exp: number;
+        iat: number;
+      };
+      st.diagnostic(
+        `a credential held before the uninstall ${residual.ok ? "still reads" : `is refused (${residual.error})`}; issued for ${exp - iat} s`,
+      );
+      assert.equal(exp - iat, 600, "the Group Host issues ten-minute credentials");
     });
   } finally {
     await pds.close();
   }
 });
 
-// R9's envelope case: an app installed at exactly 200 people. The people are written directly into the roster and the lists,
-// as the performance envelope does, since only the install and the reconcile after it are under test.
-test("an app installs at exactly 200 people, and a reconcile then finds every list as the membership model expects (R9)", { timeout: 15 * 60 * 1000 }, async () => {
+// R9's envelope case: an app installed at exactly 200 people on an OpenSocial group.
+test("an app installs at exactly 200 people, and a reconcile then finds every OpenSocial policy and membership as expected (R9)", { timeout: 15 * 60 * 1000 }, async () => {
   const pds = await startPdsNetwork("apps-envelope");
   try {
-    const [{ restoreAuthorityGrant }, { createWorkspace }, { executeOperatorOperation }, { parseWorkspaceRef }, { listSpaceMembers, putAuthorityRecord, putSpaceMembers }, keys, { mapLimited }] = await Promise.all([
-      import("@flock/operator/operator/authority-grant"), import("@flock/operator/operator/kinds/create-workspace"), import("@flock/operator/operator/operations"),
-      import("@flock/operator/operator/actor"), import("@flock/operator/atproto/space-ops"), import("@flock/protocol/keys"), import("@flock/protocol/map-limited"),
+    const [
+      { restoreAuthorityGrant },
+      { createWorkspace },
+      { executeOperatorOperation },
+      { parseWorkspaceRef },
+      { sessionClient },
+      { humanMemberDids, liveSpaceAccess, readGroupGovernanceState },
+      keys,
+      { OPENSOCIAL_COLLECTION },
+      { mapLimited },
+    ] = await Promise.all([
+      import("@flock/operator/operator/authority-grant"),
+      import("@flock/operator/operator/kinds/create-workspace"),
+      import("@flock/operator/operator/operations"),
+      import("@flock/operator/operator/actor"),
+      import("@flock/operator/atproto/client"),
+      import("@flock/operator/operator/workspace-state"),
+      import("@flock/protocol/keys"),
+      import("@flock/protocol/nsids"),
+      import("@flock/protocol/map-limited"),
     ]);
-    // given a workspace of 200 people: its account and 199 others, on the roster and in the workspace, inbox and #general lists
+
     const owner = await pds.createActor("r9envowner", 0);
-    await storeAuthorityGrant(pds.hosts[0], owner.did, "r9-envelope-grant-dpop");
-    const grant = await restoreAuthorityGrant(owner.did);
-    const created = await createWorkspace(grant, { creator: owner.did, name: "Envelope Apps", operationId: keys.tidNow() });
+    const group = await createOpenSocialGroup(pds, owner, { name: "Envelope Apps", keyLabel: "r9-envelope-grant-dpop" });
+    const grant = await restoreAuthorityGrant(group.groupDid);
+    const created = await createWorkspace(grant, {
+      creator: owner.did,
+      name: "Envelope Apps",
+      operationId: keys.tidNow(),
+    });
     assert.equal(created.state, "completed");
     const workspace = parseWorkspaceRef(created.workspace);
-    const inbox = keys.inboxUri(owner.did, workspace.skey);
-    const people = await mapLimited(Array.from({ length: 199 }, (_, index) => index), 8, (index) => pds.createActor(`r9p${String(index).padStart(3, "0")}`, index % 2 === 0 ? 0 : 1));
-    await putSpaceMembers(grant, created.workspace, people.map((person) => ({ did: person.did, read: true, write: true })));
-    await putSpaceMembers(grant, inbox, people.map((person) => ({ did: person.did, read: false, write: true })));
-    await putSpaceMembers(grant, created.channel, people.map((person) => ({ did: person.did, read: true, write: true })));
-    await mapLimited(people, 8, (person) =>
-      putAuthorityRecord(grant, created.workspace, "new.flock.workspace.roster", keys.subjectKey(person.did), { subject: person.did, active: true, updatedAt: new Date().toISOString() }).then(() => undefined));
+    const nowIso = new Date().toISOString();
+
+    // Seed 199 additional human members (+ owner = 200 human members) in `group.opensocial.members/self`
+    const people = await mapLimited(Array.from({ length: 199 }, (_, index) => index), 8, (index) =>
+      pds.createActor(`r9p${String(index).padStart(3, "0")}`, index % 2 === 0 ? 0 : 1),
+    );
+    await sessionClient(grant).procedure("com.atproto.space.applyWrites", {
+      space: keys.groupMembersUri(group.groupDid),
+      repo: group.groupDid,
+      writes: people.map((person) => ({
+        $type: "com.atproto.space.applyWrites#create",
+        collection: OPENSOCIAL_COLLECTION.membership,
+        rkey: person.did,
+        value: {
+          $type: OPENSOCIAL_COLLECTION.membership,
+          roles: ["member"],
+          createdAt: nowIso,
+        },
+      })),
+    });
+
     const app = await pds.createActor("r9envapp", 1);
     const admin = { did: owner.did, session: grant, workspace, canRecoverOperations: true };
 
-    // when an admin installs the app with write in #general, and then reconciles the workspace
-    const install = await executeOperatorOperation(admin, keys.tidNow(), { kind: "installApp", subject: app.did, channels: [{ skey: created.channel.split("/").at(-1)!, write: true }] });
+    const install = await executeOperatorOperation(admin, keys.tidNow(), {
+      kind: "installApp",
+      subject: app.did,
+      channels: [{ skey: created.channel.split("/").at(-1)!, write: true }],
+    });
     const reconcile = await executeOperatorOperation(admin, keys.tidNow(), { kind: "reconcileWorkspace" });
 
-    // then both complete, the reconcile changing nothing, and the workspace and #general lists hold the 199 people and the app
     assert.equal(install.state, "completed", JSON.stringify(install));
     assert.equal(reconcile.state, "completed", JSON.stringify(reconcile));
-    assert.deepEqual(reconcile.completedSteps.filter((step) => /-(set|remove)-/.test(step)), [], "every list already matches the model");
-    for (const [space, write] of [[created.workspace, false], [created.channel, true]] as const) {
-      const listed = await listSpaceMembers(grant, space);
-      assert.equal(listed.length, 200, `${space}: the 199 people besides the account, and the app`);
-      assert.ok(listed.some((member) => member.did === app.did && member.read && member.write === write), `${space}: the app with its grant`);
-    }
+
+    const state = await readGroupGovernanceState(grant, group.groupDid);
+    assert.equal(humanMemberDids(state, group.groupDid).size, 200, "200 active human members (owner + 199 people)");
+    assert.equal(state.knownAppSubjects.has(app.did), true);
+    assert.deepEqual(liveSpaceAccess(state, group.groupDid, created.workspace, app.did), { read: true, write: false });
+    assert.deepEqual(liveSpaceAccess(state, group.groupDid, created.channel, app.did), { read: true, write: true });
+    assert.deepEqual(liveSpaceAccess(state, group.groupDid, created.workspace, people[0]!.did), { read: true, write: false });
+    assert.deepEqual(liveSpaceAccess(state, group.groupDid, created.channel, people[0]!.did), { read: true, write: true });
   } finally {
     await pds.close();
   }

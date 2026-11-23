@@ -1,7 +1,9 @@
+import { groupMembersUri, groupMetaUri, parseWorkspaceUri } from "@flock/protocol/keys";
 import { AppInboxClient } from "./app-inbox-client";
 import { ChannelClient } from "./channel-client";
 import { CredentialCache } from "./credentials";
 import { TasksClient } from "./ext/tasks";
+import type { GroupClient } from "./group-client";
 import { withIdentityCache } from "./identity";
 import { Lifecycle } from "./lifecycle";
 import { MemoryStore } from "./memory-store";
@@ -33,7 +35,14 @@ export type Engine = {
  */
 export function createEngine(
   host: ClientTransport,
-  input: { store?: SyncStore; options?: Partial<SyncOptions>; operator?: OperatorService; applyOwnWrites?: boolean } = {},
+  input: {
+    store?: SyncStore;
+    options?: Partial<SyncOptions>;
+    operator?: OperatorService;
+    applyOwnWrites?: boolean;
+    getGroupClient?: (groupDid: string) => Promise<GroupClient> | GroupClient;
+    reauthorizeOperator?: (groupDid: string) => Promise<boolean | void> | boolean | void;
+  } = {},
 ): Engine {
   const store = input.store ?? new MemoryStore();
   const transport = withIdentityCache(host, store);
@@ -41,12 +50,34 @@ export function createEngine(
   const credentials = new CredentialCache(transport, (space) => lifecycle.dropSpace(space));
   const sync = new SyncCore({ transport, credentials, store, options: input.options });
   const writeQueue = new WriteQueue({ store, now: () => transportNow(transport) });
+  const operator = input.operator
+    ? new OperatorClient(transport, input.operator, {
+        onWorkspaceMutated: async (workspaceUriValue) => {
+          await sync.markSpaceStale(workspaceUriValue);
+          const parsed = parseWorkspaceUri(workspaceUriValue);
+          if (parsed) {
+            await Promise.all([
+              sync.markSpaceStale(groupMetaUri(parsed.authorityDid)),
+              sync.markSpaceStale(groupMembersUri(parsed.authorityDid)),
+            ]);
+          }
+        },
+      })
+    : undefined;
   return {
     credentials,
     sync,
     lifecycle,
     channels: new ChannelClient({ transport, credentials, sync, lifecycle, applyOwnWrites: input.applyOwnWrites }),
-    workspaces: new WorkspaceClient({ transport, credentials, lifecycle, sync }),
+    workspaces: new WorkspaceClient({
+      transport,
+      credentials,
+      lifecycle,
+      sync,
+      ...(operator ? { operator } : {}),
+      ...(input.getGroupClient ? { getGroupClient: input.getGroupClient } : {}),
+      ...(input.reauthorizeOperator ? { reauthorizeOperator: input.reauthorizeOperator } : {}),
+    }),
     appInboxes: new AppInboxClient({ transport, sync }),
     tasks: new TasksClient({
       transport,
@@ -57,12 +88,6 @@ export function createEngine(
       applyOwnWrites: input.applyOwnWrites,
     }),
     writeQueue,
-    ...(input.operator
-      ? {
-          operator: new OperatorClient(transport, input.operator, {
-            onWorkspaceMutated: (workspaceUri) => sync.markSpaceStale(workspaceUri),
-          }),
-        }
-      : {}),
+    ...(operator ? { operator } : {}),
   };
 }

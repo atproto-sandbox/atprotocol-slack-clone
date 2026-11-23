@@ -36,8 +36,9 @@ function boundText(value: string, maxGraphemes: number, maxBytes: number): strin
   return result;
 }
 
-/** The echo bot's answer to a message: its text after `echo: `, in its thread; none for a message with no text, or where it reads only. */
+/** The echo bot's answer to a message: its text after `echo: `, in its thread; none for a hidden message, a message with no text, or where it reads only. */
 export function echoReply({ canWrite, message }: AppMessage): { text: string; parent: string } | null {
+  if (message.hidden === true) return null;
   const text = typeof message.value.text === "string" ? message.value.text.trim() : "";
   if (!canWrite || text.length === 0) return null;
   const parent = typeof message.value.parent === "string" ? message.value.parent : message.uri;

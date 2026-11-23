@@ -15,7 +15,7 @@ export function sessionTransport(session: AccountSession, identity: IdentityConf
   return {
     did: session.did,
     memberClient: new AtprotoClient((path, init) => session.fetchHandler(path, init)),
-    resolvePds: (did) => resolvePds(did, identity),
+    resolvePds: (did, forceRefresh) => resolvePds(did, identity, forceRefresh),
     resolveKemKey: (did, forceRefresh) => resolveKemKey(did, identity, forceRefresh),
     fetchEndpoint,
     generateKey: generateSpaceKey,

@@ -57,7 +57,7 @@ export type WriterState = {
   optimisticOverlay?: OptimisticOverlayEntry[];
 };
 
-export type ListedWriter = { did: string; repoRev: string };
+export type ListedWriter = { did: string; repoRev: string; spaceRev?: string };
 
 export type SpaceState = {
   space: string;
@@ -73,6 +73,8 @@ export type SpaceState = {
   ownWriteAt?: number | null;
   /** Incremented atomically on `invalidateSpace` (`markSpaceStale`) so cold generation-0 syncs cannot commit stale reads. */
   invalidationSeq?: number;
+  /** Monotonic store-managed revision incremented whenever writer-listing state or `invalidationSeq` changes. */
+  revision?: number;
 };
 
 /** A DID's PDS host, or its `#atproto_kem` key, as its DID document said when it was resolved. */
@@ -104,6 +106,68 @@ export type ActivityState = {
   updatedAt: number;
 };
 
+export type LeavingGroupPhase =
+  | "leaving_group"
+  | "deleting_acceptance"
+  | "reconciling_post_delete"
+  | "blocked_deactivated";
+
+export type LeavingGroupEntry = {
+  groupDid: string;
+  expectedIncarnation?: string;
+  phase: LeavingGroupPhase;
+  createdAt: number;
+};
+
+export type JoiningGroupMode = "create" | "open" | "invite" | "approval";
+
+export type JoiningGroupPhase =
+  | "submitting"
+  | "pending_approval"
+  | "membership_verified"
+  | "acceptance_pending"
+  | "discovery_verified"
+  | "orphaned_by_migration"
+  | "expired_unknown"
+  | "unsupported_status"
+  | "quota_exceeded";
+
+export type JoiningGroupCreateParams = {
+  name: string;
+  joinPolicy?: "open" | "approval" | "invite";
+  publicMeta?: boolean;
+};
+
+export type JoiningGroupEntry = {
+  operationId: string;
+  mode: JoiningGroupMode;
+  intentHash: string;
+  authorityEndpoint?: string;
+  createParams?: JoiningGroupCreateParams;
+  groupDid?: string;
+  inviteUri?: string;
+  message?: string;
+  currentIncarnation?: string;
+  rawStatus?: string;
+  phase: JoiningGroupPhase;
+  createdAt: number;
+};
+
+export type ReactivatingGroupPhase =
+  | "activating"
+  | "restoring_acceptance"
+  | "reauthorizing_operator"
+  | "refreshing_discovery";
+
+export type ReactivatingGroupEntry = {
+  operationId: string;
+  groupDid: string;
+  intentHash?: string;
+  restoredIncarnation?: string;
+  phase: ReactivatingGroupPhase;
+  createdAt: number;
+};
+
 export type WriterCommit = {
   space: string;
   repo: string;
@@ -119,6 +183,11 @@ export type WriterCommit = {
   next?: Omit<WriterState, "space" | "repo" | "generation">;
   /** Marks the stored state stale, atomically: a hint, or an own write applied before its host's listing shows it. */
   markStale?: boolean;
+  /**
+   * For authority writer-listing hints (`markStale: true`): applies atomically only when `current` exists, is not
+   * already stale or an unchecked tombstone, and `current.syncedRev === null || current.syncedRev < staleIfBehindRev`.
+   */
+  staleIfBehindRev?: string;
   /** When set alongside `markStale`, captures the earliest pre-write `prevRecord` per key for `listRepoOps` continuity. */
   recordOptimistic?: boolean;
   /** Collections whose held records are replaced wholesale by these (a refresh). */
@@ -127,11 +196,43 @@ export type WriterCommit = {
   remove?: Array<{ collection: string; rkey: string }>;
   /** Optional monotonic clock update persisted in the same atomic transaction when the commit applies. */
   clock?: ClockUpdate;
+  /** Optional atomic own-write space touch persisted in the same transaction when `epoch` / `expectedGeneration` checks pass. */
+  touchOwnSpace?: {
+    ownWriteAt: number;
+    workspace?: string | null;
+    defaultLastOpenedAt: number;
+  };
+};
+
+export type PutSpaceOptions = {
+  /** Refuses the write if the space was purged or cleared since `epoch` was read. */
+  epoch?: string;
+  /** Refuses the write if `invalidateSpace` bumped `invalidationSeq` since the writer scan started. */
+  expectedInvalidationSeq?: number;
+  /** Refuses the write if `SpaceState.revision` (`existing?.revision ?? 0`) advanced since the writer scan started. */
+  expectedRevision?: number;
+  /** Refuses the write if `existing?.spaceRev` is strictly newer than `state.spaceRev`. */
+  disallowOlderSpaceRev?: boolean;
+  /** Atomically touches `workspace` / `lastOpenedAt` without clobbering concurrent `writers` / `spaceRev` or bumping `revision`. */
+  touchMetadataOnly?: boolean;
+  /** Atomically preserves a newer `ownWriteAt` set concurrently after `preserveNewerOwnWriteSince`. */
+  preserveNewerOwnWriteSince?: number;
+};
+
+export type PurgeWriterOptions = {
+  /** Refuses the purge if the space was purged or cleared since `epoch` was read. */
+  epoch?: string;
+  /** Refuses the purge if `invalidateSpace` bumped `invalidationSeq` since the writer scan started. */
+  expectedInvalidationSeq?: number;
+  /** Refuses the purge if `SpaceState.revision` (`existing?.revision ?? 0`) advanced since the writer scan started. */
+  expectedSpaceRevision?: number;
+  /** Refuses the purge if the writer's stored generation advanced since the writer scan snapshotted `held`. */
+  expectedGeneration?: number;
 };
 
 export interface SyncStore {
   getSpace(space: string): Promise<SpaceState | undefined>;
-  putSpace(state: SpaceState): Promise<void>;
+  putSpace(state: SpaceState, options?: PutSpaceOptions): Promise<boolean>;
   listSpaces(): Promise<SpaceState[]>;
   getWriter(space: string, repo: string): Promise<WriterState | undefined>;
   listWriters(space: string): Promise<WriterState[]>;
@@ -146,12 +247,13 @@ export interface SyncStore {
   commit(change: WriterCommit): Promise<boolean>;
   /** Atomically clears writer listing freshness, increments `invalidationSeq`, and marks every tracked or extra repo stale. */
   invalidateSpace(space: string, extraRepos?: readonly string[]): Promise<void>;
-  /** Drops a writer's records; its state becomes an empty tombstone with an advanced generation. */
-  purgeWriter(space: string, repo: string): Promise<void>;
+  /** Drops a writer's records if optional epoch/invalidationSeq/generation guards pass; its state becomes an empty tombstone with an advanced generation. */
+  purgeWriter(space: string, repo: string, options?: PurgeWriterOptions): Promise<boolean>;
   /** Drops a space's records and state; its writers become tombstones with advanced generations. */
   purgeSpace(space: string): Promise<void>;
   getIdentity(kind: IdentityKind, did: string): Promise<IdentityEntry | undefined>;
   putIdentity(entry: IdentityEntry): Promise<void>;
+  deleteIdentity(kind: IdentityKind, did: string): Promise<void>;
   getClock(accountDid: string, scope?: string): Promise<ClockState | undefined>;
   /** Atomically reads, updates monotonically, and persists the clock state for `(accountDid, scope)`. */
   updateClock(
@@ -163,7 +265,19 @@ export interface SyncStore {
   putActivityState(state: ActivityState): Promise<void>;
   markActivitySeen(accountDid: string, space: string, eventIds: readonly string[], updatedAt?: number): Promise<ActivityState>;
   dismissActivity(accountDid: string, space: string, eventIds: readonly string[], updatedAt?: number): Promise<ActivityState>;
-  /** Drops everything, resolved identities, activity state, and clock state included: the account signed out. */
+  getLeavingGroup(groupDid: string): Promise<LeavingGroupEntry | undefined>;
+  putLeavingGroup(entry: LeavingGroupEntry): Promise<void>;
+  deleteLeavingGroup(groupDid: string): Promise<void>;
+  listLeavingGroups(): Promise<LeavingGroupEntry[]>;
+  getJoiningGroup(operationId: string): Promise<JoiningGroupEntry | undefined>;
+  putJoiningGroup(entry: JoiningGroupEntry): Promise<void>;
+  deleteJoiningGroup(operationId: string): Promise<void>;
+  listJoiningGroups(): Promise<JoiningGroupEntry[]>;
+  getReactivatingGroup(operationId: string): Promise<ReactivatingGroupEntry | undefined>;
+  putReactivatingGroup(entry: ReactivatingGroupEntry): Promise<void>;
+  deleteReactivatingGroup(operationId: string): Promise<void>;
+  listReactivatingGroups(): Promise<ReactivatingGroupEntry[]>;
+  /** Drops everything, resolved identities, activity state, group journals, and clock state included: the account signed out. */
   clear(): Promise<void>;
 }
 
@@ -301,6 +415,14 @@ export function nextWriterState(
 
 /** Whether `change` may apply over `current`: the generation it was computed from, and a revision no older than the stored one. */
 export function commitAllowed(current: WriterState | undefined, change: WriterCommit): boolean {
+  if (change.staleIfBehindRev !== undefined) {
+    if (!current || current.stale || (current.syncedRev === null && current.checkedAt === null)) {
+      return false;
+    }
+    if (change.staleIfBehindRev === "" || (current.syncedRev !== null && current.syncedRev >= change.staleIfBehindRev)) {
+      return false;
+    }
+  }
   const generation = current?.generation ?? 0;
   if (change.expectedGeneration !== null && change.expectedGeneration !== generation) return false;
   if (change.rev !== undefined && change.rev !== null && current?.syncedRev && change.rev < current.syncedRev) return false;
@@ -378,4 +500,61 @@ export function dedupeIds(ids: readonly string[]): string[] {
     }
   }
   return out;
+}
+
+export function cloneLeavingGroupEntry(entry: LeavingGroupEntry): LeavingGroupEntry {
+  if (typeof entry.groupDid !== "string" || entry.groupDid.length === 0) {
+    throw new SyncStoreError("LeavingGroupEntry.groupDid must not be empty.");
+  }
+  return {
+    groupDid: entry.groupDid,
+    ...(entry.expectedIncarnation !== undefined ? { expectedIncarnation: entry.expectedIncarnation } : {}),
+    phase: entry.phase,
+    createdAt: entry.createdAt,
+  };
+}
+
+export function cloneJoiningGroupEntry(entry: JoiningGroupEntry): JoiningGroupEntry {
+  if (typeof entry.operationId !== "string" || entry.operationId.length === 0) {
+    throw new SyncStoreError("JoiningGroupEntry.operationId must not be empty.");
+  }
+  return {
+    operationId: entry.operationId,
+    mode: entry.mode,
+    intentHash: entry.intentHash,
+    ...(entry.authorityEndpoint !== undefined ? { authorityEndpoint: entry.authorityEndpoint } : {}),
+    ...(entry.createParams !== undefined
+      ? {
+          createParams: {
+            name: entry.createParams.name,
+            ...(entry.createParams.joinPolicy !== undefined ? { joinPolicy: entry.createParams.joinPolicy } : {}),
+            ...(entry.createParams.publicMeta !== undefined ? { publicMeta: entry.createParams.publicMeta } : {}),
+          },
+        }
+      : {}),
+    ...(entry.groupDid !== undefined ? { groupDid: entry.groupDid } : {}),
+    ...(entry.inviteUri !== undefined ? { inviteUri: entry.inviteUri } : {}),
+    ...(entry.message !== undefined ? { message: entry.message } : {}),
+    ...(entry.currentIncarnation !== undefined ? { currentIncarnation: entry.currentIncarnation } : {}),
+    ...(entry.rawStatus !== undefined ? { rawStatus: entry.rawStatus } : {}),
+    phase: entry.phase,
+    createdAt: entry.createdAt,
+  };
+}
+
+export function cloneReactivatingGroupEntry(entry: ReactivatingGroupEntry): ReactivatingGroupEntry {
+  if (typeof entry.operationId !== "string" || entry.operationId.length === 0) {
+    throw new SyncStoreError("ReactivatingGroupEntry.operationId must not be empty.");
+  }
+  if (typeof entry.groupDid !== "string" || entry.groupDid.length === 0) {
+    throw new SyncStoreError("ReactivatingGroupEntry.groupDid must not be empty.");
+  }
+  return {
+    operationId: entry.operationId,
+    groupDid: entry.groupDid,
+    ...(entry.intentHash !== undefined ? { intentHash: entry.intentHash } : {}),
+    ...(entry.restoredIncarnation !== undefined ? { restoredIncarnation: entry.restoredIncarnation } : {}),
+    phase: entry.phase,
+    createdAt: entry.createdAt,
+  };
 }

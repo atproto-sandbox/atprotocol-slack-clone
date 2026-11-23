@@ -5,29 +5,37 @@ import type { ChannelPage } from "./channel-client";
 import { DmClient } from "./dm/dm-client";
 import { readIndependentChannelPage, type IndependentChannelPage } from "@flock/reader/independent";
 import { readIndependentDmConversation } from "@flock/reader/independent-dm";
-import { reactionRecordKey, spaceRecordUri } from "@flock/protocol/keys";
-import { COLLECTION } from "@flock/protocol/nsids";
+import { reactionRecordKey, SELF_SKEY, spaceRecordUri } from "@flock/protocol/keys";
+import { ATPROTO_SPACE_COLLECTION, COLLECTION, OPENSOCIAL_COLLECTION } from "@flock/protocol/nsids";
 import { AUTHORITY, createWorkspace, key, transportFor, writeMessage } from "./testing/engine-fixture";
 import { FakeNetwork } from "@flock/testing/fake-network";
 
 // The engine against the independent readers, for what the readers can express: a fresh read of a channel page and of a
-// DM conversation, after each sync and writer-set case that ends in such a read. The readers share no code with the engine.
+// DM conversation, after each sync, writer-set, and moderation-label case that ends in such a read. The readers share no code with the engine.
 
 const ALICE = "did:plc:alice";
 const BOB = "did:plc:bob2";
 const CAROL = "did:plc:carol";
 
 function sameView(engine: ChannelPage, reader: IndependentChannelPage, label: string): void {
-  assert.deepEqual(engine.messages.map((message) => [message.uri, message.value]), reader.messages.map((message) => [message.uri, message.value]), `${label}: messages`);
-  assert.deepEqual(engine.reactions.map((reaction) => reaction.uri), reader.reactions.map((reaction) => reaction.uri), `${label}: reactions`);
+  assert.deepEqual(
+    engine.messages.map((message) => [message.uri, message.value, message.hidden ?? false, message.labels ?? []]),
+    reader.messages.map((message) => [message.uri, message.value, message.hidden ?? false, message.labels ?? []]),
+    `${label}: messages`,
+  );
+  assert.deepEqual(
+    engine.reactions.map((reaction) => [reaction.uri, reaction.labels ?? []]),
+    reader.reactions.map((reaction) => [reaction.uri, reaction.labels ?? []]),
+    `${label}: reactions`,
+  );
   assert.equal(engine.degradedReasons.length > 0, reader.degraded, `${label}: degraded`);
 }
 
-test("a channel page matches the independent reader through writes, replies, reactions, a set-aside writer and a removed member", async () => {
+test("a channel page matches the independent reader through writes, replies, reactions, moderation labels, a set-aside writer and a removed member", async () => {
   const network = new FakeNetwork();
   const fixture = await createWorkspace(network, { members: [ALICE, BOB, CAROL], channels: [{ skey: "general", visibility: "public" }] });
   const space = fixture.channels.general!;
-  const ref = { workspace: fixture.workspace, skey: "acme-general" };
+  const ref = { workspace: fixture.workspace, skey: "general" };
   const engine = createEngine(transportFor(network, ALICE));
   const reader = transportFor(network, ALICE);
   const compare = async (label: string) => {
@@ -52,21 +60,50 @@ test("a channel page matches the independent reader through writes, replies, rea
   await network.deleteAs(CAROL, space, COLLECTION.message, key(27));
   await compare("an edit, a delete and two writers sharing a key");
 
+  // Moderation labels (`!hide` and `!takedown`) project identically across SyncCore + ChannelClient and @flock/reader!
+  const hiddenTarget = spaceRecordUri(space, ALICE, COLLECTION.message, key(30));
+  const takedownTarget = spaceRecordUri(space, BOB, COLLECTION.message, key(28));
+  await network.clientFor(AUTHORITY).procedure("com.atproto.space.putRecord", {
+    space,
+    repo: AUTHORITY,
+    collection: ATPROTO_SPACE_COLLECTION.label,
+    rkey: key(100),
+    record: { $type: ATPROTO_SPACE_COLLECTION.label, src: AUTHORITY, uri: hiddenTarget, val: "!hide", cts: "2026-11-10T12:01:00.000Z" },
+  });
+  await network.clientFor(AUTHORITY).procedure("com.atproto.space.putRecord", {
+    space,
+    repo: AUTHORITY,
+    collection: ATPROTO_SPACE_COLLECTION.label,
+    rkey: key(101),
+    record: { $type: ATPROTO_SPACE_COLLECTION.label, src: AUTHORITY, uri: takedownTarget, val: "!takedown", cts: "2026-11-10T12:01:00.000Z" },
+  });
+  await engine.sync.markSpaceStale(space);
+  await compare("!hide decoration and !takedown withholding");
+
   network.setAccountState(BOB, "deactivated");
   network.advanceClock(engine.sync.options.truthIntervalMs);
   await compare("a deactivated writer set aside");
   network.setAccountState(BOB, "active");
 
-  await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMembers", { space, dids: [CAROL] });
+  await network.clientFor(AUTHORITY).procedure("com.atproto.space.deleteRecord", {
+    space: fixture.members,
+    repo: AUTHORITY,
+    collection: OPENSOCIAL_COLLECTION.membership,
+    rkey: CAROL,
+  });
   network.advanceClock(engine.sync.options.truthIntervalMs);
   await compare("a removed member, after the truth interval");
 
   const dave = "did:plc:dave";
-  await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.putMembers", {
-    space,
-    members: [{ did: dave, read: true, write: true }],
-  });
   network.createAccount(dave, "pds1");
+  await network.clientFor(AUTHORITY).procedure("com.atproto.space.putRecord", {
+    space: fixture.members,
+    repo: AUTHORITY,
+    collection: OPENSOCIAL_COLLECTION.membership,
+    rkey: dave,
+    record: { $type: OPENSOCIAL_COLLECTION.membership, roles: ["member"], createdAt: "2026-11-10T12:00:00.000Z" },
+  });
+  await network.writeAs(dave, fixture.members, OPENSOCIAL_COLLECTION.acceptance, SELF_SKEY, { createdAt: "2026-11-10T12:00:00.000Z" });
   await writeMessage(network, dave, space, 50);
   await compare("a new writer");
 });

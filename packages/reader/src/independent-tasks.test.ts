@@ -3,7 +3,6 @@ import test from "node:test";
 import { COMMIT_MAC_PROFILE, MAC_COVERED_HEADER, RECORD_MAC_PROFILE, SpaceMacError, SpaceRepoVerificationError } from "@atproto/space";
 import { fetchRepoOpsPages, listBoundedWriters, listWritersSince, RepoOpsPageError, WRITER_CURSOR_MAX_AGE_MS, WRITER_REMOVED_TYPE, WRITER_WRITE_TYPE } from "@flock/protocol/atproto/record-pages";
 import { mintSpaceCredentialWith } from "@flock/protocol/atproto/space-credential-core";
-import { memberspacePolicy } from "@flock/protocol/atproto/space-policy";
 import { XrpcError } from "@flock/protocol/atproto/xrpc";
 import {
   advanceHlc,
@@ -12,19 +11,30 @@ import {
   MAX_ANCESTOR_REFS,
   opRef,
 } from "@flock/protocol/entity-merge";
-import { spaceRecordUri, subjectKey, tasksSpaceUri } from "@flock/protocol/keys";
-import { COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
+import { groupMembersUri, SELF_SKEY, spaceRecordUri, tasksSpaceUri, workspaceUri } from "@flock/protocol/keys";
+import { ATPROTO_SPACE_COLLECTION, COLLECTION, OPENSOCIAL_COLLECTION, OPENSOCIAL_POLICY, SPACE_TYPE } from "@flock/protocol/nsids";
 import { WORKSPACE_ENVELOPE } from "@flock/protocol/workspace-summary";
 import { FakeNetwork } from "@flock/testing/fake-network";
-import { buildHostSuspendedTasksResult, readIndependentTasksSpace, type IndependentDeps } from "./independent-tasks";
+import {
+  buildHostSuspendedTasksResult,
+  readIndependentTasksSpace,
+  summarizeVerifiedWorkspaceRecords,
+  type IndependentDeps,
+} from "./independent-tasks";
 
-const AUTHORITY = "did:plc:authority";
-const ALICE = "did:plc:alice";
-const BOB = "did:plc:bob2";
-const CAROL = "did:plc:carol";
-const DAVE = "did:plc:dave2";
+const AUTHORITY = "did:plc:authorityaaaaaaaaaaaaaaa";
+const ALICE = "did:plc:aliceaaaaaaaaaaaaaaaaaaa";
+const BOB = "did:plc:bob2aaaaaaaaaaaaaaaaaaaa";
+const CAROL = "did:plc:carolaaaaaaaaaaaaaaaaaaa";
+const DAVE = "did:plc:dave2aaaaaaaaaaaaaaaaaaa";
 const TIMESTAMP = "2026-11-16T12:00:00.000Z";
 const BASE_HLC_MS = 1_700_000_000_000;
+
+function groupDidFor(label: string): string {
+  if (label === "acme") return AUTHORITY;
+  const cleaned = label.toLowerCase().replace(/[^a-z2-7]/g, "").slice(0, 18);
+  return `did:plc:grp${cleaned.padEnd(21, "a")}`;
+}
 
 function tidFor(n: number): string {
   const alphabet = "234567abcdefghijklmnopqrstuvwxyz";
@@ -61,63 +71,98 @@ async function createTasksWorkspaceFixture(
     tasksReadMembers?: readonly string[];
     createMissingAccounts?: boolean;
   },
-): Promise<{ workspace: string; tasksSpace: string; skey: string }> {
-  const skey = input.skey ?? "acme";
-  if (!network.hasAccount(AUTHORITY)) network.createAccount(AUTHORITY, "pds1");
-  const owner = network.clientFor(AUTHORITY);
+): Promise<{ groupDid: string; workspace: string; membersSpace: string; tasksSpace: string; skey: string }> {
+  const label = input.skey ?? "acme";
+  const groupDid = groupDidFor(label);
 
-  const { space: workspace } = await owner.procedure<unknown, { space: string }>("com.atproto.space.createSpace", {
+  await network.createGroupAccount(groupDid, {
+    name: `Workspace ${label}`,
+    joinPolicy: "invite",
+    publicMeta: true,
+    sovereignRotationKeys: ["did:key:zDnaeTestSovereignKey"],
+  });
+  const owner = network.clientFor(groupDid);
+  const workspace = workspaceUri(groupDid);
+  const membersSpace = groupMembersUri(groupDid);
+
+  await owner.procedure("com.atproto.space.createSpace", {
     spaceType: SPACE_TYPE.workspace,
-    skey,
-    policy: memberspacePolicy(),
-  });
-  await network.writeAs(AUTHORITY, workspace, COLLECTION.workspaceProfile, "self", {
-    name: `Workspace ${skey}`,
-    createdAt: TIMESTAMP,
-  });
-  await network.writeAs(AUTHORITY, workspace, COLLECTION.admin, subjectKey(AUTHORITY), {
-    subject: AUTHORITY,
-    active: true,
-    updatedAt: TIMESTAMP,
+    skey: SELF_SKEY,
+    policy: {
+      $type: OPENSOCIAL_POLICY,
+      publicRead: false,
+      unlisted: false,
+      grants: [
+        { role: "admin", read: true, write: true },
+        { role: "moderator", read: true, write: true },
+        { role: "member", read: true },
+      ],
+    },
   });
 
-  const tasksSpace = tasksSpaceUri(AUTHORITY, skey);
+  const tasksSpace = tasksSpaceUri(groupDid, SELF_SKEY);
   const enableTasks = input.enableTasks ?? true;
   if (enableTasks) {
     await owner.procedure("com.atproto.space.createSpace", {
       spaceType: SPACE_TYPE.tasks,
       skey: tasksSpace.split("/").at(-1)!,
-      policy: memberspacePolicy(),
+      policy: {
+        $type: OPENSOCIAL_POLICY,
+        publicRead: false,
+        unlisted: false,
+        grants: [
+          { role: "admin", read: true, write: true },
+          { role: "moderator", read: true, write: true },
+          { role: "member", read: true, write: true },
+        ],
+      },
     });
-    await network.writeAs(AUTHORITY, workspace, COLLECTION.extInstall, "tasks", {
+  }
+
+  for (const [idx, did] of input.members.entries()) {
+    if ((input.createMissingAccounts ?? true) && !network.hasAccount(did)) {
+      network.createAccount(did, did.includes("bob2") || did.includes("dave2") ? "pds2" : "pds1");
+    }
+    if (did === groupDid) continue;
+    await owner.procedure("com.atproto.space.putRecord", {
+      space: membersSpace,
+      repo: groupDid,
+      collection: OPENSOCIAL_COLLECTION.membership,
+      rkey: did,
+      record: {
+        $type: OPENSOCIAL_COLLECTION.membership,
+        roles: idx === 0 ? ["admin", "member"] : ["member"],
+        createdAt: TIMESTAMP,
+      },
+    });
+    if (network.hasAccount(did)) {
+      const mem = await owner.query<{ value: Record<string, unknown> }>("com.atproto.space.getRecord", {
+        space: membersSpace,
+        repo: groupDid,
+        collection: OPENSOCIAL_COLLECTION.membership,
+        rkey: did,
+      });
+      const inc = mem.value["new.flock.incarnation"];
+      await network.writeAs(did, membersSpace, OPENSOCIAL_COLLECTION.acceptance, SELF_SKEY, {
+        createdAt: TIMESTAMP,
+        ...(typeof inc === "string" ? { "new.flock.incarnation": inc } : {}),
+      });
+    }
+  }
+
+  if (enableTasks) {
+    await network.writeAs(groupDid, workspace, COLLECTION.extInstall, "tasks", {
       extId: "tasks",
       active: true,
       space: tasksSpace,
       cleanupComplete: false,
-      enabledBy: AUTHORITY,
+      enabledBy: input.members[0] ?? ALICE,
       enabledAt: TIMESTAMP,
       updatedAt: TIMESTAMP,
     });
   }
 
-  const tasksMembers = new Set(input.tasksReadMembers ?? input.members);
-  for (const did of [AUTHORITY, ...input.members]) {
-    if ((input.createMissingAccounts ?? true) && !network.hasAccount(did)) {
-      network.createAccount(did, did.endsWith("2") ? "pds2" : "pds1");
-    }
-    await network.writeAs(AUTHORITY, workspace, COLLECTION.workspaceRoster, subjectKey(did), {
-      subject: did,
-      active: true,
-      updatedAt: TIMESTAMP,
-    });
-    if (did === AUTHORITY) continue;
-    await owner.procedure("com.atproto.memberspace.putMembers", { space: workspace, members: [{ did, read: true, write: true }] });
-    if (enableTasks && tasksMembers.has(did)) {
-      await owner.procedure("com.atproto.memberspace.putMembers", { space: tasksSpace, members: [{ did, read: true, write: true }] });
-    }
-  }
-
-  return { workspace, tasksSpace, skey };
+  return { groupDid, workspace, membersSpace, tasksSpace, skey: SELF_SKEY };
 }
 
 test("multi-writer cold STAR verification merges projects, tasks, comments, OR-Sets, conflicts, and drops orphan/invalid records", async () => {
@@ -318,9 +363,9 @@ test("returns structured disabled result when Tasks extension is missing or deac
   await network.writeAs(AUTHORITY, workspace, COLLECTION.extInstall, "tasks", {
     extId: "tasks",
     active: false,
-    space: tasksSpaceUri(AUTHORITY, "acme"),
+    space: tasksSpaceUri(AUTHORITY, SELF_SKEY),
     cleanupComplete: true,
-    enabledBy: AUTHORITY,
+    enabledBy: ALICE,
     enabledAt: TIMESTAMP,
     updatedAt: TIMESTAMP,
     disabledAt: TIMESTAMP,
@@ -418,9 +463,7 @@ test("D11.1 #4 RepoNotFound trust boundary: unwritten non-listed roster member s
     const network = new FakeNetwork();
     const { workspace, tasksSpace } = await createTasksWorkspaceFixture(network, {
       members: [ALICE, CAROL],
-      createMissingAccounts: false,
     });
-    network.createAccount(ALICE, "pds1");
     await network.writeAs(ALICE, tasksSpace, COLLECTION.task, tidFor(1), {
       title: "Task",
       status: "todo",
@@ -429,15 +472,23 @@ test("D11.1 #4 RepoNotFound trust boundary: unwritten non-listed roster member s
       createdAt: TIMESTAMP,
     });
 
-    // Carol has no account so resolvePds(CAROL) throws.
-    const noAccount = await readIndependentTasksSpace(depsFor(network, ALICE), workspace);
+    const baseDeps = depsFor(network, ALICE);
+    // Simulate resolvePds(CAROL) throwing (e.g. unresolvable DID) -> fail closed.
+    const noAccount = await readIndependentTasksSpace(
+      {
+        ...baseDeps,
+        resolvePds: async (did) => {
+          if (did === CAROL) throw new Error("PLC record missing for CAROL");
+          return baseDeps.resolvePds(did);
+        },
+      },
+      workspace,
+    );
     assert.equal(noAccount.complete, false);
     assert.equal(noAccount.degraded, true);
     assert.deepEqual(noAccount.setAside.map((s) => s.did), [CAROL]);
 
-    // Register Carol but have resolvePds return unsafe plain HTTP on a non-loopback host -> still fail closed.
-    network.createAccount(CAROL, "pds2");
-    const baseDeps = depsFor(network, ALICE);
+    // Have resolvePds return unsafe plain HTTP on a non-loopback host -> still fail closed.
     const unsafeHttp = await readIndependentTasksSpace(
       {
         ...baseDeps,
@@ -727,11 +778,11 @@ test("rejects forged MAC, tampered STAR, oversized STAR (>16 MiB), and forged fa
   }
 });
 
-test("malformed workspace.roster or ext.install sets workspaceSnapshotComplete: false, complete: false, and suppresses Activity", async () => {
-  // 1. Malformed workspace.roster record alongside valid active tasks ext.install -> snapshot incomplete, tasks read with complete: false & Activity suppressed.
+test("overflowed membership envelope or malformed ext.install sets workspaceSnapshotComplete: false, complete: false, and suppresses Activity", async () => {
+  // 1. Membership envelope overflow (> 200 members) alongside valid active tasks ext.install -> snapshot incomplete, tasks read with complete: false & Activity suppressed.
   {
     const network = new FakeNetwork();
-    const { workspace, tasksSpace } = await createTasksWorkspaceFixture(network, { members: [ALICE, BOB] });
+    const { groupDid, workspace, membersSpace, tasksSpace } = await createTasksWorkspaceFixture(network, { members: [ALICE, BOB] });
     const rkey = tidFor(1);
     const taskUri = spaceRecordUri(tasksSpace, ALICE, COLLECTION.task, rkey);
     await network.writeAs(ALICE, tasksSpace, COLLECTION.task, rkey, {
@@ -754,29 +805,33 @@ test("malformed workspace.roster or ext.install sets workspaceSnapshotComplete: 
       title: "Bob title",
     });
 
-    // Inject malformed workspace.roster record (rkey does not match subjectKey(subject)).
-    await network.writeAs(AUTHORITY, workspace, COLLECTION.workspaceRoster, "bad-roster-key", {
-      subject: CAROL,
-      active: true,
-      updatedAt: TIMESTAMP,
-    });
+    for (let i = 0; i < 199; i += 1) {
+      const extraDid = `did:plc:extramem${String(i).padStart(4, "0")}aaaaaaaaaaaa`;
+      await network.clientFor(groupDid).procedure("com.atproto.space.putRecord", {
+        space: membersSpace,
+        repo: groupDid,
+        collection: OPENSOCIAL_COLLECTION.membership,
+        rkey: extraDid,
+        record: { $type: OPENSOCIAL_COLLECTION.membership, roles: ["member"], createdAt: TIMESTAMP },
+      });
+    }
 
     const result = await readIndependentTasksSpace(depsFor(network, ALICE), workspace);
     assert.equal(result.enabled, true);
     assert.equal(result.workspaceSnapshotComplete, false);
     assert.equal(result.complete, false);
     assert.equal(result.degraded, true);
-    assert.ok(result.degradedReasons.some((r) => r.includes(COLLECTION.workspaceRoster)));
+    assert.ok(result.degradedReasons.some((r) => r.includes(`${WORKSPACE_ENVELOPE.members} members`)));
     assert.equal(result.tasks.length, 1);
     assert.equal(result.tasks[0]!.conflictFinal, false);
     assert.equal(result.tasks[0]!.otherVersions.title?.length, 1);
     assert.deepEqual(result.activities, [], "conflict Activity must be suppressed when workspaceSnapshotComplete is false");
   }
 
-  // 2. Malformed secondary ext.install record -> workspaceSnapshotComplete: false & Activity suppressed.
+  // 2. Malformed secondary ext.install record (`validate: false`) -> workspaceSnapshotComplete: false & Activity suppressed.
   {
     const network = new FakeNetwork();
-    const { workspace, tasksSpace } = await createTasksWorkspaceFixture(network, { members: [ALICE, BOB] });
+    const { groupDid, workspace, tasksSpace } = await createTasksWorkspaceFixture(network, { members: [ALICE, BOB] });
     const rkey = tidFor(1);
     const taskUri = spaceRecordUri(tasksSpace, ALICE, COLLECTION.task, rkey);
     await network.writeAs(ALICE, tasksSpace, COLLECTION.task, rkey, {
@@ -799,13 +854,21 @@ test("malformed workspace.roster or ext.install sets workspaceSnapshotComplete: 
       title: "Bob title",
     });
 
-    await network.writeAs(AUTHORITY, workspace, COLLECTION.extInstall, "bogus", {
-      extId: "bogus",
-      active: true,
-      space: tasksSpace,
-      enabledBy: AUTHORITY,
-      enabledAt: TIMESTAMP,
-      updatedAt: TIMESTAMP,
+    await network.clientFor(groupDid).procedure("com.atproto.space.putRecord", {
+      space: workspace,
+      repo: groupDid,
+      collection: COLLECTION.extInstall,
+      rkey: "bogus",
+      validate: false,
+      record: {
+        $type: COLLECTION.extInstall,
+        extId: "bogus",
+        active: true,
+        space: tasksSpace,
+        enabledBy: ALICE,
+        enabledAt: TIMESTAMP,
+        updatedAt: TIMESTAMP,
+      },
     });
 
     const result = await readIndependentTasksSpace(depsFor(network, ALICE), workspace);
@@ -817,18 +880,26 @@ test("malformed workspace.roster or ext.install sets workspaceSnapshotComplete: 
     assert.deepEqual(result.activities, []);
   }
 
-  // 3. Malformed "tasks" ext.install (non-canonical space URI) -> enabled: false, workspaceSnapshotComplete: false, complete: false.
+  // 3. Malformed "tasks" ext.install (non-canonical space URI, `validate: false`) -> enabled: false, workspaceSnapshotComplete: false, complete: false.
   {
     const network = new FakeNetwork();
-    const { workspace } = await createTasksWorkspaceFixture(network, { members: [ALICE] });
-    await network.writeAs(AUTHORITY, workspace, COLLECTION.extInstall, "tasks", {
-      extId: "tasks",
-      active: true,
-      space: `at://${AUTHORITY}/space/${SPACE_TYPE.tasks}/non-canonical`,
-      cleanupComplete: false,
-      enabledBy: AUTHORITY,
-      enabledAt: TIMESTAMP,
-      updatedAt: TIMESTAMP,
+    const { groupDid, workspace } = await createTasksWorkspaceFixture(network, { members: [ALICE] });
+    await network.clientFor(groupDid).procedure("com.atproto.space.putRecord", {
+      space: workspace,
+      repo: groupDid,
+      collection: COLLECTION.extInstall,
+      rkey: "tasks",
+      validate: false,
+      record: {
+        $type: COLLECTION.extInstall,
+        extId: "tasks",
+        active: true,
+        space: `at://${groupDid}/space/${SPACE_TYPE.tasks}/non-canonical`,
+        cleanupComplete: false,
+        enabledBy: ALICE,
+        enabledAt: TIMESTAMP,
+        updatedAt: TIMESTAMP,
+      },
     });
 
     const result = await readIndependentTasksSpace(depsFor(network, ALICE), workspace);
@@ -843,7 +914,7 @@ test("removed intermediate writer B (D -> B -> R and >256 sTruncated overflow) y
   // 1. D (Alice) -> B (Bob) -> R (Carol), then Bob removed under D14 -> R still dominates D cleanly and stays final.
   {
     const network = new FakeNetwork();
-    const { workspace, tasksSpace } = await createTasksWorkspaceFixture(network, {
+    const { groupDid, workspace, membersSpace, tasksSpace } = await createTasksWorkspaceFixture(network, {
       members: [ALICE, BOB, CAROL],
     });
     const rootRkey = tidFor(1);
@@ -878,13 +949,13 @@ test("removed intermediate writer B (D -> B -> R and >256 sTruncated overflow) y
       title: "Carol restored",
     });
 
-    // Remove Bob from roster & Tasks space access (D14 purge).
-    await network.writeAs(AUTHORITY, workspace, COLLECTION.workspaceRoster, subjectKey(BOB), {
-      subject: BOB,
-      active: false,
-      updatedAt: TIMESTAMP,
+    // Remove Bob from membership & Tasks space access (D14 purge).
+    await network.clientFor(groupDid).procedure("com.atproto.space.deleteRecord", {
+      space: membersSpace,
+      repo: groupDid,
+      collection: OPENSOCIAL_COLLECTION.membership,
+      rkey: BOB,
     });
-    await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMembers", { space: tasksSpace, dids: [BOB] });
 
     const result = await readIndependentTasksSpace(depsFor(network, ALICE), workspace);
     assert.equal(result.complete, true);
@@ -901,7 +972,7 @@ test("removed intermediate writer B (D -> B -> R and >256 sTruncated overflow) y
   // 2. >256 sTruncated overflow across Alice, Bob, Carol, followed by Bob removal -> deterministic cold merge & uncertainAncestry.
   {
     const network = new FakeNetwork();
-    const { workspace, tasksSpace } = await createTasksWorkspaceFixture(network, {
+    const { groupDid, workspace, membersSpace, tasksSpace } = await createTasksWorkspaceFixture(network, {
       members: [ALICE, BOB, CAROL],
     });
     const rootRkey = tidFor(1);
@@ -937,12 +1008,12 @@ test("removed intermediate writer B (D -> B -> R and >256 sTruncated overflow) y
     assert.equal(ops.at(-1)!.s!.length, MAX_ANCESTOR_REFS);
 
     // Purge Bob under D14.
-    await network.writeAs(AUTHORITY, workspace, COLLECTION.workspaceRoster, subjectKey(BOB), {
-      subject: BOB,
-      active: false,
-      updatedAt: TIMESTAMP,
+    await network.clientFor(groupDid).procedure("com.atproto.space.deleteRecord", {
+      space: membersSpace,
+      repo: groupDid,
+      collection: OPENSOCIAL_COLLECTION.membership,
+      rkey: BOB,
     });
-    await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMembers", { space: tasksSpace, dids: [BOB] });
 
     const runA = await readIndependentTasksSpace(depsFor(network, ALICE), workspace);
     const runB = await readIndependentTasksSpace(depsFor(network, CAROL), workspace);
@@ -1044,14 +1115,17 @@ test("workspace snapshot forged MAC, oversized roster (>200), and deactivated Ta
   // 2. Active workspace roster > 200 members -> workspaceSnapshotComplete: false, complete: false, Activity suppressed.
   {
     const network = new FakeNetwork();
-    const { workspace, tasksSpace } = await createTasksWorkspaceFixture(network, { members: [ALICE, BOB] });
-    const extraRosterBatch1 = Array.from({ length: 199 }, (_, i) => ({
-      action: "create" as const,
-      collection: COLLECTION.workspaceRoster,
-      rkey: subjectKey(`did:plc:extra${i}`),
-      value: { subject: `did:plc:extra${i}`, active: true, updatedAt: TIMESTAMP },
-    }));
-    await network.applyWritesAs(AUTHORITY, workspace, extraRosterBatch1);
+    const { groupDid, workspace, membersSpace, tasksSpace } = await createTasksWorkspaceFixture(network, { members: [ALICE, BOB] });
+    for (let i = 0; i < 199; i += 1) {
+      const extraDid = `did:plc:extra${String(i).padStart(4, "0")}aaaaaaaaaaaaaaa`;
+      await network.clientFor(groupDid).procedure("com.atproto.space.putRecord", {
+        space: membersSpace,
+        repo: groupDid,
+        collection: OPENSOCIAL_COLLECTION.membership,
+        rkey: extraDid,
+        record: { $type: OPENSOCIAL_COLLECTION.membership, roles: ["member"], createdAt: TIMESTAMP },
+      });
+    }
 
     const rkey = tidFor(1);
     const taskUri = spaceRecordUri(tasksSpace, ALICE, COLLECTION.task, rkey);
@@ -1136,16 +1210,16 @@ test("JSON listRecords fallback enforces aggregate CBOR byte cap and classifies 
     }
     let bobListCalls = 0;
     network.interceptResponse = ({ method, params, response }) => {
-      if (method === "com.atproto.space.getRepo" && params.repo === BOB) {
+      if (method === "com.atproto.space.getRepo" && params.space === tasksSpace && params.repo === BOB) {
         return new Response(JSON.stringify({ error: "MethodNotImplemented", message: "no star" }), { status: 501 });
       }
-      if (method === "com.atproto.space.listRecords" && params.repo === BOB) {
+      if (method === "com.atproto.space.listRecords" && params.space === tasksSpace && params.repo === BOB) {
         bobListCalls += 1;
       }
       return response;
     };
 
-    const res = await readIndependentTasksSpace(depsFor(network, ALICE), workspace, { maxStarArchiveBytes: 512 });
+    const res = await readIndependentTasksSpace(depsFor(network, ALICE), workspace, { maxStarArchiveBytes: 768 });
     assert.equal(bobListCalls, 1);
     assert.equal(res.complete, false);
     assert.deepEqual(res.setAside, [
@@ -1191,7 +1265,7 @@ test("listWriters #repoRemoved, cross-page removal override, and >72h / InvalidC
   // 1. Live FakeNetwork removeMembers emits #repoRemoved so Bob is excluded from listWriters & readIndependentTasksSpace.
   {
     const network = new FakeNetwork();
-    const { workspace, tasksSpace } = await createTasksWorkspaceFixture(network, { members: [ALICE, BOB] });
+    const { groupDid, workspace, membersSpace, tasksSpace } = await createTasksWorkspaceFixture(network, { members: [ALICE, BOB] });
     await network.writeAs(ALICE, tasksSpace, COLLECTION.task, tidFor(1), {
       title: "Alice task",
       status: "todo",
@@ -1209,23 +1283,22 @@ test("listWriters #repoRemoved, cross-page removal override, and >72h / InvalidC
 
     const cred = await mintSpaceCredentialWith(depsFor(network, ALICE), tasksSpace);
     const beforeScan = await listBoundedWriters(cred.client(await network.resolvePds(AUTHORITY)), { space: tasksSpace, maxRepos: 100 });
-    assert.deepEqual(beforeScan.writers.map((w) => w.repo).sort(), [ALICE, BOB]);
+    assert.deepEqual(beforeScan.writers.map((w) => w.repo).filter((r) => r !== groupDid).sort(), [ALICE, BOB]);
 
-    await network.writeAs(AUTHORITY, workspace, COLLECTION.workspaceRoster, subjectKey(BOB), {
-      subject: BOB,
-      active: false,
-      updatedAt: TIMESTAMP,
+    await network.clientFor(groupDid).procedure("com.atproto.space.deleteRecord", {
+      space: membersSpace,
+      repo: groupDid,
+      collection: OPENSOCIAL_COLLECTION.membership,
+      rkey: BOB,
     });
-    await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMembers", { space: tasksSpace, dids: [BOB] });
 
     const afterScan = await listBoundedWriters(cred.client(await network.resolvePds(AUTHORITY)), { space: tasksSpace, maxRepos: 100 });
-    assert.deepEqual(afterScan.writers.map((w) => w.repo), [ALICE]);
+    assert.deepEqual(afterScan.writers.map((w) => w.repo).filter((r) => r !== groupDid), [ALICE]);
 
     const res = await readIndependentTasksSpace(depsFor(network, ALICE), workspace);
     assert.equal(res.complete, true);
     assert.deepEqual(res.tasks.map((t) => t.title), ["Alice task"]);
 
-    // Incremental listWritersSince sees #repoRemoved; >72h cursor or InvalidCursor falls back to full listBoundedWriters.
     const inc = await listWritersSince(cred.client(await network.resolvePds(AUTHORITY)), {
       space: tasksSpace,
       since: beforeScan.spaceRev,
@@ -1243,7 +1316,7 @@ test("listWriters #repoRemoved, cross-page removal override, and >72h / InvalidC
       maxRepos: 100,
     });
     assert.equal(staleFallback.fullReconcile, true);
-    assert.deepEqual(staleFallback.writers?.map((w) => w.repo), [ALICE]);
+    assert.deepEqual(staleFallback.writers?.map((w) => w.repo).filter((r) => r !== groupDid), [ALICE]);
 
     network.interceptResponse = ({ method, params, response }) => {
       if (method === "com.atproto.space.listWriters" && params.cursor === beforeScan.spaceRev) {
@@ -1261,13 +1334,13 @@ test("listWriters #repoRemoved, cross-page removal override, and >72h / InvalidC
       maxRepos: 100,
     });
     assert.equal(invalidCursorFallback.fullReconcile, true);
-    assert.deepEqual(invalidCursorFallback.writers?.map((w) => w.repo), [ALICE]);
+    assert.deepEqual(invalidCursorFallback.writers?.map((w) => w.repo).filter((r) => r !== groupDid), [ALICE]);
   }
 
   // 2. Cross-page latest-wins: page 1 emits #repoWrite for BOB, page 2 emits #repoRemoved for BOB -> BOB excluded from readIndependentTasksSpace.
   {
     const network = new FakeNetwork();
-    const { workspace, tasksSpace } = await createTasksWorkspaceFixture(network, { members: [ALICE, BOB] });
+    const { groupDid, workspace, membersSpace, tasksSpace } = await createTasksWorkspaceFixture(network, { members: [ALICE, BOB] });
     await network.writeAs(ALICE, tasksSpace, COLLECTION.task, tidFor(1), {
       title: "Alice survives",
       status: "todo",
@@ -1282,10 +1355,11 @@ test("listWriters #repoRemoved, cross-page removal override, and >72h / InvalidC
       t: hlcAt(10),
       createdAt: TIMESTAMP,
     });
-    await network.writeAs(AUTHORITY, workspace, COLLECTION.workspaceRoster, subjectKey(BOB), {
-      subject: BOB,
-      active: false,
-      updatedAt: TIMESTAMP,
+    await network.clientFor(groupDid).procedure("com.atproto.space.deleteRecord", {
+      space: membersSpace,
+      repo: groupDid,
+      collection: OPENSOCIAL_COLLECTION.membership,
+      rkey: BOB,
     });
 
     let bobProbed = false;
@@ -1630,4 +1704,133 @@ test("verifies RFC 9421 MACs on every listRepoOps page, refreshes rotated KEM ke
   assert.deepEqual(badKem.setAside, [
     { did: BOB, reason: "it publishes no usable #atproto_kem key", permanent: true },
   ]);
+});
+
+test("readIndependentTasksSpace marks workspaceSnapshotComplete: false when membersWriterScan is truncated and withholds !takedown members from rosterMembers", async () => {
+  const network = new FakeNetwork();
+  const { workspace, membersSpace, tasksSpace } = await createTasksWorkspaceFixture(network, { members: [ALICE, BOB] });
+  const owner = network.clientFor(AUTHORITY);
+
+  // Account-level !takedown on BOB excludes BOB from snapshot.rosterMembers!
+  await owner.procedure("com.atproto.space.putRecord", {
+    space: membersSpace,
+    repo: AUTHORITY,
+    collection: ATPROTO_SPACE_COLLECTION.label,
+    rkey: tidFor(50),
+    record: {
+      $type: ATPROTO_SPACE_COLLECTION.label,
+      src: AUTHORITY,
+      uri: BOB,
+      val: "!takedown",
+      cts: "2026-11-10T12:15:00.000Z",
+    },
+  });
+  const baseDeps = depsFor(network, ALICE);
+  const withTakedown = await readIndependentTasksSpace(baseDeps, workspace);
+  assert.equal(withTakedown.rosterMembers.includes(BOB), false, "!takedown member excluded from tasks rosterMembers");
+
+  // Truncated listWriters on membersSpace marks workspaceSnapshotComplete: false and complete: false!
+  const truncMembersWritersDeps = {
+    ...baseDeps,
+    fetchEndpoint: async (req: Request) => {
+      const url = new URL(req.url);
+      if (
+        url.pathname === "/xrpc/com.atproto.space.listWriters" &&
+        url.searchParams.get("space") === membersSpace
+      ) {
+        const offset = Number((url.searchParams.get("cursor") ?? "w-0").replace("w-", "")) || 0;
+        const limit = Number(url.searchParams.get("limit") ?? "100");
+        const total = 20_001;
+        const count = Math.max(0, Math.min(limit, total - offset));
+        const repos = Array.from({ length: count }, (_, idx) => ({
+          $type: WRITER_WRITE_TYPE,
+          repo: offset === 0 && idx === 0 ? ALICE : `did:web:fillertask-${offset + idx}.example`,
+          repoRev: tidFor(10),
+          spaceRev: tidFor(10),
+        }));
+        return Response.json({
+          repos,
+          ...(offset + count < total ? { cursor: `w-${offset + count}` } : {}),
+        });
+      }
+      return baseDeps.fetchEndpoint(req);
+    },
+  };
+  const truncSnap = await readIndependentTasksSpace(truncMembersWritersDeps, workspace);
+  assert.equal(truncSnap.workspaceSnapshotComplete, false);
+  assert.equal(truncSnap.complete, false);
+  assert.equal(truncSnap.degraded, true);
+  assert.ok(truncSnap.degradedReasons.some((r) => r.includes("Members space writer set exceeds")));
+
+  // Round 18 Fix #3: Missing or malformed published `com.atproto.space.policy/self` records (even when ALL core policies are absent!)
+  // MUST NOT trigger synthetic fallback policies and MUST mark `workspaceSnapshotComplete: false` and `degradedReasons`!
+  const missingPolSnap = summarizeVerifiedWorkspaceRecords({
+    workspaceUri: workspace,
+    authorityDid: AUTHORITY,
+    workspaceSkey: "self",
+    expectedTasksSpace: tasksSpace,
+    metaUri: `at://${AUTHORITY}/space/group.opensocial.meta/self`,
+    membersUri: membersSpace,
+    metaRecords: [
+      {
+        collection: OPENSOCIAL_COLLECTION.profile,
+        rkey: SELF_SKEY,
+        cid: "bafyreiprofile00001",
+        record: { $type: OPENSOCIAL_COLLECTION.profile, displayName: "Acme", joinPolicy: "invite" },
+      },
+    ],
+    membersAuthorityRecords: [
+      {
+        collection: OPENSOCIAL_COLLECTION.role,
+        rkey: "member",
+        cid: "bafyreirolemember01",
+        record: { $type: OPENSOCIAL_COLLECTION.role, displayName: "Member", default: true },
+      },
+    ],
+    wsAuthorityRecords: [],
+    acceptances: [],
+    memberWriters: new Map(),
+    membersWriterScanTruncated: false,
+    memberSetAside: [],
+  });
+  assert.equal(missingPolSnap.workspaceSnapshotComplete, false, "policy-less snapshot must NEVER fall back to synthetic core policies");
+  assert.ok(
+    missingPolSnap.degradedReasons.some((r) => r.includes("Space policy records contain malformed or missing entries")),
+  );
+
+  const badWrapperSnap = summarizeVerifiedWorkspaceRecords({
+    workspaceUri: workspace,
+    authorityDid: AUTHORITY,
+    workspaceSkey: "self",
+    expectedTasksSpace: tasksSpace,
+    metaUri: `at://${AUTHORITY}/space/group.opensocial.meta/self`,
+    membersUri: membersSpace,
+    metaRecords: [
+      {
+        collection: OPENSOCIAL_COLLECTION.profile,
+        rkey: SELF_SKEY,
+        cid: "bafyreiprofile00001",
+        record: { $type: OPENSOCIAL_COLLECTION.profile, displayName: "Acme", joinPolicy: "invite" },
+      },
+      {
+        collection: ATPROTO_SPACE_COLLECTION.spacePolicy,
+        rkey: SELF_SKEY,
+        cid: "bafyreipolbad1",
+        record: {
+          $type: "com.example.wrongWrapper",
+          policy: { $type: OPENSOCIAL_POLICY, publicRead: true, unlisted: false, grants: [] },
+        },
+      },
+    ],
+    membersAuthorityRecords: [],
+    wsAuthorityRecords: [],
+    acceptances: [],
+    memberWriters: new Map(),
+    membersWriterScanTruncated: false,
+    memberSetAside: [],
+  });
+  assert.equal(badWrapperSnap.workspaceSnapshotComplete, false);
+  assert.ok(
+    badWrapperSnap.degradedReasons.some((r) => r.includes("Space policy records contain malformed or missing entries")),
+  );
 });

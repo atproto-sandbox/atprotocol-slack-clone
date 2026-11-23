@@ -11,9 +11,10 @@
         "new.flock.ext.tasks.projectEdit",
         "new.flock.ext.tasks.task",
         "new.flock.ext.tasks.taskEdit",
-        "new.flock.ext.tasks.comment"
+        "new.flock.ext.tasks.comment",
+        "com.atproto.label.record"
       ],
-      "description": "Shared workspace projects, tasks, causal edits, and task comments."
+      "description": "Shared workspace projects, tasks, causal edits, task comments, and moderation labels."
     }
   }
 }

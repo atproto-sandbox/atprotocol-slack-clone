@@ -1,15 +1,18 @@
-import { appInboxState, listSpaceMembers } from "../../atproto/space-ops";
-import { appInboxUri, channelUri, inboxUri } from "@flock/protocol/keys";
-import { COLLECTION } from "@flock/protocol/nsids";
-import { OperationRejectedError, type OperationContext } from "../journal";
+import { effectiveHumanAdmins } from "@flock/protocol/scopes";
 import type { OperatorActor } from "../actor";
-import { activeAdmins, assertNoMembership, directoryRecords, hasActiveAdminRecord, isSpaceNotFound, writeRoster } from "../workspace-state";
+import { OperationRejectedError, type OperationContext } from "../journal";
+import { deleteMembershipRecord, readGroupGovernanceState } from "../workspace-state";
 import type { OperationKind } from "./kind";
-import { removeListMember } from "../members";
-import { activeInstalls, readInstall, uncleanedExtInstalls } from "../membership";
 
 const REMOVAL_STEPS = [
-  "remove-ext-{extId}", "remove-inbox-membership", "remove-app-inbox-{app}", "remove-channel-{skey}", "remove-workspace-membership", "deactivate-workspace-roster", "deactivate-admin", "removal-verified",
+  "remove-ext-{extId}",
+  "remove-inbox-membership",
+  "remove-app-inbox-{app}",
+  "remove-channel-{skey}",
+  "remove-workspace-membership",
+  "deactivate-workspace-roster",
+  "deactivate-admin",
+  "removal-verified",
 ] as const;
 
 export const removeMemberKind: OperationKind = {
@@ -22,7 +25,6 @@ export const removeMemberKind: OperationKind = {
   run: (actor, context, request) => removeMember(actor, context, request.subject as string),
 };
 
-/** A member removing themselves: the same steps as a removal, run for the member who asked. */
 export const leaveWorkspaceKind: OperationKind = {
   kind: "leaveWorkspace",
   required: [],
@@ -34,60 +36,54 @@ export const leaveWorkspaceKind: OperationKind = {
 };
 
 async function removeMember(actor: OperatorActor, context: OperationContext, subject: string): Promise<void> {
-  if (subject === actor.workspace.authorityDid) throw new OperationRejectedError("The workspace authority cannot be removed.");
-  if ((await readInstall(actor, subject))?.active) throw new OperationRejectedError("An installed app is removed with uninstallApp.");
-  const admins = await activeAdmins(actor);
-  const subjectIsEffectiveAdmin = admins.has(subject);
-  const subjectHasActiveAdminRecord = await hasActiveAdminRecord(actor, subject);
-  if (subjectIsEffectiveAdmin && admins.size <= 1) throw new OperationRejectedError("The last active admin cannot leave or be removed.");
-  const inbox = inboxUri(actor.workspace.authorityDid, actor.workspace.skey);
-  const channels = await directoryRecords(actor);
-  const workspace = actor.workspace.uri;
-  const installs = await activeInstalls(actor);
-  const appInboxes: Array<{ app: string; space: string }> = [];
-  for (const install of [...installs.values()].sort((left, right) => left.subject.localeCompare(right.subject))) {
-    const space = appInboxUri(actor.workspace.authorityDid, actor.workspace.skey, install.subject);
-    if (await appInboxState(actor.session, space) === "present") appInboxes.push({ app: install.subject, space });
+  const groupDid = actor.workspace.authorityDid;
+  if (subject === groupDid) {
+    throw new OperationRejectedError("The group account cannot be removed.");
   }
-  const extInstalls = await uncleanedExtInstalls(actor);
-  for (const ext of extInstalls) {
-    await context.step(`remove-ext-${ext.extId}`, async () => {
-      try {
-        const members = await listSpaceMembers(actor.session, ext.space);
-        if (members.some((member) => member.did === subject)) {
-          await removeListMember(actor.session, ext.space, subject);
-        }
-      } catch (error) {
-        if (isSpaceNotFound(error)) return;
-        throw error;
-      }
-    });
+
+  const state = await readGroupGovernanceState(actor.session, groupDid);
+  if (state.knownAppSubjects.has(subject)) {
+    throw new OperationRejectedError("An installed app is removed with uninstallApp.");
   }
-  await context.step("remove-inbox-membership", () => removeListMember(actor.session, inbox, subject));
-  for (const appInbox of appInboxes) {
-    await context.step(`remove-app-inbox-${appInbox.app}`, () => removeListMember(actor.session, appInbox.space, subject));
+
+  const admins = effectiveHumanAdmins(state, groupDid);
+  if (admins.includes(subject) && admins.length <= 1) {
+    throw new OperationRejectedError("The last active admin cannot leave or be removed.");
   }
-  for (const channel of channels) {
-    const channelSpace = channelUri(actor.workspace.authorityDid, channel.value.skey);
-    await context.step(`remove-channel-${channel.value.skey}`, async () => {
-      await removeListMember(actor.session, channelSpace, subject);
-      if (channel.value.visibility === "private") await writeRoster(actor, channelSpace, subject, false, COLLECTION.channelRoster);
-    });
-  }
-  await context.step("remove-workspace-membership", () => removeListMember(actor.session, workspace, subject));
-  await context.step("deactivate-workspace-roster", () => writeRoster(actor, workspace, subject, false));
-  if (subjectHasActiveAdminRecord) await context.step("deactivate-admin", () => writeRoster(actor, workspace, subject, false, COLLECTION.admin));
-  await context.step("removal-verified", async () => {
-    for (const ext of extInstalls) {
-      try {
-        await assertNoMembership(actor, ext.space, subject);
-      } catch (error) {
-        if (!isSpaceNotFound(error)) throw error;
-      }
+
+  // Legacy step replay markers (no-ops under OpenSocial flat union RBAC):
+  for (const prev of context.completedSteps) {
+    if (prev.startsWith("remove-ext-")) {
+      const extId = prev.slice("remove-ext-".length);
+      await context.step(`remove-ext-${extId}`, async () => {});
+    } else if (prev.startsWith("remove-app-inbox-")) {
+      const app = prev.slice("remove-app-inbox-".length);
+      await context.step(`remove-app-inbox-${app}`, async () => {});
+    } else if (prev.startsWith("remove-channel-")) {
+      const skey = prev.slice("remove-channel-".length);
+      await context.step(`remove-channel-${skey}`, async () => {});
     }
-    await assertNoMembership(actor, inbox, subject);
-    for (const appInbox of appInboxes) await assertNoMembership(actor, appInbox.space, subject);
-    await assertNoMembership(actor, workspace, subject);
-    for (const channel of channels) await assertNoMembership(actor, channelUri(actor.workspace.authorityDid, channel.value.skey), subject);
+  }
+  if (context.completedSteps.includes("remove-inbox-membership")) {
+    await context.step("remove-inbox-membership", async () => {});
+  }
+
+  // Single O(1) `deleteRecord(membership/<subject>)` evicts `subject` from all group space writer sets!
+  await context.step("remove-workspace-membership", () =>
+    deleteMembershipRecord(actor.session, groupDid, subject),
+  );
+
+  if (context.completedSteps.includes("deactivate-workspace-roster")) {
+    await context.step("deactivate-workspace-roster", async () => {});
+  }
+  if (context.completedSteps.includes("deactivate-admin")) {
+    await context.step("deactivate-admin", async () => {});
+  }
+
+  await context.step("removal-verified", async () => {
+    const latest = await readGroupGovernanceState(actor.session, groupDid);
+    if (latest.memberships.has(subject)) {
+      throw new Error("Group membership removal has not converged.");
+    }
   });
 }

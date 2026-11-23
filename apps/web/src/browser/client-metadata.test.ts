@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildBrowserClientMetadata } from "./client-metadata";
+import { groupAdminScopes } from "@flock/protocol/scopes";
+import { buildBrowserClientMetadata, buildGroupBrowserClientMetadata } from "./client-metadata";
 
 const scope = "atproto space:new.flock.dm.inbox?authority=*&collection=new.flock.dm.request&action=create";
 
@@ -34,4 +35,18 @@ test("a loopback appUrl given as 'localhost' still redirects on the 127.0.0.1 IP
 test("HTTPS is never treated as loopback even on a loopback hostname", () => {
   const metadata = buildBrowserClientMetadata({ appUrl: "https://127.0.0.1:3000", scope });
   assert.equal(metadata.client_id, "https://127.0.0.1:3000/oauth/client-metadata.json");
+});
+
+test("buildGroupBrowserClientMetadata publishes /oauth/group-client-metadata.json and /oauth/group-callback with groupAdminScopes() (never aud=self)", () => {
+  const httpsMeta = buildGroupBrowserClientMetadata({ appUrl: "https://spaces.example.com" });
+  assert.equal(httpsMeta.client_id, "https://spaces.example.com/oauth/group-client-metadata.json");
+  assert.deepEqual(httpsMeta.redirect_uris, ["https://spaces.example.com/oauth/group-callback"]);
+  assert.equal(httpsMeta.scope, groupAdminScopes().join(" "));
+  assert.equal(httpsMeta.scope.includes("aud=self"), false);
+
+  const loopbackMeta = buildGroupBrowserClientMetadata({ appUrl: "http://localhost:3000" });
+  assert.deepEqual(loopbackMeta.redirect_uris, ["http://127.0.0.1:3000/oauth/group-callback"]);
+  const cid = new URL(loopbackMeta.client_id);
+  assert.equal(cid.hostname, "localhost");
+  assert.equal(cid.searchParams.get("redirect_uri"), "http://127.0.0.1:3000/oauth/group-callback");
 });

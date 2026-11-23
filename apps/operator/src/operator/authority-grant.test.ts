@@ -659,3 +659,29 @@ test("quarantined sessionStore + out-of-band probe preserve authority_grant acro
   await grant.revokeAuthorityGrant(did).catch(() => undefined);
   assert.equal(grant.hasAuthorityGrant(did), false);
 });
+
+test("assertCredentialFreeOriginUrl and authorityClientMetadata reject embedded userinfo, paths, queries, and fragments", () => {
+  for (const bad of [
+    "https://user:secret@operator.example",
+    "https://user@operator.example",
+    "https://operator.example/subpath",
+    "https://operator.example?leak=1",
+    "https://operator.example#frag",
+    "ftp://operator.example",
+  ]) {
+    assert.throws(
+      () => grant.assertCredentialFreeOriginUrl(new URL(bad), "operatorUrl"),
+      grant.AuthorityFlowError,
+      `must reject ${bad}`,
+    );
+    assert.throws(
+      () => grant.authorityClientMetadata({ operatorUrl: new URL(bad), authorityClientKeys: [] }),
+      grant.AuthorityFlowError,
+      `authorityClientMetadata must reject ${bad}`,
+    );
+  }
+  assert.equal(
+    grant.assertCredentialFreeOriginUrl(new URL("https://operator.example"), "operatorUrl"),
+    "https://operator.example",
+  );
+});

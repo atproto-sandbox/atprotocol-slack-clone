@@ -1,19 +1,46 @@
+import { isValidRecordKey, isValidTid } from "@atproto/syntax";
 import { sha256 } from "@noble/hashes/sha2";
 import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils";
-import { COLLECTION, NAMESPACE, SPACE_TYPE } from "./nsids";
+import { COLLECTION, NAMESPACE, OPENSOCIAL_SPACE_TYPE, SPACE_TYPE } from "./nsids";
 
 const BASE32 = "abcdefghijklmnopqrstuvwxyz234567";
 const TID_BASE32 = "234567abcdefghijklmnopqrstuvwxyz";
 
+export const SELF_SKEY = "self";
 export const DM_INBOX_SKEY = "self";
 
-/** A space key: record-key syntax (the PDS refuses `.` and `..`), at most 128 characters. */
+/**
+ * Protocol-level ATProto record-key syntax (1..512 `[A-Za-z0-9._~:-]` characters, rejecting `.` and `..`),
+ * matching `@atproto/syntax` `isValidRecordKey`.
+ */
+export function isRecordKey(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length >= 1 &&
+    value.length <= 512 &&
+    /^[A-Za-z0-9._~:-]{1,512}$/.test(value) &&
+    value !== "." &&
+    value !== ".." &&
+    isValidRecordKey(value)
+  );
+}
+
+/** A Flock-created UI/Operator space key: record-key syntax (rejecting `.` and `..`), capped at 128 characters. */
 export function isSkey(value: unknown): value is string {
   return typeof value === "string" && /^[A-Za-z0-9._~:-]{1,128}$/.test(value) && value !== "." && value !== "..";
 }
 
+/**
+ * Canonical ATProto TID syntax: 13 characters, leading `[234567abcdefghij]` (64th bit === 0) followed by
+ * 12 `[234567abcdefghijklmnopqrstuvwxyz]` characters, matching `@atproto/syntax` `isValidTid`.
+ */
 export function isTid(value: unknown): value is string {
-  return typeof value === "string" && /^[234567abcdefghijklmnopqrstuvwxyz]{13}$/.test(value);
+  return (
+    typeof value === "string" &&
+    value.length === 13 &&
+    /^[234567abcdefghij][234567abcdefghijklmnopqrstuvwxyz]{12}$/.test(value) &&
+    isValidTid(value)
+  );
 }
 
 export type Did = `did:${string}:${string}`;
@@ -35,12 +62,19 @@ export function subjectKey(did: string): string {
   return `d-${recordKeyHash(did)}`;
 }
 
-export function requestRecordKey(channelUri: string, requesterDid: string): string {
-  return `r-${recordKeyHash(joinParts(channelUri, requesterDid))}`;
+/** Non-roster service-principal role key: `"app-" + base32Lower(sha256(utf8(appDid))).slice(0, 52)` (56 chars, full 256-bit digest). */
+export function appRoleKey(appDid: string): string {
+  return `app-${stableHash(appDid).slice(0, 52)}`;
 }
 
-export function acceptanceRecordKey(workspaceUri: string): string {
-  return `a-${recordKeyHash(workspaceUri)}`;
+/** Per-private-channel role key assigned on `group.opensocial.membership`. */
+export function channelRoleKey(channelSkey: string): string {
+  if (!isSkey(channelSkey)) throw new TypeError("Invalid private channel key.");
+  return `channel-${channelSkey}`;
+}
+
+export function requestRecordKey(channelUri: string, requesterDid: string): string {
+  return `r-${recordKeyHash(joinParts(channelUri, requesterDid))}`;
 }
 
 export function reactionRecordKey(messageUri: string, emoji: string, authorDid: string): string {
@@ -55,11 +89,26 @@ export function spaceUri(authorityDid: string, type: string, skey: string): stri
   return `at://${authorityDid}/space/${type}/${skey}`;
 }
 
-export function workspaceUri(authorityDid: string, skey = "workspace"): string {
+export function groupMetaUri(groupDid: string): string {
+  if (!isDid(groupDid)) throw new TypeError("Invalid group DID.");
+  return spaceUri(groupDid, OPENSOCIAL_SPACE_TYPE.meta, SELF_SKEY);
+}
+
+export function groupMembersUri(groupDid: string): string {
+  if (!isDid(groupDid)) throw new TypeError("Invalid group DID.");
+  return spaceUri(groupDid, OPENSOCIAL_SPACE_TYPE.members, SELF_SKEY);
+}
+
+export function personalInvitesUri(userDid: string): string {
+  if (!isDid(userDid)) throw new TypeError("Invalid user DID.");
+  return spaceUri(userDid, OPENSOCIAL_SPACE_TYPE.invites, SELF_SKEY);
+}
+
+export function workspaceUri(authorityDid: string, skey = SELF_SKEY): string {
   return spaceUri(authorityDid, SPACE_TYPE.workspace, skey);
 }
 
-export function inboxUri(authorityDid: string, skey = "workspace"): string {
+export function inboxUri(authorityDid: string, skey = SELF_SKEY): string {
   return spaceUri(authorityDid, SPACE_TYPE.inbox, skey);
 }
 
@@ -79,7 +128,7 @@ export function extSpaceUri(authorityDid: string, workspaceSkey: string, extId: 
   return spaceUri(authorityDid, spaceType, extSpaceSkey(workspaceSkey, extId));
 }
 
-export function tasksSpaceUri(authorityDid: string, workspaceSkey: string): string {
+export function tasksSpaceUri(authorityDid: string, workspaceSkey = SELF_SKEY): string {
   return extSpaceUri(authorityDid, workspaceSkey, "tasks", SPACE_TYPE.tasks);
 }
 
@@ -138,13 +187,13 @@ export function canonicalParticipants(dids: readonly string[]): string[] {
   return unique;
 }
 
-const SPACE_URI_PATTERN = /^at:\/\/(did:[^/\s]+)\/space\/([A-Za-z0-9.-]+)\/([A-Za-z0-9._~:-]{1,128})$/;
+const SPACE_URI_PATTERN = /^at:\/\/(did:[^/\s]+)\/space\/([A-Za-z0-9.-]+)\/([A-Za-z0-9._~:-]{1,512})$/;
 
 export function parseSpaceUri(uri: string): { authorityDid: Did; type: string; skey: string } | null {
   const match = SPACE_URI_PATTERN.exec(uri);
   if (!match) return null;
   const [, authorityDid, type, skey] = match;
-  return isDid(authorityDid) && isSkey(skey) ? { authorityDid, type, skey } : null;
+  return isDid(authorityDid) && isRecordKey(skey) ? { authorityDid, type, skey } : null;
 }
 
 /** The authority of any space URI. */
@@ -154,28 +203,63 @@ export function requireSpaceAuthority(space: string): Did {
   return parsed.authorityDid;
 }
 
-/** A workspace space URI's authority and skey, or null for any other URI. */
+export function parseGroupMetaUri(uri: string): { groupDid: Did } | null {
+  const parsed = parseSpaceUri(uri);
+  return parsed?.type === OPENSOCIAL_SPACE_TYPE.meta && parsed.skey === SELF_SKEY
+    ? { groupDid: parsed.authorityDid }
+    : null;
+}
+
+export function parseGroupMembersUri(uri: string): { groupDid: Did } | null {
+  const parsed = parseSpaceUri(uri);
+  return parsed?.type === OPENSOCIAL_SPACE_TYPE.members && parsed.skey === SELF_SKEY
+    ? { groupDid: parsed.authorityDid }
+    : null;
+}
+
+export function parsePersonalInvitesUri(uri: string): { userDid: Did } | null {
+  const parsed = parseSpaceUri(uri);
+  return parsed?.type === OPENSOCIAL_SPACE_TYPE.invites && parsed.skey === SELF_SKEY
+    ? { userDid: parsed.authorityDid }
+    : null;
+}
+
+/** A workspace space URI's authority and skey (`self`), or null for any other URI. */
 export function parseWorkspaceUri(uri: string): { authorityDid: Did; skey: string } | null {
   const parsed = parseSpaceUri(uri);
-  return parsed?.type === SPACE_TYPE.workspace ? { authorityDid: parsed.authorityDid, skey: parsed.skey } : null;
+  return parsed?.type === SPACE_TYPE.workspace && parsed.skey === SELF_SKEY
+    ? { authorityDid: parsed.authorityDid, skey: parsed.skey }
+    : null;
+}
+
+/** An admin inbox space URI's authority and skey (`self`), or null for any other URI. */
+export function parseInboxUri(uri: string): { authorityDid: Did; skey: string } | null {
+  const parsed = parseSpaceUri(uri);
+  return parsed?.type === SPACE_TYPE.inbox && parsed.skey === SELF_SKEY
+    ? { authorityDid: parsed.authorityDid, skey: parsed.skey }
+    : null;
 }
 
 /** A channel space URI's authority and skey, or null for any other URI. */
 export function parseChannelUri(uri: string): { authorityDid: Did; skey: string } | null {
   const parsed = parseSpaceUri(uri);
-  return parsed?.type === SPACE_TYPE.channel ? { authorityDid: parsed.authorityDid, skey: parsed.skey } : null;
+  return parsed?.type === SPACE_TYPE.channel && isSkey(parsed.skey)
+    ? { authorityDid: parsed.authorityDid, skey: parsed.skey }
+    : null;
 }
 
 /** An app inbox space URI's authority and skey, or null for any other URI. */
 export function parseAppInboxUri(uri: string): { authorityDid: Did; skey: string } | null {
   const parsed = parseSpaceUri(uri);
-  return parsed?.type === SPACE_TYPE.appInbox ? { authorityDid: parsed.authorityDid, skey: parsed.skey } : null;
+  return parsed?.type === SPACE_TYPE.appInbox && isSkey(parsed.skey)
+    ? { authorityDid: parsed.authorityDid, skey: parsed.skey }
+    : null;
 }
 
 /** An extension space URI's authority, space type, and skey (optionally filtered to `spaceType`), or null for any other URI. */
 export function parseExtSpaceUri(uri: string, spaceType?: string): { authorityDid: Did; type: string; skey: string } | null {
   const parsed = parseSpaceUri(uri);
-  if (!parsed) return null;
+  if (!parsed || !isSkey(parsed.skey)) return null;
   const extPrefix = `${NAMESPACE}.ext.`;
   if (!parsed.type.startsWith(extPrefix) || parsed.type.length <= extPrefix.length) return null;
   if (spaceType !== undefined && parsed.type !== spaceType) return null;
@@ -185,27 +269,29 @@ export function parseExtSpaceUri(uri: string, spaceType?: string): { authorityDi
 /** A Tasks extension space URI's authority and skey, or null for any other URI. */
 export function parseTasksSpaceUri(uri: string): { authorityDid: Did; skey: string } | null {
   const parsed = parseSpaceUri(uri);
-  return parsed?.type === SPACE_TYPE.tasks ? { authorityDid: parsed.authorityDid, skey: parsed.skey } : null;
+  return parsed?.type === SPACE_TYPE.tasks && isSkey(parsed.skey)
+    ? { authorityDid: parsed.authorityDid, skey: parsed.skey }
+    : null;
 }
 
-export function spaceRecordUri(spaceUri: string, repoDid: string, collection: string, rkey: string): string {
-  if (!parseSpaceUri(spaceUri) || !isDid(repoDid) || !/^[A-Za-z0-9.-]+$/.test(collection) || !/^[A-Za-z0-9._~:-]+$/.test(rkey)) {
+export function spaceRecordUri(spaceUriValue: string, repoDid: string, collection: string, rkey: string): string {
+  if (!parseSpaceUri(spaceUriValue) || !isDid(repoDid) || !/^[A-Za-z0-9.-]+$/.test(collection) || !isRecordKey(rkey)) {
     throw new TypeError("Invalid space record URI components.");
   }
-  return `${spaceUri}/${repoDid}/${collection}/${rkey}`;
+  return `${spaceUriValue}/${repoDid}/${collection}/${rkey}`;
 }
 
 export function parseSpaceRecordUri(
   uri: string,
-  spaceUri: string,
+  spaceUriValue: string,
   collection: string,
 ): { repo: string; rkey: string } | null {
-  const prefix = `${spaceUri}/`;
+  const prefix = `${spaceUriValue}/`;
   if (!uri.startsWith(prefix)) return null;
   const parts = uri.slice(prefix.length).split("/");
-  if (parts.length !== 3 || parts[1] !== collection || !isDid(parts[0]) || !/^[A-Za-z0-9._~:-]+$/.test(parts[2])) return null;
+  if (parts.length !== 3 || parts[1] !== collection || !isDid(parts[0]) || !isRecordKey(parts[2])) return null;
   try {
-    return spaceRecordUri(spaceUri, parts[0], collection, parts[2]) === uri
+    return spaceRecordUri(spaceUriValue, parts[0], collection, parts[2]) === uri
       ? { repo: parts[0], rkey: parts[2] }
       : null;
   } catch {
@@ -213,17 +299,51 @@ export function parseSpaceRecordUri(
   }
 }
 
+export function parseAnySpaceRecordUri(
+  uri: unknown,
+): { spaceUri: string; authorityDid: Did; spaceType: string; skey: string; repoDid: Did; collection: string; rkey: string } | null {
+  if (typeof uri !== "string") return null;
+  const match = /^(at:\/\/[^/\s]+\/space\/[^/\s]+\/[^/\s]+)\/([^/\s]+)\/([A-Za-z0-9.-]+)\/([^/\s]+)$/.exec(uri);
+  if (!match) return null;
+  const [, rawSpaceUri, rawRepoDid, collection, rkey] = match;
+  const parsedSpace = parseSpaceUri(rawSpaceUri);
+  if (!parsedSpace || !isDid(rawRepoDid) || !isRecordKey(rkey)) return null;
+  return {
+    spaceUri: rawSpaceUri,
+    authorityDid: parsedSpace.authorityDid,
+    spaceType: parsedSpace.type,
+    skey: parsedSpace.skey,
+    repoDid: rawRepoDid,
+    collection,
+    rkey,
+  };
+}
+
 export function tidNow(nowMs = Date.now(), clockId = randomClockId()): string {
   if (!Number.isSafeInteger(nowMs) || nowMs < 0 || clockId < 0 || clockId > 1023) {
     throw new RangeError("Invalid TID timestamp or clock identifier.");
   }
-  let value = (BigInt(nowMs) * 1000n << 10n) | BigInt(clockId);
+  let value = ((BigInt(nowMs) * 1000n) << 10n) | BigInt(clockId);
+  // Clear top bit so generated TIDs always start with [234567abcdefghij]
+  value &= 0x7fffffffffffffffn;
   let encoded = "";
   for (let index = 0; index < 13; index += 1) {
     encoded = TID_BASE32[Number(value & 31n)] + encoded;
     value >>= 5n;
   }
   return encoded;
+}
+
+/** Decodes the 53-bit microsecond timestamp from a canonical 13-character ATProto TID. */
+export function tidTimestampUs(tid: string): bigint {
+  if (!isTid(tid)) {
+    throw new TypeError("Invalid TID.");
+  }
+  let value = 0n;
+  for (let index = 0; index < tid.length; index += 1) {
+    value = (value << 5n) | BigInt(TID_BASE32.indexOf(tid[index]!));
+  }
+  return value >> 10n;
 }
 
 export function canonicalJson(value: unknown): string {
@@ -266,7 +386,7 @@ function canonicalValue(value: unknown): string {
   if (typeof value === "object") {
     const proto = Object.getPrototypeOf(value);
     if (proto !== Object.prototype && proto !== null) {
-      throw new TypeError("Canonical JSON accepts only plain objects.");
+      throw new TypeError("Canonical JSON cannot encode non-finite or non-plain objects: plain objects only.");
     }
     const record = value as Record<string, unknown>;
     const keys = Object.keys(record).sort();
