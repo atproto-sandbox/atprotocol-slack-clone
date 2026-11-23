@@ -17,12 +17,20 @@ export class CreationNotAuthorizedError extends Error {
   }
 }
 
-/** Written when a creation flow completes for someone other than the authority: it replaces any earlier one for the same three. */
-export function grantCreationAuthorization(authorization: CreationAuthorization, now: number): void {
+/**
+ * Written when a creation flow completes for someone other than the authority: it replaces any earlier one for the same
+ * three. When `operationId` (the flow's `creationKey`) is supplied, the authorization is bound to that exact operation so
+ * concurrent creations for the same user and display name cannot collide.
+ */
+export function grantCreationAuthorization(
+  authorization: CreationAuthorization,
+  now: number,
+  operationId: string | null = null,
+): void {
   const db = getRawDb();
   db.transaction(() => {
     db.prepare("DELETE FROM creation_authorization WHERE expires_at <= ?").run(now);
-    upsert(authorization, null, now + CREATION_AUTHORIZATION_SECONDS);
+    upsert(authorization, operationId, now + CREATION_AUTHORIZATION_SECONDS);
   })();
 }
 
@@ -48,6 +56,10 @@ export function hasCreationAuthorization(authorization: CreationAuthorization, o
 /**
  * Resolves the newly approved `groupDid` (`authority_did`) when `createWorkspace` is resumed after a `prompt=create`
  * authority flow without an explicit `authority` DID in the request body.
+ *
+ * Prefers an exact `operation_id` binding (from `creationKey`). Falls back to an unbound (`operation_id IS NULL`) row
+ * only when exactly one non-expired unbound authorization exists for `(initiatorDid, name)` — rejecting ambiguous
+ * multi-group matches rather than silently choosing the newest group.
  */
 export function findCreationAuthorizationAuthority(
   initiatorDid: string,
@@ -55,12 +67,21 @@ export function findCreationAuthorizationAuthority(
   operationId: string,
   now: number,
 ): string | null {
-  const row = getRawDb()
+  const db = getRawDb();
+  const exact = db
     .prepare(`SELECT authority_did FROM creation_authorization
-      WHERE initiator_did = ? AND name = ? AND expires_at > ? AND (operation_id IS NULL OR operation_id = ?)
-      ORDER BY expires_at DESC LIMIT 1`)
-    .get(initiatorDid, name, now, operationId) as { authority_did: string } | undefined;
-  return row?.authority_did ?? null;
+      WHERE initiator_did = ? AND name = ? AND expires_at > ? AND operation_id = ?
+      LIMIT 2`)
+    .all(initiatorDid, name, now, operationId) as Array<{ authority_did: string }>;
+  if (exact.length === 1) return exact[0]!.authority_did;
+  if (exact.length > 1) return null;
+
+  const unbound = db
+    .prepare(`SELECT authority_did FROM creation_authorization
+      WHERE initiator_did = ? AND name = ? AND expires_at > ? AND operation_id IS NULL
+      LIMIT 2`)
+    .all(initiatorDid, name, now) as Array<{ authority_did: string }>;
+  return unbound.length === 1 ? unbound[0]!.authority_did : null;
 }
 
 /**

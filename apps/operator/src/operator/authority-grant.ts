@@ -306,7 +306,11 @@ export async function completeAuthorityFlow(
   // Someone other than the authority account asked to create this workspace: the approval lets them, once (the
   // authority account itself needs only its grant).
   if (binding.purpose.kind === "createWorkspace" && binding.initiatorDid !== session.did) {
-    grantCreationAuthorization({ authorityDid: session.did, initiatorDid: binding.initiatorDid, name: binding.purpose.name }, now);
+    grantCreationAuthorization(
+      { authorityDid: session.did, initiatorDid: binding.initiatorDid, name: binding.purpose.name },
+      now,
+      binding.purpose.creationKey ?? null,
+    );
   }
   return { authorityDid: session.did, initiatorDid: binding.initiatorDid, purpose: binding.purpose };
 }

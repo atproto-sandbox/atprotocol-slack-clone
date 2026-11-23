@@ -446,13 +446,6 @@ test("verifyPublicLexicons default production boundedSafeFetch wiring (no fetchI
 });
 
 test("verifyPublicLexicons fails closed when authoritative DNS TXT resolution hangs past bounded timeout", async () => {
-  type VerifyOptionsWithDnsControls = NonNullable<Parameters<typeof verifyPublicLexicons>[0]> & {
-    dnsServers?: string[];
-    dnsTimeoutMs?: number;
-  };
-  const callWithDnsControls = (opts: VerifyOptionsWithDnsControls) =>
-    verifyPublicLexicons(opts as Parameters<typeof verifyPublicLexicons>[0]);
-
   // 1. Real unresponsive UDP DNS socket exercising `dns.promises.Resolver` + `resolver.cancel()` with NO `resolveTxt` override
   const blackholeDns = dgram.createSocket("udp4");
   await new Promise<void>((resolveBind) => blackholeDns.bind(0, "127.0.0.1", () => resolveBind()));
@@ -461,10 +454,11 @@ test("verifyPublicLexicons fails closed when authoritative DNS TXT resolution ha
   try {
     await assert.rejects(
       () =>
-        callWithDnsControls({
+        verifyPublicLexicons({
           repoRoot: REPO_ROOT,
           dnsServers: [`127.0.0.1:${dnsPort}`],
           dnsTimeoutMs: 60,
+          allowLoopback: true,
         }),
       /DNS TXT lookup .* timed out after 60ms/,
     );
@@ -476,7 +470,7 @@ test("verifyPublicLexicons fails closed when authoritative DNS TXT resolution ha
   // 2. Hanging custom `resolveTxt` callback is also bounded by `dnsTimeoutMs`
   await assert.rejects(
     () =>
-      callWithDnsControls({
+      verifyPublicLexicons({
         repoRoot: REPO_ROOT,
         dnsTimeoutMs: 50,
         resolveTxt: () => new Promise(() => {}),

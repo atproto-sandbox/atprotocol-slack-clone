@@ -23,9 +23,12 @@ export function loadVendoredPublicLexicons(repoRoot?: string): VendoredLexiconEn
 export function verifyPublicLexicons(options?: {
   repoRoot?: string;
   resolveTxt?: (hostname: string) => Promise<string[][]>;
+  dnsServers?: string[];
+  dnsTimeoutMs?: number;
   fetchImpl?: typeof globalThis.fetch;
   plcUrl?: string;
   allowHttp?: boolean;
+  allowLoopback?: boolean;
 }): Promise<{
   totalLexicons: number;
   verifiedCount: number;
