@@ -12,7 +12,7 @@ There is no proprietary application database of record for content or membership
 
 [![Watch the end-to-end BDD session recording](docs/media/bdd-session-preview.gif)](https://atproto-sandbox.github.io/atprotocol-slack-clone/media/bdd-session.mp4)
 
-Full 27.3-minute Chromium/Playwright Gherkin session recording captured on the R12 baseline prior to R13's adoption of `opensocial.group` atmospheric groups: [**stream on GitHub Pages**](https://atproto-sandbox.github.io/atprotocol-slack-clone/media/bdd-session.mp4) or view [`docs/media/bdd-session.mp4`](docs/media/bdd-session.mp4) (Git LFS). In R13, workspace governance, invitations, roles, moderation, and host portability are upgraded to `opensocial.group` (`1 Group == 1 DID`).
+Full 30.4-minute 1080p Chromium/Playwright E2E session recording covering **86/86 passing tests** (all 11 real-browser Playwright E2E specs starting with `opensocial-groups.spec.ts`, followed by all 75 Cucumber Gherkin BDD scenarios) on R13 `opensocial.group` atmospheric groups: [**stream on GitHub Pages**](https://atproto-sandbox.github.io/atprotocol-slack-clone/media/bdd-session.mp4) or view [`docs/media/bdd-session.mp4`](docs/media/bdd-session.mp4) (Git LFS).
 
 ## What it does
 
@@ -97,6 +97,7 @@ GitHub's README cannot run interactive HTML slides directly; use **GitHub Pages*
 
 ## Project notes
 
+- [`groups-proposal-feedback.md`](groups-proposal-feedback.md): focused implementation feedback for the `opensocial.group` proposal authors—what worked well, concrete spec/security edge cases, and draft lexicon/example fixes before 1.0.
 - [`protocol-authors-feedback.md`](protocol-authors-feedback.md): synthesis for the ATProto Spaces and `opensocial.group` protocol authors—what worked well and concrete R13 spec recommendations.
 - [`PROGRESS.md`](PROGRESS.md) and [`.ai/plans/r13-opensocial-groups.md`](.ai/plans/r13-opensocial-groups.md): R13 `opensocial.group` architectural plan and verification logs.
 - [`.ai/upstream/`](.ai/upstream): upstream protocol requests (`U1`–`U12`), tracking which items `opensocial.group` resolved and which core Spaces items remain orthogonal.
