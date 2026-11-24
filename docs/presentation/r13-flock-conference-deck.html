@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flock on opensocial.group — R13 conference deck</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* ── Tokens ───────────────────────────────────────────────────────────── */
+:root {
+  --font-sans: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --t-hero: 168px;
+  --t-display: 100px;
+  --t-statement: 76px;
+  --t-title: 56px;
+  --t-subhead: 44px;
+  --t-lead: 36px;
+  --t-body: 30px;
+  --t-dense: 28px;
+  --t-label: 24px;
+  --t-source: 20px;
+  --pad-x: 120px;
+  --pad-top: 88px;
+  --pad-bottom: 104px;
+  --gap: 48px;
+  --footer: "Flock · opensocial.group · R13 · alpha";
+}
+[data-theme="light"] {
+  --bg: #FBFAF7; --surface: #F1EFE9; --ink: #14171C; --muted: #5A6170; --rule: #D9D5CB; --quiet: #948F84;
+  --accent: #1D4ED8; --accent-soft: #E3EAFB; --good: #17794A; --bad: #BF3A2B; --warn: #9A5B00; --backdrop: #1B1B1B;
+}
+[data-theme="dark"] {
+  --bg: #0E1116; --surface: #171B22; --ink: #F1F3F6; --muted: #A0A8B6; --rule: #2B313C; --quiet: #5F6877;
+  --accent: #6EA8FF; --accent-soft: #16233B; --good: #4CC38A; --bad: #FF7B6B; --warn: #F2B450; --backdrop: #000;
+}
+* { box-sizing: border-box; margin: 0; }
+html, body { height: 100%; overflow: hidden; background: var(--backdrop); }
+body { font: 400 var(--t-body)/1.4 var(--font-sans); color: var(--ink); -webkit-font-smoothing: antialiased; }
+.deck {
+  position: fixed; top: 50%; left: 50%; width: 1920px; height: 1080px;
+  transform: translate(-50%, -50%) scale(var(--scale, 1)); counter-reset: slide;
+}
+.slide {
+  position: absolute; top: 0; left: 0; width: 1920px; height: 1080px; overflow: hidden;
+  padding: var(--pad-top) var(--pad-x) var(--pad-bottom); background: var(--bg);
+  display: grid; grid-template-rows: auto minmax(0, 1fr) auto; gap: var(--gap); counter-increment: slide;
+}
+.slide::before, .slide::after {
+  position: absolute; bottom: 44px; font-size: var(--t-source); line-height: 1.4; color: var(--muted);
+}
+.slide::before { content: var(--footer); left: var(--pad-x); }
+.slide::after { content: counter(slide); right: var(--pad-x); font-variant-numeric: tabular-nums; }
+.cover::before, .cover::after { content: none; }
+h1 { font: 600 var(--t-display)/1.05 var(--font-sans); letter-spacing: -0.025em; max-width: 1560px; text-wrap: balance; }
+h2 { font: 600 var(--t-title)/1.14 var(--font-sans); letter-spacing: -0.015em; max-width: 1560px; text-wrap: balance; }
+h3 { font: 600 var(--t-lead)/1.2 var(--font-sans); }
+.kicker { font: 500 var(--t-label)/1.2 var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); margin-bottom: 20px; }
+.lead { font-size: var(--t-lead); line-height: 1.35; color: var(--muted); max-width: 1320px; margin-top: 24px; }
+.source { font-size: var(--t-source); color: var(--muted); max-width: 1500px; }
+.label { font-size: var(--t-label); color: var(--muted); }
+p, li, td { text-wrap: pretty; }
+strong { font-weight: 600; }
+.accent { color: var(--accent); } .good { color: var(--good); } .bad { color: var(--bad); } .warn { color: var(--warn); }
+ul, ol { list-style: none; padding: 0; display: grid; gap: 20px; }
+ul > li { position: relative; padding-left: 36px; }
+ul > li::before { content: ""; position: absolute; left: 0; top: 0.68em; width: 16px; height: 3px; background: var(--accent); }
+ol.points { counter-reset: point; gap: 32px; }
+ol.points > li { counter-increment: point; display: grid; grid-template-columns: 72px 1fr; align-items: baseline; }
+ol.points > li::before { content: counter(point, decimal-leading-zero); font: 500 var(--t-label) var(--font-mono); color: var(--accent); }
+.split { display: grid; grid-template-columns: 1fr 1fr; gap: 80px; align-items: start; }
+.split.l-wide { grid-template-columns: 7fr 5fr; }
+.split.r-wide { grid-template-columns: 5fr 7fr; }
+.stack { display: grid; gap: 32px; align-content: start; }
+.callout { background: var(--accent-soft); border-left: 6px solid var(--accent); padding: 36px 40px; display: grid; gap: 16px; }
+.callout .kicker { margin-bottom: 0; }
+.callout .big { font: 600 var(--t-subhead)/1.2 var(--font-sans); letter-spacing: -0.01em; }
+.section { background: var(--surface); grid-template-rows: 1fr; align-items: end; }
+.section::before { content: none; }
+.section h2 { font-size: var(--t-display); letter-spacing: -0.025em; }
+.statement { grid-template-rows: 1fr; align-items: center; }
+.statement .big { font: 500 var(--t-statement)/1.14 var(--font-sans); letter-spacing: -0.02em; max-width: 1560px; text-wrap: balance; }
+.statement .big em { font-style: normal; color: var(--accent); }
+.stats { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 64px; align-self: center; }
+.stats:has(.stat:nth-child(4)) { --t-hero: 120px; --t-unit: var(--t-lead); gap: 48px; }
+.stat { border-top: 4px solid var(--ink); padding-top: 28px; }
+.stat .value { font: 600 var(--t-hero)/1 var(--font-sans); letter-spacing: -0.04em; font-variant-numeric: tabular-nums; }
+.stat .unit { font-size: var(--t-unit, var(--t-subhead)); font-weight: 500; margin-left: 0.2em; color: var(--muted); }
+.stat .what { line-height: 1.3; margin-top: 24px; }
+.stat .label { margin-top: 12px; }
+table.data { width: 100%; align-self: start; border-collapse: collapse; font-size: var(--t-dense); line-height: 1.3; }
+table.data th, table.data td { text-align: left; vertical-align: top; padding: 20px 28px; border-bottom: 1px solid var(--rule); }
+table.data thead th { font-size: var(--t-label); font-weight: 600; border-bottom: 3px solid var(--ink); }
+table.data tr > :first-child { padding-left: 0; }
+table.data tbody th { font-weight: 400; color: var(--muted); }
+.backup table.data :is(th, td) { padding-top: 12px; padding-bottom: 12px; }
+table.data .pick { background: var(--accent-soft); font-weight: 600; }
+table.data thead .pick { color: var(--accent); }
+.flow { display: flex; gap: 40px; }
+.node { flex: 1; position: relative; padding: 24px; border: 2px solid var(--ink); font-size: var(--t-dense); font-weight: 600; line-height: 1.25; }
+.node + .node::before { content: ""; position: absolute; top: 50%; left: -40px; width: 28px; height: 2px; background: var(--ink); }
+.node + .node::after { content: ""; position: absolute; top: calc(50% - 7px); left: -14px; border: 7px solid transparent; border-right: 0; border-left: 12px solid var(--ink); }
+.node small { display: block; margin-top: 10px; font: 400 var(--t-label)/1.2 var(--font-mono); color: var(--muted); }
+.node.hl { border-color: var(--accent); background: var(--accent-soft); }
+.timeline { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; align-content: start; padding-top: 14px; }
+.phase { position: relative; display: grid; gap: 16px; padding: 36px 48px 0 0; border-top: 4px solid var(--ink); }
+.phase::before { content: ""; position: absolute; top: -14px; left: 0; width: 24px; height: 24px; border-radius: 50%; background: var(--accent); }
+.phase .when { font: 500 var(--t-label)/1.2 var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); }
+.phase ul { font-size: var(--t-dense); gap: 12px; }
+.demo-media { width: 100%; max-height: 520px; border: 2px solid var(--rule); background: #0a0c10; object-fit: contain; }
+.demo-media.hero { max-height: 640px; align-self: center; }
+.repo-link { font: 500 var(--t-body) var(--font-mono); color: var(--accent); text-decoration: underline; text-underline-offset: 6px; }
+.flow-map { display: grid; gap: 14px; align-self: center; width: 100%; }
+.flow-row { display: grid; grid-template-columns: 200px 1fr 200px; grid-template-rows: auto auto; gap: 6px 24px; align-items: center; }
+.flow-end { font: 600 var(--t-dense) var(--font-sans); line-height: 1.25; text-align: center; padding: 10px 8px; border: 2px solid var(--rule); background: var(--surface); }
+.flow-end.hl { border-color: var(--accent); background: var(--accent-soft); }
+.flow-track { position: relative; height: 6px; background: var(--rule); border-radius: 3px; }
+.packet { position: absolute; top: 50%; width: 18px; height: 18px; margin-top: -9px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); animation: packet-run 4s ease-in-out infinite; }
+.packet.p2 { animation-delay: 0.9s; background: var(--good); }
+.packet.p3 { animation-delay: 1.8s; background: var(--warn); }
+.packet.p4 { animation-delay: 2.6s; }
+.flow-cap { font: 500 var(--t-label) var(--font-mono); color: var(--muted); text-align: center; grid-column: 2; }
+@keyframes packet-run {
+  0% { left: 0%; opacity: 0; } 8% { opacity: 1; } 92% { opacity: 1; }
+  100% { left: calc(100% - 18px); opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) { .packet { animation: none; left: 62%; opacity: 1; } }
+table.data.compact :is(th, td) { padding: 10px 14px; font-size: var(--t-label); }
+@media screen {
+  body:not(.overview) .slide:not(.active) { visibility: hidden; }
+  html:has(.overview), body.overview { height: auto; overflow: auto; }
+  .overview .deck { position: static; transform: none; width: auto; height: auto; display: flex; flex-wrap: wrap; justify-content: center; gap: 28px; padding: 28px; }
+  .overview .slide { position: relative; flex: none; zoom: 0.3; cursor: pointer; }
+  .overview .slide.active { outline: 14px solid var(--accent); }
+}
+@page { size: 1920px 1080px; margin: 0; }
+@media print {
+  html, body { height: auto; overflow: visible; background: none; }
+  .deck { position: static; transform: none; width: auto; height: auto; }
+  .slide { position: relative; break-after: page; break-inside: avoid; print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+}
+</style>
+</head>
+<body>
+<main class="deck">
+
+<section class="slide">
+  <div class="split r-wide">
+    <video class="demo-media hero" controls preload="metadata" playsinline>
+      <source src="../media/flock-desk-e2e.mp4" type="video/mp4">
+    </video>
+    <div class="stack" style="align-self: center; gap: 22px;">
+      <p class="kicker">Flock · atproto Spaces · R13</p>
+      <h2>Team workspaces on opensocial.group—with Web and Desk as independent clients</h2>
+      <p class="lead">Alpha reference app for atmospheric groups (<code>1&nbsp;Group == 1&nbsp;DID</code>), sovereign personal-PDS DMs, and <strong>Flock&nbsp;Desk</strong>—a second client with zero Operator dependency.</p>
+      <p><a class="repo-link" href="https://github.com/atproto-sandbox/atprotocol-slack-clone">github.com/atproto-sandbox/atprotocol-slack-clone</a></p>
+      <p><a class="repo-link" href="https://bsky.app/profile/mikestaub.social">Mike Staub · bsky.app/profile/mikestaub.social</a></p>
+    </div>
+  </div>
+  <p class="source">Demo: docs/media/flock-desk-e2e.mp4 (~149&nbsp;s, 1080p BDD · Flock Web + Flock Desk)</p>
+</section>
+
+<section class="slide">
+  <header>
+    <p class="kicker">Executive summary</p>
+    <h2>R13 ships opensocial.group governance, 86/86 browser E2E gates, and an Operator-free Desk client in one open repo</h2>
+  </header>
+  <div class="split l-wide">
+    <ol class="points">
+      <li><span><strong>Workspaces are Group DIDs</strong> on <code>apps/group-host</code> with flat RBAC, cross-PDS <code>invites/self</code>, and ATProto-native moderation.</span></li>
+      <li><span><strong>Messages stay on member PDS repos</strong>; the Operator orchestrates admin mutations and content-free change hints only.</span></li>
+      <li><span><strong>Flock Desk</strong> (<code>apps/desk</code>, <code>@flock/shell</code>) matches canonical Web state without <code>@flock/client</code> or the Operator.</span></li>
+    </ol>
+    <aside class="callout">
+      <p class="kicker">Ask</p>
+      <p class="big">Clone the repo, watch slide&nbsp;1, run <code>pnpm test:bdd</code>, and tell us what breaks for your client.</p>
+    </aside>
+  </div>
+</section>
+
+<section class="slide section">
+  <div>
+    <p class="kicker">Part 1</p>
+    <h2>Why</h2>
+  </div>
+</section>
+
+<section class="slide">
+  <header>
+    <p class="kicker">Why</p>
+    <h2>Workspaces should be portable, permissioned, and readable without our servers</h2>
+  </header>
+  <div class="split">
+    <ul>
+      <li><strong>No app message database.</strong> Channel posts live on writer PDSes; group state on the Group Host.</li>
+      <li><strong>Permission follows lexicons.</strong> RBAC and space credentials gate reads—not a shadow ACL.</li>
+      <li><strong>Anyone can verify.</strong> <code>@flock/reader</code> and Flock Desk rebuild canonical state from public APIs alone.</li>
+    </ul>
+    <aside class="callout">
+      <p class="kicker">The bet</p>
+      <p class="big">A credible team app plus a second client proves Spaces are ready for real products—not only demos.</p>
+    </aside>
+  </div>
+</section>
+
+<section class="slide statement">
+  <p class="big">Flock still uses a <em>small</em> Operator for journaled admin work and change cursors—<em>without</em> storing message bodies or DM rows.</p>
+</section>
+
+<section class="slide">
+  <header>
+    <p class="kicker">Evidence today</p>
+    <h2>CI runs 86/86 real-browser tests and ships 135 published lexicons on a pinned alpha spec</h2>
+  </header>
+  <div class="stats">
+    <article class="stat">
+      <p class="value">86<span class="unit">/86</span></p>
+      <p class="what">Playwright + Cucumber BDD on Chromium, local PDS + Group Host</p>
+      <p class="label good">README · Nov&nbsp;2026</p>
+    </article>
+    <article class="stat">
+      <p class="value">135</p>
+      <p class="what">JSON lexicons (<code>group.opensocial.*</code> + <code>new.flock.*</code> + vendored <code>com.atproto.*</code>)</p>
+      <p class="label">packages/protocol</p>
+    </article>
+    <article class="stat">
+      <p class="value">2</p>
+      <p class="what">Independent browser origins (<code>@flock/web</code> + Flock Desk) on one workspace</p>
+      <p class="label">BDD default · Desk second app</p>
+    </article>
+  </div>
+  <p class="source">Source: README.md, PLAN.md M7 · Status alpha · upstream pins documented in repo</p>
+</section>
+
+<section class="slide section">
+  <div>
+    <p class="kicker">Part 2</p>
+    <h2>Architecture</h2>
+  </div>
+</section>
+
+<section class="slide">
+  <header>
+    <p class="kicker">Governance</p>
+    <h2>Each workspace is one OpenSocial group DID hosted on apps/group-host</h2>
+  </header>
+  <div class="flow" style="margin-top:8px;">
+    <div class="node hl">Group DID<br><small><code>did:plc:…</code> · :3004</small></div>
+    <div class="node">Member PDS<br><small>messages, reactions, tasks, acceptance</small></div>
+    <div class="node">Flock Web<br><small><code>@flock/client</code> sync · :3000</small></div>
+  </div>
+  <ul style="margin-top:32px;">
+    <li><strong>Flat union RBAC</strong> via <code>group.opensocial.policy</code>; <strong>O(1)</strong> <code>membership</code> updates across many channels.</li>
+    <li><strong>Cross-PDS invites</strong> on each member's <code>group.opensocial.invites/self</code> space.</li>
+  </ul>
+  <p class="source">ARCHITECTURE.md · opensocial.group proposal</p>
+</section>
+
+<section class="slide">
+  <header>
+    <p class="kicker">Data paths</p>
+    <h2>Web uses the Operator for admin orchestration; Flock Desk talks only to PDS and Group Host</h2>
+  </header>
+  <div class="flow-map">
+    <article class="flow-row">
+      <p class="flow-end hl">Flock Web</p>
+      <div class="flow-track"><i class="packet" aria-hidden="true"></i></div>
+      <p class="flow-end hl">Operator</p>
+      <p class="flow-cap">Journaled admin mutations</p>
+    </article>
+    <article class="flow-row">
+      <p class="flow-end hl">Flock Desk</p>
+      <div class="flow-track"><i class="packet p2" aria-hidden="true"></i></div>
+      <p class="flow-end hl">Group Host</p>
+      <p class="flow-cap">Join · leave · reports · zero Operator RPC</p>
+    </article>
+    <article class="flow-row">
+      <p class="flow-end">Both clients</p>
+      <div class="flow-track"><i class="packet p3" aria-hidden="true"></i></div>
+      <p class="flow-end">Writer PDS</p>
+      <p class="flow-cap">STAR reads/writes · space credentials</p>
+    </article>
+    <article class="flow-row">
+      <p class="flow-end">Web</p>
+      <div class="flow-track"><i class="packet p4" aria-hidden="true"></i></div>
+      <p class="flow-end">Operator</p>
+      <p class="flow-cap">Content-free change feed</p>
+    </article>
+  </div>
+  <p class="source">Operator holds no channel message bodies; DMs never touch Group Host or Operator SQLite</p>
+</section>
+
+<section class="slide">
+  <header>
+    <p class="kicker">Flock Desk</p>
+    <h2>Flock Desk is a genuinely independent browser client backed by @flock/shell on port 3005</h2>
+  </header>
+  <div class="split">
+    <ul>
+      <li>Personal-PDS OAuth with <code>deskMemberScopes()</code> only—no Operator scopes in client metadata.</li>
+      <li>Direct writes and bounded reads; lifecycle journal <code>flock-desk-lifecycle:&lt;did&gt;</code> for join/leave only.</li>
+      <li>AST + ESLint boundary tests forbid <code>@flock/client</code>, <code>@flock/web</code>, and <code>@flock/operator</code>.</li>
+    </ul>
+    <aside class="callout">
+      <p class="kicker">Recorded proof</p>
+      <p class="big">BDD <em>Render one workspace from two independent apps</em> passes with Web + Desk by default.</p>
+      <p class="label"><a class="repo-link" href="../media/flock-desk-e2e.mp4">flock-desk-e2e.mp4</a></p>
+    </aside>
+  </div>
+</section>
+
+<section class="slide backup">
+  <header>
+    <p class="kicker">Appendix · clients</p>
+    <h2>Flock Web and Flock Desk share lexicons but not code, OAuth clients, or Operator contact</h2>
+  </header>
+  <table class="data compact">
+    <thead>
+      <tr><th></th><th>@flock/web</th><th class="pick">Flock Desk</th></tr>
+    </thead>
+    <tbody>
+      <tr><th>Origin / port</th><td>Reference UI · :3000</td><td class="pick">Astryx UI · :3005</td></tr>
+      <tr><th>Sync / writes</th><td><code>@flock/client</code> engine</td><td class="pick"><code>@flock/shell</code> direct XRPC</td></tr>
+      <tr><th>Operator</th><td>Admin orchestration + change feed</td><td class="pick">No requests</td></tr>
+      <tr><th>IndexedDB</th><td>Full protocol cache</td><td class="pick">OAuth + small lifecycle journal</td></tr>
+      <tr><th>Parity tests</th><td>Reference</td><td class="pick"><code>desk-parity.spec.ts</code> + 7 BDD scenarios</td></tr>
+    </tbody>
+  </table>
+  <p class="source">PLAN.md M7 · features/flock-desk.feature</p>
+</section>
+
+<section class="slide section">
+  <div>
+    <p class="kicker">Part 3</p>
+    <h2>Proof &amp; next</h2>
+  </div>
+</section>
+
+<section class="slide">
+  <header>
+    <p class="kicker">Verification</p>
+    <h2>Desk parity covers post, reply, edit, delete, moderation labels, and cross-tab isolation</h2>
+  </header>
+  <div class="split">
+    <ul>
+      <li><code>desk-parity.spec.ts</code> — cross-client channel mutations and fresh-credential enforcement.</li>
+      <li><code>features/flock-desk.feature</code> — invite links, inbox acceptance, removal after admin kick.</li>
+      <li><code>packages/reader</code> — headless parity for groups, DMs, and Tasks without server DBs.</li>
+    </ul>
+    <aside class="callout">
+      <p class="kicker">Full regression reel</p>
+      <p class="big">30&nbsp;min session: all 86 scenarios — <a class="repo-link" href="../media/bdd-session.mp4">bdd-session.mp4</a></p>
+    </aside>
+  </div>
+</section>
+
+<section class="slide">
+  <header>
+    <p class="kicker">Pre-launch gates</p>
+    <h2>Production still needs live lexicon DNS, public HTTPS deploys, and backup drills</h2>
+  </header>
+  <div class="timeline">
+    <article class="phase">
+      <p class="when">Gate 1</p>
+      <h3>Lexicons</h3>
+      <ul><li><code>pnpm verify:lexicons</code> on public PDS</li></ul>
+    </article>
+    <article class="phase">
+      <p class="when">Gate 2</p>
+      <h3>Deploy</h3>
+      <ul><li>web + group-host + operator HTTPS</li></ul>
+    </article>
+    <article class="phase">
+      <p class="when">Gate 3</p>
+      <h3>Operate</h3>
+      <ul><li>Backups · restore drills · pilot</li></ul>
+    </article>
+  </div>
+  <p class="source">PLAN.md · docs/operations.md</p>
+</section>
+
+<section class="slide">
+  <header>
+    <p class="kicker">Collaborate</p>
+    <h2>We want third-party clients, protocol feedback, and stress tests before calling this production-ready</h2>
+  </header>
+  <div class="callout" style="align-self:start;">
+    <p class="kicker">Repository</p>
+    <p class="big"><a class="repo-link" href="https://github.com/atproto-sandbox/atprotocol-slack-clone">https://github.com/atproto-sandbox/atprotocol-slack-clone</a></p>
+    <p class="label">README → playground · <a class="repo-link" href="https://github.com/atproto-sandbox/atprotocol-slack-clone/blob/main/docs/dev-onboarding.md">Developer onboarding</a> · <a class="repo-link" href="r12-atproto-conference-deck.html">Historical R12 deck</a></p>
+    <p class="label"><a class="repo-link" href="https://bsky.app/profile/mikestaub.social">Mike Staub · bsky.app/profile/mikestaub.social</a></p>
+  </div>
+</section>
+
+</main>
+<script>
+(() => {
+  const slides = [...document.querySelectorAll('.slide')];
+  let current = 0;
+  const fit = () => document.documentElement.style.setProperty('--scale', Math.min(innerWidth / 1920, innerHeight / 1080));
+  const inOverview = () => document.body.classList.contains('overview');
+  const show = (index) => {
+    current = Math.max(0, Math.min(slides.length - 1, index));
+    slides.forEach((slide, i) => slide.classList.toggle('active', i === current));
+    history.replaceState(null, '', `#${current + 1}`);
+    if (inOverview()) slides[current].scrollIntoView({ block: 'nearest' });
+  };
+  const showFromHash = () => show((parseInt(location.hash.slice(1), 10) || 1) - 1);
+  const toggleOverview = () => {
+    if (document.body.classList.toggle('overview')) slides[current].scrollIntoView({ block: 'center' });
+  };
+  const keys = {
+    ArrowRight: () => show(current + 1), PageDown: () => show(current + 1), ' ': () => show(current + 1),
+    ArrowLeft: () => show(current - 1), PageUp: () => show(current - 1),
+    Home: () => show(0), End: () => show(slides.length - 1),
+    o: toggleOverview, Escape: () => inOverview() && toggleOverview(),
+    f: () => (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen()),
+  };
+  addEventListener('keydown', (event) => {
+    const action = keys[event.key] ?? keys[event.key.toLowerCase()];
+    if (event.metaKey || event.ctrlKey || event.altKey || !action) return;
+    event.preventDefault();
+    action();
+  });
+  addEventListener('click', (event) => {
+    if (event.target.closest('a, video') || String(getSelection())) return;
+    if (inOverview()) {
+      const picked = event.target.closest('.slide');
+      if (picked) { show(slides.indexOf(picked)); toggleOverview(); }
+      return;
+    }
+    show(current + (event.clientX < innerWidth / 3 ? -1 : 1));
+  });
+  addEventListener('hashchange', showFromHash);
+  addEventListener('resize', fit);
+  fit();
+  showFromHash();
+})();
+</script>
+</body>
+</html>
