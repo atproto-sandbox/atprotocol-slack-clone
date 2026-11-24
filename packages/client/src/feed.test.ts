@@ -10,7 +10,7 @@ import type { ChangesAnswer, OperatorService } from "./operator-client";
 // Following spaces through the change feed: the order that loses nothing, and what the client does with changed, reset and
 // denied spaces.
 
-const SPACE = "at://did:plc:owner/space/new.flock.channel/acme-general";
+const SPACE = "at://did:plc:owner/space/new.flock.channel/general";
 const ALICE = "did:plc:alice";
 
 /** An operator that answers each call from a queue, recording what it was asked. */
@@ -71,7 +71,7 @@ test("a deleted workspace comes back denied; the client's mint reports it delete
   const fixture = await createWorkspace(network, { members: [ALICE], channels: [{ skey: "general", visibility: "public" }] });
   await writeMessage(network, ALICE, fixture.channels.general!, 1);
   const alice = createEngine(transportFor(network, ALICE));
-  await alice.channels.readPage({ workspace: fixture.workspace, skey: "acme-general" });
+  await alice.channels.readPage({ workspace: fixture.workspace, skey: "general" });
   const operator = scriptedOperator([answer("1"), answer("2", { denied: [fixture.workspace] })]);
   const follower = new ChangeFollower({ operator, credentials: alice.credentials, sync: async () => undefined });
   await follower.follow([fixture.workspace]);
@@ -134,13 +134,20 @@ test("the long-poll token lasts fourteen minutes and is reused across polls; eve
     fetchEndpoint: async (request) => {
       if (new URL(request.url).origin !== service.endpoint) return network.fetchEndpoint(request);
       expiries.push(network.readServiceToken(request.headers.get("authorization")!.replace(/^Bearer /, ""))!.exp);
-      return Response.json(new URL(request.url).pathname.endsWith("getChanges") ? answer("1") : { writers: [] });
+      return Response.json(
+        new URL(request.url).pathname.endsWith("getChanges")
+          ? answer("1")
+          : { operation: { id: "op1", workspace: "at://did:plc:owner/space/new.flock.workspace/self", kind: "createChannel", state: "completed", completedSteps: [], createdAt: "2026-11-10T12:00:00.000Z", updatedAt: "2026-11-10T12:00:00.000Z" } },
+      );
     },
   }, { operator: service });
   const issued = (run: () => Promise<unknown>) => countCalls(network, run).then((calls) => calls["com.atproto.server.getServiceAuth"] ?? 0);
   assert.equal(await issued(async () => { await engine.operator!.getChanges([]); await engine.operator!.getChanges([]); }), 1);
   assert.equal(expiries[0]! - Math.floor(network.now() / 1000), 14 * 60);
-  assert.equal(await issued(async () => { await engine.operator!.listInboxWriters("at://w"); await engine.operator!.listInboxWriters("at://w"); }), 2);
+  assert.equal(await issued(async () => {
+    await engine.operator!.getOperation("at://did:plc:owner/space/new.flock.workspace/self", "op1");
+    await engine.operator!.getOperation("at://did:plc:owner/space/new.flock.workspace/self", "op1");
+  }), 2);
   network.advanceClock(13.5 * 60 * 1000);
   assert.equal(await issued(() => engine.operator!.getChanges([])), 1, "renewed a minute before it runs out");
 });

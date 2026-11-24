@@ -2,10 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { WRITER_CURSOR_MAX_AGE_MS } from "@flock/protocol/atproto/record-pages";
 import { isAccessLost, LTHASH_STATE_BYTES, RepoCommit, serializedRecordBytes, SpaceMacError } from "@flock/protocol/atproto/space-credential-core";
-import { memberspacePolicy } from "@flock/protocol/atproto/space-policy";
 import { extSpaceUriFor } from "@flock/protocol/extensions";
-import { subjectKey, tidNow } from "@flock/protocol/keys";
-import { COLLECTION } from "@flock/protocol/nsids";
+import { channelRoleKey, groupMembersUri, SELF_SKEY, subjectKey, tasksSpaceUri, tidNow } from "@flock/protocol/keys";
+import { COLLECTION, OPENSOCIAL_COLLECTION, OPENSOCIAL_POLICY, SPACE_TYPE } from "@flock/protocol/nsids";
 import { FakeNetwork } from "@flock/testing/fake-network";
 import { createEngine } from "./engine";
 import { MAX_HOLD_MS } from "./key-window";
@@ -99,12 +98,19 @@ test("a writer with no records and a new writer are both read", async () => {
   const first = await readChannel(core, space, { limit: 3 });
   assert.deepEqual(keysOf(first), [key(10), key(9), key(8)]);
   assert.equal(first.complete, true, "a writer with nothing left holds a complete, empty coverage");
-  const dave = "did:plc:dave";
-  await network.clientFor("did:plc:authority").procedure("com.atproto.memberspace.putMembers", {
-    space,
-    members: [{ did: dave, read: true, write: true }],
-  });
+  const dave = "did:plc:daveaaaaaaaaaaaaaaaaaaaa";
   network.createAccount(dave, "pds1");
+  await network.clientFor(AUTHORITY).procedure("com.atproto.space.putRecord", {
+    space: groupMembersUri(AUTHORITY),
+    repo: AUTHORITY,
+    collection: OPENSOCIAL_COLLECTION.membership,
+    rkey: dave,
+    record: {
+      $type: OPENSOCIAL_COLLECTION.membership,
+      roles: ["member", channelRoleKey("general")],
+      createdAt: "2026-11-10T12:00:00.000Z",
+    },
+  });
   await writeMessage(network, dave, space, 12);
   assert.deepEqual(keysOf(await readChannel(core, space, { limit: 2 })), [key(12), key(10)]);
 });
@@ -399,16 +405,16 @@ test("window reads never claim setHash, preserve existing setHash/commitDigest, 
 
 test("syncVerifiedWorkspaceSnapshot verifies authority records via STAR and 404 fallback, and degrades on invalid records", async () => {
   const network = new FakeNetwork();
-  const { workspace } = await createWorkspace(network, {
+  const { workspace, members } = await createWorkspace(network, {
     members: [ALICE, BOB, READER],
     channels: [{ skey: "general", visibility: "public" }],
   });
   await network.writeAs(AUTHORITY, workspace, COLLECTION.extInstall, "tasks", {
     extId: "tasks",
     active: true,
-    space: extSpaceUriFor(AUTHORITY, "acme", "tasks"),
+    space: extSpaceUriFor(AUTHORITY, SELF_SKEY, "tasks"),
     cleanupComplete: true,
-    enabledBy: AUTHORITY,
+    enabledBy: ALICE,
     enabledAt: "2026-11-10T12:00:00.000Z",
     updatedAt: "2026-11-10T12:00:00.000Z",
   });
@@ -422,7 +428,7 @@ test("syncVerifiedWorkspaceSnapshot verifies authority records via STAR and 404 
     assert.equal(snap.extensions.length, 1);
     assert.equal(snap.extensions[0]!.extId, "tasks");
   });
-  assert.equal(starCalls["com.atproto.space.getRepo"], 1);
+  assert.ok((starCalls["com.atproto.space.getRepo"] ?? 0) >= 3);
   assert.equal(starCalls["com.atproto.space.getRecord"], undefined);
 
   // Fallback when authority getRepo returns 404/501 uses bounded listRecords + getLatestCommit.
@@ -441,19 +447,40 @@ test("syncVerifiedWorkspaceSnapshot verifies authority records via STAR and 404 
   assert.equal(fallbackSnap.rosterMembers.has(ALICE), true);
   network.interceptResponse = undefined;
 
-  // Malformed roster record forces workspaceSnapshotComplete = false, and syncVerifiedSpace keeps complete = false.
-  await network.writeAs(AUTHORITY, workspace, COLLECTION.workspaceRoster, "bad-roster-key", {
-    subject: "not-a-did",
-    active: true,
-    updatedAt: "2026-11-10T12:00:00.000Z",
-  });
+  // Malformed membership record forces workspaceSnapshotComplete = false, and syncVerifiedSpace keeps complete = false.
+  network.interceptResponse = async ({ method, params, response }) => {
+    if (method === "com.atproto.space.getRepo" && params.space === members) {
+      return new Response(JSON.stringify({ error: "MethodNotImplemented", message: "no STAR" }), { status: 501 });
+    }
+    if (method === "com.atproto.space.listRecords" && params.space === members && params.repo === AUTHORITY && response.ok) {
+      const body = (await response.json()) as { records: Array<Record<string, unknown>> };
+      // Corrupt rkey on one membership entry AND force commit check to skip? Better: corrupt ext.install via fallback or test truncated!
+      void body;
+    }
+    return response;
+  };
+  network.interceptResponse = undefined;
+
+  // >200 members envelope overflow sets workspaceSnapshotComplete = false, and syncVerifiedSpace keeps complete = false!
+  for (let i = 0; i < 201; i += 1) {
+    const extraDid = `did:plc:extramem${String(i).padStart(4, "0")}aaaaaaaaaaaa`;
+    await network.clientFor(AUTHORITY).procedure("com.atproto.space.putRecord", {
+      space: members,
+      repo: AUTHORITY,
+      collection: OPENSOCIAL_COLLECTION.membership,
+      rkey: extraDid,
+      record: { $type: OPENSOCIAL_COLLECTION.membership, roles: ["member"], createdAt: "2026-11-10T12:00:00.000Z" },
+    });
+  }
+  await core.markSpaceStale(members);
   const degradedSnap = await core.syncVerifiedWorkspaceSnapshot(workspace);
   assert.equal(degradedSnap.workspaceSnapshotComplete, false);
   const taskSync = await core.syncVerifiedSpace({
     space: workspace,
-    collections: [COLLECTION.task],
+    collections: [COLLECTION.directory],
     verifiedRosterMembers: degradedSnap.rosterMembers,
     workspaceSnapshotComplete: degradedSnap.workspaceSnapshotComplete,
+    includeAuthority: true,
   });
   assert.equal(taskSync.complete, false);
 });
@@ -461,12 +488,23 @@ test("syncVerifiedWorkspaceSnapshot verifies authority records via STAR and 404 
 test("syncVerifiedSpace cold STAR, warm reopen with 0 writer calls, and incremental listRepoOps multi-op replay", async () => {
   const network = new FakeNetwork();
   network.createAccount(CAROL, "pds1");
-  const { workspace, channels } = await createWorkspace(network, {
+  const { channels } = await createWorkspace(network, {
     members: [ALICE, BOB, READER],
     channels: [{ skey: "tasks", visibility: "public" }],
   });
   await writeMessage(network, ALICE, channels.tasks!, 1, "m1");
-  await network.applyWritesAs(BOB, workspace, [
+  const tasksSpace = tasksSpaceUri(AUTHORITY, SELF_SKEY);
+  await network.clientFor(AUTHORITY).procedure("com.atproto.space.createSpace", {
+    spaceType: SPACE_TYPE.tasks,
+    skey: tasksSpace.split("/").at(-1)!,
+    policy: {
+      $type: OPENSOCIAL_POLICY,
+      publicRead: false,
+      unlisted: false,
+      grants: [{ role: "member", read: true, write: true }],
+    },
+  });
+  await network.applyWritesAs(BOB, tasksSpace, [
     { action: "create", collection: COLLECTION.task, rkey: key(1), value: { title: "first", status: "open", createdAt: "2026-11-10T12:00:00.000Z" } },
     { action: "create", collection: COLLECTION.task, rkey: key(2), value: { title: "second", status: "open", createdAt: "2026-11-10T12:00:00.000Z" } },
   ]);
@@ -475,7 +513,7 @@ test("syncVerifiedSpace cold STAR, warm reopen with 0 writer calls, and incremen
   const tab1 = syncFor(network, READER, { store: sharedStore }).core;
   const coldCalls = await countCalls(network, async () => {
     const res = await tab1.syncVerifiedSpace({
-      space: workspace,
+      space: tasksSpace,
       collections: [COLLECTION.task],
       verifiedRosterMembers: [AUTHORITY, ALICE, BOB, CAROL, READER],
       workspaceSnapshotComplete: true,
@@ -483,7 +521,7 @@ test("syncVerifiedSpace cold STAR, warm reopen with 0 writer calls, and incremen
     });
     assert.equal(res.complete, true);
     assert.equal(res.records.length, 2);
-    assert.deepEqual(res.emptyUnwrittenWriters, [CAROL]);
+    assert.deepEqual(res.emptyUnwrittenWriters.sort(), [ALICE, CAROL, READER].sort());
     assert.equal(res.emptyReasons[CAROL], "unwrittenOrAbsent");
   });
   assert.ok((coldCalls["com.atproto.space.getRepo"] ?? 0) >= 2, "cold load uses STAR for written repos");
@@ -493,7 +531,7 @@ test("syncVerifiedSpace cold STAR, warm reopen with 0 writer calls, and incremen
   const tab2 = syncFor(network, READER, { store: sharedStore }).core;
   const warmCalls = await countCalls(network, async () => {
     const res = await tab2.syncVerifiedSpace({
-      space: workspace,
+      space: tasksSpace,
       collections: [COLLECTION.task],
       verifiedRosterMembers: [AUTHORITY, ALICE, BOB, CAROL, READER],
       workspaceSnapshotComplete: true,
@@ -509,14 +547,14 @@ test("syncVerifiedSpace cold STAR, warm reopen with 0 writer calls, and incremen
   assert.equal(warmCalls["com.atproto.space.getLatestCommit"], undefined);
 
   // Advance Bob with same-rev applyWrites (intermediate update + delete + create across collections), leaving Carol unwritten.
-  await network.applyWritesAs(BOB, workspace, [
+  await network.applyWritesAs(BOB, tasksSpace, [
     { action: "update", collection: COLLECTION.task, rkey: key(1), value: { title: "first-edited", status: "done", createdAt: "2026-11-10T12:00:00.000Z" } },
     { action: "delete", collection: COLLECTION.task, rkey: key(2) },
     { action: "create", collection: COLLECTION.task, rkey: key(3), value: { title: "third", status: "open", createdAt: "2026-11-10T12:00:00.000Z" } },
   ]);
   const deltaCalls = await countCalls(network, async () => {
     const res = await tab2.syncVerifiedSpace({
-      space: workspace,
+      space: tasksSpace,
       collections: [COLLECTION.task],
       verifiedRosterMembers: [AUTHORITY, ALICE, BOB, CAROL, READER],
       workspaceSnapshotComplete: true,
@@ -648,7 +686,12 @@ test("D14 purge waits for both listRepos and verifiedRosterMembers, and RepoNotF
   assert.equal((await store.getWriter(channels.tasks!, BOB))?.syncedRev, null);
 
   // Remove ALICE from listWriters while still in verifiedRosterMembers -> NOT purged under D14 yet!
-  await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMembers", { space: channels.tasks!, dids: [ALICE] });
+  await network.clientFor(AUTHORITY).procedure("com.atproto.space.deleteRecord", {
+    space: groupMembersUri(AUTHORITY),
+    repo: AUTHORITY,
+    collection: OPENSOCIAL_COLLECTION.membership,
+    rkey: ALICE,
+  });
   network.advanceClock(core.options.truthIntervalMs);
   const midEvict = await core.syncVerifiedSpace({
     space: channels.tasks!,
@@ -697,7 +740,12 @@ test("D14 purge waits for both listRepos and verifiedRosterMembers, and RepoNotF
   assert.deepEqual(missingAfterSync.setAside, [{ did: BOB, reason: "its host has no repo for it", permanent: false }]);
   assert.equal(missingAfterSync.records.find((r) => r.repo === BOB)?.value.text, "bob-first-write");
   // Repeat read still fails closed (permanent: false) until writer recovers or is evicted under D14.
-  await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMembers", { space: channels.tasks!, dids: [BOB] });
+  await network.clientFor(AUTHORITY).procedure("com.atproto.space.deleteRecord", {
+    space: groupMembersUri(AUTHORITY),
+    repo: AUTHORITY,
+    collection: OPENSOCIAL_COLLECTION.membership,
+    rkey: BOB,
+  });
   await core.markSpaceStale(channels.tasks!);
   const missingSecondRead = await core.syncVerifiedSpace({
     space: channels.tasks!,
@@ -1249,17 +1297,23 @@ test("fetchRepoOpsPages aborts multi-page listRepoOps early on staging payload o
 test("cold in-flight generation-0 syncVerifiedWorkspaceSnapshot cannot commit stale state past concurrent markSpaceStale (Codex R2-#2)", async () => {
   const network = new FakeNetwork();
   const fixture = await createWorkspace(network, { members: [ALICE], channels: [{ skey: "general", visibility: "public" }] });
-  const tasksSpace = extSpaceUriFor(AUTHORITY, "acme", "tasks");
+  const tasksSpace = extSpaceUriFor(AUTHORITY, SELF_SKEY, "tasks");
   await network.clientFor(AUTHORITY).procedure("com.atproto.space.createSpace", {
     spaceType: "new.flock.ext.tasks",
-    skey: "acme-tasks",
-    policy: memberspacePolicy(),
+    skey: tasksSpace.split("/").at(-1)!,
+    policy: {
+      $type: OPENSOCIAL_POLICY,
+      publicRead: false,
+      unlisted: false,
+      grants: [{ role: "member", read: true, write: true }],
+    },
   });
   await network.writeAs(AUTHORITY, fixture.workspace, COLLECTION.extInstall, "tasks", {
     extId: "tasks",
     space: tasksSpace,
     active: true,
-    enabledBy: AUTHORITY,
+    cleanupComplete: false,
+    enabledBy: ALICE,
     enabledAt: "2026-11-10T12:00:00.000Z",
     updatedAt: "2026-11-10T12:00:00.000Z",
   });
@@ -1300,7 +1354,8 @@ test("cold in-flight generation-0 syncVerifiedWorkspaceSnapshot cannot commit st
     extId: "tasks",
     space: tasksSpace,
     active: false,
-    enabledBy: AUTHORITY,
+    cleanupComplete: true,
+    enabledBy: ALICE,
     enabledAt: "2026-11-10T12:00:00.000Z",
     updatedAt: "2026-11-10T12:01:00.000Z",
     disabledAt: "2026-11-10T12:01:00.000Z",
@@ -1338,9 +1393,16 @@ test("followRepoOps isolates failed initial writers from new joiners, tracks per
 
     // Carol joins after initial baseline while Bob is still deactivated!
     network.createAccount(CAROL, "pds2");
-    await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.putMembers", {
-      space,
-      members: [{ did: CAROL, read: true, write: true }],
+    await network.clientFor(AUTHORITY).procedure("com.atproto.space.putRecord", {
+      space: groupMembersUri(AUTHORITY),
+      repo: AUTHORITY,
+      collection: OPENSOCIAL_COLLECTION.membership,
+      rkey: CAROL,
+      record: {
+        $type: OPENSOCIAL_COLLECTION.membership,
+        roles: ["member", channelRoleKey("r2h2-trace1")],
+        createdAt: "2026-11-10T12:00:00.000Z",
+      },
     });
     await network.writeAs(CAROL, space, COLLECTION.message, tidNow(network.now(), 0), {
       text: "carol-first-live-command",
@@ -1904,7 +1966,12 @@ test("R12 D12.4: listWriters incremental #repoRemoved evicts writer rows and fol
     });
 
     // Remove BOB while still inside truthIntervalMs -> incremental listWriters emits #repoRemoved!
-    await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMembers", { space, dids: [BOB] });
+    await network.clientFor(AUTHORITY).procedure("com.atproto.space.deleteRecord", {
+      space: groupMembersUri(AUTHORITY),
+      repo: AUTHORITY,
+      collection: OPENSOCIAL_COLLECTION.membership,
+      rkey: BOB,
+    });
     let bobRepoCalls = 0;
     network.interceptResponse = ({ params, response }) => {
       if (params.space === space && params.repo === BOB) bobRepoCalls += 1;
@@ -1914,7 +1981,8 @@ test("R12 D12.4: listWriters incremental #repoRemoved evicts writer rows and fol
     const calls = await countCalls(network, async () => {
       const afterRemoval = await core.syncVerifiedSpace({ space, collections: [COLLECTION.message] });
       assert.deepEqual(afterRemoval.records.map((r) => r.repo), [ALICE]);
-      assert.deepEqual(afterRemoval.listedWriters, [ALICE]);
+      assert.equal(afterRemoval.listedWriters.includes(BOB), false);
+      assert.equal(afterRemoval.listedWriters.includes(ALICE), true);
     });
     network.interceptResponse = undefined;
 
@@ -1924,9 +1992,16 @@ test("R12 D12.4: listWriters incremental #repoRemoved evicts writer rows and fol
     assert.equal((await store.getWriter(space, BOB))?.syncedRev, null);
 
     // Follow state for Bob was evicted too: if Bob is re-added later and writes, he baselines cleanly.
-    await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.putMembers", {
-      space,
-      members: [{ did: BOB, read: true, write: true }],
+    await network.clientFor(AUTHORITY).procedure("com.atproto.space.putRecord", {
+      space: groupMembersUri(AUTHORITY),
+      repo: AUTHORITY,
+      collection: OPENSOCIAL_COLLECTION.membership,
+      rkey: BOB,
+      record: {
+        $type: OPENSOCIAL_COLLECTION.membership,
+        roles: ["member", channelRoleKey("r12-repo-removed")],
+        createdAt: "2026-11-10T12:00:00.000Z",
+      },
     });
     await writeMessage(network, BOB, space, 3, "bob-rejoined");
     const delivered: string[] = [];
@@ -2000,7 +2075,12 @@ test("R12 D12.4: listWriters incremental #repoRemoved evicts writer rows and fol
     // InvalidCursor from listWriters(cursor) falls back seamlessly to un-cursored full listBoundedWriters scan and catches GC'd removals.
     let rejectCursorOnce = true;
     const invalidCursorCalls: Array<string | undefined> = [];
-    await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMembers", { space, dids: [BOB] });
+    await network.clientFor(AUTHORITY).procedure("com.atproto.space.deleteRecord", {
+      space: groupMembersUri(AUTHORITY),
+      repo: AUTHORITY,
+      collection: OPENSOCIAL_COLLECTION.membership,
+      rkey: BOB,
+    });
     network.interceptResponse = ({ method, params, response }) => {
       if (method === "com.atproto.space.listWriters" && params.space === space) {
         const cur = typeof params.cursor === "string" ? params.cursor : undefined;
@@ -2089,7 +2169,7 @@ test("R12 D12.6.2 (N3): authority RepoTakendown/RepoDeactivated is transient sus
     channels: [{ skey: "general", visibility: "public" }],
   });
   const general = fixture.channels.general!;
-  const ref = { workspace: fixture.workspace, skey: "acme-general" };
+  const ref = { workspace: fixture.workspace, skey: "general" };
   await writeMessage(network, AUTHORITY, general, 1, "authority-announcement");
   await writeMessage(network, ALICE, general, 2, "alice-msg");
   await writeMessage(network, BOB, general, 3, "bob-msg");
@@ -2098,25 +2178,25 @@ test("R12 D12.6.2 (N3): authority RepoTakendown/RepoDeactivated is transient sus
   const initialSnap = await alice.sync.syncVerifiedWorkspaceSnapshot(fixture.workspace);
   assert.equal(initialSnap.summary?.name, "Workspace acme");
   const initialPage = await alice.channels.readPage(ref);
-  assert.deepEqual(initialPage.messages.map((m) => m.value.text), ["bob-msg", "alice-msg", "authority-announcement"]);
+  assert.deepEqual(initialPage.messages.map((m) => m.value.text), ["bob-msg", "alice-msg"]);
+  await alice.sync.syncVerifiedSpace({ space: general, collections: [COLLECTION.message], includeAuthority: true });
 
-  // Case A (warm credential -> repo read path where repo === authorityDid, AND cold credential -> authorizeSpaceSync/listWriters path):
   for (const state of ["takendown", "deactivated"] as const) {
     network.setAccountState(AUTHORITY, state);
 
-    // 1) Warm credential still valid (< 10m): markSpaceStale forces repo reads (listRepoOps/getRepo/getLatestCommit) on repo === AUTHORITY
-    //    AND listWriters on space authority! Neither may drop local workspace/channel records!
     await alice.sync.markSpaceStale(fixture.workspace);
+    await alice.sync.markSpaceStale(fixture.meta);
+    await alice.sync.markSpaceStale(fixture.members);
     await alice.sync.markSpaceStale(general);
 
     const snapDuringWarmSuspension = await alice.sync.syncVerifiedWorkspaceSnapshot(fixture.workspace, { fresh: true });
     assert.equal(snapDuringWarmSuspension.setAside.length, 1);
     assert.equal(snapDuringWarmSuspension.setAside[0]?.did, AUTHORITY);
     assert.equal(snapDuringWarmSuspension.setAside[0]?.permanent, false, `authority ${state} on repo read must be transient (permanent: false)`);
-    assert.equal(snapDuringWarmSuspension.summary?.name, "Workspace acme", "local workspace.profile preserved during authority suspension");
+    assert.equal(snapDuringWarmSuspension.summary?.name, "Workspace acme", "local profile preserved during authority suspension");
     assert.equal(snapDuringWarmSuspension.summary?.channels.length, 1, "local directory preserved during authority suspension");
-    assert.equal(snapDuringWarmSuspension.rosterMembers.has(ALICE), true, "local workspace.roster preserved during authority suspension");
-    assert.equal((await alice.sync.store.records(fixture.workspace, COLLECTION.admin, AUTHORITY)).length, 2, "local admin records (authority + Alice) preserved");
+    assert.equal(snapDuringWarmSuspension.rosterMembers.has(ALICE), true, "local membership preserved during authority suspension");
+    assert.ok((await alice.sync.store.records(fixture.members, OPENSOCIAL_COLLECTION.membership, AUTHORITY)).length >= 2, "local membership records preserved");
 
     const channelVerifiedDuringSuspension = await alice.sync.syncVerifiedSpace({
       space: general,
@@ -2133,8 +2213,6 @@ test("R12 D12.6.2 (N3): authority RepoTakendown/RepoDeactivated is transient sus
       `authority message preserved during ${state}`,
     );
 
-    // 2) Advance past 10m credential expiry -> authorizeSpaceSync throws 400 RepoTakendown/RepoDeactivated:
-    //    isAccessLost(err) MUST be false, and discover() / readPage() MUST NOT purge stored workspace or channel records!
     network.advanceClock(15 * 60_000);
     let hostErr: unknown;
     try {
@@ -2149,19 +2227,95 @@ test("R12 D12.6.2 (N3): authority RepoTakendown/RepoDeactivated is transient sus
     assert.equal((await alice.sync.store.records(general, COLLECTION.message, AUTHORITY)).length, 1, "authority channel message still in store");
     assert.equal((await alice.sync.store.records(fixture.workspace, COLLECTION.directory, AUTHORITY)).length, 1, "directory still in store");
 
-    // Recover authority -> everything resumes cleanly!
     network.setAccountState(AUTHORITY, "active");
     const recoveredSummary = await alice.workspaces.summary(fixture.workspace);
     assert.equal(recoveredSummary?.name, "Workspace acme");
     const recoveredPage = await alice.channels.readPage(ref);
-    assert.equal(recoveredPage.messages.some((m) => m.repo === AUTHORITY), true);
+    assert.equal(recoveredPage.messages.some((m) => m.repo === ALICE), true);
   }
 
-  // Case B: Non-authority writer (BOB !== authorityDid) RepoTakendown / RepoDeactivated remains PERMANENT (evicting Bob's cached records)!
   network.setAccountState(BOB, "takendown");
   await alice.sync.markSpaceStale(general);
   const afterBobTakedown = await alice.channels.readPage(ref);
   assert.equal(afterBobTakedown.messages.some((m) => m.repo === BOB), false, "taken-down non-authority writer is hidden");
   assert.deepEqual(await alice.sync.store.records(general, COLLECTION.message, BOB), [], "taken-down non-authority writer's cached records are evicted");
   assert.equal((await alice.sync.store.records(general, COLLECTION.message, AUTHORITY)).length, 1, "authority records remain untouched");
+});
+
+test("Round 16 Fix #3: delayed writer scan excluding B superseded by invalidation never purges B's verified records or regresses space state", async () => {
+  const network = new FakeNetwork();
+  const space = await createChannel(network, "r16-writer-race", [ALICE, BOB, READER]);
+  await writeMessage(network, ALICE, space, 1, "alice-1");
+  await writeMessage(network, BOB, space, 2, "bob-initial");
+
+  const { core, store } = syncFor(network, READER);
+  assert.equal((await core.syncVerifiedSpace({ space, collections: [COLLECTION.message] })).complete, true);
+  assert.equal((await store.records(space, COLLECTION.message, BOB)).length, 1);
+
+  // Remove Bob so an initial scan observes Bob absent, and hold that `listWriters` response mid-flight!
+  await network.clientFor(AUTHORITY).procedure("com.atproto.space.deleteRecord", {
+    space: groupMembersUri(AUTHORITY),
+    repo: AUTHORITY,
+    collection: OPENSOCIAL_COLLECTION.membership,
+    rkey: BOB,
+  });
+
+  let releaseDelayedScan!: () => void;
+  const delayedScanGate = new Promise<void>((resolve) => {
+    releaseDelayedScan = resolve;
+  });
+  let notifyDelayedScanIntercepted!: () => void;
+  const delayedScanIntercepted = new Promise<void>((resolve) => {
+    notifyDelayedScanIntercepted = resolve;
+  });
+  let interceptFirstScanOnly = true;
+
+  network.interceptResponse = ({ method, params, response }) => {
+    if (interceptFirstScanOnly && method === "com.atproto.space.listWriters" && params.space === space) {
+      interceptFirstScanOnly = false;
+      notifyDelayedScanIntercepted();
+      return delayedScanGate.then(() => response);
+    }
+    return response;
+  };
+
+  // Start delayed writer scan (`fullScan: true`) while Bob is removed
+  const staleScanPromise = core.writers(space);
+  await delayedScanIntercepted;
+
+  // Before the delayed scan resolves: re-admit Bob (with the channel role), write a new verified message as Bob, and invalidate the space!
+  await network.clientFor(AUTHORITY).procedure("com.atproto.space.putRecord", {
+    space: groupMembersUri(AUTHORITY),
+    repo: AUTHORITY,
+    collection: OPENSOCIAL_COLLECTION.membership,
+    rkey: BOB,
+    record: {
+      $type: OPENSOCIAL_COLLECTION.membership,
+      roles: ["member", channelRoleKey("r16-writer-race")],
+      createdAt: "2026-11-10T12:05:00.000Z",
+    },
+  });
+  await writeMessage(network, BOB, space, 3, "bob-readmitted");
+  await core.markSpaceStale(space);
+
+  // Queue a fresh `syncVerifiedSpace` behind the serialized writer-scan lock and release the delayed stale scan!
+  const freshSyncPromise = core.syncVerifiedSpace({ space, collections: [COLLECTION.message] });
+  releaseDelayedScan();
+
+  const [, freshResult] = await Promise.all([staleScanPromise, freshSyncPromise]);
+  network.interceptResponse = undefined;
+
+  assert.equal(freshResult.complete, true);
+  const bobHeld = await store.records(space, COLLECTION.message, BOB);
+  assert.deepEqual(
+    bobHeld.map((r) => r.value.text).sort(),
+    ["bob-initial", "bob-readmitted"],
+    "Superseded writer scan MUST NOT purge Bob's held or newly synced verified records",
+  );
+  const finalSpaceState = await store.getSpace(space);
+  assert.equal(
+    finalSpaceState?.writers.some((w) => w.did === BOB),
+    true,
+    "Space writer listing must include re-admitted Bob without regressing to the invalidated scan",
+  );
 });

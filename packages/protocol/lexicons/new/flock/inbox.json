@@ -4,10 +4,10 @@
   "defs": {
     "main": {
       "type": "space",
-      "key": "any",
+      "key": "literal:self",
       "title": "Admin inbox",
-      "collections": ["new.flock.joinRequest", "new.flock.joinDecision"],
-      "description": "An inbox where workspace members can write requests and active admins can read them."
+      "collections": ["new.flock.joinRequest", "new.flock.joinDecision", "com.atproto.label.record"],
+      "description": "An inbox where workspace members write private-channel requests and active admins decide them."
     }
   }
 }

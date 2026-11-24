@@ -5,7 +5,12 @@ import { join } from "node:path";
 import test, { after, before } from "node:test";
 import { closeDb } from "../lib/db";
 import {
-  consumeCreationAuthorization, CREATION_AUTHORIZATION_SECONDS, CreationNotAuthorizedError, grantCreationAuthorization, restoreCreationAuthorization,
+  consumeCreationAuthorization,
+  CREATION_AUTHORIZATION_SECONDS,
+  CreationNotAuthorizedError,
+  findCreationAuthorizationAuthority,
+  grantCreationAuthorization,
+  restoreCreationAuthorization,
 } from "./creation-authorization";
 
 const AUTHORITY = "did:plc:workspaceaccount";
@@ -58,4 +63,36 @@ test("a new flow for the same workspace replaces the earlier approval, for any o
   restoreCreationAuthorization(approval("Again"), "5555555555555", T0);
   grantCreationAuthorization(approval("Again"), T0 + 60);
   consumeCreationAuthorization(approval("Again"), "5555555555556", T0 + 60);
+});
+
+test("findCreationAuthorizationAuthority resolves exact operation_id bindings and rejects ambiguous unbound matches", () => {
+  const groupA = "did:plc:groupboundaaaaaaaaaaa2";
+  const groupB = "did:plc:groupboundbbbbbbbbbbb3";
+  const opA = "666666666666a";
+  const opB = "666666666666b";
+
+  // Two concurrent creations for the same user and display name with distinct creationKey/operationId bindings
+  grantCreationAuthorization({ authorityDid: groupA, initiatorDid: CREATOR, name: "Shared Name" }, T0, opA);
+  grantCreationAuthorization({ authorityDid: groupB, initiatorDid: CREATOR, name: "Shared Name" }, T0 + 10, opB);
+
+  assert.equal(findCreationAuthorizationAuthority(CREATOR, "Shared Name", opA, T0 + 15), groupA);
+  assert.equal(findCreationAuthorizationAuthority(CREATOR, "Shared Name", opB, T0 + 15), groupB);
+  assert.equal(findCreationAuthorizationAuthority(CREATOR, "Shared Name", "666666666666c", T0 + 15), null);
+
+  // Consuming opA cannot consume groupB's authorization
+  refused(() => consumeCreationAuthorization({ authorityDid: groupB, initiatorDid: CREATOR, name: "Shared Name" }, opA, T0 + 15));
+  consumeCreationAuthorization({ authorityDid: groupA, initiatorDid: CREATOR, name: "Shared Name" }, opA, T0 + 15);
+  consumeCreationAuthorization({ authorityDid: groupB, initiatorDid: CREATOR, name: "Shared Name" }, opB, T0 + 15);
+
+  // Two ambiguous unbound (operation_id = NULL) authorizations for the same user & name must NOT pick the newest
+  const unboundA = "did:plc:unboundaaaaaaaaaaaaaa4";
+  const unboundB = "did:plc:unboundbbbbbbbbbbbbbb5";
+  grantCreationAuthorization({ authorityDid: unboundA, initiatorDid: CREATOR, name: "Ambiguous" }, T0);
+  assert.equal(findCreationAuthorizationAuthority(CREATOR, "Ambiguous", "777777777777a", T0 + 5), unboundA);
+  grantCreationAuthorization({ authorityDid: unboundB, initiatorDid: CREATOR, name: "Ambiguous" }, T0 + 10);
+  assert.equal(
+    findCreationAuthorizationAuthority(CREATOR, "Ambiguous", "777777777777a", T0 + 15),
+    null,
+    "multiple unbound authorizations for the same user and name must fail closed",
+  );
 });

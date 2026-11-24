@@ -41,6 +41,9 @@ async function installAndStartEchoBot(world: AppWorld, owner: Actor, bot: Bot): 
   await page.getByLabel("App account").fill(bot.did);
   await page.getByLabel("Access to #general").selectOption("write");
   await page.getByRole("button", { name: "Install app →" }).click();
+  // Wait for `runOperation({ kind: "installApp" })` to finish all steps (including `putMembershipRoles`) and `reset()` the form.
+  await expect(page.getByLabel("App account")).toHaveValue("", { timeout: 60_000 });
+  await expect(page.getByRole("button", { name: "Install app →" })).toBeEnabled({ timeout: 60_000 });
   await page.locator(".app-row").filter({ hasText: "Echo" }).filter({ hasText: "#general (read and write)" }).waitFor({ state: "visible" });
 
   const engine = createEngine(bot.transport, {
@@ -271,6 +274,7 @@ When("the admin removes the echo bot, warned that its earlier messages leave the
   await page.getByRole("alert").filter({ hasText: "also takes its earlier messages out of every channel’s view" }).waitFor({ state: "visible" });
   await page.getByRole("button", { name: "Remove app", exact: true }).click();
   await row.waitFor({ state: "hidden" });
+  await expect(page.getByRole("button", { name: "Install app →" })).toBeEnabled({ timeout: 60_000 });
 });
 
 Then("the member no longer sees the echo bot's answer", { timeout: 300_000 }, async function (this: AppWorld) {

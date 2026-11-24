@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import type { MergedTaskView, TaskCommentView, TaskStatus } from "@flock/client/ext/tasks";
 import {
   isoToDateInput,
@@ -31,6 +32,7 @@ export function TasksListView({
   onChangeStatus,
   onRestoreTask,
 }: TasksListViewProps) {
+  const [revealedHidden, setRevealedHidden] = useState<ReadonlySet<string>>(() => new Set());
   if (tasks.length === 0) {
     return (
       <div className="starter-card tasks-empty">
@@ -45,11 +47,29 @@ export function TasksListView({
         const conflictCount = Object.values(task.otherVersions).reduce((sum, list) => sum + (list?.length ?? 0), 0);
         const commentCount = commentsByTask.get(task.uri)?.length ?? 0;
         const dueLabel = isoToDateInput(task.dueDate);
+        const isHiddenCollapsed = Boolean(task.hidden) && !revealedHidden.has(task.uri);
+        if (isHiddenCollapsed) {
+          return (
+            <article key={task.uri} role="listitem" className="tasks-row" data-hidden="true">
+              <span className="status-note">
+                Hidden by group moderation —{" "}
+                <button
+                  type="button"
+                  className="text-button"
+                  onClick={() => setRevealedHidden((prev) => new Set([...prev, task.uri]))}
+                >
+                  Show
+                </button>
+              </span>
+            </article>
+          );
+        }
         return (
           <article
             key={task.uri}
             role="listitem"
             className={`tasks-row ${task.deleted ? "tasks-row-deleted" : ""}`}
+            data-hidden={task.hidden ? "true" : undefined}
           >
             <div className="tasks-row-main">
               <select

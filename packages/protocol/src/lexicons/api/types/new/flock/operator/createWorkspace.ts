@@ -20,12 +20,15 @@ export type QueryParams = {}
 export interface InputSchema {
   name: string
   operationId: string
-  /** The workspace account: its DID is in every URI of the workspace. Omitted, the caller's own. */
+  /** The opensocial.group DID created or reauthorized through startAuthorityFlow. */
   authority?: string
+  joinPolicy?: 'open' | 'approval' | 'invite' | (string & {})
+  publicMeta?: boolean
 }
 
 export interface OutputSchema {
   operationId: string
+  groupDid?: string
   workspace: string
   /** The workspace's general channel. */
   channel: string
@@ -36,8 +39,10 @@ export interface OutputSchema {
     | 'completed'
     | 'failed'
     | 'paused'
+    | 'aborted_actor_revoked'
     | (string & {})
   completedSteps: string[]
+  takenOverBy?: string
   error?: string
 }
 

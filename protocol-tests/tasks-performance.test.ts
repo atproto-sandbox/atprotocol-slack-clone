@@ -15,14 +15,22 @@ import {
   TASK_STATUSES,
   type ClosureInputOp,
 } from "@flock/protocol/entity-merge";
-import { spaceRecordUri, subjectKey, tasksSpaceUri, tidNow } from "@flock/protocol/keys";
+import { groupMembersUri, SELF_SKEY, spaceRecordUri, tasksSpaceUri, tidNow } from "@flock/protocol/keys";
 import { mapLimited } from "@flock/protocol/map-limited";
-import { COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
+import { COLLECTION, OPENSOCIAL_COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
 import { WORKSPACE_ENVELOPE } from "@flock/protocol/workspace-summary";
 import { readIndependentTasksSpace } from "@flock/reader/independent-tasks";
+import { startGroupHostServer, type RunningGroupHost } from "@flock/group-host/server";
 import { createFixtureTempRoot } from "./fixture-temp";
 import { acceptedTimestamps, loadSlurFilter } from "./support/accepted-tid";
-import { actorTransport, bearerSession, publishAppLexicons, type NetworkActor } from "./support/pds-network";
+import {
+  acceptGroupMembership,
+  actorTransport,
+  bearerSession,
+  createOpenSocialGroup,
+  publishAppLexicons,
+  type NetworkActor,
+} from "./support/pds-network";
 
 const PINNED_CHECKOUT = process.env.ATPROTO_PINNED_CHECKOUT;
 const WRITER_COUNT = 50;
@@ -317,10 +325,15 @@ test("D11.13 frozen 50-writer / 1,000-task / 5,020-record Tasks performance enve
   const fixtureTemp = createFixtureTempRoot("tasks-perf-fixture-");
   const dbDir = mkdtempSync(join(fixtureTemp.path, "tasks-perf-db-"));
   let network: TestNetwork | undefined;
+  let groupHost: RunningGroupHost | undefined;
 
   const prevEnv = {
     NODE_ENV: process.env.NODE_ENV,
+    ATPROTO_ACCEPTANCE_TEST: process.env.ATPROTO_ACCEPTANCE_TEST,
     APP_URL: process.env.APP_URL,
+    GROUP_HOST_URL: process.env.GROUP_HOST_URL,
+    GROUP_HOST_DATABASE_PATH: process.env.GROUP_HOST_DATABASE_PATH,
+    GROUP_HOST_ENCRYPTION_KEY: process.env.GROUP_HOST_ENCRYPTION_KEY,
     AUTH_ENCRYPTION_KEY: process.env.AUTH_ENCRYPTION_KEY,
     OPERATOR_SERVICE_REF: process.env.OPERATOR_SERVICE_REF,
     PLC_URL: process.env.PLC_URL,
@@ -345,19 +358,35 @@ test("D11.13 frozen 50-writer / 1,000-task / 5,020-record Tasks performance enve
       lexiconAuthority: true,
       pds: { rateLimitsEnabled: false },
     });
+    groupHost = await startGroupHostServer({
+      port: 0,
+      databasePath: join(dbDir, "group-host.db"),
+      plcUrl: network.plc.url,
+      encryptionKeyHex: "5b".repeat(32),
+      handleDomain: "groups.localhost",
+      allowLoopback: true,
+    });
     Object.assign(process.env, {
       NODE_ENV: "test",
+      ATPROTO_ACCEPTANCE_TEST: "true",
       APP_URL: "http://127.0.0.1:3000",
+      GROUP_HOST_URL: groupHost.url,
+      GROUP_HOST_DATABASE_PATH: join(dbDir, "group-host.db"),
+      GROUP_HOST_ENCRYPTION_KEY: "5b".repeat(32),
       AUTH_ENCRYPTION_KEY: "4c".repeat(32),
       OPERATOR_SERVICE_REF: "did:web:localhost%3A3000#atproto_flock_operator",
       PLC_URL: network.plc.url,
       DATABASE_PATH: join(dbDir, "app.db"),
     });
+    (await import("@flock/operator/config")).resetOperatorConfigCacheForTest();
 
     await publishAppLexicons(network as never, process.cwd());
-    const [{ ensureMemberListSpace, listSpaceMembers, putAuthorityRecord, putSpaceMember }] = await Promise.all([
-      import("@flock/operator/atproto/space-ops"),
-    ]);
+    const [{ restoreAuthorityGrant }, { ensureOpenSocialSpace, putAuthorityRecord }, { defaultExtensionSpacePolicy, defaultWorkspaceSpacePolicy }] =
+      await Promise.all([
+        import("@flock/operator/operator/authority-grant"),
+        import("@flock/operator/atproto/space-ops"),
+        import("@flock/operator/operator/workspace-spaces"),
+      ]);
 
     const hosts = [network.pds, network.extraPdses[0]!] as const;
     const writers: NetworkActor[] = await mapLimited(
@@ -380,24 +409,17 @@ test("D11.13 frozen 50-writer / 1,000-task / 5,020-record Tasks performance enve
 
     const authority = writers[0]!;
     const reader = writers[1]!;
-    const ownerSession = bearerSession(authority);
-    const workspaceSkey = "tasks-perf-50w";
-    const workspace = await ensureMemberListSpace(ownerSession as never, SPACE_TYPE.workspace, workspaceSkey);
-    const tasksSpace = tasksSpaceUri(authority.did, workspaceSkey);
+    const createdGroup = await createOpenSocialGroup({ groupHost, plcUrl: network.plc.url }, authority, {
+      name: "Tasks Perf Workspace",
+    });
+    const ownerSession = await restoreAuthorityGrant(createdGroup.groupDid);
+    const workspace = await ensureOpenSocialSpace(ownerSession, SPACE_TYPE.workspace, SELF_SKEY, defaultWorkspaceSpacePolicy());
+    const tasksSpace = tasksSpaceUri(createdGroup.groupDid, SELF_SKEY);
     const tasksSkey = tasksSpace.split("/").at(-1)!;
-    await ensureMemberListSpace(ownerSession as never, SPACE_TYPE.tasks, tasksSkey);
+    await ensureOpenSocialSpace(ownerSession, SPACE_TYPE.tasks, tasksSkey, defaultExtensionSpacePolicy());
 
     const nowIso = new Date().toISOString();
-    await putAuthorityRecord(ownerSession as never, workspace, COLLECTION.workspaceProfile, "self", {
-      name: "Tasks Perf Workspace",
-      createdAt: nowIso,
-    });
-    await putAuthorityRecord(ownerSession as never, workspace, COLLECTION.admin, subjectKey(authority.did), {
-      subject: authority.did,
-      active: true,
-      updatedAt: nowIso,
-    });
-    await putAuthorityRecord(ownerSession as never, workspace, COLLECTION.extInstall, "tasks", {
+    await putAuthorityRecord(ownerSession, workspace, COLLECTION.extInstall, "tasks", {
       extId: "tasks",
       active: true,
       space: tasksSpace,
@@ -407,18 +429,17 @@ test("D11.13 frozen 50-writer / 1,000-task / 5,020-record Tasks performance enve
       updatedAt: nowIso,
     });
 
+    const membersSpace = groupMembersUri(createdGroup.groupDid);
     await mapLimited(writers, PER_ORIGIN_CONNECTIONS, async (writer) => {
-      await putAuthorityRecord(ownerSession as never, workspace, COLLECTION.workspaceRoster, subjectKey(writer.did), {
-        subject: writer.did,
-        active: true,
-        updatedAt: nowIso,
-      });
       if (writer.did !== authority.did) {
-        await putSpaceMember(ownerSession as never, workspace, writer.did, true, true);
-        await putSpaceMember(ownerSession as never, tasksSpace, writer.did, true, true);
+        await putAuthorityRecord(ownerSession, membersSpace, OPENSOCIAL_COLLECTION.membership, writer.did, {
+          roles: ["member"],
+          createdAt: nowIso,
+        });
+        await acceptGroupMembership({ plcUrl: network!.plc.url }, writer, createdGroup.groupDid);
       }
     });
-    assert.equal((await listSpaceMembers(ownerSession as never, tasksSpace)).length, WRITER_COUNT - 1);
+    await settled(network.plc.url, reader, membersSpace, writers);
 
     // Seed exact 5,020 records across 50 writers using applyWrites batches.
     const slurFilter = await loadSlurFilter(pinnedCheckout);
@@ -631,7 +652,11 @@ test("D11.13 frozen 50-writer / 1,000-task / 5,020-record Tasks performance enve
       const tasksCalls = measured.bySpace[tasksSpace]!;
       const wsCalls = measured.bySpace[workspace]!;
       assert.equal(tasksCalls["com.atproto.space.listWriters"], 1, "Tasks space makes exact 1 listWriters call");
-      assert.equal(tasksCalls["com.atproto.space.getRepo"], WRITER_COUNT, "Tasks space makes exact 50 STAR getRepo calls");
+      assert.equal(
+        tasksCalls["com.atproto.space.getRepo"],
+        WRITER_COUNT + 1,
+        "Tasks space makes exact 51 STAR getRepo calls (50 human writers + group authority policy repo)",
+      );
       assert.equal(tasksCalls["com.atproto.space.getRecord"], undefined, "0 N+1 getRecord calls on Tasks space");
       assert.equal(tasksCalls["com.atproto.space.listRecords"], undefined, "0 listRecords calls on Tasks space");
       assert.equal(tasksCalls["com.atproto.space.listRepoOps"], undefined, "0 listRepoOps calls on cold load");
@@ -833,21 +858,15 @@ test("D11.13 frozen 50-writer / 1,000-task / 5,020-record Tasks performance enve
     // Create a clean Tasks workspace on the two real PDS instances so Gate 5 isolates oversized STAR rejection RSS
     // from re-cloning/merging the 5,020 cached records of the other 49 writers, while still running end-to-end
     // `engine.tasks.readSpace` and `readIndependentTasksSpace` across real federated PDS hosts.
-    const gate5Skey = "tasks-perf-gate5-oversized";
-    const gate5Workspace = await ensureMemberListSpace(ownerSession as never, SPACE_TYPE.workspace, gate5Skey);
-    const gate5TasksSpace = tasksSpaceUri(authority.did, gate5Skey);
-    const gate5TasksSkey = gate5TasksSpace.split("/").at(-1)!;
-    await ensureMemberListSpace(ownerSession as never, SPACE_TYPE.tasks, gate5TasksSkey);
-    await putAuthorityRecord(ownerSession as never, gate5Workspace, COLLECTION.workspaceProfile, "self", {
+    const gate5Group = await createOpenSocialGroup({ groupHost, plcUrl: network.plc.url }, authority, {
       name: "Tasks Perf Gate 5 Workspace",
-      createdAt: nowIso,
     });
-    await putAuthorityRecord(ownerSession as never, gate5Workspace, COLLECTION.admin, subjectKey(authority.did), {
-      subject: authority.did,
-      active: true,
-      updatedAt: nowIso,
-    });
-    await putAuthorityRecord(ownerSession as never, gate5Workspace, COLLECTION.extInstall, "tasks", {
+    const gate5OwnerSession = await restoreAuthorityGrant(gate5Group.groupDid);
+    const gate5Workspace = await ensureOpenSocialSpace(gate5OwnerSession, SPACE_TYPE.workspace, SELF_SKEY, defaultWorkspaceSpacePolicy());
+    const gate5TasksSpace = tasksSpaceUri(gate5Group.groupDid, SELF_SKEY);
+    const gate5TasksSkey = gate5TasksSpace.split("/").at(-1)!;
+    await ensureOpenSocialSpace(gate5OwnerSession, SPACE_TYPE.tasks, gate5TasksSkey, defaultExtensionSpacePolicy());
+    await putAuthorityRecord(gate5OwnerSession, gate5Workspace, COLLECTION.extInstall, "tasks", {
       extId: "tasks",
       active: true,
       space: gate5TasksSpace,
@@ -856,17 +875,15 @@ test("D11.13 frozen 50-writer / 1,000-task / 5,020-record Tasks performance enve
       enabledAt: nowIso,
       updatedAt: nowIso,
     });
-    for (const member of [authority, reader, oversizedWriter]) {
-      await putAuthorityRecord(ownerSession as never, gate5Workspace, COLLECTION.workspaceRoster, subjectKey(member.did), {
-        subject: member.did,
-        active: true,
-        updatedAt: nowIso,
+    const gate5MembersSpace = groupMembersUri(gate5Group.groupDid);
+    for (const member of [reader, oversizedWriter]) {
+      await putAuthorityRecord(gate5OwnerSession, gate5MembersSpace, OPENSOCIAL_COLLECTION.membership, member.did, {
+        roles: ["member"],
+        createdAt: nowIso,
       });
-      if (member.did !== authority.did) {
-        await putSpaceMember(ownerSession as never, gate5Workspace, member.did, true, true);
-        await putSpaceMember(ownerSession as never, gate5TasksSpace, member.did, true, true);
-      }
+      await acceptGroupMembership({ plcUrl: network.plc.url }, member, gate5Group.groupDid);
     }
+    await settled(network.plc.url, reader, gate5MembersSpace, [reader, oversizedWriter]);
 
     const gate5AuthorityClient = new AtprotoClient(bearerSession(authority).fetchHandler);
     const gate5ProjectStamp = allocStamp();
@@ -1049,7 +1066,7 @@ test("D11.13 frozen 50-writer / 1,000-task / 5,020-record Tasks performance enve
       gate1ColdLoad: {
         ...gate1Stats,
         tasksListWritersCalls: 1,
-        tasksGetRepoCalls: WRITER_COUNT,
+        tasksGetRepoCalls: WRITER_COUNT + 1,
         tasksGetRecordCalls: 0,
         workspaceGetRepoCalls: 1,
       },
@@ -1094,7 +1111,9 @@ test("D11.13 frozen 50-writer / 1,000-task / 5,020-record Tasks performance enve
       true,
     );
   } finally {
+    await groupHost?.close().catch(() => undefined);
     await network?.close();
+    (await import("@flock/operator/lib/db")).closeDb();
     rmSync(dbDir, { recursive: true, force: true });
     fixtureTemp.cleanup();
     for (const [key, value] of Object.entries(prevEnv)) {

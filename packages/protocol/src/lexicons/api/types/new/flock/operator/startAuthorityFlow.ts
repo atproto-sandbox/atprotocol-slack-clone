@@ -19,10 +19,13 @@ export type QueryParams = {}
 
 export interface InputSchema {
   purpose: 'createWorkspace' | 'reauthorize' | (string & {})
-  /** The workspace to create, for purpose createWorkspace. */
+  /** The group display name, for purpose createWorkspace. */
   name?: string
-  /** The workspace account to approve for. Omitted, the caller's own. */
+  /** Existing group DID to reauthorize or complete workspace provisioning on. */
   authority?: string
+  joinPolicy?: 'open' | 'approval' | 'invite' | (string & {})
+  publicMeta?: boolean
+  creationKey?: string
 }
 
 export interface OutputSchema {

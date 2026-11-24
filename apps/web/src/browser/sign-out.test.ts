@@ -3,6 +3,7 @@ import test from "node:test";
 import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 import { IndexedDbStore } from "@flock/client/indexeddb-store";
 import { tasksSpaceUri } from "@flock/protocol/keys";
+import { groupOAuthDbName } from "./group-session";
 import { signOutAccount } from "./sign-out";
 
 // Sign-out in the browser: what the account kept here goes even when its host cannot be told, and the result says which held.
@@ -106,4 +107,30 @@ test("D11.7: signing out completely erases IndexedDbStore activity and clock sta
     ownLastHlc: "001700000000999.0009",
   });
   reopenedBob.close();
+});
+
+test("signing out deletes flock-group-oauth:<viewerDid> while preserving another account's Group OAuth DB", async () => {
+  const factory = new IDBFactory();
+  Object.assign(globalThis, { indexedDB: factory, IDBKeyRange });
+
+  for (const who of [ALICE, BOB]) {
+    await new Promise<void>((resolve, reject) => {
+      const req = factory.open(groupOAuthDbName(who), 1);
+      req.onupgradeneeded = () => {
+        req.result.createObjectStore("session");
+      };
+      req.onsuccess = () => {
+        req.result.close();
+        resolve();
+      };
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  const res = await signOutAccount(ALICE, async () => undefined, { idbFactory: factory });
+  assert.deepEqual(res, { revoked: true, erased: true });
+  assert.deepEqual(
+    (await factory.databases()).map((db) => db.name),
+    [groupOAuthDbName(BOB)],
+  );
 });

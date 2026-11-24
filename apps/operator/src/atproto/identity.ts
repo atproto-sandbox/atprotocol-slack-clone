@@ -24,8 +24,26 @@ export function getIdResolver(): IdResolver {
   return resolver;
 }
 
-export async function resolvePds(did: string): Promise<string> {
-  const { pds } = await getIdResolver().did.resolveAtprotoData(did);
+export type IdentityTestOverrides = {
+  resolvePds: (did: string, options?: { forceRefresh?: boolean }) => Promise<string>;
+  resolveKemKey: (did: string, forceRefresh?: boolean) => Promise<string>;
+  resolveSigningKey: (did: string, forceRefresh?: boolean) => Promise<string>;
+  fetchEndpoint: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+};
+
+let testOverrides: IdentityTestOverrides | undefined;
+
+export function setIdentityTestOverrides(overrides?: IdentityTestOverrides): void {
+  testOverrides = overrides;
+}
+
+export async function resolvePds(
+  did: string,
+  forceRefresh?: boolean | { forceRefresh?: boolean },
+): Promise<string> {
+  const force = typeof forceRefresh === "boolean" ? forceRefresh : Boolean(forceRefresh?.forceRefresh);
+  if (testOverrides) return testOverrides.resolvePds(did, forceRefresh === undefined ? undefined : { forceRefresh: force });
+  const { pds } = await getIdResolver().did.resolveAtprotoData(did, force);
   await assertSafePdsEndpoint(pds);
   return pds;
 }
@@ -36,26 +54,35 @@ const MAX_CACHED_KEM_KEYS = 1_024;
  * The account's `#atproto_kem` did:key, remembered for ten minutes (the browser keeps DID documents as long). `forceRefresh`
  * resolves it again, for a MAC that failed after a key rotation.
  */
-export const resolveKemKey = cacheKemKeys(async (did, forceRefresh) => {
+const defaultResolveKemKey = cacheKemKeys(async (did, forceRefresh) => {
   const document = await getIdResolver().did.resolve(did, forceRefresh);
   if (!document) throw new Error(`Could not resolve ${did}.`);
   return kemKeyFromDidDocument(did, document);
 }, { ttlMs: DID_DOCUMENT_TTL_MS, maxEntries: MAX_CACHED_KEM_KEYS });
 
+export const resolveKemKey = (did: string, forceRefresh = false): Promise<string> =>
+  testOverrides ? testOverrides.resolveKemKey(did, forceRefresh) : defaultResolveKemKey(did, forceRefresh);
+
 /**
  * The account's `#atproto` signing did:key, cached for ten minutes and bypassed on `forceRefresh` after key rotation.
  */
-export const resolveSigningKey = cacheKemKeys(
+const defaultResolveSigningKey = cacheKemKeys(
   (did, forceRefresh) => getIdResolver().did.resolveAtprotoKey(did, forceRefresh),
   { ttlMs: DID_DOCUMENT_TTL_MS, maxEntries: MAX_CACHED_KEM_KEYS },
 );
+
+export const resolveSigningKey = (did: string, forceRefresh = false): Promise<string> =>
+  testOverrides ? testOverrides.resolveSigningKey(did, forceRefresh) : defaultResolveSigningKey(did, forceRefresh);
 
 export async function assertSafePdsEndpoint(endpoint: string): Promise<void> {
   await assertSafeEndpoint(endpoint, loopbackDevelopment);
 }
 
+const defaultFetchValidatedEndpoint = safeFetch(loopbackDevelopment);
+
 /** Every request the operator sends to a host someone else named goes through here (`@flock/net/safe-fetch`). */
-export const fetchValidatedEndpoint = safeFetch(loopbackDevelopment);
+export const fetchValidatedEndpoint = (input: RequestInfo | URL, init?: RequestInit): Promise<Response> =>
+  testOverrides ? testOverrides.fetchEndpoint(input, init) : defaultFetchValidatedEndpoint(input, init);
 
 export async function fetchIdResolverEndpoint(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const response = await fetchValidatedEndpoint(input, init);

@@ -2,31 +2,29 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 import { serializedRecordBytes } from "@flock/protocol/atproto/space-credential-core";
-import { memberspacePolicy } from "@flock/protocol/atproto/space-policy";
 import { advanceHlc, buildEditClosure, MAX_ANCESTOR_REFS, opRef } from "@flock/protocol/entity-merge";
-import { spaceRecordUri, subjectKey, tasksSpaceUri, tidNow } from "@flock/protocol/keys";
-import { COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
+import { groupMembersUri, SELF_SKEY, spaceRecordUri, tasksSpaceUri, tidNow, workspaceUri } from "@flock/protocol/keys";
+import { ATPROTO_SPACE_COLLECTION, COLLECTION, OPENSOCIAL_COLLECTION, OPENSOCIAL_POLICY, SPACE_TYPE } from "@flock/protocol/nsids";
 import { WORKSPACE_ENVELOPE } from "@flock/protocol/workspace-summary";
 import { readIndependentTasksSpace, type IndependentTasksReadResult } from "@flock/reader/independent-tasks";
 import { FakeNetwork } from "@flock/testing/fake-network";
 import { createEngine } from "./engine";
 import type { TasksSpaceView } from "./ext/tasks";
 import { IndexedDbStore } from "./indexeddb-store";
-import { countCalls, transportFor } from "./testing/engine-fixture";
+import { AUTHORITY, countCalls, key, plcDidForLabel, transportFor } from "./testing/engine-fixture";
 
 Object.assign(globalThis, { IDBKeyRange });
 
-const AUTHORITY = "did:plc:authority";
-const ALICE = "did:plc:alice";
-const BOB = "did:plc:bob2";
-const CAROL = "did:plc:carol";
-const DAVE = "did:plc:dave2";
+const ALICE = "did:plc:aliceaaaaaaaaaaaaaaaaaaa";
+const BOB = "did:plc:bob2aaaaaaaaaaaaaaaaaaaa";
+const CAROL = "did:plc:carolaaaaaaaaaaaaaaaaaaa";
+const DAVE = "did:plc:dave2aaaaaaaaaaaaaaaaaaa";
 const TIMESTAMP = "2026-11-16T12:00:00.000Z";
 const BASE_HLC_MS = 1_700_000_000_000;
 
 function omitKeys<T extends Record<string, unknown>>(items: readonly T[], keys: readonly string[]) {
   return items.map((item) =>
-    Object.fromEntries(Object.entries(item).filter(([key]) => !keys.includes(key))),
+    Object.fromEntries(Object.entries(item).filter(([k]) => !keys.includes(k))),
   );
 }
 
@@ -59,69 +57,97 @@ async function createTasksFixture(
   network: FakeNetwork,
   input: { members: readonly string[]; enableTasks?: boolean; skey?: string },
 ) {
-  const skey = input.skey ?? "parity";
-  if (!network.hasAccount(AUTHORITY)) network.createAccount(AUTHORITY, "pds1");
-  const owner = network.clientFor(AUTHORITY);
-  const { space: workspace } = await owner.procedure<unknown, { space: string }>("com.atproto.space.createSpace", {
+  const label = input.skey ?? "parity";
+  const groupDid = label === "parity" ? AUTHORITY : plcDidForLabel(label);
+  await network.createGroupAccount(groupDid, {
+    name: `Workspace ${label}`,
+    joinPolicy: "invite",
+    publicMeta: true,
+    sovereignRotationKeys: ["did:key:zDnaeTestSovereignKey"],
+  });
+  const owner = network.clientFor(groupDid);
+  const workspace = workspaceUri(groupDid);
+  const membersSpace = groupMembersUri(groupDid);
+
+  await owner.procedure("com.atproto.space.createSpace", {
     spaceType: SPACE_TYPE.workspace,
-    skey,
-    policy: memberspacePolicy(),
-  });
-  await network.writeAs(AUTHORITY, workspace, COLLECTION.workspaceProfile, "self", {
-    name: `Workspace ${skey}`,
-    createdAt: TIMESTAMP,
-  });
-  await network.writeAs(AUTHORITY, workspace, COLLECTION.admin, subjectKey(AUTHORITY), {
-    subject: AUTHORITY,
-    active: true,
-    updatedAt: TIMESTAMP,
+    skey: SELF_SKEY,
+    policy: {
+      $type: OPENSOCIAL_POLICY,
+      publicRead: false,
+      unlisted: false,
+      grants: [
+        { role: "admin", read: true, write: true },
+        { role: "moderator", read: true, write: true },
+        { role: "member", read: true },
+      ],
+    },
   });
 
-  const tasksSpace = tasksSpaceUri(AUTHORITY, skey);
+  const tasksSpace = tasksSpaceUri(groupDid, SELF_SKEY);
   const enableTasks = input.enableTasks ?? true;
   if (enableTasks) {
     await owner.procedure("com.atproto.space.createSpace", {
       spaceType: SPACE_TYPE.tasks,
       skey: tasksSpace.split("/").at(-1)!,
-      policy: memberspacePolicy(),
+      policy: {
+        $type: OPENSOCIAL_POLICY,
+        publicRead: false,
+        unlisted: false,
+        grants: [
+          { role: "admin", read: true, write: true },
+          { role: "moderator", read: true, write: true },
+          { role: "member", read: true, write: true },
+        ],
+      },
     });
-    await network.writeAs(AUTHORITY, workspace, COLLECTION.extInstall, "tasks", {
+  }
+
+  for (const [idx, did] of input.members.entries()) {
+    if (!network.hasAccount(did)) network.createAccount(did, did.endsWith("2") || did.includes("bob2") || did.includes("dave2") ? "pds2" : "pds1");
+    if (did === groupDid) continue;
+    await owner.procedure("com.atproto.space.putRecord", {
+      space: membersSpace,
+      repo: groupDid,
+      collection: OPENSOCIAL_COLLECTION.membership,
+      rkey: did,
+      record: {
+        $type: OPENSOCIAL_COLLECTION.membership,
+        roles: idx === 0 ? ["admin", "member"] : ["member"],
+        createdAt: TIMESTAMP,
+      },
+    });
+    const mem = await owner.query<{ value: Record<string, unknown> }>("com.atproto.space.getRecord", {
+      space: membersSpace,
+      repo: groupDid,
+      collection: OPENSOCIAL_COLLECTION.membership,
+      rkey: did,
+    });
+    const inc = mem.value["new.flock.incarnation"];
+    await network.writeAs(did, membersSpace, OPENSOCIAL_COLLECTION.acceptance, SELF_SKEY, {
+      createdAt: TIMESTAMP,
+      ...(typeof inc === "string" ? { "new.flock.incarnation": inc } : {}),
+    });
+  }
+
+  if (enableTasks) {
+    await network.writeAs(groupDid, workspace, COLLECTION.extInstall, "tasks", {
       extId: "tasks",
       active: true,
       space: tasksSpace,
       cleanupComplete: false,
-      enabledBy: AUTHORITY,
+      enabledBy: input.members[0] ?? ALICE,
       enabledAt: TIMESTAMP,
       updatedAt: TIMESTAMP,
     });
   }
 
-  for (const did of [AUTHORITY, ...input.members]) {
-    if (!network.hasAccount(did)) network.createAccount(did, did.endsWith("2") ? "pds2" : "pds1");
-    await network.writeAs(AUTHORITY, workspace, COLLECTION.workspaceRoster, subjectKey(did), {
-      subject: did,
-      active: true,
-      updatedAt: TIMESTAMP,
-    });
-    if (did === AUTHORITY) continue;
-    await owner.procedure("com.atproto.memberspace.putMembers", {
-      space: workspace,
-      members: [{ did, read: true, write: true }],
-    });
-    if (enableTasks) {
-      await owner.procedure("com.atproto.memberspace.putMembers", {
-        space: tasksSpace,
-        members: [{ did, read: true, write: true }],
-      });
-    }
-  }
-
-  return { workspace, tasksSpace, skey };
+  return { groupDid, workspace, membersSpace, tasksSpace, skey: SELF_SKEY };
 }
 
-test("engine.tasks matches readIndependentTasksSpace across cold STAR, listRepoOps incremental, local writes, warm reopen, conflicts, delete/restore, and D14", async () => {
+test("engine.tasks matches readIndependentTasksSpace across cold STAR, listRepoOps incremental, local writes, warm reopen, conflicts, moderation labels, delete/restore, and D14", async () => {
   const network = new FakeNetwork();
-  const { workspace, tasksSpace } = await createTasksFixture(network, { members: [ALICE, BOB, CAROL] });
+  const { groupDid, workspace, membersSpace, tasksSpace } = await createTasksFixture(network, { members: [ALICE, BOB, CAROL] });
 
   const idb = await IndexedDbStore.open(ALICE, new IDBFactory());
   try {
@@ -139,7 +165,6 @@ test("engine.tasks matches readIndependentTasksSpace across cold STAR, listRepoO
       return eng;
     };
 
-    // 1. Seed initial project, task, and comments, then verify cold STAR parity.
     const proj = await bobEngine.tasks.createProject(workspace, {
       name: "Core",
       description: "Initial",
@@ -156,7 +181,6 @@ test("engine.tasks matches readIndependentTasksSpace across cold STAR, listRepoO
     });
     const comment1 = await carolEngine.tasks.addComment(workspace, { taskUri: task1.uri, body: "Carol initial comment" });
 
-    // Orphan & invalid records alongside valid records must match independent reader behavior.
     const missingTaskUri = spaceRecordUri(tasksSpace, DAVE, COLLECTION.task, "3k22222222222");
     await network.writeAs(CAROL, tasksSpace, COLLECTION.taskEdit, (await carolEngine.writeQueue.reserveStamp(CAROL)).tid, {
       subject: missingTaskUri,
@@ -181,7 +205,6 @@ test("engine.tasks matches readIndependentTasksSpace across cold STAR, listRepoO
     assert.ok((coldCalls["com.atproto.space.getRepo"] ?? 0) >= 3, "cold load uses STAR getRepo");
     await compare("cold STAR initial load");
 
-    // 2. Remote incremental writes by Bob & Carol -> Alice advances via listRepoOps (0 getRepo calls!).
     const bobTask1View = (await bobEngine.tasks.getTask(workspace, task1.uri))!;
     const carolTask1View = (await carolEngine.tasks.getTask(workspace, task1.uri))!;
     network.advanceClock(10);
@@ -210,7 +233,37 @@ test("engine.tasks matches readIndependentTasksSpace across cold STAR, listRepoO
     assert.ok((incCalls["com.atproto.space.listRepoOps"] ?? 0) >= 2);
     await compare("incremental listRepoOps after remote conflicts");
 
-    // 3. Local writes via aliceEngine: update project, add/delete comment, create+delete+restore task, concurrent delete overwrite.
+    // Moderation `!hide` and `!takedown` labels on tasks/comments project identically across TasksClient & independent reader!
+    const moderatedTask = await aliceEngine.tasks.createTask(workspace, { title: "Takendown task" });
+    await network.clientFor(groupDid).procedure("com.atproto.space.putRecord", {
+      space: tasksSpace,
+      repo: groupDid,
+      collection: ATPROTO_SPACE_COLLECTION.label,
+      rkey: key(200),
+      record: { $type: ATPROTO_SPACE_COLLECTION.label, src: groupDid, uri: task1.uri, val: "!hide", cts: "2026-11-16T12:05:00.000Z" },
+    });
+    await network.clientFor(groupDid).procedure("com.atproto.space.putRecord", {
+      space: tasksSpace,
+      repo: groupDid,
+      collection: ATPROTO_SPACE_COLLECTION.label,
+      rkey: key(201),
+      record: { $type: ATPROTO_SPACE_COLLECTION.label, src: groupDid, uri: moderatedTask.uri, val: "!takedown", cts: "2026-11-16T12:05:00.000Z" },
+    });
+    await aliceEngine.sync.markSpaceStale(tasksSpace);
+    const modPaired = await compare("moderation !hide and !takedown parity");
+    assert.equal(modPaired.tasks.find((t) => t.uri === task1.uri)?.hidden, true);
+    assert.equal(modPaired.tasks.some((t) => t.uri === moderatedTask.uri), false);
+
+    // Negate `!hide` so clean state continues
+    await network.clientFor(groupDid).procedure("com.atproto.space.putRecord", {
+      space: tasksSpace,
+      repo: groupDid,
+      collection: ATPROTO_SPACE_COLLECTION.label,
+      rkey: key(202),
+      record: { $type: ATPROTO_SPACE_COLLECTION.label, src: groupDid, uri: task1.uri, val: "!hide", neg: true, cts: "2026-11-16T12:06:00.000Z" },
+    });
+    await aliceEngine.sync.markSpaceStale(tasksSpace);
+
     const aliceSpace = await aliceEngine.tasks.readSpace(workspace);
     const aliceProj = aliceSpace.projects.find((p) => p.uri === proj.uri)!;
     await aliceEngine.tasks.updateProject(workspace, {
@@ -226,12 +279,10 @@ test("engine.tasks matches readIndependentTasksSpace across cold STAR, listRepoO
     const delTask2 = await aliceEngine.tasks.deleteTask(workspace, { context: task2.observedContext });
     await aliceEngine.tasks.addComment(workspace, { taskUri: task1.uri, body: "Alice permanent comment" });
 
-    // Carol concurrently edits task2 without seeing delete -> concurrentDeleteOverwrite Activity!
     network.advanceClock(10);
     await carolEngine.tasks.updateTask(workspace, { context: carolTask2.observedContext, title: "Carol concurrent edit on deleted task" });
     await compare("after local writes + concurrentDeleteOverwrite");
 
-    // Restore task2 and verify parity.
     await aliceEngine.tasks.restoreTask(workspace, { context: delTask2.observedContext });
     await compare("after restoreTask");
 
@@ -255,15 +306,14 @@ test("engine.tasks matches readIndependentTasksSpace across cold STAR, listRepoO
     const carolViewD14 = (await carolEngine.tasks.getTask(workspace, d14Task.uri))!;
     await carolEngine.tasks.restoreTask(workspace, { context: carolViewD14.observedContext });
 
-    await network.writeAs(AUTHORITY, workspace, COLLECTION.workspaceRoster, subjectKey(BOB), {
-      subject: BOB,
-      active: false,
-      updatedAt: TIMESTAMP,
+    await network.clientFor(groupDid).procedure("com.atproto.space.deleteRecord", {
+      space: membersSpace,
+      repo: groupDid,
+      collection: OPENSOCIAL_COLLECTION.membership,
+      rkey: BOB,
     });
-    await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMembers", { space: tasksSpace, dids: [BOB] });
     await compare("after D14 intermediate writer removal");
 
-    // 6. Set-aside deactivated writer parity.
     network.setAccountState(CAROL, "deactivated");
     network.advanceClock(aliceEngine.sync.options.truthIntervalMs);
     await compare("after Carol deactivated");
@@ -274,7 +324,7 @@ test("engine.tasks matches readIndependentTasksSpace across cold STAR, listRepoO
 
 test("engine.tasks matches readIndependentTasksSpace across 255/256/257 saturation and saturated D14 eviction", async () => {
   const network = new FakeNetwork();
-  const { workspace, tasksSpace } = await createTasksFixture(network, { members: [ALICE, BOB, CAROL] });
+  const { groupDid, workspace, membersSpace, tasksSpace } = await createTasksFixture(network, { members: [ALICE, BOB, CAROL], skey: "saturation" });
   const alice = createEngine(transportFor(network, ALICE));
   const bob = createEngine(transportFor(network, BOB));
   const carol = createEngine(transportFor(network, CAROL));
@@ -302,39 +352,34 @@ test("engine.tasks matches readIndependentTasksSpace across 255/256/257 saturati
     ops.push({ repo, rkey, t: lastT, s: closure.s, sTruncated: closure.sTruncated });
   };
 
-  // Seed 254 edits -> 255 ops total (root + 254).
   for (let i = 1; i <= 254; i += 1) {
     await seedEdit([BOB, CAROL, ALICE][i % 3]!, i);
   }
   assertTasksParity(await alice.tasks.readSpace(workspace), await readIndependentTasksSpace(reader, workspace), "255 ops");
 
-  // 255th edit -> 256 ops total (closureRefs = 256, still final).
   await seedEdit(BOB, 255);
   const view256 = await alice.tasks.readSpace(workspace);
   assert.equal(view256.tasks[0]!.closureRefs.length, MAX_ANCESTOR_REFS);
   assert.equal(view256.tasks[0]!.uncertainAncestry, false);
   assertTasksParity(view256, await readIndependentTasksSpace(reader, workspace), "256 ops exact boundary");
 
-  // 256th edit -> 257 ops total (s.length = 256, still final).
   await seedEdit(CAROL, 256);
   const view257 = await alice.tasks.readSpace(workspace);
   assert.equal(view257.tasks[0]!.uncertainAncestry, false);
   assertTasksParity(view257, await readIndependentTasksSpace(reader, workspace), "256 ancestors still final");
 
-  // 257th edit -> 257 ancestors (> 256), triggers sTruncated: true & uncertainAncestry: true.
   await seedEdit(ALICE, 257);
   const viewSaturated = await alice.tasks.readSpace(workspace);
   assert.equal(viewSaturated.tasks[0]!.uncertainAncestry, true);
   assert.equal(viewSaturated.tasks[0]!.conflictFinal, false);
   assertTasksParity(viewSaturated, await readIndependentTasksSpace(reader, workspace), "257 ancestors saturated");
 
-  // Remove intermediate writer Bob under D14 on the saturated task and verify exact parity!
-  await network.writeAs(AUTHORITY, workspace, COLLECTION.workspaceRoster, subjectKey(BOB), {
-    subject: BOB,
-    active: false,
-    updatedAt: TIMESTAMP,
+  await network.clientFor(groupDid).procedure("com.atproto.space.deleteRecord", {
+    space: membersSpace,
+    repo: groupDid,
+    collection: OPENSOCIAL_COLLECTION.membership,
+    rkey: BOB,
   });
-  await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMembers", { space: tasksSpace, dids: [BOB] });
   assertTasksParity(
     await alice.tasks.readSpace(workspace),
     await readIndependentTasksSpace(reader, workspace),
@@ -342,7 +387,7 @@ test("engine.tasks matches readIndependentTasksSpace across 255/256/257 saturati
   );
 });
 
-test("engine.tasks matches readIndependentTasksSpace when Tasks is disabled or workspace snapshot is malformed", async () => {
+test("engine.tasks matches readIndependentTasksSpace when Tasks is disabled or workspace snapshot exceeds member envelope", async () => {
   const network = new FakeNetwork();
   const disabled = await createTasksFixture(network, { members: [ALICE], enableTasks: false, skey: "disabled" });
   const alice = createEngine(transportFor(network, ALICE));
@@ -354,31 +399,35 @@ test("engine.tasks matches readIndependentTasksSpace when Tasks is disabled or w
     "disabled Tasks extension",
   );
 
-  const malformed = await createTasksFixture(network, { members: [ALICE, BOB], skey: "malformed" });
-  const t = await alice.tasks.createTask(malformed.workspace, { title: "Task before malformed roster" });
+  const overflow = await createTasksFixture(network, { members: [ALICE, BOB], skey: "malformed" });
+  const t = await alice.tasks.createTask(overflow.workspace, { title: "Task before member overflow" });
   const bob = createEngine(transportFor(network, BOB));
-  const bobView = (await bob.tasks.getTask(malformed.workspace, t.uri))!;
-  await bob.tasks.updateTask(malformed.workspace, { context: bobView.observedContext, title: "Bob" });
-  await alice.tasks.updateTask(malformed.workspace, { context: t.observedContext, title: "Alice" });
+  const bobView = (await bob.tasks.getTask(overflow.workspace, t.uri))!;
+  await bob.tasks.updateTask(overflow.workspace, { context: bobView.observedContext, title: "Bob" });
+  await alice.tasks.updateTask(overflow.workspace, { context: t.observedContext, title: "Alice" });
 
-  await network.writeAs(AUTHORITY, malformed.workspace, COLLECTION.workspaceRoster, "bad-roster-key", {
-    subject: CAROL,
-    active: true,
-    updatedAt: TIMESTAMP,
-  });
+  for (let i = 0; i < 200; i += 1) {
+    const extraDid = `did:plc:extra${String(i).padStart(4, "0")}aaaaaaaaaaaaaaa`;
+    await network.clientFor(overflow.groupDid).procedure("com.atproto.space.putRecord", {
+      space: overflow.membersSpace,
+      repo: overflow.groupDid,
+      collection: OPENSOCIAL_COLLECTION.membership,
+      rkey: extraDid,
+      record: { $type: OPENSOCIAL_COLLECTION.membership, roles: ["member"], createdAt: TIMESTAMP },
+    });
+  }
   network.advanceClock(alice.sync.options.truthIntervalMs);
-  const engMalformed = await alice.tasks.readSpace(malformed.workspace);
-  const indMalformed = await readIndependentTasksSpace(reader, malformed.workspace);
-  assert.equal(engMalformed.workspaceSnapshotComplete, false);
-  assert.deepEqual(engMalformed.activities, []);
-  assertTasksParity(engMalformed, indMalformed, "malformed workspace.roster");
+  const engOverflow = await alice.tasks.readSpace(overflow.workspace);
+  const indOverflow = await readIndependentTasksSpace(reader, overflow.workspace);
+  assert.equal(engOverflow.workspaceSnapshotComplete, false);
+  assert.deepEqual(engOverflow.activities, []);
+  assertTasksParity(engOverflow, indOverflow, "overflowed membership envelope");
 });
 
 test("engine.tasks and readIndependentTasksSpace match on RepoStarLimitError and persistent STAR verification failures (cold & warm)", async () => {
-  // 1. Cold + warm RepoStarLimitError parity: both classify permanent: true with "its answer is larger than this app reads", and warm purges cached records.
   {
     const network = new FakeNetwork();
-    const { workspace } = await createTasksFixture(network, { members: [ALICE, BOB], skey: "star-limit" });
+    const { workspace } = await createTasksFixture(network, { members: [ALICE, BOB], skey: "starlimit" });
     const alice = createEngine(transportFor(network, ALICE));
     const bob = createEngine(transportFor(network, BOB));
     const reader = transportFor(network, ALICE);
@@ -386,10 +435,8 @@ test("engine.tasks and readIndependentTasksSpace match on RepoStarLimitError and
     await alice.tasks.createTask(workspace, { title: "Alice task" });
     await bob.tasks.createTask(workspace, { title: "Bob small task" });
 
-    // Seed warm cache under normal envelope.
     assert.equal((await alice.tasks.readSpace(workspace)).tasks.length, 2);
 
-    // Bob adds a big description exceeding maxStarArchiveBytes: 900 on read -> both cold reader & warm engine agree on permanent: true & drop Bob's tasks.
     await bob.tasks.createTask(workspace, { title: "Bob oversized", description: "x".repeat(1200) });
     const engLimit = await alice.tasks.readSpace(workspace, { fresh: true, maxStarArchiveBytes: 900 });
     const indLimit = await readIndependentTasksSpace(reader, workspace, { maxStarArchiveBytes: 900 });
@@ -407,20 +454,17 @@ test("engine.tasks and readIndependentTasksSpace match on RepoStarLimitError and
     );
   }
 
-  // 2. Cold + warm persistent RepoVerificationError/StarParseError parity: both classify permanent: true with "its records could not be authenticated".
   {
     const network = new FakeNetwork();
-    const { workspace } = await createTasksFixture(network, { members: [ALICE, BOB], skey: "star-verify" });
+    const { workspace } = await createTasksFixture(network, { members: [ALICE, BOB], skey: "starverify" });
     const alice = createEngine(transportFor(network, ALICE));
     const bob = createEngine(transportFor(network, BOB));
     const reader = transportFor(network, ALICE);
 
     await alice.tasks.createTask(workspace, { title: "Alice task" });
     await bob.tasks.createTask(workspace, { title: "Bob task" });
-    // Warm cache includes Bob initially.
     assert.equal((await alice.tasks.readSpace(workspace)).tasks.length, 2);
 
-    // Bob updates while host returns corrupted STAR archive on every retry.
     const bobView = (await bob.tasks.readSpace(workspace)).tasks.find((t) => t.repo === BOB)!;
     await bob.tasks.updateTask(workspace, { context: bobView.observedContext, title: "Bob v2" });
     network.interceptResponse = ({ method, params, response }) => {
@@ -449,17 +493,15 @@ test("engine.tasks and readIndependentTasksSpace match on RepoStarLimitError and
     );
   }
 
-  // 3. Codex R2-#6 exact 16 MiB boundary parity: < 16 MiB CBOR record values where STAR framing pushes archive > 16 MiB
-  //    MUST reject identically with permanent setAside across cold STAR, cold JSON fallback (501), and warm listRepoOps delta!
   {
     const network = new FakeNetwork();
-    const { workspace, tasksSpace } = await createTasksFixture(network, { members: [ALICE, BOB], skey: "star-16mib-boundary" });
+    const { workspace, tasksSpace } = await createTasksFixture(network, { members: [ALICE, BOB], skey: "star16mib" });
     const alice = createEngine(transportFor(network, ALICE));
     const reader = transportFor(network, ALICE);
 
     await alice.tasks.createTask(workspace, { title: "Alice seed task" });
 
-    const maxBytes = WORKSPACE_ENVELOPE.maxStarArchiveBytes; // 16 * 1024 * 1024
+    const maxBytes = WORKSPACE_ENVELOPE.maxStarArchiveBytes;
     const totalCount = 2_100;
     const baseCount = 2_070;
 
@@ -479,12 +521,10 @@ test("engine.tasks and readIndependentTasksSpace match on RepoStarLimitError and
       return { collection: COLLECTION.task, rkey, value };
     };
 
-    // Calibrate record size so 2,100 CBOR record values sum to (16 MiB - 1 KiB), strictly < 16 MiB in raw values
-    // while STAR framing (~95 KiB across 2,100 entries + header) pushes total STAR archive > 16 MiB.
     const probe = makeTaskRecord(0, 7_900);
     const probeCborBytes = await serializedRecordBytes(probe.collection, probe.rkey, probe.value);
     const overheadPerRecord = probeCborBytes - 7_900;
-    const targetTotalValuesBytes = maxBytes - 1024; // 16 MiB - 1 KiB
+    const targetTotalValuesBytes = maxBytes - 1024;
     const perRecordDesc = Math.floor((targetTotalValuesBytes - totalCount * overheadPerRecord) / totalCount);
 
     hlc = "";
@@ -500,13 +540,11 @@ test("engine.tasks and readIndependentTasksSpace match on RepoStarLimitError and
     }
     assert.ok(sumValueBytes <= maxBytes - 512 && sumValueBytes >= maxBytes - 2048, `raw CBOR values=${sumValueBytes} near 16 MiB - 1 KiB`);
 
-    // Import first 2,070 records (well under 16 MiB even with STAR framing) so Alice's warm cache syncs cleanly.
     await network.importRepoAs(BOB, tasksSpace, allRecords.slice(0, baseCount));
     const warmInitial = await alice.tasks.readSpace(workspace, { fresh: true });
     assert.equal(warmInitial.complete, true);
     assert.equal(warmInitial.tasks.length, baseCount + 1);
 
-    // Add final 30 records (~240 KiB delta) so CBOR values stay <= 16 MiB - 1 KiB while STAR archive crosses 16 MiB.
     await network.applyWritesAs(
       BOB,
       tasksSpace,
@@ -518,7 +556,6 @@ test("engine.tasks and readIndependentTasksSpace match on RepoStarLimitError and
       })),
     );
 
-    // 1) Warm Engine incremental listRepoOps delta rejects directly with 0 getRepo STAR calls and purges Bob's cache.
     let warmDelta!: TasksSpaceView;
     const warmCalls = await countCalls(network, async () => {
       warmDelta = await alice.tasks.readSpace(workspace);
@@ -529,13 +566,11 @@ test("engine.tasks and readIndependentTasksSpace match on RepoStarLimitError and
     ]);
     assert.equal(warmDelta.tasks.some((t) => t.repo === BOB), false);
 
-    // 2) Cold STAR (Engine + Independent Reader) matches warm delta parity.
     const coldStarReader = await readIndependentTasksSpace(reader, workspace);
     const coldStarEngine = await createEngine(transportFor(network, ALICE)).tasks.readSpace(workspace);
     assertTasksParity(warmDelta, coldStarReader, "16 MiB STAR boundary warm delta vs cold STAR reader");
     assertTasksParity(coldStarEngine, coldStarReader, "16 MiB STAR boundary cold STAR engine vs reader");
 
-    // 3) Cold JSON fallback (getRepo -> 501) on BOTH Engine and Independent Reader matches cold STAR & warm delta parity.
     network.interceptResponse = ({ method, params, response }) => {
       if (method === "com.atproto.space.getRepo" && params.space === tasksSpace && params.repo === BOB && response.ok) {
         return new Response(JSON.stringify({ error: "MethodNotImplemented", message: "no getRepo" }), {
@@ -551,25 +586,32 @@ test("engine.tasks and readIndependentTasksSpace match on RepoStarLimitError and
     assertTasksParity(coldFallbackEngine, coldStarReader, "16 MiB STAR boundary cold JSON fallback vs cold STAR");
   }
 
-  // 4. Carbon R2-M2 parity: cross-engine disableExtension with no non-authority writers still matches independent reader after 10m credential expiry.
   {
     const network = new FakeNetwork();
-    const { workspace, tasksSpace } = await createTasksFixture(network, { members: [ALICE, BOB], skey: "disable-parity" });
+    const { groupDid, workspace, tasksSpace } = await createTasksFixture(network, { members: [ALICE, BOB], skey: "disableparity" });
     const bob = createEngine(transportFor(network, BOB));
     const reader = transportFor(network, BOB);
 
     assert.equal((await bob.tasks.readSpace(workspace)).enabled, true);
 
-    await network.writeAs(AUTHORITY, workspace, COLLECTION.extInstall, "tasks", {
+    await network.writeAs(groupDid, workspace, COLLECTION.extInstall, "tasks", {
       extId: "tasks",
       space: tasksSpace,
       active: false,
+      cleanupComplete: true,
+      enabledBy: ALICE,
+      enabledAt: TIMESTAMP,
       updatedAt: TIMESTAMP,
       disabledAt: TIMESTAMP,
     });
-    await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMembers", {
+    await network.clientFor(groupDid).procedure("com.atproto.space.updateSpace", {
       space: tasksSpace,
-      dids: [ALICE, BOB],
+      policy: {
+        $type: OPENSOCIAL_POLICY,
+        publicRead: false,
+        unlisted: true,
+        grants: [],
+      },
     });
 
     network.advanceClock(15 * 60_000);

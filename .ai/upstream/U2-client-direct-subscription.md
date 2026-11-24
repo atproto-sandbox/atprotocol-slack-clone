@@ -1,5 +1,7 @@
 # Let clients subscribe to space changes directly, without a relay service
 
+Status against `6747610566` + `opensocial.group` `8df0cc82` (R13, 2026-11-21): **Still open (orthogonal to `opensocial.group`).** Upstream `6747610566` replaced standalone `registerNotify`/`notifyWrite` with inline `authorizeSpaceSync(notify: { endpoint, token })` + `notifySpaceUpdate`, which still delivers webhooks only to a publicly routable HTTPS endpoint (`L7`). In R13, `opensocial.group` keeps group space notifications at `1` webhook per space (`apps/group-host` → `apps/operator`), while browser clients still rely on Operator's `getChanges` relay (using stateless PoP-gated `dm1` tokens from `getDmNotifyTarget` for sovereign DMs and `inv1` tokens from `getSpaceNotifyTarget` for personal `group.opensocial.invites/self` spaces).
+
 Status against `5d88b414` (2026-10-30): Not affected. `registerNotify` still takes a service identifier, and `notifyWrite` now carries `data` (renamed from `hash`); a browser still has no delivery endpoint. `listRepoOps` and `getLatestCommit` now need a MAC request, which a streaming method would have to carry as well.
 
 Status against `5b95b2f2`: Not affected. `registerNotify` still takes a service identifier; `notifyWrite` gained `spaceRev` and `prevSpaceRev`, which makes a gap detectable but does not give a browser a delivery endpoint.

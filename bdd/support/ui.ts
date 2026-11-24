@@ -26,7 +26,7 @@ export async function waitForApp(world: AppWorld, actor: Actor): Promise<void> {
 }
 
 export async function waitForOrigin(actor: Actor, origin: string): Promise<void> {
-  await actor.page.waitForURL((url) => url.origin === origin && !url.pathname.startsWith("/oauth"), { timeout: 30_000 });
+  await actor.page.waitForURL((url) => url.origin === origin && !url.pathname.startsWith("/oauth"), { timeout: 60_000 });
 }
 
 /**
@@ -59,13 +59,61 @@ export async function signInIfPrompted(actor: Actor): Promise<void> {
   await actor.page.getByRole("button", { name: "Sign in", exact: true }).click();
 }
 
-/** The PDS consent screen: sign in there if asked, then approve or decline. */
+/**
+ * Completes either a direct personal-PDS consent screen OR a Group Host multi-hop OAuth consent flow
+ * (Group Host `/oauth/authorize` -> Personal PDS `/oauth/authorize` -> optional Group Host `/oauth/confirm-action`).
+ */
 export async function completeConsent(actor: Actor, decision: "authorize" | "deny" = "authorize"): Promise<void> {
-  await actor.page.waitForURL(/\/oauth\/authorize\?/, { timeout: 30_000 });
-  await signInIfPrompted(actor);
-  const button = actor.page.getByRole("button", { name: decision === "authorize" ? "Authorize" : "Deny access", exact: true });
-  await button.waitFor({ state: "visible" });
-  await button.click();
+  const { page } = actor;
+  await page.waitForURL(/\/oauth\/(?:authorize|confirm-action)/, { timeout: 30_000 });
+
+  const groupForm = page.getByTestId("group-oauth-authorize-form");
+  const pdsPassword = page.locator("input[name=password]");
+  const pdsAuthorize = page.getByRole("button", { name: "Authorize", exact: true });
+  const groupConfirm = page.getByTestId("group-oauth-confirm-form");
+
+  await groupForm.or(pdsPassword).or(pdsAuthorize).or(groupConfirm).first().waitFor({ state: "visible" });
+
+  if (await groupForm.isVisible()) {
+    if (decision === "deny") {
+      await page.getByTestId("group-oauth-deny-button").click();
+      return;
+    }
+    await page.getByTestId("group-oauth-actor-input").fill(actor.did);
+    await page.getByTestId("group-oauth-approve-button").click();
+
+    await page.waitForFunction(() => !document.querySelector('[data-testid="group-oauth-authorize-form"]'));
+    await pdsPassword
+      .or(pdsAuthorize)
+      .or(groupConfirm)
+      .or(page.locator("main"))
+      .first()
+      .waitFor({ state: "visible" });
+  }
+
+  if ((await pdsPassword.isVisible()) || (await pdsAuthorize.isVisible())) {
+    await signInIfPrompted(actor);
+    if (decision === "deny" && !(await groupConfirm.isVisible())) {
+      const denyButton = page.getByRole("button", { name: "Deny access", exact: true }).or(
+        page.getByRole("button", { name: /Reject|Deny|Cancel/i }),
+      ).first();
+      await denyButton.waitFor({ state: "visible" });
+      await denyButton.click();
+      return;
+    }
+    await pdsAuthorize.waitFor({ state: "visible" });
+    await pdsAuthorize.click();
+
+    await groupConfirm.or(page.locator("main")).first().waitFor({ state: "visible" });
+  }
+
+  if (await groupConfirm.isVisible()) {
+    if (decision === "deny") {
+      await page.getByTestId("group-oauth-confirm-deny").click();
+    } else {
+      await page.getByTestId("group-oauth-confirm-approve").click();
+    }
+  }
 }
 
 /**

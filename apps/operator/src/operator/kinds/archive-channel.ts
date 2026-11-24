@@ -1,12 +1,18 @@
-import { listSpaceMembers, putAuthorityRecord } from "../../atproto/space-ops";
-import { channelUri } from "@flock/protocol/keys";
-import { COLLECTION } from "@flock/protocol/nsids";
-import { OperationRejectedError, type OperationContext } from "../journal";
+import { channelRoleKey, channelUri, groupMembersUri } from "@flock/protocol/keys";
+import { COLLECTION, OPENSOCIAL_COLLECTION } from "@flock/protocol/nsids";
+import {
+  deleteAuthorityRecord,
+  getOpenSocialSpacePolicy,
+  putAuthorityRecord,
+  updateOpenSocialSpacePolicy,
+} from "../../atproto/space-ops";
 import type { OperatorActor } from "../actor";
-import { activePrivateRoster, getOwnerRecord, writeRoster } from "../workspace-state";
-import type { OperationKind } from "./kind";
-import { removeListMember } from "../members";
+import { OperationRejectedError, type OperationContext } from "../journal";
+import { dropMemberList } from "../member-access";
 import { activeInstalls, writeInstall } from "../membership";
+import { getOwnerRecord, putMembershipRoles, readGroupGovernanceState } from "../workspace-state";
+import { archivedChannelPolicy } from "../workspace-spaces";
+import type { OperationKind } from "./kind";
 
 export const archiveChannelKind: OperationKind = {
   kind: "archiveChannel",
@@ -14,7 +20,11 @@ export const archiveChannelKind: OperationKind = {
   actor: "admin",
   submittedThrough: "execute",
   steps: [
-    "channel-archive-transition", "channel-archive-remove-{did}", "channel-archive-roster-{did}", "channel-archive-verified", "channel-archive-final",
+    "channel-archive-transition",
+    "channel-archive-remove-{did}",
+    "channel-archive-roster-{did}",
+    "channel-archive-verified",
+    "channel-archive-final",
     "channel-archive-app-{did}",
   ],
   run: (actor, context, request) => archiveChannel(actor, context, request.skey as string),
@@ -22,32 +32,74 @@ export const archiveChannelKind: OperationKind = {
 };
 
 async function archiveChannel(actor: OperatorActor, context: OperationContext, skey: string): Promise<void> {
+  const groupDid = actor.workspace.authorityDid;
   const directory = await getOwnerRecord(actor.session, actor.workspace.uri, COLLECTION.directory, skey);
-  if (!directory || typeof directory.name !== "string") throw new OperationRejectedError("Channel does not exist.");
+  if (!directory || typeof directory.name !== "string") {
+    throw new OperationRejectedError("Channel does not exist.");
+  }
   if (directory.visibility === "archived") return;
-  const space = channelUri(actor.workspace.authorityDid, skey);
-  await context.step("channel-archive-transition", () => putAuthorityRecord(actor.session, actor.workspace.uri, COLLECTION.directory, skey, {
-    skey, name: directory.name, visibility: "transitioning",
-  }).then(() => undefined));
-  // An app's grant of the channel ends with it, in its install record first, as every change of an app's access is made.
+
+  const space = channelUri(groupDid, skey);
+  const privRole = channelRoleKey(skey);
+  const membersSpace = groupMembersUri(groupDid);
+
+  await context.step("channel-archive-transition", async () => {
+    await putAuthorityRecord(actor.session, actor.workspace.uri, COLLECTION.directory, skey, {
+      skey,
+      name: directory.name,
+      visibility: "transitioning",
+    });
+    // Step 1: clear channel space grants (`unlisted: true, grants: []`) so writers are evicted and role reference in policy is gone.
+    await updateOpenSocialSpacePolicy(actor.session, space, archivedChannelPolicy());
+    dropMemberList(space);
+  });
+
   for (const install of (await activeInstalls(actor)).values()) {
     if (!install.channels.has(skey)) continue;
     const channels = new Map(install.channels);
     channels.delete(skey);
     await context.step(`channel-archive-app-${install.subject}`, () => writeInstall(actor, { ...install, channels }));
   }
-  const members = await listSpaceMembers(actor.session, space);
-  for (const member of members) {
-    await context.step(`channel-archive-remove-${member.did}`, () => removeListMember(actor.session, space, member.did));
+
+  // Step 2: remove `channel-<skey>` from any member holding it.
+  const state = await readGroupGovernanceState(actor.session, groupDid);
+  for (const [did, membership] of state.memberships.entries()) {
+    if (did === groupDid || !membership.roles.includes(privRole)) continue;
+    await context.step(`channel-archive-remove-${did}`, async () => {
+      const latest = await readGroupGovernanceState(actor.session, groupDid);
+      const cur = latest.memberships.get(did);
+      if (!cur || !cur.roles.includes(privRole)) return;
+      const remaining = cur.roles.filter((r) => r !== privRole);
+      await putMembershipRoles(actor.session, groupDid, did, remaining.length > 0 ? remaining : ["member"]);
+    });
+    if (context.completedSteps.includes(`channel-archive-roster-${did}`)) {
+      await context.step(`channel-archive-roster-${did}`, async () => {});
+    }
   }
-  for (const did of await activePrivateRoster(actor, space)) {
-    await context.step(`channel-archive-roster-${did}`, () => writeRoster(actor, space, did, false, COLLECTION.channelRoster));
-  }
+
   await context.step("channel-archive-verified", async () => {
-    if ((await listSpaceMembers(actor.session, space)).length !== 0) throw new Error("Channel members remain after archive.");
-    if ((await activePrivateRoster(actor, space)).size !== 0) throw new Error("Private channel roster remains active after archive.");
+    await updateOpenSocialSpacePolicy(actor.session, space, archivedChannelPolicy());
+    dropMemberList(space);
+    // Step 3: delete `role/channel-<skey>` now that zero policies or memberships reference it (`RoleInUse`-safe!).
+    await deleteAuthorityRecord(actor.session, membersSpace, OPENSOCIAL_COLLECTION.role, privRole);
+
+    const policy = await getOpenSocialSpacePolicy(actor.session, space);
+    if (!policy || policy.grants.length !== 0 || policy.unlisted !== true) {
+      throw new Error("Archived channel policy still holds grants.");
+    }
+    const latest = await readGroupGovernanceState(actor.session, groupDid);
+    for (const membership of latest.memberships.values()) {
+      if (membership.roles.includes(privRole)) {
+        throw new Error(`Archived channel role ${privRole} remains assigned.`);
+      }
+    }
   });
-  await context.step("channel-archive-final", () => putAuthorityRecord(actor.session, actor.workspace.uri, COLLECTION.directory, skey, {
-    skey, name: directory.name, visibility: "archived",
-  }).then(() => undefined));
+
+  await context.step("channel-archive-final", () =>
+    putAuthorityRecord(actor.session, actor.workspace.uri, COLLECTION.directory, skey, {
+      skey,
+      name: directory.name,
+      visibility: "archived",
+    }).then(() => undefined),
+  );
 }

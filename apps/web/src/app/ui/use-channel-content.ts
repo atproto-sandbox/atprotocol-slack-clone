@@ -4,7 +4,7 @@ import { useCallback, useEffect } from "react";
 import { CHANNEL_PAGE } from "@flock/client/channel-client";
 import type { Engine } from "@flock/client/engine";
 import type { LiveSpaces, Snapshot, Snapshots } from "@flock/client/views";
-import { channelUri, parseWorkspaceUri } from "@flock/protocol/keys";
+import { channelUri, groupMembersUri, parseWorkspaceUri } from "@flock/protocol/keys";
 import { httpStatus, isAccessFailure, mergeMessages, messageOf, withReactions, type ChannelSelection, type Message, type Reaction } from "./client-api";
 import { useLiveKey, useSnapshot } from "./use-live-view";
 
@@ -24,6 +24,10 @@ export type ChannelContent = {
 /** The live view key of one open channel, as it is now: a channel whose visibility changed is another view, read afresh. */
 export function channelKey(channel: { workspace: string; skey: string; visibility: string }): string {
   return `channel:${channel.workspace} ${channel.skey} ${channel.visibility}`;
+}
+
+export function channelWatchedSpaces(space: string | null, authorityDid: string | undefined): string[] {
+  return space && authorityDid ? [space, groupMembersUri(authorityDid)] : [];
 }
 
 type Session = { engine: Engine | null; live: LiveSpaces | null; snapshots: Snapshots | null };
@@ -50,7 +54,10 @@ export function useChannelContent(session: Session, did: string, selection: Chan
     const ref = { workspace, skey };
     const shown = snapshots.get<ChannelContent>(key).value?.messages.length ?? 0;
     try {
-      const page = await engine.channels.readPage(ref, { limit: Math.max(CHANNEL_PAGE, shown) });
+      const page = await engine.channels.readPage(ref, {
+        limit: Math.max(CHANNEL_PAGE, shown),
+        trustWatchedAccountLabels: Boolean(live),
+      });
       const roster = visibility === "private" ? await engine.channels.roster(ref) : null;
       return {
         messages: withReactions(page.messages as Array<Omit<Message, "reactions">>, page.reactions as Reaction[], did),
@@ -60,9 +67,9 @@ export function useChannelContent(session: Session, did: string, selection: Chan
       if (!isAccessFailure(error)) throw error;
       return { messages: [], roster: null, degradedReasons: [], refused: { status: httpStatus(error), message: messageOf(error) } };
     }
-  }, [engine, snapshots, key, workspace, skey, visibility, did]);
+  }, [engine, live, snapshots, key, workspace, skey, visibility, did]);
 
-  useLiveKey(session, key, space ? [space] : [], load);
+  useLiveKey(session, key, channelWatchedSpaces(space, authorityDid), load);
   useEffect(() => {
     // Once a minute the open channel is read again, whatever the change feed said.
     if (!live || !key) return;

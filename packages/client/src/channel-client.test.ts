@@ -5,8 +5,8 @@ import { createEngine } from "./engine";
 import { ChannelUnavailableError } from "./errors";
 import { key, transportFor, createWorkspace, AUTHORITY, writeMessage } from "./testing/engine-fixture";
 import { FakeNetwork } from "@flock/testing/fake-network";
-import { reactionRecordKey, spaceRecordUri, subjectKey } from "@flock/protocol/keys";
-import { COLLECTION } from "@flock/protocol/nsids";
+import { channelRoleKey, reactionRecordKey, spaceRecordUri } from "@flock/protocol/keys";
+import { ATPROTO_SPACE_COLLECTION, COLLECTION, OPENSOCIAL_COLLECTION } from "@flock/protocol/nsids";
 
 // The channel rows of the route table ("What the member routes do today"): each rule the routes enforce, now owned by
 // `ChannelClient`, on the fake network.
@@ -18,7 +18,7 @@ async function workspace(channels: Parameters<typeof createWorkspace>[1]["channe
   const network = new FakeNetwork();
   const fixture = await createWorkspace(network, { members: [ALICE, BOB], channels });
   const alice = createEngine(transportFor(network, ALICE));
-  const ref = (skey = "general") => ({ workspace: fixture.workspace, skey: `acme-${skey}` });
+  const ref = (skey = "general") => ({ workspace: fixture.workspace, skey });
   return { network, fixture, alice, ref };
 }
 
@@ -29,7 +29,7 @@ test("readPage serves a valid directory entry and refuses a transitioning or arc
   assert.deepEqual(page.messages.map((message) => message.rkey), [key(1)]);
   assert.equal(page.complete, true);
   await assert.rejects(alice.channels.readPage(ref("moving")), (error: unknown) => error instanceof ChannelUnavailableError && error.visibility === "transitioning");
-  await network.writeAs(AUTHORITY, fixture.workspace, COLLECTION.directory, "acme-general", { skey: "acme-general", name: "general", visibility: "archived" });
+  await network.writeAs(AUTHORITY, fixture.workspace, COLLECTION.directory, "general", { skey: "general", name: "general", visibility: "archived" });
   await assert.rejects(alice.channels.readPage(ref()), (error: unknown) => error instanceof ChannelUnavailableError && error.visibility === "archived");
   assert.deepEqual(await alice.sync.store.records(fixture.channels.general!, COLLECTION.message), [], "the archived channel's copy was dropped");
 });
@@ -38,7 +38,12 @@ test("readPage refuses a channel whose directory entry is missing or invalid, an
   const { network, fixture, alice, ref } = await workspace();
   await writeMessage(network, BOB, fixture.channels.general!, 1);
   await alice.channels.readPage(ref());
-  await network.writeAs(AUTHORITY, fixture.workspace, COLLECTION.directory, "acme-general", { skey: "acme-other", name: "general", visibility: "public" });
+  await network.clientFor(AUTHORITY).procedure("com.atproto.space.deleteRecord", {
+    space: fixture.workspace,
+    repo: AUTHORITY,
+    collection: COLLECTION.directory,
+    rkey: "general",
+  });
   await assert.rejects(alice.channels.readPage(ref()), /missing or invalid/);
   assert.deepEqual(await alice.sync.store.records(fixture.channels.general!, COLLECTION.message), []);
 });
@@ -115,14 +120,23 @@ test("join requests are for private channels only, with a new request id each ti
   await alice.channels.withdrawJoin(ref());
 });
 
-test("roster lists a private channel's members and gives a public channel none", async () => {
+test("roster lists a private channel's members from OpenSocial role grants + memberships and gives a public channel none", async () => {
   const network = new FakeNetwork();
-  const fixture = await createWorkspace(network, { members: [ALICE, BOB], channels: [{ skey: "general", visibility: "public" }, { skey: "secret", visibility: "private", members: [ALICE, BOB] }] });
+  const fixture = await createWorkspace(network, {
+    members: [ALICE, BOB],
+    channels: [{ skey: "general", visibility: "public" }, { skey: "secret", visibility: "private", members: [ALICE, BOB] }],
+  });
   const alice = createEngine(transportFor(network, ALICE));
-  assert.deepEqual(await alice.channels.roster({ workspace: fixture.workspace, skey: "acme-secret" }), [ALICE, BOB].sort());
-  assert.deepEqual(await alice.channels.roster({ workspace: fixture.workspace, skey: "acme-general" }), []);
-  await network.writeAs(AUTHORITY, fixture.channels.secret!, COLLECTION.channelRoster, subjectKey(BOB), { subject: BOB, active: false, updatedAt: "2026-11-10T12:00:00.000Z" });
-  assert.deepEqual(await alice.channels.roster({ workspace: fixture.workspace, skey: "acme-secret" }), [ALICE]);
+  assert.deepEqual(await alice.channels.roster({ workspace: fixture.workspace, skey: "secret" }), [ALICE, BOB].sort());
+  assert.deepEqual(await alice.channels.roster({ workspace: fixture.workspace, skey: "general" }), []);
+  await network.clientFor(AUTHORITY).procedure("com.atproto.space.putRecord", {
+    space: fixture.members,
+    repo: AUTHORITY,
+    collection: OPENSOCIAL_COLLECTION.membership,
+    rkey: BOB,
+    record: { $type: OPENSOCIAL_COLLECTION.membership, roles: ["member"], createdAt: "2026-11-10T12:00:00.000Z" },
+  });
+  assert.deepEqual(await alice.channels.roster({ workspace: fixture.workspace, skey: "secret" }), [ALICE]);
 });
 
 test("a writer set aside is named in the page's degraded reasons, and the page still serves everyone else", async () => {
@@ -137,27 +151,39 @@ test("a writer set aside is named in the page's degraded reasons, and the page s
 });
 
 test("losing access to a channel drops its copy", async () => {
-  const { network, fixture, alice, ref } = await workspace();
-  const space = fixture.channels.general!;
+  const { network, fixture, alice, ref } = await workspace([{ skey: "secret", visibility: "private", members: [ALICE, BOB] }]);
+  const space = fixture.channels.secret!;
   await writeMessage(network, BOB, space, 1);
-  await alice.channels.readPage(ref());
-  await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMembers", { space, dids: [ALICE] });
+  await alice.channels.readPage(ref("secret"));
+  await network.clientFor(AUTHORITY).procedure("com.atproto.space.putRecord", {
+    space: fixture.members,
+    repo: AUTHORITY,
+    collection: OPENSOCIAL_COLLECTION.membership,
+    rkey: ALICE,
+    record: { $type: OPENSOCIAL_COLLECTION.membership, roles: ["member"], createdAt: "2026-11-10T12:00:00.000Z" },
+  });
   network.advanceClock(11 * 60 * 1000);
-  await assert.rejects(alice.channels.readPage(ref()));
+  await assert.rejects(alice.channels.readPage(ref("secret")));
   assert.deepEqual(await alice.sync.store.records(space, COLLECTION.message), []);
 });
 
 test("after the account leaves a channel its cached credential and held copy go at once; a channel it can still read is kept", async () => {
-  const { network, fixture, alice, ref } = await workspace();
-  const space = fixture.channels.general!;
+  const { network, fixture, alice, ref } = await workspace([{ skey: "secret", visibility: "private", members: [ALICE, BOB] }]);
+  const space = fixture.channels.secret!;
   await writeMessage(network, BOB, space, 1);
-  await alice.channels.readPage(ref());
-  await alice.channels.left(ref());
+  await alice.channels.readPage(ref("secret"));
+  await alice.channels.left(ref("secret"));
   assert.equal((await alice.sync.store.records(space, COLLECTION.message)).length, 1, "a channel the account can still read is kept");
-  await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMembers", { space, dids: [ALICE] });
-  await alice.channels.left(ref());
+  await network.clientFor(AUTHORITY).procedure("com.atproto.space.putRecord", {
+    space: fixture.members,
+    repo: AUTHORITY,
+    collection: OPENSOCIAL_COLLECTION.membership,
+    rkey: ALICE,
+    record: { $type: OPENSOCIAL_COLLECTION.membership, roles: ["member"], createdAt: "2026-11-10T12:00:00.000Z" },
+  });
+  await alice.channels.left(ref("secret"));
   assert.deepEqual(await alice.sync.store.records(space, COLLECTION.message), [], "the held copy was dropped");
-  await assert.rejects(alice.channels.readPage(ref()), "no cached credential reads the channel any longer");
+  await assert.rejects(alice.channels.readPage(ref("secret")), "no cached credential reads the channel any longer");
 });
 
 test("paging a channel where two writers share keys at a page boundary shows every message once, in merge order", async () => {
@@ -179,7 +205,12 @@ test("paging a channel where two writers share keys at a page boundary shows eve
 test("a write is refused once the member is removed, even while a cached credential would still be accepted", async () => {
   const { network, fixture, alice, ref } = await workspace();
   await alice.channels.readPage(ref());
-  await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMembers", { space: fixture.channels.general!, dids: [ALICE] });
+  await network.clientFor(AUTHORITY).procedure("com.atproto.space.deleteRecord", {
+    space: fixture.members,
+    repo: AUTHORITY,
+    collection: OPENSOCIAL_COLLECTION.membership,
+    rkey: ALICE,
+  });
   await assert.rejects(alice.channels.send(ref(), "after removal"));
   assert.equal((await network.clientFor(ALICE).query<{ records: unknown[] }>("com.atproto.space.listRecords", {
     space: fixture.channels.general!, repo: ALICE, collection: COLLECTION.message,
@@ -222,9 +253,16 @@ test("an own write the authority never lists is out of view after one truth inte
 
 test("roster refuses a private channel whose roster exceeds the supported members", async () => {
   const { network, fixture, alice, ref } = await workspace([{ skey: "secret", visibility: "private", members: [ALICE] }]);
+  const privRole = channelRoleKey("secret");
   for (let n = 0; n < 201; n += 1) {
     const did = `did:plc:member${n}`;
-    await network.writeAs(AUTHORITY, fixture.channels.secret!, COLLECTION.channelRoster, subjectKey(did), { subject: did, active: true, updatedAt: "2026-11-10T12:00:00.000Z" });
+    await network.clientFor(AUTHORITY).procedure("com.atproto.space.putRecord", {
+      space: fixture.members,
+      repo: AUTHORITY,
+      collection: OPENSOCIAL_COLLECTION.membership,
+      rkey: did,
+      record: { $type: OPENSOCIAL_COLLECTION.membership, roles: ["member", privRole], createdAt: "2026-11-10T12:00:00.000Z" },
+    });
   }
   await assert.rejects(alice.channels.roster(ref("secret")), /exceeds 200 members/);
 });
@@ -296,9 +334,9 @@ test("getMessage gates target and parent authors against sync.writers (Carbon R2
   const baseTransport = transportFor(network, ALICE);
   const inspectedAlice = createEngine({
     ...baseTransport,
-    resolvePds: async (did) => {
+    resolvePds: async (did, force) => {
       resolvedDids.push(did);
-      return baseTransport.resolvePds(did);
+      return baseTransport.resolvePds(did, force);
     },
     fetchEndpoint: async (request) => {
       fetchedUrls.push(request.url);
@@ -332,11 +370,118 @@ test("getMessage gates target and parent authors against sync.writers (Carbon R2
   network.setListingLag(space, false);
 
   // 5. Evicted writer removed from authority listWriters (D14) MUST return null on getMessage.
-  await network.clientFor(AUTHORITY).procedure("com.atproto.memberspace.removeMembers", { space, dids: [BOB] });
+  await network.clientFor(AUTHORITY).procedure("com.atproto.space.deleteRecord", {
+    space: fixture.members,
+    repo: AUTHORITY,
+    collection: OPENSOCIAL_COLLECTION.membership,
+    rkey: BOB,
+  });
   await inspectedAlice.sync.markSpaceStale(space);
   const evictedCalls = resolvedDids.length;
   assert.equal(await inspectedAlice.channels.getMessage(ref(), ancientUri), null);
   assert.equal(resolvedDids.length, evictedCalls, "evicted member getMessage returns null without resolving BOB PDS");
+});
+
+test("moderation labels withhold !takedown messages, replies, reactions, and takendown accounts, and mark !hide messages hidden until negated", async () => {
+  const { network, fixture, alice, ref } = await workspace();
+  const space = fixture.channels.general!;
+  const owner = network.clientFor(AUTHORITY);
+
+  await writeMessage(network, BOB, space, 1, "bob top");
+  await writeMessage(network, ALICE, space, 2, "alice top");
+  const bobTop = spaceRecordUri(space, BOB, COLLECTION.message, key(1));
+  const aliceTop = spaceRecordUri(space, ALICE, COLLECTION.message, key(2));
+  const replyToBob = spaceRecordUri(space, ALICE, COLLECTION.message, key(3));
+  await network.writeAs(ALICE, space, COLLECTION.message, key(3), {
+    text: "reply to bob",
+    createdAt: "2026-11-10T12:00:00.000Z",
+    parent: bobTop,
+  });
+  await alice.channels.react(ref(), aliceTop, "👍");
+
+  // 1. `!hide` on aliceTop sets `hidden: true` and `labels: ["!hide"]` without dropping the message.
+  await owner.procedure("com.atproto.space.putRecord", {
+    space,
+    repo: AUTHORITY,
+    collection: ATPROTO_SPACE_COLLECTION.label,
+    rkey: key(10),
+    record: { $type: ATPROTO_SPACE_COLLECTION.label, src: AUTHORITY, uri: aliceTop, val: "!hide", cts: "2026-11-10T12:01:00.000Z" },
+  });
+  await alice.sync.markSpaceStale(space);
+  let page = await alice.channels.readPage(ref());
+  const hiddenMsg = page.messages.find((m) => m.uri === aliceTop)!;
+  assert.equal(hiddenMsg.hidden, true);
+  assert.deepEqual(hiddenMsg.labels, ["!hide"]);
+  assert.equal((await alice.channels.getMessage(ref(), aliceTop))?.hidden, true);
+
+  // 2. `!takedown` on bobTop withholds bobTop AND its reply (`replyToBob`), and `getMessage` returns null for both!
+  await owner.procedure("com.atproto.space.putRecord", {
+    space,
+    repo: AUTHORITY,
+    collection: ATPROTO_SPACE_COLLECTION.label,
+    rkey: key(11),
+    record: { $type: ATPROTO_SPACE_COLLECTION.label, src: AUTHORITY, uri: bobTop, val: "!takedown", cts: "2026-11-10T12:02:00.000Z" },
+  });
+  await alice.sync.markSpaceStale(space);
+  page = await alice.channels.readPage(ref());
+  assert.deepEqual(page.messages.map((m) => m.uri), [aliceTop]);
+  assert.equal(await alice.channels.getMessage(ref(), bobTop), null);
+  assert.equal(await alice.channels.getMessage(ref(), replyToBob), null);
+
+  // 3. Negating `!hide` with a later `cts` clears `hidden`.
+  await owner.procedure("com.atproto.space.putRecord", {
+    space,
+    repo: AUTHORITY,
+    collection: ATPROTO_SPACE_COLLECTION.label,
+    rkey: key(12),
+    record: { $type: ATPROTO_SPACE_COLLECTION.label, src: AUTHORITY, uri: aliceTop, val: "!hide", neg: true, cts: "2026-11-10T12:03:00.000Z" },
+  });
+  await alice.sync.markSpaceStale(space);
+  page = await alice.channels.readPage(ref());
+  assert.equal(page.messages.find((m) => m.uri === aliceTop)?.hidden, undefined);
+
+  // 4. Account-level `!hide` and `!takedown` labels in `members/self` take effect on `readPage` and `getMessage` via `syncAccountLabels` WITHOUT prior `markSpaceStale(members)` or `summary()`!
+  const carol = "did:plc:carolaaaaaaaaaaaaaaaaaaa";
+  network.createAccount(carol, "pds2");
+  await owner.procedure("com.atproto.space.putRecord", {
+    space: fixture.members,
+    repo: AUTHORITY,
+    collection: OPENSOCIAL_COLLECTION.membership,
+    rkey: carol,
+    record: { $type: OPENSOCIAL_COLLECTION.membership, roles: ["member"], createdAt: "2026-11-10T12:00:00.000Z" },
+  });
+  await network.writeAs(carol, fixture.members, OPENSOCIAL_COLLECTION.acceptance, "self", {
+    group: AUTHORITY,
+    createdAt: "2026-11-10T12:00:01.000Z",
+  });
+  await writeMessage(network, carol, space, 20, "carol live message");
+  const carolMsg = spaceRecordUri(space, carol, COLLECTION.message, key(20));
+
+  // Publish account-level `!hide` on `carol` in `members/self` without marking `members/self` stale.
+  await owner.procedure("com.atproto.space.putRecord", {
+    space: fixture.members,
+    repo: AUTHORITY,
+    collection: ATPROTO_SPACE_COLLECTION.label,
+    rkey: key(21),
+    record: { $type: ATPROTO_SPACE_COLLECTION.label, src: AUTHORITY, uri: carol, val: "!hide", cts: "2026-11-10T12:04:00.000Z" },
+  });
+  page = await alice.channels.readPage(ref());
+  const carolHidden = page.messages.find((m) => m.uri === carolMsg);
+  assert.equal(carolHidden?.hidden, true, "account-level !hide marks author's messages hidden");
+  assert.deepEqual(carolHidden?.labels, ["!hide"]);
+  assert.equal((await alice.channels.getMessage(ref(), carolMsg))?.hidden, true);
+
+  // Publish account-level `!takedown` on `carol` in `members/self` -> withholds `carol` on both `readPage` and `getMessage`!
+  await owner.procedure("com.atproto.space.putRecord", {
+    space: fixture.members,
+    repo: AUTHORITY,
+    collection: ATPROTO_SPACE_COLLECTION.label,
+    rkey: key(22),
+    record: { $type: ATPROTO_SPACE_COLLECTION.label, src: AUTHORITY, uri: carol, val: "!takedown", cts: "2026-11-10T12:05:00.000Z" },
+  });
+  page = await alice.channels.readPage(ref());
+  assert.equal(page.messages.some((m) => m.repo === carol), false, "account-level !takedown withholds all records from author");
+  assert.equal(await alice.channels.getMessage(ref(), carolMsg), null);
 });
 
 test("an engine with applyOwnWrites disabled keeps nothing it sends, edits, deletes or reacts with in its local store", async () => {
@@ -344,7 +489,7 @@ test("an engine with applyOwnWrites disabled keeps nothing it sends, edits, dele
   const fixture = await createWorkspace(network, { members: [ALICE], channels: [{ skey: "general", visibility: "public" }] });
   const space = fixture.channels.general!;
   const bot = createEngine(transportFor(network, ALICE), { applyOwnWrites: false });
-  const ref = { workspace: fixture.workspace, skey: "acme-general" };
+  const ref = { workspace: fixture.workspace, skey: "general" };
 
   const sent = await bot.channels.send(ref, "from bot", undefined, [sectionBlock("from bot")]);
   await bot.channels.edit(ref, sent.uri, "updated");
@@ -356,4 +501,133 @@ test("an engine with applyOwnWrites disabled keeps nothing it sends, edits, dele
 
   await bot.channels.delete(ref, sent.uri);
   assert.equal(await bot.sync.store.getSpace(space), undefined);
+});
+
+test("private channel roster excludes !takedown members and fails closed on missing/invalid policy or truncated scans, and syncAccountLabels fails closed on unverified authority repo", async () => {
+  const { network, fixture, alice, ref } = await workspace([
+    { skey: "secret", visibility: "private", members: [ALICE, BOB] },
+  ]);
+  const secretSpace = fixture.channels.secret!;
+  const owner = network.clientFor(AUTHORITY);
+
+  assert.deepEqual(await alice.channels.roster(ref("secret")), [ALICE, BOB].sort());
+
+  // 1. Account-level !takedown on BOB excludes BOB from private-channel roster!
+  await owner.procedure("com.atproto.space.putRecord", {
+    space: fixture.members,
+    repo: AUTHORITY,
+    collection: ATPROTO_SPACE_COLLECTION.label,
+    rkey: key(30),
+    record: {
+      $type: ATPROTO_SPACE_COLLECTION.label,
+      src: AUTHORITY,
+      uri: BOB,
+      val: "!takedown",
+      cts: "2026-11-10T12:10:00.000Z",
+    },
+  });
+  assert.deepEqual(await alice.channels.roster(ref("secret")), [ALICE]);
+
+  // 2. Truncated account label scan in roster() fails closed with WorkspaceEnvelopeError!
+  const base = transportFor(network, ALICE);
+  const truncRosterEngine = createEngine({
+    ...base,
+    fetchEndpoint: async (req) => {
+      const url = new URL(req.url);
+      if (
+        url.pathname === "/xrpc/com.atproto.space.listRecords" &&
+        url.searchParams.get("space") === fixture.members &&
+        url.searchParams.get("collection") === ATPROTO_SPACE_COLLECTION.label
+      ) {
+        const offset = Number((url.searchParams.get("cursor") ?? "off-0").replace("off-", "")) || 0;
+        const limit = Number(url.searchParams.get("limit") ?? "100");
+        const total = 1_001;
+        const count = Math.max(0, Math.min(limit, total - offset));
+        const records = Array.from({ length: count }, (_, idx) => {
+          const rkey = key(5_000 + offset + idx);
+          return {
+            uri: `${fixture.members}/${AUTHORITY}/${ATPROTO_SPACE_COLLECTION.label}/${rkey}`,
+            cid: "bafyreitest",
+            collection: ATPROTO_SPACE_COLLECTION.label,
+            rkey,
+            value: {
+              $type: ATPROTO_SPACE_COLLECTION.label,
+              src: AUTHORITY,
+              uri: BOB,
+              val: "custom-tag",
+              cts: "2026-11-10T12:10:00.000Z",
+            },
+          };
+        });
+        return Response.json({
+          records,
+          ...(offset + count < total ? { cursor: `off-${offset + count}` } : {}),
+        });
+      }
+      return base.fetchEndpoint(req);
+    },
+  });
+  await assert.rejects(truncRosterEngine.channels.roster(ref("secret")), /exceeds the 1000-record limit/);
+
+  // 3. Missing or malformed private-channel policy/self fails closed instead of synthesizing channel-secret fallback!
+  for (const badRecords of [
+    [],
+    [
+      {
+        uri: `${secretSpace}/${AUTHORITY}/${ATPROTO_SPACE_COLLECTION.spacePolicy}/self`,
+        cid: "bafyreipol",
+        collection: ATPROTO_SPACE_COLLECTION.spacePolicy,
+        rkey: "self",
+        value: {
+          $type: ATPROTO_SPACE_COLLECTION.spacePolicy,
+          policy: {
+            $type: "group.opensocial.policy",
+            grants: [
+              { role: "admin", read: true, write: true },
+              { role: "admin", read: true, write: false }, // duplicate role grant -> invalid!
+            ],
+          },
+        },
+      },
+    ],
+  ]) {
+    const badPolEngine = createEngine({
+      ...base,
+      fetchEndpoint: async (req) => {
+        const url = new URL(req.url);
+        if (
+          url.pathname === "/xrpc/com.atproto.space.listRecords" &&
+          url.searchParams.get("space") === secretSpace &&
+          url.searchParams.get("collection") === ATPROTO_SPACE_COLLECTION.spacePolicy
+        ) {
+          return Response.json({ records: badRecords });
+        }
+        return base.fetchEndpoint(req);
+      },
+    });
+    await assert.rejects(
+      badPolEngine.channels.roster(ref("secret")),
+      /Private-channel space policy is missing or invalid/,
+    );
+  }
+
+  // 4. syncAccountLabels fails closed (throws) when authority's members/self repo cannot be verified (e.g. 500/corrupted STAR) instead of returning empty labels!
+  const brokenMembersEngine = createEngine({
+    ...base,
+    fetchEndpoint: async (req) => {
+      const url = new URL(req.url);
+      if (
+        url.pathname === "/xrpc/com.atproto.space.getRepo" &&
+        url.searchParams.get("space") === fixture.members &&
+        url.searchParams.get("repo") === AUTHORITY
+      ) {
+        return Response.json({ error: "UpstreamFailure", message: "corrupt star" }, { status: 500 });
+      }
+      return base.fetchEndpoint(req);
+    },
+  });
+  await assert.rejects(
+    brokenMembersEngine.sync.syncAccountLabels(AUTHORITY),
+    /Moderation label state from .* could not be verified/,
+  );
 });

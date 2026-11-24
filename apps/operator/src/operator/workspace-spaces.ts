@@ -1,52 +1,276 @@
 import type { OAuthSession } from "@atproto/oauth-client-node";
-import { ensureMemberListSpace, putAuthorityRecord } from "../atproto/space-ops";
+import { isMissingXrpcResource } from "@flock/protocol/atproto/xrpc";
 import { extSpaceSkeyFor, getExtension, type ExtensionId } from "@flock/protocol/extensions";
-import { inboxUri, stableHash } from "@flock/protocol/keys";
-import { COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
+import { groupMetaUri, inboxUri, SELF_SKEY } from "@flock/protocol/keys";
+import { COLLECTION, OPENSOCIAL_COLLECTION, OPENSOCIAL_POLICY, REPO_COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
+import type { GroupOpenSocialPolicy } from "@flock/protocol/scopes";
+import { sessionClient } from "../atproto/client";
+import {
+  ensureOpenSocialSpace,
+  getOpenSocialSpacePolicy,
+  putAuthorityRecord,
+  updateOpenSocialSpacePolicy,
+} from "../atproto/space-ops";
 
-// A workspace's spaces and its first records, the same for every kind that creates a workspace (`createWorkspace`, and the
-// `bootstrapWorkspace` rows begun before it). Each kind names its own steps around these actions.
+const graphemeSegmenter = new Intl.Segmenter("en", { granularity: "grapheme" });
+function countGraphemes(text: string): number {
+  return [...graphemeSegmenter.segment(text)].length;
+}
 
-/** Refuses a workspace name the app does not create, before anything else is asked of the account. */
+/** Validates a group/workspace display name against `group.opensocial.profile` & `createWorkspace` limits (1..64 graphemes, <= 640 bytes). */
 export function assertWorkspaceName(name: string): void {
-  if (!/^[A-Za-z0-9][A-Za-z0-9 _.-]{0,59}$/.test(name.trim())) {
-    throw new Error("Workspace name must be 1 to 60 plain-text characters.");
+  const trimmed = name.trim();
+  if (
+    trimmed.length < 1 ||
+    Buffer.byteLength(trimmed, "utf8") > 640 ||
+    countGraphemes(trimmed) > 64 ||
+    /[\r\n\t\0]/.test(trimmed)
+  ) {
+    throw new Error("Workspace name must be 1 to 64 characters without control characters.");
   }
 }
 
-/** The workspace's key, derived from its name, so a retry of the same creation lands on the same spaces. */
-export function workspaceKey(name: string): string {
-  const slug = name.normalize("NFKD").replace(/[̀-ͯ]/g, "").toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "team";
-  return `${slug.slice(0, 42)}-${stableHash(name).slice(0, 10)}`;
+export function workspaceKey(...unused: readonly [string?]): string {
+  void unused;
+  return SELF_SKEY;
 }
 
-export function generalKey(workspaceSkey: string): string {
-  return `${workspaceSkey}-general`;
+export function generalKey(workspaceSkey = SELF_SKEY): string {
+  return workspaceSkey === SELF_SKEY ? "general" : `${workspaceSkey}-general`;
 }
 
-export async function createWorkspaceSpace(session: OAuthSession, skey: string): Promise<void> {
-  await ensureMemberListSpace(session, SPACE_TYPE.workspace, skey);
+export function defaultWorkspaceSpacePolicy(activeAppRoles: readonly string[] = []): GroupOpenSocialPolicy {
+  return {
+    $type: OPENSOCIAL_POLICY,
+    publicRead: false,
+    unlisted: false,
+    grants: [
+      { role: "admin", read: true, write: true },
+      { role: "moderator", read: true, write: true },
+      { role: "member", read: true },
+      ...[...new Set(activeAppRoles)].sort().map((role) => ({ role, read: true })),
+    ],
+  };
 }
 
-export async function createInboxSpace(session: OAuthSession, skey: string): Promise<void> {
-  if (await ensureMemberListSpace(session, SPACE_TYPE.inbox, skey) !== inboxUri(session.did, skey)) throw new Error("Inbox URI did not match the workspace key.");
+export function defaultInboxSpacePolicy(): GroupOpenSocialPolicy {
+  return {
+    $type: OPENSOCIAL_POLICY,
+    publicRead: false,
+    unlisted: false,
+    grants: [
+      { role: "admin", read: true, write: true },
+      { role: "moderator", read: true, write: true },
+      { role: "member", write: true },
+    ],
+  };
 }
 
-export async function createGeneralChannelSpace(session: OAuthSession, skey: string): Promise<void> {
-  await ensureMemberListSpace(session, SPACE_TYPE.channel, generalKey(skey));
+export function defaultPublicChannelPolicy(
+  activeAppGrants: ReadonlyArray<{ role: string; write: boolean }> = [],
+): GroupOpenSocialPolicy {
+  return {
+    $type: OPENSOCIAL_POLICY,
+    publicRead: false,
+    unlisted: false,
+    grants: [
+      { role: "admin", read: true, write: true },
+      { role: "moderator", read: true, write: true },
+      { role: "member", read: true, write: true },
+      ...[...activeAppGrants]
+        .sort((a, b) => a.role.localeCompare(b.role))
+        .map(({ role, write }) => ({ role, read: true, write })),
+    ],
+  };
 }
 
-export async function writeWorkspaceProfile(session: OAuthSession, workspace: string, name: string): Promise<void> {
-  await putAuthorityRecord(session, workspace, COLLECTION.workspaceProfile, "self", { name, createdAt: new Date().toISOString() });
+export function defaultPrivateChannelPolicy(
+  channelRole: string,
+  activeAppGrants: ReadonlyArray<{ role: string; write: boolean }> = [],
+): GroupOpenSocialPolicy {
+  return {
+    $type: OPENSOCIAL_POLICY,
+    publicRead: false,
+    unlisted: true,
+    grants: [
+      { role: channelRole, read: true, write: true },
+      ...[...activeAppGrants]
+        .sort((a, b) => a.role.localeCompare(b.role))
+        .map(({ role, write }) => ({ role, read: true, write })),
+    ],
+  };
 }
 
-export async function writeGeneralDirectory(session: OAuthSession, workspace: string, skey: string): Promise<void> {
+export function archivedChannelPolicy(): GroupOpenSocialPolicy {
+  return {
+    $type: OPENSOCIAL_POLICY,
+    publicRead: false,
+    unlisted: true,
+    grants: [],
+  };
+}
+
+export function defaultAppInboxPolicy(appRole: string): GroupOpenSocialPolicy {
+  return {
+    $type: OPENSOCIAL_POLICY,
+    publicRead: false,
+    unlisted: false,
+    grants: [
+      { role: "admin", write: true },
+      { role: "moderator", write: true },
+      { role: "member", write: true },
+      { role: appRole, read: true },
+    ],
+  };
+}
+
+export function disabledAppInboxPolicy(): GroupOpenSocialPolicy {
+  return {
+    $type: OPENSOCIAL_POLICY,
+    publicRead: false,
+    unlisted: true,
+    grants: [],
+  };
+}
+
+export function defaultExtensionSpacePolicy(): GroupOpenSocialPolicy {
+  return {
+    $type: OPENSOCIAL_POLICY,
+    publicRead: false,
+    unlisted: false,
+    grants: [
+      { role: "admin", read: true, write: true },
+      { role: "moderator", read: true, write: true },
+      { role: "member", read: true, write: true },
+    ],
+  };
+}
+
+export function disabledExtensionSpacePolicy(): GroupOpenSocialPolicy {
+  return {
+    $type: OPENSOCIAL_POLICY,
+    publicRead: false,
+    unlisted: true,
+    grants: [{ role: "admin", read: true, write: true }],
+  };
+}
+
+export async function createWorkspaceSpace(session: OAuthSession, skey = SELF_SKEY): Promise<void> {
+  await ensureOpenSocialSpace(session, SPACE_TYPE.workspace, skey, defaultWorkspaceSpacePolicy());
+}
+
+export async function createInboxSpace(session: OAuthSession, skey = SELF_SKEY): Promise<void> {
+  if ((await ensureOpenSocialSpace(session, SPACE_TYPE.inbox, skey, defaultInboxSpacePolicy())) !== inboxUri(session.did, skey)) {
+    throw new Error("Inbox URI did not match the workspace key.");
+  }
+}
+
+export async function createGeneralChannelSpace(session: OAuthSession, skey = SELF_SKEY): Promise<void> {
+  await ensureOpenSocialSpace(session, SPACE_TYPE.channel, generalKey(skey), defaultPublicChannelPolicy());
+}
+
+export async function ensureGroupProfileName(
+  session: OAuthSession,
+  name: string,
+  options?: { joinPolicy?: "open" | "approval" | "invite"; publicMeta?: boolean },
+): Promise<void> {
+  const metaSpace = groupMetaUri(session.did);
+  const metaPolicy = await getOpenSocialSpacePolicy(session, metaSpace);
+  if (!metaPolicy) {
+    throw new Error("OpenSocial group.opensocial.meta/self space is missing on the group host.");
+  }
+  if (options?.publicMeta !== undefined) {
+    const client = sessionClient(session);
+    const readHasDeclaration = () =>
+      client
+        .query<{ value?: Record<string, unknown> }>("com.atproto.repo.getRecord", {
+          repo: session.did,
+          collection: REPO_COLLECTION.groupDeclaration,
+          rkey: SELF_SKEY,
+        })
+        .then(
+          () => true,
+          (err: unknown) => {
+            if (isMissingXrpcResource(err)) return false;
+            throw err;
+          },
+        );
+
+    const policyNeedsUpdate = (metaPolicy.publicRead === true) !== options.publicMeta;
+    const hasDeclaration = policyNeedsUpdate ? !options.publicMeta : await readHasDeclaration();
+    if (policyNeedsUpdate || hasDeclaration !== options.publicMeta) {
+      await updateOpenSocialSpacePolicy(session, metaSpace, {
+        ...metaPolicy,
+        publicRead: options.publicMeta,
+      });
+      const postHasDeclaration = await readHasDeclaration();
+      if (options.publicMeta && !postHasDeclaration) {
+        await client.procedure("com.atproto.repo.putRecord", {
+          repo: session.did,
+          collection: REPO_COLLECTION.groupDeclaration,
+          rkey: SELF_SKEY,
+          record: {
+            $type: REPO_COLLECTION.groupDeclaration,
+            meta: metaSpace,
+            createdAt: new Date().toISOString(),
+          },
+        });
+      } else if (!options.publicMeta && postHasDeclaration) {
+        await client
+          .procedure("com.atproto.repo.deleteRecord", {
+            repo: session.did,
+            collection: REPO_COLLECTION.groupDeclaration,
+            rkey: SELF_SKEY,
+          })
+          .catch((err: unknown) => {
+            if (!isMissingXrpcResource(err)) throw err;
+          });
+      }
+    }
+  }
+  const existingProfile = await (async () => {
+    try {
+      const res = await sessionClient(session).query<{ value: Record<string, unknown> }>(
+        "com.atproto.space.getRecord",
+        { space: metaSpace, repo: session.did, collection: OPENSOCIAL_COLLECTION.profile, rkey: "self" },
+      );
+      return res.value;
+    } catch {
+      return null;
+    }
+  })();
+  const joinPolicy =
+    options?.joinPolicy ??
+    (typeof existingProfile?.joinPolicy === "string" ? existingProfile.joinPolicy : "invite");
+  if (existingProfile?.displayName === name && existingProfile?.joinPolicy === joinPolicy) {
+    return;
+  }
+  await putAuthorityRecord(session, metaSpace, OPENSOCIAL_COLLECTION.profile, "self", {
+    ...(existingProfile ?? {}),
+    displayName: name,
+    joinPolicy,
+  });
+}
+
+export async function writeGeneralDirectory(session: OAuthSession, workspace: string, skey = SELF_SKEY): Promise<void> {
   const general = generalKey(skey);
-  await putAuthorityRecord(session, workspace, COLLECTION.directory, general, { skey: general, name: "general", visibility: "public" });
+  await putAuthorityRecord(session, workspace, COLLECTION.directory, general, {
+    skey: general,
+    name: "general",
+    visibility: "public",
+  });
 }
 
-export async function ensureExtensionSpace(session: OAuthSession, workspaceSkey: string, extId: ExtensionId): Promise<string> {
+export async function ensureExtensionSpace(
+  session: OAuthSession,
+  workspaceSkey: string,
+  extId: ExtensionId,
+): Promise<string> {
   const manifest = getExtension(extId);
-  return ensureMemberListSpace(session, manifest.spaceType, extSpaceSkeyFor(workspaceSkey, extId));
+  return ensureOpenSocialSpace(
+    session,
+    manifest.spaceType,
+    extSpaceSkeyFor(workspaceSkey, extId),
+    defaultExtensionSpacePolicy(),
+  );
 }

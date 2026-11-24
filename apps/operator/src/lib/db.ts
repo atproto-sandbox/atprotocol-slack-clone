@@ -3,9 +3,18 @@ import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { Kysely, SqliteDialect } from "kysely";
 import { NAMESPACE } from "@flock/protocol/nsids";
-import { getOperatorConfig } from "../config";
+import { getOperatorConfig, resetOperatorConfigCacheForTest } from "../config";
 
-type OperationState = "queued" | "running" | "pending" | "completed" | "failed" | "paused";
+export type OperationState =
+  | "queued"
+  | "running"
+  | "pending"
+  | "completed"
+  | "failed"
+  | "paused"
+  | "aborted_actor_revoked";
+
+export const OPERATION_TAKEOVER_MIGRATION = 4;
 
 export interface SlackDb {
   oauth_request_lock: { name: string; token: string; expires_at: number };
@@ -22,6 +31,7 @@ export interface SlackDb {
     request_json: string;
     state: OperationState;
     steps_json: string;
+    taken_over_by: string | null;
     error: string | null;
     created_at: number;
     updated_at: number;
@@ -156,8 +166,9 @@ export function getDb(): Kysely<SlackDb> {
       operation_id TEXT NOT NULL,
       request_hash TEXT NOT NULL,
       request_json TEXT NOT NULL,
-      state TEXT NOT NULL CHECK (state IN ('queued','running','pending','completed','failed','paused')),
+      state TEXT NOT NULL CHECK (state IN ('queued','running','pending','completed','failed','paused','aborted_actor_revoked')),
       steps_json TEXT NOT NULL DEFAULT '[]',
+      taken_over_by TEXT,
       error TEXT,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
@@ -254,6 +265,43 @@ export function getDb(): Kysely<SlackDb> {
         SELECT DISTINCT workspace, workspace_uri FROM operation WHERE workspace_uri IS NOT NULL`);
       rawDatabase.prepare("INSERT INTO schema_migration (version, applied_at) VALUES (1, ?)").run(Math.floor(Date.now() / 1000));
     }
+    const takeoverMigration = rawDatabase.prepare("SELECT 1 FROM schema_migration WHERE version = ?").get(OPERATION_TAKEOVER_MIGRATION);
+    if (!takeoverMigration) {
+      const latestOperationColumns = rawDatabase.prepare("PRAGMA table_info(operation)").all() as Array<{ name: string }>;
+      const hasTakenOverBy = latestOperationColumns.some(({ name }) => name === "taken_over_by");
+      rawDatabase.exec(`
+        DROP TABLE IF EXISTS operation_r13_rebuild;
+        CREATE TABLE operation_r13_rebuild (
+          workspace TEXT NOT NULL,
+          workspace_uri TEXT,
+          actor TEXT NOT NULL,
+          operation_id TEXT NOT NULL,
+          request_hash TEXT NOT NULL,
+          request_json TEXT NOT NULL,
+          state TEXT NOT NULL CHECK (state IN ('queued','running','pending','completed','failed','paused','aborted_actor_revoked')),
+          steps_json TEXT NOT NULL DEFAULT '[]',
+          taken_over_by TEXT,
+          error TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY (workspace, actor, operation_id)
+        );
+        INSERT INTO operation_r13_rebuild (
+          workspace, workspace_uri, actor, operation_id, request_hash, request_json,
+          state, steps_json, taken_over_by, error, created_at, updated_at
+        )
+        SELECT
+          workspace, workspace_uri, actor, operation_id, request_hash, request_json,
+          state, steps_json, ${hasTakenOverBy ? "taken_over_by" : "NULL"}, error, created_at, updated_at
+        FROM operation;
+        DROP TABLE operation;
+        ALTER TABLE operation_r13_rebuild RENAME TO operation;
+        CREATE INDEX IF NOT EXISTS operation_status ON operation(state, updated_at);
+      `);
+      rawDatabase
+        .prepare("INSERT INTO schema_migration (version, applied_at) VALUES (?, ?)")
+        .run(OPERATION_TAKEOVER_MIGRATION, Math.floor(Date.now() / 1000));
+    }
     rawDatabase.exec(`CREATE INDEX IF NOT EXISTS operation_workspace_recovery
       ON operation(workspace, workspace_uri, state, created_at);
       CREATE INDEX IF NOT EXISTS operation_workspace_stalled
@@ -318,5 +366,6 @@ export function closeDb(): void {
   const raw = rawDatabase;
   database = undefined;
   rawDatabase = undefined;
+  resetOperatorConfigCacheForTest();
   if (raw?.open) raw.close();
 }

@@ -13,6 +13,7 @@ import type {
 import type { LiveSpaces, Snapshots } from "@flock/client/views";
 import type { WorkspaceSummary } from "@flock/protocol/workspace-summary";
 import { messageOf } from "../../client-api";
+import type { ReportRuleOption, SubmitReportFn } from "../../report-subject-modal";
 import { tasksProjectRoute, tasksRoute, tasksTaskRoute, type AppRoute } from "../../routes";
 import { TaskDetailView } from "./task-detail-view";
 import { TasksActivityView } from "./tasks-activity-view";
@@ -53,6 +54,8 @@ type TasksWorkspaceViewProps = {
   route: TasksRoute;
   navigate: (url: string) => void;
   onEnableTasks?: () => void;
+  onReportSubject?: SubmitReportFn;
+  reportRules?: readonly ReportRuleOption[];
   setStatus: (message: string) => void;
   setError: (message: string) => void;
 };
@@ -66,6 +69,8 @@ export function TasksWorkspaceView({
   route,
   navigate,
   onEnableTasks,
+  onReportSubject,
+  reportRules = [],
   setStatus,
   setError,
 }: TasksWorkspaceViewProps) {
@@ -800,6 +805,8 @@ export function TasksWorkspaceView({
             manualSyncSeq={manualSyncSeq}
             onBack={() => navigate(tasksRoute(route.authority, route.workspaceSkey, preferredLayout))}
             onMutated={() => reload()}
+            onReportSubject={onReportSubject}
+            reportRules={reportRules}
             onStatus={setStatus}
             onError={setError}
           />

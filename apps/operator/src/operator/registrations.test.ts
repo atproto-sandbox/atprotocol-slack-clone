@@ -7,8 +7,17 @@ import { fileURLToPath } from "node:url";
 import test, { after, beforeEach } from "node:test";
 import { SpaceCredentialError } from "@flock/protocol/atproto/space-credential-core";
 import { XrpcError } from "@flock/protocol/atproto/xrpc";
-import { appInboxUri, channelUri, inboxUri, subjectKey, tasksSpaceUri, workspaceUri } from "@flock/protocol/keys";
-import { COLLECTION } from "@flock/protocol/nsids";
+import {
+  appInboxUri,
+  channelUri,
+  groupMembersUri,
+  groupMetaUri,
+  inboxUri,
+  subjectKey,
+  tasksSpaceUri,
+  workspaceUri,
+} from "@flock/protocol/keys";
+import { COLLECTION, OPENSOCIAL_POLICY, SPACE_TYPE } from "@flock/protocol/nsids";
 import { closeDb, getRawDb } from "../lib/db";
 import type { SpaceNotifyTarget } from "../atproto/space-credential";
 import { parseWorkspaceRef, type OperatorActor } from "./actor";
@@ -23,6 +32,7 @@ import {
   handleRegistrationExpiredNotice,
   handleSpaceDeletedNotice,
   LONGEST_RETRY_MS,
+  refreshWorkspaceRegistrations,
   registrationDeps,
   registrationProblems,
   registerSpace,
@@ -35,14 +45,7 @@ import {
   type SweepDeps,
 } from "./registrations";
 import { authenticateSpaceWebhook } from "./space-notification";
-import { fakeAuthorityPds } from "./testing/fake-authority-pds";
-
-// The operator's inline space notification registrations:
-// - Staged with a single stable 32-byte base64url token BEFORE calling authorizeSpaceSync so synchronous confirmRegistration succeeds
-// - Exact same token reused across every renewal (zero rotations, zero duplicate PDS rows)
-// - Short 15s -> 30s -> 60s -> 120s failure backoff
-// - Fast 60s SQL-first due renewal sweep + 30-min discovery backfill sweep
-// - Gap-free spaceRev catch-up wake on renewal + authority confirmation before #spaceDeleted purge
+import { fakeGroupHost, plcDid } from "./testing/fake-group-session";
 
 const DIRECTORY = mkdtempSync(join(tmpdir(), "slack-registrations-test-"));
 const SERVICE_REF = "did:web:operator.test#atproto_flock_operator";
@@ -50,6 +53,7 @@ process.env.DATABASE_PATH = join(DIRECTORY, "registrations.db");
 process.env.AUTH_ENCRYPTION_KEY = "66".repeat(32);
 process.env.APP_URL = "http://127.0.0.1:3000";
 process.env.OPERATOR_URL = "http://127.0.0.1:3001";
+process.env.GROUP_HOST_URL = "http://127.0.0.1:3004";
 process.env.OPERATOR_SERVICE_REF = SERVICE_REF;
 after(() => {
   closeDb();
@@ -57,19 +61,34 @@ after(() => {
 });
 beforeEach(() => {
   resetAuthoritySuspensionForTests();
-  for (const table of ["notification_registration", "notification_registration_failure", "space_notification", "oauth_request_lock", "workspace_lock"]) {
+  for (const table of [
+    "notification_registration",
+    "notification_registration_failure",
+    "space_notification",
+    "oauth_request_lock",
+    "workspace_lock",
+  ]) {
     getRawDb().prepare(`DELETE FROM ${table}`).run();
   }
 });
 
-const OWNER = "did:plc:owner";
-const WORKSPACE = workspaceUri(OWNER, "acme");
-const INBOX = inboxUri(OWNER, "acme");
-const GENERAL = channelUri(OWNER, "acme-general");
-const RANDOM = channelUri(OWNER, "acme-random");
+const GROUP = plcDid("groupreg");
+const ADMIN = plcDid("adminreg");
+const META = groupMetaUri(GROUP);
+const MEMBERS = groupMembersUri(GROUP);
+const WORKSPACE = workspaceUri(GROUP);
+const INBOX = inboxUri(GROUP);
+const GENERAL = channelUri(GROUP, "general");
+const RANDOM = channelUri(GROUP, "random");
 const TEN_MIN = 10 * 60 * 1000;
-const { session } = fakeAuthorityPds(OWNER);
-const actor: OperatorActor = { did: OWNER, session, workspace: parseWorkspaceRef(WORKSPACE), canRecoverOperations: true };
+const baseGroup = await fakeGroupHost(GROUP, { creatorDid: ADMIN });
+const { session } = baseGroup;
+const actor: OperatorActor = {
+  did: ADMIN,
+  session,
+  workspace: parseWorkspaceRef(WORKSPACE),
+  canRecoverOperations: true,
+};
 
 type RegistrationRow = {
   expires_at: number;
@@ -86,7 +105,7 @@ const registrationRow = (space: string): RegistrationRow | undefined =>
 
 const expiry = (space: string): number | undefined => registrationRow(space)?.expires_at;
 
-function authority(start = Date.UTC(2026, 10, 10), ttlMs = TEN_MIN) {
+function authority(start = Date.UTC(2026, 10, 10), ttlMs = TEN_MIN, groupDid = GROUP, wsUri = WORKSPACE) {
   const clock = { now: start };
   const registered: string[] = [];
   const notifyCalls: Array<{ space: string; notify: SpaceNotifyTarget }> = [];
@@ -97,7 +116,6 @@ function authority(start = Date.UTC(2026, 10, 10), ttlMs = TEN_MIN) {
 
   const deps: SweepDeps = {
     register: async (_session, space, notify): Promise<RegistrationOutcome> => {
-      // Simulate PDS synchronous confirmRegistration during authorizeSpaceSync!
       assert.deepEqual(
         authenticateSpaceWebhook(space, notify.token),
         { kind: "operator" },
@@ -119,7 +137,7 @@ function authority(start = Date.UTC(2026, 10, 10), ttlMs = TEN_MIN) {
       return confirmDeletedResult;
     },
     now: () => clock.now,
-    workspaces: () => [{ authorityDid: OWNER, uri: WORKSPACE }],
+    workspaces: () => [{ authorityDid: groupDid, uri: wsUri }],
     grant: async () => {
       grantCalls += 1;
       return session;
@@ -134,9 +152,15 @@ function authority(start = Date.UTC(2026, 10, 10), ttlMs = TEN_MIN) {
     notifyCalls,
     failing,
     spaceRevs,
-    get grantCalls() { return grantCalls; },
-    resetGrantCalls() { grantCalls = 0; },
-    setConfirmDeleted(value: boolean | (() => Promise<boolean>)) { confirmDeletedResult = value; },
+    get grantCalls() {
+      return grantCalls;
+    },
+    resetGrantCalls() {
+      grantCalls = 0;
+    },
+    setConfirmDeleted(value: boolean | (() => Promise<boolean>)) {
+      confirmDeletedResult = value;
+    },
   };
 }
 
@@ -151,7 +175,6 @@ test("registerSpace stages placeholder token before authorizeSpaceSync, persists
   assert.ok(first.token.length >= 43, "32-byte base64url random token");
   assert.equal(notifyCalls[0]?.notify.endpoint, "http://localhost:3001");
 
-  // Short TTL (60s) caps renew margin at 30% (18s)
   const shortAuth = authority(clock.now + 8 * 60_000, 60_000);
   assert.equal(await registerSpace(session, WORKSPACE, GENERAL, shortAuth.deps), true);
   const second = registrationRow(GENERAL)!;
@@ -175,7 +198,6 @@ test("a completed operation registers created spaces; transient or 401 AccountTa
   assert.equal(firstProblem!.expiredAt, undefined, "staged expires_at=0 placeholder is not reported as lapsed");
   assert.equal(Date.parse(firstProblem!.nextAttemptAt!) - clock.now, FIRST_RETRY_MS);
 
-  // Subsequent failures (including reversible 401 AccountTakedown) back off 30s -> 60s -> 120s -> 120s while preserving token
   failing.set(GENERAL, () => new XrpcError(401, "Account is takendown", "AccountTakedown"));
   const backoffs: number[] = [FIRST_RETRY_MS];
   for (let attempt = 0; attempt < 4; attempt += 1) {
@@ -185,7 +207,6 @@ test("a completed operation registers created spaces; transient or 401 AccountTa
   assert.deepEqual(backoffs, [15_000, 30_000, 60_000, 120_000, LONGEST_RETRY_MS]);
   assert.equal(registrationRow(GENERAL)?.token, stagedToken, "staged token is retained across AccountTakedown failures");
 
-  // Once account recovers, retry reuses that exact staged token and clears failure state
   failing.delete(GENERAL);
   clock.now += LONGEST_RETRY_MS;
   assert.equal(await registerSpace(session, WORKSPACE, GENERAL, deps), true);
@@ -200,9 +221,8 @@ test("SpaceDeleted during initial staging deletes the placeholder row; SpaceDele
   assert.equal(registrationRow(GENERAL), undefined, "placeholder row deleted on initial SpaceDeleted");
   assert.deepEqual(registrationProblems(WORKSPACE, deps.now()), []);
 
-  // Existing registered space with notices and cached member list
   assert.equal(await registerSpace(session, WORKSPACE, RANDOM, deps), true);
-  recordWriteNotification({ space: RANDOM, repo: "did:plc:writer", repoRev: "3kabcdefghij2" });
+  recordWriteNotification({ space: RANDOM, repo: plcDid("writer"), repoRev: "3kabcdefghij2" });
   failing.set(RANDOM, () => new SpaceCredentialError("Space was deleted", 410, "SpaceDeleted"));
   assert.equal(await registerSpace(session, WORKSPACE, RANDOM, deps), false);
   assert.equal(registrationRow(RANDOM), undefined);
@@ -214,17 +234,14 @@ test("authorizeSpaceSync.spaceRev gap catch-up emits a space_notification wake o
   spaceRevs.set(GENERAL, "3kabcdefghij2");
   const startHead = readNotices([]).head;
 
-  // Initial registration with spaceRev records baseline rev and emits wake
   assert.equal(await registerSpace(session, WORKSPACE, GENERAL, deps), true);
   assert.equal(registrationRow(GENERAL)?.last_space_rev, "3kabcdefghij2");
   const afterInitHead = readNotices([]).head;
   assert.equal(afterInitHead, startHead + 1);
 
-  // Renewal with identical spaceRev emits ZERO wakes
   assert.equal(await registerSpace(session, WORKSPACE, GENERAL, deps), true);
   assert.equal(readNotices([]).head, afterInitHead, "unchanged spaceRev emits no duplicate wake");
 
-  // Missed write during operator downtime advances spaceRev -> renewal emits catch-up wake and updates last_space_rev
   spaceRevs.set(GENERAL, "3kabcdefghij5");
   assert.equal(await registerSpace(session, WORKSPACE, GENERAL, deps), true);
   assert.equal(registrationRow(GENERAL)?.last_space_rev, "3kabcdefghij5");
@@ -238,7 +255,7 @@ test("an operation that did not complete registers nothing, and an archived chan
 
   await registerSpace(session, WORKSPACE, RANDOM, deps);
   const token = registrationRow(RANDOM)!.token;
-  recordWriteNotification({ space: RANDOM, repo: "did:plc:writer", repoRev: "rev" });
+  recordWriteNotification({ space: RANDOM, repo: plcDid("writer"), repoRev: "3kabcdefghij2" });
   assert.deepEqual(authenticateSpaceWebhook(RANDOM, token), { kind: "operator" });
 
   await afterOperation(actor, { archivesSpaces: () => [RANDOM] }, { kind: "archiveChannel" }, { state: "completed" }, deps);
@@ -256,13 +273,11 @@ test("sweepDueRegistrations does zero grant restores and zero PDS calls when not
   registered.length = 0;
   resetGrantCalls();
 
-  // Fresh registrations: SQL-first query returns 0 rows -> 0 grant restores, 0 PDS calls
   assert.deepEqual(await sweepDueRegistrations(deps), { registered: 0, failed: 0, skipped: [] });
   assert.equal(auth.grantCalls, 0);
   assert.deepEqual(registered, []);
 
-  // Legacy migrated pre-R12 row (token='', expires_at=0, renew_at=0) is renewed immediately on startup
-  const legacyChannel = channelUri(OWNER, "acme-legacy");
+  const legacyChannel = channelUri(GROUP, "legacy");
   getRawDb()
     .prepare("INSERT INTO notification_registration (service_ref, space_uri, expires_at, workspace_uri, token, renew_at) VALUES (?, ?, 0, ?, '', 0)")
     .run(SERVICE_REF, legacyChannel, WORKSPACE);
@@ -271,10 +286,9 @@ test("sweepDueRegistrations does zero grant restores and zero PDS calls when not
   assert.ok(registrationRow(legacyChannel)!.token.length > 0);
   assert.equal(auth.grantCalls, 1, "restores authority grant once for the authority");
 
-  // 10 due spaces under one authority: restores grant once and caps concurrent register() calls at <= 4
   let inFlight = 0;
   let maxInFlight = 0;
-  const manySpaces = Array.from({ length: 10 }, (_, idx) => channelUri(OWNER, `acme-c${idx}`));
+  const manySpaces = Array.from({ length: 10 }, (_, idx) => channelUri(GROUP, `c${idx}`));
   for (const sp of manySpaces) {
     getRawDb()
       .prepare("INSERT INTO notification_registration (service_ref, space_uri, expires_at, workspace_uri, token, renew_at) VALUES (?, ?, ?, ?, ?, ?)")
@@ -292,7 +306,6 @@ test("sweepDueRegistrations does zero grant restores and zero PDS calls when not
       inFlight -= 1;
     }
   };
-  // Overlapping call while sweep is in flight returns null immediately via in-process mutex
   const [firstSweep, overlappingSweep] = await Promise.all([
     sweepDueRegistrations(deps),
     sweepDueRegistrations(deps),
@@ -309,7 +322,6 @@ test("handleRegistrationExpiredNotice marks renew_at=0, emits wake, and renews a
   const originalToken = registrationRow(GENERAL)!.token;
   notifyCalls.length = 0;
 
-  // Registration expired 10 minutes ago; PDS sends #registrationExpired on next write
   clock.now += 20 * 60_000;
   const beforeHead = readNotices([]).head;
   handleRegistrationExpiredNotice(GENERAL, "3kabcdefghij7", deps);
@@ -326,43 +338,45 @@ test("handleRegistrationExpiredNotice marks renew_at=0, emits wake, and renews a
 
 test("handleSpaceDeletedNotice refuses to purge unless authority authorizeSpaceSync confirms SpaceDeleted", async () => {
   const { deps, setConfirmDeleted } = authority();
+  const memberDid = plcDid("memberreg");
   await registerSpace(session, WORKSPACE, GENERAL, deps);
-  recordWriteNotification({ space: GENERAL, repo: OWNER, repoRev: "3kabcdefghij2" });
+  recordWriteNotification({ space: GENERAL, repo: GROUP, repoRev: "3kabcdefghij2" });
   const access: MemberAccessDeps = {
     isRegistered: isRegisteredSpace,
-    readMembers: async () => [{ did: "did:plc:member", read: true, write: true }],
+    readMembers: async () => [{ did: memberDid, read: true, write: true }],
     now: () => 1_000,
   };
-  assert.equal(await mayFollow(GENERAL, "did:plc:member", access), true);
+  assert.equal(await mayFollow(GENERAL, memberDid, access), true);
 
-  // 1. Live space (confirmSpaceDeleted returns false) -> refuses purge
   setConfirmDeleted(false);
   assert.equal(await handleSpaceDeletedNotice(GENERAL, deps), false);
   assert.ok(registrationRow(GENERAL));
 
-  // 2. Transient outage / RepoTakendown / missing grant -> refuses purge
   for (const err of [
     new XrpcError(503, "Service unavailable", "ServiceUnavailable"),
     new XrpcError(400, "Repo takendown", "RepoTakendown"),
     new XrpcError(400, "Repo deactivated", "RepoDeactivated"),
   ]) {
-    setConfirmDeleted(async () => { throw err; });
+    setConfirmDeleted(async () => {
+      throw err;
+    });
     assert.equal(await handleSpaceDeletedNotice(GENERAL, deps), false);
     assert.ok(registrationRow(GENERAL), `state kept on ${err.code}`);
   }
   const savedGrant = deps.grant;
-  deps.grant = async () => { throw Object.assign(new Error("no grant"), { name: "AuthorityReauthorizationRequiredError" }); };
+  deps.grant = async () => {
+    throw Object.assign(new Error("no grant"), { name: "AuthorityReauthorizationRequiredError" });
+  };
   assert.equal(await handleSpaceDeletedNotice(GENERAL, deps), false);
   assert.ok(registrationRow(GENERAL));
   deps.grant = savedGrant;
 
-  // 3. Authority confirms SpaceDeleted -> purges notices, registration, and cached member list
   setConfirmDeleted(true);
   assert.equal(await handleSpaceDeletedNotice(GENERAL, deps), true);
   assert.equal(registrationRow(GENERAL), undefined);
   assert.equal(isRegisteredSpace(GENERAL), false);
   assert.equal((getRawDb().prepare("SELECT count(*) AS count FROM space_notification WHERE space_uri=?").get(GENERAL) as { count: number }).count, 0);
-  assert.equal(await mayFollow(GENERAL, "did:plc:member", access), false);
+  assert.equal(await mayFollow(GENERAL, memberDid, access), false);
 });
 
 test("the discovery sweep registers missing or due spaces, leaves fresh ones, waits out failure backoff, and drops inactive spaces", async () => {
@@ -431,7 +445,9 @@ test("a workspace whose authority grant is gone is skipped by both sweeps and re
   registered.length = 0;
   getRawDb().prepare("UPDATE notification_registration SET renew_at = 0 WHERE space_uri = ?").run(GENERAL);
 
-  deps.grant = async () => { throw Object.assign(new Error("no grant"), { name: "AuthorityReauthorizationRequiredError" }); };
+  deps.grant = async () => {
+    throw Object.assign(new Error("no grant"), { name: "AuthorityReauthorizationRequiredError" });
+  };
   assert.deepEqual(await sweepDueRegistrations(deps), {
     registered: 0,
     failed: 0,
@@ -447,7 +463,9 @@ test("a workspace whose authority grant is gone is skipped by both sweeps and re
 
 test("registering does not wait on the workspace lock, and sweeps pause while admin mutations are paused", async () => {
   const { deps, registered } = authority(Date.now());
-  getRawDb().prepare("INSERT INTO workspace_lock (workspace, token, expires_at) VALUES (?, ?, ?)").run(OWNER, "held-by-an-operation", Math.floor(Date.now() / 1000) + 600);
+  getRawDb()
+    .prepare("INSERT INTO workspace_lock (workspace, token, expires_at) VALUES (?, ?, ?)")
+    .run(GROUP, "held-by-an-operation", Math.floor(Date.now() / 1000) + 600);
   const started = Date.now();
   assert.equal(await registerSpace(session, WORKSPACE, GENERAL, deps), true);
   assert.ok(Date.now() - started < 1_000);
@@ -465,7 +483,7 @@ test("registering does not wait on the workspace lock, and sweeps pause while ad
 
 test("a space registered while the discovery sweep reads the directory is not mistaken for one no longer active", async () => {
   const { deps } = authority();
-  const created = channelUri(OWNER, "acme-new");
+  const created = channelUri(GROUP, "newch");
   deps.activeSpaces = async () => {
     await registerSpace(session, WORKSPACE, created, deps);
     return [WORKSPACE, INBOX, GENERAL];
@@ -479,7 +497,8 @@ test("the feed knows a space the operator registered or failed to, for this oper
   await registerSpace(session, WORKSPACE, GENERAL, deps);
   failing.set(RANDOM, () => new XrpcError(503, "outage", "ServiceUnavailable"));
   await registerSpace(session, WORKSPACE, RANDOM, deps);
-  getRawDb().prepare("INSERT INTO notification_registration (service_ref,space_uri,expires_at,workspace_uri,token,renew_at) VALUES (?,?,?,?,?,0)")
+  getRawDb()
+    .prepare("INSERT INTO notification_registration (service_ref,space_uri,expires_at,workspace_uri,token,renew_at) VALUES (?,?,?,?,?,0)")
     .run("did:web:previous.test#atproto_flock_operator", INBOX, Date.now() + TEN_MIN, WORKSPACE, "other-tok");
   assert.deepEqual([GENERAL, RANDOM, INBOX, WORKSPACE].map(isRegisteredSpace), [true, true, false, false]);
   purgeSpaceNotifications(RANDOM);
@@ -487,34 +506,66 @@ test("the feed knows a space the operator registered or failed to, for this oper
   assert.deepEqual(registrationProblems(WORKSPACE, deps.now()), []);
 });
 
+async function createOpenSocialSpace(host: Awaited<ReturnType<typeof fakeGroupHost>>, spaceType: string, skey: string) {
+  await host.selfClient.procedure("com.atproto.space.createSpace", {
+    spaceType,
+    skey,
+    policy: {
+      $type: OPENSOCIAL_POLICY,
+      publicRead: false,
+      unlisted: spaceType === SPACE_TYPE.appInbox,
+      grants: [{ role: "member", read: true, write: true }],
+    },
+  });
+}
+
 test("after reconcileWorkspace, present unregistered active inboxes are registered and only registered inactive inboxes are unregistered", async () => {
-  const pds = fakeAuthorityPds(OWNER);
-  const wsActor: OperatorActor = { did: OWNER, session: pds.session, workspace: parseWorkspaceRef(WORKSPACE), canRecoverOperations: true };
-  const activeNew = "did:plc:bot-new";
-  const activeAlready = "did:plc:bot-already";
-  const activeMissing = "did:plc:bot-missing";
-  const inactiveRegistered = "did:plc:bot-gone-reg";
-  const inactiveUnregistered = "did:plc:bot-gone-unreg";
+  const gDid = plcDid("groupapp1");
+  const host = await fakeGroupHost(gDid, { creatorDid: ADMIN });
+  const wsUri = workspaceUri(gDid);
+  await createOpenSocialSpace(host, SPACE_TYPE.workspace, "self");
+  await createOpenSocialSpace(host, SPACE_TYPE.inbox, "self");
+  await createOpenSocialSpace(host, SPACE_TYPE.channel, "general");
+
+  const wsActor: OperatorActor = {
+    did: ADMIN,
+    session: host.session,
+    workspace: parseWorkspaceRef(wsUri),
+    canRecoverOperations: true,
+  };
+  const activeNew = plcDid("botnew");
+  const activeAlready = plcDid("botalready");
+  const activeMissing = plcDid("botmissing");
+  const inactiveRegistered = plcDid("botgonereg");
+  const inactiveUnregistered = plcDid("botgoneunreg");
   const nowIso = "2026-11-15T00:00:00.000Z";
   for (const [did, active] of [
-    [activeNew, true], [activeAlready, true], [activeMissing, true], [inactiveRegistered, false], [inactiveUnregistered, false],
+    [activeNew, true],
+    [activeAlready, true],
+    [activeMissing, true],
+    [inactiveRegistered, false],
+    [inactiveUnregistered, false],
   ] as const) {
-    pds.recordsOf(WORKSPACE, COLLECTION.appInstall).set(subjectKey(did), {
-      $type: COLLECTION.appInstall, subject: did, active, channels: [], installedBy: OWNER, installedAt: nowIso, updatedAt: nowIso,
+    await host.putRecord(wsUri, COLLECTION.appInstall, subjectKey(did), {
+      subject: did,
+      active,
+      channels: [],
+      installedBy: ADMIN,
+      installedAt: nowIso,
+      updatedAt: nowIso,
     });
   }
-  const inboxNew = appInboxUri(OWNER, "acme", activeNew);
-  const inboxAlready = appInboxUri(OWNER, "acme", activeAlready);
-  const inboxGoneReg = appInboxUri(OWNER, "acme", inactiveRegistered);
-  const inboxGoneUnreg = appInboxUri(OWNER, "acme", inactiveUnregistered);
-  pds.membersOf(inboxNew);
-  pds.membersOf(inboxAlready);
-  pds.membersOf(inboxGoneReg);
-  pds.membersOf(inboxGoneUnreg);
+  const inboxNew = appInboxUri(gDid, "self", activeNew);
+  const inboxAlready = appInboxUri(gDid, "self", activeAlready);
+  const inboxGoneReg = appInboxUri(gDid, "self", inactiveRegistered);
+  const inboxGoneUnreg = appInboxUri(gDid, "self", inactiveUnregistered);
+  for (const uri of [inboxNew, inboxAlready, inboxGoneReg, inboxGoneUnreg]) {
+    await createOpenSocialSpace(host, SPACE_TYPE.appInbox, uri.split("/").at(-1)!);
+  }
 
-  const { deps, registered } = authority(Date.now());
-  await registerSpace(pds.session, WORKSPACE, inboxAlready, deps);
-  await registerSpace(pds.session, WORKSPACE, inboxGoneReg, deps);
+  const { deps, registered } = authority(Date.now(), TEN_MIN, gDid, wsUri);
+  await registerSpace(host.session, wsUri, inboxAlready, deps);
+  await registerSpace(host.session, wsUri, inboxGoneReg, deps);
   registered.length = 0;
 
   await afterOperation(wsActor, {}, { kind: "reconcileWorkspace" }, { state: "completed" }, deps);
@@ -523,71 +574,114 @@ test("after reconcileWorkspace, present unregistered active inboxes are register
   assert.equal(isRegisteredSpace(inboxGoneReg), false);
 });
 
-test("the sweep keeps active present inboxes, drops inactive ones, raises no failure for missing ones, and renews other spaces under an old grant", async () => {
+test("the sweep keeps active present inboxes, drops inactive ones, raises no failure for missing ones, and renews core + modality spaces under an old grant", async () => {
+  const gDid = plcDid("groupapp2");
   let rejectAppInboxScope = false;
-  const pds = fakeAuthorityPds(OWNER, {
-    intercept: (method, target) => rejectAppInboxScope && method === "com.atproto.space.getSpace" && target.space?.includes("/new.flock.app.inbox/")
-      ? Response.json({ error: "ScopeMissingError", message: "missing scope" }, { status: 403 })
-      : undefined,
+  const host = await fakeGroupHost(gDid, {
+    creatorDid: ADMIN,
+    intercept: (method, target) =>
+      rejectAppInboxScope && method === "com.atproto.space.getSpace" && target.space?.includes("/new.flock.app.inbox/")
+        ? Response.json({ error: "ScopeMissingError", message: "missing scope" }, { status: 403 })
+        : undefined,
   });
-  pds.recordsOf(WORKSPACE, COLLECTION.directory).set("acme-general", {
-    $type: COLLECTION.directory, skey: "acme-general", name: "general", visibility: "public",
+  const wsUri = workspaceUri(gDid);
+  const inUri = inboxUri(gDid);
+  const genUri = channelUri(gDid, "general");
+  const metaUri = groupMetaUri(gDid);
+  const memUri = groupMembersUri(gDid);
+  await createOpenSocialSpace(host, SPACE_TYPE.workspace, "self");
+  await createOpenSocialSpace(host, SPACE_TYPE.inbox, "self");
+  await createOpenSocialSpace(host, SPACE_TYPE.channel, "general");
+  await host.putRecord(wsUri, COLLECTION.directory, "general", {
+    skey: "general",
+    name: "general",
+    visibility: "public",
   });
+
   const nowIso = "2026-11-15T00:00:00.000Z";
-  const botPresent = "did:plc:bot-present";
-  const botMissing = "did:plc:bot-missing";
-  const botInactive = "did:plc:bot-inactive";
+  const botPresent = plcDid("botpresent");
+  const botMissing = plcDid("botmissing2");
+  const botInactive = plcDid("botinactive");
   for (const [did, active] of [[botPresent, true], [botMissing, true], [botInactive, false]] as const) {
-    pds.recordsOf(WORKSPACE, COLLECTION.appInstall).set(subjectKey(did), {
-      $type: COLLECTION.appInstall, subject: did, active, channels: [], installedBy: OWNER, installedAt: nowIso, updatedAt: nowIso,
+    await host.putRecord(wsUri, COLLECTION.appInstall, subjectKey(did), {
+      subject: did,
+      active,
+      channels: [],
+      installedBy: ADMIN,
+      installedAt: nowIso,
+      updatedAt: nowIso,
     });
   }
-  const inboxPresent = appInboxUri(OWNER, "acme", botPresent);
-  const inboxMissing = appInboxUri(OWNER, "acme", botMissing);
-  const inboxInactive = appInboxUri(OWNER, "acme", botInactive);
-  pds.membersOf(inboxPresent);
-  pds.membersOf(inboxInactive);
+  const inboxPresent = appInboxUri(gDid, "self", botPresent);
+  const inboxMissing = appInboxUri(gDid, "self", botMissing);
+  const inboxInactive = appInboxUri(gDid, "self", botInactive);
+  await createOpenSocialSpace(host, SPACE_TYPE.appInbox, inboxPresent.split("/").at(-1)!);
+  await createOpenSocialSpace(host, SPACE_TYPE.appInbox, inboxInactive.split("/").at(-1)!);
 
-  const { deps, clock, registered } = authority();
-  deps.grant = async () => pds.session;
+  const { deps, clock, registered } = authority(Date.UTC(2026, 10, 10), TEN_MIN, gDid, wsUri);
+  deps.grant = async () => host.session;
   deps.activeSpaces = registrationDeps.activeSpaces;
-  await registerSpace(pds.session, WORKSPACE, inboxInactive, deps);
+  await registerSpace(host.session, wsUri, inboxInactive, deps);
   registered.length = 0;
 
-  assert.deepEqual(await sweepRegistrations(deps), { registered: 4, failed: 0, skipped: [] });
-  assert.deepEqual(registered.sort(), [WORKSPACE, INBOX, GENERAL, inboxPresent].sort());
+  assert.deepEqual(await sweepRegistrations(deps), { registered: 6, failed: 0, skipped: [] });
+  assert.deepEqual(registered.sort(), [metaUri, memUri, wsUri, inUri, genUri, inboxPresent].sort());
   assert.equal(registered.includes(inboxMissing), false);
   assert.equal(isRegisteredSpace(inboxInactive), false);
-  assert.deepEqual(registrationProblems(WORKSPACE, clock.now), []);
+  assert.deepEqual(registrationProblems(wsUri, clock.now), []);
 
   rejectAppInboxScope = true;
   clock.now += 31 * 60 * 1000;
   registered.length = 0;
-  assert.deepEqual(await sweepRegistrations(deps), { registered: 3, failed: 0, skipped: [] });
-  assert.deepEqual(registered.sort(), [WORKSPACE, INBOX, GENERAL].sort());
+  assert.deepEqual(await sweepRegistrations(deps), { registered: 5, failed: 0, skipped: [] });
+  assert.deepEqual(registered.sort(), [metaUri, memUri, wsUri, inUri, genUri].sort());
 });
 
 test("reconcileWorkspace and sweep manage extension space registrations and tolerate ScopeMissingError during background sweep", async () => {
-  const tasksSpace = tasksSpaceUri(OWNER, "acme");
+  const gDid = plcDid("groupext1");
+  const tasksSpace = tasksSpaceUri(gDid, "self");
   let rejectTasksScope = false;
-  const pds = fakeAuthorityPds(OWNER, {
-    intercept: (method, target) => rejectTasksScope && method === "com.atproto.space.getSpace" && target.spaceType === "new.flock.ext.tasks"
-      ? Response.json({ error: "ScopeMissingError", message: "missing tasks scope" }, { status: 403 })
-      : undefined,
+  const host = await fakeGroupHost(gDid, {
+    creatorDid: ADMIN,
+    intercept: (method, target) =>
+      rejectTasksScope && method === "com.atproto.space.getSpace" && target.spaceType === "new.flock.ext.tasks"
+        ? Response.json({ error: "ScopeMissingError", message: "missing tasks scope" }, { status: 403 })
+        : undefined,
   });
-  pds.recordsOf(WORKSPACE, COLLECTION.directory).set("acme-general", {
-    $type: COLLECTION.directory, skey: "acme-general", name: "general", visibility: "public",
+  const wsUri = workspaceUri(gDid);
+  const inUri = inboxUri(gDid);
+  const genUri = channelUri(gDid, "general");
+  const metaUri = groupMetaUri(gDid);
+  const memUri = groupMembersUri(gDid);
+  await createOpenSocialSpace(host, SPACE_TYPE.workspace, "self");
+  await createOpenSocialSpace(host, SPACE_TYPE.inbox, "self");
+  await createOpenSocialSpace(host, SPACE_TYPE.channel, "general");
+  await createOpenSocialSpace(host, SPACE_TYPE.tasks, tasksSpace.split("/").at(-1)!);
+  await host.putRecord(wsUri, COLLECTION.directory, "general", {
+    skey: "general",
+    name: "general",
+    visibility: "public",
   });
-  const wsActor: OperatorActor = { did: OWNER, session: pds.session, workspace: parseWorkspaceRef(WORKSPACE), canRecoverOperations: true };
-  const nowIso = "2026-11-16T00:00:00.000Z";
-  pds.recordsOf(WORKSPACE, COLLECTION.extInstall).set("tasks", {
-    $type: COLLECTION.extInstall, extId: "tasks", active: true, space: tasksSpace, cleanupComplete: false,
-    enabledBy: OWNER, enabledAt: nowIso, updatedAt: nowIso,
-  });
-  pds.membersOf(tasksSpace);
 
-  const { deps, clock, registered } = authority();
-  deps.grant = async () => pds.session;
+  const wsActor: OperatorActor = {
+    did: ADMIN,
+    session: host.session,
+    workspace: parseWorkspaceRef(wsUri),
+    canRecoverOperations: true,
+  };
+  const nowIso = "2026-11-16T00:00:00.000Z";
+  await host.putRecord(wsUri, COLLECTION.extInstall, "tasks", {
+    extId: "tasks",
+    active: true,
+    space: tasksSpace,
+    cleanupComplete: false,
+    enabledBy: ADMIN,
+    enabledAt: nowIso,
+    updatedAt: nowIso,
+  });
+
+  const { deps, clock, registered } = authority(Date.UTC(2026, 10, 10), TEN_MIN, gDid, wsUri);
+  deps.grant = async () => host.session;
   deps.activeSpaces = registrationDeps.activeSpaces;
 
   await afterOperation(wsActor, {}, { kind: "reconcileWorkspace" }, { state: "completed" }, deps);
@@ -596,19 +690,25 @@ test("reconcileWorkspace and sweep manage extension space registrations and tole
 
   registered.length = 0;
   clock.now += 31 * 60 * 1000;
-  assert.deepEqual(await sweepRegistrations(deps), { registered: 4, failed: 0, skipped: [] });
-  assert.deepEqual(registered.sort(), [WORKSPACE, INBOX, GENERAL, tasksSpace].sort());
+  assert.deepEqual(await sweepRegistrations(deps), { registered: 6, failed: 0, skipped: [] });
+  assert.deepEqual(registered.sort(), [metaUri, memUri, wsUri, inUri, genUri, tasksSpace].sort());
 
   rejectTasksScope = true;
   clock.now += 31 * 60 * 1000;
   registered.length = 0;
-  assert.deepEqual(await sweepRegistrations(deps), { registered: 3, failed: 0, skipped: [] });
-  assert.deepEqual(registered.sort(), [WORKSPACE, INBOX, GENERAL].sort());
+  assert.deepEqual(await sweepRegistrations(deps), { registered: 5, failed: 0, skipped: [] });
+  assert.deepEqual(registered.sort(), [metaUri, memUri, wsUri, inUri, genUri].sort());
 
   rejectTasksScope = false;
-  pds.recordsOf(WORKSPACE, COLLECTION.extInstall).set("tasks", {
-    $type: COLLECTION.extInstall, extId: "tasks", active: false, space: tasksSpace, cleanupComplete: true,
-    enabledBy: OWNER, enabledAt: nowIso, updatedAt: nowIso, disabledAt: nowIso,
+  await host.putRecord(wsUri, COLLECTION.extInstall, "tasks", {
+    extId: "tasks",
+    active: false,
+    space: tasksSpace,
+    cleanupComplete: true,
+    enabledBy: ADMIN,
+    enabledAt: nowIso,
+    updatedAt: nowIso,
+    disabledAt: nowIso,
   });
   await afterOperation(wsActor, {}, { kind: "reconcileWorkspace" }, { state: "completed" }, deps);
   assert.equal(isRegisteredSpace(tasksSpace), false);
@@ -616,14 +716,13 @@ test("reconcileWorkspace and sweep manage extension space registrations and tole
 
 test("sweepDueRegistrations stops after 1 suspended request for an authority, bulk-backs off all due rows in one transaction, and recovers after backoff", async () => {
   const { deps, clock, notifyCalls } = authority();
-  const spaces = Array.from({ length: 12 }, (_, idx) => channelUri(OWNER, `susp-ch-${idx}`)).sort();
+  const spaces = Array.from({ length: 12 }, (_, idx) => channelUri(GROUP, `susp-ch-${idx}`)).sort();
   for (const sp of spaces) {
     assert.equal(await registerSpace(session, WORKSPACE, sp, deps), true);
   }
   notifyCalls.length = 0;
   resetAuthoritySuspensionForTests();
 
-  // Advance until all 12 spaces are due for renewal, and mark authority suspended
   clock.now += TEN_MIN - RENEW_WITHIN_MS + 1_000;
   let suspended = true;
   const origRegister = deps.register;
@@ -635,7 +734,6 @@ test("sweepDueRegistrations stops after 1 suspended request for an authority, bu
     return origRegister(sess, sp, notify);
   };
 
-  // 1. First sweep probes spaces[0], sees AccountTakedown, stops immediately, and bulk-backs off all 12 due rows!
   const firstReport = await sweepDueRegistrations(deps);
   assert.deepEqual(firstReport, { registered: 0, failed: 12, skipped: [] });
   assert.equal(notifyCalls.length, 1, `expected strictly 1 PDS call across 12 due spaces, saw ${notifyCalls.length}`);
@@ -649,17 +747,14 @@ test("sweepDueRegistrations stops after 1 suspended request for an authority, bu
     assert.equal(row.next_attempt_at, clock.now + FIRST_RETRY_MS);
   }
 
-  // 2. Within backoff window, sweepDueRegistrations selects 0 due rows (0 grant restores, 0 PDS calls)
   clock.now += 5_000;
   assert.deepEqual(await sweepDueRegistrations(deps), { registered: 0, failed: 0, skipped: [] });
   assert.equal(notifyCalls.length, 1);
 
-  // 3. After 15s while STILL suspended, single-flight probe makes 1 PDS call and bulk-backs off to +30s
   clock.now += AUTHORITY_SUSPENDED_BACKOFF_MS;
   assert.deepEqual(await sweepDueRegistrations(deps), { registered: 0, failed: 12, skipped: [] });
   assert.equal(notifyCalls.length, 2, "still-suspended release makes only 1 probe call");
 
-  // 4. Once authority recovers after 30s backoff, all 12 spaces renew cleanly and clear failures
   suspended = false;
   clock.now += 30_000;
   const recoveredReport = await sweepDueRegistrations(deps);
@@ -668,9 +763,9 @@ test("sweepDueRegistrations stops after 1 suspended request for an authority, bu
 });
 
 test("two operator processes racing initial registerSpace claim and confirm the exact same winning token", async () => {
-  const raceSpace = channelUri(OWNER, "cross-process-race");
+  const raceSpace = channelUri(GROUP, "cross-process-race");
   const registrationsPath = fileURLToPath(new URL("./registrations.ts", import.meta.url));
-  const pdsPath = fileURLToPath(new URL("./testing/fake-authority-pds.ts", import.meta.url));
+  const helperPath = fileURLToPath(new URL("./testing/fake-group-session.ts", import.meta.url));
 
   let releaseParent!: () => void;
   const parentGate = new Promise<void>((resolve) => {
@@ -694,13 +789,12 @@ test("two operator processes racing initial registerSpace claim and confirm the 
   const parentPromise = registerSpace(session, WORKSPACE, raceSpace, parentDeps);
   await parentClaimed;
 
-  // Spawn a second Node process sharing DATABASE_PATH that races initial registerSpace while parent's authorizeSpaceSync is in flight
   const childToken = await new Promise<string>((resolve, reject) => {
     const script = `
       import { registerSpace } from ${JSON.stringify(registrationsPath)};
-      import { fakeAuthorityPds } from ${JSON.stringify(pdsPath)};
+      import { fakeGroupHost, plcDid } from ${JSON.stringify(helperPath)};
       import { closeDb } from ${JSON.stringify(fileURLToPath(new URL("../lib/db.ts", import.meta.url)))};
-      const { session } = fakeAuthorityPds(${JSON.stringify(OWNER)});
+      const { session } = await fakeGroupHost(${JSON.stringify(GROUP)}, { creatorDid: plcDid("adminreg") });
       let observed = "";
       const ok = await registerSpace(session, ${JSON.stringify(WORKSPACE)}, ${JSON.stringify(raceSpace)}, {
         now: () => Date.now(),
@@ -720,8 +814,12 @@ test("two operator processes racing initial registerSpace claim and confirm the 
     });
     let stdout = "";
     let stderr = "";
-    child.stdout.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; });
-    child.stderr.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
+    child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.setEncoding("utf8").on("data", (chunk: string) => {
+      stderr += chunk;
+    });
     child.once("error", reject);
     child.once("close", (code) => {
       if (code === 0) resolve(stdout.trim());
@@ -739,10 +837,9 @@ test("two operator processes racing initial registerSpace claim and confirm the 
 });
 
 test("in-flight renewal awaiting a deferred grant or PDS authorizeSpaceSync while unregisterSpace archives does NOT recreate the purged row or failure state", async () => {
-  // Case 1: Renewal awaits deferred deps.grant() while unregisterSpace runs (both grant resolution and grant failure)
   for (const grantOutcome of ["resolve", "reject"] as const) {
     const { deps } = authority();
-    const targetSpace = channelUri(OWNER, `archive-race-grant-${grantOutcome}`);
+    const targetSpace = channelUri(GROUP, `archive-race-grant-${grantOutcome}`);
     assert.equal(await registerSpace(session, WORKSPACE, targetSpace, deps), true);
     assert.ok(registrationRow(targetSpace));
 
@@ -767,7 +864,6 @@ test("in-flight renewal awaiting a deferred grant or PDS authorizeSpaceSync whil
     const renewing = renewSpaceRegistration(targetSpace, deps);
     await entered;
 
-    // Archive runs while renewal is paused inside deps.grant()
     await unregisterSpace(session, targetSpace);
     assert.equal(registrationRow(targetSpace), undefined);
 
@@ -781,10 +877,9 @@ test("in-flight renewal awaiting a deferred grant or PDS authorizeSpaceSync whil
     );
   }
 
-  // Case 2: Renewal awaits deferred PDS deps.register() across a separate connection/archive purge (both success and failure)
   for (const pdsOutcome of ["resolve", "reject"] as const) {
     const { deps } = authority();
-    const targetSpace = channelUri(OWNER, `archive-race-pds-${pdsOutcome}`);
+    const targetSpace = channelUri(GROUP, `archive-race-pds-${pdsOutcome}`);
     assert.equal(await registerSpace(session, WORKSPACE, targetSpace, deps), true);
     const beforeHead = readNotices([]).head;
 
@@ -811,7 +906,6 @@ test("in-flight renewal awaiting a deferred grant or PDS authorizeSpaceSync whil
     const renewing = renewSpaceRegistration(targetSpace, deps);
     await entered;
 
-    // Simulate cross-process archive purging SQLite rows while authorizeSpaceSync HTTP call is in flight
     purgeSpaceNotifications(targetSpace);
     assert.equal(registrationRow(targetSpace), undefined);
 
@@ -826,3 +920,40 @@ test("in-flight renewal awaiting a deferred grant or PDS authorizeSpaceSync whil
     assert.equal(readNotices([]).head, beforeHead, "cancelled renewal emits zero wake notices");
   }
 });
+
+test("refreshWorkspaceRegistrations clears authority suspension, bypasses failure backoff timers across all active spaces, and drops removed spaces", async () => {
+  const { deps, clock } = authority();
+  const general = channelUri(GROUP, "general");
+  const archived = channelUri(GROUP, "archived-old");
+  const activeSpaces = [META, MEMBERS, WORKSPACE, INBOX, general];
+  deps.activeSpaces = async () => activeSpaces;
+
+  // Seed backed-off failure rows (next_attempt_at far in the future) + a stale registration on `archived`
+  assert.equal(await registerSpace(session, WORKSPACE, archived, deps), true);
+  let failAll = true;
+  const baseRegister = deps.register;
+  deps.register = async (sess, sp, notify) => {
+    if (failAll) {
+      throw new XrpcError(401, "Authority deactivated", "AccountDeactivated");
+    }
+    return baseRegister(sess, sp, notify);
+  };
+  for (const sp of activeSpaces) {
+    assert.equal(await registerSpace(session, WORKSPACE, sp, deps), false);
+  }
+  // Normal `isDue` / `sweepRegistrations` is still within `FIRST_RETRY_MS` / `AUTHORITY_SUSPENDED_BACKOFF_MS` backoff!
+  assert.equal(registrationProblems(WORKSPACE, clock.now).length, activeSpaces.length);
+
+  // `refreshWorkspaceRegistrations` clears cached suspension and unconditionally refreshes every active space immediately!
+  failAll = false;
+  const refreshed = await refreshWorkspaceRegistrations(session, WORKSPACE, deps);
+  assert.deepEqual(refreshed, { registered: activeSpaces.length, failed: 0 });
+  assert.deepEqual(registrationProblems(WORKSPACE, clock.now), []);
+  for (const sp of activeSpaces) {
+    assert.equal(isRegisteredSpace(sp), true, `${sp} must be registered immediately`);
+  }
+  assert.equal(isRegisteredSpace(archived), false, "removed/archived space registration dropped");
+});
+
+void META;
+void MEMBERS;

@@ -1,15 +1,16 @@
 @phase5
 Feature: Membership, privacy, and archive lifecycle
-  Multi-space changes remain honest and recover after partial failure.
+  Centralized OpenSocial group.opensocial.members/self membership and role changes, per-space group.opensocial.policy
+  role grants, channel privacy transitions, and archival remain honest and recover cleanly after partial failure.
 
   Rule: Removal stops new credential issuance
 
-    Scenario: Remove a workspace member from every applicable space
+    Scenario: Remove a workspace member from Group Host governance
       Given a member has workspace, inbox, public-channel, and private-channel access
       When an admin removes that member
-      Then membership is removed from each applicable space
+      Then their Group Host membership record is removed and access is revoked
       And the workspace and private rosters become inactive
-      And the operation stays pending until every PDS member list agrees
+      And the operation stays pending until Group Host membership removal is verified
 
     Scenario: An old credential expires after removal
       Given a member holds a space credential with a short maximum lifetime
@@ -34,15 +35,15 @@ Feature: Membership, privacy, and archive lifecycle
       And unselected members cannot mint new credentials after completion
 
     Scenario: Recover a partially completed privacy transition
-      Given a privacy transition failed after any PDS mutation step
+      Given a privacy transition failed after a Group Host mutation step
       When the operator restarts
       Then the journal resumes the desired state
-      And the channel remains transitioning until all member lists agree
+      And the channel remains transitioning until the Group Host channel role and policy update completes
 
     Scenario: Archive a channel
       Given a channel contains messages
       When an admin archives it
-      Then all channel members are removed before it is marked archived
+      Then all channel policy role grants are removed before it is marked archived
       And no new channel credentials are issued
       And existing messages remain in their authors' repos
 
@@ -72,7 +73,7 @@ Feature: Membership, privacy, and archive lifecycle
 
     @slow
     Scenario: Recover after every injected mutation failure
-      Given an admin operation can fail after each PDS write
+      Given an admin operation can fail after each Group Host write
       When a failure is injected and the operator restarts
       Then the operation remains visibly pending until state converges
 

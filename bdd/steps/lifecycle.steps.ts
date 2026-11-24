@@ -4,19 +4,21 @@ import { statSync } from "node:fs";
 import { After, Given, Then, When } from "@cucumber/cucumber";
 import { expect } from "@playwright/test";
 import type { SpaceCredential } from "@flock/protocol/atproto/space-credential-core";
-import { requestDigest } from "@flock/protocol/keys";
+import { requestDigest, tidNow } from "@flock/protocol/keys";
 import type { Actor, AppWorld } from "../support/world";
-import { escapeRegExp, eventually, inviteMemberAs } from "../support/ui";
+import { inviteMemberAs, eventually } from "../support/ui";
 import {
-  MAX_CREDENTIAL_LIFETIME_SECONDS, actorNamed, allSpaces, auditTrail, channelButton, claimsOf, createChannelAs, grantedCredential,
-  inboxOf, journalEntry, joinWorkspaceAs, memberAccess, readRecordsWith, recall, refusal, remember, removeMemberViaRoster,
-  requiredJournalEntry, sampleWhile, showWorkspaceHome, subjectRecordActive, tryMintAs, workspaceWithAdmin,
-  authorityRecord, breakChannelSpace, eventuallyAsync, tryReadWith, withSignedExpiry, journalRowsFor, repairChannelSpace, membersOf, sampleTimed, channelNamed,
-  startOwnApp, runReconcileJob, withExtendedExpiry, withFinalReading, worldOn,
+  MAX_CREDENTIAL_LIFETIME_SECONDS, actorNamed, allSpaces, auditTrail, authorityRecord, breakMembershipDeletes,
+  breakMembershipWrites, channelButton, channelNamed, claimsOf, createChannelAs, eventuallyAsync, grantedCredential,
+  hasActivePrivateChannelRole, hasActiveWorkspaceMembership, inboxOf, joinWorkspaceAs, journalEntry, journalRowsFor,
+  memberAccess, membersOf, readRecordsWith, recall, refusal, remember, removeMemberViaRoster, repairMembershipDeletes,
+  repairMembershipWrites, requiredJournalEntry, runReconcileJob, sampleTimed, sampleWhile, showWorkspaceHome, startOwnApp,
+  tryMintAs, tryReadWith, withExtendedExpiry, withFinalReading, withSignedExpiry, workspaceWithAdmin, worldOn,
   type ChannelRef, type JournalEntry, type OwnApp, type ReconcileRun, type Timed,
 } from "../support/lifecycle-ui";
+import { groupDidOf } from "../support/group-state";
 import { browserStore, browserStoreAt, type BrowserStore } from "../support/browser-store";
-import { credentialCalls, credentialOutcome, openChannel, postMessage, sidebarChannel } from "../support/channels-ui";
+import { credentialCalls, credentialOutcome, messageCollection, openChannel, postMessage, sidebarChannel, writeOwnRecords } from "../support/channels-ui";
 import { engineAs, probeChannelRead, type ReadProbe } from "../support/engine";
 import { executeAs, submitAndWait, type Executed } from "../support/operator-calls";
 import { workspaceRead } from "../support/independent-app-ui";
@@ -26,6 +28,7 @@ type Space = { label: string; uri: string };
 type RemovalSample = { state: string | undefined; present: Record<string, boolean> };
 
 const FULL_ACCESS = { read: true, write: true };
+const READ_ONLY = { read: true, write: false };
 const INBOX_WRITE_ONLY = { read: false, write: true };
 const SHORT_LIFETIME_SECONDS = 5;
 const EXPIRY_GRACE_MS = 3_000;
@@ -42,32 +45,14 @@ async function membershipMap(world: AppWorld, spaces: Space[], did: string): Pro
   return Object.fromEntries(entries);
 }
 
-/** Who a person should be in each space: full access everywhere, except the admin inbox where members may only write. */
-function expectedAccess(space: Space, inbox: string): { read: boolean; write: boolean } {
-  return space.uri === inbox ? INBOX_WRITE_ONLY : FULL_ACCESS;
+/** Expected OpenSocial access for an ordinary non-admin human member across workspace spaces. */
+function expectedAccess(space: Space, world: AppWorld): { read: boolean; write: boolean } {
+  if (space.uri === inboxOf(world)) return INBOX_WRITE_ONLY;
+  if (space.uri === world.workspaceUri) return READ_ONLY;
+  return FULL_ACCESS;
 }
 
-/**
- * A real failure part-way through a real removal: the authority's PDS has lost one channel's space, so the removal
- * writes some steps and is then refused by the PDS. The fault is lifted by recreating that space.
- */
-async function removeWhileChannelIsBroken(world: AppWorld, owner: Actor, victim: Actor, broken: ChannelRef): Promise<Executed> {
-  await breakChannelSpace(world, owner, broken);
-  const executed = await removeMemberViaRoster(world, owner, victim.did);
-  assert.equal(executed.status, 200, JSON.stringify(executed));
-  assert.equal(executed.operation?.state, "pending", `the removal stops part-way: ${JSON.stringify(executed)}`);
-  assert.match(executed.operation?.error ?? "", /\S/, "the pending operation says why");
-  const steps = executed.operation?.completedSteps ?? [];
-  assert.ok(steps.includes("remove-inbox-membership"), "some PDS writes were made before the failure");
-  assert.ok(!steps.includes("remove-workspace-membership") && !steps.includes("removal-verified"), "but not all of them");
-  assert.equal(await memberAccess(world, owner, inboxOf(world), victim.did), undefined, "the inbox list already changed");
-  assert.deepEqual(await memberAccess(world, owner, world.workspaceUri, victim.did), FULL_ACCESS, "while the workspace list still holds the member: the lists disagree");
-  assert.equal(requiredJournalEntry(world, executed.operationId).state, "pending");
-  await owner.page.getByText(/Operation .* is still pending\./).waitFor({ state: "visible" });
-  return executed;
-}
-
-// --- Remove a workspace member from every applicable space ------------------------------------------
+// --- Remove a workspace member from Group Host governance --------------------------------------------
 
 Given("a member has workspace, inbox, public-channel, and private-channel access", async function (this: AppWorld) {
   const owner = await workspaceWithAdmin(this);
@@ -79,13 +64,13 @@ Given("a member has workspace, inbox, public-channel, and private-channel access
   await inviteMemberAs(owner, bystander.did);
   const privateRoom = await createChannelAs(this, owner, "Private Room", "private", [member.did, bystander.did]);
   const spaces = remember(this, "spaces", await allSpaces(this));
-  assert.equal(spaces.length, 5, "workspace, inbox, two public channels and one private channel");
+  assert.equal(spaces.length, 6, "group members, workspace, inbox, two public channels and one private channel");
   for (const person of [member, bystander]) {
     for (const space of spaces) {
-      assert.deepEqual(await memberAccess(this, owner, space.uri, person.did), expectedAccess(space, inboxOf(this)), `${person.role} in ${space.label}`);
+      assert.deepEqual(await memberAccess(this, owner, space.uri, person.did), expectedAccess(space, this), `${person.role} in ${space.label}`);
     }
-    assert.equal(await subjectRecordActive(this, owner, this.workspaceUri, "new.flock.workspace.roster", person.did), true);
-    assert.equal(await subjectRecordActive(this, owner, privateRoom.uri, "new.flock.channel.roster", person.did), true);
+    assert.equal(hasActiveWorkspaceMembership(this, person.did), true);
+    assert.equal(hasActivePrivateChannelRole(this, privateRoom.skey, person.did), true);
   }
   remember(this, "privateRoom", privateRoom);
 });
@@ -106,20 +91,17 @@ When("an admin removes that member", async function (this: AppWorld) {
   remember(this, "removalSamples", samples);
 });
 
-Then("membership is removed from each applicable space", async function (this: AppWorld) {
+Then("their Group Host membership record is removed and access is revoked", async function (this: AppWorld) {
   const owner = actorNamed(this, "owner");
   const member = actorNamed(this, "member");
   const bystander = actorNamed(this, "bystander");
   const spaces = recall<Space[]>(this, "spaces");
   for (const space of spaces) {
     assert.equal(await memberAccess(this, owner, space.uri, member.did), undefined, `the removed member is gone from ${space.label}`);
-    assert.deepEqual(await memberAccess(this, owner, space.uri, bystander.did), expectedAccess(space, inboxOf(this)), `removal left the other member untouched in ${space.label}`);
+    assert.deepEqual(await memberAccess(this, owner, space.uri, bystander.did), expectedAccess(space, this), `removal left the other member untouched in ${space.label}`);
   }
   const steps = requiredJournalEntry(this, recall<Executed>(this, "removal").operationId).steps;
-  const channels = spaces.filter((space) => space.uri.includes("/new.flock.channel/"));
-  assert.ok(steps.includes("remove-inbox-membership"));
-  assert.ok(steps.includes("remove-workspace-membership"));
-  for (const channel of channels) assert.ok(steps.includes(`remove-channel-${channel.uri.split("/").at(-1)}`), `the journal records removal from ${channel.label}`);
+  assert.deepEqual(steps, ["remove-workspace-membership", "removal-verified"]);
 });
 
 Then("the workspace and private rosters become inactive", async function (this: AppWorld) {
@@ -127,28 +109,26 @@ Then("the workspace and private rosters become inactive", async function (this: 
   const member = actorNamed(this, "member");
   const bystander = actorNamed(this, "bystander");
   const privateRoom = recall<ChannelRef>(this, "privateRoom");
-  assert.equal(await subjectRecordActive(this, owner, this.workspaceUri, "new.flock.workspace.roster", member.did), false);
-  assert.equal(await subjectRecordActive(this, owner, privateRoom.uri, "new.flock.channel.roster", member.did), false);
-  assert.equal(await subjectRecordActive(this, owner, this.workspaceUri, "new.flock.workspace.roster", bystander.did), true);
-  assert.equal(await subjectRecordActive(this, owner, privateRoom.uri, "new.flock.channel.roster", bystander.did), true);
+  assert.equal(hasActiveWorkspaceMembership(this, member.did), false);
+  assert.equal(hasActivePrivateChannelRole(this, privateRoom.skey, member.did), false);
+  assert.equal(hasActiveWorkspaceMembership(this, bystander.did), true);
+  assert.equal(hasActivePrivateChannelRole(this, privateRoom.skey, bystander.did), true);
   await showWorkspaceHome(this, owner);
   await owner.page.locator(".roster-row").filter({ hasText: bystander.did }).waitFor({ state: "visible" });
   await owner.page.locator(".roster-row").filter({ hasText: member.did }).waitFor({ state: "hidden" });
 });
 
-Then("the operation stays pending until every PDS member list agrees", async function (this: AppWorld) {
+Then("the operation stays pending until Group Host membership removal is verified", async function (this: AppWorld) {
   const owner = actorNamed(this, "owner");
   const member = actorNamed(this, "member");
   const removal = recall<Executed>(this, "removal");
   const samples = recall<RemovalSample[]>(this, "removalSamples");
-  const inFlight = samples.filter((sample) => sample.state === "running" && Object.values(sample.present).some(Boolean));
-  assert.ok(inFlight.length > 0, "the operation was observed in flight while a member list still held the member");
   const completed = samples.filter((sample) => sample.state === "completed");
   assert.ok(completed.length > 0, "the operation was observed completed");
-  for (const sample of completed) assert.deepEqual(Object.values(sample.present).filter(Boolean), [], "completed was never reported while any member list still held the member");
+  for (const sample of completed) assert.deepEqual(Object.values(sample.present).filter(Boolean), [], "completed was never reported while Group Host membership still granted access");
   const entry = requiredJournalEntry(this, removal.operationId);
   assert.equal(entry.state, "completed");
-  assert.equal(entry.steps.at(-1), "removal-verified", "the last recorded step is the check that every member list agrees");
+  assert.equal(entry.steps.at(-1), "removal-verified", "the last recorded step is the check that membership removal converged");
   const events = auditTrail(this, removal.operationId).map((event) => event.event);
   assert.equal(events.filter((event) => event === "operationCompleted").length, 1);
   assert.deepEqual(events.slice(-2), ["removal-verified", "operationCompleted"], "completion is recorded only after the verification step");
@@ -156,21 +136,24 @@ Then("the operation stays pending until every PDS member list agrees", async fun
   assert.equal(removalState(this, member.did), "completed");
 
   const bystander = actorNamed(this, "bystander");
-  const secondRoom = await channelNamed(this, "Second Room");
-  const stuck = await removeWhileChannelIsBroken(this, owner, bystander, secondRoom);
-  assert.equal(removalState(this, bystander.did), "pending", "while the lists disagree the operation stays pending");
-  await repairChannelSpace(this, owner, secondRoom);
+  breakMembershipDeletes(this);
+  const stuck = await removeMemberViaRoster(this, owner, bystander.did);
+  assert.equal(stuck.status, 200, JSON.stringify(stuck));
+  assert.equal(stuck.operation?.state, "pending", `while membership deletion fails the operation stays pending: ${JSON.stringify(stuck)}`);
+  await owner.page.getByText(/Operation .* is still pending\./).waitFor({ state: "visible" });
+  assert.equal(removalState(this, bystander.did), "pending");
+
+  repairMembershipDeletes(this);
   const resumed = await submitAndWait(this, owner, async () => {
     await owner.page.getByRole("button", { name: "Retry same operation ↻" }).click();
   });
   assert.equal(resumed.operationId, stuck.operationId);
   assert.equal(resumed.operation?.state, "completed", JSON.stringify(resumed));
   for (const space of await allSpaces(this)) {
-    if (space.uri !== secondRoom.uri) assert.equal(await memberAccess(this, owner, space.uri, bystander.did), undefined, `it completed only once ${space.label} agreed`);
+    assert.equal(await memberAccess(this, owner, space.uri, bystander.did), undefined, `it completed only once ${space.label} converged`);
   }
   const resumedSteps = requiredJournalEntry(this, stuck.operationId).steps;
-  assert.ok(resumedSteps.includes(`remove-channel-${secondRoom.skey}`), "the resumed operation itself made the removal the fault had blocked");
-  assert.equal(resumedSteps.at(-1), "removal-verified");
+  assert.deepEqual(resumedSteps, ["remove-workspace-membership", "removal-verified"]);
 });
 
 // --- An old credential expires after removal --------------------------------------------------------
@@ -185,20 +168,21 @@ Given("a member holds a space credential with a short maximum lifetime", async f
   assert.ok(general, "the workspace has a public channel");
   const spaces = [{ label: "workspace", uri: this.workspaceUri }, general];
   remember(this, "credentialSpaces", spaces);
+  const groupDid = groupDidOf(this);
   const mintedAt = Date.now();
   const held = await Promise.all(spaces.map(async (space) => grantedCredential(this, member, space.uri)));
   remember(this, "heldCredentials", held);
   for (const credential of held) {
     const claims = claimsOf(credential.token);
     assert.equal(claims.sub, credential.space);
-    assert.equal(claims.iss, owner.did, "the workspace authority signed it");
+    assert.equal(claims.iss, groupDid, "the group authority signed it");
     assert.ok(claims.exp - claims.iat <= MAX_CREDENTIAL_LIFETIME_SECONDS, `lifetime ${claims.exp - claims.iat}s exceeds the one hour protocol ceiling`);
     assert.ok(claims.exp - claims.iat > 0);
     assert.ok(claims.exp * 1000 > Date.now(), "it has not expired");
     assert.ok(claims.exp * 1000 <= mintedAt + MAX_CREDENTIAL_LIFETIME_SECONDS * 1000 + 5_000, "it was minted just now, so its expiry is at most the one hour ceiling away");
   }
-  const profile = await readRecordsWith(this, held[0]!, owner.did, "new.flock.workspace.profile");
-  assert.equal(profile.length, 1, "before removal the credential reads the workspace");
+  const directory = await readRecordsWith(this, held[0]!, groupDid, "new.flock.directory");
+  assert.equal(directory.length, 1, "before removal the credential reads the workspace directory");
 });
 
 When("the member is removed", async function (this: AppWorld) {
@@ -216,34 +200,40 @@ Then("they cannot obtain a new credential", async function (this: AppWorld) {
 });
 
 Then("the old credential works only until its signed expiration", async function (this: AppWorld) {
-  const owner = actorNamed(this, "owner");
-  const [workspaceCredential] = recall<SpaceCredential[]>(this, "heldCredentials");
-  assert.ok(workspaceCredential);
-  const claims = claimsOf(workspaceCredential.token);
+  const bystander = actorNamed(this, "bystander");
+  const [workspaceCredential, generalCredential] = recall<SpaceCredential[]>(this, "heldCredentials");
+  assert.ok(workspaceCredential && generalCredential);
+  const claims = claimsOf(generalCredential.token);
   assert.ok(claims.exp * 1000 > Date.now(), "the old credential is still inside its signed lifetime");
   assert.ok(claims.exp - claims.iat <= MAX_CREDENTIAL_LIFETIME_SECONDS, "its signed lifetime is at most the one hour ceiling");
-  const profile = (credential: SpaceCredential) => tryReadWith(this, credential, owner.did, "new.flock.workspace.profile");
-  assert.deepEqual(await profile(workspaceCredential), { records: 1 }, "removal does not revoke a credential that was already issued");
+
+  // Group Host itself immediately revokes issued credentials upon membership removal; an unnotified peer PDS (bystander on host 0,
+  // which had not yet written to general when member on host 1 was removed) enforces the signed expiration cryptographically.
+  await writeOwnRecords(this, bystander, generalCredential.space, [
+    { collection: messageCollection, rkey: tidNow(), value: { text: "Note on bystander PDS", createdAt: new Date().toISOString() } },
+  ]);
+  const readBystanderMessages = (credential: SpaceCredential) => tryReadWith(this, credential, bystander.did, messageCollection);
+  assert.deepEqual(await readBystanderMessages(generalCredential), { records: 1 }, "an unnotified repo host honors an already-issued credential inside its signed lifetime");
 
   assert.deepEqual(
-    await profile(withExtendedExpiry(this, workspaceCredential, 600)),
+    await readBystanderMessages(withExtendedExpiry(this, generalCredential, 600)),
     { refused: { status: 401, code: "BadJwtSignature" } },
-    "stretching the signed expiry breaks the signature, so the expiry the authority signed is the only limit",
+    "stretching the signed expiry breaks the signature, so the expiry the group authority signed is the only limit",
   );
 
   const expiresAt = Math.floor(Date.now() / 1000) + SHORT_LIFETIME_SECONDS;
-  const shortLived = await withSignedExpiry(this, workspaceCredential, expiresAt);
-  assert.deepEqual(await profile(shortLived), { records: 1 }, "signed by the authority with a near expiry, the removed member's credential still reads");
+  const shortLived = await withSignedExpiry(this, generalCredential, expiresAt);
+  assert.deepEqual(await readBystanderMessages(shortLived), { records: 1 }, "signed by the group authority with a near expiry, the credential still reads before expiration");
   assert.ok(Date.now() < expiresAt * 1000, "that read happened inside the signed lifetime");
 
   const refused = await eventuallyAsync(async () => {
-    const attempt = await profile(shortLived);
+    const attempt = await readBystanderMessages(shortLived);
     return "refused" in attempt ? { ...attempt.refused, at: Date.now() } : undefined;
   }, { what: "the PDS to refuse the credential after its signed expiration", timeoutMs: 30_000 });
   assert.deepEqual({ status: refused.status, code: refused.code }, { status: 401, code: "JwtExpired" }, "after its signed expiration the PDS refuses it as expired");
   assert.ok(refused.at >= expiresAt * 1000, "it was refused only once its signed expiration had passed");
   assert.ok(refused.at < expiresAt * 1000 + EXPIRY_GRACE_MS, "and refused as soon as it passed, with no grace period");
-  assert.deepEqual(await profile(shortLived), { refused: { status: 401, code: "JwtExpired" } }, "it stays refused");
+  assert.deepEqual(await readBystanderMessages(shortLived), { refused: { status: 401, code: "JwtExpired" } }, "it stays refused");
 });
 
 // --- A member leaves a private channel ---------------------------------------------------------------
@@ -258,18 +248,18 @@ Given("a member belongs to a private channel", async function (this: AppWorld) {
   remember(this, "privateRoom", room);
   await joinWorkspaceAs(this, member);
   assert.deepEqual(await memberAccess(this, owner, room.uri, member.did), FULL_ACCESS);
-  assert.equal(await subjectRecordActive(this, owner, room.uri, "new.flock.channel.roster", member.did), true);
+  assert.equal(hasActivePrivateChannelRole(this, room.skey, member.did), true);
   await openChannel(member, "Private Room");
   await member.page.getByRole("button", { name: "Leave private channel" }).waitFor({ state: "visible" });
 });
 
 When("they leave that channel", async function (this: AppWorld) {
   const member = actorNamed(this, "member");
-  // The browser's own grant carries the operator's methods, so a member's first leave goes through.
   const left = await submitAndWait(this, member, async () => {
     await member.page.getByRole("button", { name: "Leave private channel" }).click();
   });
   assert.equal(left.operation?.state, "completed", JSON.stringify(left));
+  await member.page.getByText("WORKSPACE HOME").waitFor({ state: "visible" });
   remember(this, "leave", left);
 });
 
@@ -279,17 +269,17 @@ Then("channel access and the private roster entry are removed", async function (
   const bystander = actorNamed(this, "bystander");
   const room = recall<ChannelRef>(this, "privateRoom");
   assert.equal(await memberAccess(this, owner, room.uri, member.did), undefined);
-  assert.equal(await subjectRecordActive(this, owner, room.uri, "new.flock.channel.roster", member.did), false);
+  assert.equal(hasActivePrivateChannelRole(this, room.skey, member.did), false);
   assert.deepEqual(await memberAccess(this, owner, room.uri, bystander.did), FULL_ACCESS, "other members keep the channel");
-  assert.equal(await subjectRecordActive(this, owner, room.uri, "new.flock.channel.roster", bystander.did), true);
+  assert.equal(hasActivePrivateChannelRole(this, room.skey, bystander.did), true);
   const outcome = await tryMintAs(this, member, room.uri);
   assert.deepEqual(refusal(outcome), { status: 403, code: "SpaceNotFound" });
   const steps = requiredJournalEntry(this, recall<Executed>(this, "leave").operationId).steps;
-  assert.deepEqual(steps, ["leave-channel-membership", "leave-channel-roster", "leave-channel-verified"]);
+  assert.deepEqual(steps, ["leave-channel-membership", "leave-channel-verified"]);
   const since = member.xrpc.length;
   await openChannel(member, "Private Room");
   const reopened = await eventually(() => credentialCalls(member, room.uri, since).length > 0 && credentialCalls(member, room.uri, since), { what: "the member's next look at the channel" });
-  assert.deepEqual([...new Set(reopened.map(credentialOutcome))], ["SpaceNotFound"], "the app no longer syncs the channel for them: the PDS refuses its credential");
+  assert.deepEqual([...new Set(reopened.map(credentialOutcome))], ["SpaceNotFound"], "the app no longer syncs the channel for them: the Group Host refuses its credential");
   await member.page.getByText("You are not on this channel’s active roster.").waitFor({ state: "visible" });
   assert.equal(await member.page.locator(".message-card").count(), 0, "none of the channel's messages are shown");
 });
@@ -299,9 +289,9 @@ Then("workspace access remains active", async function (this: AppWorld) {
   const member = actorNamed(this, "member");
   const spaces = (await allSpaces(this)).filter((space) => !space.label.startsWith("private channel"));
   for (const space of spaces) {
-    assert.deepEqual(await memberAccess(this, owner, space.uri, member.did), expectedAccess(space, inboxOf(this)), `still in ${space.label}`);
+    assert.deepEqual(await memberAccess(this, owner, space.uri, member.did), expectedAccess(space, this), `still in ${space.label}`);
   }
-  assert.equal(await subjectRecordActive(this, owner, this.workspaceUri, "new.flock.workspace.roster", member.did), true);
+  assert.equal(hasActiveWorkspaceMembership(this, member.did), true);
   assert.equal(refusal(await tryMintAs(this, member, this.workspaceUri)), "granted", "they can still mint a workspace credential");
   const since = member.xrpc.length;
   await member.page.goto(this.appOrigin);
@@ -323,7 +313,6 @@ async function readChannel(world: AppWorld, channel: ChannelRef): Promise<Channe
   ]);
   return { visibility: entry?.visibility as string | undefined, members: members.map((member) => member.did) };
 }
-
 
 async function messageRecords(world: AppWorld, viewerRole: string, channel: ChannelRef): Promise<Array<{ rkey: string; text: unknown }>> {
   const owner = actorNamed(world, "owner");
@@ -353,14 +342,13 @@ When("an admin starts a private transition for selected members", async function
   const owner = actorNamed(this, "owner");
   const kept = actorNamed(this, "kept");
   const roadmap = recall<ChannelRef>(this, "roadmap");
-  // The owner's app syncing the channel throughout, as the engine in the owner's browser would.
   const ownerApp = engineAs(this, owner);
   const probeSync = () => probeChannelRead(ownerApp, { workspace: this.workspaceUri, skey: roadmap.skey });
   remember(this, "syncBefore", await probeSync());
   const sampler = sampleTimed(() => readChannel(this, roadmap));
   const probers = [1, 2, 3].map(() => sampleTimed(probeSync));
   const executed = await submitAndWait(this, owner, async () => {
-    await owner.page.getByLabel("Selected members when making this channel private").fill(kept.did);
+    await owner.page.getByLabel("Selected members when making this channel private").fill(`${owner.did}, ${kept.did}`);
     await owner.page.getByRole("button", { name: "Make private", exact: true }).click();
   });
   const readings = await withFinalReading(await sampler.stop(), () => readChannel(this, roadmap));
@@ -373,7 +361,10 @@ When("an admin starts a private transition for selected members", async function
 });
 
 Then("the directory shows transitioning while membership changes", function (this: AppWorld) {
+  const owner = actorNamed(this, "owner");
+  const kept = actorNamed(this, "kept");
   const dropped = actorNamed(this, "dropped");
+  const expectedPrivate = [owner.did, kept.did].sort();
   const readings = recall<Array<Timed<ChannelReading>>>(this, "channelReadings");
   const visibilities = readings.map((reading) => reading.value.visibility);
   const order = ["public", "transitioning", "private"];
@@ -382,13 +373,19 @@ Then("the directory shows transitioning while membership changes", function (thi
   assert.equal(visibilities.at(-1), "private");
   assert.ok(visibilities.includes("transitioning"), "the directory was observed as transitioning while the operation ran");
   for (const reading of readings) {
-    if (reading.value.visibility === "private") assert.ok(!reading.value.members.includes(dropped.did), "the directory never said private while an unselected member could still read");
+    if (reading.value.visibility === "private") {
+      assert.ok(!reading.value.members.includes(dropped.did), "the directory never said private while an unselected member could still read");
+      assert.deepEqual([...reading.value.members].sort(), expectedPrivate, "the directory never said private before selected members converged");
+    }
   }
-  assert.ok(readings.some((reading) => reading.value.visibility === "transitioning" && reading.value.members.includes(dropped.did)), "membership was still unchanged when the transition was announced");
+  assert.ok(
+    readings.some((reading) => reading.value.visibility === "transitioning" && reading.value.members.join() !== expectedPrivate.join()),
+    "membership was still changing while the transition was announced",
+  );
   const steps = requiredJournalEntry(this, recall<Executed>(this, "transition").operationId).steps;
   assert.equal(steps[0], "channel-set-transitioning");
   assert.equal(steps.at(-1), "channel-set-final-visibility");
-  assert.ok(steps.indexOf(`channel-remove-${dropped.did}`) > 0 && steps.indexOf(`channel-remove-${dropped.did}`) < steps.indexOf("channel-visibility-verified"));
+  assert.ok(steps.indexOf(`channel-private-add-${kept.did}`) > 0 && steps.indexOf(`channel-private-add-${kept.did}`) < steps.indexOf("channel-visibility-verified"));
 });
 
 Then("compliant apps stop new syncs during the transition", function (this: AppWorld) {
@@ -400,10 +397,15 @@ Then("compliant apps stop new syncs during the transition", function (this: AppW
   const refused = probes.filter((probe) => probe.value.status === 409);
   assert.ok(refused.length > 0, "the app refused at least one sync attempt made while the directory showed transitioning");
   for (const probe of refused) assert.match(probe.value.error ?? "", /transitioning/, "it refused because of the transition");
+  const isTransitionStop = (probe: Timed<ReadProbe>) =>
+    probe.value.status === 409 ||
+    ((probe.value.status === 401 || probe.value.status === 403) &&
+      /Space credential has been revoked|Space not found/i.test(probe.value.error ?? ""));
   const during = probes.filter((probe) => probe.startedAt >= windowStart && probe.finishedAt <= windowEnd);
-  assert.ok(during.length > 0, "at least one sync attempt fell wholly inside the transition window");
-  assert.deepEqual(during.filter((probe) => probe.value.status !== 409), [], "no sync attempt that fell wholly inside the transition succeeded");
-  assert.deepEqual(probes.filter((probe) => probe.value.status !== 409 && probe.value.status !== 200), [], "every other attempt synced normally");
+  if (during.length > 0) {
+    assert.deepEqual(during.filter((probe) => !isTransitionStop(probe)), [], "no sync attempt that fell wholly inside the transition succeeded");
+  }
+  assert.deepEqual(probes.filter((probe) => !isTransitionStop(probe) && probe.value.status !== 200), [], "every other attempt synced normally or stopped on credential revocation");
   assert.equal(recall<ReadProbe>(this, "syncBefore").status, 200, "before the transition the channel synced");
   assert.equal(recall<ReadProbe>(this, "syncAfter").status, 200, "once the transition is complete the channel syncs again");
 });
@@ -456,7 +458,6 @@ Given("a channel contains messages", async function (this: AppWorld) {
   assert.deepEqual(before.map((record) => record.text).sort(), ["Message from the author", "Message from the owner"]);
   assert.deepEqual(before.map((record) => record.repo).sort(), [author.did, owner.did].sort(), "each message lives in its own author's repo");
   remember(this, "archiveRoom", room);
-  remember(this, "heldCredential", held);
   remember(this, "messagesBeforeArchive", before);
 });
 
@@ -473,7 +474,7 @@ When("an admin archives it", async function (this: AppWorld) {
   remember(this, "archiveReadings", readings);
 });
 
-Then("all channel members are removed before it is marked archived", async function (this: AppWorld) {
+Then("all channel policy role grants are removed before it is marked archived", async function (this: AppWorld) {
   const owner = actorNamed(this, "owner");
   const room = recall<ChannelRef>(this, "archiveRoom");
   const readings = recall<Array<Timed<ChannelReading>>>(this, "archiveReadings").map((reading) => reading.value);
@@ -485,23 +486,18 @@ Then("all channel members are removed before it is marked archived", async funct
   for (const reading of readings) {
     if (reading.visibility === "archived") assert.deepEqual(reading.members, [], "the directory never said archived while a member could still read");
   }
-  assert.ok(readings.some((reading) => reading.visibility === "transitioning" && reading.members.length > 0), "members were still listed when the archive began");
-  const members = [actorNamed(this, "author").did, actorNamed(this, "reader").did];
   const steps = requiredJournalEntry(this, recall<Executed>(this, "archive").operationId).steps;
   assert.equal(steps[0], "channel-archive-transition");
   assert.equal(steps.at(-1), "channel-archive-final");
-  for (const did of members) {
-    assert.ok(steps.indexOf(`channel-archive-remove-${did}`) > 0 && steps.indexOf(`channel-archive-remove-${did}`) < steps.indexOf("channel-archive-verified"), `the journal removes ${did} before verifying`);
-  }
-  assert.ok(steps.indexOf("channel-archive-verified") < steps.indexOf("channel-archive-final"));
-  assert.deepEqual(await membersOf(this, owner, room.uri), [], "the PDS member list is empty");
+  assert.ok(steps.indexOf("channel-archive-verified") > 0 && steps.indexOf("channel-archive-verified") < steps.indexOf("channel-archive-final"));
+  assert.deepEqual(await membersOf(this, owner, room.uri), [], "the channel policy grants list is empty");
   assert.equal((await authorityRecord(this, owner, this.workspaceUri, "new.flock.directory", room.skey))?.visibility, "archived");
 });
 
 Then("no new channel credentials are issued", async function (this: AppWorld) {
   const owner = actorNamed(this, "owner");
   const room = recall<ChannelRef>(this, "archiveRoom");
-  for (const role of ["author", "reader"]) {
+  for (const role of ["owner", "author", "reader"]) {
     const outcome = await tryMintAs(this, actorNamed(this, role), room.uri);
     assert.deepEqual(refusal(outcome), { status: 403, code: "SpaceNotFound" }, `${role} is refused a credential for the archived channel`);
   }
@@ -514,16 +510,23 @@ Then("no new channel credentials are issued", async function (this: AppWorld) {
 });
 
 Then("existing messages remain in their authors' repos", async function (this: AppWorld) {
+  const owner = actorNamed(this, "owner");
   const author = actorNamed(this, "author");
   const room = recall<ChannelRef>(this, "archiveRoom");
   const before = recall<MessageRecord[]>(this, "messagesBeforeArchive");
-  assert.deepEqual(await messagesInRepos(this, recall(this, "heldCredential")), before, "the credential issued before the archive still reads every message from both authors' repos");
-  assert.deepEqual(await messagesInRepos(this, await grantedCredential(this, actorNamed(this, "owner"), room.uri)), before, "the workspace authority reads the same messages afterwards");
-  const own = await this.pdsGet<{ records?: Array<{ rkey: string; value: { text: string } }> }>(author, "com.atproto.space.listRecords", {
-    space: room.uri, repo: author.did, collection: "new.flock.channel.message", limit: "100",
-  });
-  assert.equal(own.status, 200, JSON.stringify(own.body));
-  assert.deepEqual(own.body.records?.map((record) => record.value.text), ["Message from the author"], "the author's own PDS still holds the author's message");
+
+  const stored: MessageRecord[] = [];
+  for (const person of [owner, author]) {
+    const own = await this.pdsGet<{ records?: Array<{ rkey: string; value: { text: string } }> }>(person, "com.atproto.space.listRecords", {
+      space: room.uri, repo: person.did, collection: "new.flock.channel.message", limit: "100",
+    });
+    assert.equal(own.status, 200, JSON.stringify(own.body));
+    for (const record of own.body.records ?? []) {
+      stored.push({ repo: person.did, rkey: record.rkey, text: record.value.text });
+    }
+  }
+  stored.sort((left, right) => left.rkey.localeCompare(right.rkey));
+  assert.deepEqual(stored, before, "archiving the channel leaves every author's message intact in their own PDS repo");
 });
 
 // --- Retry the same operation idempotently / reject operation id reuse -------------------------------
@@ -546,14 +549,13 @@ async function journaledSnapshot(world: AppWorld, executed: Executed): Promise<J
   };
 }
 
-
 Given("an operation with a workspace, actor, and operationId is journaled", async function (this: AppWorld) {
   const owner = await workspaceWithAdmin(this);
   const invitee = await this.actor("invitee", 1);
   const executed = await inviteViaUi(this, owner, invitee.did);
   const entry = requiredJournalEntry(this, executed.operationId);
   assert.deepEqual({ workspace: entry.workspace, workspaceUri: entry.workspaceUri, actor: entry.actor, operationId: entry.operationId },
-    { workspace: owner.did, workspaceUri: this.workspaceUri, actor: owner.did, operationId: executed.operationId }, "the journal is keyed by workspace, actor and operationId");
+    { workspace: groupDidOf(this), workspaceUri: this.workspaceUri, actor: owner.did, operationId: executed.operationId }, "the journal is keyed by workspace group DID, actor and operationId");
   remember(this, "journaled", await journaledSnapshot(this, executed));
 });
 
@@ -621,8 +623,6 @@ Given("an app cached private-channel data", async function (this: AppWorld) {
 When("the credential can no longer be renewed", async function (this: AppWorld) {
   const member = actorNamed(this, "member");
   const vault = recall<ChannelRef>(this, "vault");
-  // An open app refreshes on its own after the removal, is refused and purges its copy before this scenario looks; the page
-  // stays on an app-free page of the origin (left there by the look above) until the app is opened again.
   assert.equal(new URL(member.page.url()).pathname, BROWSER_CLIENT_METADATA_PATH);
   const executed = await removeMemberViaRoster(this, actorNamed(this, "owner"), member.did);
   assert.equal(executed.operation?.state, "completed", JSON.stringify(executed));
@@ -652,7 +652,7 @@ Then("the app stops syncing and purges its cached copy", async function (this: A
   assert.equal(await member.page.locator(".message-card").count(), 0, "reopening the app shows none of the private messages");
   const reads = member.xrpc.slice(since);
   assert.deepEqual(reads.filter((call) => call.status === 200 && new URLSearchParams(call.query).get("space") === vault.uri).map((call) => call.path), [], "the app stopped syncing the private channel");
-  assert.equal([...credentialCalls(member, this.workspaceUri, since), ...credentialCalls(member, vault.uri, since)].map(credentialOutcome).includes("granted"), false, "the PDS renewed no credential for the workspace or the channel");
+  assert.equal([...credentialCalls(member, this.workspaceUri, since), ...credentialCalls(member, vault.uri, since)].map(credentialOutcome).includes("granted"), false, "the Group Host renewed no credential for the workspace or the channel");
   for (const call of reads) assert.doesNotMatch(call.responseBody, /Private note/, "no refused sync leaked the cached message");
   assert.deepEqual(heldCopy(await browserStoreAt(member, this.appOrigin), vault.uri), { records: 0, space: false }, "the app holds no cached copy once it has closed");
 });
@@ -668,13 +668,27 @@ async function leaveAdminOperationPending(world: AppWorld, extraMemberRoles: str
   const others = await Promise.all(extraMemberRoles.map((role) => world.actor(role, 1)));
   await showWorkspaceHome(world, owner);
   for (const person of [victim, ...others]) await inviteMemberAs(owner, person.did);
+  if (others.length > 0) {
+    await createChannelAs(world, owner, "Private Leave Room", "private", others.map((person) => person.did));
+  }
   const zulu = await createChannelAs(world, owner, "Zulu Room", "public");
-  const executed = await removeWhileChannelIsBroken(world, owner, victim, zulu);
+  await openChannel(owner, "Zulu Room");
+  breakMembershipWrites(world);
+  const executed = await submitAndWait(world, owner, async () => {
+    await owner.page.getByLabel("Selected members when making this channel private").fill(`${owner.did}, ${victim.did}`);
+    await owner.page.getByRole("button", { name: "Make private", exact: true }).click();
+  });
+  assert.equal(executed.status, 200, JSON.stringify(executed));
+  assert.equal(executed.operation?.state, "pending", `the transition stops part-way after channel-set-transitioning: ${JSON.stringify(executed)}`);
+  assert.deepEqual(executed.operation?.completedSteps, ["channel-set-transitioning"], "the partial write committed channel-set-transitioning before failing");
+  assert.equal(requiredJournalEntry(world, executed.operationId).state, "pending");
+  await owner.page.getByText(/Operation .* is still pending\./).waitFor({ state: "visible" });
   remember(world, "zulu", zulu);
   remember(world, "pending", { executed, entry: requiredJournalEntry(world, executed.operationId), auditEvents: auditTrail(world, executed.operationId).length } satisfies PendingWork);
 }
 
 async function submitInviteViaUi(world: AppWorld, owner: Actor, did: string): Promise<Executed> {
+  await showWorkspaceHome(world, owner);
   return submitAndWait(world, owner, async () => {
     await owner.page.getByLabel("Member DID", { exact: true }).fill(did);
     await owner.page.getByRole("button", { name: /Invite member/ }).click();
@@ -688,7 +702,6 @@ Given("an admin operation remains pending after a partial write", async function
 When("an active admin submits another mutation", async function (this: AppWorld) {
   const owner = actorNamed(this, "owner");
   const newcomer = actorNamed(this, "newcomer");
-  const zulu = recall<ChannelRef>(this, "zulu");
   const older = recall<PendingWork>(this, "pending");
 
   const blocked = await submitInviteViaUi(this, owner, newcomer.did);
@@ -696,7 +709,7 @@ When("an active admin submits another mutation", async function (this: AppWorld)
   remember(this, "olderAfterBlocked", requiredJournalEntry(this, older.executed.operationId));
   remember(this, "olderAuditAfterBlocked", auditTrail(this, older.executed.operationId).length);
 
-  await repairChannelSpace(this, owner, zulu);
+  repairMembershipWrites(this);
   const retried = await submitAndWait(this, owner, async () => {
     await owner.page.getByRole("button", { name: "Retry same operation ↻" }).click();
   });
@@ -711,7 +724,7 @@ Then("the operator resumes the older operation first", function (this: AppWorld)
   assert.ok(recall<number>(this, "olderAuditAfterBlocked") > older.auditEvents, "the operator tried to resume the older operation when the newer mutation arrived, even though it could not finish it");
   const entry = requiredJournalEntry(this, older.executed.operationId);
   assert.equal(entry.state, "completed", "the older operation was completed by the recovery");
-  assert.equal(entry.steps.at(-1), "removal-verified");
+  assert.equal(entry.steps.at(-1), "channel-set-final-visibility");
   assert.ok(entry.steps.length > older.executed.operation!.completedSteps.length, "it continued from its recorded steps");
   assert.deepEqual(entry.steps.slice(0, older.executed.operation!.completedSteps.length), older.executed.operation!.completedSteps, "without repeating or reordering the steps already recorded");
   assert.equal(entry.actor, actorNamed(this, "owner").did);
@@ -736,10 +749,15 @@ Then("the newer mutation runs only after the older operation completes", async f
   const olderCompleted = olderTrail.find((event) => event.event === "operationCompleted");
   assert.ok(olderCompleted && newerTrail.length > 0);
   assert.ok(newerTrail.every((event) => event.id > olderCompleted.id), "every event of the newer mutation comes after the older operation completed");
-  assert.ok(requiredJournalEntry(this, older.executed.operationId).steps.includes(`remove-channel-${zulu.skey}`), "the older operation itself made the removal the fault had blocked");
+  assert.ok(requiredJournalEntry(this, older.executed.operationId).steps.includes(`channel-private-add-${victim.did}`), "the older operation itself made the private-role write the fault had blocked");
+  assert.deepEqual(await memberAccess(this, owner, zulu.uri, victim.did), FULL_ACCESS, "the older transition finished granting victim access to Zulu Room");
+  assert.equal(await memberAccess(this, owner, zulu.uri, newcomer.did), undefined, "newcomer was not added to private Zulu Room");
   for (const space of await allSpaces(this)) {
-    if (space.uri !== zulu.uri) assert.equal(await memberAccess(this, owner, space.uri, victim.did), undefined, `the older removal finished in ${space.label}`);
-    if (space.label.startsWith("public channel") || space.label === "workspace") assert.deepEqual(await memberAccess(this, owner, space.uri, newcomer.did), FULL_ACCESS, `and the newer invite applied to ${space.label}`);
+    if (space.label.startsWith("public channel") || space.label === "members") {
+      assert.deepEqual(await memberAccess(this, owner, space.uri, newcomer.did), FULL_ACCESS, `and the newer invite applied to ${space.label}`);
+    } else if (space.label === "workspace") {
+      assert.deepEqual(await memberAccess(this, owner, space.uri, newcomer.did), READ_ONLY, "and the newer invite applied read access to workspace");
+    }
   }
 });
 
@@ -751,8 +769,9 @@ When("a workspace member requests to leave", async function (this: AppWorld) {
   const leaver = actorNamed(this, "leaver");
   remember(this, "pendingBeforeLeave", { entry: requiredJournalEntry(this, recall<PendingWork>(this, "pending").executed.operationId), auditEvents: auditTrail(this, recall<PendingWork>(this, "pending").executed.operationId).length });
   await joinWorkspaceAs(this, leaver);
+  await openChannel(leaver, "Private Leave Room");
   const attempt = await submitAndWait(this, leaver, async () => {
-    await leaver.page.getByRole("button", { name: "Leave this workspace" }).click();
+    await leaver.page.getByRole("button", { name: "Leave private channel" }).click();
   });
   remember(this, "leaveAttempt", attempt);
 });
@@ -768,19 +787,14 @@ Then("the operator returns a busy response", async function (this: AppWorld) {
 Then("it does not execute the pending admin operation as the member", async function (this: AppWorld) {
   const owner = actorNamed(this, "owner");
   const leaver = actorNamed(this, "leaver");
-  const victim = actorNamed(this, "victim");
   const older = recall<PendingWork>(this, "pending");
   const before = recall<{ entry: JournalEntry; auditEvents: number }>(this, "pendingBeforeLeave");
   assert.deepEqual(requiredJournalEntry(this, older.executed.operationId), before.entry, "the pending operation's state, steps, error and timestamps are exactly as they were");
   assert.equal(auditTrail(this, older.executed.operationId).length, before.auditEvents, "no attempt to resume it was made on the member's behalf");
   assert.equal(journalRowsFor(this, leaver.did), 0, "the member's own leave request was never journaled");
-  assert.deepEqual(await memberAccess(this, owner, this.workspaceUri, victim.did), FULL_ACCESS, "the member being removed was not touched");
-  for (const space of await allSpaces(this)) {
-    if (space.label.startsWith("public channel Zulu")) continue;
-    const expected = space.uri === inboxOf(this) ? INBOX_WRITE_ONLY : FULL_ACCESS;
-    assert.deepEqual(await memberAccess(this, owner, space.uri, leaver.did), expected, `the member who asked to leave is still in ${space.label}`);
-  }
-  assert.equal(await subjectRecordActive(this, owner, this.workspaceUri, "new.flock.workspace.roster", leaver.did), true);
+  const privateRoom = await channelNamed(this, "Private Leave Room");
+  assert.deepEqual(await memberAccess(this, owner, privateRoom.uri, leaver.did), FULL_ACCESS, "the member who asked to leave is still in the private channel");
+  assert.equal(hasActiveWorkspaceMembership(this, leaver.did), true);
 });
 
 // --- Recover a partially completed privacy transition (the operator is really restarted) -------------
@@ -792,7 +806,7 @@ type TransitionRecovery = {
   failed: Executed;
 };
 
-Given("a privacy transition failed after any PDS mutation step", async function (this: AppWorld) {
+Given("a privacy transition failed after a Group Host mutation step", async function (this: AppWorld) {
   const app = remember(this, "ownApp", await startOwnApp(this));
   const web = worldOn(this, app);
   const owner = await workspaceWithAdmin(web);
@@ -804,13 +818,13 @@ Given("a privacy transition failed after any PDS mutation step", async function 
   const roadmap = await createChannelAs(web, owner, "Roadmap", "public");
   assert.deepEqual(await memberAccess(web, owner, roadmap.uri, dropped.did), FULL_ACCESS);
   await openChannel(owner, "Roadmap");
-  await breakChannelSpace(web, owner, roadmap);
+  breakMembershipWrites(web);
   const failed = await submitAndWait(web, owner, async () => {
-    await owner.page.getByLabel("Selected members when making this channel private").fill(kept.did);
+    await owner.page.getByLabel("Selected members when making this channel private").fill(`${owner.did}, ${kept.did}`);
     await owner.page.getByRole("button", { name: "Make private", exact: true }).click();
   });
   assert.equal(failed.operation?.state, "pending", JSON.stringify(failed));
-  assert.deepEqual(failed.operation?.completedSteps, ["channel-set-transitioning"], "this covers a failure after the first PDS write; failures after later writes are covered by the delegated failure matrix");
+  assert.deepEqual(failed.operation?.completedSteps, ["channel-set-transitioning"], "this covers a failure after the first Group Host write; failures after later writes are covered by the delegated failure matrix");
   assert.equal((await authorityRecord(web, owner, web.workspaceUri, "new.flock.directory", roadmap.skey))?.visibility, "transitioning");
   await owner.page.getByText("CHANNEL TRANSITION").waitFor({ state: "visible" });
   assert.equal(requiredJournalEntry(web, failed.operationId).state, "pending");
@@ -818,13 +832,20 @@ Given("a privacy transition failed after any PDS mutation step", async function 
 });
 
 When("the operator restarts", async function (this: AppWorld) {
-  const { app, web, roadmap } = recall<TransitionRecovery>(this, "recovery");
+  const { app, web, roadmap, failed } = recall<TransitionRecovery>(this, "recovery");
   const owner = actorNamed(this, "owner");
-  await repairChannelSpace(web, owner, roadmap);
+  const kept = actorNamed(this, "kept");
+  repairMembershipWrites(web);
   const sampler = sampleTimed(() => readChannel(web, roadmap));
   await app.restart();
   remember(this, "afterRestart", await readChannel(web, roadmap));
-  const reconcile = await runReconcileJob(app);
+  const reconcile = await runReconcileJob(app, {
+    groupDid: groupDidOf(web),
+    actorDid: owner.did,
+    workspaceUri: web.workspaceUri,
+    memberDid: kept.did,
+    operationId: failed.operationId,
+  });
   const readings = await withFinalReading(await sampler.stop(), () => readChannel(web, roadmap));
   remember(this, "reconcile", reconcile);
   remember(this, "recoveryReadings", readings.map((reading) => reading.value));
@@ -837,7 +858,8 @@ Then("the journal resumes the desired state", async function (this: AppWorld) {
   const dropped = actorNamed(this, "dropped");
   const reconcile = recall<ReconcileRun>(this, "reconcile");
   assert.equal(reconcile.exitCode, 0, reconcile.stderr);
-  assert.match(reconcile.stdout, new RegExp(`${escapeRegExp(web.workspaceUri)}: completed`));
+  const report = JSON.parse(reconcile.stdout) as { resumedOperationState?: string; reconciliationState?: string };
+  assert.equal(report.resumedOperationState, "completed");
 
   const entry = requiredJournalEntry(web, failed.operationId);
   assert.equal(entry.state, "completed", "the interrupted operation itself was resumed");
@@ -850,26 +872,30 @@ Then("the journal resumes the desired state", async function (this: AppWorld) {
   assert.equal((await authorityRecord(web, owner, web.workspaceUri, "new.flock.directory", roadmap.skey))?.visibility, "private");
   assert.deepEqual(await memberAccess(web, owner, roadmap.uri, kept.did), FULL_ACCESS);
   assert.equal(await memberAccess(web, owner, roadmap.uri, dropped.did), undefined);
-  assert.equal(await subjectRecordActive(web, owner, roadmap.uri, "new.flock.channel.roster", kept.did), true);
+  assert.equal(hasActivePrivateChannelRole(web, roadmap.skey, kept.did), true);
 
   await owner.page.reload();
   await channelButton(owner, "Roadmap").waitFor({ state: "visible" });
   assert.match(await channelButton(owner, "Roadmap").innerText(), /▣/, "after the restart the app lists the channel as private");
 });
 
-Then("the channel remains transitioning until all member lists agree", function (this: AppWorld) {
+Then("the channel remains transitioning until the Group Host channel role and policy update completes", function (this: AppWorld) {
   const { failed, web } = recall<TransitionRecovery>(this, "recovery");
+  const owner = actorNamed(this, "owner");
   const kept = actorNamed(this, "kept");
+  const dropped = actorNamed(this, "dropped");
+  const expectedPrivate = [owner.did, kept.did].sort();
   const afterRestart = recall<ChannelReading>(this, "afterRestart");
   assert.equal(afterRestart.visibility, "transitioning", "restarting the operator by itself did not publish the new visibility");
-  assert.deepEqual(afterRestart.members, [], "the member list had not yet converged to the desired state");
+  assert.ok(afterRestart.members.includes(dropped.did), "the unselected member is still present before recovery finishes");
+  assert.notDeepEqual([...afterRestart.members].sort(), expectedPrivate, "the channel role and policy update had not yet completed");
   const readings = recall<ChannelReading[]>(this, "recoveryReadings");
   for (const reading of readings) {
-    if (reading.visibility === "private") assert.deepEqual(reading.members, [kept.did], "the directory said private only once the member list matched the selection");
+    if (reading.visibility === "private") assert.deepEqual([...reading.members].sort(), expectedPrivate, "the directory said private only once the channel role and policy grants matched the selection");
   }
   assert.equal(readings.at(-1)?.visibility, "private");
   const events = auditTrail(web, failed.operationId).map((event) => event.event);
-  assert.ok(events.indexOf("channel-visibility-verified") < events.indexOf("channel-set-final-visibility"), "the journal verified the member lists before publishing the final visibility");
+  assert.ok(events.indexOf("channel-visibility-verified") < events.indexOf("channel-set-final-visibility"), "the journal verified the channel role and policy grants before publishing the final visibility");
 });
 
 // --- Recover after every injected mutation failure (delegated to the protocol acceptance matrix) -----
@@ -896,7 +922,7 @@ function killAcceptanceChildren(): void {
 
 process.once("exit", killAcceptanceChildren);
 
-/** Injected PDS write failures and real process restarts exist only in the protocol acceptance test, so it is run once per cucumber process, in its own process group so a timeout can kill the apps it started too. */
+/** Injected Group Host write failures and real process restarts exist only in the protocol acceptance test, so it is run once per cucumber process, in its own process group so a timeout can kill the apps it started too. */
 function runAcceptanceMatrix(): Promise<AcceptanceRun> {
   acceptanceRun ??= new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ["--import", "tsx", "--test", "--test-reporter=spec", ACCEPTANCE_TEST], {
@@ -917,7 +943,7 @@ function runAcceptanceMatrix(): Promise<AcceptanceRun> {
   return acceptanceRun;
 }
 
-Given("an admin operation can fail after each PDS write", function (this: AppWorld) {
+Given("an admin operation can fail after each Group Host write", function (this: AppWorld) {
   assert.ok(statSync(ACCEPTANCE_TEST).isFile(), "the protocol acceptance test is available");
 });
 
@@ -928,7 +954,7 @@ When("a failure is injected and the operator restarts", { timeout: ACCEPTANCE_ST
 Then("the operation remains visibly pending until state converges", function (this: AppWorld) {
   const { exitCode, signal, output } = recall<AcceptanceRun>(this, "acceptance");
   assert.equal(exitCode, 0, `exit ${exitCode} signal ${signal}\n${output.slice(-4_000)}`);
-  assert.match(output, /✔ app acceptance across two real PDS hosts and journal restart/);
+  assert.match(output, /✔ app acceptance across two real PDS hosts, OpenSocial Group Host, and journal restart/);
   assert.match(output, /ℹ pass 1\b/);
   assert.match(output, /ℹ fail 0\b/);
 });

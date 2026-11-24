@@ -4,10 +4,10 @@
   "defs": {
     "main": {
       "type": "space",
-      "key": "any",
+      "key": "literal:self",
       "title": "Workspace",
-      "collections": ["new.flock.workspace.profile", "new.flock.directory", "new.flock.workspace.roster", "new.flock.admin", "new.flock.app.install", "new.flock.ext.install", "new.flock.acceptance"],
-      "description": "A shared team workspace directory, roster, admin state, and acceptance index."
+      "collections": ["new.flock.directory", "new.flock.app.install", "new.flock.ext.install", "com.atproto.label.record"],
+      "description": "A shared team workspace directory, app installations, extension installations, and moderation labels."
     }
   }
 }

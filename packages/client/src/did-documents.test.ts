@@ -46,6 +46,20 @@ test("resolvePds reads #atproto_pds for did:plc through the PLC directory and ca
   assert.equal(await resolvePds("did:plc:alice", config), "https://pds.example");
   assert.equal(calls.length, 1, "the second resolution is served from the in-memory cache");
   assert.equal(calls[0]!.redirect, "error", "DID document fetches never follow redirects");
+
+  responder = () =>
+    jsonDocument({
+      id: "did:plc:alice",
+      service: [{ id: "#atproto_pds", type: "AtprotoPersonalDataServer", serviceEndpoint: "https://pds2.example" }],
+    });
+  assert.equal(await resolvePds("did:plc:alice", config, { forceRefresh: false }), "https://pds.example");
+  assert.equal(calls.length, 1);
+  assert.equal(
+    await resolvePds("did:plc:alice", config, { forceRefresh: true }),
+    "https://pds2.example",
+    "{ forceRefresh: true } bypasses the DID document cache after host migration",
+  );
+  assert.equal(calls.length, 2);
 });
 
 test("the DID document cache expires after ten minutes", async () => {

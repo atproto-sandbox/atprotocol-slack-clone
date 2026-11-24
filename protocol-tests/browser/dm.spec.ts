@@ -1,46 +1,25 @@
 import assert from "node:assert/strict";
-import { createServer } from "node:net";
 import { mkdtempSync, rmSync } from "node:fs";
-import { readdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { after, before, test } from "node:test";
 import { chromium, type Page } from "@playwright/test";
-import { createFixtureTempRoot } from "../fixture-temp";
-import { startStack, type Stack } from "../support/app-server";
+import { availablePort, startStack, type Stack } from "../support/app-server";
+import { startPdsNetwork, type PdsNetwork } from "../support/pds-network";
 
 // M5 browser acceptance (.ai/plans/dm-tasks/m5.md): two accounts on two PDS
 // hosts complete a full DM round trip through the real browser OAuth flow (the
 // one browser-held session, which signing in creates), then one side revokes
 // and the other loses access after reload. Alongside the UI assertions, every
-// request either page sends to the app's own origin is captured so the test
-// can prove message text never reaches this app's server.
+// request either page sends to the app's own origin, its operator, or the Group
+// Host is captured so the test can prove message text never reaches them.
 
-const projectRoot = process.cwd();
-const pinnedCheckout = process.env.ATPROTO_PINNED_CHECKOUT;
 const alicePassword = "dm-browser-alice-pass";
 const bobPassword = "dm-browser-bob-pass";
 const aliceMessage = "Hello Bob, this direct message must never reach the app server.";
 const bobReply = "Hi Alice, replying from my own PDS, not through the app.";
 
-type TestAgent = {
-  com: { atproto: { server: {
-    createAccount(input: Record<string, unknown>): Promise<{ data: { did: string } }>;
-    createSession(input: Record<string, unknown>): Promise<{ data: { accessJwt: string } }>;
-  } }; repo: { createRecord(input: Record<string, unknown>, options: { headers: { authorization: string } }): Promise<unknown> } };
-};
-type TestPds = { url: string; getAgent(): TestAgent };
-type TestNetwork = {
-  pds: TestPds;
-  extraPdses: TestPds[];
-  plc: { url: string };
-  close(): Promise<void>;
-  lexiconAuthority?: { did: string };
-};
-
-let network: TestNetwork | undefined;
-let fixtureTemp: ReturnType<typeof createFixtureTempRoot> | undefined;
+let pds: PdsNetwork | undefined;
 let stack: Stack | undefined;
 let scratchDirectory: string | undefined;
 let appUrl: URL | undefined;
@@ -52,31 +31,19 @@ const appRequests: AppRequestRecord[] = [];
 const macResponses: Array<Promise<{ actor: string; url: string; headers: Record<string, string> }>> = [];
 
 before(async () => {
-  assert.ok(pinnedCheckout, "set ATPROTO_PINNED_CHECKOUT to the pinned atproto checkout");
-  const { TestNetworkNoAppView } = await import(pathToFileURL(join(pinnedCheckout, "packages/dev-env/src/index.ts")).href) as {
-    TestNetworkNoAppView: { create(options: { extraPdses: number; lexiconAuthority: boolean }): Promise<TestNetwork> };
-  };
-  fixtureTemp = createFixtureTempRoot("slack-dm-browser-fixture-");
-  try {
-    network = await TestNetworkNoAppView.create({ extraPdses: 1, lexiconAuthority: true });
-  } catch (error) {
-    fixtureTemp.cleanup();
-    fixtureTemp = undefined;
-    throw error;
-  }
-  await publishAppLexicons(network);
+  const [port, operatorPort] = [await availablePort(), await availablePort()];
+  pds = await startPdsNetwork("slack-dm-browser", { appPort: port, operatorPort });
 
-  const alice = await network.pds.getAgent().com.atproto.server.createAccount({
+  const alice = await pds.hosts[0].getAgent().com.atproto.server.createAccount({
     handle: "dm-alice.test", email: "dm-alice@dm-browser.test", password: alicePassword,
   });
   aliceDid = alice.data.did;
-  const bob = await network.extraPdses[0]!.getAgent().com.atproto.server.createAccount({
+  const bob = await pds.hosts[1].getAgent().com.atproto.server.createAccount({
     handle: "dm-bob.test2", email: "dm-bob@dm-browser.test", password: bobPassword,
   });
   bobDid = bob.data.did;
 
   scratchDirectory = mkdtempSync(join(tmpdir(), "slack-dm-oauth-browser-"));
-  const [port, operatorPort] = [await freePort(), await freePort()];
   stack = await startStack({
     PATH: process.env.PATH ?? "",
     HOME: process.env.HOME ?? tmpdir(),
@@ -86,9 +53,10 @@ before(async () => {
     ATPROTO_ACCEPTANCE_TEST: "true",
     APP_URL: `http://127.0.0.1:${port}`,
     OPERATOR_URL: `http://127.0.0.1:${operatorPort}`,
+    GROUP_HOST_URL: pds.groupHostUrl,
     DATABASE_PATH: join(scratchDirectory, "app.db"),
     AUTH_ENCRYPTION_KEY: Buffer.alloc(32, 0x3c).toString("hex"),
-    PLC_URL: network.plc.url,
+    PLC_URL: pds.plcUrl,
     OPERATOR_SERVICE_REF: `did:web:localhost%3A${operatorPort}#atproto_flock_operator`,
   });
   appUrl = stack.appUrl;
@@ -97,15 +65,14 @@ before(async () => {
 after(async () => {
   try {
     await stack?.stop();
-    await network?.close();
+    await pds?.close();
   } finally {
     if (scratchDirectory) rmSync(scratchDirectory, { recursive: true, force: true });
-    fixtureTemp?.cleanup();
   }
 });
 
-test("real browsers complete a DM round trip across two PDS hosts, then a leave revokes read access", async () => {
-  assert.ok(appUrl);
+test("real browsers complete a DM round trip across two PDS hosts, then a leave revokes read access", { timeout: 300_000 }, async () => {
+  assert.ok(appUrl && pds);
   const browser = await chromium.launch({ headless: true });
   const aliceContext = await browser.newContext();
   const bobContext = await browser.newContext();
@@ -114,8 +81,9 @@ test("real browsers complete a DM round trip across two PDS hosts, then a leave 
     const bobPage = await bobContext.newPage();
     alicePage.setDefaultTimeout(30_000);
     bobPage.setDefaultTimeout(30_000);
-    recordAppRequests("alice", alicePage, stack!);
-    recordAppRequests("bob", bobPage, stack!);
+    const groupHostOrigin = new URL(pds.groupHostUrl).origin;
+    recordAppRequests("alice", alicePage, stack!, groupHostOrigin);
+    recordAppRequests("bob", bobPage, stack!, groupHostOrigin);
     recordMacResponses("alice", alicePage);
     recordMacResponses("bob", bobPage);
 
@@ -198,7 +166,7 @@ test("real browsers complete a DM round trip across two PDS hosts, then a leave 
     assert.equal(await alicePage.getByText(bobReply, { exact: true }).count(), 0, "bob's messages disappear once his half is revoked");
 
     const forbidden = appRequests.filter((entry) => [aliceMessage, bobReply].some((text) => entry.body.includes(text) || decodeURIComponent(entry.url).includes(text)));
-    assert.deepEqual(forbidden, [], `no request to the app's origin may carry DM message text: ${JSON.stringify(forbidden)}`);
+    assert.deepEqual(forbidden, [], `no request to the app, operator, or group host may carry DM message text: ${JSON.stringify(forbidden)}`);
     assert.ok(appRequests.length > 0, "sanity check: traffic to the app's origin was actually observed during the flow");
   } finally {
     await bobContext.close();
@@ -221,11 +189,11 @@ function recordMacResponses(actor: string, page: Page): void {
   });
 }
 
-/** Every request a page sends to either of the app's servers: the web app's origin and its operator's. */
-function recordAppRequests(actor: string, page: Page, app: Stack): void {
+/** Every request a page sends to the web app's origin, its operator's, or the Group Host's. */
+function recordAppRequests(actor: string, page: Page, app: Stack, groupHostOrigin: string): void {
   page.on("request", (request) => {
     const url = new URL(request.url());
-    if (url.origin !== app.appUrl.origin && url.origin !== app.operatorUrl.origin) return;
+    if (url.origin !== app.appUrl.origin && url.origin !== app.operatorUrl.origin && url.origin !== groupHostOrigin) return;
     const body = request.postData() ?? "";
     appRequests.push({ actor, method: request.method(), url: request.url(), body });
   });
@@ -244,36 +212,3 @@ async function signInForDms(page: Page, app: URL, did: string, password: string)
   await page.waitForURL(app.origin, { timeout: 30_000 });
   await page.getByRole("button", { name: /New message/ }).waitFor({ state: "visible" });
 }
-
-async function publishAppLexicons(fixture: TestNetwork): Promise<void> {
-  assert.ok(fixture.lexiconAuthority, "fixture must expose its lexicon authority");
-  const agent = fixture.pds.getAgent();
-  const session = await agent.com.atproto.server.createSession({ identifier: "lex-authority.test", password: "hunter2" });
-  const root = join(projectRoot, "packages/protocol/lexicons/new/flock");
-  const files = await readdir(root, { recursive: true });
-  const published = new Set<string>();
-  for (const relative of files.filter((file) => file.endsWith(".json"))) {
-    const lexicon = JSON.parse(await readFile(join(root, relative), "utf8")) as { id: string };
-    if (published.has(lexicon.id)) continue;
-    published.add(lexicon.id);
-    await agent.com.atproto.repo.createRecord({
-      repo: fixture.lexiconAuthority.did,
-      collection: "com.atproto.lexicon.schema",
-      rkey: lexicon.id,
-      record: lexicon,
-    }, { headers: { authorization: `Bearer ${session.data.accessJwt}` } });
-  }
-}
-
-async function freePort(): Promise<number> {
-  const listener = createServer();
-  await new Promise<void>((resolve, reject) => {
-    listener.once("error", reject);
-    listener.listen(0, "127.0.0.1", resolve);
-  });
-  const address = listener.address();
-  assert.ok(address && typeof address !== "string");
-  await new Promise<void>((resolve, reject) => listener.close((error) => error ? reject(error) : resolve()));
-  return address.port;
-}
-

@@ -1,0 +1,23 @@
+{
+  "lexicon": 1,
+  "id": "group.opensocial.authManageProfile",
+  "defs": {
+    "main": {
+      "type": "permission-set",
+      "description": "For group-DID sessions. Limited to what the authorizing user's roles grant.",
+      "title": "Group profile",
+      "detail": "Edit the group's profile and rules.",
+      "permissions": [
+        {
+          "type": "permission",
+          "resource": "space",
+          "spaceType": "group.opensocial.meta",
+          "authority": "self",
+          "skey": "self",
+          "collection": ["group.opensocial.profile", "group.opensocial.rule"],
+          "action": ["read", "create", "update", "delete"]
+        }
+      ]
+    }
+  }
+}

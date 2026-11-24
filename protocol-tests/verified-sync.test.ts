@@ -6,9 +6,15 @@ import { createEngine } from "@flock/client/engine";
 import { MemoryStore } from "@flock/client/memory-store";
 import { SyncCore } from "@flock/client/sync";
 import { AtprotoClient } from "@flock/protocol/atproto/xrpc";
-import { tidNow } from "@flock/protocol/keys";
+import { groupMembersUri, tidNow } from "@flock/protocol/keys";
 import { COLLECTION } from "@flock/protocol/nsids";
-import { actorTransport, bearerSession, startPdsNetwork, storeAuthorityGrant } from "./support/pds-network";
+import {
+  acceptGroupMembership,
+  actorTransport,
+  bearerSession,
+  createOpenSocialGroup,
+  startPdsNetwork,
+} from "./support/pds-network";
 import { Probe } from "./support/sync-dataset";
 
 function trackedTransport(
@@ -44,45 +50,66 @@ test("verified sync engine, workspace snapshot, listRepoOps, warm reopen, RepoNo
   try {
     const [
       { restoreAuthorityGrant },
+      { grantCreationAuthorization },
       { createWorkspace },
       { registrationDeps },
       { requireActiveWorkspaceAdmin },
       { executeOperatorOperation },
     ] = await Promise.all([
       import("@flock/operator/operator/authority-grant"),
+      import("@flock/operator/operator/creation-authorization"),
       import("@flock/operator/operator/kinds/create-workspace"),
       import("@flock/operator/operator/registrations"),
       import("@flock/operator/operator/security"),
       import("@flock/operator/operator/operations"),
     ]);
 
-    const authority = await pds.createActor("vsowner", 0);
+    const owner = await pds.createActor("vsowner", 0);
     const alice = await pds.createActor("vsalice", 0);
     const bob = await pds.createActor("vsbob", 1);
     const carol = await pds.createActor("vscarol", 1);
     const reader = await pds.createActor("vsreader", 0);
     const app = await pds.createActor("vsapp", 1);
 
-    await storeAuthorityGrant(pds.hosts[0], authority.did, "vs-authority-dpop");
-    const created = await createWorkspace(await restoreAuthorityGrant(authority.did), {
-      creator: authority.did,
-      name: "Verified Sync",
-      operationId: tidNow(),
-    }, registrationDeps);
+    const group = await createOpenSocialGroup(pds, owner, { name: "Verified Sync", keyLabel: "vs-authority-dpop" });
+    grantCreationAuthorization(
+      { authorityDid: group.groupDid, initiatorDid: owner.did, name: "Verified Sync" },
+      Math.floor(Date.now() / 1000),
+    );
+    const created = await createWorkspace(
+      await restoreAuthorityGrant(group.groupDid),
+      {
+        creator: owner.did,
+        name: "Verified Sync",
+        operationId: tidNow(),
+      },
+      registrationDeps,
+    );
     assert.equal(created.state, "completed");
 
-    const admin = await requireActiveWorkspaceAdmin(created.workspace, authority.did);
+    const admin = await requireActiveWorkspaceAdmin(created.workspace, owner.did);
     const generalSkey = created.channel.split("/").at(-1)!;
     for (const member of [alice, bob, carol, reader]) {
       const res = await executeOperatorOperation(admin, tidNow(), { kind: "inviteMember", subject: member.did }, registrationDeps);
       assert.equal(res.state, "completed", `invite ${member.handle}`);
+      await acceptGroupMembership(pds, member, group.groupDid);
     }
-    const appInstallRes = await executeOperatorOperation(admin, tidNow(), {
-      kind: "installApp",
-      subject: app.did,
-      channels: [{ skey: generalSkey, write: true }],
-    }, registrationDeps);
+    const appInstallRes = await executeOperatorOperation(
+      admin,
+      tidNow(),
+      {
+        kind: "installApp",
+        subject: app.did,
+        channels: [{ skey: generalSkey, write: true }],
+      },
+      registrationDeps,
+    );
     assert.equal(appInstallRes.state, "completed");
+
+    const membersProbe = new Probe(pds, reader, groupMembersUri(group.groupDid));
+    for (const member of [owner, alice, bob, carol, reader]) {
+      await membersProbe.waitForCurrentRevision(member.did);
+    }
 
     const aliceClient = new AtprotoClient(bearerSession(alice).fetchHandler);
     const bobClient = new AtprotoClient(bearerSession(bob).fetchHandler);
@@ -121,7 +148,7 @@ test("verified sync engine, workspace snapshot, listRepoOps, warm reopen, RepoNo
     await probe.waitForCurrentRevision(alice.did);
     await probe.waitForCurrentRevision(bob.did);
 
-    // 1. syncVerifiedWorkspaceSnapshot verifies authority workspace repo end-to-end via STAR primary (0 getRecord).
+    // 1. syncVerifiedWorkspaceSnapshot verifies group meta/members/workspace + 5 human acceptance repos via STAR primary (0 getRecord).
     const sharedStore = new MemoryStore();
     const coldHarness = trackedTransport(pds, reader);
     const coldCore = new SyncCore({
@@ -133,11 +160,13 @@ test("verified sync engine, workspace snapshot, listRepoOps, warm reopen, RepoNo
       coldCore.syncVerifiedWorkspaceSnapshot(created.workspace),
     );
     assert.equal(snapshot.workspaceSnapshotComplete, true);
-    assert.equal(snapCalls["com.atproto.space.getRepo"], 1);
+    assert.equal(snapCalls["com.atproto.space.getRepo"], 8, "3 group spaces (meta, members, workspace) + 5 human acceptance repos");
     assert.equal(snapCalls["com.atproto.space.getRecord"], undefined);
-    for (const did of [authority.did, alice.did, bob.did, carol.did, reader.did]) {
+    for (const did of [owner.did, alice.did, bob.did, carol.did, reader.did]) {
       assert.equal(snapshot.rosterMembers.has(did), true, `roster contains ${did}`);
     }
+    assert.equal(snapshot.rosterMembers.has(group.groupDid), false, "group DID is never on the human roster");
+    assert.equal(snapshot.rosterMembers.has(app.did), false, "installed app service principal is never on the human roster");
 
     // 2. Cold verified space sync uses STAR for Alice/Bob and accepts unwritten Carol (RepoNotFound + valid PDS + omitted from listWriters).
     const { result: coldSync, byMethod: coldCalls } = await coldHarness.count(() =>
@@ -216,8 +245,13 @@ test("verified sync engine, workspace snapshot, listRepoOps, warm reopen, RepoNo
     );
     assert.equal(deltaSync.complete, true);
     assert.deepEqual(
-      deltaSync.records.filter((r) => r.repo === bob.did).map((r) => ({ rkey: r.rkey, text: r.value.text })),
-      [{ rkey: b1Rkey, text: "bob-1-edited" }, { rkey: b3Rkey, text: "bob-3" }],
+      deltaSync.records
+        .filter((r) => r.repo === bob.did)
+        .map((r) => ({ rkey: r.rkey, text: r.value.text })),
+      [
+        { rkey: b1Rkey, text: "bob-1-edited" },
+        { rkey: b3Rkey, text: "bob-3" },
+      ],
     );
     assert.equal(deltaCalls["com.atproto.space.listRepoOps"], 1);
     assert.equal(deltaCalls["com.atproto.space.getRepo"], undefined);
@@ -258,7 +292,7 @@ test("verified sync engine, workspace snapshot, listRepoOps, warm reopen, RepoNo
     assert.equal(afterClear.records.some((r) => r.repo === bob.did), false);
     assert.equal(clearCalls["com.atproto.space.getRepo"], 1, "clearRecords reset falls back cleanly to STAR");
 
-    // 7. AppRuntime using real SyncCore.followRepoOps against the two pinned PDS hosts:
+    // 7. AppRuntime using real SyncCore.followRepoOps against the two pinned PDS hosts and OpenSocial Group Host:
     // delivers same-rev applyWrites with reverse-TID rkeys in host (rev, idx) order and handles clearRecords reset cleanly.
     const appDelivered: string[] = [];
     const appResets: string[] = [];

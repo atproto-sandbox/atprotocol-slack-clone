@@ -8,11 +8,12 @@ import { COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
 import type { ShellLifecycleSnapshot } from "@flock/web/browser/shell-lifecycle";
 import { availablePort, startAppServer, startOperatorServer, type AppServer } from "../support/app-server";
 import { consent, openChannel } from "../support/browser-app";
-import { actorTransport, combinedMemberScopes, mintBrowserSession, startPdsNetwork, storeAuthorityGrant, type NetworkActor } from "../support/pds-network";
+import { actorTransport, createOpenSocialGroup, startPdsNetwork, type NetworkActor } from "../support/pds-network";
+import { Probe } from "../support/sync-dataset";
 
 const WORKSPACE_NAME = "Routing Workspace";
 
-test("App Router URL routing, loopback normalization, returnTo OAuth lifecycle, legacy reconnect, Back/Forward shell persistence, and deep-route CSP (R11e)", { timeout: 600_000 }, async () => {
+test("App Router URL routing, loopback normalization, returnTo OAuth lifecycle, legacy reconnect, Back/Forward shell persistence, and deep-route CSP (R11e / R13)", { timeout: 600_000 }, async () => {
   const appPort = await availablePort();
   const operatorPort = await availablePort();
   const pds = await startPdsNetwork("url-routing-browser", { appPort, operatorPort });
@@ -26,11 +27,13 @@ test("App Router URL routing, loopback normalization, returnTo OAuth lifecycle, 
 
     const [
       { restoreAuthorityGrant },
+      { grantCreationAuthorization },
       { createWorkspace },
       { registrationDeps },
       { parseWorkspaceRef },
     ] = await Promise.all([
       import("@flock/operator/operator/authority-grant"),
+      import("@flock/operator/operator/creation-authorization"),
       import("@flock/operator/operator/kinds/create-workspace"),
       import("@flock/operator/operator/registrations"),
       import("@flock/operator/operator/actor"),
@@ -38,9 +41,17 @@ test("App Router URL routing, loopback normalization, returnTo OAuth lifecycle, 
 
     const alice = await pds.createActor("routealice", 0);
     const bob = await pds.createActor("routebob", 1);
-    await storeAuthorityGrant(pds.hosts[0], alice.did, "route-authority");
+    const createdGroup = await createOpenSocialGroup(pds, alice, {
+      name: WORKSPACE_NAME,
+      keyLabel: "route-authority",
+    });
+    const groupDid = createdGroup.groupDid;
+    grantCreationAuthorization(
+      { authorityDid: groupDid, initiatorDid: alice.did, name: WORKSPACE_NAME },
+      Math.floor(Date.now() / 1000),
+    );
     const created = await createWorkspace(
-      await restoreAuthorityGrant(alice.did),
+      await restoreAuthorityGrant(groupDid),
       { creator: alice.did, name: WORKSPACE_NAME, operationId: tidNow() },
       registrationDeps,
     );
@@ -50,9 +61,7 @@ test("App Router URL routing, loopback normalization, returnTo OAuth lifecycle, 
     const generalSkey = created.channel.split("/").at(-1)!;
     const channelSelection = { workspace: workspaceUri, skey: generalSkey, name: "general", visibility: "public" };
 
-    const scopes = await combinedMemberScopes(pds.serviceRef);
-    const aliceNodeSession = await mintBrowserSession(alice.pds, alice.did, scopes, "route-alice-node");
-    const aliceEngine = createEngine(actorTransport(pds, alice, aliceNodeSession.session), {
+    const aliceEngine = createEngine(actorTransport(pds, alice), {
       operator: { serviceRef: pds.serviceRef, endpoint: operator.url },
     });
     assert.equal((await aliceEngine.operator!.execute({
@@ -78,15 +87,15 @@ test("App Router URL routing, loopback normalization, returnTo OAuth lifecycle, 
 
     // Seed channel messages (including older parent + reply), second channel, 610-message archive channel (>5 pages),
     // and a task + project for deep links.
-    const randomSkey = `${workspaceSkey}-random`;
-    const archiveSkey = `${workspaceSkey}-archive`;
+    const randomSkey = "random";
+    const archiveSkey = "archive";
     const randomSelection = { workspace: workspaceUri, skey: randomSkey, name: "random", visibility: "public" };
     const parentMsg = await aliceEngine.channels.send(channelSelection, "Root permalink message");
     await aliceEngine.channels.send(channelSelection, "Thread reply message", parentMsg.uri);
     const randomMsg = await aliceEngine.channels.send(randomSelection, "Channel B reply parent");
 
-    const archiveSpace = channelUri(alice.did, archiveSkey);
-    const aliceTransport = actorTransport(pds, alice, aliceNodeSession.session);
+    const archiveSpace = channelUri(groupDid, archiveSkey);
+    const aliceTransport = actorTransport(pds, alice);
     const baseMs = Date.now() - 100_000;
     const ancientRkey = tidNow(baseMs, 0);
     const archiveWrites = Array.from({ length: 610 }, (_, idx) => ({
@@ -106,6 +115,7 @@ test("App Router URL routing, loopback normalization, returnTo OAuth lifecycle, 
         writes: archiveWrites.slice(start, start + 200),
       });
     }
+    await new Probe(pds, alice, archiveSpace).waitForCurrentRevision(alice.did);
 
     const projectRes = await aliceEngine.tasks.createProject(workspaceUri, { name: "Alpha Project" });
     const taskRes = await aliceEngine.tasks.createTask(workspaceUri, {
@@ -119,12 +129,12 @@ test("App Router URL routing, loopback normalization, returnTo OAuth lifecycle, 
     const { DmClient } = await import("@flock/client/dm/dm-client");
     const bobDm = new DmClient({ ...actorTransport(pds, bob), store: inMemoryKv() });
     await bobDm.enableDms("everyone");
-    const aliceDm = new DmClient({ ...actorTransport(pds, alice, aliceNodeSession.session), store: inMemoryKv() });
+    const aliceDm = new DmClient({ ...actorTransport(pds, alice), store: inMemoryKv() });
     await aliceDm.enableDms("everyone");
     const startedDm = await aliceDm.startConversation([bob.did]);
     await aliceDm.send(startedDm.convKey, "DM deep link ping");
 
-    const encAuth = encodeURIComponent(alice.did);
+    const encAuth = encodeURIComponent(groupDid);
     const encWs = encodeURIComponent(workspaceSkey);
     const encCh = encodeURIComponent(generalSkey);
     const encRandom = encodeURIComponent(randomSkey);
@@ -151,9 +161,9 @@ test("App Router URL routing, loopback normalization, returnTo OAuth lifecycle, 
     assert.equal(inviteRes.status, 307);
     assert.equal(inviteRes.headers.get("location"), `${app.url}/${inviteQuery}`);
 
-    const deepRedirectRes = await fetch(`${localhostBase}/w/did%3Aweb%3Alocalhost%253A3000/acme/c/gen?thread=at%3A%2F%2F1`, { redirect: "manual" });
+    const deepRedirectRes = await fetch(`${localhostBase}/w/did%3Aweb%3Alocalhost%253A3000/self/c/general?thread=at%3A%2F%2F1`, { redirect: "manual" });
     assert.equal(deepRedirectRes.status, 307);
-    assert.equal(deepRedirectRes.headers.get("location"), `${app.url}/w/did%3Aweb%3Alocalhost%253A3000/acme/c/gen?thread=at%3A%2F%2F1`);
+    assert.equal(deepRedirectRes.headers.get("location"), `${app.url}/w/did%3Aweb%3Alocalhost%253A3000/self/c/general?thread=at%3A%2F%2F1`);
 
     // Next.js collapses leading repeated slashes (308 -> /evil.example/steal) before middleware; follow one hop
     // manually to confirm neither Next nor proxy ever emits a protocol-relative or off-origin redirect.
@@ -337,7 +347,7 @@ test("App Router URL routing, loopback normalization, returnTo OAuth lifecycle, 
     await page.reload();
     await page.getByText("DM deep link ping", { exact: true }).waitFor({ state: "visible" });
 
-    // 5. Legacy R10 browser session missing R11 Tasks scope -> "Connect this browser →" preserves deep returnTo.
+    // 5. Legacy browser session missing R11 Tasks scope -> "Connect this browser →" preserves deep returnTo.
     await stripScopeAndVerifyReconnect(page, alice, taskDeepUrl, `space:${SPACE_TYPE.tasks}`);
     await page.getByLabel("Task title").waitFor({ state: "visible" });
     assert.equal(page.url(), taskDeepUrl);
@@ -381,7 +391,7 @@ test("App Router URL routing, loopback normalization, returnTo OAuth lifecycle, 
     await page.waitForURL(boardDeepUrl, { timeout: 30_000 });
     await page.getByRole("region", { name: "In progress" }).getByText("Deep link task", { exact: true }).waitFor({ state: "visible" });
 
-    assert.ok(extSpaceUriFor(alice.did, workspaceSkey, "tasks"));
+    assert.ok(extSpaceUriFor(groupDid, workspaceSkey, "tasks"));
     assert.ok(COLLECTION.task);
   } finally {
     await browser?.close();

@@ -1,12 +1,20 @@
 import type { AtprotoDid, HandleResolver, OAuthSession } from "@atproto/oauth-client-browser";
 import { buildBrowserClientMetadata } from "./client-metadata";
 import { readUpstreamText } from "@flock/protocol/bounded-json";
-import { OPERATOR_METHOD, SPACE_TYPE, type SpaceType } from "@flock/protocol/nsids";
+import { OPENSOCIAL_SPACE_TYPE, OPERATOR_METHOD, SPACE_TYPE, type AnySpaceType } from "@flock/protocol/nsids";
 import { spaceCollections } from "@flock/protocol/registry";
 import { LEGACY_OPERATOR_METHODS } from "@flock/protocol/scopes";
 
-/** What the browser session is built from: the app's origin, the PLC, the one grant, and the operator (its DID and where it serves). */
-export type BrowserSessionConfig = { appUrl: string; plcUrl: string; scope: string; serviceRef: string; operatorUrl: string; loopback: boolean };
+/** What the browser session is built from: the app's origin, the PLC, the one grant, the operator, and the default Group Host. */
+export type BrowserSessionConfig = {
+  appUrl: string;
+  plcUrl: string;
+  scope: string;
+  serviceRef: string;
+  operatorUrl: string;
+  groupHostUrl?: string;
+  loopback: boolean;
+};
 
 /** Restored OAuth session annotated with whether optional R12 DM notify-target scope upgrade requires reconnect. */
 export type RestoredSession = OAuthSession & { readonly needsNotifyScopeUpgrade: boolean };
@@ -145,7 +153,10 @@ type ReducedSpaceScope = {
   collections: ReadonlySet<string>;
 };
 
-const KNOWN_SPACE_TYPES: ReadonlySet<string> = new Set(Object.values(SPACE_TYPE));
+const KNOWN_SPACE_TYPES: ReadonlySet<string> = new Set([
+  ...Object.values(SPACE_TYPE),
+  ...Object.values(OPENSOCIAL_SPACE_TYPE),
+]);
 const SPACE_PARAM_KEYS: ReadonlySet<string> = new Set(["authority", "skey", "collection", "action", "manage"]);
 const VALID_SPACE_ACTIONS: ReadonlySet<string> = new Set(["read_self", "read", "create", "update", "delete"]);
 const VALID_MANAGE_OPS: ReadonlySet<string> = new Set(["create", "update", "delete"]);
@@ -190,7 +201,7 @@ function reduceSpaceScope(token: string, accountDid: string): ReducedSpaceScope 
   const collections = rawCollections.length > 0
     ? new Set(rawCollections)
     : KNOWN_SPACE_TYPES.has(spaceType)
-      ? new Set(spaceCollections(spaceType as SpaceType))
+      ? new Set(spaceCollections(spaceType as AnySpaceType))
       : new Set([`__all__:${spaceType}`]);
 
   return { spaceType, authority, skey, actions, manage, collections };
@@ -265,12 +276,17 @@ function coversRpcScope(granted: ReducedRpcScope, requested: ReducedRpcScope): b
 
 function coversLegacyPreR12RpcScope(granted: ReducedRpcScope, requested: ReducedRpcScope): boolean {
   if (granted.aud !== "*" && granted.aud !== requested.aud) return false;
-  if (!requested.lxms.has(OPERATOR_METHOD.getDmNotifyTarget)) return false;
+  if (
+    !requested.lxms.has(OPERATOR_METHOD.getDmNotifyTarget) &&
+    !requested.lxms.has(OPERATOR_METHOD.getSpaceNotifyTarget)
+  ) {
+    return false;
+  }
   for (const method of LEGACY_OPERATOR_METHODS) {
     if (!granted.lxms.has(method)) return false;
   }
   for (const lxm of requested.lxms) {
-    if (lxm === OPERATOR_METHOD.getDmNotifyTarget) continue;
+    if (lxm === OPERATOR_METHOD.getDmNotifyTarget || lxm === OPERATOR_METHOD.getSpaceNotifyTarget) continue;
     if (!granted.lxms.has(lxm)) return false;
   }
   return true;

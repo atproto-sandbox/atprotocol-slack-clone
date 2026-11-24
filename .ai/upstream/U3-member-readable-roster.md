@@ -1,5 +1,7 @@
 # Optional: let members list who else is in a space
 
+Status against `6747610566` + `opensocial.group` `8df0cc82` (R13, 2026-11-21): **Solved for groups/workspaces by `opensocial.group`; low-priority optional ask for plain `memberspace`.** In R13, Flock adopted `opensocial.group` (`apps/group-host`), storing roles (`group.opensocial.role/*`), memberships (`group.opensocial.membership/*`), and member-authored `group.opensocial.acceptance/self` inside the member-readable `at://<groupDid>/space/group.opensocial.members/self` space—retiring Flock's bespoke `workspace.roster`, `admin`, and `channel.roster` lexicons as well as the `reconcile-workspaces` job. Sovereign personal-PDS DMs enumerate participants via conversation headers and do not need `memberspace` role lists.
+
 Status against `5d88b414` (2026-10-30): Partly addressed. `memberspace.policy.publishMembers` (opt-in) publishes the member list as `com.atproto.memberspace.member` records (`{ read, write }`, keyed by the member's DID) in the authority's own repo, readable with a space credential. It carries no roles or display data, so an app that needs admin roles still keeps its own roster records; it also exposes which members may read. `listMembers` itself is still owner-only. We do not use it yet.
 
 Status against `5b95b2f2`: Not affected. `simplespace.listMembers` is still owner-only OAuth and not readable with a space credential.

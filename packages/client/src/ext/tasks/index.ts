@@ -35,6 +35,7 @@ export {
   type ProjectWriteResult,
   type RestoreFieldVersionInput,
   type TaskActivityItem,
+  type TaskCommentWithLabels,
   type TaskDetailView,
   type TasksActivityResult,
   type TasksClientDeps,

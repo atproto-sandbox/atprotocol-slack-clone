@@ -208,6 +208,20 @@ table.data.compact :is(th, td) { padding: 8px 14px; font-size: var(--t-label); }
 table.data.compact tbody th { font-family: var(--font-mono); white-space: normal; }
 table.data.compact tr:has(th[colspan]) th { padding-top: 18px; color: var(--accent); border-bottom: none; }
 
+/* ── R13 supersession banner ──────────────────────────────────────────── */
+.r13-supersession-banner {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 30;
+  padding: 8px 20px; background: var(--accent-soft); border-bottom: 2px solid var(--accent);
+  color: var(--ink); font: 500 14px/1.4 var(--font-sans); text-align: center;
+}
+.r13-supersession-banner code { font-family: var(--font-mono); font-size: 13px; }
+.r13-supersession-banner a { color: var(--accent); font-weight: 600; text-decoration: underline; }
+.r13-slide-note {
+  background: var(--accent-soft); border-left: 5px solid var(--accent);
+  padding: 16px 22px; font-size: var(--t-label); line-height: 1.35; color: var(--ink);
+}
+@media print { .r13-supersession-banner { position: static; } }
+
 /* ── Modes: present (default), overview (press O), print/PDF ──────────── */
 @media screen {
   body:not(.overview) .slide:not(.active) { visibility: hidden; }
@@ -225,6 +239,9 @@ table.data.compact tr:has(th[colspan]) th { padding-top: 18px; color: var(--acce
 </style>
 </head>
 <body>
+<aside class="r13-supersession-banner" role="note">
+  <strong>Historical R12 Baseline Deck:</strong> In <strong>R13</strong>, Flock upgraded workspace governance to <code>opensocial.group</code> atmospheric Group DIDs (<code>1 Group == 1 DID</code> on <code>apps/group-host</code>: flat <code>group.opensocial.policy</code> RBAC, <code>O(1)</code> <code>membership</code> writes, cross-PDS <code>invites/self</code>, ATProto-native moderation, and two-host migration) while keeping sovereign personal-PDS DMs on <code>com.atproto.memberspace.policy</code>. See <a href="../../ARCHITECTURE.md">ARCHITECTURE.md</a> and <a href="../../README.md">README.md</a>.
+</aside>
 <main class="deck">
 
 <section class="slide">
@@ -232,15 +249,16 @@ table.data.compact tr:has(th[colspan]) th { padding-top: 18px; color: var(--acce
     <video class="demo-media hero" controls preload="metadata" playsinline>
       <source src="../media/bdd-session.mp4" type="video/mp4">
     </video>
-            <div class="stack" style="align-self: center;">
-      <p class="kicker">Flock · atproto Spaces</p>
+            <div class="stack" style="align-self: center; gap: 22px;">
+      <p class="kicker">Flock · atproto Spaces (R12 Historical Deck)</p>
       <h2>Team chat can live on the open web without a vendor-owned database</h2>
-      <p class="lead">Flock is an alpha Slack-style workspace where channels and membership live on members’ PDSes. This talk is about <strong>why</strong> we built it that way and <strong>how</strong> we stay aligned as Spaces evolves.</p>
+      <p class="lead">Flock is an alpha Slack-style workspace on ATProto Spaces. This deck captures the <strong>R12 baseline</strong>; R13 adopts <strong><code>opensocial.group</code> atmospheric groups</strong> (<code>1 Group == 1 DID</code>) for workspace governance while preserving sovereign personal-PDS DMs.</p>
+      <div class="r13-slide-note"><strong>R13 Update:</strong> Workspaces now run on <code>apps/group-host</code> (<code>group.opensocial.*</code> RBAC, <code>invites/self</code>, moderation &amp; host migration), retiring R12’s <code>com.atproto.memberspace</code> workspace fan-out.</div>
       <p><a class="repo-link" href="https://github.com/atproto-sandbox/atprotocol-slack-clone">https://github.com/atproto-sandbox/atprotocol-slack-clone</a></p>
       <p><a class="repo-link" href="https://bsky.app/profile/mikestaub.social">Mike Staub · bsky.app/profile/mikestaub.social</a></p>
     </div>
   </div>
-  <p class="source">Demo: docs/media/bdd-session.mp4 — full UI scenario walkthrough</p>
+  <p class="source">Demo: docs/media/bdd-session.mp4 — R12 UI scenario walkthrough (superseded on workspace governance by R13 opensocial.group)</p>
 </section>
 
 <section class="slide section">
@@ -537,7 +555,7 @@ table.data.compact tr:has(th[colspan]) th { padding-top: 18px; color: var(--acce
     action();
   });
   addEventListener('click', (event) => {
-    if (event.target.closest('a') || String(getSelection())) return;
+    if (event.target.closest('a, .r13-supersession-banner') || String(getSelection())) return;
     if (inOverview()) {
       const picked = event.target.closest('.slide');
       if (picked) { show(slides.indexOf(picked)); toggleOverview(); }

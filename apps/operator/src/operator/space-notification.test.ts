@@ -4,9 +4,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after, beforeEach } from "node:test";
 import { closeDb, getRawDb } from "../lib/db";
-import { dmConversationUri, dmInboxUri } from "@flock/protocol/keys";
+import { dmConversationUri, dmInboxUri, personalInvitesUri } from "@flock/protocol/keys";
 import { WebhookAuthError } from "./errors";
-import { authenticateSpaceNotification, authenticateSpaceWebhook, deriveDmNotifyToken, DM_TOKEN_EPOCH_MS, operatorNotifyEndpoint } from "./space-notification";
+import {
+  authenticateSpaceNotification,
+  authenticateSpaceWebhook,
+  deriveDmNotifyToken,
+  deriveSpaceNotifyToken,
+  DM_TOKEN_EPOCH_MS,
+  operatorNotifyEndpoint,
+} from "./space-notification";
 
 const DIRECTORY = mkdtempSync(join(tmpdir(), "slack-space-notification-test-"));
 const SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
@@ -129,4 +136,30 @@ test("operatorNotifyEndpoint maps loopback IP literals to localhost for PDS safe
   assert.equal(operatorNotifyEndpoint(new URL("http://127.0.0.1:3001")), "http://localhost:3001");
   assert.equal(operatorNotifyEndpoint(new URL("http://[::1]:4123")), "http://localhost:4123");
   assert.equal(operatorNotifyEndpoint(new URL("https://operator.spaces.example.com")), "https://operator.spaces.example.com");
+});
+
+test("deriveSpaceNotifyToken issues stateless inv1 tokens exclusively for the caller's own group.opensocial.invites/self space across [epoch, epoch - 1]", () => {
+  const aliceInvites = personalInvitesUri(ALICE);
+  const bobInvites = personalInvitesUri(BOB);
+  const baseMs = 200 * DM_TOKEN_EPOCH_MS + 1_000;
+  const key = Buffer.from(KEY_HEX, "hex");
+
+  const tok1 = deriveSpaceNotifyToken(aliceInvites, ALICE, key, baseMs);
+  const tok2 = deriveSpaceNotifyToken(aliceInvites, ALICE, key, baseMs + 5 * 60_000);
+  assert.equal(tok1, tok2);
+  assert.ok(tok1.startsWith("inv1."));
+
+  // Cannot derive for another user's invites space or for a channel/DM space
+  assert.throws(() => deriveSpaceNotifyToken(bobInvites, ALICE, key, baseMs), /caller's own/);
+  assert.throws(() => deriveSpaceNotifyToken(CHANNEL, ALICE, key, baseMs), /caller's own/);
+  assert.throws(() => deriveSpaceNotifyToken(dmInboxUri(ALICE), ALICE, key, baseMs), /caller's own/);
+
+  // Accepted in [epoch, epoch - 1]
+  assert.deepEqual(authenticateSpaceWebhook(aliceInvites, tok1, key, baseMs), { kind: "invites", callerDid: ALICE });
+  assert.deepEqual(authenticateSpaceWebhook(aliceInvites, tok1, key, baseMs + DM_TOKEN_EPOCH_MS), { kind: "invites", callerDid: ALICE });
+
+  // Rejected after 2 epochs, on another user's invites space, or on an operator/DM space
+  assert.throws(() => authenticateSpaceWebhook(aliceInvites, tok1, key, baseMs + 2 * DM_TOKEN_EPOCH_MS), isWebhookRefusal);
+  assert.throws(() => authenticateSpaceWebhook(bobInvites, tok1, key, baseMs), isWebhookRefusal);
+  assert.throws(() => authenticateSpaceWebhook(CHANNEL, tok1, key, baseMs), isWebhookRefusal);
 });

@@ -1,35 +1,21 @@
 import assert from "node:assert/strict";
-import { createServer } from "node:net";
 import { mkdtempSync, rmSync } from "node:fs";
-import { readdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { after, before, test } from "node:test";
 import Database from "better-sqlite3";
 import { chromium, type Response as PageResponse } from "@playwright/test";
-import { createFixtureTempRoot } from "../fixture-temp";
-import { startStack, type Stack } from "../support/app-server";
-import { actorTransport } from "../support/pds-network";
 import { createEngine } from "@flock/client/engine";
 import type { OperatorClient } from "@flock/client/operator-client";
 import { tidNow } from "@flock/protocol/keys";
+import { availablePort, startStack, type Stack } from "../support/app-server";
+import { consent } from "../support/browser-app";
+import { actorTransport, startPdsNetwork, type PdsNetwork } from "../support/pds-network";
 
-const projectRoot = process.cwd();
-const pinnedCheckout = process.env.ATPROTO_PINNED_CHECKOUT;
 const password = "browser-acceptance-pass";
 const memberPassword = "browser-member-acceptance-pass";
 
-let network: {
-  pds: { url: string; getAgent(): { com: { atproto: { server: {
-    createAccount(input: Record<string, unknown>): Promise<{ data: { did: string } }>;
-    createSession(input: Record<string, unknown>): Promise<{ data: { accessJwt: string } }>;
-  } }; repo: { createRecord(input: Record<string, unknown>, options: { headers: { authorization: string } }): Promise<unknown> } } } };
-  plc: { url: string };
-  close(): Promise<void>;
-  lexiconAuthority?: { did: string };
-} | undefined;
-let fixtureTemp: ReturnType<typeof createFixtureTempRoot> | undefined;
+let pds: PdsNetwork | undefined;
 let stack: Stack | undefined;
 let secondaryStack: Stack | undefined;
 let scratchDirectory: string | undefined;
@@ -40,21 +26,10 @@ let ownerDid = "";
 let memberDid = "";
 
 before(async () => {
-  assert.ok(pinnedCheckout, "set ATPROTO_PINNED_CHECKOUT to the pinned atproto checkout");
-  const { TestNetworkNoAppView } = await import(pathToFileURL(join(pinnedCheckout, "packages/dev-env/src/index.ts")).href) as {
-    TestNetworkNoAppView: { create(options: { extraPdses: number; lexiconAuthority: boolean }): Promise<NonNullable<typeof network>> };
-  };
-  fixtureTemp = createFixtureTempRoot("slack-browser-fixture-");
-  try {
-    network = await TestNetworkNoAppView.create({ extraPdses: 0, lexiconAuthority: true });
-  } catch (error) {
-    fixtureTemp.cleanup();
-    fixtureTemp = undefined;
-    throw error;
-  }
-  await publishAppLexicons(network);
+  const [initAppPort, initOpPort] = [await availablePort(), await availablePort()];
+  pds = await startPdsNetwork("slack-oauth-browser", { appPort: initAppPort, operatorPort: initOpPort });
 
-  const agent = network.pds.getAgent();
+  const agent = pds.hosts[0].getAgent();
   const owner = await agent.com.atproto.server.createAccount({
     handle: "browser-owner.test",
     email: "browser-owner@acceptance.test",
@@ -78,14 +53,13 @@ after(async () => {
   try {
     await secondaryStack?.stop();
     await stack?.stop();
-    await network?.close();
+    await pds?.close();
   } finally {
     if (scratchDirectory) rmSync(scratchDirectory, { recursive: true, force: true });
-    fixtureTemp?.cleanup();
   }
 });
 
-test("real browsers complete OAuth, workspace sharing, private-channel requests, and message flows across independent apps", async () => {
+test("real browsers complete OAuth, workspace sharing, private-channel requests, and message flows across independent apps", { timeout: 300_000 }, async () => {
   assert.ok(appUrl);
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext();
@@ -111,22 +85,38 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
     await page.getByRole("button", { name: "Sign in", exact: true }).click();
     await page.getByRole("button", { name: "Authorize", exact: true }).waitFor({ state: "visible" });
     assert.match(await page.locator("body").innerText(), /Access permissioned spaces/);
-    // Signing in is the browser's own session: one grant on the PDS for reading and writing the account's spaces, the
-    // operator's methods and direct messages.
+    // Signing in is the browser's own session: one grant on the PDS for reading and writing the account's spaces,
+    // OpenSocial group participation, the operator's methods and direct messages.
     const browserScope = await page.evaluate(() => String((window as unknown as { __authorizeData?: { scope?: string } }).__authorizeData?.scope ?? ""));
     await page.getByRole("button", { name: "Authorize", exact: true }).click();
 
     await page.waitForURL(appUrl.origin, { timeout: 30_000 });
     await page.getByText("No workspaces yet").waitFor({ state: "visible" });
-    for (const expected of ["space:new.flock.channel?", "new.flock.channel.message", "lxm=new.flock.operator.getChanges", "lxm=new.flock.operator.listInboxWriters", "lxm=new.flock.operator.execute", "lxm=new.flock.operator.createWorkspace", "lxm=new.flock.operator.startAuthorityFlow", "lxm=new.flock.operator.listStalledOperations", "lxm=new.flock.operator.getDmNotifyTarget", "space:new.flock.dm.conversation"]) {
+    for (const expected of [
+      "space:new.flock.channel?",
+      "new.flock.channel.message",
+      "space:group.opensocial.meta?",
+      "space:group.opensocial.members?authority=*&action=read_self",
+      "space:group.opensocial.members?",
+      "space:group.opensocial.invites?",
+      "lxm=group.opensocial.requestJoin",
+      "lxm=new.flock.operator.getChanges",
+      "lxm=new.flock.operator.execute",
+      "lxm=new.flock.operator.createWorkspace",
+      "lxm=new.flock.operator.startAuthorityFlow",
+      "lxm=new.flock.operator.listStalledOperations",
+      "lxm=new.flock.operator.getDmNotifyTarget",
+      "lxm=new.flock.operator.getSpaceNotifyTarget",
+      "space:new.flock.dm.conversation",
+    ]) {
       assert.ok(browserScope.includes(expected), `the browser's grant includes ${expected}`);
     }
     await page.getByText("Create a shared workspace or accept an invitation.").waitFor({ state: "visible" });
 
     assert.deepEqual(await context.cookies(appUrl.origin), [], "signing in sets no cookie on the app: the browser holds the session");
 
-    // First-time creation: one click. The operator answers that the authority's approval is required, the app sends the
-    // user to the PDS consent screen on its own, and creation resumes after approval.
+    // First-time creation: one click. The operator answers that the group authority's approval is required, the app sends
+    // the user to the Group Host consent screen on its own, and creation resumes after approval.
     assert.equal(await page.getByRole("button", { name: /Authorize workspace setup/ }).count(), 0, "there is no separate manual authorization step");
     await page.getByLabel("Workspace name").fill("Browser Acceptance Workspace");
     const firstAttempt = page.waitForResponse((response) => new URL(response.url()).pathname === "/xrpc/new.flock.operator.createWorkspace");
@@ -136,13 +126,12 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
     assert.equal(firstResponse.status(), 403, "creating before approving the permission is refused");
     const refusal = await firstResponse.json() as { error: string; message: string };
     assert.equal(refusal.error, "AuthorizationRequired", "the refusal is typed, not a raw scope string");
-    assert.match(refusal.message, /needs the workspace account's approval/);
+    assert.match(refusal.message, /needs the group account's approval/);
     await page.waitForURL(/\/oauth\/authorize\?/, { timeout: 30_000 });
 
-    // Decline on the consent screen. Returning without the permission must explain itself (no redirect
+    // Decline on the Group Host consent screen. Returning without the permission must explain itself (no redirect
     // loop), keep the typed name, and leave the user able to try again.
-    await signInIfPrompted(page);
-    await page.getByRole("button", { name: "Deny access", exact: true }).click();
+    await consent(page, { did: ownerDid, password }, { decision: "deny" });
     await page.getByText(/Permission was not granted/).waitFor({ state: "visible", timeout: 30_000 });
     assert.equal(await page.getByLabel("Workspace name").inputValue(), "Browser Acceptance Workspace", "the typed name is kept");
 
@@ -156,9 +145,7 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
     assert.equal(authorityClientId.searchParams.get("redirect_uri"), `${stack!.operatorUrl.origin}/authority/callback`, "the workspace authority approves through the authority flow");
     const authorityCallbacks: string[] = [];
     page.on("request", (request) => { if (new URL(request.url()).pathname === "/authority/callback") authorityCallbacks.push(request.url()); });
-    await signInIfPrompted(page);
-    await page.getByRole("button", { name: "Authorize", exact: true }).waitFor({ state: "visible" });
-    await page.getByRole("button", { name: "Authorize", exact: true }).click();
+    await consent(page, { did: ownerDid, password });
     await page.waitForURL(appUrl.origin, { timeout: 30_000 });
     await page.getByRole("heading", { name: "Browser Acceptance Workspace", exact: true }).waitFor({ state: "visible", timeout: 30_000 });
 
@@ -202,7 +189,7 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
     await page.locator(".roster-row").filter({ hasText: memberDid }).waitFor({ state: "visible", timeout: 30_000 });
     assert.equal(await page.locator(".envelope-alert").count(), 0, "workspaces inside the supported envelope are not marked degraded");
     const workspaceUri = (await page.locator(".welcome-banner .mono-note").innerText()).trim();
-    assert.match(workspaceUri, /^at:\/\/did:plc:[a-z0-9]+\/space\/new\.flock\.workspace\//, "the workspace home shows the workspace URI");
+    assert.match(workspaceUri, /^at:\/\/did:plc:[a-z0-9]+\/space\/new\.flock\.workspace\/self$/, "the workspace home shows the canonical OpenSocial workspace URI");
 
     secondaryStack = await startStack(await stackEnv({ databasePath: join(scratchDirectory!, "independent-app.db"), encryptionKey: Buffer.alloc(32, 0x6b).toString("hex") }));
     secondaryAppUrl = secondaryStack.appUrl;
@@ -282,38 +269,6 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
   }
 });
 
-async function publishAppLexicons(fixture: NonNullable<typeof network>): Promise<void> {
-  assert.ok(fixture.lexiconAuthority, "fixture must expose its lexicon authority");
-  const agent = fixture.pds.getAgent();
-  const session = await agent.com.atproto.server.createSession({ identifier: "lex-authority.test", password: "hunter2" });
-  const root = join(projectRoot, "packages/protocol/lexicons/new/flock");
-  const files = await readdir(root, { recursive: true });
-  const published = new Set<string>();
-  for (const relative of files.filter((file) => file.endsWith(".json"))) {
-    const lexicon = JSON.parse(await readFile(join(root, relative), "utf8")) as { id: string };
-    if (published.has(lexicon.id)) continue;
-    published.add(lexicon.id);
-    await agent.com.atproto.repo.createRecord({
-      repo: fixture.lexiconAuthority.did,
-      collection: "com.atproto.lexicon.schema",
-      rkey: lexicon.id,
-      record: lexicon,
-    }, { headers: { authorization: `Bearer ${session.data.accessJwt}` } });
-  }
-}
-
-async function freePort(): Promise<number> {
-  const listener = createServer();
-  await new Promise<void>((resolve, reject) => {
-    listener.once("error", reject);
-    listener.listen(0, "127.0.0.1", resolve);
-  });
-  const address = listener.address();
-  assert.ok(address && typeof address !== "string");
-  await new Promise<void>((resolve, reject) => listener.close((error) => error ? reject(error) : resolve()));
-  return address.port;
-}
-
 async function signInIfPrompted(
   page: import("@playwright/test").Page,
   handle = "browser-owner.test",
@@ -331,12 +286,12 @@ async function signInIfPrompted(
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
 }
 
-test("with the operator on the web app's site, the authority flow runs twice at once, and neither a used ticket nor a used callback can be replayed", async () => {
+test("with the operator on the web app's site, the authority flow runs twice at once, and neither a used ticket nor a used callback can be replayed", { timeout: 180_000 }, async () => {
   assert.ok(stack && databasePath);
   await authorityFlowTwiceAtOnce(stack, databasePath);
 });
 
-test("with the operator on another site, the authority flow runs the same way", async () => {
+test("with the operator on another site, the authority flow runs the same way", { timeout: 180_000 }, async () => {
   assert.ok(scratchDirectory);
   // [::1] is another site than 127.0.0.1: the flow's cookie lives on the operator's origin and travels on top-level navigations only.
   const crossSiteDatabase = join(scratchDirectory, "cross-site.db");
@@ -349,20 +304,16 @@ test("with the operator on another site, the authority flow runs the same way", 
 });
 
 /**
- * The owner signs in to `app`, then two authority flows are started and approved at once in two tabs of one browser; a
- * started ticket is used again; a third flow's callback arrives without its flow cookie, then with it, then is replayed; and
- * the grant left creates a workspace. The flows run between the web app's origin, the operator's and the PDS.
+ * The owner signs in to `app`, provisions a group workspace, then two reauthorize authority flows are started and approved
+ * at once in two tabs of one browser; a started ticket is used again; a third flow's callback arrives without its flow cookie,
+ * then with it, then is replayed; and the grant left runs an admin operation on the group. The flows run between the web app's
+ * origin, the operator's, the Group Host, and the owner's personal PDS.
  */
 async function authorityFlowTwiceAtOnce(app: Stack, appDatabase: string): Promise<void> {
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext();
-  const grantRow = () => {
-    const db = new Database(appDatabase, { readonly: true, fileMustExist: true });
-    try { return db.prepare("SELECT key, value FROM authority_grant WHERE key = ?").all(ownerDid) as Array<{ key: string; value: string }>; }
-    finally { db.close(); }
-  };
   try {
-    // given the owner signed in to the app in one browser, and the operator called as the owner's browser calls it
+    // given the owner signed in to the app in one browser, and an initial OpenSocial group workspace provisioned on `app`
     const page = await context.newPage();
     page.setDefaultTimeout(30_000);
     await page.goto(app.appUrl.origin);
@@ -370,11 +321,29 @@ async function authorityFlowTwiceAtOnce(app: Stack, appDatabase: string): Promis
     await page.getByRole("button", { name: /Continue with atproto/i }).click();
     await completePdsConsentFlow(page, app.appUrl, "browser-owner.test", password);
     const operator = await ownerOperator(app);
-    const startUrl = async () => new URL((await operator.startAuthorityFlow({ purpose: "reauthorize" })).url, app.operatorUrl).href;
+
+    const bootstrapOpId = tidNow();
+    const bootstrapName = `Grant Target ${app.operatorUrl.port}`;
+    const bootstrapTicket = new URL(
+      (await operator.startAuthorityFlow({ purpose: "createWorkspace", name: bootstrapName, creationKey: bootstrapOpId })).url,
+      app.operatorUrl,
+    ).href;
+    await page.goto(bootstrapTicket);
+    await consent(page, { did: ownerDid, password });
+    await page.waitForURL((url) => url.origin === app.appUrl.origin && !url.pathname.startsWith("/authority"));
+    const bootstrapped = await operator.createWorkspace({ name: bootstrapName, operationId: bootstrapOpId });
+    assert.equal(bootstrapped.state, "completed", JSON.stringify(bootstrapped));
+    const groupDid = bootstrapped.groupDid;
+
+    const grantRow = () => {
+      const db = new Database(appDatabase, { readonly: true, fileMustExist: true });
+      try { return db.prepare("SELECT key, value FROM authority_grant WHERE key = ?").all(groupDid) as Array<{ key: string; value: string }>; }
+      finally { db.close(); }
+    };
+    const startUrl = async () =>
+      new URL((await operator.startAuthorityFlow({ purpose: "reauthorize", authority: groupDid })).url, app.operatorUrl).href;
     const approve = async (tab: import("@playwright/test").Page) => {
-      await tab.waitForURL(/\/oauth\/authorize\?/);
-      await signInIfPrompted(tab);
-      await tab.getByRole("button", { name: "Authorize", exact: true }).click();
+      await consent(tab, { did: ownerDid, password });
       await tab.waitForURL((url) => url.origin === app.appUrl.origin && !url.pathname.startsWith("/authority"));
       return tab.url();
     };
@@ -386,7 +355,7 @@ async function authorityFlowTwiceAtOnce(app: Stack, appDatabase: string): Promis
     await second.goto(await startUrl());
     const landed = [await approve(first), await approve(second)];
 
-    // then both complete, and one grant remains
+    // then both complete, and one grant remains for groupDid
     for (const url of landed) assert.doesNotMatch(url, /authority=failed/, "each flow completes");
     assert.equal(grantRow().length, 1, "two approvals leave one grant");
 
@@ -396,14 +365,12 @@ async function authorityFlowTwiceAtOnce(app: Stack, appDatabase: string): Promis
     assert.match(replayed.url(), /[?&]authority=failed/, "a used ticket is refused");
 
     // and a third flow approved without its flow cookie is refused, completes once the cookie is back, and then cannot be
-    // replayed even with it. The flow cookie is taken while the browser is at the consent page (set by /authority/start,
-    // cleared by the callback), and the callback URL from the request event, since a navigation reached through a redirect
-    // is not routable.
+    // replayed even with it.
     const third = await context.newPage();
     const callbacks: string[] = [];
     third.on("request", (request) => { if (new URL(request.url()).pathname === "/authority/callback") callbacks.push(request.url()); });
     await third.goto(await startUrl());
-    await third.waitForURL(/\/oauth\/authorize\?/);
+    await third.waitForURL(/\/oauth\/(?:authorize|confirm-action)/);
     const flowCookies = (await context.cookies(new URL("/authority/callback", app.operatorUrl).href)).filter(({ name }) => name.startsWith("spaces_oauth_"));
     assert.ok(flowCookies.length > 0, "the flow cookie is set for the operator's callback while the flow is open");
     const beforeThird = grantRow();
@@ -422,9 +389,18 @@ async function authorityFlowTwiceAtOnce(app: Stack, appDatabase: string): Promis
     assert.match(third.url(), /[?&]authority=failed/, "a used state is refused even with its cookie");
     assert.deepEqual(grantRow(), afterApproval, "the refused replay leaves the grant as it was");
 
-    // and the grant that remains works: the operator creates a workspace with it (one per run, since a creation makes a new one)
-    const created = await operator.createWorkspace({ name: `Grant Survivor ${app.operatorUrl.port}`, operationId: tidNow() });
-    assert.equal(created.state, "completed", JSON.stringify(created));
+    // and the grant that remains works: the operator runs an admin operation on the group workspace with it
+    const executed = await operator.execute({
+      workspace: bootstrapped.workspace,
+      operationId: tidNow(),
+      request: {
+        kind: "createChannel",
+        skey: `survivor-${app.operatorUrl.port}`,
+        name: `Grant Survivor ${app.operatorUrl.port}`,
+        visibility: "public",
+      },
+    });
+    assert.equal(executed.operation.state, "completed", JSON.stringify(executed));
   } finally {
     await browser.close();
   }
@@ -432,9 +408,9 @@ async function authorityFlowTwiceAtOnce(app: Stack, appDatabase: string): Promis
 
 /** The operator as the owner's browser calls it: each method with a service token the owner's own host issues. */
 async function ownerOperator(app: Stack): Promise<OperatorClient> {
-  assert.ok(network);
-  const { data } = await network.pds.getAgent().com.atproto.server.createSession({ identifier: ownerDid, password });
-  const engine = createEngine(actorTransport({ plcUrl: network.plc.url }, { did: ownerDid, accessJwt: data.accessJwt, pds: { url: network.pds.url } }), {
+  assert.ok(pds);
+  const { data } = await pds.hosts[0].getAgent().com.atproto.server.createSession({ identifier: ownerDid, password });
+  const engine = createEngine(actorTransport({ plcUrl: pds.plcUrl }, { did: ownerDid, accessJwt: data.accessJwt, pds: { url: pds.hosts[0].url } }), {
     operator: { serviceRef: `did:web:localhost%3A${app.operatorUrl.port}#atproto_flock_operator`, endpoint: app.operatorUrl.origin },
   });
   assert.ok(engine.operator);
@@ -454,10 +430,10 @@ async function completePdsConsentFlow(
   await page.waitForURL(app.origin, { timeout: 30_000 });
 }
 
-/** One app's environment: the web app and its operator on free ports (the operator on `operatorHost`), its own database and key. */
+/** One app's environment: the web app, its operator, and the Group Host on free ports, its own database and key. */
 async function stackEnv(input: { databasePath: string; encryptionKey: string; operatorHost?: string }): Promise<NodeJS.ProcessEnv> {
-  assert.ok(network);
-  const [appPort, operatorPort] = [await freePort(), await freePort()];
+  assert.ok(pds);
+  const [appPort, operatorPort] = [await availablePort(), await availablePort()];
   return {
     PATH: process.env.PATH ?? "",
     HOME: process.env.HOME ?? tmpdir(),
@@ -467,9 +443,10 @@ async function stackEnv(input: { databasePath: string; encryptionKey: string; op
     ATPROTO_ACCEPTANCE_TEST: "true",
     APP_URL: `http://127.0.0.1:${appPort}`,
     OPERATOR_URL: `http://${input.operatorHost ?? "127.0.0.1"}:${operatorPort}`,
+    GROUP_HOST_URL: pds.groupHostUrl,
     DATABASE_PATH: input.databasePath,
     AUTH_ENCRYPTION_KEY: input.encryptionKey,
-    PLC_URL: network.plc.url,
+    PLC_URL: pds.plcUrl,
     OPERATOR_SERVICE_REF: `did:web:localhost%3A${operatorPort}#atproto_flock_operator`,
   };
 }

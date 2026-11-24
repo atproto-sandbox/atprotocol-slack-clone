@@ -4,7 +4,7 @@
   "defs": {
     "main": {
       "type": "procedure",
-      "description": "Issues a single-use, two-minute ticket for the caller to grant the operator authority over a workspace account's workspaces (the caller's own account, or the one named by authority), and returns the operator URL that starts the flow. The caller opens it as a top-level navigation; the flow succeeds only for someone who signs in as that account. For createWorkspace with another account, it also leaves the caller an approval to create that one workspace.",
+      "description": "Issues a single-use, two-minute ticket for the caller to create a new opensocial.group account (prompt=create) or reauthorize the operator's shared group-DID session as an active effective human admin.",
       "input": {
         "encoding": "application/json",
         "schema": {
@@ -12,8 +12,11 @@
           "required": ["purpose"],
           "properties": {
             "purpose": { "type": "string", "knownValues": ["createWorkspace", "reauthorize"] },
-            "name": { "type": "string", "minLength": 1, "maxLength": 60, "description": "The workspace to create, for purpose createWorkspace." },
-            "authority": { "type": "string", "format": "did", "description": "The workspace account to approve for. Omitted, the caller's own." }
+            "name": { "type": "string", "minLength": 1, "maxLength": 640, "maxGraphemes": 64, "description": "The group display name, for purpose createWorkspace." },
+            "authority": { "type": "string", "format": "did", "description": "Existing group DID to reauthorize or complete workspace provisioning on." },
+            "joinPolicy": { "type": "string", "knownValues": ["open", "approval", "invite"] },
+            "publicMeta": { "type": "boolean" },
+            "creationKey": { "type": "string", "minLength": 1, "maxLength": 128 }
           }
         }
       },

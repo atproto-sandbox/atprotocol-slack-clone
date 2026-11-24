@@ -6,8 +6,8 @@
       "type": "space",
       "key": "any",
       "title": "App inbox",
-      "collections": ["new.flock.app.command", "new.flock.app.action"],
-      "description": "An app's workspace inbox where roster members write commands and button actions and only the installed app reads them."
+      "collections": ["new.flock.app.command", "new.flock.app.action", "com.atproto.label.record"],
+      "description": "An app's workspace inbox where group members write commands and button actions and only the installed app reads them."
     }
   }
 }

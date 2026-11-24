@@ -13,18 +13,17 @@ Feature: Private channel requests
       And an ordinary member cannot read the request repo
 
     Scenario: A missed app notification is found by listWriters
-      Given a request write reached the authority PDS writer set
+      Given a request write reached the Group Host writer set
       And the app notification was dropped
       When the admin inbox performs its next 60 second reconciliation
       Then it finds the request writer through listWriters
 
-    Scenario: A dropped PDS-to-authority notification is recovered
-      Given a request write reached the requester's PDS
-      And the PDS-to-authority notifyRepoUpdate was dropped
-      When the admin inbox performs its next 60 second reconciliation
-      Then the operator returns the current inbox write-member DID
-      And the admin reads that repo with their inbox credential
-      And the operator never returns the request body
+    Scenario: An unreadable inbox writer is skipped without exposing request bodies to the operator
+      Given two members submitted requests to the authority inbox writer set
+      And one writer's PDS repo becomes oversized and unreadable
+      When the admin inbox syncs
+      Then the admin reads the healthy member's request with their inbox credential and sees the skipped writer warning
+      And the operator has no inbox-writer endpoint and never sees any request body
 
   Rule: Decisions apply only to the current request generation
 
@@ -40,7 +39,7 @@ Feature: Private channel requests
       Given an admin has read the current request
       When the admin denies it
       Then an authority-authored denial is recorded
-      And the requester receives no channel membership
+      And the requester receives no channel role grant
 
     Scenario: Ignore a decision for an older request generation
       Given a requester withdrew and resubmitted a request with a fresh requestId

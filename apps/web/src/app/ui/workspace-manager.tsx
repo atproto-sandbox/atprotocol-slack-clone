@@ -5,11 +5,12 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChannelView } from "./channel-view";
 import { acceptFailure } from "@flock/client/accept-errors";
-import { captureInviteLink, INVITE_LINK_KEY, isAccessFailure, makeTid, needsAuthorityApproval, WORKSPACE_OPERATION_KEY, workspaceCreationFrom, workspaceOperationIdFor, messageOf, parsePastedWorkspaceUri, resolveScopedReplyTo, type Message, type PendingOperation, type PermalinkResolution, type ScopedReplyDraft, type WorkspaceCreationInput } from "./client-api";
+import { captureInviteLink, clearPendingOperatorOperation, INVITE_LINK_KEY, isAccessFailure, makeTid, needsAuthorityApproval, readPendingOperatorOperations, upsertPendingOperatorOperation, WORKSPACE_OPERATION_KEY, workspaceCreationFrom, workspaceOperationIdFor, messageOf, parsePastedGroupOrWorkspace, parsePastedWorkspaceUri, resolveScopedReplyTo, type Message, type PendingOperation, type PermalinkResolution, type ScopedReplyDraft, type WorkspaceCreationInput } from "./client-api";
 import { DmProvider, type DmView } from "./dm-context";
 import type { ExtensionToggleOutcome } from "./extensions-panel";
 import { TasksWorkspaceView } from "./ext/tasks/tasks-workspace-view";
 import { InviteBanner } from "./invite-banner";
+import type { ReportRuleOption } from "./report-subject-modal";
 import { channelRoute, dmConversationRoute, dmHomeRoute, homeRoute, messageRoute, parseRoute, sanitizeReturnTo, sentThreadCleanupRoute, tasksRoute, workspaceRoute } from "./routes";
 import { SessionProvider, useBrowserSessionContext } from "./session-context";
 import { Sidebar } from "./sidebar";
@@ -23,14 +24,177 @@ import { useDiscovery } from "./use-discovery";
 import { NO_WORKSPACE, shownChannel } from "./selection";
 import type { BrowserSessionConfig } from "../../browser/session";
 import type { ExtensionId } from "@flock/protocol/extensions";
+import type { GroupClient, GroupRule } from "@flock/client/group-client";
 import { isDid } from "@flock/protocol/keys";
 import { SPACE_TYPE } from "@flock/protocol/nsids";
-import type { AuthorityFlowRequest } from "@flock/client/operator-client";
-import type { WorkspaceDiscovery } from "@flock/client/workspace-client";
+import type { AuthorityFlowRequest, OperatorClient } from "@flock/client/operator-client";
+import type { ReceivedGroupInvite, WorkspaceClient, WorkspaceDiscovery } from "@flock/client/workspace-client";
 import type { WorkspaceSummary } from "@flock/protocol/workspace-summary";
 
 // The DM stage renders only client-side; see the note in sidebar.tsx.
 const DmStage = dynamic(() => import("./dm-stage").then((mod) => mod.DmStage), { ssr: false });
+
+export async function abortUnstartedWorkspaceCreation(
+  workspaces: Pick<WorkspaceClient, "dismissUnstartedCreateOperation"> | null | undefined,
+  storage: Pick<Storage, "getItem" | "removeItem">,
+): Promise<boolean> {
+  const raw = storage.getItem(WORKSPACE_OPERATION_KEY);
+  if (!raw) return false;
+  let operationId: string | undefined;
+  try {
+    const parsed = JSON.parse(raw) as { operationId?: unknown };
+    if (typeof parsed?.operationId === "string" && parsed.operationId.length > 0) {
+      operationId = parsed.operationId;
+    }
+  } catch {
+    storage.removeItem(WORKSPACE_OPERATION_KEY);
+    return false;
+  }
+  if (!operationId || !workspaces) {
+    storage.removeItem(WORKSPACE_OPERATION_KEY);
+    return false;
+  }
+  const outcome = await workspaces.dismissUnstartedCreateOperation(operationId);
+  if (outcome !== "in_progress") {
+    storage.removeItem(WORKSPACE_OPERATION_KEY);
+  }
+  return outcome === "dismissed";
+}
+
+export async function executeBrowserWorkspaceCreation(
+  input: WorkspaceCreationInput,
+  deps: {
+    mayAuthorize: boolean;
+    engine: { workspaces: WorkspaceClient; operator?: OperatorClient } | null;
+    storage: Pick<Storage, "getItem" | "setItem" | "removeItem">;
+    refreshWorkspaces: () => Promise<WorkspaceDiscovery | undefined>;
+    approveAuthority: (req: AuthorityFlowRequest) => Promise<void>;
+    onWorkspaceSelected: (workspaceUri: string) => void;
+    setStatus: (status: string) => void;
+    setError: (error: string) => void;
+    setBusy: (busy: boolean) => void;
+  },
+): Promise<void> {
+  let redirecting = false;
+  const effectiveJoinPolicy = input.joinPolicy ?? "invite";
+  const effectivePublicMeta = input.publicMeta ?? true;
+  deps.setBusy(true);
+  deps.setError("");
+  deps.setStatus("Creating protocol spaces and authority records…");
+  try {
+    if (!deps.engine?.operator) throw new Error("Connect this browser first.");
+    const operationId = workspaceOperationIdFor(
+      { name: input.name, account: "", joinPolicy: effectiveJoinPolicy, publicMeta: effectivePublicMeta },
+      deps.storage.getItem(WORKSPACE_OPERATION_KEY),
+    );
+    deps.storage.setItem(
+      WORKSPACE_OPERATION_KEY,
+      JSON.stringify({
+        name: input.name,
+        account: "",
+        joinPolicy: effectiveJoinPolicy,
+        publicMeta: effectivePublicMeta,
+        operationId,
+      }),
+    );
+    const result = await deps.engine.workspaces.createWorkspace(
+      {
+        name: input.name,
+        joinPolicy: effectiveJoinPolicy,
+        publicMeta: effectivePublicMeta,
+      },
+      {
+        operationId,
+        operator: deps.engine.operator,
+      },
+    );
+    const current = await deps.refreshWorkspaces();
+    const inDiscovered = Boolean(
+      result.workspace && current?.workspaces.some((entry) => entry.uri === result.workspace),
+    );
+    if (inDiscovered) {
+      deps.onWorkspaceSelected(result.workspace);
+    }
+    if (result.state === "completed" || inDiscovered) {
+      deps.storage.removeItem(WORKSPACE_OPERATION_KEY);
+      deps.setStatus("Workspace created on AT Protocol.");
+    } else {
+      deps.setStatus(
+        `Setup is pending after ${(result.completedSteps ?? []).length} steps.${result.error ? ` ${result.error}` : ""} Retry to resume.`,
+      );
+    }
+  } catch (caught) {
+    deps.setStatus("");
+    if (!needsAuthorityApproval(caught)) {
+      deps.setError(messageOf(caught));
+      return;
+    }
+    if (!deps.mayAuthorize) {
+      await abortUnstartedWorkspaceCreation(deps.engine?.workspaces, deps.storage);
+      await deps.refreshWorkspaces().catch(() => undefined);
+      deps.setError(
+        "Permission was not granted, so the workspace could not be created. Try again and approve every requested permission.",
+      );
+      return;
+    }
+    const operationId = workspaceOperationIdFor(
+      { name: input.name, account: "", joinPolicy: effectiveJoinPolicy, publicMeta: effectivePublicMeta },
+      deps.storage.getItem(WORKSPACE_OPERATION_KEY),
+    );
+    deps.setStatus("Opening the permission screen. Approve it to finish creating your workspace…");
+    deps.storage.setItem("spaces.pendingWorkspaceName", input.name);
+    deps.storage.setItem("spaces.pendingJoinPolicy", effectiveJoinPolicy);
+    deps.storage.setItem("spaces.pendingPublicMeta", effectivePublicMeta ? "1" : "0");
+    deps.storage.setItem("spaces.autoCreateWorkspace", "1");
+    try {
+      await deps.approveAuthority({
+        purpose: "createWorkspace",
+        name: input.name,
+        joinPolicy: effectiveJoinPolicy,
+        publicMeta: effectivePublicMeta,
+        creationKey: operationId,
+      });
+      redirecting = true;
+    } catch (grantFailure) {
+      deps.storage.removeItem("spaces.pendingWorkspaceName");
+      deps.storage.removeItem("spaces.pendingJoinPolicy");
+      deps.storage.removeItem("spaces.pendingPublicMeta");
+      deps.storage.removeItem("spaces.autoCreateWorkspace");
+      await abortUnstartedWorkspaceCreation(deps.engine?.workspaces, deps.storage);
+      await deps.refreshWorkspaces().catch(() => undefined);
+      deps.setStatus("");
+      deps.setError(messageOf(grantFailure));
+    }
+  } finally {
+    if (!redirecting) deps.setBusy(false);
+  }
+}
+
+export function toPermalinkMessage(found: {
+  uri: string;
+  cid?: string;
+  rkey: string;
+  repo: string;
+  value: unknown;
+  hidden?: boolean;
+  labels?: string[];
+}): Message {
+  return {
+    uri: found.uri,
+    ...(found.cid !== undefined ? { cid: found.cid } : {}),
+    rkey: found.rkey,
+    repo: found.repo,
+    value: found.value as Message["value"],
+    reactions: [],
+    ...(found.hidden !== undefined ? { hidden: found.hidden } : {}),
+    ...(found.labels !== undefined ? { labels: found.labels } : {}),
+  };
+}
+
+export function formatReceivedInvitesWarning(error: unknown): string {
+  if (error === undefined || error === null) return "";
+  return `Cross-PDS invitations could not be loaded completely: ${messageOf(error)}`;
+}
 
 /** The signed-in account's app: its browser session restored once, and the workspace, channel and DM views on top of it. */
 export function WorkspaceManager({ did, dmConfig }: { did: string; dmConfig: BrowserSessionConfig }) {
@@ -45,7 +209,7 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
   // Sign-in, reads, writes and operator calls all go through the browser session and its engine; the server holds no member
   // session.
   const session = useBrowserSessionContext();
-  const { engine, live, snapshots, status: sessionStatus, error: sessionError, connect: connectSession } = session;
+  const { engine, groupOAuth, live, snapshots, status: sessionStatus, error: sessionError, connect: connectSession } = session;
   const pathname = usePathname() ?? "/";
   const searchParams = useSearchParams();
   const router = useRouter();
@@ -63,9 +227,15 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
   /** The workspace a person chose on `/` (or kept for sidebar context on `/dm`); deep workspace routes override it. */
   const [chosenWorkspace, setChosenWorkspace] = useState<string | null>(null);
   const [workspaceName, setWorkspaceName] = useState("");
-  const [workspaceAccount, setWorkspaceAccount] = useState("");
+  const [joinPolicy, setJoinPolicy] = useState<"invite" | "approval" | "open">("invite");
+  const [publicMeta, setPublicMeta] = useState<boolean>(true);
   const [inviteUri, setInviteUri] = useState("");
+  const [joinMessage, setJoinMessage] = useState("");
+  const [reactivateDid, setReactivateDid] = useState("");
   const [invitedTo, setInvitedTo] = useState<string | null>(null);
+  const [groupClientState, setGroupClientState] = useState<{ groupDid: string; client: GroupClient | null } | null>(null);
+  const [groupClientSeq, setGroupClientSeq] = useState(0);
+  const [rulesByWorkspace, setRulesByWorkspace] = useState<Record<string, ReportRuleOption[]>>({});
   const [messageText, setMessageText] = useState("");
   const [chosenCommandApp, setChosenCommandApp] = useState<string | null>(null);
   const [composerStatus, setComposerStatus] = useState("");
@@ -78,13 +248,14 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
   const [permalinkLookup, setPermalinkLookup] = useState<{ channelKey: string; resolution: PermalinkResolution } | null>(null);
   const [trackedChannelIdentity, setTrackedChannelIdentity] = useState<string | null>(null);
   const [requestSubmitted, setRequestSubmitted] = useState(false);
-  const [pendingOperation, setPendingOperation] = useState<PendingOperation | null>(null);
-  /** An operation went through in this page, so the admin's app keeps the workspace reconciled from then on. */
-  const [operatorReady, setOperatorReady] = useState(false);
+  const [pendingOperations, setPendingOperations] = useState<PendingOperation[]>([]);
+  const pendingOperation = pendingOperations[pendingOperations.length - 1] ?? null;
+  const operationInFlightRef = useRef(false);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const resumedRef = useRef(false);
+  const authorityFailedRef = useRef(false);
   const navEpochRef = useRef(0);
   const navigateTo = useCallback((url: string, replace = false) => {
     navEpochRef.current += 1;
@@ -113,19 +284,70 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
 
   // Already a member: the invitation has been used, so it is no longer offered.
   const listed = useCallback((discovery: WorkspaceDiscovery) => {
+    if (!sessionStorage.getItem("spaces.autoCreateWorkspace")) {
+      const rawWorkspaceOp = sessionStorage.getItem(WORKSPACE_OPERATION_KEY);
+      if (rawWorkspaceOp) {
+        try {
+          const parsedOp = JSON.parse(rawWorkspaceOp) as { name?: unknown; operationId?: unknown };
+          if (
+            typeof parsedOp.operationId === "string" &&
+            !discovery.joiningGroups?.some((j) => j.operationId === parsedOp.operationId) &&
+            typeof parsedOp.name === "string" &&
+            discovery.workspaces.some((w) => w.name === parsedOp.name)
+          ) {
+            sessionStorage.removeItem(WORKSPACE_OPERATION_KEY);
+          }
+        } catch {
+          sessionStorage.removeItem(WORKSPACE_OPERATION_KEY);
+        }
+      }
+    }
     const waiting = sessionStorage.getItem(INVITE_LINK_KEY);
     if (!waiting || !discovery.workspaces.some((workspace) => workspace.uri === waiting)) return;
     sessionStorage.removeItem(INVITE_LINK_KEY);
     setInvitedTo((current) => current === waiting ? null : current);
   }, []);
   const discoveryChoice = routeWorkspaceUri ?? chosenWorkspace;
-  const { discovery: discovered, workspace: discoveredWorkspace, reload: refreshWorkspaces } = useDiscovery(session, discoveryChoice, listed);
+  const { discovery: discovered, invites: receivedInvites, workspace: discoveredWorkspace, reload: refreshWorkspaces } = useDiscovery(session, did, discoveryChoice, listed);
   const workspaces = useMemo(() => discovered.value?.workspaces ?? [], [discovered.value]);
   const workspaceCandidates = discovered.value?.candidates ?? [];
+  const joiningGroups = discovered.value?.joiningGroups ?? [];
+  const leavingGroups = discovered.value?.leavingGroups ?? [];
+  const crossPdsInvites = receivedInvites.value ?? [];
+  const invitesWarning = formatReceivedInvitesWarning(receivedInvites.error);
   const workspacesLoaded = discovered.value !== undefined;
   const missingRouteWorkspace = Boolean(routeWorkspaceUri && workspacesLoaded && !workspaces.some((workspace) => workspace.uri === routeWorkspaceUri));
   const activeWorkspace = missingRouteWorkspace ? null : discoveredWorkspace;
   const activeUri = activeWorkspace?.uri ?? "";
+  const activeGroupDid = activeWorkspace?.groupDid ?? null;
+  const activeReportRules = useMemo<readonly ReportRuleOption[]>(
+    () => (activeUri ? rulesByWorkspace[activeUri] ?? [] : []),
+    [activeUri, rulesByWorkspace],
+  );
+
+  const activeGroupClient =
+    activeGroupDid && groupClientState?.groupDid === activeGroupDid ? groupClientState.client : null;
+
+  const refreshActiveGroupClient = useCallback(async () => {
+    setGroupClientSeq((s) => s + 1);
+  }, []);
+
+  useEffect(() => {
+    if (!groupOAuth || !activeGroupDid) return;
+    let cancelled = false;
+    const targetGroupDid = activeGroupDid;
+    void groupOAuth.restoreGroupClient(targetGroupDid).then(
+      (gc) => {
+        if (!cancelled) setGroupClientState({ groupDid: targetGroupDid, client: gc });
+      },
+      () => {
+        if (!cancelled) setGroupClientState({ groupDid: targetGroupDid, client: null });
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [groupOAuth, activeGroupDid, groupClientSeq]);
   const activeDeclarations = useMemo<WorkspaceDeclarations>(
     () => (activeUri ? declarationsByWorkspace[activeUri] ?? {} : {}),
     [activeUri, declarationsByWorkspace],
@@ -266,13 +488,7 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
           setPermalinkLookup({ channelKey: activeChannelKey, resolution: { uri: targetUri, status: "not_found" } });
           return;
         }
-        const linked: Message = {
-          uri: found.uri,
-          rkey: found.rkey,
-          repo: found.repo,
-          value: found.value as Message["value"],
-          reactions: [],
-        };
+        const linked = toPermalinkMessage(found);
         setPermalinkLookup({
           channelKey: activeChannelKey,
           resolution: { uri: targetUri, status: "resolved", message: linked },
@@ -332,31 +548,6 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
     channelHasError,
   ]);
 
-  /** Joins a workspace the account was added to: the browser writes the acceptance record to its own repo. */
-  const acceptWorkspace = useCallback(async (workspace: string) => {
-    if (!engine) return;
-    setBusy(true);
-    setError("");
-    try {
-      await engine.workspaces.accept(workspace);
-      setStatus("Workspace invitation accepted. Loading shared records…");
-      const current = await refreshWorkspaces();
-      if (!current?.workspaces.some((entry) => entry.uri === workspace)) {
-        setStatus("");
-        setError("You accepted the invitation, but the workspace isn't available to you yet. Use Refresh in a moment, and ask an admin to check that your account was added.");
-        return;
-      }
-      setChosenWorkspace(workspace); resetChannelInput();
-      setInviteUri("");
-      setInvitedTo((cur) => cur === workspace ? null : cur);
-      if (sessionStorage.getItem(INVITE_LINK_KEY) === workspace) sessionStorage.removeItem(INVITE_LINK_KEY);
-    } catch (caught) {
-      setError(acceptFailure(caught)?.error ?? messageOf(caught));
-    } finally {
-      setBusy(false);
-    }
-  }, [engine, resetChannelInput, refreshWorkspaces]);
-
   /**
    * Sends the browser to approve the operator's grant for a workspace account (this person's own, or a dedicated one, which
    * whoever approves must sign in as): for a workspace being created, or again for a workspace's account.
@@ -371,51 +562,21 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
   // and this approves, returns, and resumes the same journaled operation once. The resumed
   // attempt must not redirect again, so an approval that did not take shows an error instead
   // of looping.
-  const createWorkspaceNamed = useCallback(async ({ name, account }: WorkspaceCreationInput, options: { mayAuthorize: boolean }) => {
-    let redirecting = false;
-    setBusy(true); setError(""); setStatus("Creating protocol spaces and authority records…");
-    try {
-      if (account && !isDid(account)) throw new Error("The workspace account must be a DID (did:plc:… or did:web:…), or empty for your own account.");
-      const authority = account ? { authority: account } : {};
-      const operationId = workspaceOperationIdFor({ name, account }, sessionStorage.getItem(WORKSPACE_OPERATION_KEY));
-      sessionStorage.setItem(WORKSPACE_OPERATION_KEY, JSON.stringify({ name, account, operationId }));
-      if (!engine?.operator) throw new Error("Connect this browser first.");
-      const result = await engine.operator.createWorkspace({ name, operationId, ...authority });
-      // Under a dedicated account the person is a member, not the owner: like an invited member, they list the workspace
-      // once they have accepted it, which only their own session can write.
-      if (account && result.state === "completed") await engine.workspaces.accept(result.workspace);
-      const current = await refreshWorkspaces();
-      if (current?.workspaces.some((entry) => entry.uri === result.workspace)) {
-        setChosenWorkspace(result.workspace); resetChannelInput();
-      }
-      if (result.state === "completed") {
-        sessionStorage.removeItem(WORKSPACE_OPERATION_KEY);
-        setStatus("Workspace created on AT Protocol.");
-      } else setStatus(`Setup is pending after ${result.completedSteps.length} steps.${result.error ? ` ${result.error}` : ""} Retry to resume.`);
-    } catch (caught) {
-      setStatus("");
-      if (!needsAuthorityApproval(caught)) { setError(messageOf(caught)); return; }
-      if (!options.mayAuthorize) {
-        setError("Permission was not granted, so the workspace could not be created. Try again and approve every requested permission.");
-        return;
-      }
-      setStatus(account
-        ? "Opening the permission screen. Sign in there as the workspace account and approve it to finish creating the workspace…"
-        : "Opening the permission screen. Approve it to finish creating your workspace…");
-      sessionStorage.setItem("spaces.pendingWorkspaceName", name);
-      sessionStorage.setItem("spaces.pendingWorkspaceAccount", account);
-      sessionStorage.setItem("spaces.autoCreateWorkspace", "1");
-      try {
-        await approveAuthority({ purpose: "createWorkspace", name, ...(account ? { authority: account } : {}) });
-        redirecting = true;
-      } catch (grantFailure) {
-        sessionStorage.removeItem("spaces.pendingWorkspaceName");
-        sessionStorage.removeItem("spaces.pendingWorkspaceAccount");
-        sessionStorage.removeItem("spaces.autoCreateWorkspace");
-        setStatus("");
-        setError(messageOf(grantFailure));
-      }
-    } finally { if (!redirecting) setBusy(false); }
+  const createWorkspaceNamed = useCallback(async (creationInput: WorkspaceCreationInput, options: { mayAuthorize: boolean }) => {
+    await executeBrowserWorkspaceCreation(creationInput, {
+      mayAuthorize: options.mayAuthorize,
+      engine,
+      storage: sessionStorage,
+      refreshWorkspaces,
+      approveAuthority,
+      onWorkspaceSelected: (wsUri) => {
+        setChosenWorkspace(wsUri);
+        resetChannelInput();
+      },
+      setStatus,
+      setError,
+      setBusy,
+    });
   }, [engine, approveAuthority, resetChannelInput, refreshWorkspaces]);
 
   useEffect(() => {
@@ -425,13 +586,18 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
       if (!event.persisted) return;
       sessionStorage.removeItem("spaces.autoCreateWorkspace");
       sessionStorage.removeItem("spaces.pendingWorkspaceName");
-      sessionStorage.removeItem("spaces.pendingWorkspaceAccount");
+      sessionStorage.removeItem("spaces.pendingJoinPolicy");
+      sessionStorage.removeItem("spaces.pendingPublicMeta");
+      sessionStorage.removeItem("spaces.pendingReactivateOp");
+      void abortUnstartedWorkspaceCreation(engine?.workspaces, sessionStorage).then(() =>
+        refreshWorkspaces().catch(() => undefined),
+      );
       setBusy(false);
       setStatus("");
     };
     window.addEventListener("pageshow", onPageShow);
     return () => window.removeEventListener("pageshow", onPageShow);
-  }, []);
+  }, [engine, refreshWorkspaces]);
 
   useEffect(() => {
     // What arrives in the URL is taken before the browser session is ready, since connecting it leaves the page.
@@ -439,6 +605,7 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
       const search = window.location.search;
       const invitedWorkspace = captureInviteLink(search, sessionStorage) ?? sessionStorage.getItem(INVITE_LINK_KEY);
       const authorityFailed = new URLSearchParams(search).get("authority") === "failed";
+      authorityFailedRef.current = authorityFailed;
       if (search.includes("invite=") || search.includes("authority=")) {
         const cleaned = sanitizeReturnTo(window.location.pathname, search);
         window.history.replaceState(null, "", cleaned ?? window.location.pathname);
@@ -446,6 +613,8 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
       if (invitedWorkspace) { setInvitedTo(invitedWorkspace); setInviteUri(invitedWorkspace); }
       // A workspace creation that was waiting on the approval reports the outcome itself when it retries.
       if (authorityFailed && !sessionStorage.getItem("spaces.autoCreateWorkspace")) {
+        sessionStorage.removeItem("spaces.pendingReactivateOp");
+        sessionStorage.removeItem("spaces.pendingReactivateGroup");
         setError("The workspace authority permission was not approved. Try again from the operation that asked for it.");
       }
     }, 0);
@@ -459,21 +628,92 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
       if (resumedRef.current) return;
       resumedRef.current = true;
       const savedName = sessionStorage.getItem("spaces.pendingWorkspaceName");
-      const savedAccount = sessionStorage.getItem("spaces.pendingWorkspaceAccount") ?? "";
-      if (savedName) { setWorkspaceName(savedName); setWorkspaceAccount(savedAccount); sessionStorage.removeItem("spaces.pendingWorkspaceName"); }
-      sessionStorage.removeItem("spaces.pendingWorkspaceAccount");
-      if (sessionStorage.getItem("spaces.autoCreateWorkspace")) {
+      const savedPolicyRaw = sessionStorage.getItem("spaces.pendingJoinPolicy");
+      const savedPolicy: "invite" | "approval" | "open" =
+        savedPolicyRaw === "open" || savedPolicyRaw === "approval" ? savedPolicyRaw : "invite";
+      const savedPublicMeta = sessionStorage.getItem("spaces.pendingPublicMeta") !== "0";
+      if (savedName) {
+        setWorkspaceName(savedName);
+        setJoinPolicy(savedPolicy);
+        setPublicMeta(savedPublicMeta);
+        sessionStorage.removeItem("spaces.pendingWorkspaceName");
+      }
+      sessionStorage.removeItem("spaces.pendingJoinPolicy");
+      sessionStorage.removeItem("spaces.pendingPublicMeta");
+      const hadAutoCreate = Boolean(sessionStorage.getItem("spaces.autoCreateWorkspace"));
+      if (hadAutoCreate) {
         sessionStorage.removeItem("spaces.autoCreateWorkspace");
-        if (savedName) void createWorkspaceNamed({ name: savedName, account: savedAccount }, { mayAuthorize: false });
+        if (savedName) {
+          void createWorkspaceNamed(
+            { name: savedName, joinPolicy: savedPolicy, publicMeta: savedPublicMeta },
+            { mayAuthorize: false },
+          );
+        }
+      } else if (authorityFailedRef.current) {
+        void abortUnstartedWorkspaceCreation(engine.workspaces, sessionStorage).then(() =>
+          refreshWorkspaces().catch(() => undefined),
+        );
       }
-      const savedOperatorOperation = sessionStorage.getItem("spaces.pendingOperatorOperation");
-      if (savedOperatorOperation) {
-        try { setPendingOperation(JSON.parse(savedOperatorOperation) as PendingOperation); }
-        catch { sessionStorage.removeItem("spaces.pendingOperatorOperation"); }
+      const rawPendingReactivateOp = sessionStorage.getItem("spaces.pendingReactivateOp");
+      const savedReactivateDid = sessionStorage.getItem("spaces.pendingReactivateGroup");
+      sessionStorage.removeItem("spaces.pendingReactivateOp");
+      sessionStorage.removeItem("spaces.pendingReactivateGroup");
+      if (!authorityFailedRef.current) {
+        let resumeTarget: { groupDid: string; operationId?: string; mayAuthorize: boolean } | null = null;
+        if (rawPendingReactivateOp) {
+          try {
+            const parsed = JSON.parse(rawPendingReactivateOp) as { groupDid?: unknown; operationId?: unknown };
+            if (isDid(parsed.groupDid)) {
+              resumeTarget = {
+                groupDid: parsed.groupDid,
+                ...(typeof parsed.operationId === "string" && parsed.operationId ? { operationId: parsed.operationId } : {}),
+                mayAuthorize: false,
+              };
+            }
+          } catch {
+            // ignore malformed sessionStorage value
+          }
+        }
+        if (!resumeTarget && savedReactivateDid && isDid(savedReactivateDid)) {
+          resumeTarget = { groupDid: savedReactivateDid, mayAuthorize: true };
+        }
+        if (resumeTarget) {
+          const { groupDid: targetGroupDid, operationId: targetOpId, mayAuthorize } = resumeTarget;
+          const effectiveOpId = targetOpId ?? makeTid();
+          setReactivateDid(targetGroupDid);
+          let redirecting = false;
+          void engine.workspaces
+            .reactivateGroup(targetGroupDid, {
+              operationId: effectiveOpId,
+              reauthorizeOperator: async (gDid) => {
+                if (!mayAuthorize) return;
+                sessionStorage.setItem(
+                  "spaces.pendingReactivateOp",
+                  JSON.stringify({ groupDid: gDid, operationId: effectiveOpId }),
+                );
+                setStatus("Opening the permission screen to reauthorize Operator for this group…");
+                await approveAuthority({ purpose: "reauthorize", authority: gDid });
+                redirecting = true;
+              },
+            })
+            .then(async (res) => {
+              sessionStorage.removeItem(`spaces.reauthAttempted:${targetGroupDid}`);
+              await refreshWorkspaces();
+              setChosenWorkspace(res.workspace);
+              setReactivateDid("");
+              setStatus(`Reactivated group ${targetGroupDid}.`);
+            })
+            .catch((caught: unknown) => {
+              if (redirecting && needsAuthorityApproval(caught)) return;
+              setStatus("");
+              setError(messageOf(caught));
+            });
+        }
       }
+      setPendingOperations(readPendingOperatorOperations(sessionStorage));
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [engine, createWorkspaceNamed]);
+  }, [engine, createWorkspaceNamed, approveAuthority, refreshWorkspaces]);
 
   const admin = useAdminViews(session, activeWorkspace);
   const inboxView = admin.inbox.value;
@@ -483,34 +723,166 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
   const shownError = error || (backgroundFailure === undefined ? "" : messageOf(backgroundFailure));
 
   useEffect(() => {
-    const operator = engine?.operator;
-    if (!activeWorkspace?.isAdmin || activeWorkspace.degradedReasons.length || !operator || !operatorReady) return;
-    const workspace = activeWorkspace.uri;
-    // Once an operation went through, an admin's app asks the operator to reconcile the member lists now and every five minutes.
-    const reconcile = () => {
-      void operator.execute({ workspace, operationId: makeTid(), request: { kind: "reconcileWorkspace" } }).then(({ operation }) => {
-        if (operation.state !== "completed") setStatus(`Workspace reconciliation is ${operation.state}.${operation.error ? ` ${operation.error}` : ""}`);
-      }).catch((caught) => setError(messageOf(caught)));
-    };
-    const timer = window.setTimeout(reconcile, 0);
-    const interval = window.setInterval(reconcile, 300_000);
-    return () => { window.clearTimeout(timer); window.clearInterval(interval); };
-  }, [engine, activeWorkspace?.uri, activeWorkspace?.isAdmin, activeWorkspace?.degradedReasons.length, operatorReady]);
-
-  useEffect(() => {
     // A read the account was refused (removed, the channel archived or paused) has the selection follow the workspace now.
     if (contentRefused) void refreshWorkspaces().catch((caught) => setError(messageOf(caught)));
   }, [contentRefused, refreshWorkspaces]);
 
   async function createWorkspace(event: FormEvent) {
     event.preventDefault();
-    await createWorkspaceNamed(workspaceCreationFrom({ name: workspaceName, account: workspaceAccount }, did), { mayAuthorize: true });
+    await createWorkspaceNamed(
+      workspaceCreationFrom({ name: workspaceName, account: "", joinPolicy, publicMeta }, did),
+      { mayAuthorize: true },
+    );
   }
 
-  async function connectInvitation(uri: string) {
-    if (busy) return;
-    if (!parsePastedWorkspaceUri(uri)) { setError(`Paste a workspace URI in the form at://DID/space/${SPACE_TYPE.workspace}/key.`); return; }
-    await acceptWorkspace(uri.trim());
+  async function connectInvitation(rawInput: string) {
+    if (busy || !engine) return;
+    const parsed = parsePastedGroupOrWorkspace(rawInput);
+    if (!parsed) {
+      setError(`Paste a Group DID (did:plc:…) or workspace URI in the form at://DID/space/${SPACE_TYPE.workspace}/self.`);
+      return;
+    }
+    const trimmedMessage = joinMessage.trim();
+    if (parsePastedWorkspaceUri(rawInput) && !trimmedMessage) {
+      // First attempt direct acceptance (for admin-pre-admitted invite links); if not yet admitted, fall through to requestJoin!
+      setBusy(true);
+      setError("");
+      try {
+        await engine.workspaces.accept(parsed.workspaceUri);
+        setStatus("Workspace invitation accepted. Loading shared records…");
+        const current = await refreshWorkspaces();
+        if (current?.workspaces.some((entry) => entry.uri === parsed.workspaceUri)) {
+          setChosenWorkspace(parsed.workspaceUri);
+          resetChannelInput();
+          setInviteUri("");
+          setInvitedTo((cur) => (cur === parsed.workspaceUri ? null : cur));
+          if (sessionStorage.getItem(INVITE_LINK_KEY) === parsed.workspaceUri) sessionStorage.removeItem(INVITE_LINK_KEY);
+          setBusy(false);
+          return;
+        }
+      } catch (acceptErr) {
+        // Fall through to OpenSocial requestJoin (open / approval group) if not yet in members/self
+        if (!isAccessFailure(acceptErr)) {
+          setError(acceptFailure(acceptErr)?.error ?? messageOf(acceptErr));
+          setBusy(false);
+          return;
+        }
+      }
+      setBusy(false);
+    }
+
+    setBusy(true);
+    setError("");
+    try {
+      const profile = await engine.workspaces.tryReadPublicGroupProfile(parsed.groupDid);
+      const mode = profile?.joinPolicy === "approval" || trimmedMessage ? "approval" : "open";
+      const joined = await engine.workspaces.joinGroup({
+        groupDid: parsed.groupDid,
+        mode,
+        ...(trimmedMessage ? { message: trimmedMessage } : {}),
+      });
+      await refreshWorkspaces();
+      if (joined.status === "admitted") {
+        setChosenWorkspace(joined.workspace);
+        resetChannelInput();
+        setInviteUri("");
+        setJoinMessage("");
+        setInvitedTo((cur) => (cur === joined.workspace ? null : cur));
+        if (sessionStorage.getItem(INVITE_LINK_KEY) === joined.workspace) sessionStorage.removeItem(INVITE_LINK_KEY);
+        setStatus("Joined group on AT Protocol.");
+      } else {
+        setJoinMessage("");
+        setStatus("Join request submitted — awaiting moderator approval.");
+      }
+    } catch (caught) {
+      setError(acceptFailure(caught)?.error ?? messageOf(caught));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function acceptCrossPdsInvite(invite: ReceivedGroupInvite) {
+    if (busy || !engine) return;
+    setBusy(true);
+    setError("");
+    try {
+      const res = await engine.workspaces.joinGroup({
+        groupDid: invite.groupDid,
+        mode: "invite",
+        inviteUri: invite.uri,
+      });
+      await refreshWorkspaces();
+      setChosenWorkspace(res.workspace);
+      resetChannelInput();
+      setStatus(`Accepted invitation to ${invite.groupName ?? invite.groupDid}.`);
+    } catch (caught) {
+      setError(messageOf(caught));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function startReactivateGroup(targetDid: string) {
+    const cleaned = targetDid.trim();
+    if (!isDid(cleaned)) {
+      setError("Enter a valid Group DID (did:plc:… or did:web:…).");
+      return;
+    }
+    if (!engine || !groupOAuth) return;
+    let redirecting = false;
+    setBusy(true);
+    setError("");
+    sessionStorage.removeItem(`spaces.reauthAttempted:${cleaned}`);
+    try {
+      const existingClient = await groupOAuth.restoreGroupClient(cleaned);
+      if (!existingClient) {
+        sessionStorage.setItem("spaces.pendingReactivateGroup", cleaned);
+        const url = await groupOAuth.authorizeGroup({
+          groupOrHost: cleaned,
+          roleScope: "admin",
+          prompt: "login",
+          appState: {
+            returnTo: window.location.pathname,
+            purpose: "recovery",
+            groupDid: cleaned,
+          },
+        });
+        window.location.assign(url.toString());
+        redirecting = true;
+        return;
+      }
+      const operationId = makeTid();
+      const res = await engine.workspaces.reactivateGroup(cleaned, {
+        operationId,
+        reauthorizeOperator: async (gDid) => {
+          sessionStorage.setItem(
+            "spaces.pendingReactivateOp",
+            JSON.stringify({ groupDid: gDid, operationId }),
+          );
+          setStatus("Opening the permission screen to reauthorize Operator for this group…");
+          await approveAuthority({ purpose: "reauthorize", authority: gDid });
+          redirecting = true;
+        },
+      });
+      sessionStorage.removeItem("spaces.pendingReactivateOp");
+      sessionStorage.removeItem(`spaces.reauthAttempted:${cleaned}`);
+      await refreshWorkspaces();
+      setChosenWorkspace(res.workspace);
+      setReactivateDid("");
+      setStatus(`Reactivated group ${cleaned}.`);
+    } catch (caught) {
+      if (redirecting && needsAuthorityApproval(caught)) return;
+      sessionStorage.removeItem("spaces.pendingReactivateOp");
+      setStatus("");
+      setError(messageOf(caught));
+    } finally {
+      if (!redirecting) setBusy(false);
+    }
+  }
+
+  async function beginReactivate(event: FormEvent) {
+    event.preventDefault();
+    await startReactivateGroup(reactivateDid);
   }
 
   function dismissInvitation() {
@@ -524,25 +896,27 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
   }
 
   async function runOperation(request: Record<string, unknown>, workspace = activeWorkspace?.uri, operationId = makeTid()): Promise<boolean> {
-    if (!workspace) return false;
+    if (!workspace || operationInFlightRef.current) return false;
     if (activeWorkspace?.uri === workspace && activeWorkspace.degradedReasons.length) {
       setError(`Workspace mutations are paused in degraded mode. ${activeWorkspace.degradedReasons.join(" ")}`);
       return false;
     }
+    operationInFlightRef.current = true;
     const pending = { workspace, operationId, request };
-    setPendingOperation(pending);
-    sessionStorage.setItem("spaces.pendingOperatorOperation", JSON.stringify(pending));
+    setPendingOperations(upsertPendingOperatorOperation(sessionStorage, pending));
     setBusy(true); setError(""); setStatus("Submitting workspace operation…");
     try {
       if (!engine?.operator) throw new Error("Connect this browser first.");
       const { operation } = await engine.operator.execute(pending);
-      setOperatorReady(true);
       setStatus(request.kind === "inviteMember" && operation.state === "completed"
         ? `Added ${String(request.subject)}. Send them an invite link (use “Copy invite link”) so they can find and join the workspace.`
         : `Operation ${operation.state}; ${operation.completedSteps.length} steps recorded.${operation.error ? ` ${operation.error}` : ""}`);
-      if (operation.state === "completed" || operation.state === "failed") {
-        setPendingOperation(null);
-        sessionStorage.removeItem("spaces.pendingOperatorOperation");
+      if (
+        operation.state === "completed" ||
+        operation.state === "failed" ||
+        operation.state === "aborted_actor_revoked"
+      ) {
+        setPendingOperations(clearPendingOperatorOperation(sessionStorage, operationId));
       }
       await refreshWorkspaces();
       if (request.kind === "leaveChannel" && operation.state === "completed") {
@@ -580,21 +954,24 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
       }
       setError(messageOf(caught));
       return false;
-    } finally { setBusy(false); }
+    } finally {
+      operationInFlightRef.current = false;
+      setBusy(false);
+    }
   }
 
   async function toggleExtension(extId: ExtensionId, enable: boolean): Promise<ExtensionToggleOutcome> {
-    if (!activeWorkspace) return { kind: "failed" };
+    if (!activeWorkspace || operationInFlightRef.current) return { kind: "failed" };
     if (activeWorkspace.degradedReasons.length) {
       setError(`Workspace mutations are paused in degraded mode. ${activeWorkspace.degradedReasons.join(" ")}`);
       return { kind: "failed" };
     }
+    operationInFlightRef.current = true;
     const workspace = activeWorkspace.uri;
     const operationId = makeTid();
     const request = { kind: enable ? "enableExtension" : "disableExtension", extId } as const;
     const pending = { workspace, operationId, request };
-    setPendingOperation(pending);
-    sessionStorage.setItem("spaces.pendingOperatorOperation", JSON.stringify(pending));
+    setPendingOperations(upsertPendingOperatorOperation(sessionStorage, pending));
     setBusy(true);
     setError("");
     setStatus(enable ? `Enabling ${extId} extension…` : `Disabling ${extId} extension…`);
@@ -603,11 +980,13 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
       const { operation } = enable
         ? await engine.operator.enableExtension(workspace, extId, operationId)
         : await engine.operator.disableExtension(workspace, extId, operationId);
-      setOperatorReady(true);
       setStatus(`Operation ${operation.state}; ${operation.completedSteps.length} steps recorded.${operation.error ? ` ${operation.error}` : ""}`);
-      if (operation.state === "completed" || operation.state === "failed") {
-        setPendingOperation(null);
-        sessionStorage.removeItem("spaces.pendingOperatorOperation");
+      if (
+        operation.state === "completed" ||
+        operation.state === "failed" ||
+        operation.state === "aborted_actor_revoked"
+      ) {
+        setPendingOperations(clearPendingOperatorOperation(sessionStorage, operationId));
       }
       await refreshWorkspaces();
       admin.reload();
@@ -624,6 +1003,7 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
       setError(messageOf(caught));
       return { kind: "failed" };
     } finally {
+      operationInFlightRef.current = false;
       setBusy(false);
     }
   }
@@ -822,8 +1202,46 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
   }
 
   async function leaveWorkspace() {
-    if (!activeWorkspace || did === activeWorkspace.authorityDid) return;
-    await runOperation({ kind: "leaveWorkspace" });
+    if (!engine || !activeWorkspace || did === activeWorkspace.authorityDid) return;
+    setBusy(true);
+    setError("");
+    setStatus("Leaving workspace…");
+    try {
+      await engine.workspaces.leaveGroup(activeWorkspace.groupDid);
+      await refreshWorkspaces();
+      setStatus("Left workspace.");
+      const liveRoute = typeof window === "undefined" ? parsedRoute : parseRoute(window.location.pathname, window.location.search);
+      if (liveRoute && liveRoute.kind !== "home" && "workspaceUri" in liveRoute && liveRoute.workspaceUri === activeWorkspace.uri) {
+        navigateTo(homeRoute());
+      }
+    } catch (caught) {
+      setStatus("");
+      setError(messageOf(caught));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submitModerationReport(input: {
+    subject: string;
+    cid?: string;
+    reasonType: string;
+    rule?: string;
+    reason?: string;
+  }) {
+    if (!engine || !activeWorkspace) return;
+    await engine.workspaces.createReport({
+      groupDid: activeWorkspace.groupDid,
+      ...input,
+    });
+  }
+
+  function handleRulesChanged(loadedRules: GroupRule[]) {
+    if (!activeUri) return;
+    setRulesByWorkspace((prev) => ({
+      ...prev,
+      [activeUri]: loadedRules.map((r) => ({ uri: r.uri, title: r.title })),
+    }));
   }
 
   async function leaveChannel() {
@@ -888,6 +1306,7 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
           {pendingOperation && <p className="status-note">Operation {pendingOperation.operationId} is still pending. <button className="text-button" disabled={busy || workspaceDegraded} onClick={() => void runOperation(pendingOperation.request, pendingOperation.workspace, pendingOperation.operationId)}>Retry same operation ↻</button></p>}
           {stalledWork && stalledWork.operations.length > 0 && <div className="operation-alert" role="alert"><strong>{stalledWork.operations.length} operation(s) have had no progress for at least five minutes.{stalledWork.truncated ? " Showing the oldest 100; more stalled operations exist." : ""}</strong>{stalledWork.operations.map((operation) => <p key={`${operation.actor}:${operation.operationId}`}>{operation.operationId} · {operation.actor} · {operation.error ?? operation.state}</p>)}</div>}
           {inboxView && inboxView.skipped.length > 0 && <p className="status-note" role="status">Join requests from {inboxView.skipped.map(({ did: writer, reason }) => `${writer} (${reason})`).join("; ")} could not be read.</p>}
+          {invitesWarning && <div className="operation-alert" role="status"><strong>{invitesWarning}</strong></div>}
           {sessionStatus === "ready" && <>
           {parsedRoute === null ? (
             <div className="starter-card">
@@ -899,6 +1318,171 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
           ) : (
             <>
               {workspacesLoaded && invitedTo && !workspaces.some((workspace) => workspace.uri === invitedTo) && <InviteBanner workspace={invitedTo} busy={busy} join={() => void connectInvitation(invitedTo)} dismiss={dismissInvitation} />}
+              {crossPdsInvites.length > 0 && (
+                <section className="starter-card" aria-label="Cross-PDS invitations">
+                  <span className="eyebrow">GROUP INVITATIONS</span>
+                  <h3>Pending cross-PDS invitations ({crossPdsInvites.length})</h3>
+                  <div className="roster-list">
+                    {crossPdsInvites.map((inv) => (
+                      <div className="roster-row" key={inv.uri}>
+                        <span>
+                          <strong>{inv.groupName ?? inv.groupDid}</strong>
+                          {inv.groupDescription ? ` — ${inv.groupDescription}` : ""}
+                          {inv.message ? ` · “${inv.message}”` : ""}
+                          {inv.expiresAt ? ` · expires ${inv.expiresAt}` : ""}
+                        </span>
+                        <button
+                          type="button"
+                          className="primary-button"
+                          disabled={busy}
+                          onClick={() => void acceptCrossPdsInvite(inv)}
+                        >
+                          Accept invite
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              )}
+              {joiningGroups.length > 0 && engine && (
+                <section className="starter-card" aria-label="Pending group join operations">
+                  <span className="eyebrow">GROUP JOIN STATUS</span>
+                  <div className="roster-list">
+                    {joiningGroups.map((entry) => (
+                      <div className="roster-row" key={entry.operationId}>
+                        <span>
+                          <code>{entry.groupDid ?? entry.operationId}</code> ·{" "}
+                          {entry.mode === "create"
+                            ? `Creating workspace${entry.createParams?.name ? ` "${entry.createParams.name}"` : ""} (${entry.phase})`
+                            : entry.phase === "pending_approval"
+                              ? "Awaiting moderator approval"
+                              : entry.phase === "orphaned_by_migration"
+                                ? "Group moved hosts — re-request to join"
+                                : entry.phase === "expired_unknown"
+                                  ? "Join request expired — re-request to join"
+                                  : entry.phase === "unsupported_status"
+                                    ? `Unsupported join status (${entry.rawStatus ?? "unknown"})`
+                                    : entry.phase === "quota_exceeded"
+                                      ? "Join request rate limit reached (429)"
+                                      : entry.phase}
+                        </span>
+                        <div>
+                          {entry.mode === "create" && entry.createParams && (
+                            <button
+                              type="button"
+                              className="primary-button"
+                              disabled={busy}
+                              onClick={() => {
+                                sessionStorage.setItem(
+                                  WORKSPACE_OPERATION_KEY,
+                                  JSON.stringify({
+                                    name: entry.createParams!.name,
+                                    account: "",
+                                    joinPolicy: entry.createParams!.joinPolicy ?? "invite",
+                                    publicMeta: entry.createParams!.publicMeta ?? true,
+                                    operationId: entry.operationId,
+                                  }),
+                                );
+                                void createWorkspaceNamed(entry.createParams!, { mayAuthorize: true });
+                              }}
+                            >
+                              Retry
+                            </button>
+                          )}
+                          {entry.mode === "create" && entry.phase === "submitting" && !entry.groupDid && (
+                            <button
+                              type="button"
+                              className="text-button"
+                              disabled={busy}
+                              onClick={() =>
+                                void engine.workspaces
+                                  .dismissUnstartedCreateOperation(entry.operationId)
+                                  .then((outcome) => {
+                                    if (outcome !== "in_progress") {
+                                      const raw = sessionStorage.getItem(WORKSPACE_OPERATION_KEY);
+                                      if (raw && raw.includes(entry.operationId)) {
+                                        sessionStorage.removeItem(WORKSPACE_OPERATION_KEY);
+                                      }
+                                    }
+                                    return refreshWorkspaces();
+                                  })
+                                  .catch((err: unknown) => setError(messageOf(err)))
+                              }
+                            >
+                              Dismiss
+                            </button>
+                          )}
+                          {entry.phase === "pending_approval" && entry.groupDid && (
+                            <button
+                              type="button"
+                              className="text-button danger"
+                              disabled={busy}
+                              onClick={() =>
+                                void engine.workspaces
+                                  .cancelJoinRequest(entry.groupDid!)
+                                  .then(() => refreshWorkspaces())
+                                  .catch((err: unknown) => setError(messageOf(err)))
+                              }
+                            >
+                              Cancel request
+                            </button>
+                          )}
+                          {(entry.phase === "orphaned_by_migration" ||
+                            entry.phase === "expired_unknown" ||
+                            entry.phase === "quota_exceeded") && (
+                            <button
+                              type="button"
+                              className="primary-button"
+                              disabled={busy}
+                              onClick={() =>
+                                void engine.workspaces
+                                  .retryJoinOperation(entry.operationId)
+                                  .then(() => refreshWorkspaces())
+                                  .catch((err: unknown) => setError(messageOf(err)))
+                              }
+                            >
+                              {entry.phase === "quota_exceeded" ? "Retry" : "Re-request"}
+                            </button>
+                          )}
+                          {(entry.phase === "orphaned_by_migration" ||
+                            entry.phase === "expired_unknown" ||
+                            entry.phase === "unsupported_status" ||
+                            entry.phase === "quota_exceeded") && (
+                            <button
+                              type="button"
+                              className="text-button"
+                              disabled={busy}
+                              onClick={() =>
+                                void engine.workspaces
+                                  .dismissJoinOperation(entry.operationId)
+                                  .then(() => refreshWorkspaces())
+                                  .catch((err: unknown) => setError(messageOf(err)))
+                              }
+                            >
+                              Dismiss
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              )}
+              {leavingGroups.filter((l) => l.phase === "blocked_deactivated").map((leaveEntry) => (
+                <div className="starter-card lifecycle-card" key={leaveEntry.groupDid}>
+                  <p>
+                    Leaving <code>{leaveEntry.groupDid}</code> is paused while the group is deactivated.
+                  </p>
+                  <button
+                    type="button"
+                    className="text-button"
+                    disabled={busy}
+                    onClick={() => void startReactivateGroup(leaveEntry.groupDid)}
+                  >
+                    Reactivate group →
+                  </button>
+                </div>
+              ))}
               {missingRouteWorkspace ? (
                 <div className="starter-card">
                   <p className="form-error" role="alert">Workspace not found or you do not have access to it.</p>
@@ -906,7 +1490,24 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
                 </div>
               ) : !activeWorkspace ? (
                 workspacesLoaded || parsedRoute.kind === "home" ? (
-                  <WorkspaceOnboarding busy={busy} workspaceName={workspaceName} setWorkspaceName={setWorkspaceName} workspaceAccount={workspaceAccount} setWorkspaceAccount={setWorkspaceAccount} inviteUri={inviteUri} setInviteUri={setInviteUri} createWorkspace={createWorkspace} beginAccept={beginAccept} />
+                  <WorkspaceOnboarding
+                    busy={busy}
+                    workspaceName={workspaceName}
+                    setWorkspaceName={setWorkspaceName}
+                    joinPolicy={joinPolicy}
+                    setJoinPolicy={setJoinPolicy}
+                    publicMeta={publicMeta}
+                    setPublicMeta={setPublicMeta}
+                    inviteUri={inviteUri}
+                    setInviteUri={setInviteUri}
+                    joinMessage={joinMessage}
+                    setJoinMessage={setJoinMessage}
+                    reactivateDid={reactivateDid}
+                    setReactivateDid={setReactivateDid}
+                    createWorkspace={createWorkspace}
+                    beginAccept={beginAccept}
+                    beginReactivate={beginReactivate}
+                  />
                 ) : (
                   <p className="status-note" role="status">Loading workspace…</p>
                 )
@@ -925,6 +1526,8 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
                   route={parsedRoute}
                   navigate={(url) => navigateTo(url)}
                   onEnableTasks={() => navigateTo(workspaceRoute(activeWorkspace.authorityDid, activeWorkspace.skey))}
+                  onReportSubject={submitModerationReport}
+                  reportRules={activeReportRules}
                   setStatus={setStatus}
                   setError={setError}
                 />
@@ -959,11 +1562,18 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
                   toggleReaction={toggleReaction}
                   editMessage={editMessage}
                   deleteMessage={deleteMessage}
+                  onReportSubject={submitModerationReport}
+                  reportRules={activeReportRules}
+                  onReported={() => setStatus("Report submitted to group moderators.")}
                   setError={setError}
                 />
               ) : (
                 <WorkspaceHome
                   did={did}
+                  engine={engine}
+                  groupClient={activeGroupClient}
+                  groupOAuth={groupOAuth}
+                  returnTo={routeKey}
                   apps={appDirectory}
                   activeWorkspace={activeWorkspace}
                   declarations={activeDeclarations}
@@ -972,6 +1582,17 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
                   inbox={inboxView?.requests ?? []}
                   inboxLoaded={inboxView !== undefined && !inboxView.refused}
                   inboxPermissionMissing={inboxView?.refused === true}
+                  reportRules={activeReportRules}
+                  onRulesChanged={handleRulesChanged}
+                  onReportSubject={submitModerationReport}
+                  onGroupClientChanged={refreshActiveGroupClient}
+                  onWorkspaceMutated={async () => {
+                    await refreshWorkspaces();
+                  }}
+                  onGroupDeleted={() => {
+                    void refreshWorkspaces();
+                    navigateTo(homeRoute());
+                  }}
                   runOperation={runOperation}
                   onToggleExtension={toggleExtension}
                   onReauthorizeAuthority={reauthorizeAuthority}

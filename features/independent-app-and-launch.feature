@@ -38,4 +38,4 @@ Feature: Independent app conformance and launch limits
       Given the owner has paused admin mutations
       When an admin submits a mutation
       Then the operator rejects or queues it as paused
-      And committed PDS records and member lists remain unchanged
+      And committed PDS records and Group Host governance records remain unchanged

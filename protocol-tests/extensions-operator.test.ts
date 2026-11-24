@@ -10,20 +10,39 @@ import { isScopeMissingError } from "@flock/protocol/atproto/xrpc";
 import { extSpaceUriFor } from "@flock/protocol/extensions";
 import { requestDigest, tidNow } from "@flock/protocol/keys";
 import { COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
+import { groupAdminScopes } from "@flock/protocol/scopes";
 import { availablePort, startOperatorServer, type AppServer } from "./support/app-server";
 import {
+  acceptGroupMembership,
   actorTransport,
   combinedMemberScopes,
+  createOpenSocialGroup,
   mintAppSession,
   mintBrowserSession,
   startPdsNetwork,
-  storeAuthorityGrant,
+  storeGroupAuthorityGrant,
 } from "./support/pds-network";
 
-test("extensions at the pinned PDS: enable, discovery, getChanges, membership lifecycle, disable, and legacy authority grant safety (R11c)", { timeout: 10 * 60_000 }, async (t) => {
+function buildLegacyAuthorityScopeWithoutTasks(groupDid?: string): string {
+  const coveredModalities = [
+    SPACE_TYPE.workspace,
+    SPACE_TYPE.inbox,
+    SPACE_TYPE.channel,
+    SPACE_TYPE.appInbox,
+  ];
+  return [
+    ...groupAdminScopes(groupDid).filter((token) => !token.startsWith("space:*?collection=*")),
+    ...coveredModalities.map(
+      (spaceType) =>
+        `space:${spaceType}?collection=*&action=read&action=create&action=update&action=delete&manage=create&manage=update&manage=delete`,
+    ),
+  ].join(" ");
+}
+
+test("extensions at the pinned PDS: enable, discovery, getChanges, membership lifecycle, disable, and legacy authority grant safety (R13 OpenSocial)", { timeout: 10 * 60_000 }, async (t) => {
   const port = await availablePort();
   const pds = await startPdsNetwork("extensions-operator", { operatorPort: port });
-  const appStateDir = mkdtempSync(join(tmpdir(), "r11c-ext-app-"));
+  const appStateDir = mkdtempSync(join(tmpdir(), "r13-ext-app-"));
   let server: AppServer | undefined;
   try {
     server = await startOperatorServer();
@@ -33,7 +52,8 @@ test("extensions at the pinned PDS: enable, discovery, getChanges, membership li
       { executeOperatorOperation },
       { parseWorkspaceRef },
       { registrationDeps },
-      { listSpaceMembers, putAuthorityRecord, spaceExists },
+      { getOpenSocialSpacePolicy, putAuthorityRecord, spaceExists },
+      { liveSpaceAccess, readGroupGovernanceState },
       { mintSpaceCredential },
       { sessionClient },
       { resolvePds },
@@ -46,6 +66,7 @@ test("extensions at the pinned PDS: enable, discovery, getChanges, membership li
       import("@flock/operator/operator/actor"),
       import("@flock/operator/operator/registrations"),
       import("@flock/operator/atproto/space-ops"),
+      import("@flock/operator/operator/workspace-state"),
       import("@flock/operator/atproto/space-credential"),
       import("@flock/operator/atproto/client"),
       import("@flock/operator/atproto/identity"),
@@ -55,11 +76,8 @@ test("extensions at the pinned PDS: enable, discovery, getChanges, membership li
 
     const operatorService = { serviceRef: pds.serviceRef, endpoint: server.url };
     const fullAuthorityScope = authorityClientMetadata().scope;
-    const legacyAuthorityScope = fullAuthorityScope
-      .split(" ")
-      .filter((scope) => !scope.startsWith(`space:${SPACE_TYPE.tasks}?`))
-      .join(" ");
-    assert.notEqual(legacyAuthorityScope, fullAuthorityScope, "legacy authority scope excludes Tasks space scope");
+    const legacyAuthorityScope = buildLegacyAuthorityScopeWithoutTasks();
+    assert.notEqual(legacyAuthorityScope, fullAuthorityScope, "legacy authority scope excludes Tasks space management");
 
     const owner = await pds.createActor("r11cowner", 0);
     const memberOne = await pds.createActor("r11cm1", 1);
@@ -67,8 +85,11 @@ test("extensions at the pinned PDS: enable, discovery, getChanges, membership li
     const leaver = await pds.createActor("r11cleaver", 1);
     const appActor = await pds.createActor("r11capp", 1);
 
-    await storeAuthorityGrant(pds.hosts[0], owner.did, "r11c-owner-full");
-    const created = await createWorkspace(await restoreAuthorityGrant(owner.did), {
+    const group = await createOpenSocialGroup(pds, owner, {
+      name: "Extensions Workspace",
+      keyLabel: "r11c-owner-full",
+    });
+    const created = await createWorkspace(await restoreAuthorityGrant(group.groupDid), {
       creator: owner.did,
       name: "Extensions Workspace",
       operationId: tidNow(),
@@ -76,7 +97,7 @@ test("extensions at the pinned PDS: enable, discovery, getChanges, membership li
     assert.equal(created.state, "completed");
     const workspace = created.workspace;
     const workspaceRef = parseWorkspaceRef(workspace);
-    const tasksSpace = extSpaceUriFor(owner.did, workspaceRef.skey, "tasks");
+    const tasksSpace = extSpaceUriFor(group.groupDid, workspaceRef.skey, "tasks");
     const generalSkey = created.channel.split("/").at(-1)!;
 
     const scopes = await combinedMemberScopes(pds.serviceRef);
@@ -112,11 +133,16 @@ test("extensions at the pinned PDS: enable, discovery, getChanges, membership li
       const enabled = await ownerEngine.operator!.enableExtension(workspace, "tasks");
       assert.equal(enabled.operation.state, "completed");
 
-      const grant = await restoreAuthorityGrant(owner.did);
+      const grant = await restoreAuthorityGrant(group.groupDid);
       assert.equal(await spaceExists(grant, tasksSpace), true);
-      const members = await listSpaceMembers(grant, tasksSpace);
-      assert.deepEqual(members, [{ did: memberOne.did, read: true, write: true }]);
-      assert.equal(members.some((m) => m.did === appActor.did), false, "apps never get Tasks space access");
+      const gov = await readGroupGovernanceState(grant, group.groupDid);
+      assert.deepEqual(liveSpaceAccess(gov, group.groupDid, tasksSpace, owner.did), { read: true, write: true });
+      assert.deepEqual(liveSpaceAccess(gov, group.groupDid, tasksSpace, memberOne.did), { read: true, write: true });
+      assert.deepEqual(
+        liveSpaceAccess(gov, group.groupDid, tasksSpace, appActor.did),
+        { read: false, write: false },
+        "apps never get Tasks space access",
+      );
       assert.equal(isRegisteredSpace(tasksSpace), true, "Tasks space notice registration is recorded");
 
       const discovery = await memberOneEngine.workspaces.discover();
@@ -130,7 +156,7 @@ test("extensions at the pinned PDS: enable, discovery, getChanges, membership li
       assert.equal(summary.extensions?.[0]?.cleanupComplete, false);
       assert.equal(summary.extensions?.[0]?.space, tasksSpace);
 
-      // App is denied by OAuth scope, PDS Tasks space member list, and operator getChanges.
+      // App is denied by OAuth scope, OpenSocial Tasks space policy, and operator getChanges.
       const appScopeErr = await mintSpaceCredential(appSession, tasksSpace).then(() => null, (err: unknown) => err);
       assert.ok(appScopeErr && isScopeMissingError(appScopeErr));
       const appCredErr = await mintSpaceCredentialWith(actorTransport(pds, appActor), tasksSpace).then(() => null, (err: unknown) => err);
@@ -138,7 +164,7 @@ test("extensions at the pinned PDS: enable, discovery, getChanges, membership li
       const appFeed = await appEngine.operator!.getChanges([{ space: tasksSpace, after: "0" }]);
       assert.deepEqual(appFeed.denied, [tasksSpace]);
 
-      // Member writes a project record to Tasks space and getChanges delivers the real PDS write notification.
+      // Member writes a project record to Tasks space and getChanges delivers the real GroupHost write notification.
       const { head } = await memberOneEngine.operator!.getChanges([]);
       const projectRkey = tidNow();
       await sessionClient(ownerBrowser.session).procedure("com.atproto.space.createRecord", {
@@ -166,7 +192,7 @@ test("extensions at the pinned PDS: enable, discovery, getChanges, membership li
         }
         cursor = answer.head;
       }
-      assert.equal(delivered, true, `real PDS notifySpaceUpdate delivered Tasks space change\n${server!.output()}`);
+      assert.equal(delivered, true, `real GroupHost notifySpaceUpdate delivered Tasks space change\n${server!.output()}`);
 
       const m1Cred = await mintSpaceCredential(memberOneBrowser.session, tasksSpace);
       const readProject = await m1Cred.client(await resolvePds(owner.did)).query<{ value: { name?: string } }>(
@@ -180,14 +206,16 @@ test("extensions at the pinned PDS: enable, discovery, getChanges, membership li
       assert.equal((await ownerEngine.operator!.execute({
         workspace, operationId: tidNow(), request: { kind: "inviteMember", subject: memberTwo.did },
       })).operation.state, "completed");
+      await acceptGroupMembership(pds, memberTwo, group.groupDid);
       assert.equal((await ownerEngine.operator!.execute({
         workspace, operationId: tidNow(), request: { kind: "inviteMember", subject: leaver.did },
       })).operation.state, "completed");
+      await acceptGroupMembership(pds, leaver, group.groupDid);
 
-      const grant = await restoreAuthorityGrant(owner.did);
-      const members = await listSpaceMembers(grant, tasksSpace);
-      assert.equal(members.some((m) => m.did === memberTwo.did && m.read && m.write), true);
-      assert.equal(members.some((m) => m.did === leaver.did && m.read && m.write), true);
+      const grant = await restoreAuthorityGrant(group.groupDid);
+      const govBefore = await readGroupGovernanceState(grant, group.groupDid);
+      assert.deepEqual(liveSpaceAccess(govBefore, group.groupDid, tasksSpace, memberTwo.did), { read: true, write: true });
+      assert.deepEqual(liveSpaceAccess(govBefore, group.groupDid, tasksSpace, leaver.did), { read: true, write: true });
 
       // memberTwo writes a task and reads Changes before removal.
       const taskRkey = tidNow();
@@ -208,11 +236,12 @@ test("extensions at the pinned PDS: enable, discovery, getChanges, membership li
       const { head: m2Head } = await memberTwoEngine.operator!.getChanges([]);
       const { head: leaverHead } = await leaverEngine.operator!.getChanges([]);
 
-      // removeMember revokes Tasks access immediately.
+      // removeMember revokes Tasks access immediately via O(1) membership deletion.
       assert.equal((await ownerEngine.operator!.execute({
         workspace, operationId: tidNow(), request: { kind: "removeMember", subject: memberTwo.did },
       })).operation.state, "completed");
-      assert.equal((await listSpaceMembers(grant, tasksSpace)).some((m) => m.did === memberTwo.did), false);
+      const govAfterM2 = await readGroupGovernanceState(grant, group.groupDid);
+      assert.deepEqual(liveSpaceAccess(govAfterM2, group.groupDid, tasksSpace, memberTwo.did), { read: false, write: false });
       const m2Started = Date.now();
       const m2Changes = await memberTwoEngine.operator!.getChanges([{ space: tasksSpace, after: m2Head }]);
       assert.deepEqual(m2Changes.denied, [tasksSpace]);
@@ -220,11 +249,12 @@ test("extensions at the pinned PDS: enable, discovery, getChanges, membership li
       const m2CredErr = await mintSpaceCredential(memberTwoBrowser.session, tasksSpace).then(() => null, (err: unknown) => err);
       assert.ok(m2CredErr && isAccessLost(m2CredErr));
 
-      // leaveWorkspace revokes Tasks access immediately.
+      // leaveWorkspace revokes Tasks access immediately via O(1) membership deletion.
       assert.equal((await leaverEngine.operator!.execute({
         workspace, operationId: tidNow(), request: { kind: "leaveWorkspace" },
       })).operation.state, "completed");
-      assert.equal((await listSpaceMembers(grant, tasksSpace)).some((m) => m.did === leaver.did), false);
+      const govAfterLeaver = await readGroupGovernanceState(grant, group.groupDid);
+      assert.deepEqual(liveSpaceAccess(govAfterLeaver, group.groupDid, tasksSpace, leaver.did), { read: false, write: false });
       const leaverStarted = Date.now();
       const leaverChanges = await leaverEngine.operator!.getChanges([{ space: tasksSpace, after: leaverHead }]);
       assert.deepEqual(leaverChanges.denied, [tasksSpace]);
@@ -250,8 +280,10 @@ test("extensions at the pinned PDS: enable, discovery, getChanges, membership li
       const disabled = await ownerEngine.operator!.disableExtension(workspace, "tasks");
       assert.equal(disabled.operation.state, "completed");
 
-      const grant = await restoreAuthorityGrant(owner.did);
-      assert.deepEqual(await listSpaceMembers(grant, tasksSpace), []);
+      const grant = await restoreAuthorityGrant(group.groupDid);
+      const disabledPolicy = await getOpenSocialSpacePolicy(grant, tasksSpace);
+      assert.deepEqual(disabledPolicy?.grants ?? [], [{ role: "admin", read: true, write: true }]);
+      assert.equal(disabledPolicy?.unlisted, true);
       assert.equal(isRegisteredSpace(tasksSpace), false, "notice registration dropped");
       assert.equal(
         (getRawDb().prepare("SELECT count(*) AS count FROM space_notification WHERE space_uri = ?").get(tasksSpace) as { count: number }).count,
@@ -270,11 +302,13 @@ test("extensions at the pinned PDS: enable, discovery, getChanges, membership li
       assert.equal(await memberOneEngine.sync.store.getSpace(tasksSpace), undefined, "disabled extension space purged from client store");
     });
 
-    await t.test("legacy authority grant without Tasks scope succeeds on pre-R11 and cleanly disabled workspaces, and blocks enable/removal/leave/reconcile on active or uncleaned extensions", async () => {
+    await t.test("legacy authority grant without Tasks scope succeeds on pre-R11 and cleanly disabled workspaces, and blocks enable/disable/reconcile on active or uncleaned extensions", async () => {
       // 1. Cleanly disabled workspace (cleanupComplete: true) under legacy authority grant succeeds on remove, leave, reconcile.
       await ownerEngine.operator!.execute({ workspace, operationId: tidNow(), request: { kind: "inviteMember", subject: memberTwo.did } });
       await ownerEngine.operator!.execute({ workspace, operationId: tidNow(), request: { kind: "inviteMember", subject: leaver.did } });
-      await storeAuthorityGrant(pds.hosts[0], owner.did, "r11c-owner-legacy-disabled", { scope: legacyAuthorityScope });
+      await storeGroupAuthorityGrant(pds, owner, group.groupDid, "r11c-owner-legacy-disabled", {
+        scope: buildLegacyAuthorityScopeWithoutTasks(group.groupDid),
+      });
       assert.equal((await ownerEngine.operator!.execute({
         workspace, operationId: tidNow(), request: { kind: "removeMember", subject: memberTwo.did },
       })).operation.state, "completed");
@@ -287,14 +321,17 @@ test("extensions at the pinned PDS: enable, discovery, getChanges, membership li
 
       // 2. Fresh pre-R11 workspace (Tasks never enabled) under legacy authority grant: remove/leave/reconcile succeed; enableExtension fails cleanly until re-grant.
       const legacyOwner = await pds.createActor("r11clegowner", 0);
-      await storeAuthorityGrant(pds.hosts[0], legacyOwner.did, "r11c-leg-init");
-      const legacyCreated = await createWorkspace(await restoreAuthorityGrant(legacyOwner.did), {
+      const legacyGroup = await createOpenSocialGroup(pds, legacyOwner, {
+        name: "Legacy Workspace",
+        keyLabel: "r11c-leg-init",
+      });
+      const legacyCreated = await createWorkspace(await restoreAuthorityGrant(legacyGroup.groupDid), {
         creator: legacyOwner.did,
         name: "Legacy Workspace",
         operationId: tidNow(),
       }, registrationDeps);
       const legacyWs = legacyCreated.workspace;
-      const legacyTasksSpace = extSpaceUriFor(legacyOwner.did, parseWorkspaceRef(legacyWs).skey, "tasks");
+      const legacyTasksSpace = extSpaceUriFor(legacyGroup.groupDid, parseWorkspaceRef(legacyWs).skey, "tasks");
       const legacyOwnerEngine = createEngine(actorTransport(pds, legacyOwner), { operator: operatorService });
       assert.equal((await legacyOwnerEngine.operator!.execute({
         workspace: legacyWs, operationId: tidNow(), request: { kind: "inviteMember", subject: memberTwo.did },
@@ -303,7 +340,9 @@ test("extensions at the pinned PDS: enable, discovery, getChanges, membership li
         workspace: legacyWs, operationId: tidNow(), request: { kind: "inviteMember", subject: leaver.did },
       })).operation.state, "completed");
 
-      await storeAuthorityGrant(pds.hosts[0], legacyOwner.did, "r11c-leg-downgraded", { scope: legacyAuthorityScope });
+      await storeGroupAuthorityGrant(pds, legacyOwner, legacyGroup.groupDid, "r11c-leg-downgraded", {
+        scope: buildLegacyAuthorityScopeWithoutTasks(legacyGroup.groupDid),
+      });
       assert.equal((await legacyOwnerEngine.operator!.execute({
         workspace: legacyWs, operationId: tidNow(), request: { kind: "removeMember", subject: memberTwo.did },
       })).operation.state, "completed");
@@ -323,7 +362,7 @@ test("extensions at the pinned PDS: enable, discovery, getChanges, membership li
       assert.equal(getRawDb().prepare("SELECT 1 FROM operation WHERE operation_id = ?").get(enableOpId), undefined);
 
       // Re-grant full scope -> retry enableExtension with the same operationId succeeds.
-      await storeAuthorityGrant(pds.hosts[0], legacyOwner.did, "r11c-leg-regranted");
+      await storeGroupAuthorityGrant(pds, legacyOwner, legacyGroup.groupDid, "r11c-leg-regranted");
       assert.equal((await legacyOwnerEngine.operator!.execute({
         workspace: legacyWs, operationId: tidNow(), request: { kind: "inviteMember", subject: memberTwo.did },
       })).operation.state, "completed");
@@ -332,26 +371,24 @@ test("extensions at the pinned PDS: enable, discovery, getChanges, membership li
       })).operation.state, "completed");
       assert.equal((await legacyOwnerEngine.operator!.enableExtension(legacyWs, "tasks", enableOpId)).operation.state, "completed");
 
-      // 3. Active extension under legacy grant fails cleanly on removeMember, leaveWorkspace, and reconcileWorkspace.
-      await storeAuthorityGrant(pds.hosts[0], legacyOwner.did, "r11c-leg-active-downgrade", { scope: legacyAuthorityScope });
-      await assert.rejects(
-        legacyOwnerEngine.operator!.execute({ workspace: legacyWs, operationId: tidNow(), request: { kind: "removeMember", subject: memberTwo.did } }),
-        (err: unknown) => err instanceof OperatorRemoteError && err.status === 502 && err.code === "AuthoritySessionUnavailable",
-      );
-      await assert.rejects(
-        leaverEngine.operator!.execute({ workspace: legacyWs, operationId: tidNow(), request: { kind: "leaveWorkspace" } }),
-        (err: unknown) => err instanceof OperatorRemoteError && err.status === 502 && err.code === "AuthoritySessionUnavailable",
-      );
+      // 3. Active extension under legacy grant fails cleanly on reconcileWorkspace and disableExtension.
+      await storeGroupAuthorityGrant(pds, legacyOwner, legacyGroup.groupDid, "r11c-leg-active-downgrade", {
+        scope: buildLegacyAuthorityScopeWithoutTasks(legacyGroup.groupDid),
+      });
       await assert.rejects(
         legacyOwnerEngine.operator!.execute({ workspace: legacyWs, operationId: tidNow(), request: { kind: "reconcileWorkspace" } }),
         (err: unknown) => err instanceof OperatorRemoteError && err.status === 502 && err.code === "AuthoritySessionUnavailable",
       );
-      // Verify memberTwo was NOT removed from workspace or Tasks space!
-      await storeAuthorityGrant(pds.hosts[0], legacyOwner.did, "r11c-leg-check");
-      const fullGrant = await restoreAuthorityGrant(legacyOwner.did);
-      assert.equal((await listSpaceMembers(fullGrant, legacyTasksSpace)).some((m) => m.did === memberTwo.did), true);
+      // Clean up the pending reconcile row so we can also verify uncleaned disable and recovery deterministically.
+      getRawDb().prepare("DELETE FROM operation WHERE workspace = ? AND state = 'pending'").run(legacyGroup.groupDid);
 
-      // 4. Uncleaned disable (active: false, cleanupComplete: false) under legacy grant ALSO blocks remove/leave/reconcile and recovery.
+      // Verify memberTwo still has Tasks space access!
+      await storeGroupAuthorityGrant(pds, legacyOwner, legacyGroup.groupDid, "r11c-leg-check");
+      const fullGrant = await restoreAuthorityGrant(legacyGroup.groupDid);
+      const govCheck = await readGroupGovernanceState(fullGrant, legacyGroup.groupDid);
+      assert.deepEqual(liveSpaceAccess(govCheck, legacyGroup.groupDid, legacyTasksSpace, memberTwo.did), { read: true, write: true });
+
+      // 4. Uncleaned disable (active: false, cleanupComplete: false) under legacy grant blocks reconcileWorkspace and recovery.
       const nowIso = new Date().toISOString();
       await putAuthorityRecord(fullGrant, legacyWs, COLLECTION.extInstall, "tasks", {
         extId: "tasks",
@@ -363,53 +400,49 @@ test("extensions at the pinned PDS: enable, discovery, getChanges, membership li
         updatedAt: nowIso,
         disabledAt: nowIso,
       });
-      await storeAuthorityGrant(pds.hosts[0], legacyOwner.did, "r11c-leg-uncleaned-downgrade", { scope: legacyAuthorityScope });
-      await assert.rejects(
-        legacyOwnerEngine.operator!.execute({ workspace: legacyWs, operationId: tidNow(), request: { kind: "removeMember", subject: memberTwo.did } }),
-        (err: unknown) => err instanceof OperatorRemoteError && err.status === 502 && err.code === "AuthoritySessionUnavailable",
-      );
-      await assert.rejects(
-        leaverEngine.operator!.execute({ workspace: legacyWs, operationId: tidNow(), request: { kind: "leaveWorkspace" } }),
-        (err: unknown) => err instanceof OperatorRemoteError && err.status === 502 && err.code === "AuthoritySessionUnavailable",
-      );
+      await storeGroupAuthorityGrant(pds, legacyOwner, legacyGroup.groupDid, "r11c-leg-uncleaned-downgrade", {
+        scope: buildLegacyAuthorityScopeWithoutTasks(legacyGroup.groupDid),
+      });
       await assert.rejects(
         legacyOwnerEngine.operator!.execute({ workspace: legacyWs, operationId: tidNow(), request: { kind: "reconcileWorkspace" } }),
         (err: unknown) => err instanceof OperatorRemoteError && err.status === 502 && err.code === "AuthoritySessionUnavailable",
       );
+      getRawDb().prepare("DELETE FROM operation WHERE workspace = ? AND state = 'pending'").run(legacyGroup.groupDid);
 
-      // Verify a pending operation blocked on legacy Tasks scope raises AuthorityReauthorizationRequiredError when another op attempts recovery.
+      // Verify a pending disableExtension operation blocked on legacy Tasks scope raises AuthorityReauthorizationRequiredError when another op attempts recovery.
       const legacyActor = {
         did: legacyOwner.did,
-        session: await restoreAuthorityGrant(legacyOwner.did),
+        session: await restoreAuthorityGrant(legacyGroup.groupDid),
         workspace: parseWorkspaceRef(legacyWs),
         canRecoverOperations: true,
       };
-      const pendingReq = { kind: "removeMember", subject: memberTwo.did };
+      const pendingReq = { kind: "disableExtension", extId: "tasks" };
       getRawDb().prepare(`INSERT INTO operation (workspace, workspace_uri, actor, operation_id, request_hash, request_json, state, steps_json, error, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, 'missing tasks scope', ?, ?)`).run(
-        legacyOwner.did,
+        legacyGroup.groupDid,
         legacyWs,
         legacyOwner.did,
         "222222222229a",
         requestDigest({ workspace: legacyWs, request: pendingReq }),
         JSON.stringify({ workspace: legacyWs, request: pendingReq }),
-        JSON.stringify(["remove-inbox-membership"]),
+        JSON.stringify(["ext-disable-record"]),
         Math.floor(Date.now() / 1000) - 60,
         Math.floor(Date.now() / 1000) - 60,
       );
       await assert.rejects(
-        executeOperatorOperation(legacyActor, tidNow(), { kind: "reconcileWorkspace" }, registrationDeps),
+        executeOperatorOperation(legacyActor, tidNow(), { kind: "removeMember", subject: memberTwo.did }, registrationDeps),
         AuthorityReauthorizationRequiredError,
       );
       // Clean up synthetic row before finishing via HTTP re-consent.
       getRawDb().prepare("DELETE FROM operation WHERE operation_id = ?").run("222222222229a");
 
       // Re-grant full scope -> reconcileWorkspace finishes cleanup, removeMember & leaveWorkspace succeed!
-      await storeAuthorityGrant(pds.hosts[0], legacyOwner.did, "r11c-leg-final-regrant");
+      await storeGroupAuthorityGrant(pds, legacyOwner, legacyGroup.groupDid, "r11c-leg-final-regrant");
       assert.equal((await legacyOwnerEngine.operator!.execute({
         workspace: legacyWs, operationId: tidNow(), request: { kind: "reconcileWorkspace" },
       })).operation.state, "completed");
-      assert.deepEqual(await listSpaceMembers(await restoreAuthorityGrant(legacyOwner.did), legacyTasksSpace), []);
+      const finalPolicy = await getOpenSocialSpacePolicy(await restoreAuthorityGrant(legacyGroup.groupDid), legacyTasksSpace);
+      assert.deepEqual(finalPolicy?.grants ?? [], [{ role: "admin", read: true, write: true }]);
       const legacySummary = await legacyOwnerEngine.workspaces.summary(legacyWs);
       assert.equal(legacySummary?.extensions?.[0]?.cleanupComplete, true);
       assert.equal((await legacyOwnerEngine.operator!.execute({

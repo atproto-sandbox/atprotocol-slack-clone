@@ -1,12 +1,25 @@
 import { listBoundedRecords } from "@flock/protocol/atproto/record-pages";
 import { MAX_LISTED_SET_ASIDE } from "@flock/protocol/atproto/repo-failure";
-import { selectValidChannelMessages } from "@flock/protocol/atproto/valid-channel-messages";
 import { isAccessLost, isCredentialRefused } from "@flock/protocol/atproto/space-credential-core";
+import { selectValidChannelMessages } from "@flock/protocol/atproto/valid-channel-messages";
 import { isMissingXrpcResource } from "@flock/protocol/atproto/xrpc";
-import { channelUri, inboxUri, isSkey, parseSpaceRecordUri, parseWorkspaceUri, reactionRecordKey, requestRecordKey, spaceRecordUri, tidNow } from "@flock/protocol/keys";
-import { COLLECTION } from "@flock/protocol/nsids";
+import {
+  channelUri,
+  groupMembersUri,
+  inboxUri,
+  isDid,
+  isSkey,
+  parseSpaceRecordUri,
+  parseWorkspaceUri,
+  reactionRecordKey,
+  requestRecordKey,
+  spaceRecordUri,
+  tidNow,
+} from "@flock/protocol/keys";
+import { isHidden, isTakendown, labelsForResource, projectActiveLabels, type ActiveSpaceLabel } from "@flock/protocol/moderation";
+import { ATPROTO_SPACE_COLLECTION, COLLECTION, OPENSOCIAL_COLLECTION } from "@flock/protocol/nsids";
 import { validateSpaceRecord } from "@flock/protocol/registry";
-import { WorkspaceEnvelopeError } from "@flock/protocol/workspace-summary";
+import { extractGroupSpacePolicyRecord, WorkspaceEnvelopeError } from "@flock/protocol/workspace-summary";
 import type { MessageBlock } from "./blocks";
 import type { CredentialCache } from "./credentials";
 import { ChannelUnavailableError } from "./errors";
@@ -24,8 +37,23 @@ const MAX_PRIVATE_ROSTER_SCAN = 1_000;
 export type ChannelRef = { workspace: string; skey: string };
 export type Visibility = "public" | "private" | "transitioning" | "archived";
 
-export type ChannelMessage = { uri: string; repo: string; rkey: string; value: Record<string, unknown> };
-export type ChannelReaction = { uri: string; repo: string; rkey: string; value: Record<string, unknown> };
+export type ChannelMessage = {
+  uri: string;
+  repo: string;
+  rkey: string;
+  cid?: string;
+  value: Record<string, unknown>;
+  hidden?: boolean;
+  labels?: string[];
+};
+export type ChannelReaction = {
+  uri: string;
+  repo: string;
+  rkey: string;
+  cid?: string;
+  value: Record<string, unknown>;
+  labels?: string[];
+};
 
 export type ChannelPage = {
   messages: ChannelMessage[];
@@ -107,11 +135,29 @@ export class ChannelClient {
     return { ...current, visibility: current.visibility };
   }
 
-  async readPage(ref: ChannelRef, options: { before?: string; limit?: number } = {}): Promise<ChannelPage> {
+  async readPage(
+    ref: ChannelRef,
+    options: { before?: string; limit?: number; trustWatchedAccountLabels?: boolean } = {},
+  ): Promise<ChannelPage> {
     const limit = options.limit ?? CHANNEL_PAGE;
     const { authorityDid, space } = await this.readable(ref);
     const writers = await this.deps.sync.writers(space, { workspace: ref.workspace });
-    const sources = writers.map((writer) => ({ space, repo: writer.did }));
+    const listedWritersSet = new Set(writers.map((writer) => writer.did));
+    const [channelLabels, accountLabels] = await Promise.all([
+      this.deps.sync.syncSpaceActiveLabels(space, {
+        workspace: ref.workspace,
+        listedWriters: listedWritersSet,
+      }),
+      this.deps.sync.syncAccountLabels(authorityDid, {
+        ...(options.trustWatchedAccountLabels ? { trustWatchedCache: true } : {}),
+      }),
+    ]);
+    const isMessageWithheld = (uri: string, repo: string, cid?: string) =>
+      isTakendown(accountLabels, repo) || isTakendown(channelLabels, uri, cid || undefined);
+
+    const sources = writers
+      .filter((writer) => writer.did !== authorityDid)
+      .map((writer) => ({ space, repo: writer.did }));
     const parentReads = new Map<string, Promise<{ uri: string; value: Record<string, unknown> } | null>>();
     const result = await this.deps.sync.read({
       sources,
@@ -120,22 +166,47 @@ export class ChannelClient {
       limit,
       before: decodeCursor(options.before),
       select: async (candidates, count) => {
-        const byUri = new Map(candidates.map((record) => [record.uri, record]));
-        const selected = await selectValidChannelMessages(candidates.map(messageOf), {
-          authorityDid, spaceUri: space, limit: count,
-          getParent: (repo, rkey) => this.parent(space, repo, rkey, byUri, parentReads),
+        const survivingCandidates = candidates.filter(
+          (record) => !isMessageWithheld(record.uri, record.repo, record.cid),
+        );
+        const byUri = new Map(survivingCandidates.map((record) => [record.uri, record]));
+        const selected = await selectValidChannelMessages(survivingCandidates.map((r) => messageOf(r)), {
+          authorityDid,
+          spaceUri: space,
+          limit: count,
+          getParent: async (repo, rkey) => {
+            const parentUri = spaceRecordUri(space, repo, COLLECTION.message, rkey);
+            if (isTakendown(accountLabels, repo) || isTakendown(channelLabels, parentUri)) return null;
+            return this.parent(space, repo, rkey, byUri, parentReads, channelLabels, accountLabels);
+          },
         });
         return selected.messages.map((message) => byUri.get(message.uri)!);
       },
     });
-    const messages = result.items.map(messageOf);
+    const messages = result.items.map((record) => decorateMessageLabels(record, channelLabels, accountLabels));
     const knownMessages = new Set(messages.map((message) => message.uri));
-    const listed = new Set(sources.filter((source) => !result.setAside.some((aside) => aside.permanent && aside.did === source.repo)).map((source) => source.repo));
+    const listed = new Set(
+      sources
+        .filter((source) => !result.setAside.some((aside) => aside.permanent && aside.did === source.repo))
+        .map((source) => source.repo),
+    );
     const reactions = (await this.deps.sync.store.records(space, COLLECTION.reaction))
-      .filter((record) => listed.has(record.repo) && typeof record.value.subject === "string" && knownMessages.has(record.value.subject) && validateSpaceRecord(COLLECTION.reaction, record.value, {
-        authorityDid, spaceUri: space, repoDid: record.repo, rkey: record.rkey, knownMessages,
-      }).valid)
-      .map(messageOf)
+      .filter(
+        (record) =>
+          listed.has(record.repo) &&
+          !isTakendown(accountLabels, record.repo) &&
+          !isTakendown(channelLabels, record.uri, record.cid || undefined) &&
+          typeof record.value.subject === "string" &&
+          knownMessages.has(record.value.subject) &&
+          validateSpaceRecord(COLLECTION.reaction, record.value, {
+            authorityDid,
+            spaceUri: space,
+            repoDid: record.repo,
+            rkey: record.rkey,
+            knownMessages,
+          }).valid,
+      )
+      .map((record) => decorateReactionLabels(record, channelLabels))
       .sort((left, right) => (left.uri < right.uri ? -1 : left.uri > right.uri ? 1 : 0));
     return {
       messages,
@@ -147,23 +218,34 @@ export class ChannelClient {
     };
   }
 
-  /** Reads one message in `ref` with a verified MAC, checking writer membership (D14) and a reply's parent, or null when missing or invalid. */
+  /** Reads one message in `ref` with a verified MAC, checking writer membership (D14), labels, and a reply's parent, or null when missing/withheld/invalid. */
   async getMessage(ref: ChannelRef, uri: string): Promise<ChannelMessage | null> {
     const { authorityDid, space } = await this.readable(ref);
     const target = parseSpaceRecordUri(uri, space, COLLECTION.message);
     if (!target) return null;
-    const writers = new Set((await this.deps.sync.writers(space, { workspace: ref.workspace })).map((writer) => writer.did));
+    const writersList = await this.deps.sync.writers(space, { workspace: ref.workspace });
+    const writers = new Set(writersList.map((writer) => writer.did));
     if (!writers.has(target.repo)) return null;
+    const [channelLabels, accountLabels] = await Promise.all([
+      this.deps.sync.syncSpaceActiveLabels(space, {
+        workspace: ref.workspace,
+        listedWriters: writers,
+      }),
+      this.deps.sync.syncAccountLabels(authorityDid),
+    ]);
+    if (isTakendown(accountLabels, target.repo)) return null;
     const record = await this.verifiedMessageRecord(space, target.repo, target.rkey);
     if (!record) return null;
+    if (isTakendown(channelLabels, record.uri, record.cid)) return null;
     const known = new Set<string>();
     if (record.value.parent !== undefined) {
       if (typeof record.value.parent !== "string") return null;
       const parentTarget = parseSpaceRecordUri(record.value.parent, space, COLLECTION.message);
-      if (!parentTarget || !writers.has(parentTarget.repo)) return null;
+      if (!parentTarget || !writers.has(parentTarget.repo) || isTakendown(accountLabels, parentTarget.repo)) return null;
       const parent = await this.verifiedMessageRecord(space, parentTarget.repo, parentTarget.rkey);
       if (
         !parent ||
+        isTakendown(channelLabels, parent.uri, parent.cid) ||
         parent.value.parent !== undefined ||
         !validateSpaceRecord(COLLECTION.message, parent.value, {
           authorityDid,
@@ -184,7 +266,20 @@ export class ChannelClient {
       knownMessages: known,
       knownTopLevelMessages: known,
     });
-    return validation.valid ? { uri: record.uri, repo: target.repo, rkey: target.rkey, value: record.value } : null;
+    if (!validation.valid) return null;
+    return decorateMessageLabels(
+      {
+        space,
+        repo: target.repo,
+        collection: COLLECTION.message,
+        rkey: target.rkey,
+        uri: record.uri,
+        cid: record.cid ?? "",
+        value: record.value,
+      },
+      channelLabels,
+      accountLabels,
+    );
   }
 
   async send(
@@ -210,10 +305,11 @@ export class ChannelClient {
     }
     const validation = validateSpaceRecord(COLLECTION.message, record, { authorityDid, spaceUri: space, repoDid: this.deps.transport.did, rkey, knownMessages: known, knownTopLevelMessages: known });
     if (!validation.valid) throw new Error(validation.reason);
+    const writeEpoch = await this.deps.sync.store.epoch(space);
     const result = await this.deps.transport.memberClient.procedure<unknown, { uri: string; cid: string }>("com.atproto.space.createRecord", {
       space, repo: this.deps.transport.did, collection: COLLECTION.message, rkey, record,
     });
-    await this.applyOwn(ref, space, COLLECTION.message, rkey, result.cid, record);
+    await this.applyOwn(ref, space, COLLECTION.message, rkey, result.cid, record, writeEpoch);
     return { uri: spaceRecordUri(space, this.deps.transport.did, COLLECTION.message, rkey), rkey };
   }
 
@@ -240,19 +336,21 @@ export class ChannelClient {
     }
     const validation = validateSpaceRecord(COLLECTION.message, record, { authorityDid, spaceUri: space, repoDid: target.repo, rkey: target.rkey, knownMessages: known, knownTopLevelMessages: known });
     if (!validation.valid) throw new Error(validation.reason);
+    const writeEpoch = await this.deps.sync.store.epoch(space);
     const result = await this.deps.transport.memberClient.procedure<unknown, { uri: string; cid: string }>("com.atproto.space.putRecord", {
       space, repo: target.repo, collection: COLLECTION.message, rkey: target.rkey, record,
     });
-    await this.applyOwn(ref, space, COLLECTION.message, target.rkey, result.cid, record);
+    await this.applyOwn(ref, space, COLLECTION.message, target.rkey, result.cid, record, writeEpoch);
   }
 
   async delete(ref: ChannelRef, uri: string): Promise<void> {
     const { space } = await this.readable(ref);
     const target = this.ownMessage(space, uri);
     await this.deps.credentials.fresh(space);
+    const writeEpoch = await this.deps.sync.store.epoch(space);
     await this.deps.transport.memberClient.procedure("com.atproto.space.deleteRecord", { space, repo: target.repo, collection: COLLECTION.message, rkey: target.rkey });
     if (this.applyOwnWrites) {
-      await this.deps.sync.applyOwnWrite({ space, repo: target.repo }, { remove: [{ collection: COLLECTION.message, rkey: target.rkey }] }, { workspace: ref.workspace });
+      await this.deps.sync.applyOwnWrite({ space, repo: target.repo }, { remove: [{ collection: COLLECTION.message, rkey: target.rkey }] }, { workspace: ref.workspace, epoch: writeEpoch });
     }
   }
 
@@ -267,10 +365,11 @@ export class ChannelClient {
     const record = { $type: COLLECTION.reaction, subject, emoji, createdAt: new Date(transportNow(this.deps.transport)).toISOString() };
     const validation = validateSpaceRecord(COLLECTION.reaction, record, { authorityDid, spaceUri: space, repoDid: this.deps.transport.did, rkey, knownMessages: new Set([subject]) });
     if (!validation.valid) throw new Error(validation.reason);
+    const writeEpoch = await this.deps.sync.store.epoch(space);
     const result = await this.deps.transport.memberClient.procedure<unknown, { uri: string; cid: string }>("com.atproto.space.putRecord", {
       space, repo: this.deps.transport.did, collection: COLLECTION.reaction, rkey, record,
     });
-    await this.applyOwn(ref, space, COLLECTION.reaction, rkey, result.cid, record);
+    await this.applyOwn(ref, space, COLLECTION.reaction, rkey, result.cid, record, writeEpoch);
     return { rkey };
   }
 
@@ -280,13 +379,14 @@ export class ChannelClient {
     if (!parseSpaceRecordUri(subject, space, COLLECTION.message)) throw new Error("Invalid message URI.");
     await this.deps.credentials.fresh(space);
     const rkey = reactionRecordKey(subject, emoji, this.deps.transport.did);
+    const writeEpoch = await this.deps.sync.store.epoch(space);
     try {
       await this.deps.transport.memberClient.procedure("com.atproto.space.deleteRecord", { space, repo: this.deps.transport.did, collection: COLLECTION.reaction, rkey });
     } catch (error) {
       if (!isMissingXrpcResource(error)) throw error;
     }
     if (this.applyOwnWrites) {
-      await this.deps.sync.applyOwnWrite({ space, repo: this.deps.transport.did }, { remove: [{ collection: COLLECTION.reaction, rkey }] }, { workspace: ref.workspace });
+      await this.deps.sync.applyOwnWrite({ space, repo: this.deps.transport.did }, { remove: [{ collection: COLLECTION.reaction, rkey }] }, { workspace: ref.workspace, epoch: writeEpoch });
     }
   }
 
@@ -320,17 +420,111 @@ export class ChannelClient {
     }
   }
 
-  /** The members of a private channel, from the authority's roster; a public channel has no roster. */
+  /**
+   * The human members of a private channel, derived from `group.opensocial.membership` in `members/self`
+   * intersected with `group.opensocial.policy` read grants on the private channel space (`channel-<skey>`).
+   */
   async roster(ref: ChannelRef): Promise<string[]> {
     const { authorityDid, space, visibility } = await this.readable(ref);
     if (visibility !== "private") return [];
-    const client = await this.deps.credentials.clientFor(space, authorityDid);
-    const roster = await listBoundedRecords(client, { space, repo: authorityDid, collection: COLLECTION.channelRoster, maxRecords: MAX_PRIVATE_ROSTER_SCAN });
-    const members = new Set(roster.records.flatMap((record) => validateSpaceRecord(COLLECTION.channelRoster, record.value, {
-      authorityDid, spaceUri: space, repoDid: authorityDid, rkey: record.rkey,
-    }).valid && record.value.active === true && typeof record.value.subject === "string" ? [record.value.subject] : []));
-    if (roster.truncated) throw new WorkspaceEnvelopeError(`Private-channel roster exceeds the ${MAX_PRIVATE_ROSTER_SCAN}-record scan limit; the roster may be incomplete.`);
-    if (members.size > MAX_SUPPORTED_MEMBERS) throw new WorkspaceEnvelopeError(`Private-channel roster exceeds ${MAX_SUPPORTED_MEMBERS} members.`);
+
+    // Mint/reuse credential on `space` first so callers lacking private-channel read access fail with `SpaceCredentialError`.
+    const channelClient = await this.deps.credentials.clientFor(space, authorityDid);
+    const membersSpace = groupMembersUri(authorityDid);
+    const [membersClient, wsClient] = await Promise.all([
+      this.deps.credentials.clientFor(membersSpace, authorityDid),
+      this.deps.credentials.clientFor(ref.workspace, authorityDid),
+    ]);
+
+    const [channelPolScan, membershipsScan, accountLabelScan, installsScan] = await Promise.all([
+      listBoundedRecords(channelClient, {
+        space,
+        repo: authorityDid,
+        collection: ATPROTO_SPACE_COLLECTION.spacePolicy,
+        maxRecords: 1,
+      }),
+      listBoundedRecords(membersClient, {
+        space: membersSpace,
+        repo: authorityDid,
+        collection: OPENSOCIAL_COLLECTION.membership,
+        maxRecords: MAX_PRIVATE_ROSTER_SCAN,
+      }),
+      listBoundedRecords(membersClient, {
+        space: membersSpace,
+        repo: authorityDid,
+        collection: ATPROTO_SPACE_COLLECTION.label,
+        maxRecords: MAX_PRIVATE_ROSTER_SCAN,
+      }),
+      listBoundedRecords(wsClient, {
+        space: ref.workspace,
+        repo: authorityDid,
+        collection: COLLECTION.appInstall,
+        maxRecords: MAX_PRIVATE_ROSTER_SCAN,
+      }),
+    ]);
+
+    if (
+      channelPolScan.truncated ||
+      membershipsScan.truncated ||
+      accountLabelScan.truncated ||
+      installsScan.truncated
+    ) {
+      throw new WorkspaceEnvelopeError(
+        `Private-channel roster or moderation label scan exceeds the ${MAX_PRIVATE_ROSTER_SCAN}-record limit; refusing fail-open roster projection.`,
+      );
+    }
+
+    const extractedChannelPolicy = extractGroupSpacePolicyRecord(authorityDid, space, channelPolScan);
+    if (!extractedChannelPolicy.valid || !extractedChannelPolicy.policy) {
+      throw new WorkspaceEnvelopeError(
+        "Private-channel space policy is missing or invalid; refusing fail-open roster projection.",
+      );
+    }
+
+    const validatedPolicy = extractedChannelPolicy.policy;
+    const grantedReadRoles = new Set<string>();
+    for (const g of validatedPolicy.grants) {
+      if (g.read === true && typeof g.role === "string") grantedReadRoles.add(g.role);
+    }
+
+    const accountLabels = projectActiveLabels(
+      accountLabelScan.records.map((r) => ({ repoDid: authorityDid, rkey: r.rkey, value: r.value })),
+      { groupDid: authorityDid, spaceUri: membersSpace, nowMs: transportNow(this.deps.transport) },
+    );
+
+    const knownAppSubjects = new Set<string>(
+      installsScan.records
+        .filter((r) =>
+          validateSpaceRecord(COLLECTION.appInstall, r.value, {
+            authorityDid,
+            spaceUri: ref.workspace,
+            repoDid: authorityDid,
+            rkey: r.rkey,
+          }).valid,
+        )
+        .map((r) => String(r.value.subject)),
+    );
+
+    const members = new Set<string>();
+    for (const rec of membershipsScan.records) {
+      if (!isDid(rec.rkey) || rec.rkey === authorityDid || knownAppSubjects.has(rec.rkey)) continue;
+      if (isTakendown(accountLabels, rec.rkey)) continue;
+      const valid = validateSpaceRecord(OPENSOCIAL_COLLECTION.membership, rec.value, {
+        authorityDid,
+        spaceUri: membersSpace,
+        repoDid: authorityDid,
+        rkey: rec.rkey,
+      }).valid;
+      if (!valid) continue;
+      const roles = rec.value.roles as string[];
+      if (roles.some((role) => grantedReadRoles.has(role))) {
+        members.add(rec.rkey);
+      }
+    }
+
+    if (members.size > MAX_SUPPORTED_MEMBERS) {
+      throw new WorkspaceEnvelopeError(`Private-channel roster exceeds ${MAX_SUPPORTED_MEMBERS} members.`);
+    }
     return [...members].sort();
   }
 
@@ -353,10 +547,13 @@ export class ChannelClient {
     repo: string,
     collection: string,
     rkey: string,
-  ): Promise<{ uri: string; value: Record<string, unknown> } | null> {
+  ): Promise<{ uri: string; cid?: string; value: Record<string, unknown> } | null> {
     try {
       const client = credential.client(await this.deps.transport.resolvePds(repo));
-      const record = await client.query<{ uri: string; value: Record<string, unknown> }>("com.atproto.space.getRecord", { space, repo, collection, rkey });
+      const record = await client.query<{ uri: string; cid?: string; value: Record<string, unknown> }>(
+        "com.atproto.space.getRecord",
+        { space, repo, collection, rkey },
+      );
       return record.uri === spaceRecordUri(space, repo, collection, rkey) ? record : null;
     } catch (error) {
       if (isMissingXrpcResource(error)) return null;
@@ -371,19 +568,34 @@ export class ChannelClient {
     rkey: string,
     held: ReadonlyMap<string, StoredRecord>,
     reads: Map<string, Promise<{ uri: string; value: Record<string, unknown> } | null>>,
+    channelLabels: readonly ActiveSpaceLabel[],
+    accountLabels: readonly ActiveSpaceLabel[],
   ): Promise<{ uri: string; value: Record<string, unknown> } | null> {
     const uri = spaceRecordUri(space, repo, COLLECTION.message, rkey);
+    if (isTakendown(accountLabels, repo) || isTakendown(channelLabels, uri)) {
+      return Promise.resolve(null);
+    }
     const local = held.get(uri);
     if (local) return Promise.resolve({ uri, value: local.value });
     let read = reads.get(uri);
     if (!read) {
-      read = this.deps.credentials.get(space).then((credential) => this.verifiedRecord(credential, space, repo, COLLECTION.message, rkey));
+      read = this.deps.credentials
+        .get(space)
+        .then((credential) => this.verifiedRecord(credential, space, repo, COLLECTION.message, rkey))
+        .then((fetched) => {
+          if (!fetched || isTakendown(channelLabels, fetched.uri, fetched.cid)) return null;
+          return { uri: fetched.uri, value: fetched.value };
+        });
       reads.set(uri, read);
     }
     return read;
   }
 
-  private async verifiedMessageRecord(space: string, repo: string, rkey: string): Promise<{ uri: string; value: Record<string, unknown> } | null> {
+  private async verifiedMessageRecord(
+    space: string,
+    repo: string,
+    rkey: string,
+  ): Promise<{ uri: string; cid?: string; value: Record<string, unknown> } | null> {
     const credential = await this.deps.credentials.get(space);
     try {
       return await this.verifiedRecord(credential, space, repo, COLLECTION.message, rkey);
@@ -394,17 +606,72 @@ export class ChannelClient {
     }
   }
 
-  private async applyOwn(ref: ChannelRef, space: string, collection: string, rkey: string, cid: string, value: Record<string, unknown>): Promise<void> {
+  private async applyOwn(
+    ref: ChannelRef,
+    space: string,
+    collection: string,
+    rkey: string,
+    cid: string,
+    value: Record<string, unknown>,
+    epoch?: string,
+  ): Promise<void> {
     if (!this.applyOwnWrites) return;
     const repo = this.deps.transport.did;
-    await this.deps.sync.applyOwnWrite({ space, repo }, {
-      upsert: [{ space, repo, collection, rkey, uri: spaceRecordUri(space, repo, collection, rkey), cid: cid ?? "", value }],
-    }, { workspace: ref.workspace });
+    await this.deps.sync.applyOwnWrite(
+      { space, repo },
+      {
+        upsert: [{ space, repo, collection, rkey, uri: spaceRecordUri(space, repo, collection, rkey), cid: cid ?? "", value }],
+      },
+      { workspace: ref.workspace, ...(epoch !== undefined ? { epoch } : {}) },
+    );
   }
 }
 
 function messageOf(record: StoredRecord): ChannelMessage {
-  return { uri: record.uri, repo: record.repo, rkey: record.rkey, value: record.value };
+  return {
+    uri: record.uri,
+    repo: record.repo,
+    rkey: record.rkey,
+    ...(record.cid ? { cid: record.cid } : {}),
+    value: record.value,
+  };
+}
+
+function decorateMessageLabels(
+  record: StoredRecord,
+  channelLabels: readonly ActiveSpaceLabel[],
+  accountLabels: readonly ActiveSpaceLabel[],
+): ChannelMessage {
+  const recLabels = labelsForResource(channelLabels, record.uri, record.cid || undefined);
+  const accLabels = labelsForResource(accountLabels, record.repo);
+  const allVals = [...new Set([...recLabels.map((l) => l.val), ...accLabels.map((l) => l.val)])].sort();
+  const hidden =
+    isHidden(channelLabels, record.uri, record.cid || undefined) || isHidden(accountLabels, record.repo);
+  return {
+    uri: record.uri,
+    repo: record.repo,
+    rkey: record.rkey,
+    ...(record.cid ? { cid: record.cid } : {}),
+    value: record.value,
+    ...(hidden ? { hidden: true } : {}),
+    ...(allVals.length > 0 ? { labels: allVals } : {}),
+  };
+}
+
+function decorateReactionLabels(
+  record: StoredRecord,
+  channelLabels: readonly ActiveSpaceLabel[],
+): ChannelReaction {
+  const recLabels = labelsForResource(channelLabels, record.uri, record.cid || undefined).map((l) => l.val);
+  const allVals = [...new Set(recLabels)].sort();
+  return {
+    uri: record.uri,
+    repo: record.repo,
+    rkey: record.rkey,
+    ...(record.cid ? { cid: record.cid } : {}),
+    value: record.value,
+    ...(allVals.length > 0 ? { labels: allVals } : {}),
+  };
 }
 
 /** What a page tells its reader about what may be missing: writers set aside, partly read or changing, and bounds reached. */

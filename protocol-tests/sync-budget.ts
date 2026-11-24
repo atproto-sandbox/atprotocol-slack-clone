@@ -68,10 +68,33 @@ async function main(): Promise<void> {
     }
     process.stdout.write(`\n| writers | phase | calls | median ms | p95 ms |\n|---|---|---|---|---|\n`);
     for (const row of report) process.stdout.write(`| ${row.writers} | ${row.phase} | ${row.calls} | ${row.median.toFixed(0)} | ${row.p95.toFixed(0)} |\n`);
-    // R4's gate: within the truth interval a reopen costs the same number of upstream calls at every writer count.
+    // R4 + R13 Gate 5b hard numeric thresholds:
+    // - warm `reopen`: `calls === 1` and `p95 <= 150 ms` at every writer count (20, 100, 200)
+    // - `one new message`: writer-refresh calls `<= 4` (`total calls <= 5` including 1 `listWriters`) and `p95 <= 300 ms` at every writer count
+    // - 200-writer cold `first open`: listing calls (`listRecords + listWriters`) `<= 405` (`total calls <= 1015` including bracketed `getLatestCommit` & `plc resolve`) and `p95 <= 15_000 ms`
     const reopenCalls = new Set(report.filter((row) => row.phase === "reopen").map((row) => row.calls));
     if (reopenCalls.size !== 1) throw new Error(`A reopen's call count depends on the writer count: ${[...reopenCalls].join(", ")}.`);
-    process.stdout.write(`\nGATE reopen calls are the same at every writer count: ${[...reopenCalls][0]}\n`);
+    for (const row of report) {
+      if (row.phase === "reopen") {
+        if (row.calls !== 1) throw new Error(`Gate 5b failed (${row.writers} writers reopen): expected calls === 1, got ${row.calls}`);
+        if (row.p95 > 150) throw new Error(`Gate 5b failed (${row.writers} writers reopen): expected p95 <= 150 ms, got ${row.p95.toFixed(1)} ms`);
+      } else if (row.phase === "one new message") {
+        const writerCalls = row.calls - (row.byMethod["com.atproto.space.listWriters"] ?? 0);
+        if (writerCalls > 4 || row.calls > 5) {
+          throw new Error(`Gate 5b failed (${row.writers} writers one new message): expected writerCalls <= 4 and total calls <= 5, got writerCalls=${writerCalls}, total=${row.calls}`);
+        }
+        if (row.p95 > 300) throw new Error(`Gate 5b failed (${row.writers} writers one new message): expected p95 <= 300 ms, got ${row.p95.toFixed(1)} ms`);
+      } else if (row.phase === "first open" && row.writers === 200) {
+        const listingCalls =
+          (row.byMethod["com.atproto.space.listRecords"] ?? 0) +
+          (row.byMethod["com.atproto.space.listWriters"] ?? 0);
+        if (listingCalls > 405 || row.calls > 1015) {
+          throw new Error(`Gate 5b failed (200 writers first open): expected listingCalls <= 405 and total calls <= 1015, got listingCalls=${listingCalls}, total=${row.calls}`);
+        }
+        if (row.p95 > 15_000) throw new Error(`Gate 5b failed (200 writers first open): expected p95 <= 15000 ms, got ${row.p95.toFixed(1)} ms`);
+      }
+    }
+    process.stdout.write(`\nGATE 5b PASSED: reopen calls === ${[...reopenCalls][0]} (p95 <= 150 ms), one new message <= 4 writer calls / 5 total (p95 <= 300 ms), 200w first open <= 405 listing calls / 1015 total (p95 <= 15000 ms)\n`);
   } finally {
     await pds.close();
   }

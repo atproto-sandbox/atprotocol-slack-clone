@@ -41,19 +41,19 @@ test("route builders and parsers round-trip every grammar route including did:pl
   assert.deepEqual(parseRoute("/"), { kind: "home" });
 
   for (const authority of [DID_PLC, DID_WEB, DID_WEB_PORT]) {
-    const wsUrl = workspaceRoute(authority, "acme");
+    const wsUrl = workspaceRoute(authority, "self");
     if (authority === DID_WEB_PORT) {
-      assert.equal(wsUrl, "/w/did%3Aweb%3Alocalhost%253A3000/acme", "percent in did:web port encodes as %253A on the wire");
+      assert.equal(wsUrl, "/w/did%3Aweb%3Alocalhost%253A3000/self", "percent in did:web port encodes as %253A on the wire");
     }
     const parsedWs = parseRoute(wsUrl);
     assert.deepEqual(parsedWs, {
       kind: "workspace",
       authority,
-      workspaceSkey: "acme",
-      workspaceUri: `at://${authority}/space/new.flock.workspace/acme`,
+      workspaceSkey: "self",
+      workspaceUri: `at://${authority}/space/new.flock.workspace/self`,
     });
 
-    const chUrl = channelRoute({ authority, workspaceSkey: "acme", channelSkey: "general", thread: `at://${authority}/space/new.flock.channel/general/${DID_BOB}/new.flock.channel.message/${TID}` });
+    const chUrl = channelRoute({ authority, workspaceSkey: "self", channelSkey: "general", thread: `at://${authority}/space/new.flock.channel/general/${DID_BOB}/new.flock.channel.message/${TID}` });
     const [chPath, chSearch = ""] = chUrl.split("?");
     const parsedCh = parseRoute(chPath!, `?${chSearch}`);
     assert.equal(parsedCh?.kind, "channel");
@@ -61,12 +61,12 @@ test("route builders and parsers round-trip every grammar route including did:pl
     assert.equal(parsedCh?.kind === "channel" && parsedCh.channelSkey, "general");
     assert.equal(parsedCh?.kind === "channel" && parsedCh.thread, `at://${authority}/space/new.flock.channel/general/${DID_BOB}/new.flock.channel.message/${TID}`);
 
-    const msgUrl = messageRoute({ authority, workspaceSkey: "acme", channelSkey: "general", repo: DID_WEB_PORT, rkey: TID });
+    const msgUrl = messageRoute({ authority, workspaceSkey: "self", channelSkey: "general", repo: DID_WEB_PORT, rkey: TID });
     assert.deepEqual(parseRoute(msgUrl), {
       kind: "message",
       authority,
-      workspaceSkey: "acme",
-      workspaceUri: `at://${authority}/space/new.flock.workspace/acme`,
+      workspaceSkey: "self",
+      workspaceUri: `at://${authority}/space/new.flock.workspace/self`,
       channelSkey: "general",
       repo: DID_WEB_PORT,
       rkey: TID,
@@ -74,17 +74,17 @@ test("route builders and parsers round-trip every grammar route including did:pl
     });
 
     for (const view of [undefined, "list", "board", "activity"] as const) {
-      const tUrl = tasksRoute(authority, "acme", view);
+      const tUrl = tasksRoute(authority, "self", view);
       assert.deepEqual(parseRoute(tUrl), {
         kind: "tasks",
         view: view ?? "default",
         authority,
-        workspaceSkey: "acme",
-        workspaceUri: `at://${authority}/space/new.flock.workspace/acme`,
+        workspaceSkey: "self",
+        workspaceUri: `at://${authority}/space/new.flock.workspace/self`,
       });
     }
 
-    const taskDetailUrl = tasksTaskRoute({ authority, workspaceSkey: "acme", repo: DID_BOB, rkey: TID });
+    const taskDetailUrl = tasksTaskRoute({ authority, workspaceSkey: "self", repo: DID_BOB, rkey: TID });
     const parsedTask = parseRoute(taskDetailUrl);
     assert.equal(parsedTask?.kind, "tasks");
     if (parsedTask?.kind === "tasks" && parsedTask.view === "task") {
@@ -103,7 +103,7 @@ test("route builders and parsers round-trip every grammar route including did:pl
 });
 
 test("parseDecodedSegments preserves pre-decoded Next params without double-decoding did:web:localhost%3A3000", () => {
-  const route = parseDecodedSegments(["w", DID_WEB_PORT, "acme", "ext", "tasks", "p", DID_WEB_PORT, TID]);
+  const route = parseDecodedSegments(["w", DID_WEB_PORT, "self", "ext", "tasks", "p", DID_WEB_PORT, TID]);
   assert.equal(route?.kind, "tasks");
   if (route?.kind === "tasks" && route.view === "project") {
     assert.equal(route.authority, DID_WEB_PORT);
@@ -114,8 +114,8 @@ test("parseDecodedSegments preserves pre-decoded Next params without double-deco
 });
 
 test("cross-repo same-rkey projects produce distinct routes and distinct projectUris", () => {
-  const aliceProjUrl = tasksProjectRoute({ authority: DID_PLC, workspaceSkey: "acme", repo: DID_PLC, rkey: TID });
-  const bobProjUrl = tasksProjectRoute({ authority: DID_PLC, workspaceSkey: "acme", repo: DID_BOB, rkey: TID });
+  const aliceProjUrl = tasksProjectRoute({ authority: DID_PLC, workspaceSkey: "self", repo: DID_PLC, rkey: TID });
+  const bobProjUrl = tasksProjectRoute({ authority: DID_PLC, workspaceSkey: "self", repo: DID_BOB, rkey: TID });
   assert.notEqual(aliceProjUrl, bobProjUrl);
 
   const parsedAlice = parseRoute(aliceProjUrl);
@@ -140,9 +140,10 @@ test("parseRoute rejects invalid segments, bad percent encoding, and unknown pat
     "/w/%ZZ/acme",
     "/w/not-a-did/acme",
     "/w/did:plc:abc/..",
-    "/w/did:plc:abc/acme/c/..",
-    "/w/did:plc:abc/acme/c/gen/m/did:plc:bob/..",
-    "/w/did:plc:abc/acme/ext/unknown",
+    "/w/did:plc:abc/acme",
+    "/w/did:plc:abc/self/c/..",
+    "/w/did:plc:abc/self/c/gen/m/did:plc:bob/..",
+    "/w/did:plc:abc/self/ext/unknown",
     "/dm/not-a-tid",
     "/unknown",
   ]) {
@@ -211,27 +212,27 @@ test("captureReturnTo and consumeReturnTo strip transient params, preserve deep 
 test("sentThreadCleanupRoute clears ?thread= only when still on that channel with a thread query", () => {
   const sent = {
     authority: DID_PLC,
-    workspaceSkey: "acme",
-    workspaceUri: `at://${DID_PLC}/space/new.flock.workspace/acme`,
+    workspaceSkey: "self",
+    workspaceUri: `at://${DID_PLC}/space/new.flock.workspace/self`,
     channelSkey: "general",
   };
   assert.equal(
-    sentThreadCleanupRoute(parseRoute(`/w/${encodeURIComponent(DID_PLC)}/acme`), sent),
+    sentThreadCleanupRoute(parseRoute(`/w/${encodeURIComponent(DID_PLC)}/self`), sent),
     null,
     "navigating back to workspace home suppresses post-send channel replace",
   );
   assert.equal(
-    sentThreadCleanupRoute(parseRoute(`/w/${encodeURIComponent(DID_PLC)}/acme/c/general`), sent),
+    sentThreadCleanupRoute(parseRoute(`/w/${encodeURIComponent(DID_PLC)}/self/c/general`), sent),
     null,
     "plain channel URL without ?thread= needs no redundant router.replace",
   );
   assert.equal(
-    sentThreadCleanupRoute(parseRoute(`/w/${encodeURIComponent(DID_PLC)}/acme/c/random`, `?thread=at://msg/1`), sent),
+    sentThreadCleanupRoute(parseRoute(`/w/${encodeURIComponent(DID_PLC)}/self/c/random`, `?thread=at://msg/1`), sent),
     null,
     "switching to another channel suppresses post-send replace on the previous channel",
   );
   assert.equal(
-    sentThreadCleanupRoute(parseRoute(`/w/${encodeURIComponent(DID_PLC)}/acme/c/general`, `?thread=at://msg/1`), sent),
-    `/w/${encodeURIComponent(DID_PLC)}/acme/c/general`,
+    sentThreadCleanupRoute(parseRoute(`/w/${encodeURIComponent(DID_PLC)}/self/c/general`, `?thread=at://msg/1`), sent),
+    `/w/${encodeURIComponent(DID_PLC)}/self/c/general`,
   );
 });

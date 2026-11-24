@@ -10,7 +10,10 @@ async function lintRestrictedRules(filePath: string, code: string): Promise<Lint
   const [result] = await eslint.lintText(code, { filePath });
   assert.ok(result, `Expected ESLint result for ${filePath}`);
   return result.messages.filter(
-    (msg) => msg.ruleId === "no-restricted-imports" || msg.ruleId === "no-restricted-syntax",
+    (msg) =>
+      msg.ruleId === "no-restricted-imports" ||
+      msg.ruleId === "no-restricted-syntax" ||
+      msg.ruleId === "flock-boundaries/no-legacy-memberspace",
   );
 }
 
@@ -173,17 +176,6 @@ test("D11.11: existing browser, node, operator, and DM rules are never shadowed 
     await assertForbidden(filePath, `import { safeFetch } from "@flock/net/fetch";\nvoid safeFetch;\n`, "Only a Node process");
   }
 
-  // MEMBER_LIST_WRITES
-  await assertForbidden(
-    "apps/operator/src/operator/operations.ts",
-    `import { putSpaceMember } from "../atproto/space-ops";\nvoid putSpaceMember;\n`,
-    "apps/operator/src/operator/members.ts",
-  );
-  await assertAllowed(
-    "apps/operator/src/operator/members.ts",
-    `import { putSpaceMember } from "../atproto/space-ops";\nvoid putSpaceMember;\n`,
-  );
-
   // NO_DM_IMPORT
   await assertForbidden(
     "apps/web/src/app/oauth/client-metadata.json/route.ts",
@@ -211,6 +203,85 @@ test("D11.11: existing browser, node, operator, and DM rules are never shadowed 
     `import { TasksClient } from "../ext/tasks";\nvoid TasksClient;\n`,
     "D11.11",
   );
+});
+
+test("R13 OpenSocial hard-cut: com.atproto.memberspace.{putMembers,removeMembers,listMembers} is forbidden outside DM/protocol/fixture allowlist", async () => {
+  const strictlyForbiddenTargets = [
+    "apps/operator/src/operator/operations.ts",
+    "apps/operator/src/atproto/space-ops.ts",
+    "apps/operator/src/operator/security.test.ts",
+    "apps/group-host/src/methods.ts",
+    "packages/client/src/channel-client.ts",
+    "packages/client/src/sync.ts",
+    "packages/client/src/sync.test.ts",
+    "packages/client/src/testing/engine-fixture.ts",
+    "packages/client/src/ext/tasks/tasks-client.ts",
+    "packages/reader/src/independent.ts",
+    "packages/reader/src/independent-tasks.test.ts",
+    "apps/web/src/app/ui/workspace-manager.tsx",
+    "apps/echo-bot/src/echo.ts",
+    "apps/webhooks/src/main.ts",
+    "protocol-tests/app-acceptance.test.ts",
+    "bdd/steps/workspaces.steps.ts",
+    "bdd/support/channels-ui.ts",
+  ];
+
+  for (const filePath of strictlyForbiddenTargets) {
+    for (const method of ["putMembers", "removeMembers", "listMembers"]) {
+      await assertForbidden(filePath, `export const m = "com.atproto.memberspace.${method}";\n`, "R13 OpenSocial hard-cut");
+      await assertForbidden(filePath, `export const m = \`com.atproto.memberspace.${method}\`;\n`, "R13 OpenSocial hard-cut");
+      await assertForbidden(
+        filePath,
+        `import type * as T from "@flock/protocol/lexicons/api/types/com/atproto/memberspace/${method}";\nexport type X = T.InputSchema;\n`,
+        "R13 OpenSocial hard-cut",
+      );
+    }
+    await assertForbidden(
+      filePath,
+      "export const m = `com.atproto.memberspace.\\u0070utMembers`;\n",
+      "R13 OpenSocial hard-cut",
+    );
+    await assertForbidden(
+      filePath,
+      `import { listMemberPages } from "@flock/protocol/atproto/record-pages";\nvoid listMemberPages;\n`,
+      "R13 OpenSocial hard-cut",
+    );
+  }
+
+  // `workspace-client.ts` & `workspace-client.test.ts` allow ONLY `listMembers` (for personal `invites/self` verification), NEVER `putMembers`/`removeMembers`.
+  for (const filePath of [
+    "packages/client/src/workspace-client.ts",
+    "packages/client/src/workspace-client.test.ts",
+  ]) {
+    await assertAllowed(filePath, `export const m = "com.atproto.memberspace.listMembers";\n`);
+    await assertAllowed(
+      filePath,
+      `import { listMemberPages } from "@flock/protocol/atproto/record-pages";\nvoid listMemberPages;\n`,
+    );
+    await assertForbidden(filePath, `export const m = "com.atproto.memberspace.putMembers";\n`, "R13 OpenSocial hard-cut");
+    await assertForbidden(filePath, `export const m = "com.atproto.memberspace.removeMembers";\n`, "R13 OpenSocial hard-cut");
+  }
+
+  // Sanctioned DM / protocol / fixture modules remain permitted.
+  for (const filePath of [
+    "packages/protocol/src/scopes.ts",
+    "packages/protocol/src/atproto/record-pages.ts",
+    "packages/protocol/src/atproto/space-policy.ts",
+    "packages/client/src/dm/dm-client.ts",
+    "packages/client/src/dm/dm-client.test.ts",
+    "packages/reader/src/independent-dm.ts",
+    "packages/testing/src/fake-network.ts",
+    "protocol-tests/dm-acceptance.test.ts",
+    "protocol-tests/opensocial-groups.test.ts",
+    "protocol-tests/atproto/slack-dm-conformance.test.ts",
+    "bdd/steps/dm-conversations.steps.ts",
+    "bdd/support/dm-policy-ui.ts",
+  ]) {
+    await assertAllowed(
+      filePath,
+      `export const methods = ["com.atproto.memberspace.putMembers", "com.atproto.memberspace.removeMembers", "com.atproto.memberspace.listMembers"];\n`,
+    );
+  }
 });
 
 test("D11.11: computed dynamic import() specifiers are blocked while static literal dynamic imports remain allowed", async () => {

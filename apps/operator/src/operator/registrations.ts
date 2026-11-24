@@ -9,7 +9,7 @@ import { mapLimited } from "@flock/protocol/map-limited";
 import { isSpaceDeleted, mintSpaceCredential, type SpaceNotifyTarget } from "../atproto/space-credential";
 import { getConfig } from "@flock/deployment/config";
 import { getRawDb } from "../lib/db";
-import { appInboxUri, channelUri, inboxUri, parseAppInboxUri, requireSpaceAuthority } from "@flock/protocol/keys";
+import { appInboxUri, channelUri, groupMembersUri, groupMetaUri, inboxUri, parseAppInboxUri, requireSpaceAuthority, workspaceUri } from "@flock/protocol/keys";
 import { parseWorkspaceRef, type OperatorActor } from "./actor";
 import { restoreAuthorityGrant } from "./authority-grant";
 import {
@@ -735,6 +735,60 @@ export async function sweepRegistrations(deps: SweepDeps = registrationDeps): Pr
   return report;
 }
 
+/**
+ * Synchronously refreshes change-notice registrations across all active spaces of `workspace` using `session`
+ * (ignoring failure backoff timers so post-deactivation / post-reauthorization reactivation restores realtime
+ * coverage before `WorkspaceClient.reactivateGroup` leaves `reauthorizing_operator`), and drops stale registrations.
+ */
+export async function refreshWorkspaceRegistrations(
+  session: OAuthSession,
+  workspace: string,
+  deps: SweepDeps = registrationDeps,
+): Promise<{ registered: number; failed: number }> {
+  markAuthorityHealthy(session.did, deps.now());
+  const held = heldSpaces(workspace);
+  const spaces = await deps.activeSpaces(session, workspace);
+  const outcomes = await mapLimited(spaces, RENEW_CONCURRENCY, (space) =>
+    registerSpace(session, workspace, space, deps),
+  );
+  for (const space of held.filter((space) => !spaces.includes(space))) {
+    await unregisterSpace(session, space);
+  }
+  let registered = 0;
+  let failed = 0;
+  for (const ok of outcomes) {
+    if (ok) registered += 1;
+    else failed += 1;
+  }
+  return { registered, failed };
+}
+
+/**
+ * Refreshes change-notice registrations across all workspaces governed by `authorityDid` after `/authority/callback`
+ * persists a replacement shared OAuth grant (`purpose.kind === "reauthorize"`).
+ */
+export async function refreshAuthorityWorkspaceRegistrations(
+  authorityDid: string,
+  deps: SweepDeps = registrationDeps,
+): Promise<void> {
+  if (adminMutationsPaused()) return;
+  markAuthorityHealthy(authorityDid, deps.now());
+  const session = await deps.grant(authorityDid);
+  const knownUris = deps
+    .workspaces()
+    .filter((ws) => ws.authorityDid === authorityDid)
+    .map((ws) => ws.uri);
+  if (knownUris.length === 0) {
+    const defaultWs = workspaceUri(authorityDid);
+    if (await spaceExists(session, defaultWs)) {
+      knownUris.push(defaultWs);
+    }
+  }
+  for (const uri of new Set(knownUris)) {
+    await refreshWorkspaceRegistrations(session, uri, deps);
+  }
+}
+
 export type RegistrationProblem = { space: string; failures: number; error?: string; nextAttemptAt?: string; expiredAt?: string };
 
 /** The workspace's spaces whose registration failed since it last succeeded, or ran out: they get no change ticks meanwhile. */
@@ -861,6 +915,8 @@ async function activeWorkspaceSpaces(session: OAuthSession, workspace: string): 
     }
   }
   return [
+    groupMetaUri(ref.authorityDid),
+    groupMembersUri(ref.authorityDid),
     workspace,
     inboxUri(ref.authorityDid, ref.skey),
     ...openChannels.map(({ value }) => channelUri(ref.authorityDid, value.skey)),

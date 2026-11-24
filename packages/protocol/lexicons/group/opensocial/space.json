@@ -1,0 +1,25 @@
+{
+  "lexicon": 1,
+  "id": "group.opensocial.space",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "An entry in the group's space index, in the members space. The host maintains it as spaces are created, deleted, or unlisted, and rejects direct writes.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": ["space", "createdAt"],
+        "properties": {
+          "space": {
+            "type": "string",
+            "format": "space-ref"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          }
+        }
+      }
+    }
+  }
+}

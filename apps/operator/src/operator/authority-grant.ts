@@ -29,7 +29,7 @@ import { canonicalOAuthScope } from "../auth/oauth-scope";
 import { generateSpaceKey } from "@flock/protocol/atproto/space-key";
 import { XrpcError } from "@flock/protocol/atproto/xrpc";
 import { readUpstreamJson } from "@flock/protocol/bounded-json";
-import { workspaceAuthorityScopes } from "@flock/protocol/scopes";
+import { groupAdminScopes } from "@flock/protocol/scopes";
 import { getConfig } from "@flock/deployment/config";
 import { getAuthorityClientKeys, getOperatorConfig, type AuthorityClientKey } from "../config";
 import { getRawDb } from "../lib/db";
@@ -72,12 +72,12 @@ export class AuthorityFlowError extends Error {
   }
 }
 
-export type AuthorityTicketInput = { initiatorDid: string; authorityDid: string; purpose: AuthorityFlowPurpose };
+export type AuthorityTicketInput = { initiatorDid: string; authorityDid: string | null; purpose: AuthorityFlowPurpose };
 export type CompletedAuthorityFlow = { authorityDid: string; initiatorDid: string; purpose: AuthorityFlowPurpose };
 
-/** The scope every authority grant asks for: the same for every workspace, so one client ID serves them all. */
+/** The scope every authority grant asks for: the same for every OpenSocial group, so one client ID serves them all. */
 export function authorityGrantScope(): string {
-  return canonicalOAuthScope(["atproto", ...workspaceAuthorityScopes()]);
+  return canonicalOAuthScope(groupAdminScopes());
 }
 
 /**
@@ -91,8 +91,22 @@ function authorityClientConfig(): AuthorityClientConfig {
   return { operatorUrl: getConfig().operatorUrl, authorityClientKeys: getAuthorityClientKeys() };
 }
 
+export function assertCredentialFreeOriginUrl(url: URL, label = "URL"): string {
+  if (
+    (url.protocol !== "http:" && url.protocol !== "https:") ||
+    url.username !== "" ||
+    url.password !== "" ||
+    (url.pathname !== "/" && url.pathname !== "") ||
+    url.search !== "" ||
+    url.hash !== ""
+  ) {
+    throw new AuthorityFlowError(`${label} must be an http(s) origin without credentials, path, query, or hash.`);
+  }
+  return url.origin;
+}
+
 export function authorityClientMetadata(config: AuthorityClientConfig = authorityClientConfig()) {
-  const origin = config.operatorUrl.origin;
+  const origin = assertCredentialFreeOriginUrl(config.operatorUrl, "operatorUrl");
   const redirectUri = `${origin}${AUTHORITY_FLOW_PATHS.callback}`;
   const scope = authorityGrantScope();
   const common = {
@@ -129,14 +143,19 @@ export function authorityPublicJwks(config: Pick<AuthorityClientConfig, "authori
 }
 
 export function authorityStartUrl(ticket: string): URL {
-  const url = new URL(AUTHORITY_FLOW_PATHS.start, getConfig().operatorUrl);
+  const origin = assertCredentialFreeOriginUrl(getConfig().operatorUrl, "operatorUrl");
+  const url = new URL(AUTHORITY_FLOW_PATHS.start, origin);
   url.searchParams.set("ticket", ticket);
   return url;
 }
 
 /** A single-use, two-minute ticket that lets one top-level navigation start the authority flow. */
 export function issueAuthorityTicket(input: AuthorityTicketInput, now = unixNow()): string {
-  if (!isDid(input.initiatorDid) || !isDid(input.authorityDid) || !isAuthorityFlowPurpose(input.purpose)) {
+  const validAuthority =
+    input.authorityDid === null
+      ? input.purpose.kind === "createWorkspace"
+      : isDid(input.authorityDid);
+  if (!isDid(input.initiatorDid) || !validAuthority || !isAuthorityFlowPurpose(input.purpose)) {
     throw new AuthorityFlowError("Invalid authority approval request.");
   }
   const ticket = randomBytes(32).toString("base64url");
@@ -144,7 +163,7 @@ export function issueAuthorityTicket(input: AuthorityTicketInput, now = unixNow(
   db.transaction(() => {
     db.prepare("DELETE FROM authority_ticket WHERE expires_at <= ?").run(now);
     db.prepare("INSERT INTO authority_ticket (token_hash, initiator_did, authority_did, purpose_json, expires_at) VALUES (?, ?, ?, ?, ?)")
-      .run(hashTicket(ticket), input.initiatorDid, input.authorityDid, JSON.stringify(input.purpose), now + TICKET_SECONDS);
+      .run(hashTicket(ticket), input.initiatorDid, input.authorityDid ?? "", JSON.stringify(input.purpose), now + TICKET_SECONDS);
   })();
   return ticket;
 }
@@ -157,36 +176,80 @@ export function consumeAuthorityTicket(ticket: string, now = unixNow()): Authori
   if (!row || row.expires_at <= now) return null;
   const purpose: unknown = JSON.parse(row.purpose_json);
   if (!isAuthorityFlowPurpose(purpose)) return null;
-  return { initiatorDid: row.initiator_did, authorityDid: row.authority_did, purpose };
+  const authorityDid = row.authority_did === "" ? null : row.authority_did;
+  if (authorityDid !== null && !isDid(authorityDid)) return null;
+  if (authorityDid === null && purpose.kind !== "createWorkspace") return null;
+  return { initiatorDid: row.initiator_did, authorityDid, purpose };
 }
 
 /**
- * The operator URL that starts the authority flow that `initiatorDid` asked for, for the account `authorityDid` (their own,
- * or a dedicated workspace account): a ticket for creating the named workspace, or, without a name, for reauthorizing. A
- * browser opens it as a top-level navigation; only a sign-in as that account completes it.
+ * The operator URL that starts the authority flow that `initiatorDid` asked for:
+ * either creating a new OpenSocial group via `prompt=create` on `groupHostUrl` (`authorityDid === null`),
+ * provisioning onto a specific `authorityDid`, or reauthorizing an existing `groupDid` (`purpose.kind === "reauthorize"`).
  */
-export function authorityFlowUrl(initiatorDid: string, authorityDid: string, workspaceName: string | null, now = unixNow()): URL {
+export function authorityFlowUrl(
+  initiatorDid: string,
+  authorityDid: string | null,
+  purposeOrName: AuthorityFlowPurpose | string | null,
+  now = unixNow(),
+): URL {
+  const purpose: AuthorityFlowPurpose =
+    typeof purposeOrName === "string"
+      ? { kind: "createWorkspace", name: purposeOrName }
+      : purposeOrName ?? { kind: "reauthorize" };
   const ticket = issueAuthorityTicket({
     initiatorDid,
     authorityDid,
-    purpose: workspaceName ? { kind: "createWorkspace", name: workspaceName } : { kind: "reauthorize" },
+    purpose,
   }, now);
   return authorityStartUrl(ticket);
 }
 
-/** Starts the flow a ticket allows: returns the PDS authorization URL and the per-flow cookie that binds it to this browser. */
+/** Starts the flow a ticket allows: returns the Group Host / PDS authorization URL and the per-flow cookie that binds it to this browser. */
 export async function beginAuthorityFlow(ticket: string, now = unixNow()): Promise<{ url: URL; cookieName: string; cookieValue: string }> {
   const intent = consumeAuthorityTicket(ticket, now);
   if (!intent) throw new AuthorityFlowError("This approval link is invalid, already used, or expired.");
   const scope = authorityGrantScope();
-  const flow = await startOAuthFlow(await authorityGrantClient(), intent.authorityDid, { scope }, {
-    kind: "authority",
-    expectedDid: intent.authorityDid,
-    initiatorDid: intent.initiatorDid,
-    purpose: intent.purpose,
-    expiresAt: now + FLOW_SECONDS,
-    clientScope: scope,
-  }, getOperatorConfig().encryptionKey);
+  const isPromptCreate = intent.authorityDid === null && intent.purpose.kind === "createWorkspace";
+  const targetInput = isPromptCreate
+    ? assertCredentialFreeOriginUrl(getConfig().groupHostUrl, "groupHostUrl")
+    : intent.authorityDid!;
+  const extraParParams: Record<string, string> = {};
+  if (isPromptCreate && intent.purpose.kind === "createWorkspace" && intent.purpose.creationKey) {
+    extraParParams.creation_key = intent.purpose.creationKey;
+  }
+  const flow = await startOAuthFlow(
+    await authorityGrantClient(),
+    targetInput,
+    {
+      scope,
+      ...(isPromptCreate ? { prompt: "create" } : {}),
+      ...extraParParams,
+    } as Parameters<OAuthFlowClient["authorize"]>[1],
+    {
+      kind: "authority",
+      expectedDid: intent.authorityDid,
+      initiatorDid: intent.initiatorDid,
+      purpose: intent.purpose,
+      expiresAt: now + FLOW_SECONDS,
+      clientScope: scope,
+    },
+    getOperatorConfig().encryptionKey,
+  );
+  if (
+    (flow.url.protocol !== "http:" && flow.url.protocol !== "https:") ||
+    flow.url.username !== "" ||
+    flow.url.password !== ""
+  ) {
+    throw new AuthorityFlowError("Refusing authorization URL with embedded credentials or invalid protocol.");
+  }
+  flow.url.searchParams.set("actor", intent.initiatorDid);
+  if (intent.purpose.kind === "createWorkspace") {
+    flow.url.searchParams.set("name", intent.purpose.name);
+    if (intent.purpose.joinPolicy) flow.url.searchParams.set("join_policy", intent.purpose.joinPolicy);
+    if (intent.purpose.publicMeta !== undefined) flow.url.searchParams.set("public_meta", String(intent.purpose.publicMeta));
+    if (intent.purpose.creationKey) flow.url.searchParams.set("creation_key", intent.purpose.creationKey);
+  }
   return { url: flow.url, cookieName: oauthFlowCookieName(flow.state), cookieValue: flow.cookieValue };
 }
 
@@ -219,7 +282,13 @@ export async function completeAuthorityFlow(
   const { session, state } = await (await deps.callbackClient(staged)).callback(params);
   try {
     assertOAuthFlowAppState(binding, state);
-    if (session.did !== binding.expectedDid) throw new AuthorityFlowError("You signed in as a different account than the workspace authority.");
+    if (!isDid(session.did)) throw new AuthorityFlowError("Approved session did not carry a valid group DID.");
+    if (binding.expectedDid !== null && session.did !== binding.expectedDid) {
+      throw new AuthorityFlowError("You signed in as a different account than the workspace authority.");
+    }
+    if (binding.expectedDid === null && session.did === binding.initiatorDid) {
+      throw new AuthorityFlowError("Group creation flow must return a distinct group DID, not the personal account DID.");
+    }
   } catch (error) {
     await session.signOut().catch(() => undefined);
     throw error;
@@ -233,16 +302,21 @@ export async function completeAuthorityFlow(
     await session.signOut().catch(() => undefined);
     throw error;
   }
+  markAuthorityHealthy(session.did, now * 1000);
   // Someone other than the authority account asked to create this workspace: the approval lets them, once (the
   // authority account itself needs only its grant).
   if (binding.purpose.kind === "createWorkspace" && binding.initiatorDid !== session.did) {
-    grantCreationAuthorization({ authorityDid: session.did, initiatorDid: binding.initiatorDid, name: binding.purpose.name }, now);
+    grantCreationAuthorization(
+      { authorityDid: session.did, initiatorDid: binding.initiatorDid, name: binding.purpose.name },
+      now,
+      binding.purpose.creationKey ?? null,
+    );
   }
   return { authorityDid: session.did, initiatorDid: binding.initiatorDid, purpose: binding.purpose };
 }
 
 export type RestoreAuthorityGrantDeps = {
-  resolvePds?: (did: string) => Promise<string>;
+  resolvePds?: (did: string, options?: { forceRefresh?: boolean }) => Promise<string>;
   fetchEndpoint?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   now?: () => number;
 };
@@ -356,6 +430,7 @@ export async function persistAuthorityGrant(did: string, saved: NodeSavedSession
     await store.set(did, saved);
     return previous;
   });
+  markAuthorityHealthy(did);
   if (!replaced) return;
   await revokeDetached(did, replaced).catch((error: unknown) => {
     getRawDb().prepare("INSERT INTO audit_event (workspace, actor, operation_id, event, details_json, created_at) VALUES (?, ?, '', ?, ?, ?)")
@@ -497,7 +572,7 @@ async function probeAuthorityAccountStatus(
     const res = await fetchFn(authSyncUrl, {
       method: "POST",
       headers: { "content-type": "application/json", accept: "application/json" },
-      body: JSON.stringify({ space: workspaceUri(did, "probe"), credentialKey }),
+      body: JSON.stringify({ space: workspaceUri(did), credentialKey }),
       signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
     });
     if (res.status === 408 || res.status === 425 || res.status === 429 || res.status >= 500) {

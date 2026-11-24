@@ -10,7 +10,7 @@ import type { AtprotoClient } from "@flock/protocol/atproto/xrpc";
 export type ClientTransport = {
   did: string;
   memberClient: AtprotoClient;
-  resolvePds(did: string): Promise<string>;
+  resolvePds(did: string, forceRefresh?: boolean): Promise<string>;
   resolveKemKey: ResolveKemKey;
   fetchEndpoint(request: Request): Promise<Response>;
   generateKey(): Promise<SpaceKey>;

@@ -4,8 +4,16 @@ import Database from "better-sqlite3";
 import type { OAuthSession } from "@atproto/oauth-client-node";
 import { inviteLinkFor } from "@flock/web/app/ui/client-api";
 import { pinnedCheckoutPath } from "../../protocol-tests/support/app-fixture";
-import { COLLECTION } from "@flock/protocol/nsids";
-import { parseWorkspaceUri } from "@flock/protocol/keys";
+import { ATPROTO_SPACE_COLLECTION, COLLECTION, OPENSOCIAL_COLLECTION } from "@flock/protocol/nsids";
+import { groupMembersUri, groupMetaUri, isDid, parseWorkspaceUri, SELF_SKEY } from "@flock/protocol/keys";
+import { validateSpacePolicy, validateSpaceRecord } from "@flock/protocol/registry";
+import {
+  effectiveHumanAdmins,
+  type EffectiveGovernanceState,
+  type GroupMembershipRecord,
+  type GroupOpenSocialPolicy,
+  type GroupRoleRecord,
+} from "@flock/protocol/scopes";
 import { listingCalls, openChannel, workspaceChannels } from "./channels-ui";
 import { escapeRegExp, eventually, signInFromLoginFormAt, waitForOrigin } from "./ui";
 import { PAGE_TIMEOUT_MS, type Actor, type AppWorld } from "./world";
@@ -124,28 +132,117 @@ export async function observeWorkspace(viewer: AppViewer, workspaceName: string,
 
 /**
  * The workspace's roster, admins and directory as the account's page read them since `since` (an index into its XRPC calls),
- * from the newest complete listing of each the browser made itself: active subjects, and the channels not archived;
- * undefined until it has made one of each. Asserts the page listed them only from the authority's own repo.
+ * from the newest complete listing of each the browser made itself: active human members, effective admins, and non-archived
+ * channels; undefined until it has made one of each. Asserts the page listed them only from `<groupDid>`'s own repo.
  */
 export function workspaceRead(viewer: Actor, workspaceUri: string, since = 0): WorkspaceRead | undefined {
-  const authority = parseWorkspaceUri(workspaceUri)?.authorityDid;
-  type Listed = { value: Record<string, unknown> };
-  const read = (collection: string): Listed[] | undefined => {
-    const listings = listingCalls(viewer, collection, since).filter(({ call, query }) => call.status === 200 && call.body === "recorded" && query.get("space") === workspaceUri);
+  const groupDid = parseWorkspaceUri(workspaceUri)?.authorityDid;
+  if (!groupDid) return undefined;
+  const metaSpace = groupMetaUri(groupDid);
+  const membersSpace = groupMembersUri(groupDid);
+
+  type Listed = { rkey: string; value: Record<string, unknown> };
+  const read = (targetSpace: string, collection: string): Listed[] | undefined => {
+    const listings = listingCalls(viewer, collection, since).filter(
+      ({ call, query }) => call.status === 200 && call.body === "recorded" && query.get("space") === targetSpace,
+    );
     const start = listings.map(({ query }) => query.get("cursor")).lastIndexOf(null);
     if (start < 0) return undefined;
-    const pages = listings.slice(start).map(({ call, query }) => ({ query, body: JSON.parse(call.responseBody) as { cursor?: string; records: Listed[] } }));
+    const pages = listings.slice(start).map(({ call, query }) => ({
+      query,
+      body: JSON.parse(call.responseBody) as { cursor?: string; records: Listed[] },
+    }));
     if (pages.at(-1)?.body.cursor !== undefined) return undefined;
-    assert.deepEqual([...new Set(pages.map(({ query }) => query.get("repo")))], [authority], `the app read ${collection} only from the workspace authority's repo`);
+    assert.deepEqual(
+      [...new Set(pages.map(({ query }) => query.get("repo")))],
+      [groupDid],
+      `the app read ${collection} in ${targetSpace} only from the workspace authority's repo`,
+    );
     return pages.flatMap(({ body }) => body.records);
   };
-  const activeSubjects = (records: Listed[]) => records.filter((record) => record.value.active === true).map((record) => String(record.value.subject)).sort();
-  const [roster, adminRecords, directory] = [read(COLLECTION.workspaceRoster), read(COLLECTION.admin), read(COLLECTION.directory)];
-  if (!roster || !adminRecords || !directory) return undefined;
+
+  const profiles = read(metaSpace, OPENSOCIAL_COLLECTION.profile);
+  const roles = read(membersSpace, OPENSOCIAL_COLLECTION.role);
+  const memberships = read(membersSpace, OPENSOCIAL_COLLECTION.membership);
+  const directory = read(workspaceUri, COLLECTION.directory);
+  const installs = read(workspaceUri, COLLECTION.appInstall);
+  const metaPolicy = read(metaSpace, ATPROTO_SPACE_COLLECTION.spacePolicy);
+  const membersPolicy = read(membersSpace, ATPROTO_SPACE_COLLECTION.spacePolicy);
+  const wsPolicy = read(workspaceUri, ATPROTO_SPACE_COLLECTION.spacePolicy);
+
+  if (!profiles || !roles || !memberships || !directory || !installs || !metaPolicy || !membersPolicy || !wsPolicy) {
+    return undefined;
+  }
+
+  const validRecords = (targetSpace: string, collection: string, listed: Listed[]) =>
+    listed.filter(
+      (record) =>
+        validateSpaceRecord(collection, record.value, {
+          authorityDid: groupDid,
+          spaceUri: targetSpace,
+          repoDid: groupDid,
+          rkey: record.rkey,
+        }).valid,
+    );
+
+  const rolesMap = new Map<string, GroupRoleRecord>();
+  for (const { rkey, value } of validRecords(membersSpace, OPENSOCIAL_COLLECTION.role, roles)) {
+    rolesMap.set(rkey, {
+      displayName: String(value.displayName),
+      ...(typeof value.description === "string" ? { description: value.description } : {}),
+      default: value.default === true,
+      scopes: Array.isArray(value.scopes) ? (value.scopes as string[]) : [],
+      assignable: Array.isArray(value.assignable) ? (value.assignable as string[]) : [],
+    });
+  }
+
+  const knownAppSubjects = new Set<string>();
+  for (const { value } of validRecords(workspaceUri, COLLECTION.appInstall, installs)) {
+    const subjectDid = String(value.subject);
+    if (subjectDid !== groupDid) knownAppSubjects.add(subjectDid);
+  }
+
+  const membershipsMap = new Map<string, GroupMembershipRecord>();
+  for (const { rkey, value } of validRecords(membersSpace, OPENSOCIAL_COLLECTION.membership, memberships)) {
+    if (!isDid(rkey) || rkey === groupDid) continue;
+    membershipsMap.set(rkey, {
+      ...(value as GroupMembershipRecord),
+      roles: Array.isArray(value.roles) ? (value.roles as string[]) : [],
+      createdAt: String(value.createdAt),
+    });
+  }
+
+  const spacePolicies = new Map<string, GroupOpenSocialPolicy>();
+  for (const [spUri, spType, skey, polRecords] of [
+    [metaSpace, "group.opensocial.meta", SELF_SKEY, metaPolicy],
+    [membersSpace, "group.opensocial.members", SELF_SKEY, membersPolicy],
+    [workspaceUri, "new.flock.workspace", SELF_SKEY, wsPolicy],
+  ] as const) {
+    const selfPol = polRecords.find((r) => r.rkey === SELF_SKEY)?.value?.policy;
+    if (selfPol && typeof selfPol === "object" && !Array.isArray(selfPol)) {
+      const candidate = selfPol as GroupOpenSocialPolicy;
+      if (validateSpacePolicy({ $type: "group.opensocial.policy", ...candidate }, { groupDid, spaceType: spType, skey }).valid) {
+        spacePolicies.set(spUri, candidate);
+      }
+    }
+  }
+
+  const governanceState: EffectiveGovernanceState = {
+    roles: rolesMap,
+    memberships: membershipsMap,
+    spacePolicies,
+    knownAppSubjects,
+  };
+
+  const humanMembers = [...membershipsMap.keys()]
+    .filter((did) => did !== groupDid && !knownAppSubjects.has(did))
+    .sort();
+
   return {
-    members: activeSubjects(roster),
-    admins: activeSubjects(adminRecords),
-    channels: directory.filter((record) => record.value.visibility !== "archived")
+    members: humanMembers,
+    admins: effectiveHumanAdmins(governanceState, groupDid),
+    channels: validRecords(workspaceUri, COLLECTION.directory, directory)
+      .filter((record) => record.value.visibility !== "archived")
       .map(({ value }) => ({ skey: String(value.skey), name: String(value.name), visibility: String(value.visibility) }))
       .sort((left, right) => left.name.localeCompare(right.name)),
   };
@@ -161,7 +258,8 @@ export async function withIndependentReader<T>(
   read: (reader: typeof import("@flock/reader/independent"), deps: import("@flock/reader/independent").IndependentDeps, session: OAuthSession) => Promise<T>,
 ): Promise<T> {
   const environment: Record<string, string> = {
-    APP_URL: world.appOrigin, OPERATOR_URL: world.operatorOrigin, PLC_URL: world.fixture.plcUrl, ATPROTO_ACCEPTANCE_TEST: "true",
+    APP_URL: world.appOrigin, OPERATOR_URL: world.operatorOrigin, GROUP_HOST_URL: world.fixture.groupHostUrl.origin,
+    PLC_URL: world.fixture.plcUrl, ATPROTO_ACCEPTANCE_TEST: "true",
     DATABASE_PATH: `${world.fixture.databasePath}.independent-reader-unused`, AUTH_ENCRYPTION_KEY: "7".repeat(64),
     OPERATOR_SERVICE_REF: world.operatorServiceRef,
   };
@@ -177,7 +275,7 @@ export async function withIndependentReader<T>(
       },
     } as unknown as OAuthSession;
     const { sessionCredentialDeps } = await import("@flock/operator/atproto/space-credential");
-    return await read(await import("@flock/reader/independent"), sessionCredentialDeps(session), session);
+    return await read(await import("@flock/reader/independent"), { ...sessionCredentialDeps(session), did: account.did }, session);
   } finally {
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key]; else process.env[key] = value;
@@ -255,5 +353,5 @@ export function runNode(args: string[], options: { env: NodeJS.ProcessEnv; timeo
 
 /** Runs a protocol test file with `node --test` and collects its TAP output. */
 export function runProtocolTest(file: string, timeoutMs: number): Promise<ChildRun> {
-  return runNode(["--import", "tsx", "--test", file], { env: { ...process.env, ATPROTO_PINNED_CHECKOUT: pinnedCheckoutPath() }, timeoutMs, what: file });
+  return runNode(["--import", "tsx", "--test", file], { env: { ...process.env, NODE_OPTIONS: "", ATPROTO_PINNED_CHECKOUT: pinnedCheckoutPath() }, timeoutMs, what: file });
 }

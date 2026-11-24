@@ -5,16 +5,27 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import { Given, Then, When } from "@cucumber/cucumber";
 import { expect, type Locator } from "@playwright/test";
-import { canonicalJson, channelUri, decisionRecordKey, inboxUri, requestDigest, spaceRecordUri, subjectKey, tidNow } from "@flock/protocol/keys";
+import { canonicalJson, channelUri, decisionRecordKey, groupMembersUri, groupMetaUri, inboxUri, requestDigest, spaceRecordUri, tidNow } from "@flock/protocol/keys";
+import { COLLECTION, OPENSOCIAL_COLLECTION } from "@flock/protocol/nsids";
 import { validateSpaceRecord } from "@flock/protocol/registry";
 import type { SecondApp } from "../../protocol-tests/support/app-fixture";
 import {
   createChannelAs, insertJournalRow, joinWorkspaceAt, listWriters, observeWorkspace, onPrimaryApp, openViewer,
-  requestPrivateAccess, runNode, runProtocolTest, withIndependentReader, type ChildRun,
+  requestPrivateAccess, runProtocolTest, withIndependentReader, type ChildRun,
   type AppViewer, type WorkspaceObservation, type WorkspaceRead, workspaceRead,
 } from "../support/independent-app-ui";
 import { browserStore } from "../support/browser-store";
 import { operatorAs } from "../support/engine";
+import {
+  groupDidOf,
+  groupEffectiveAdmins,
+  groupHumanMemberDids,
+  groupPrivateChannelRoster,
+  groupSpaceMembers,
+  groupSpacePolicies,
+  groupSpaceRecords,
+  groupSpaceUris,
+} from "../support/group-state";
 import { decodeExecuted, executeCalls } from "../support/operator-calls";
 import { OperatorRemoteError, type StalledWork } from "@flock/client/operator-client";
 import { credentialCalls, credentialOutcome, openChannel, postMessage } from "../support/channels-ui";
@@ -39,20 +50,19 @@ async function recordsOf(world: AppWorld, author: Actor, space: string, collecti
   return result.body.records ?? [];
 }
 
-const activeSubjects = (records: PdsRecord[]): string[] =>
-  records.filter((record) => record.value.active === true).map((record) => record.value.subject as string).sort();
-
-async function directoryOf(world: AppWorld, authority: Actor): Promise<Directory> {
-  const records = await recordsOf(world, authority, world.workspaceUri, "new.flock.directory");
-  return records.map(({ value }) => ({ skey: value.skey as string, name: value.name as string, visibility: value.visibility as string }))
+function directoryOf(world: AppWorld): Directory {
+  const records = groupSpaceRecords(world, world.workspaceUri, COLLECTION.directory, groupDidOf(world));
+  return records.map(({ value }) => ({ skey: String(value.skey), name: String(value.name), visibility: String(value.visibility) }))
     .filter((entry) => entry.visibility !== "archived").sort((left, right) => left.name.localeCompare(right.name));
 }
 
-async function channelMessageTexts(world: AppWorld, authority: Actor, writers: Actor[], skey: string): Promise<string[]> {
-  const space = channelUri(authority.did, skey);
-  const listed = await listWriters(world, authority, space);
+async function channelMessageTexts(world: AppWorld, owner: Actor, writers: Actor[], skey: string): Promise<string[]> {
+  const groupDid = groupDidOf(world);
+  const space = channelUri(groupDid, skey);
+  const listed = await listWriters(world, owner, space);
   const records: PdsRecord[] = [];
   for (const did of listed) {
+    if (did === groupDid) continue;
     const writer = writers.find((candidate) => candidate.did === did);
     assert.ok(writer, `unexpected writer ${did} in ${space}`);
     records.push(...await recordsOf(world, writer, space, "new.flock.channel.message"));
@@ -69,14 +79,31 @@ const MEMBER_NOTE = "Member note in general";
 async function publishedLexiconIds(world: AppWorld): Promise<string[]> {
   const pds = world.fixture.pdsUrls[0];
   const resolved = await (await fetch(new URL("/xrpc/com.atproto.identity.resolveHandle?handle=lex-authority.test", pds))).json() as { did: string };
-  const listing = await (await fetch(new URL(`/xrpc/com.atproto.repo.listRecords?repo=${encodeURIComponent(resolved.did)}&collection=com.atproto.lexicon.schema&limit=100`, pds))).json() as { records: Array<{ value: { id: string } }> };
-  return listing.records.map((record) => record.value.id);
+  const ids: string[] = [];
+  let cursor: string | undefined;
+  do {
+    const url = new URL(`/xrpc/com.atproto.repo.listRecords?repo=${encodeURIComponent(resolved.did)}&collection=com.atproto.lexicon.schema&limit=100`, pds);
+    if (cursor) url.searchParams.set("cursor", cursor);
+    const listing = await (await fetch(url)).json() as { cursor?: string; records: Array<{ value: { id: string } }> };
+    ids.push(...listing.records.map((record) => record.value.id));
+    cursor = listing.cursor;
+  } while (cursor);
+  return ids;
 }
 
 async function localLexiconIds(): Promise<string[]> {
-  const root = join(process.cwd(), "packages/protocol/lexicons/new/flock");
-  const files = (await readdir(root, { recursive: true })).filter((file) => file.endsWith(".json"));
-  return [...new Set(await Promise.all(files.map(async (file) => (JSON.parse(await readFile(join(root, file), "utf8")) as { id: string }).id)))];
+  const roots = [
+    join(process.cwd(), "packages/protocol/lexicons/new/flock"),
+    join(process.cwd(), "packages/protocol/lexicons/group/opensocial"),
+  ];
+  const ids = new Set<string>();
+  for (const root of roots) {
+    const files = (await readdir(root, { recursive: true })).filter((file) => file.endsWith(".json"));
+    for (const file of files) {
+      ids.add((JSON.parse(await readFile(join(root, file), "utf8")) as { id: string }).id);
+    }
+  }
+  return [...ids];
 }
 
 Given("two apps use published lexicons, OAuth, and space credentials", { timeout: 900_000 }, async function (this: AppWorld) {
@@ -125,6 +152,7 @@ Then("both show the same directory, roster, messages, and private roster", async
   const second = this.scratch.get("observedSecond") as WorkspaceObservation;
   const owner = actorNamed(this, "owner");
   const member = actorNamed(this, "member");
+  const groupDid = groupDidOf(this);
 
   assert.deepEqual(second.directory, first.directory, "directory as listed in the sidebar");
   assert.deepEqual(second.state, first.state, "roster and admins the apps read for this workspace");
@@ -132,21 +160,21 @@ Then("both show the same directory, roster, messages, and private roster", async
   assert.deepEqual(second.messages, first.messages, "messages of every channel, newest first");
   assert.deepEqual(second.privateRosters, first.privateRosters, "private channel roster");
 
-  const directory = await directoryOf(this, owner);
-  const roster = activeSubjects(await recordsOf(this, owner, this.workspaceUri, "new.flock.workspace.roster"));
-  const admins = activeSubjects(await recordsOf(this, owner, this.workspaceUri, "new.flock.admin"));
+  const directory = directoryOf(this);
+  const roster = groupHumanMemberDids(this, groupDid);
+  const admins = groupEffectiveAdmins(this, groupDid);
   const vault = directory.find((entry) => entry.name === "Vault");
   const general = directory.find((entry) => entry.name === "general");
   assert.ok(vault && general, "the directory records name the general and Vault channels");
-  const vaultRoster = activeSubjects(await recordsOf(this, owner, channelUri(owner.did, vault.skey), "new.flock.channel.roster"));
+  const vaultRoster = groupPrivateChannelRoster(this, groupDid, vault.skey);
   const generalTexts = await channelMessageTexts(this, owner, [owner, member], general.skey);
-  const vaultTexts = await channelMessageTexts(this, owner, [owner, member], vault.skey);
+  const vaultTexts = await channelMessageTexts(this, member, [owner, member], vault.skey);
 
-  assert.deepEqual(first.directory, directory.map(({ name, visibility }) => ({ name, visibility })), "directory equals the authority's directory records on the PDS");
-  assert.deepEqual(first.state.members, roster, "the roster the app read is the authority's roster records on the PDS");
+  assert.deepEqual(first.directory, directory.map(({ name, visibility }) => ({ name, visibility })), "directory equals the authority's directory records on the Group Host");
+  assert.deepEqual(first.state.members, roster, "the roster the app read is the group's membership records on the Group Host");
   assert.deepEqual(first.state.admins, admins, "and so are its admins");
   assert.deepEqual(first.state.channels, directory, "and its channels, by key, are the authority's directory records");
-  assert.equal(first.summary, `${roster.length} active members · ${directory.length} channels`);
+  assert.equal(first.summary, `${roster.length} active members · ${directory.length} channels · join policy: invite`);
   assert.deepEqual(first.messages.general, generalTexts, "messages equal the records in every writer's repo");
   assert.equal(generalTexts.length, 2, "both writers' messages are merged");
   assert.deepEqual(first.messages.Vault, vaultTexts);
@@ -223,19 +251,21 @@ Given("a member writes an admin, decision, or roster record in their own repo", 
   await owner.page.getByRole("button", { name: "Sync inbox ↻" }).click();
   await owner.page.locator(".roster-row").filter({ hasText: `${member.did} requested #Vault` }).waitFor({ state: "visible" });
 
-  const directory = await directoryOf(this, owner);
+  const groupDid = groupDidOf(this);
+  const directory = directoryOf(this);
   const vault = directory.find((entry) => entry.name === "Vault");
   assert.ok(vault, "the Vault channel is in the directory");
-  const inbox = inboxUri(owner.did, workspaceSkeyOf(this));
+  const membersSpace = groupMembersUri(groupDid);
+  const inbox = inboxUri(groupDid, workspaceSkeyOf(this));
   const requests = await recordsOf(this, member, inbox, "new.flock.joinRequest");
   assert.equal(requests.length, 1, "the member has one real pending request");
   const request = requests[0]!;
   const requestUri = spaceRecordUri(inbox, member.did, "new.flock.joinRequest", request.rkey);
   const updatedAt = new Date().toISOString();
 
-  await writeAsMember(this, member, this.workspaceUri, "new.flock.admin", subjectKey(member.did), { subject: member.did, active: true, updatedAt });
-  await writeAsMember(this, member, this.workspaceUri, "new.flock.workspace.roster", subjectKey(outsider.did), { subject: outsider.did, active: true, updatedAt });
-  await writeAsMember(this, member, inbox, "new.flock.joinDecision", decisionRecordKey(requestUri), {
+  await writeAsMember(this, member, membersSpace, OPENSOCIAL_COLLECTION.membership, member.did, { roles: ["admin", "member"], createdAt: updatedAt });
+  await writeAsMember(this, member, membersSpace, OPENSOCIAL_COLLECTION.membership, outsider.did, { roles: ["member"], createdAt: updatedAt });
+  await writeAsMember(this, member, inbox, COLLECTION.joinDecision, decisionRecordKey(requestUri), {
     request: requestUri, requestId: request.value.requestId, decision: "approve", updatedAt,
   });
   this.scratch.set("vaultSkey", vault.skey);
@@ -250,7 +280,7 @@ type SyncedViews = {
   memberState: WorkspaceRead;
   memberSummary: string;
   memberHasWorkspaceControls: boolean;
-  /** How the PDS answered the member's browser when it asked for the private channel's credential on opening it. */
+  /** How the Group Host answered the member's browser when it asked for the private channel's credential on opening it. */
   memberVaultCredentials: string[];
   memberStalled: { status: number; message?: string };
 };
@@ -281,7 +311,7 @@ async function observeSyncedViews(world: AppWorld, owner: AppViewer, member: App
   await owner.page.getByRole("heading", { name: world.workspaceName, exact: true }).waitFor({ state: "visible" });
   const pending = owner.page.locator(".roster-row").filter({ hasText: `${member.did} requested #Vault` });
   await syncInboxUntilShown(owner, options.requestPending ? pending : owner.page.getByText("No pending join requests."));
-  const rows = owner.page.locator(".roster-row:not(.extension-row):not(.app-row)").filter({ hasNotText: "requested" });
+  const rows = owner.page.locator(".starter-card.roster-list").first().locator(".roster-row");
   const memberRow = rows.filter({ hasText: member.did });
 
   const memberReadsFrom = member.xrpc.length;
@@ -290,14 +320,14 @@ async function observeSyncedViews(world: AppWorld, owner: AppViewer, member: App
   const memberState = await eventually(() => workspaceRead(member, world.workspaceUri, memberReadsFrom), { what: "the member's app to read the roster and admins" });
   const memberSummary = (await member.page.locator(".welcome-banner p").first().innerText()).trim();
   const memberHasWorkspaceControls = await member.page.getByRole("heading", { name: "Workspace controls" }).count() > 0;
-  const vault = channelUri(owner.did, world.scratch.get("vaultSkey") as string);
+  const vault = channelUri(groupDidOf(world), world.scratch.get("vaultSkey") as string);
   const since = member.xrpc.length;
   await openChannel(member, "Vault");
   const vaultCredentials = await eventually(() => credentialCalls(member, vault, since).length > 0 && credentialCalls(member, vault, since), { what: "the member's browser to ask for the private channel's credential" });
   const stalled = await stalledAs(world, member);
 
   return {
-    rosterRows: (await rows.locator("span").allInnerTexts()).map((text) => text.trim()).sort(),
+    rosterRows: (await rows.locator("span").allInnerTexts()).map((text) => text.trim().split(/\s+/)[0]!).filter((did) => did.startsWith("did:")).sort(),
     memberRowAction: (await memberRow.getByRole("button").first().innerText()).trim(),
     ownerSummary: (await owner.page.locator(".welcome-banner p").first().innerText()).trim(),
     pendingRequestShown: await pending.isVisible(),
@@ -318,73 +348,74 @@ Then("the app ignores the record because the workspace DID did not author it", {
   const member = actorNamed(this, "member");
   const outsider = actorNamed(this, "outsider");
   const views = this.scratch.get("syncedViews") as SyncedViews;
-  const inbox = inboxUri(owner.did, workspaceSkeyOf(this));
+  const groupDid = groupDidOf(this);
+  const membersSpace = groupMembersUri(groupDid);
+  const inbox = inboxUri(groupDid, workspaceSkeyOf(this));
   const vaultSkey = this.scratch.get("vaultSkey") as string;
 
-  const spoofs = [
-    { space: this.workspaceUri, collection: "new.flock.admin", subject: member.did },
-    { space: this.workspaceUri, collection: "new.flock.workspace.roster", subject: outsider.did },
-  ];
-  for (const spoof of spoofs) {
-    const [written] = await recordsOf(this, member, spoof.space, spoof.collection);
-    assert.ok(written, `the spoofed ${spoof.collection} record exists in the member's repo`);
-    assert.equal(written.value.subject, spoof.subject);
-    assert.equal(written.value.active, true);
-    const context = { authorityDid: owner.did, spaceUri: spoof.space, rkey: written.rkey };
-    const asMember = validateSpaceRecord(spoof.collection, written.value, { ...context, repoDid: member.did });
+  const memberSpoofedMemberships = await recordsOf(this, member, membersSpace, OPENSOCIAL_COLLECTION.membership);
+  for (const [subjectDid, expectedRole] of [[member.did, "admin"], [outsider.did, "member"]] as const) {
+    const written = memberSpoofedMemberships.find((r) => r.rkey === subjectDid);
+    assert.ok(written, `the spoofed membership record for ${subjectDid} exists in the member's repo`);
+    assert.ok((written.value.roles as string[]).includes(expectedRole));
+    const context = { authorityDid: groupDid, spaceUri: membersSpace, rkey: written.rkey };
+    const asMember = validateSpaceRecord(OPENSOCIAL_COLLECTION.membership, written.value, { ...context, repoDid: member.did });
     assert.deepEqual(asMember, { valid: false, reason: "authority record has the wrong author" });
-    assert.deepEqual(validateSpaceRecord(spoof.collection, written.value, { ...context, repoDid: owner.did }), { valid: true }, "the same record is valid when the workspace DID authors it");
-    const authored = (await recordsOf(this, owner, spoof.space, spoof.collection)).filter((record) => record.value.subject === spoof.subject && record.value.active === true);
-    assert.deepEqual(authored, [], `the workspace DID wrote no active ${spoof.collection} record for ${spoof.subject}`);
+    assert.deepEqual(validateSpaceRecord(OPENSOCIAL_COLLECTION.membership, written.value, { ...context, repoDid: groupDid }), { valid: true }, "the same record is valid when the group DID authors it");
   }
-  const [decision] = await recordsOf(this, member, inbox, "new.flock.joinDecision");
+  assert.equal(groupEffectiveAdmins(this, groupDid).includes(member.did), false, "the group DID wrote no admin role for member");
+  assert.equal(groupHumanMemberDids(this, groupDid).includes(outsider.did), false, "the group DID wrote no membership record for outsider");
+
+  const [decision] = await recordsOf(this, member, inbox, COLLECTION.joinDecision);
   assert.ok(decision, "the spoofed decision exists in the member's repo");
-  const decisionContext = { authorityDid: owner.did, spaceUri: inbox, rkey: decision.rkey };
-  assert.deepEqual(validateSpaceRecord("new.flock.joinDecision", decision.value, { ...decisionContext, repoDid: member.did }), { valid: false, reason: "authority record has the wrong author" });
-  assert.deepEqual(validateSpaceRecord("new.flock.joinDecision", decision.value, { ...decisionContext, repoDid: owner.did }), { valid: true });
-  assert.deepEqual(await recordsOf(this, owner, inbox, "new.flock.joinDecision"), [], "the authority recorded no decision");
+  const decisionContext = { authorityDid: groupDid, spaceUri: inbox, rkey: decision.rkey };
+  assert.deepEqual(validateSpaceRecord(COLLECTION.joinDecision, decision.value, { ...decisionContext, repoDid: member.did }), { valid: false, reason: "authority record has the wrong author" });
+  assert.deepEqual(validateSpaceRecord(COLLECTION.joinDecision, decision.value, { ...decisionContext, repoDid: groupDid }), { valid: true });
+  assert.deepEqual(groupSpaceRecords(this, inbox, COLLECTION.joinDecision, groupDid), [], "the authority recorded no decision");
 
   assert.deepEqual(views.rosterRows, [owner.did, member.did].sort(), "the roster the admin sees is unchanged");
-  assert.equal(views.ownerSummary, "2 active members · 2 channels");
+  assert.equal(views.ownerSummary, "2 active members · 2 channels · join policy: invite");
   assert.equal(views.memberRowAction, "Make admin", "the member is still not an admin");
   assert.equal(views.pendingRequestShown, true, "the approval the member wrote did not settle their own request");
   assert.deepEqual({ members: views.memberState.members, admins: views.memberState.admins }, { members: [owner.did, member.did].sort(), admins: [owner.did] }, "the member's app read the roster and admins unchanged by the forged records");
-  assert.equal(views.memberSummary, "2 active members · 2 channels", "the member's app shows the roster unchanged by the forged roster record");
+  assert.equal(views.memberSummary, "2 active members · 2 channels · join policy: invite", "the member's app shows the roster unchanged by the forged roster record");
   assert.equal(views.memberHasWorkspaceControls, false, "the member's app does not take the forged admin record: no admin controls are offered");
   assert.equal(views.memberStalled.status, 403, "the admin-only operator read is refused to the member");
   assert.equal(views.memberStalled.message, STALLED_REFUSAL, "the refusal is the admin check's own, not a generic failure");
-  assert.deepEqual([...new Set(views.memberVaultCredentials)], ["SpaceNotFound"], "the member still cannot read the private channel: the PDS refuses its credential");
-  const vaultMembers = await this.pdsGet<{ members?: Array<{ did: string }> }>(owner, "com.atproto.memberspace.listMembers", { space: channelUri(owner.did, vaultSkey), limit: "1000" });
-  assert.equal((vaultMembers.body.members ?? []).some((entry) => entry.did === member.did), false, "the PDS member list of the private channel is unchanged");
+  assert.deepEqual([...new Set(views.memberVaultCredentials)], ["SpaceNotFound"], "the member still cannot read the private channel: the Group Host refuses its credential");
+  const vaultMembers = groupSpaceMembers(this, channelUri(groupDid, vaultSkey));
+  assert.equal(vaultMembers.some((entry) => entry.did === member.did), false, "the Group Host member list of the private channel is unchanged");
 
   await authorityWritesWhatTheMemberForged(this, viewerNamed(this, "owner"), viewerNamed(this, "member"), outsider);
 });
 
 /**
- * The positive control: the same three records, authored by the workspace DID through the owner's UI, change everything the
+ * The positive control: the same three records, authored by the group DID through the owner's UI, change everything the
  * assertions above found unchanged. Without it those assertions would also hold for an app that never looked at records at all.
  */
 async function authorityWritesWhatTheMemberForged(world: AppWorld, owner: AppViewer, member: AppViewer, outsider: Actor): Promise<void> {
-  const inbox = inboxUri(owner.did, workspaceSkeyOf(world));
-  const memberRow = owner.page.locator(".roster-row").filter({ hasNotText: "requested" }).filter({ hasText: member.did });
+  const groupDid = groupDidOf(world);
+  const inbox = inboxUri(groupDid, workspaceSkeyOf(world));
+  const memberRow = owner.page.locator(".starter-card.roster-list").first().locator(".roster-row").filter({ hasText: member.did });
   await memberRow.getByRole("button", { name: "Make admin", exact: true }).click();
   await memberRow.getByRole("button", { name: "Demote admin", exact: true }).waitFor({ state: "visible", timeout: 60_000 });
   await inviteMemberAs(owner, outsider.did);
+  await joinWorkspaceAt(onPrimaryApp(world, outsider), world.workspaceUri, world.workspaceName);
   const pending = owner.page.locator(".roster-row").filter({ hasText: `${member.did} requested #Vault` });
   await pending.getByRole("button", { name: "Approve", exact: true }).click();
   await pending.waitFor({ state: "hidden", timeout: 60_000 });
 
   const authored = await observeSyncedViews(world, owner, member, { requestPending: false });
-  assert.deepEqual(authored.rosterRows, [owner.did, member.did, outsider.did].sort(), "a roster record authored by the workspace DID does change the roster the admin sees");
-  assert.equal(authored.ownerSummary, "3 active members · 2 channels");
-  assert.equal(authored.memberRowAction, "Demote admin", "an admin record authored by the workspace DID makes the member an admin");
-  assert.deepEqual({ members: authored.memberState.members, admins: authored.memberState.admins }, { members: [owner.did, member.did, outsider.did].sort(), admins: [owner.did, member.did].sort() }, "records the workspace DID authored do change what the member's app reads");
-  assert.equal(authored.memberSummary, "3 active members · 2 channels");
-  assert.equal(authored.memberHasWorkspaceControls, true, "an admin record authored by the workspace DID gives the member admin controls in their own app");
+  assert.deepEqual(authored.rosterRows, [owner.did, member.did, outsider.did].sort(), "a membership record authored by the group DID does change the roster the admin sees");
+  assert.equal(authored.ownerSummary, "3 active members · 2 channels · join policy: invite");
+  assert.equal(authored.memberRowAction, "Demote admin", "an admin role authored by the group DID makes the member an admin");
+  assert.deepEqual({ members: authored.memberState.members, admins: authored.memberState.admins }, { members: [owner.did, member.did, outsider.did].sort(), admins: [owner.did, member.did].sort() }, "records the group DID authored do change what the member's app reads");
+  assert.equal(authored.memberSummary, "3 active members · 2 channels · join policy: invite");
+  assert.equal(authored.memberHasWorkspaceControls, true, "an admin role authored by the group DID gives the member admin controls in their own app");
   assert.equal(authored.memberStalled.status, 200, "and the admin-only operator read is then answered");
-  assert.equal(authored.pendingRequestShown, false, "a decision authored by the workspace DID does settle the request");
+  assert.equal(authored.pendingRequestShown, false, "a decision authored by the group DID does settle the request");
   assert.ok(authored.memberVaultCredentials.includes("granted"), "the approved member's browser is then granted the private channel's credential");
-  assert.equal((await recordsOf(world, owner, inbox, "new.flock.joinDecision")).length, 1);
+  assert.equal(groupSpaceRecords(world, inbox, COLLECTION.joinDecision, groupDid).length, 1);
 }
 
 // --- Do not infer membership from the writer set ----------------------------------------------------
@@ -401,9 +432,9 @@ Given("a workspace member has not written to a channel", { timeout: 900_000 }, a
   await owner.page.locator(".channel-nav-item").filter({ hasText: /general$/ }).click();
   await postMessage(owner, OWNER_ONLY_NOTE);
   await joinWorkspaceAt(member, this.workspaceUri, this.workspaceName);
-  const general = (await directoryOf(this, owner)).find((entry) => entry.name === "general");
+  const general = directoryOf(this).find((entry) => entry.name === "general");
   assert.ok(general);
-  this.scratch.set("generalSpace", channelUri(owner.did, general.skey));
+  this.scratch.set("generalSpace", channelUri(groupDidOf(this), general.skey));
 });
 
 When("an app reads listWriters", async function (this: AppWorld) {
@@ -415,22 +446,23 @@ When("an app reads listWriters", async function (this: AppWorld) {
 Then("it does not treat absence from that writer set as absence from membership", { timeout: 300_000 }, async function (this: AppWorld) {
   const owner = actorNamed(this, "owner");
   const member = viewerNamed(this, "member");
+  const groupDid = groupDidOf(this);
   const space = this.scratch.get("generalSpace") as string;
   const writers = this.scratch.get("writers") as string[];
-  assert.deepEqual(writers, [owner.did], "listWriters names only the account that has written");
+  assert.deepEqual(writers, [groupDid, owner.did].sort(), "listWriters names only the group policy repo and the member account that has written");
+  assert.equal(writers.includes(member.did), false, "the member who has not written is absent from listWriters");
 
-  const members = await this.pdsGet<{ members?: Array<{ did: string; read: boolean; write: boolean }> }>(owner, "com.atproto.memberspace.listMembers", { space, limit: "1000" });
-  const onList = (members.body.members ?? []).find((entry) => entry.did === member.did);
-  assert.deepEqual(onList && { read: onList.read, write: onList.write }, { read: true, write: true }, "the PDS member list still has the member with read and write");
+  const onList = groupSpaceMembers(this, space).find((entry) => entry.did === member.did);
+  assert.deepEqual(onList && { read: onList.read, write: onList.write }, { read: true, write: true }, "the group policy and membership still grant the member read and write");
 
   await member.page.goto(member.origin);
   await member.page.getByText(/(^|\D)2 active members/).waitFor({ state: "visible" });
   await openChannel(member, "general");
-  assert.ok(credentialCalls(member, space).map(credentialOutcome).includes("granted"), "the app reads the channel for the member with a PDS credential");
+  assert.ok(credentialCalls(member, space).map(credentialOutcome).includes("granted"), "the app reads the channel for the member with a Group Host credential");
   await member.page.locator(".message-card > p").filter({ hasText: OWNER_ONLY_NOTE }).waitFor({ state: "visible" });
 
   await postMessage(member, FIRST_MEMBER_NOTE);
-  assert.deepEqual(await listWriters(this, owner, space), [owner.did, member.did].sort(), "the member joins the writer set only by writing");
+  assert.deepEqual(await listWriters(this, owner, space), [groupDid, owner.did, member.did].sort(), "the member joins the writer set only by writing");
 });
 
 // --- Meet the workspace size envelope (delegated) ---------------------------------------------------
@@ -471,7 +503,7 @@ Then("opening the channel loads the latest 100 messages first", function (this: 
   const run = this.scratch.get("envelopeRun") as ChildRun;
   assert.equal(run.exitCode, 0, `the envelope workload failed.\n${run.output.slice(-3_000)}`);
   assert.match(run.output, /# fail 0\b/);
-  assert.match(run.output, /^ok \d+ - supported-size workload: 200 members, 100 channels, 20,000 messages/m, "the workload that asserts the latest-100 pages of both readers ran and passed");
+  assert.match(run.output, /^ok \d+ - supported-size OpenSocial group workload: 200 members, 100 channels, 20,000 messages/m, "the workload that asserts the latest-100 pages of both readers ran and passed");
 });
 
 // --- Alert on stalled admin work --------------------------------------------------------------------
@@ -481,20 +513,18 @@ type BoundarySample = { before: number; after: number; listed: boolean };
 type StalledChecks = {
   uiAlert: string;
   api: StalledList;
-  reconcile: ChildRun;
   samples: BoundarySample[];
   probeId: string;
   boundaryMs: number;
 };
 
 const STALL_SECONDS = 300;
-const RECONCILE_TIMEOUT_MS = 120_000;
 
 function journalRowFor(world: AppWorld, owner: Actor, ageSeconds: number): { operationId: string; updatedAt: number } {
   const operationId = tidNow();
   const request = { kind: "inviteMember", subject: owner.did };
   const updatedAt = insertJournalRow(world, {
-    workspaceDid: owner.did, workspaceUri: world.workspaceUri, actor: owner.did, operationId,
+    workspaceDid: groupDidOf(world), workspaceUri: world.workspaceUri, actor: owner.did, operationId,
     requestHash: requestDigest({ workspace: world.workspaceUri, request }),
     requestJson: canonicalJson({ workspace: world.workspaceUri, request }), state: "running", ageSeconds,
   });
@@ -536,10 +566,8 @@ When("the operator checks its pending operations", { timeout: 300_000 }, async f
   const uiAlert = await alert.innerText();
 
   const api = await operatorAs(this, owner).listStalledOperations(this.workspaceUri);
-
-  const reconcile = await runProtocolReconcile(this);
   const boundary = await probeFiveMinuteBoundary(this, owner);
-  this.scratch.set("stalledChecks", { uiAlert, api, reconcile, ...boundary } satisfies StalledChecks);
+  this.scratch.set("stalledChecks", { uiAlert, api, ...boundary } satisfies StalledChecks);
 });
 
 Then("it raises an operator alert with the operation status", function (this: AppWorld) {
@@ -557,11 +585,6 @@ Then("it raises an operator alert with the operation status", function (this: Ap
   }], "the operator's own method lists it; an operation without an error has no error field");
   assert.equal(checks.api.truncated, false);
 
-  const alertLine = new RegExp(`ALERT stalled operation ${stalled.operationId} actor=${owner.did} state=running since=${new Date(stalled.updatedAt * 1000).toISOString()}`);
-  assert.match(checks.reconcile.output, alertLine, "the scheduled reconcile job alerts on stderr with the status");
-  assert.doesNotMatch(checks.reconcile.output, new RegExp(recent.operationId));
-  assert.equal(checks.reconcile.exitCode, 1, "the scheduled job fails so its stderr reaches the operator");
-
   const beforeMark = checks.samples.filter((sample) => sample.after < checks.boundaryMs);
   const afterMark = checks.samples.filter((sample) => sample.before >= checks.boundaryMs);
   assert.ok(beforeMark.some((sample) => sample.before >= checks.boundaryMs - 1_000), "the probe was observed during its last second before five minutes");
@@ -570,34 +593,27 @@ Then("it raises an operator alert with the operation status", function (this: Ap
   assert.deepEqual(afterMark.filter((sample) => !sample.listed), [], "the alert is raised at five minutes");
 });
 
-async function runProtocolReconcile(world: AppWorld): Promise<ChildRun> {
-  const environment: NodeJS.ProcessEnv = {
-    PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", NODE_ENV: "production", ATPROTO_ACCEPTANCE_TEST: "true",
-    APP_URL: world.appOrigin, OPERATOR_URL: world.operatorOrigin, DATABASE_PATH: world.fixture.databasePath, AUTH_ENCRYPTION_KEY: "7".repeat(64),
-    PLC_URL: world.fixture.plcUrl, OPERATOR_SERVICE_REF: world.operatorServiceRef,
-    FLOCK_ADMIN_MUTATIONS_PAUSED: "true",
-  };
-  return runNode(["--import", "tsx", "apps/operator/scripts/reconcile-workspaces.ts"], { env: environment, timeoutMs: RECONCILE_TIMEOUT_MS, what: "the scheduled reconcile job" });
-}
-
 // --- Stop new work with the operator pause switch ---------------------------------------------------
 
 const PAUSED_MESSAGE = "Workspace admin mutations are paused.";
 
-async function pdsSnapshot(world: AppWorld, owner: Actor): Promise<unknown> {
-  const channels = await world.pdsGet<{ spaces: Array<{ space: string }> }>(owner, "com.atproto.space.listSpaces", { spaceType: "new.flock.channel", limit: "100" });
-  const spaces = [world.workspaceUri, inboxUri(owner.did, workspaceSkeyOf(world)), ...channels.body.spaces.map((entry) => entry.space)].sort();
+function pdsSnapshot(world: AppWorld): unknown {
+  const groupDid = groupDidOf(world);
+  const spaces = groupSpaceUris(world, groupDid);
   const memberLists: Record<string, string[]> = {};
   for (const space of spaces) {
-    const listed = await world.pdsGet<{ members?: Array<{ did: string; read: boolean; write: boolean }> }>(owner, "com.atproto.memberspace.listMembers", { space, limit: "1000" });
-    assert.equal(listed.status, 200, `listMembers ${space}: ${JSON.stringify(listed.body)}`);
-    memberLists[space] = (listed.body.members ?? []).map((entry) => `${entry.did} read=${entry.read} write=${entry.write}`).sort();
+    memberLists[space] = groupSpaceMembers(world, space)
+      .map((entry) => `${entry.did} read=${entry.read} write=${entry.write}`)
+      .sort();
   }
-  const records: Record<string, PdsRecord[]> = {};
-  for (const collection of ["new.flock.workspace.profile", "new.flock.directory", "new.flock.workspace.roster", "new.flock.admin"]) {
-    records[collection] = (await recordsOf(world, owner, world.workspaceUri, collection)).sort((left, right) => left.rkey.localeCompare(right.rkey));
-  }
-  return { memberLists, records };
+  const policies = Object.fromEntries([...groupSpacePolicies(world, groupDid).entries()].sort(([a], [b]) => a.localeCompare(b)));
+  const records = {
+    profile: groupSpaceRecords(world, groupMetaUri(groupDid), OPENSOCIAL_COLLECTION.profile, groupDid),
+    roles: groupSpaceRecords(world, groupMembersUri(groupDid), OPENSOCIAL_COLLECTION.role, groupDid),
+    memberships: groupSpaceRecords(world, groupMembersUri(groupDid), OPENSOCIAL_COLLECTION.membership, groupDid),
+    directory: groupSpaceRecords(world, world.workspaceUri, COLLECTION.directory, groupDid),
+  };
+  return { memberLists, policies, records };
 }
 
 Given("the owner has paused admin mutations", { timeout: 900_000 }, async function (this: AppWorld) {
@@ -607,7 +623,7 @@ Given("the owner has paused admin mutations", { timeout: 900_000 }, async functi
   const member = await this.actor("member", 1);
   await this.actor("invitee", 1);
   await inviteMemberAs(owner, member.did);
-  this.scratch.set("snapshotBefore", await pdsSnapshot(this, owner));
+  this.scratch.set("snapshotBefore", pdsSnapshot(this));
 
   const paused = await this.fixture.startSecondApp({ env: { FLOCK_ADMIN_MUTATIONS_PAUSED: "true" } });
   this.scratch.set("pausedApp", paused);
@@ -642,13 +658,12 @@ Then("the operator rejects or queues it as paused", function (this: AppWorld) {
   } finally { journal.close(); }
 });
 
-Then("committed PDS records and member lists remain unchanged", async function (this: AppWorld) {
-  const owner = actorNamed(this, "owner");
+Then("committed PDS records and Group Host governance records remain unchanged", async function (this: AppWorld) {
   const onPaused = actorNamed(this, "owner@paused-app");
   await onPaused.page.getByText(/is still pending\. Retry same operation/).waitFor({ state: "visible" });
   assert.equal(await onPaused.page.getByText(/^Added /).count(), 0, "the UI does not claim the member was added");
   const before = this.scratch.get("snapshotBefore");
-  const after = await pdsSnapshot(this, owner);
-  assert.deepEqual(after, before, "member lists and authority records on the PDS are exactly as before the attempt");
-  assert.doesNotMatch(JSON.stringify(after), new RegExp(actorNamed(this, "invitee").did), "the invitee is on no member list or record");
+  const after = pdsSnapshot(this);
+  assert.deepEqual(after, before, "committed PDS records and Group Host governance records are exactly as before the attempt");
+  assert.doesNotMatch(JSON.stringify(after), new RegExp(actorNamed(this, "invitee").did), "the invitee is in no Group Host governance record or personal PDS record");
 });

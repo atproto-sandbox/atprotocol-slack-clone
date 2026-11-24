@@ -3,14 +3,23 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { formatDidKey, type Keypair, P256Keypair } from '@atproto/crypto'
-import { TestNetworkNoAppView, type TestPds } from '@atproto/dev-env'
 import { createSpaceSigHeaders } from '@atproto/space'
 import { calculateJwkThumbprint } from 'jose'
 import type { NsidString } from '@atproto/syntax'
-import { Client } from '../../../oauth/oauth-provider/src/client/client.js'
-import { generateCode } from '../../../oauth/oauth-provider/src/request/code.js'
-import { com } from '../../src/lexicons/index.js'
-import { type Actor, SpaceClient, SpaceCredential } from '../_space.js'
+import {
+  type Actor,
+  afterAll,
+  com,
+  describe,
+  expect,
+  generateCode,
+  it,
+  OAuthProviderClient as Client,
+  SpaceClient,
+  SpaceCredential,
+  TestNetworkNoAppView,
+  type TestPds,
+} from '../support/pinned-atproto-harness'
 
 // Direct-message protocol gate (M0 in .ai/plans/direct-messages.md). Every
 // assumption the DM design makes about the pinned PDS is exercised here before

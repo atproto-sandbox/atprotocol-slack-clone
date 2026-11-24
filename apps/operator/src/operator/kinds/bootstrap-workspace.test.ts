@@ -8,18 +8,19 @@ import { closeDb } from "../../lib/db";
 import { workspaceUri } from "@flock/protocol/keys";
 import { parseWorkspaceRef, type OperatorActor } from "../actor";
 import { runJournaledOperation } from "../journal";
+import { plcDid } from "../testing/fake-group-session";
 import { bootstrapWorkspaceKind } from "./bootstrap-workspace";
 
-const OWNER = "did:plc:owner";
+const OWNER = plcDid("bootowner");
 let directory = "";
 
-// The app config caches DATABASE_PATH on first read, so this file shares one database. Each test uses its own workspace name.
 before(() => {
   directory = mkdtempSync(join(tmpdir(), "slack-bootstrap-test-"));
   process.env.DATABASE_PATH = join(directory, "bootstrap.db");
   process.env.AUTH_ENCRYPTION_KEY = "33".repeat(32);
   process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
   process.env.APP_URL = "http://127.0.0.1:3000";
+  process.env.GROUP_HOST_URL = "http://127.0.0.1:3004";
 });
 after(() => {
   closeDb();
@@ -40,17 +41,26 @@ function sessionWith(createSpace: (type: SpaceType, skey: string) => Response): 
 }
 
 const created = (type: SpaceType, skey: string) => Response.json({ space: `at://${OWNER}/space/${type}/${skey}` });
-test("a bootstrap replayed into a workspace whose key its name does not derive fails instead of building there", async () => {
-  // #given a journaled bootstrap for "Delta" being run against some other workspace key
+
+test("non-self workspace space URIs are rejected by parseWorkspaceRef, and a bootstrap replayed into a non-self key fails before creating anything", async () => {
+  const nonSelfUri = workspaceUri(OWNER, "not-self-key");
+  assert.throws(() => parseWorkspaceRef(nonSelfUri), /Invalid workspace space URI/);
+
   const actor: OperatorActor = {
-    did: OWNER, session: sessionWith(created), workspace: parseWorkspaceRef(workspaceUri(OWNER, "not-deltas-key")), canRecoverOperations: true,
+    did: OWNER,
+    session: sessionWith(created),
+    workspace: { uri: nonSelfUri, authorityDid: OWNER, skey: "not-self-key" },
+    canRecoverOperations: true,
   };
 
-  // #when the runner replays it
-  const view = await runJournaledOperation(actor, "5555555555555", { kind: "bootstrapWorkspace", name: "Delta" }, bootstrapWorkspaceKind.steps,
-    (context) => bootstrapWorkspaceKind.run(actor, context, { kind: "bootstrapWorkspace", name: "Delta" }));
+  const view = await runJournaledOperation(
+    actor,
+    "5555555555555",
+    { kind: "bootstrapWorkspace", name: "Delta" },
+    bootstrapWorkspaceKind.steps,
+    (context) => bootstrapWorkspaceKind.run(actor, context, { kind: "bootstrapWorkspace", name: "Delta" }),
+  );
 
-  // #then it fails before creating anything
   assert.equal(view.state, "failed");
   assert.deepEqual(view.completedSteps, []);
 });

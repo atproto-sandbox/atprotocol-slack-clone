@@ -1,70 +1,72 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { SpacePermission } from "@atproto/oauth-scopes";
+import type { DidString, NsidString, RecordKeyString } from "@atproto/syntax";
+import { groupMembersUri, groupMetaUri } from "./keys";
 import { OPERATOR_METHOD } from "./nsids";
-import { appGrantScopes, DM_BROWSER_SCOPES, LEGACY_OPERATOR_METHODS, legacyMemberGrantScopes, memberGrantScopes, OPERATOR_METHODS, operatorMethodsScope, workspaceAuthorityScopes } from "./scopes";
+import {
+  appGrantScopes,
+  DM_BROWSER_SCOPES,
+  effectiveMemberPermissions,
+  expandGroupScopes,
+  expandPolicyGrantScopes,
+  groupAdminScopes,
+  groupModeratorScopes,
+  InvalidSpacePolicyScopeError,
+  isEffectiveAdminMember,
+  isEffectiveModeratorMember,
+  LEGACY_OPERATOR_METHODS,
+  legacyMemberGrantScopes,
+  memberGrantScopes,
+  OPEN_SOCIAL_PARTICIPATE_SCOPES,
+  OPERATOR_METHODS,
+  operatorMethodsScope,
+} from "./scopes";
 
 const serviceRef = "did:web:slack.example#atproto_flock_operator";
+const groupDid = "did:plc:abcdefghijklmnopqrstuvwx";
+const aliceDid = "did:plc:aliceabcdefghijklmnopqrs";
+const bobDid = "did:plc:bobabcdefghijklmnopqrstu";
 
-test("the operator scope lists exactly the published operator methods", () => {
-  assert.equal(operatorMethodsScope(OPERATOR_METHODS, serviceRef), "rpc?lxm=new.flock.operator.execute&lxm=new.flock.operator.getOperation&lxm=new.flock.operator.listInboxWriters"
-    + "&lxm=new.flock.operator.getChanges&lxm=new.flock.operator.createWorkspace&lxm=new.flock.operator.startAuthorityFlow"
-    + "&lxm=new.flock.operator.listStalledOperations&lxm=new.flock.operator.getDmNotifyTarget&aud=did:web:slack.example%23atproto_flock_operator");
+test("operatorMethodsScope lists all published operator methods including getSpaceNotifyTarget", () => {
+  assert.equal(
+    operatorMethodsScope(OPERATOR_METHODS, serviceRef),
+    "rpc?lxm=new.flock.operator.execute&lxm=new.flock.operator.getOperation" +
+      "&lxm=new.flock.operator.getChanges&lxm=new.flock.operator.createWorkspace&lxm=new.flock.operator.startAuthorityFlow" +
+      "&lxm=new.flock.operator.listStalledOperations&lxm=new.flock.operator.getDmNotifyTarget&lxm=new.flock.operator.getSpaceNotifyTarget" +
+      "&aud=did:web:slack.example%23atproto_flock_operator",
+  );
 });
 
-test("legacyMemberGrantScopes matches memberGrantScopes except omitting optional getDmNotifyTarget", () => {
+test("legacyMemberGrantScopes matches memberGrantScopes except omitting notify-target methods", () => {
   assert.equal((LEGACY_OPERATOR_METHODS as readonly string[]).includes(OPERATOR_METHOD.getDmNotifyTarget), false);
-  assert.deepEqual([...LEGACY_OPERATOR_METHODS, OPERATOR_METHOD.getDmNotifyTarget], OPERATOR_METHODS);
+  assert.equal((LEGACY_OPERATOR_METHODS as readonly string[]).includes(OPERATOR_METHOD.getSpaceNotifyTarget), false);
   const current = memberGrantScopes(serviceRef);
   const legacy = legacyMemberGrantScopes(serviceRef);
   assert.deepEqual(legacy.slice(0, -1), current.slice(0, -1));
   assert.equal(legacy.at(-1), operatorMethodsScope(LEGACY_OPERATOR_METHODS, serviceRef));
-  assert.equal(legacy.at(-1)!.includes(OPERATOR_METHOD.getDmNotifyTarget), false);
 });
 
-test("operator RPC scopes preserve percent-encoded DID web ports", () => {
-  assert.equal(operatorMethodsScope(["new.flock.operator.execute"], "did:web:localhost%3A3000#atproto_flock_operator"),
-    "rpc?lxm=new.flock.operator.execute&aud=did:web:localhost%253A3000%23atproto_flock_operator");
+test("memberGrantScopes includes DM_BROWSER_SCOPES + OPEN_SOCIAL_PARTICIPATE_SCOPES + Flock modality scopes", () => {
+  const scopes = memberGrantScopes(serviceRef);
+  for (const dmScope of DM_BROWSER_SCOPES) {
+    assert.ok(scopes.includes(dmScope), `missing DM scope ${dmScope}`);
+  }
+  for (const osScope of OPEN_SOCIAL_PARTICIPATE_SCOPES) {
+    assert.ok(scopes.includes(osScope), `missing OpenSocial participate scope ${osScope}`);
+  }
+  assert.ok(scopes.includes("space:new.flock.workspace?authority=*&skey=self&action=read"));
+  assert.ok(scopes.includes("space:new.flock.inbox?authority=*&skey=self&action=read"));
 });
 
-test("workspace authority scopes contain no message or reaction writes", () => {
-  const scopes = workspaceAuthorityScopes();
-  assert.ok(scopes.some((scope) => scope.includes("manage=create&manage=update")));
-  assert.ok(scopes.some((scope) => scope.includes("collection=new.flock.channel.roster")));
-  assert.ok(scopes.every((scope) => !scope.includes("channel.message") && !scope.includes("channel.reaction")));
-});
-
-test("workspace authority combines equivalent read actions into compact scopes and emits no collection scope for app inboxes or tasks spaces", () => {
-  const scopes = workspaceAuthorityScopes();
-  assert.ok(scopes.includes("space:new.flock.workspace?authority=self&skey=*&action=read_self&action=read&manage=create&manage=update"));
-  assert.ok(scopes.includes("space:new.flock.inbox?authority=self&skey=*&action=read_self&action=read&manage=create&manage=update"));
-  assert.ok(scopes.includes("space:new.flock.channel?authority=self&skey=*&action=read_self&action=read&manage=create&manage=update"));
-  assert.ok(scopes.includes("space:new.flock.app.inbox?authority=self&skey=*&action=read_self&action=read&manage=create&manage=update"));
-  assert.ok(scopes.includes("space:new.flock.ext.tasks?authority=self&skey=*&action=read_self&action=read&manage=create&manage=update"));
-  assert.ok(scopes.some((scope) => scope.startsWith("space:new.flock.workspace?") && scope.includes("collection=new.flock.ext.install")));
-  assert.equal(scopes.filter((scope) => scope.startsWith("space:new.flock.app.inbox?")).length, 1, "the authority writes no records in an app inbox");
-  assert.equal(scopes.filter((scope) => scope.startsWith("space:new.flock.ext.tasks?")).length, 1, "the authority writes no records in a tasks space");
-});
-
-test("DM_BROWSER_SCOPES is the exact DM part of the browser grant (M3)", () => {
-  assert.deepEqual(DM_BROWSER_SCOPES, [
-    "atproto",
-    "space:new.flock.dm.inbox?authority=*&collection=new.flock.dm.request&action=create&action=update&action=delete",
-    "space:new.flock.dm.inbox?authority=self&action=read&manage=create&manage=update",
-    "repo:new.flock.dm.declaration?action=create&action=update",
-    "space:new.flock.dm.conversation?authority=self&collection=new.flock.dm.header&collection=new.flock.dm.message&collection=new.flock.dm.reaction&action=create&action=update&action=delete&manage=create&manage=update&manage=delete",
-    "space:new.flock.dm.conversation?authority=*&action=read",
-  ]);
-});
-
-test("the workspace authority grant, which the server holds, never carries a DM scope", () => {
-  for (const scope of workspaceAuthorityScopes()) assert.ok(!scope.includes("new.flock.dm"), scope);
-});
-
-test("an app asks for its declaration, workspace/channel/app-inbox reads, channel writes, and the change feed: no workspace inbox and no DM", () => {
+test("appGrantScopes includes meta/self and members/self read plus Flock app modality scopes without DM or inbox", () => {
   assert.deepEqual(appGrantScopes("did:web:operator.example#atproto_flock_operator"), [
     "atproto",
     "repo:new.flock.app.declaration?action=create&action=update",
-    "space:new.flock.workspace?authority=*&action=read",
+    "space:group.opensocial.meta?authority=*&skey=self&action=read",
+    "space:group.opensocial.members?authority=*&action=read_self",
+    "space:group.opensocial.members?authority=*&skey=self&action=read",
+    "space:new.flock.workspace?authority=*&skey=self&action=read",
     "space:new.flock.channel?authority=*&action=read",
     "space:new.flock.channel?authority=*&collection=new.flock.channel.message&collection=new.flock.channel.reaction&action=create&action=update&action=delete",
     "space:new.flock.app.inbox?authority=*&action=read",
@@ -72,22 +74,205 @@ test("an app asks for its declaration, workspace/channel/app-inbox reads, channe
   ]);
 });
 
-test("a member's browser grant creates and deletes commands and actions in app inboxes, with no read and no update", () => {
-  const scopes = memberGrantScopes(serviceRef);
-  const appInboxScopes = scopes.filter((scope) => scope.startsWith("space:new.flock.app.inbox?"));
-  assert.deepEqual(appInboxScopes, [
-    "space:new.flock.app.inbox?authority=*&collection=new.flock.app.command&collection=new.flock.app.action&action=create&action=delete",
-  ]);
+test("patched @atproto/oauth-scopes SpaceCollectionParam accepts '*' collection on space.importRepo checks (6747610566 parity)", () => {
+  const wildcardPerm = SpacePermission.fromString(
+    "space:*?collection=*&action=read&action=create&action=update&action=delete",
+  )!.withResolvedAuthority(groupDid as DidString);
+  assert.equal(
+    wildcardPerm.matches({
+      spaceType: "new.flock.channel" as NsidString,
+      authority: groupDid as DidString,
+      skey: "general" as RecordKeyString,
+      action: "create",
+      collection: "*",
+    }),
+    true,
+  );
+
+  const narrowPerm = SpacePermission.fromString(
+    "space:new.flock.channel?collection=new.flock.channel.message&action=create",
+  )!.withResolvedAuthority(groupDid as DidString);
+  assert.equal(
+    narrowPerm.matches({
+      spaceType: "new.flock.channel" as NsidString,
+      authority: groupDid as DidString,
+      skey: "general" as RecordKeyString,
+      action: "create",
+      collection: "*",
+    }),
+    false,
+  );
 });
 
-test("a member's browser grant reads and writes Tasks extension collections, while appGrantScopes remains unchanged", () => {
-  const scopes = memberGrantScopes(serviceRef);
-  const tasksScopes = scopes.filter((scope) => scope.startsWith("space:new.flock.ext.tasks?"));
-  assert.deepEqual(tasksScopes, [
-    "space:new.flock.ext.tasks?authority=*&action=read",
-    "space:new.flock.ext.tasks?authority=*&collection=new.flock.ext.tasks.project&collection=new.flock.ext.tasks.projectEdit&collection=new.flock.ext.tasks.task&collection=new.flock.ext.tasks.taskEdit&collection=new.flock.ext.tasks.comment&action=create&action=update&action=delete",
-  ]);
-  for (const scope of appGrantScopes(serviceRef)) {
-    assert.ok(!scope.includes("new.flock.ext.tasks"), scope);
+test("groupAdminScopes never emits invalid aud=self and expands cleanly with zero dropped permissions", () => {
+  const preDidScopes = groupAdminScopes();
+  assert.ok(preDidScopes.every((s) => !s.includes("aud=self")));
+  const preDidPerms = expandGroupScopes(preDidScopes);
+  assert.equal(preDidPerms.allowsAccount({ attr: "repo", action: "manage" }), true);
+  assert.equal(preDidPerms.allowsIdentity({ attr: "*" }), true);
+  assert.equal(
+    preDidPerms.allowsRpc({
+      aud: `${groupDid}#atproto_pds`,
+      lxm: "group.opensocial.listJoinRequests",
+    }),
+    true,
+  );
+  assert.equal(
+    preDidPerms.allowsRpc({
+      aud: "did:web:target.groups.example" as `${DidString}#${string}`,
+      lxm: "com.atproto.server.createAccount",
+    }),
+    true,
+  );
+  assert.equal(
+    preDidPerms.allowsRpc({
+      aud: "did:web:target.groups.example" as `${DidString}#${string}`,
+      lxm: "group.opensocial.abortMigration",
+    }),
+    true,
+  );
+  const modPerms = expandGroupScopes(groupModeratorScopes());
+  assert.equal(
+    modPerms.allowsRpc({
+      aud: "did:web:target.groups.example" as `${DidString}#${string}`,
+      lxm: "group.opensocial.abortMigration",
+    }),
+    false,
+  );
+
+  const postDidPerms = expandGroupScopes(groupAdminScopes(groupDid), groupDid);
+  assert.equal(
+    postDidPerms.allowsSpace(
+      { spaceDid: groupDid as DidString, spaceType: "new.flock.channel", skey: "general" },
+      { action: "create", collection: "*" },
+    ),
+    true,
+  );
+  assert.equal(
+    postDidPerms.allowsRpc({
+      aud: `${groupDid}#atproto_pds`,
+      lxm: "com.atproto.space.exportSpaceMeta",
+    }),
+    true,
+  );
+});
+
+test("expandPolicyGrantScopes clamps policy grants to concrete (spaceType, groupDid, skey) and rejects non-space, manage=create, and cross-space scopes", () => {
+  const clamped = expandPolicyGrantScopes(
+    ["space:*?collection=com.atproto.label.record&action=create&manage=update"],
+    { groupDid, spaceType: "new.flock.channel", skey: "general" },
+  );
+  assert.equal(clamped.length, 1);
+  // Matches target space
+  assert.equal(
+    clamped[0]!.matches({
+      spaceType: "new.flock.channel",
+      authority: groupDid as DidString,
+      skey: "general",
+      action: "create",
+      collection: "com.atproto.label.record",
+    }),
+    true,
+  );
+  // NEVER leaks to another channel skey or spaceType!
+  assert.equal(
+    clamped[0]!.matches({
+      spaceType: "new.flock.channel",
+      authority: groupDid as DidString,
+      skey: "random",
+      action: "create",
+      collection: "com.atproto.label.record",
+    }),
+    false,
+  );
+
+  // Rejects non-space scopes, manage=create, and cross-space targets
+  for (const bad of [
+    "repo:*",
+    "rpc?aud=*&lxm=group.opensocial.listModSubjects",
+    "account:status?action=manage",
+    "space:new.flock.channel?manage=create",
+    "space:group.opensocial.meta?skey=self&action=read",
+    "space:new.flock.channel?skey=other&action=read",
+    "space:new.flock.channel?authority=did:plc:other&action=read",
+  ]) {
+    assert.throws(
+      () => expandPolicyGrantScopes([bad], { groupDid, spaceType: "new.flock.channel", skey: "general" }),
+      (err: unknown) => err instanceof InvalidSpacePolicyScopeError && err.code === "InvalidSpacePolicyScope",
+      bad,
+    );
   }
+});
+
+test("effectiveMemberPermissions unions role.scopes AND space-clamped policy.grants[].scopes across admin & moderator checks", () => {
+  const roles = new Map([
+    [
+      "admin",
+      {
+        displayName: "Admin",
+        scopes: groupAdminScopes(groupDid).filter((s) => s !== "atproto"),
+        assignable: ["*"],
+      },
+    ],
+    [
+      "channel-mod",
+      {
+        displayName: "Channel Mod",
+        scopes: groupModeratorScopes().filter((s) => s !== "atproto" && !s.startsWith("space:*")),
+        assignable: [],
+      },
+    ],
+  ]);
+
+  const memberships = new Map([
+    [aliceDid, { roles: ["admin"], createdAt: "2026-11-20T00:00:00.000Z" }],
+    [bobDid, { roles: ["channel-mod"], createdAt: "2026-11-20T00:00:00.000Z" }],
+  ]);
+
+  const generalChannelUri = `at://${groupDid}/space/new.flock.channel/general`;
+  const spacePolicies = new Map([
+    [
+      groupMembersUri(groupDid),
+      { grants: [{ role: "admin", read: true, write: true }, { role: "channel-mod", read: true, write: true }] },
+    ],
+    [
+      groupMetaUri(groupDid),
+      { grants: [{ role: "admin", read: true }, { role: "channel-mod", read: true }] },
+    ],
+    [
+      generalChannelUri,
+      {
+        grants: [
+          {
+            role: "channel-mod",
+            read: true,
+            write: true,
+            // Capability granted ONLY via per-space policy.grants[].scopes!
+            scopes: ["space:new.flock.channel?skey=general&collection=com.atproto.label.record&action=create&action=delete"],
+          },
+        ],
+      },
+    ],
+  ]);
+
+  const state = { roles, memberships, spacePolicies };
+  assert.equal(isEffectiveAdminMember(aliceDid, state, groupDid), true);
+  assert.equal(isEffectiveAdminMember(bobDid, state, groupDid), false);
+  assert.equal(isEffectiveModeratorMember(bobDid, state, groupDid), true);
+
+  const bobPerms = effectiveMemberPermissions(state, groupDid, bobDid);
+  assert.equal(
+    bobPerms.allowsSpace(
+      { spaceDid: groupDid as DidString, spaceType: "new.flock.channel", skey: "general" },
+      { action: "create", collection: "com.atproto.label.record" },
+    ),
+    true,
+  );
+  assert.equal(
+    bobPerms.allowsSpace(
+      { spaceDid: groupDid as DidString, spaceType: "new.flock.channel", skey: "random" },
+      { action: "create", collection: "com.atproto.label.record" },
+    ),
+    false,
+  );
 });

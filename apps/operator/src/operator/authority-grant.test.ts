@@ -102,6 +102,24 @@ test("a creation flow someone else started leaves them an approval of that one w
   assert.deepEqual(completed, { authorityDid: AUTHORITY, initiatorDid: OTHER, purpose: { kind: "createWorkspace", name: "Acme" } });
   assert.equal((await storedGrant(AUTHORITY))?.tokenSet.access_token, "theirs");
   assert.deepEqual(creationAuthorizations(), [{ authority_did: AUTHORITY, initiator_did: OTHER, name: "Acme", operation_id: null }]);
+
+  // when the creation flow carries a creationKey, the stored creation_authorization is bound to that exact operation_id
+  getRawDb().prepare("DELETE FROM creation_authorization").run();
+  const state = flow.createOAuthFlowState();
+  const appState = flow.createOAuthFlowState();
+  const boundCookie = flow.createOAuthFlowCookieValue(state, {
+    kind: "authority",
+    expectedDid: AUTHORITY,
+    initiatorDid: OTHER,
+    purpose: { kind: "createWorkspace", name: "Acme", creationKey: "3lblcreateop01" },
+    expiresAt: Math.floor(Date.now() / 1000) + 900,
+    appState,
+  }, KEY);
+  await grant.completeAuthorityFlow(new URLSearchParams({ state, code: "code", iss: "https://pds.test" }), boundCookie, {
+    callbackClient: fakeCallback(AUTHORITY, appState, "bound", []),
+    persistGrant: grant.persistAuthorityGrant,
+  });
+  assert.deepEqual(creationAuthorizations(), [{ authority_did: AUTHORITY, initiator_did: OTHER, name: "Acme", operation_id: "3lblcreateop01" }]);
 });
 
 test("a creation flow someone else started, approved by the wrong account, leaves them no approval", async () => {
@@ -658,4 +676,30 @@ test("quarantined sessionStore + out-of-band probe preserve authority_grant acro
   // Explicit revokeAuthorityGrant deletes canonical storage
   await grant.revokeAuthorityGrant(did).catch(() => undefined);
   assert.equal(grant.hasAuthorityGrant(did), false);
+});
+
+test("assertCredentialFreeOriginUrl and authorityClientMetadata reject embedded userinfo, paths, queries, and fragments", () => {
+  for (const bad of [
+    "https://user:secret@operator.example",
+    "https://user@operator.example",
+    "https://operator.example/subpath",
+    "https://operator.example?leak=1",
+    "https://operator.example#frag",
+    "ftp://operator.example",
+  ]) {
+    assert.throws(
+      () => grant.assertCredentialFreeOriginUrl(new URL(bad), "operatorUrl"),
+      grant.AuthorityFlowError,
+      `must reject ${bad}`,
+    );
+    assert.throws(
+      () => grant.authorityClientMetadata({ operatorUrl: new URL(bad), authorityClientKeys: [] }),
+      grant.AuthorityFlowError,
+      `authorityClientMetadata must reject ${bad}`,
+    );
+  }
+  assert.equal(
+    grant.assertCredentialFreeOriginUrl(new URL("https://operator.example"), "operatorUrl"),
+    "https://operator.example",
+  );
 });

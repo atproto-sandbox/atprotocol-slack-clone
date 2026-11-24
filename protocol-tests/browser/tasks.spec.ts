@@ -5,14 +5,15 @@ import { createEngine } from "@flock/client/engine";
 import { extSpaceUriFor } from "@flock/protocol/extensions";
 import { advanceHlc } from "@flock/protocol/entity-merge";
 import { tidNow } from "@flock/protocol/keys";
-import { COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
+import { COLLECTION, OPENSOCIAL_SPACE_TYPE, SPACE_TYPE } from "@flock/protocol/nsids";
 import { availablePort, startAppServer, startOperatorServer, type AppServer } from "../support/app-server";
 import { consent, openChannel, signIn } from "../support/browser-app";
-import { actorTransport, combinedMemberScopes, mintBrowserSession, startPdsNetwork, storeAuthorityGrant } from "../support/pds-network";
+import { actorTransport, createOpenSocialGroup, startPdsNetwork, storeGroupAuthorityGrant } from "../support/pds-network";
+import { Probe } from "../support/sync-dataset";
 
 const WORKSPACE_NAME = "Tasks E2E Workspace";
 
-test("Tasks UI end-to-end: legacy authority CTA, enable extension, cross-repo project collisions, board moves, detail edits/comments, concurrent conflicts, restore, and Activity persistence (R11e)", { timeout: 600_000 }, async () => {
+test("Tasks UI end-to-end: legacy authority CTA, enable extension, cross-repo project collisions, board moves, detail edits/comments, concurrent conflicts, restore, and Activity persistence (R11e / R13)", { timeout: 600_000 }, async () => {
   const appPort = await availablePort();
   const operatorPort = await availablePort();
   const pds = await startPdsNetwork("tasks-browser-e2e", { appPort, operatorPort });
@@ -26,11 +27,13 @@ test("Tasks UI end-to-end: legacy authority CTA, enable extension, cross-repo pr
 
     const [
       { authorityClientMetadata, restoreAuthorityGrant },
+      { grantCreationAuthorization },
       { createWorkspace },
       { registrationDeps },
       { parseWorkspaceRef },
     ] = await Promise.all([
       import("@flock/operator/operator/authority-grant"),
+      import("@flock/operator/operator/creation-authorization"),
       import("@flock/operator/operator/kinds/create-workspace"),
       import("@flock/operator/operator/registrations"),
       import("@flock/operator/operator/actor"),
@@ -39,32 +42,27 @@ test("Tasks UI end-to-end: legacy authority CTA, enable extension, cross-repo pr
     const alice = await pds.createActor("tasksalice", 0);
     const bob = await pds.createActor("tasksbob", 1);
 
-    // Provision workspace with a legacy pre-R11 authority grant lacking new.flock.ext.tasks.
-    const fullScope = authorityClientMetadata().scope;
-    const legacyScope = fullScope
-      .split(" ")
-      .filter((scope) => !scope.startsWith(`space:${SPACE_TYPE.tasks}?`))
-      .join(" ");
-    await storeAuthorityGrant(pds.hosts[0], alice.did, "tasks-legacy-auth", { scope: legacyScope });
-
+    const createdGroup = await createOpenSocialGroup(pds, alice, { name: WORKSPACE_NAME });
+    const groupDid = createdGroup.groupDid;
+    grantCreationAuthorization(
+      { authorityDid: groupDid, initiatorDid: alice.did, name: WORKSPACE_NAME },
+      Math.floor(Date.now() / 1000),
+    );
     const created = await createWorkspace(
-      await restoreAuthorityGrant(alice.did),
+      await restoreAuthorityGrant(groupDid),
       { creator: alice.did, name: WORKSPACE_NAME, operationId: tidNow() },
       registrationDeps,
     );
     assert.equal(created.state, "completed");
     const workspaceUri = created.workspace;
     const workspaceSkey = parseWorkspaceRef(workspaceUri).skey;
-    const tasksSpace = extSpaceUriFor(alice.did, workspaceSkey, "tasks");
+    const tasksSpace = extSpaceUriFor(groupDid, workspaceSkey, "tasks");
     const generalSelection = { workspace: workspaceUri, skey: created.channel.split("/").at(-1)!, name: "general", visibility: "public" };
 
-    const scopes = await combinedMemberScopes(pds.serviceRef);
-    const aliceNodeSession = await mintBrowserSession(alice.pds, alice.did, scopes, "tasks-alice-node");
-    const bobNodeSession = await mintBrowserSession(bob.pds, bob.did, scopes, "tasks-bob-node");
-    const aliceEngine = createEngine(actorTransport(pds, alice, aliceNodeSession.session), {
+    const aliceEngine = createEngine(actorTransport(pds, alice), {
       operator: { serviceRef: pds.serviceRef, endpoint: operator.url },
     });
-    const bobEngine = createEngine(actorTransport(pds, bob, bobNodeSession.session), {
+    const bobEngine = createEngine(actorTransport(pds, bob), {
       operator: { serviceRef: pds.serviceRef, endpoint: operator.url },
     });
 
@@ -76,6 +74,24 @@ test("Tasks UI end-to-end: legacy authority CTA, enable extension, cross-repo pr
     })).operation.state, "completed");
     await bobEngine.workspaces.accept(workspaceUri);
 
+    // Replace Operator's stored group authority grant with a narrow pre-Tasks grant omitting `space:new.flock.ext.tasks`.
+    const narrowSpaces = [
+      OPENSOCIAL_SPACE_TYPE.meta,
+      OPENSOCIAL_SPACE_TYPE.members,
+      SPACE_TYPE.workspace,
+      SPACE_TYPE.inbox,
+      SPACE_TYPE.channel,
+      SPACE_TYPE.appInbox,
+    ].map(
+      (st) =>
+        `space:${st}?collection=*&action=read&action=create&action=update&action=delete&manage=create&manage=update&manage=delete`,
+    );
+    const legacyScope = authorityClientMetadata()
+      .scope.split(" ")
+      .flatMap((token) => (token.startsWith("space:*?collection=*") ? narrowSpaces : [token]))
+      .join(" ");
+    await storeGroupAuthorityGrant(pds, alice, groupDid, "tasks-legacy-auth", { scope: legacyScope });
+
     browser = await chromium.launch({ headless: true });
     const contextA = await browser.newContext();
     const contextB = await browser.newContext();
@@ -84,7 +100,7 @@ test("Tasks UI end-to-end: legacy authority CTA, enable extension, cross-repo pr
     pageA.setDefaultTimeout(30_000);
     pageB.setDefaultTimeout(30_000);
 
-    // 1. Alice signs in, attempts Enable Tasks under legacy authority grant -> inline CTA appears without wedging channels!
+    // 1. Alice signs in, attempts Enable Tasks under narrow authority grant -> inline CTA appears without wedging channels!
     await signIn(pageA, app.url, alice, WORKSPACE_NAME);
     await pageA.getByRole("button", { name: "Enable Tasks", exact: true }).click();
     await pageA.getByText(/Workspace authority re-approval required/i).waitFor({ state: "visible" });
@@ -95,7 +111,7 @@ test("Tasks UI end-to-end: legacy authority CTA, enable extension, cross-repo pr
     await openChannel(pageA, "general");
     await pageA.getByText("Channel stays functional under legacy authority", { exact: true }).waitFor({ state: "visible" });
 
-    // Re-authorize authority, return, and retry enabling Tasks.
+    // Re-authorize group authority, return, and retry enabling Tasks.
     await pageA.getByRole("button", { name: new RegExp(WORKSPACE_NAME) }).click();
     await pageA.getByRole("button", { name: "Enable Tasks", exact: true }).click();
     await reauthButton.waitFor({ state: "visible" });
@@ -107,8 +123,8 @@ test("Tasks UI end-to-end: legacy authority CTA, enable extension, cross-repo pr
 
     // 2. Seed cross-repo same-rkey same-name projects ("Roadmap" by Alice & "Roadmap" by Bob with identical rkey).
     const sharedProjectRkey = "3k2222222222a";
-    const aliceTransport = actorTransport(pds, alice, aliceNodeSession.session);
-    const bobTransport = actorTransport(pds, bob, bobNodeSession.session);
+    const aliceTransport = actorTransport(pds, alice);
+    const bobTransport = actorTransport(pds, bob);
     await aliceEngine.tasks.readSpace(workspaceUri, { fresh: true });
     await bobEngine.tasks.readSpace(workspaceUri, { fresh: true });
 
@@ -132,6 +148,9 @@ test("Tasks UI end-to-end: legacy authority CTA, enable extension, cross-repo pr
     const bobProjUri = `${tasksSpace}/${bob.did}/${COLLECTION.taskProject}/${sharedProjectRkey}`;
     await aliceEngine.tasks.createTask(workspaceUri, { title: "Alice Roadmap Item", project: aliceProjUri, status: "todo", priority: "high" });
     await bobEngine.tasks.createTask(workspaceUri, { title: "Bob Roadmap Item", project: bobProjUri, status: "todo", priority: "medium" });
+    const tasksProbe = new Probe(pds, alice, tasksSpace);
+    await tasksProbe.waitForCurrentRevision(alice.did);
+    await tasksProbe.waitForCurrentRevision(bob.did);
 
     await pageA.getByRole("button", { name: "Tasks", exact: true }).click();
     await pageA.getByRole("button", { name: "Sync ↻" }).click();
@@ -139,7 +158,7 @@ test("Tasks UI end-to-end: legacy authority CTA, enable extension, cross-repo pr
     await pageA.getByText("Bob Roadmap Item", { exact: true }).waitFor({ state: "visible" });
 
     // Navigate to /p/[alice]/[rkey] vs /p/[bob]/[rkey] and verify project scope disambiguation.
-    const encAuth = encodeURIComponent(alice.did);
+    const encAuth = encodeURIComponent(groupDid);
     const encWs = encodeURIComponent(workspaceSkey);
     await pageA.goto(`${app.url}/w/${encAuth}/${encWs}/ext/tasks/p/${encodeURIComponent(alice.did)}/${sharedProjectRkey}`);
     await pageA.getByText("Alice Roadmap Item", { exact: true }).waitFor({ state: "visible" });
@@ -211,6 +230,9 @@ test("Tasks UI end-to-end: legacy authority CTA, enable extension, cross-repo pr
     await pageB.getByRole("button", { name: "Save task" }).click();
     await pageB.getByText("Task updated.", { exact: true }).waitFor({ state: "visible" });
 
+    await tasksProbe.waitForCurrentRevision(alice.did);
+    await tasksProbe.waitForCurrentRevision(bob.did);
+
     await pageA.getByRole("button", { name: "Sync ↻" }).click();
     const activityTabA = pageA.getByRole("tab", { name: /Activity/ });
     await activityTabA.locator(".tasks-badge").waitFor({ state: "visible" });
@@ -237,6 +259,9 @@ test("Tasks UI end-to-end: legacy authority CTA, enable extension, cross-repo pr
 
     await pageB.getByRole("button", { name: "Delete task" }).click();
     await pageB.getByText("Task deleted.", { exact: true }).waitFor({ state: "visible" });
+
+    await tasksProbe.waitForCurrentRevision(alice.did);
+    await tasksProbe.waitForCurrentRevision(bob.did);
 
     await pageA.getByRole("button", { name: "Sync ↻" }).click();
     await pageA.getByText(/This task is deleted/).waitFor({ state: "visible" });
@@ -276,6 +301,7 @@ test("Tasks UI end-to-end: legacy authority CTA, enable extension, cross-repo pr
     // concurrent name never modifies Project A, and saving a project edit diffs against opening baseline.
     const createdProjA = await aliceEngine.tasks.createProject(workspaceUri, { name: "Project Alpha" });
     const createdProjB = await aliceEngine.tasks.createProject(workspaceUri, { name: "Project Beta" });
+    await tasksProbe.waitForCurrentRevision(alice.did);
     const bobSpaceBeforeConflict = await bobEngine.tasks.readSpace(workspaceUri, { fresh: true });
     const bobProjA = bobSpaceBeforeConflict.projects.find((entry) => entry.uri === createdProjA.uri);
     const bobProjB = bobSpaceBeforeConflict.projects.find((entry) => entry.uri === createdProjB.uri);
@@ -289,6 +315,8 @@ test("Tasks UI end-to-end: legacy authority CTA, enable extension, cross-repo pr
       context: bobProjB.observedContext,
       name: "Project Beta Bob",
     });
+    await tasksProbe.waitForCurrentRevision(alice.did);
+    await tasksProbe.waitForCurrentRevision(bob.did);
 
     await pageA.getByRole("button", { name: "Sync ↻" }).click();
     const projectSelector = pageA.getByLabel("Project scope");
@@ -329,6 +357,7 @@ test("Tasks UI end-to-end: legacy authority CTA, enable extension, cross-repo pr
       context: bobProjA.observedContext,
       description: "Bob remote project notes",
     });
+    await tasksProbe.waitForCurrentRevision(bob.did);
     await pageA.getByRole("button", { name: "Sync ↻" }).click();
     await pageA.locator(".tasks-project-banner").getByText("Bob remote project notes", { exact: true }).waitFor({ state: "visible" });
     await pageA.locator("#edit-project-name").fill("Project Alpha Final");

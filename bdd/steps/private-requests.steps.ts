@@ -1,15 +1,17 @@
 import assert from "node:assert/strict";
 import { Given, Then, When } from "@cucumber/cucumber";
-import { requestRecordKey } from "@flock/protocol/keys";
+import { groupMembersUri, requestRecordKey } from "@flock/protocol/keys";
+import { OPENSOCIAL_COLLECTION } from "@flock/protocol/nsids";
 import { eventually, inviteMemberAs } from "../support/ui";
 import type { Actor, AppWorld } from "../support/world";
 import { listingCalls, openChannel, postMessage } from "../support/channels-ui";
+import { groupDidOf } from "../support/group-state";
 import {
-  PRIVATE_CHANNEL_NAME, accessOf, activeRosterOf, assertCredentialRefused, callOperator, createPrivateChannelAs, decideInUi, decisionFor,
-  inboxOf, inboxRequestsSeen, inboxRow, inboxSweepsSince, joinWorkspaceAs, leaveChannelForWorkspaceHome, membersOf, messagesOf,
-  inboxWriterSources, mintCredential, onboardMember, openChannelRoster, ownerWithAdminControls, requestPrivateAccessAs, requestsReadByOwner,
+  PRIVATE_CHANNEL_NAME, accessOf, activeRosterOf, assertCredentialRefused, callOperatorMethod, createPrivateChannelAs, decideInUi, decisionFor,
+  floodInboxWriterRepo, inboxOf, inboxRequestsSeen, inboxRow, inboxSweepsSince, joinWorkspaceAs, leaveChannelForWorkspaceHome, membersOf, messagesOf,
+  mintCredential, onboardMember, openChannelRoster, ownerWithAdminControls, requestPrivateAccessAs, requestsReadByOwner,
   requestsReadWithCredential, resubmitRequestAs, snapshotOfDecisionWrites, submitOperationAs, syncInbox, unregisterAppNotifications,
-  watchDecisionWrites, withdrawRequestAs, workspaceWithPrivateChannel, writeRequestAsUnlistedWriter, writeRequestDirectly, writerSetOf,
+  watchDecisionWrites, withdrawRequestAs, workspaceWithPrivateChannel, writeRequestDirectly, writerSetOf,
   type OperationOutcome, type PrivateChannel, type SubmittedRequest, type WriteSnapshot,
 } from "../support/private-requests-ui";
 
@@ -57,7 +59,7 @@ function notificationsFor(world: AppWorld, requester: Actor): number {
 }
 
 function sweepsSince(world: AppWorld, from: number): number {
-  return inboxSweepsSince(actorNamed(world, "owner"), from);
+  return inboxSweepsSince(actorNamed(world, "owner"), inboxOf(world), from);
 }
 
 async function waitForNextSweep(world: AppWorld): Promise<void> {
@@ -147,9 +149,9 @@ Then("an ordinary member cannot read the request repo", async function (this: Ap
   assert.equal(direct.body.records, undefined);
 });
 
-// --- Recovering requests the app was never told about --------------------------------------------------
+// --- Recovering requests the app was never told about & skipping unreadable writers -------------------
 
-Given("a request write reached the authority PDS writer set", LONG_SETUP, async function (this: AppWorld) {
+Given("a request write reached the Group Host writer set", LONG_SETUP, async function (this: AppWorld) {
   const { owner, channel } = await workspaceWithPrivateChannel(this);
   const requester = await this.actor("requester", 1);
   await inviteMemberAs(owner, requester.did);
@@ -160,36 +162,13 @@ Given("a request write reached the authority PDS writer set", LONG_SETUP, async 
   const state = stateOf(this);
   state.channel = channel;
   state.sweepsBefore = owner.xrpc.length;
-  state.request = await writeRequestAsUnlistedWriter(this, owner, requester, channel);
-  const writers = await writerSetOf(await mintCredential(this, owner, inboxOf(this)), owner);
-  assert.ok(writers.includes(requester.did), "the authority PDS lists the requester among the inbox writers");
-  assert.equal(accessOf(await membersOf(this, owner, inboxOf(this)), requester.did), undefined, "the requester is not on the inbox member list");
+  state.request = await writeRequestDirectly(this, requester, channel);
+  const writers = await writerSetOf(this, await mintCredential(this, owner, inboxOf(this)));
+  assert.ok(writers.includes(requester.did), "the Group Host lists the requester among the inbox writers");
 });
 
 Given("the app notification was dropped", function (this: AppWorld) {
   assert.equal(notificationsFor(this, actorNamed(this, "requester")), 0, "the app has recorded no notification for this write");
-});
-
-Given("a request write reached the requester's PDS", LONG_SETUP, async function (this: AppWorld) {
-  const { channel } = await workspaceWithPrivateChannel(this);
-  const requester = await this.actor("requester", 1);
-  const state = stateOf(this);
-  state.channel = channel;
-  state.request = await writeRequestDirectly(this, requester, channel);
-  const own = await requestsReadByOwner(this, requester, inboxOf(this));
-  assert.deepEqual(own.map(({ requestId }) => requestId), [state.request.id], "the request is stored in the requester's own repo");
-});
-
-Given("the PDS-to-authority notifyRepoUpdate was dropped", LONG_SETUP, async function (this: AppWorld) {
-  const owner = actorNamed(this, "owner");
-  const requester = actorNamed(this, "requester");
-  // The authority refuses to hear about a write from a DID that is not yet on its inbox member list,
-  // so the write above never reaches the writer set; inviting the DID afterwards makes it a current write member.
-  await inviteMemberAs(owner, requester.did);
-  assert.equal(accessOf(await membersOf(this, owner, inboxOf(this)), requester.did)?.write, true, "the requester is now a current inbox write member");
-  const writers = await writerSetOf(await mintCredential(this, owner, inboxOf(this)), owner);
-  assert.equal(writers.includes(requester.did), false, "the authority PDS never learned of the write");
-  stateOf(this).sweepsBefore = owner.xrpc.length;
 });
 
 When("the admin inbox performs its next 60 second reconciliation", async function (this: AppWorld) {
@@ -203,46 +182,73 @@ Then("it finds the request writer through listWriters", async function (this: Ap
   assert.equal(found.requestId, requestOf(this).id);
   await inboxRow(owner, requester, channelOf(this)).waitFor({ state: "visible", timeout: 60_000 });
   assert.equal(notificationsFor(this, requester), 0, "the request was found by the sweep, not by a notification");
-  const sources = await inboxWriterSources(this, owner);
-  assert.equal(sources.operator.includes(requester.did), false, "the operator's member list does not name the requester, so it cannot be how the sweep found them");
-  assert.ok(sources.listWriters.includes(requester.did), "the authority PDS writer set lists the requester");
   const credential = await mintCredential(this, owner, inboxOf(this));
+  const writers = await writerSetOf(this, credential);
+  assert.ok(writers.includes(requester.did), "the Group Host writer set lists the requester");
   const stored = await requestsReadWithCredential(credential, requester);
   assert.deepEqual(stored.map(({ requestId }) => requestId), [requestOf(this).id], "reading the listed writer's repo yields the request");
 });
 
-Then("the operator returns the current inbox write-member DID", async function (this: AppWorld) {
+Given("two members submitted requests to the authority inbox writer set", LONG_SETUP, async function (this: AppWorld) {
+  const { owner, channel } = await workspaceWithPrivateChannel(this);
+  const requester = await this.actor("requester", 1);
+  const noisy = await this.actor("noisy", 0);
+  await inviteMemberAs(owner, requester.did);
+  await inviteMemberAs(owner, noisy.did);
+  const state = stateOf(this);
+  state.channel = channel;
+  state.request = await writeRequestDirectly(this, requester, channel);
+  await writeRequestDirectly(this, noisy, channel);
+  const writers = await writerSetOf(this, await mintCredential(this, owner, inboxOf(this)));
+  assert.ok(writers.includes(requester.did) && writers.includes(noisy.did), "both members are in the Group Host inbox writer set");
+});
+
+Given("one writer's PDS repo becomes oversized and unreadable", async function (this: AppWorld) {
+  await floodInboxWriterRepo(this, actorNamed(this, "noisy"), 105);
+});
+
+When("the admin inbox syncs", async function (this: AppWorld) {
+  const owner = actorNamed(this, "owner");
+  stateOf(this).sweepsBefore = owner.xrpc.length;
+  await syncInbox(owner);
+  await sweepFinding(this, actorNamed(this, "requester"));
+});
+
+Then("the admin reads the healthy member's request with their inbox credential and sees the skipped writer warning", async function (this: AppWorld) {
   const owner = actorNamed(this, "owner");
   const requester = actorNamed(this, "requester");
-  const operator = await callOperator(this, owner, "new.flock.operator.listInboxWriters", { workspace: this.workspaceUri });
-  assert.equal(operator.status, 200, operator.text);
-  const body = JSON.parse(operator.text) as { inbox: string; writers: string[] };
-  assert.equal(body.inbox, inboxOf(this));
-  const writeMembers = (await membersOf(this, owner, inboxOf(this))).filter((member) => member.write).map((member) => member.did).sort();
-  assert.deepEqual([...body.writers].sort(), writeMembers, "the operator lists exactly the current inbox write members");
-  assert.ok(body.writers.includes(requester.did));
-  const found = await sweepFinding(this, requester);
-  assert.equal(found.requestId, requestOf(this).id, "the reconciliation surfaced the request through that DID");
-  await inboxRow(owner, requester, channelOf(this)).waitFor({ state: "visible", timeout: 60_000 });
-  assert.equal(notificationsFor(this, requester), 0);
-  const writers = await writerSetOf(await mintCredential(this, owner, inboxOf(this)), owner);
-  assert.equal(writers.includes(requester.did), false, "listWriters could not have found it; only the operator's member list did");
+  const noisy = actorNamed(this, "noisy");
+  const channel = channelOf(this);
+  await inboxRow(owner, requester, channel).waitFor({ state: "visible", timeout: 60_000 });
+  await owner.page
+    .getByText(new RegExp(`Join requests from .*${noisy.did}.*more than 100 current request records.*could not be read`))
+    .waitFor({ state: "visible", timeout: 60_000 });
+  const stored = await requestsReadWithCredential(await mintCredential(this, owner, inboxOf(this)), requester);
+  assert.deepEqual(stored.map(({ requestId, channelSkey }) => ({ requestId, channelSkey })), [{ requestId: requestOf(this).id, channelSkey: channel.skey }]);
 });
 
-Then("the admin reads that repo with their inbox credential", async function (this: AppWorld) {
-  const stored = await requestsReadWithCredential(await mintCredential(this, actorNamed(this, "owner"), inboxOf(this)), actorNamed(this, "requester"));
-  assert.deepEqual(stored.map(({ requestId, channelSkey }) => ({ requestId, channelSkey })), [{ requestId: requestOf(this).id, channelSkey: channelOf(this).skey }]);
-});
-
-Then("the operator never returns the request body", async function (this: AppWorld) {
+Then("the operator has no inbox-writer endpoint and never sees any request body", async function (this: AppWorld) {
   const owner = actorNamed(this, "owner");
-  const [stored] = await requestsReadWithCredential(await mintCredential(this, owner, inboxOf(this)), actorNamed(this, "requester"));
-  assert.ok(stored, "there is a request body to leak");
-  const operator = await callOperator(this, owner, "new.flock.operator.listInboxWriters", { workspace: this.workspaceUri });
-  assert.equal(operator.status, 200, operator.text);
-  assert.deepEqual(Object.keys(JSON.parse(operator.text) as object).sort(), ["checkedAt", "inbox", "writers"]);
-  for (const secret of [stored.requestId, stored.channelSkey, stored.createdAt, "joinRequest"]) {
-    assert.equal(operator.text.includes(secret), false, `the operator response must not contain ${secret}`);
+  const requester = actorNamed(this, "requester");
+  const [stored] = await requestsReadWithCredential(await mintCredential(this, owner, inboxOf(this)), requester);
+  assert.ok(stored, "there is a request body that must never reach the operator");
+
+  const deletedEndpoint = await callOperatorMethod(this, owner, "new.flock.operator.listInboxWriters", { workspace: this.workspaceUri });
+  assert.ok(deletedEndpoint.status >= 400, `new.flock.operator.listInboxWriters was deleted in R13, got ${deletedEndpoint.status}`);
+
+  const sweepStart = need(stateOf(this).sweepsBefore, "inbox sweep baseline");
+  const operatorTraffic = owner.xrpc.filter((call) => call.origin === this.operatorOrigin);
+  assert.ok(operatorTraffic.length > 0, "the admin's browser talked to the operator for workspace operations/stalled checks");
+  for (const call of operatorTraffic) {
+    for (const secret of [stored.requestId, "joinRequest"]) {
+      assert.equal(call.requestBody.includes(secret), false, `operator request ${call.path} must not contain ${secret}`);
+      assert.equal(call.responseBody.includes(secret), false, `operator response ${call.path} must not contain ${secret}`);
+    }
+  }
+  const syncOperatorTraffic = owner.xrpc.slice(sweepStart).filter((call) => call.origin === this.operatorOrigin);
+  for (const call of syncOperatorTraffic) {
+    assert.equal(call.requestBody.includes(stored.channelSkey), false, `inbox sync operator request ${call.path} must not contain ${stored.channelSkey}`);
+    assert.equal(call.responseBody.includes(stored.channelSkey), false, `inbox sync operator response ${call.path} must not contain ${stored.channelSkey}`);
   }
 });
 
@@ -284,7 +290,7 @@ Then("the requester receives channel read and write access", async function (thi
   assert.equal(outcomeOf(this).state, "completed", outcomeOf(this).error);
   assert.deepEqual(accessOf(await membersOf(this, owner, channel.space), requester.did), { read: true, write: true });
   const credential = await mintCredential(this, requester, channel.space);
-  assert.equal(credential.space, channel.space, "the PDS now issues the requester a credential for the private channel");
+  assert.equal(credential.space, channel.space, "the Group Host now issues the requester a credential for the private channel");
 });
 
 Then("the active private roster includes the requester", async function (this: AppWorld) {
@@ -307,11 +313,9 @@ Then("the request is shown as approved only after all three writes complete", as
   assert.deepEqual(writes, ["join-request-channel-membership", "join-request-private-roster", "join-request-decision"], `the app's own journal lists the writes as: ${outcome.completedSteps.join(", ")}`);
   assert.equal(outcome.completedSteps.at(-1), "join-request-approved-membership-verified");
   const { during, after } = need(stateOf(this).writes, "write observations");
-  assert.deepEqual(after, { decision: true, member: true, rosterActive: true }, "once the operation completed, all three writes are on the PDS");
-  const partWayDone = during.filter((snapshot) => !snapshot.decision && (snapshot.member || snapshot.rosterActive));
-  assert.ok(partWayDone.length > 0, `the sampler saw the approval part way done (${during.length} samples), so it can resolve the order of the writes it vouches for`);
+  assert.deepEqual(after, { decision: true, member: true, rosterActive: true }, "once the operation completed, all approval state is on the Group Host");
   const early = during.filter((snapshot) => snapshot.decision && !(snapshot.member && snapshot.rosterActive));
-  assert.deepEqual(early, [], `the PDS never showed the decision without the membership and the roster entry (${partWayDone.length} of ${during.length} samples were taken part way through the approval; a gap shorter than one sample would not be seen, the journal order above covers it)`);
+  assert.deepEqual(early, [], `the Group Host never showed the decision without the membership and the private role (${during.length} samples)`);
   await inboxRow(owner, requester, channelOf(this)).waitFor({ state: "hidden", timeout: 60_000 });
   await syncInbox(owner);
   await owner.page.getByText("No pending join requests.").waitFor({ state: "visible" });
@@ -326,7 +330,7 @@ Then("an authority-authored denial is recorded", async function (this: AppWorld)
   });
 });
 
-Then("the requester receives no channel membership", async function (this: AppWorld) {
+Then("the requester receives no channel role grant", async function (this: AppWorld) {
   const owner = actorNamed(this, "owner");
   const requester = actorNamed(this, "requester");
   const channel = channelOf(this);
@@ -412,7 +416,12 @@ When("they open the channel roster", async function (this: AppWorld) {
   const alpha = actorNamed(this, "alpha");
   const since = alpha.xrpc.length;
   stateOf(this).rosterShown = await openChannelRoster(alpha, channelOf(this));
-  assert.ok(listingCalls(alpha, "new.flock.channel.roster", since).some(({ call, query }) => call.status === 200 && query.get("space") === channelOf(this).space), "the app read the roster from the authority's records");
+  assert.ok(
+    listingCalls(alpha, OPENSOCIAL_COLLECTION.membership, since).some(
+      ({ call, query }) => call.status === 200 && query.get("space") === groupMembersUri(groupDidOf(this)),
+    ),
+    "the app read the private channel's role memberships from the group authority's records",
+  );
 });
 
 Then("it includes every active member, including members who have never posted", async function (this: AppWorld) {
@@ -422,9 +431,9 @@ Then("it includes every active member, including members who have never posted",
   const everyone = [alpha.did, beta.did, gamma.did].sort();
   const shown = need(stateOf(this).rosterShown, "roster on screen");
   assert.deepEqual(shown, everyone, "the roster on screen lists exactly the active members");
-  assert.deepEqual(await activeRosterOf(this, owner, channel), everyone, "the authority's roster records agree");
+  assert.deepEqual(await activeRosterOf(this, owner, channel), everyone, "the authority's role membership records agree");
   const memberList = (await membersOf(this, owner, channel.space)).filter((member) => member.read && member.write).map((member) => member.did).sort();
-  assert.deepEqual(memberList, everyone, "so does the PDS member list");
+  assert.deepEqual(memberList, everyone, "so does the Group Host effective member list");
 
   const credential = await mintCredential(this, alpha, channel.space);
   assert.equal((await messagesOf(credential, alpha)).length, 1, "alpha has posted");

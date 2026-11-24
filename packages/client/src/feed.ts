@@ -1,4 +1,4 @@
-import { isAccessLost } from "@flock/protocol/atproto/space-credential-core";
+import { isAccessLost, SpaceCredentialError } from "@flock/protocol/atproto/space-credential-core";
 import type { CredentialCache } from "./credentials";
 import type { OperatorClient } from "./operator-client";
 
@@ -108,6 +108,11 @@ export class ChangeFollower {
       try {
         await this.deps.sync(space);
       } catch (error) {
+        if (error instanceof SpaceCredentialError && isAccessLost(error)) {
+          this.unfollow(space);
+          result.unfollowed.push(space);
+          return;
+        }
         result.failed.push({ space, error });
         return;
       }

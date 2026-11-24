@@ -1,4 +1,4 @@
-import { parseDmSpaceUri } from "@flock/protocol/keys";
+import { parseDmSpaceUri, parsePersonalInvitesUri } from "@flock/protocol/keys";
 import { mapLimited } from "@flock/protocol/map-limited";
 import { currentDmWakeHead, ensureDmWakeReady, onDmWake, readDmWakes, type DmCursor } from "./dm-feed-wakes";
 import { mayFollow } from "./member-access";
@@ -100,7 +100,7 @@ function evaluateFeed(did: string, allowed: readonly Follow[]): EvaluatedFeed {
   const nonDm: Array<{ space: string; after: number }> = [];
   const dm: Array<{ space: string; cursor: DmCursor | null }> = [];
   for (const entry of allowed) {
-    if (parseDmSpaceUri(entry.space)) {
+    if (parseDmSpaceUri(entry.space) || parsePersonalInvitesUri(entry.space)) {
       dm.push({ space: entry.space, cursor: entry.dmCursor ?? null });
     } else {
       nonDm.push({ space: entry.space, after: entry.after });

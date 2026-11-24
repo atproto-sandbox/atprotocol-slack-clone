@@ -5,7 +5,7 @@ import type { Engine } from "@flock/client/engine";
 import { ChannelUnavailableError, isAccessLost, WorkspaceEnvelopeError } from "@flock/client/errors";
 import { ADMIN_OAUTH_PATHS, ADMIN_STATE_TTL_MS, PendingSignInCapError, type AdminIdentityOAuth } from "@flock/client/node/admin-oauth";
 import { answerAppOAuthRoute, type NodeOAuthClient } from "@flock/client/node/oauth";
-import type { WorkspaceSummary } from "@flock/client/workspace-client";
+import type { DiscoveredWorkspace, WorkspaceSummary } from "@flock/client/workspace-client";
 import {
   clearAdminCookie,
   createProcessCookieKey,
@@ -570,7 +570,7 @@ export function createWebhooksHandler(deps: WebhooksHandlerDeps): (request: Inco
     );
   }
 
-  async function readFreshSummary(workspace: string): Promise<WorkspaceSummary | null> {
+  async function readFreshSummary(workspace: string): Promise<(WorkspaceSummary & { takendownMembers?: readonly string[] }) | DiscoveredWorkspace | null> {
     try {
       return await deps.engine.workspaces.summary(workspace, { fresh: true });
     } catch (error) {
@@ -586,9 +586,10 @@ export function createWebhooksHandler(deps: WebhooksHandlerDeps): (request: Inco
       if (!summary) continue;
       const ownInstall = summary.installs.find((install) => install.did === deps.appDid);
       if (!ownInstall) continue;
-      // Must be BOTH listed as an active admin AND on the active workspace roster.
+      // Must be listed as an active admin, on the active workspace roster, and not taken down by group moderation.
       const onRoster = summary.members.some((member) => member.did === viewerDid && member.active);
-      if (!summary.admins.includes(viewerDid) || !onRoster) continue;
+      const isTakendownAdmin = summary.takendownMembers?.includes(viewerDid) === true;
+      if (!summary.admins.includes(viewerDid) || !onRoster || isTakendownAdmin) continue;
 
       const grants = new Map(ownInstall.channels.map((grant) => [grant.skey, grant.write]));
       const directory = new Map(summary.channels.map((channel) => [channel.skey, channel]));
@@ -604,7 +605,7 @@ export function createWebhooksHandler(deps: WebhooksHandlerDeps): (request: Inco
               .roster({ workspace: workspaceUri, skey })
               .then((members): { readable: true; admitted: boolean } => ({
                 readable: true,
-                admitted: viewerDid === summary.authorityDid || members.includes(viewerDid),
+                admitted: members.includes(viewerDid),
               }))
               .catch((error: unknown): { readable: false } => {
                 if (error instanceof ChannelUnavailableError || error instanceof WorkspaceEnvelopeError || isAccessLost(error)) {

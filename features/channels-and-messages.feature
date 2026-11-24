@@ -8,12 +8,12 @@ Feature: Channel conversations
       Given a workspace has current members
       When an admin creates a public channel
       Then each current workspace member has channel read and write access
-      And the directory shows the channel as public only after membership is applied
+      And the directory shows the channel as public only after the channel space policy is applied
 
-    Scenario: Keep private messages behind PDS read authorization
-      Given a member is absent from a private channel member list
+    Scenario: Keep private messages behind Group Host read authorization
+      Given a member lacks a private channel role grant
       When that member opens the channel URI
-      Then the PDS refuses a channel read credential
+      Then the Group Host refuses a channel read credential
 
   Rule: Messages and reactions remain owned by their authors
 

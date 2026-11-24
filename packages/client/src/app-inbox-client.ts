@@ -1,5 +1,6 @@
 import { isMissingXrpcResource } from "@flock/protocol/atproto/xrpc";
 import { appInboxUri, channelUri, isDid, isSkey, isTid, parseWorkspaceUri, spaceRecordUri, tidNow } from "@flock/protocol/keys";
+import { isTakendown } from "@flock/protocol/moderation";
 import { COLLECTION } from "@flock/protocol/nsids";
 import { validateSpaceRecord } from "@flock/protocol/registry";
 import type { ChannelRef } from "./channel-client";
@@ -121,6 +122,11 @@ export class AppInboxClient {
     const { authorityDid, inbox } = this.inboxOf(workspace, appDid);
     const limit = options.limit ?? INBOX_PAGE;
     const writers = options.writers ?? await this.deps.sync.writers(inbox, { workspace });
+    const listedWriters = new Set(writers.map((writer) => writer.did));
+    const [inboxLabels, accountLabels] = await Promise.all([
+      this.deps.sync.syncSpaceActiveLabels(inbox, { workspace, listedWriters }),
+      this.deps.sync.syncAccountLabels(authorityDid),
+    ]);
     const sources = writers.map((writer) => ({ space: inbox, repo: writer.did }));
     const result = await this.deps.sync.read({
       sources,
@@ -129,12 +135,17 @@ export class AppInboxClient {
       before: decodeCursor(options.before),
       select: async (candidates, count) =>
         candidates
-          .filter((record) => validateSpaceRecord(collection, record.value, {
-            authorityDid,
-            spaceUri: inbox,
-            repoDid: record.repo,
-            rkey: record.rkey,
-          }).valid)
+          .filter(
+            (record) =>
+              !isTakendown(accountLabels, record.repo) &&
+              !isTakendown(inboxLabels, record.uri, record.cid || undefined) &&
+              validateSpaceRecord(collection, record.value, {
+                authorityDid,
+                spaceUri: inbox,
+                repoDid: record.repo,
+                rkey: record.rkey,
+              }).valid,
+          )
           .slice(0, count),
     });
     return {

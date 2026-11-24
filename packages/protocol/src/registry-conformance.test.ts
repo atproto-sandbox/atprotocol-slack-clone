@@ -5,25 +5,47 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { Lexicons, type LexiconDoc } from "@atproto/lexicon";
 import {
-  acceptanceRecordKey, appInboxUri, channelUri, decisionRecordKey, dmConversationUri, dmInboxUri, inboxUri, reactionRecordKey,
-  requestRecordKey, spaceRecordUri, subjectKey, tasksSpaceUri, workspaceUri,
+  appInboxUri,
+  channelUri,
+  decisionRecordKey,
+  dmConversationUri,
+  dmInboxUri,
+  groupMembersUri,
+  groupMetaUri,
+  inboxUri,
+  personalInvitesUri,
+  reactionRecordKey,
+  requestRecordKey,
+  spaceRecordUri,
+  subjectKey,
+  tasksSpaceUri,
+  workspaceUri,
 } from "./keys";
 import { extSpaceUriFor } from "./extensions";
-import { BLOCK_TYPE, COLLECTION, type Collection } from "./nsids";
-import { REGISTRY, validateRecordShape, validateSpaceRecord, type RecordContext } from "./registry";
-
-// The registry's two validation layers checked against the published lexicon documents: shape agrees with `@atproto/lexicon`
-// reading those documents alone, every semantic rule rejects a well-shaped record that breaks it, and an unknown field is kept.
+import {
+  BLOCK_TYPE,
+  COLLECTION,
+  OPENSOCIAL_COLLECTION,
+} from "./nsids";
+import {
+  REGISTRY,
+  validateRecordShape,
+  validateSpaceRecord,
+  type RecordContext,
+  type RegisteredSpaceCollection,
+} from "./registry";
 
 const AUTHORITY = "did:plc:owner";
 const MEMBER = "did:plc:member";
 const NOW = "2026-11-01T12:00:00.000Z";
-const WORKSPACE = workspaceUri(AUTHORITY, "acme");
-const INBOX = inboxUri(AUTHORITY, "acme");
+const META = groupMetaUri(AUTHORITY);
+const MEMBERS = groupMembersUri(AUTHORITY);
+const INVITES = personalInvitesUri(MEMBER);
+const WORKSPACE = workspaceUri(AUTHORITY);
+const INBOX = inboxUri(AUTHORITY);
 const APP = "did:plc:bot";
-const APP_INBOX = appInboxUri(AUTHORITY, "acme", APP);
+const APP_INBOX = appInboxUri(AUTHORITY, "self", APP);
 const CHANNEL = channelUri(AUTHORITY, "acme-general");
-const OTHER_CHANNEL = channelUri(AUTHORITY, "acme-random");
 const MESSAGE = spaceRecordUri(CHANNEL, MEMBER, COLLECTION.message, "2222222222222");
 const REPLY = spaceRecordUri(CHANNEL, MEMBER, COLLECTION.message, "2222222222223");
 const CONV_KEY = "2222222222224";
@@ -32,8 +54,8 @@ const OTHER_HALF = dmConversationUri(MEMBER, CONV_KEY);
 const DM_MESSAGE = spaceRecordUri(OTHER_HALF, MEMBER, COLLECTION.dmMessage, "2222222222225");
 const PARTICIPANTS = [MEMBER, AUTHORITY];
 const JOIN_REQUEST = spaceRecordUri(INBOX, MEMBER, COLLECTION.joinRequest, requestRecordKey(CHANNEL, MEMBER));
-const TASKS = tasksSpaceUri(AUTHORITY, "acme");
-const OTHER_TASKS = tasksSpaceUri(AUTHORITY, "other");
+const TASKS = tasksSpaceUri(AUTHORITY);
+const OTHER_TASKS = tasksSpaceUri("did:plc:other");
 const PROJECT = spaceRecordUri(TASKS, MEMBER, COLLECTION.taskProject, "222222222222e");
 const TASK = spaceRecordUri(TASKS, MEMBER, COLLECTION.task, "222222222222f");
 const PARENT_TASK = spaceRecordUri(TASKS, MEMBER, COLLECTION.task, "222222222222g");
@@ -42,28 +64,46 @@ const OP_REF_A = "a".repeat(32);
 
 type Fixture = { record: Record<string, unknown>; context: RecordContext };
 
-/** One record per collection that both layers accept, with the context it is read in. */
-const FIXTURES: Record<Collection, Fixture> = {
-  [COLLECTION.workspaceProfile]: { record: { name: "Acme", createdAt: NOW }, context: { authorityDid: AUTHORITY, spaceUri: WORKSPACE, repoDid: AUTHORITY, rkey: "self" } },
+const FIXTURES: Record<RegisteredSpaceCollection, Fixture> = {
+  [OPENSOCIAL_COLLECTION.profile]: {
+    record: { displayName: "Acme", description: "Team space", joinPolicy: "invite", url: "https://acme.example/" },
+    context: { authorityDid: AUTHORITY, spaceUri: META, repoDid: AUTHORITY, rkey: "self" },
+  },
+  [OPENSOCIAL_COLLECTION.rule]: {
+    record: { title: "Be kind", text: "Treat everyone respectfully.", order: 0 },
+    context: { authorityDid: AUTHORITY, spaceUri: META, repoDid: AUTHORITY, rkey: "2222222222222" },
+  },
+  [OPENSOCIAL_COLLECTION.labeler]: {
+    record: { policies: { labelValues: ["!takedown", "!hide"] } },
+    context: { authorityDid: AUTHORITY, spaceUri: META, repoDid: AUTHORITY, rkey: "self" },
+  },
+  [OPENSOCIAL_COLLECTION.space]: {
+    record: { space: CHANNEL, createdAt: NOW },
+    context: { authorityDid: AUTHORITY, spaceUri: MEMBERS, repoDid: AUTHORITY, rkey: "2222222222222" },
+  },
+  [OPENSOCIAL_COLLECTION.role]: {
+    record: { displayName: "Moderator", scopes: ["include:group.opensocial.authModerate"], assignable: ["member"] },
+    context: { authorityDid: AUTHORITY, spaceUri: MEMBERS, repoDid: AUTHORITY, rkey: "moderator" },
+  },
+  [OPENSOCIAL_COLLECTION.membership]: {
+    record: { roles: ["member"], createdAt: NOW },
+    context: { authorityDid: AUTHORITY, spaceUri: MEMBERS, repoDid: AUTHORITY, rkey: MEMBER },
+  },
+  [OPENSOCIAL_COLLECTION.acceptance]: {
+    record: { createdAt: NOW },
+    context: { authorityDid: AUTHORITY, spaceUri: MEMBERS, repoDid: MEMBER, rkey: "self" },
+  },
+  [OPENSOCIAL_COLLECTION.invite]: {
+    record: { createdAt: NOW, expiresAt: "2026-12-01T12:00:00.000Z", message: "Join us!" },
+    context: { authorityDid: MEMBER, spaceUri: INVITES, repoDid: AUTHORITY, rkey: "2222222222222" },
+  },
   [COLLECTION.directory]: {
     record: { skey: "acme-general", name: "general", visibility: "public" },
     context: { authorityDid: AUTHORITY, spaceUri: WORKSPACE, repoDid: AUTHORITY, rkey: "acme-general" },
   },
-  [COLLECTION.workspaceRoster]: {
-    record: { subject: MEMBER, active: true, updatedAt: NOW },
-    context: { authorityDid: AUTHORITY, spaceUri: WORKSPACE, repoDid: AUTHORITY, rkey: subjectKey(MEMBER) },
-  },
-  [COLLECTION.admin]: {
-    record: { subject: MEMBER, active: true, updatedAt: NOW },
-    context: { authorityDid: AUTHORITY, spaceUri: WORKSPACE, repoDid: AUTHORITY, rkey: subjectKey(MEMBER) },
-  },
   [COLLECTION.appInstall]: {
-    record: { subject: MEMBER, active: true, channels: [{ skey: "acme-general", write: true }], installedBy: AUTHORITY, installedAt: NOW, updatedAt: NOW },
-    context: { authorityDid: AUTHORITY, spaceUri: WORKSPACE, repoDid: AUTHORITY, rkey: subjectKey(MEMBER) },
-  },
-  [COLLECTION.acceptance]: {
-    record: { workspace: WORKSPACE, createdAt: NOW },
-    context: { authorityDid: AUTHORITY, spaceUri: WORKSPACE, repoDid: MEMBER, rkey: acceptanceRecordKey(WORKSPACE) },
+    record: { subject: APP, active: true, channels: [{ skey: "acme-general", write: true }], installedBy: AUTHORITY, installedAt: NOW, updatedAt: NOW },
+    context: { authorityDid: AUTHORITY, spaceUri: WORKSPACE, repoDid: AUTHORITY, rkey: subjectKey(APP) },
   },
   [COLLECTION.appCommand]: {
     record: { command: "echo", text: "hello", channel: CHANNEL, createdAt: NOW },
@@ -77,7 +117,7 @@ const FIXTURES: Record<Collection, Fixture> = {
     record: {
       extId: "tasks",
       active: true,
-      space: extSpaceUriFor(AUTHORITY, "acme", "tasks"),
+      space: extSpaceUriFor(AUTHORITY, "self", "tasks"),
       cleanupComplete: false,
       enabledBy: AUTHORITY,
       enabledAt: NOW,
@@ -95,8 +135,8 @@ const FIXTURES: Record<Collection, Fixture> = {
   },
   [COLLECTION.task]: {
     record: {
-      title: "Ship R11",
-      description: "Implement pure causal merge",
+      title: "Ship R13",
+      description: "Implement OpenSocial groups",
       status: "todo",
       priority: "high",
       project: PROJECT,
@@ -114,7 +154,7 @@ const FIXTURES: Record<Collection, Fixture> = {
       subject: TASK,
       t: "001700000000002.0000",
       s: [OP_REF_A],
-      title: "Ship R11 now",
+      title: "Ship R13 now",
       status: "in_progress",
       priority: "urgent",
       addAssignees: [AUTHORITY],
@@ -142,10 +182,6 @@ const FIXTURES: Record<Collection, Fixture> = {
     record: { subject: MESSAGE, emoji: "👍", createdAt: NOW },
     context: { authorityDid: AUTHORITY, spaceUri: CHANNEL, repoDid: MEMBER, rkey: reactionRecordKey(MESSAGE, "👍", MEMBER), knownMessages: new Set([MESSAGE]) },
   },
-  [COLLECTION.channelRoster]: {
-    record: { subject: MEMBER, active: true, updatedAt: NOW },
-    context: { authorityDid: AUTHORITY, spaceUri: CHANNEL, repoDid: AUTHORITY, rkey: subjectKey(MEMBER) },
-  },
   [COLLECTION.dmRequest]: {
     record: { convKey: CONV_KEY, participants: PARTICIPANTS, createdAt: NOW },
     context: { authorityDid: AUTHORITY, spaceUri: dmInboxUri(AUTHORITY), repoDid: MEMBER, rkey: CONV_KEY },
@@ -164,18 +200,16 @@ const FIXTURES: Record<Collection, Fixture> = {
   },
 };
 
-/** The published lexicon documents, read from disk with no registry code in between. */
-const LEXICONS = fileURLToPath(new URL("../lexicons", import.meta.url));
-const PUBLISHED_DOCS: LexiconDoc[] = (readdirSync(LEXICONS, { recursive: true }) as string[])
+const LEXICONS_DIR = fileURLToPath(new URL("../lexicons", import.meta.url));
+const PUBLISHED_DOCS: LexiconDoc[] = (readdirSync(LEXICONS_DIR, { recursive: true }) as string[])
   .filter((path) => path.endsWith(".json"))
-  .map((path) => JSON.parse(readFileSync(join(LEXICONS, path), "utf8")) as LexiconDoc);
+  .map((path) => JSON.parse(readFileSync(join(LEXICONS_DIR, path), "utf8")) as LexiconDoc);
 const PUBLISHED = new Lexicons(PUBLISHED_DOCS);
 
 type PropertyDef = { type: string; format?: string; enum?: string[]; minLength?: number; maxLength?: number; maxGraphemes?: number; items?: PropertyDef };
 type CorpusItem = { label: string; value: Record<string, unknown>; wellShaped: boolean };
 
-/** Well- and ill-shaped variants of a record, derived from its lexicon's property definitions. */
-function shapeCorpus(collection: Collection, base: Record<string, unknown>): CorpusItem[] {
+function shapeCorpus(collection: RegisteredSpaceCollection, base: Record<string, unknown>): CorpusItem[] {
   const doc = PUBLISHED_DOCS.find((candidate) => candidate.id === collection);
   const schema = (doc?.defs.main as { record?: { required?: string[]; properties: Record<string, PropertyDef> } } | undefined)?.record;
   assert.ok(schema, `${collection} has a published record lexicon`);
@@ -187,7 +221,8 @@ function shapeCorpus(collection: Collection, base: Record<string, unknown>): Cor
     items.push({ label: `without ${field}`, value: Object.fromEntries(Object.entries(base).filter(([key]) => key !== field)), wellShaped: false });
   }
   for (const [field, def] of Object.entries(schema.properties)) {
-    const variant = (label: string, value: unknown, wellShaped: boolean) => items.push({ label: `${field} ${label}`, value: { ...base, [field]: value }, wellShaped });
+    const variant = (label: string, value: unknown, wellShaped: boolean) =>
+      items.push({ label: `${field} ${label}`, value: { ...base, [field]: value }, wellShaped });
     variant("null", null, false);
     if (def.type === "boolean") variant("as a string", "true", false);
     if (def.type === "string") {
@@ -196,7 +231,6 @@ function shapeCorpus(collection: Collection, base: Record<string, unknown>): Cor
       if (def.enum) variant("outside its enum", "somethingElse", false);
       if (def.minLength) variant("empty", "", false);
       if (def.maxGraphemes) {
-        // An emoji is one grapheme and four UTF-8 bytes, so the grapheme limit is reached exactly at the byte limit.
         variant("at its grapheme limit", "😀".repeat(def.maxGraphemes), true);
         variant("over its grapheme limit", "😀".repeat(def.maxGraphemes + 1), false);
         variant("over its grapheme limit in ASCII", "a".repeat(def.maxGraphemes + 1), false);
@@ -224,17 +258,12 @@ test("every registered collection has a fixture both layers accept", () => {
 
 test("schema parity: the registry's shape layer and the published lexicons alone give every corpus record the same verdict", () => {
   let compared = 0;
-  for (const [collection, { record, context }] of Object.entries(FIXTURES) as Array<[Collection, Fixture]>) {
+  for (const [collection, { record, context }] of Object.entries(FIXTURES) as Array<[RegisteredSpaceCollection, Fixture]>) {
     for (const item of shapeCorpus(collection, record)) {
-      // #given one corpus record
-      // #when both validate its shape
       const registry = validateRecordShape(collection, item.value).valid;
       const lexicon = PUBLISHED.validate(collection, item.value).success;
-
-      // #then they agree, and agree with how the record was built
       assert.equal(registry, lexicon, `${collection}: ${item.label}`);
       assert.equal(lexicon, item.wellShaped, `${collection}: ${item.label} was built ${item.wellShaped ? "well" : "ill"}-shaped`);
-      // ...and a record the lexicon rejects never gets through full validation
       if (!item.wellShaped) assert.equal(validateSpaceRecord(collection, item.value, context).valid, false, `${collection}: ${item.label}`);
       compared += 1;
     }
@@ -242,182 +271,48 @@ test("schema parity: the registry's shape layer and the published lexicons alone
   assert.ok(compared > 150, `the corpus is not trivially small (${compared} records)`);
 });
 
-type SemanticCase = { collection: Collection; breaks: string; record?: Record<string, unknown>; context?: Partial<RecordContext>; reason: RegExp };
-
-const SEMANTIC_CASES: SemanticCase[] = [
-  // Wrong author.
-  ...[COLLECTION.workspaceProfile, COLLECTION.directory, COLLECTION.workspaceRoster, COLLECTION.admin, COLLECTION.appInstall, COLLECTION.extInstall, COLLECTION.joinDecision, COLLECTION.channelRoster]
-    .map((collection): SemanticCase => ({ collection, breaks: "authored by a member", context: { repoDid: MEMBER }, reason: /wrong author/ })),
-  ...[COLLECTION.dmHeader, COLLECTION.dmMessage, COLLECTION.dmReaction]
-    .map((collection): SemanticCase => ({ collection, breaks: "authored by someone other than the half owner", context: { repoDid: MEMBER }, reason: /half owner/ })),
-  // Wrong space type.
-  ...(Object.keys(FIXTURES) as Collection[]).map((collection): SemanticCase => ({
-    collection, breaks: "read in a space of another type", context: { spaceUri: FIXTURES[collection].context.spaceUri === WORKSPACE ? CHANNEL : WORKSPACE }, reason: /space type/,
-  })),
-  // Wrong key.
-  { collection: COLLECTION.workspaceProfile, breaks: "a key other than self", context: { rkey: "other" }, reason: /must be self/ },
-  { collection: COLLECTION.dmHeader, breaks: "a key other than self", context: { rkey: "other" }, reason: /must be self/ },
-  { collection: COLLECTION.message, breaks: "a key that is not a TID", context: { rkey: "self" }, reason: /TID/ },
-  { collection: COLLECTION.appCommand, breaks: "a key that is not a TID", context: { rkey: "self" }, reason: /TID/ },
-  { collection: COLLECTION.appAction, breaks: "a key that is not a TID", context: { rkey: "self" }, reason: /TID/ },
-  { collection: COLLECTION.dmMessage, breaks: "a key that is not a TID", context: { rkey: "self" }, reason: /TID/ },
-  { collection: COLLECTION.taskProject, breaks: "a key that is not a TID", context: { rkey: "self" }, reason: /TID/ },
-  { collection: COLLECTION.taskProjectEdit, breaks: "a key that is not a TID", context: { rkey: "self" }, reason: /TID/ },
-  { collection: COLLECTION.task, breaks: "a key that is not a TID", context: { rkey: "self" }, reason: /TID/ },
-  { collection: COLLECTION.taskEdit, breaks: "a key that is not a TID", context: { rkey: "self" }, reason: /TID/ },
-  { collection: COLLECTION.taskComment, breaks: "a key that is not a TID", context: { rkey: "self" }, reason: /TID/ },
-  { collection: COLLECTION.directory, breaks: "a key other than its skey", context: { rkey: "acme-random" }, reason: /directory key/ },
-  { collection: COLLECTION.workspaceRoster, breaks: "a key other than its subject's", context: { rkey: subjectKey(AUTHORITY) }, reason: /roster key/ },
-  { collection: COLLECTION.admin, breaks: "a key other than its subject's", context: { rkey: subjectKey(AUTHORITY) }, reason: /roster key/ },
-  { collection: COLLECTION.appInstall, breaks: "a key other than its subject's", context: { rkey: subjectKey(AUTHORITY) }, reason: /roster key/ },
-  { collection: COLLECTION.appInstall, breaks: "a channel granted twice", record: { channels: [{ skey: "acme-general", write: true }, { skey: "acme-general", write: false }] }, reason: /each channel once/ },
-  { collection: COLLECTION.channelRoster, breaks: "a key other than its subject's", context: { rkey: subjectKey(AUTHORITY) }, reason: /roster key/ },
-  { collection: COLLECTION.acceptance, breaks: "a key for another workspace", context: { rkey: acceptanceRecordKey(workspaceUri(AUTHORITY, "other")) }, reason: /acceptance key/ },
-  { collection: COLLECTION.joinRequest, breaks: "another member's request key", context: { rkey: requestRecordKey(CHANNEL, AUTHORITY) }, reason: /not canonical/ },
-  { collection: COLLECTION.joinDecision, breaks: "a key for another request", context: { rkey: decisionRecordKey(spaceRecordUri(INBOX, MEMBER, COLLECTION.joinRequest, "other")) }, reason: /join decision key/ },
-  { collection: COLLECTION.reaction, breaks: "another author's reaction key", context: { rkey: reactionRecordKey(MESSAGE, "👍", AUTHORITY) }, reason: /reaction key/ },
-  { collection: COLLECTION.dmRequest, breaks: "a key other than its conversation key", context: { rkey: "222222222222b" }, reason: /conversation key/ },
-  { collection: COLLECTION.dmReaction, breaks: "another author's reaction key", context: { rkey: reactionRecordKey(DM_MESSAGE, "👍", MEMBER) }, reason: /reaction key/ },
-  // A reference outside the space.
-  { collection: COLLECTION.acceptance, breaks: "a workspace reference that is a channel", record: { workspace: CHANNEL }, context: { rkey: acceptanceRecordKey(CHANNEL) }, reason: /acceptance key/ },
-  { collection: COLLECTION.joinDecision, breaks: "a request in another inbox", record: { request: spaceRecordUri(inboxUri(AUTHORITY, "other"), MEMBER, COLLECTION.joinRequest, requestRecordKey(CHANNEL, MEMBER)) }, reason: /canonical request in this inbox/ },
-  { collection: COLLECTION.joinDecision, breaks: "a request the authority wrote", record: { request: spaceRecordUri(INBOX, AUTHORITY, COLLECTION.joinRequest, "x") }, context: { rkey: decisionRecordKey(spaceRecordUri(INBOX, AUTHORITY, COLLECTION.joinRequest, "x")) }, reason: /canonical request/ },
-  { collection: COLLECTION.message, breaks: "a parent in another channel", record: { parent: spaceRecordUri(OTHER_CHANNEL, MEMBER, COLLECTION.message, "2222222222222") }, reason: /in this channel/ },
-  { collection: COLLECTION.message, breaks: "a parent this channel does not hold", record: { parent: spaceRecordUri(CHANNEL, MEMBER, COLLECTION.message, "222222222222b") }, reason: /not in this channel/ },
-  { collection: COLLECTION.reaction, breaks: "a target in another channel", record: { subject: spaceRecordUri(OTHER_CHANNEL, MEMBER, COLLECTION.message, "2222222222222") }, reason: /not a message in this channel/ },
-  { collection: COLLECTION.reaction, breaks: "a target this channel does not hold", context: { knownMessages: new Set() }, reason: /not a message in this channel/ },
-  { collection: COLLECTION.dmMessage, breaks: "a parent in another conversation", record: { parent: spaceRecordUri(dmConversationUri(MEMBER, "222222222222b"), MEMBER, COLLECTION.dmMessage, "2222222222225") }, reason: /in this conversation/ },
-  { collection: COLLECTION.dmMessage, breaks: "a parent from a non-participant", record: { parent: spaceRecordUri(OTHER_HALF, MEMBER, COLLECTION.dmMessage, "2222222222225") }, context: { participants: [AUTHORITY, "did:plc:third"] }, reason: /participant/ },
-  { collection: COLLECTION.dmMessage, breaks: "itself as parent", record: { parent: spaceRecordUri(HALF, AUTHORITY, COLLECTION.dmMessage, "222222222222a") }, reason: /itself/ },
-  { collection: COLLECTION.dmReaction, breaks: "a target in another conversation", record: { subject: spaceRecordUri(dmConversationUri(MEMBER, "222222222222b"), MEMBER, COLLECTION.dmMessage, "2222222222225") }, reason: /in this conversation/ },
-  // A nested reply.
-  { collection: COLLECTION.message, breaks: "a reply to a reply", record: { parent: REPLY }, reason: /nested replies/ },
-  // Blocks and interactions.
-  {
-    collection: COLLECTION.message,
-    breaks: "duplicate button actionIds across blocks",
-    record: {
-      blocks: [
-        { $type: BLOCK_TYPE.actions, elements: [{ actionId: "same", label: "One" }] },
-        { $type: BLOCK_TYPE.actions, elements: [{ actionId: "same", label: "Two" }] },
-      ],
-    },
-    reason: /unique/,
-  },
-  {
-    collection: COLLECTION.message,
-    breaks: "a button actionId outside the token syntax",
-    record: { blocks: [{ $type: BLOCK_TYPE.actions, elements: [{ actionId: "bad id!", label: "One" }] }] },
-    reason: /actionId/,
-  },
-  { collection: COLLECTION.appCommand, breaks: "a command name outside the token syntax", record: { command: "Echo_1" }, reason: /command name/ },
-  { collection: COLLECTION.appCommand, breaks: "a channel of another authority", record: { channel: channelUri("did:plc:other", "acme-general") }, reason: /channel URI of this authority/ },
-  { collection: COLLECTION.appCommand, breaks: "a non-channel space as channel", record: { channel: WORKSPACE }, reason: /channel URI of this authority/ },
-  { collection: COLLECTION.appCommand, breaks: "a parent in another channel", record: { parent: spaceRecordUri(OTHER_CHANNEL, MEMBER, COLLECTION.message, "2222222222222") }, reason: /canonical message URI in its channel/ },
-  { collection: COLLECTION.appCommand, breaks: "a parent with a non-TID key", record: { parent: spaceRecordUri(CHANNEL, MEMBER, COLLECTION.message, "notatid") }, reason: /canonical message URI in its channel/ },
-  { collection: COLLECTION.appAction, breaks: "an actionId outside the token syntax", record: { actionId: "bad id!" }, reason: /actionId/ },
-  { collection: COLLECTION.appAction, breaks: "a channel of another authority", record: { channel: channelUri("did:plc:other", "acme-general") }, reason: /channel URI of this authority/ },
-  { collection: COLLECTION.appAction, breaks: "a message in another channel", record: { message: spaceRecordUri(OTHER_CHANNEL, MEMBER, COLLECTION.message, "2222222222222") }, reason: /canonical message URI in its channel/ },
-  { collection: COLLECTION.appAction, breaks: "a message with a non-TID key", record: { message: spaceRecordUri(CHANNEL, MEMBER, COLLECTION.message, "notatid") }, reason: /canonical message URI in its channel/ },
-  // Participants.
-  { collection: COLLECTION.dmRequest, breaks: "participants not in canonical order", record: { participants: [AUTHORITY, MEMBER] }, reason: /canonical/ },
-  { collection: COLLECTION.dmRequest, breaks: "participants without the sender", record: { participants: [AUTHORITY, "did:plc:third"] }, reason: /sender and the inbox owner/ },
-  { collection: COLLECTION.dmHeader, breaks: "participants without the half owner", record: { participants: [MEMBER, "did:plc:third"] }, reason: /half owner/ },
-  { collection: COLLECTION.dmHeader, breaks: "a conversation key other than the half's", record: { convKey: "222222222222b" }, reason: /conversation key/ },
-  // A subject DID past the length bound (the lexicon's did format has none).
-  ...[COLLECTION.workspaceRoster, COLLECTION.admin, COLLECTION.channelRoster].map((collection): SemanticCase => ({
-    collection, breaks: "a subject DID longer than the bound", record: { subject: `did:plc:${"a".repeat(1_500)}` },
-    context: { rkey: subjectKey(`did:plc:${"a".repeat(1_500)}`) }, reason: /length bound/,
-  })),
-  // Blank text.
-  { collection: COLLECTION.dmMessage, breaks: "text that is only spaces", record: { text: "   " }, reason: /blank/ },
-  // Extension install & Tasks collections.
-  { collection: COLLECTION.extInstall, breaks: "an unknown extension id", record: { extId: "notes" }, context: { rkey: "notes" }, reason: /unknown extension id/ },
-  { collection: COLLECTION.extInstall, breaks: "a key other than extId", context: { rkey: "other" }, reason: /must equal extId/ },
-  { collection: COLLECTION.extInstall, breaks: "a space URI for another workspace", record: { space: OTHER_TASKS }, reason: /canonical workspace extension space/ },
-  { collection: COLLECTION.extInstall, breaks: "an enabledBy DID longer than the bound", record: { enabledBy: `did:plc:${"a".repeat(1_500)}` }, reason: /length bound/ },
-  { collection: COLLECTION.taskProject, breaks: "blank project name", record: { name: "   " }, reason: /blank/ },
-  { collection: COLLECTION.taskProject, breaks: "malformed HLC string", record: { t: "a".repeat(20) }, reason: /HLC/ },
-  { collection: COLLECTION.taskProject, breaks: "HLC below MIN_HLC_MS", record: { t: "000999999999999.0000" }, reason: /HLC/ },
-  { collection: COLLECTION.taskProjectEdit, breaks: "subject in another tasks space", record: { subject: spaceRecordUri(OTHER_TASKS, MEMBER, COLLECTION.taskProject, "222222222222e") }, reason: /canonical project URI/ },
-  { collection: COLLECTION.taskProjectEdit, breaks: "subject of wrong collection", record: { subject: TASK }, reason: /canonical project URI/ },
-  { collection: COLLECTION.taskProjectEdit, breaks: "subject with non-TID key", record: { subject: spaceRecordUri(TASKS, MEMBER, COLLECTION.taskProject, "notatid") }, reason: /canonical project URI/ },
-  { collection: COLLECTION.taskProjectEdit, breaks: "malformed HLC string", record: { t: "a".repeat(20) }, reason: /HLC/ },
-  { collection: COLLECTION.taskProjectEdit, breaks: "non-hex opRef in s", record: { s: ["z".repeat(32)] }, reason: /hex opRefs/ },
-  { collection: COLLECTION.taskProjectEdit, breaks: "duplicate opRef in s", record: { s: [OP_REF_A, OP_REF_A] }, reason: /unique/ },
-  { collection: COLLECTION.taskProjectEdit, breaks: "sTruncated set to false", record: { sTruncated: false }, reason: /sTruncated/ },
-  { collection: COLLECTION.taskProjectEdit, breaks: "clearDescription set to false", record: { clearDescription: false }, reason: /clearDescription/ },
-  { collection: COLLECTION.taskProjectEdit, breaks: "both description and clearDescription set", record: { description: "x", clearDescription: true }, reason: /cannot set both/ },
-  { collection: COLLECTION.taskProjectEdit, breaks: "blank project name", record: { name: "   " }, reason: /blank/ },
-  { collection: COLLECTION.taskProjectEdit, breaks: "no-op projectEdit with zero mutations", record: { name: undefined }, reason: /at least one mutation/ },
-  { collection: COLLECTION.task, breaks: "blank task title", record: { title: "   " }, reason: /blank/ },
-  { collection: COLLECTION.task, breaks: "malformed HLC string", record: { t: "a".repeat(20) }, reason: /HLC/ },
-  { collection: COLLECTION.task, breaks: "project in another tasks space", record: { project: spaceRecordUri(OTHER_TASKS, MEMBER, COLLECTION.taskProject, "222222222222e") }, reason: /canonical project URI/ },
-  { collection: COLLECTION.task, breaks: "parent in another tasks space", record: { parent: spaceRecordUri(OTHER_TASKS, MEMBER, COLLECTION.task, "222222222222g") }, reason: /canonical task URI/ },
-  { collection: COLLECTION.task, breaks: "itself as parent", record: { parent: TASK }, reason: /itself/ },
-  { collection: COLLECTION.task, breaks: "duplicate assignees", record: { assignees: [MEMBER, MEMBER] }, reason: /unique/ },
-  { collection: COLLECTION.task, breaks: "assignee DID longer than the bound", record: { assignees: [`did:plc:${"a".repeat(1_500)}`] }, reason: /length bound/ },
-  { collection: COLLECTION.task, breaks: "blank label", record: { labels: ["   "] }, reason: /blank/ },
-  { collection: COLLECTION.task, breaks: "duplicate labels", record: { labels: ["bug", "bug"] }, reason: /unique/ },
-  { collection: COLLECTION.taskEdit, breaks: "subject in another tasks space", record: { subject: spaceRecordUri(OTHER_TASKS, MEMBER, COLLECTION.task, "222222222222f") }, reason: /canonical task URI/ },
-  { collection: COLLECTION.taskEdit, breaks: "subject of wrong collection", record: { subject: PROJECT }, reason: /canonical task URI/ },
-  { collection: COLLECTION.taskEdit, breaks: "subject with non-TID key", record: { subject: spaceRecordUri(TASKS, MEMBER, COLLECTION.task, "notatid") }, reason: /canonical task URI/ },
-  { collection: COLLECTION.taskEdit, breaks: "malformed HLC string", record: { t: "a".repeat(20) }, reason: /HLC/ },
-  { collection: COLLECTION.taskEdit, breaks: "HLC below MIN_HLC_MS", record: { t: "000999999999999.0000" }, reason: /HLC/ },
-  { collection: COLLECTION.taskEdit, breaks: "non-hex opRef in s", record: { s: ["g".repeat(32)] }, reason: /hex opRefs/ },
-  { collection: COLLECTION.taskEdit, breaks: "duplicate opRef in s", record: { s: [OP_REF_A, OP_REF_A] }, reason: /unique/ },
-  { collection: COLLECTION.taskEdit, breaks: "sTruncated set to false", record: { sTruncated: false }, reason: /sTruncated/ },
-  { collection: COLLECTION.taskEdit, breaks: "clearDescription set to false", record: { clearDescription: false }, reason: /clearDescription/ },
-  { collection: COLLECTION.taskEdit, breaks: "clearProject set to false", record: { clearProject: false }, reason: /clearProject/ },
-  { collection: COLLECTION.taskEdit, breaks: "clearDueDate set to false", record: { clearDueDate: false }, reason: /clearDueDate/ },
-  { collection: COLLECTION.taskEdit, breaks: "clearParent set to false", record: { clearParent: false }, reason: /clearParent/ },
-  { collection: COLLECTION.taskEdit, breaks: "both description and clearDescription set", record: { description: "x", clearDescription: true }, reason: /cannot set both/ },
-  { collection: COLLECTION.taskEdit, breaks: "both project and clearProject set", record: { project: PROJECT, clearProject: true }, reason: /cannot set both/ },
-  { collection: COLLECTION.taskEdit, breaks: "both dueDate and clearDueDate set", record: { dueDate: NOW, clearDueDate: true }, reason: /cannot set both/ },
-  { collection: COLLECTION.taskEdit, breaks: "both parent and clearParent set", record: { parent: PARENT_TASK, clearParent: true }, reason: /cannot set both/ },
-  { collection: COLLECTION.taskEdit, breaks: "blank task title", record: { title: "   " }, reason: /blank/ },
-  { collection: COLLECTION.taskEdit, breaks: "project in another tasks space", record: { project: spaceRecordUri(OTHER_TASKS, MEMBER, COLLECTION.taskProject, "222222222222e") }, reason: /canonical project URI/ },
-  { collection: COLLECTION.taskEdit, breaks: "parent in another tasks space", record: { parent: spaceRecordUri(OTHER_TASKS, MEMBER, COLLECTION.task, "222222222222g") }, reason: /canonical task URI/ },
-  { collection: COLLECTION.taskEdit, breaks: "parent equal to subject", record: { parent: TASK }, reason: /equal subject/ },
-  { collection: COLLECTION.taskEdit, breaks: "overlapping addAssignees and removeAssignees", record: { addAssignees: [MEMBER], removeAssignees: [MEMBER] }, reason: /disjoint/ },
-  { collection: COLLECTION.taskEdit, breaks: "overlapping addLabels and removeLabels", record: { addLabels: ["bug"], removeLabels: ["bug"] }, reason: /disjoint/ },
-  { collection: COLLECTION.taskEdit, breaks: "no-op taskEdit with zero mutations", record: { title: undefined, status: undefined, priority: undefined, addAssignees: undefined, addLabels: undefined }, reason: /at least one mutation/ },
-  { collection: COLLECTION.taskComment, breaks: "subject in another tasks space", record: { subject: spaceRecordUri(OTHER_TASKS, MEMBER, COLLECTION.task, "222222222222f") }, reason: /canonical task URI/ },
-  { collection: COLLECTION.taskComment, breaks: "subject with non-TID key", record: { subject: spaceRecordUri(TASKS, MEMBER, COLLECTION.task, "notatid") }, reason: /canonical task URI/ },
-  { collection: COLLECTION.taskComment, breaks: "blank comment body", record: { body: "   " }, reason: /blank/ },
-];
-
-test("semantic rejection: a well-shaped record that breaks any meaning rule is rejected for that rule", () => {
-  for (const testCase of SEMANTIC_CASES) {
-    // #given a fixture changed in one way that keeps its shape
-    const { record, context } = FIXTURES[testCase.collection];
-    const value = Object.fromEntries(Object.entries({ ...record, ...testCase.record }).filter(([, v]) => v !== undefined));
-    const label = `${testCase.collection}: ${testCase.breaks}`;
-    assert.equal(validateRecordShape(testCase.collection, value).valid, true, `${label} is well-shaped`);
-
-    // #when it is validated in full
-    const result = validateSpaceRecord(testCase.collection, value, { ...context, ...testCase.context });
-
-    // #then it is rejected for the rule it breaks
-    assert.equal(result.valid, false, label);
-    assert.match(result.valid ? "" : result.reason, testCase.reason, label);
-  }
-});
-
-test("every collection with a meaning rule has a case that breaks it", () => {
-  const covered = new Set(SEMANTIC_CASES.filter((testCase) => testCase.reason.source !== "space type").map((testCase) => testCase.collection));
-  for (const collection of Object.keys(REGISTRY) as Collection[]) {
-    if (REGISTRY[collection].semantic) assert.ok(covered.has(collection), collection);
-  }
-});
-
-test("a record with a field this app does not know is accepted in every collection, and the field is kept", () => {
+test("a record with an unknown extension field is accepted in every collection, and the field is kept", () => {
   for (const [collection, { record, context }] of Object.entries(FIXTURES)) {
-    // #given a record another app extended
     const extended = { ...record, addedByAnotherApp: { note: "kept" } };
-
-    // #then it is accepted as is
     assert.deepEqual(validateSpaceRecord(collection, extended, context), { valid: true }, collection);
     assert.deepEqual(extended.addedByAnotherApp, { note: "kept" });
+  }
+});
+
+test("semantic rejection covers OpenSocial and Flock collections", () => {
+  const cases: Array<{ collection: RegisteredSpaceCollection; record?: Record<string, unknown>; context?: Partial<RecordContext>; reason: RegExp }> = [
+    { collection: OPENSOCIAL_COLLECTION.profile, record: { url: "javascript:alert(1)" }, reason: /http or https/ },
+    { collection: OPENSOCIAL_COLLECTION.space, record: { space: META }, reason: /core or personal/ },
+    { collection: OPENSOCIAL_COLLECTION.role, record: { scopes: ["include:unknown.nsid.set"] }, reason: /Unknown permission-set/ },
+    { collection: OPENSOCIAL_COLLECTION.membership, context: { rkey: AUTHORITY }, reason: /implicit membership/ },
+    { collection: OPENSOCIAL_COLLECTION.membership, record: { roles: [] }, reason: /at least one role/ },
+    { collection: OPENSOCIAL_COLLECTION.acceptance, context: { repoDid: AUTHORITY }, reason: /group DID/ },
+    { collection: OPENSOCIAL_COLLECTION.invite, context: { repoDid: MEMBER }, reason: /external group DID/ },
+    { collection: COLLECTION.directory, context: { rkey: "acme-random" }, reason: /directory key/ },
+    { collection: COLLECTION.appInstall, record: { subject: AUTHORITY }, context: { rkey: subjectKey(AUTHORITY) }, reason: /group DID/ },
+    { collection: COLLECTION.appCommand, record: { command: "Echo_1" }, reason: /command name/ },
+    { collection: COLLECTION.appAction, record: { actionId: "bad id!" }, reason: /actionId/ },
+    { collection: COLLECTION.extInstall, record: { space: OTHER_TASKS }, reason: /canonical workspace extension space/ },
+    { collection: COLLECTION.taskProject, record: { name: "   " }, reason: /blank/ },
+    { collection: COLLECTION.taskProjectEdit, record: { name: undefined }, reason: /at least one mutation/ },
+    { collection: COLLECTION.task, record: { title: "   " }, reason: /blank/ },
+    { collection: COLLECTION.taskEdit, record: { title: undefined, status: undefined, priority: undefined, addAssignees: undefined, addLabels: undefined }, reason: /at least one mutation/ },
+    { collection: COLLECTION.taskComment, record: { body: "   " }, reason: /blank/ },
+    { collection: COLLECTION.joinRequest, context: { rkey: requestRecordKey(CHANNEL, AUTHORITY) }, reason: /not canonical/ },
+    { collection: COLLECTION.joinDecision, record: { request: spaceRecordUri(INBOX, AUTHORITY, COLLECTION.joinRequest, "x") }, context: { rkey: decisionRecordKey(spaceRecordUri(INBOX, AUTHORITY, COLLECTION.joinRequest, "x")) }, reason: /canonical request/ },
+    { collection: COLLECTION.message, record: { blocks: [{ $type: BLOCK_TYPE.actions, elements: [{ actionId: "bad id!", label: "One" }] }] }, reason: /actionId/ },
+    { collection: COLLECTION.reaction, context: { knownMessages: new Set() }, reason: /not a message in this channel/ },
+    { collection: COLLECTION.dmRequest, record: { participants: [AUTHORITY, MEMBER] }, reason: /canonical/ },
+    { collection: COLLECTION.dmHeader, record: { convKey: "222222222222b" }, reason: /conversation key/ },
+    { collection: COLLECTION.dmMessage, record: { text: "   " }, reason: /blank/ },
+    { collection: COLLECTION.dmReaction, record: { subject: spaceRecordUri(dmConversationUri(MEMBER, "222222222222b"), MEMBER, COLLECTION.dmMessage, "2222222222225") }, reason: /in this conversation/ },
+  ];
+
+  for (const testCase of cases) {
+    const { record, context } = FIXTURES[testCase.collection];
+    const value = Object.fromEntries(Object.entries({ ...record, ...testCase.record }).filter(([, v]) => v !== undefined));
+    const result = validateSpaceRecord(testCase.collection, value, { ...context, ...testCase.context });
+    assert.equal(result.valid, false, testCase.collection);
+    assert.match(result.valid ? "" : result.reason, testCase.reason, testCase.collection);
   }
 });

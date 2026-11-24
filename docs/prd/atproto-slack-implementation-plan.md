@@ -1,6 +1,10 @@
-# Implementation Plan: atproto Slack
+# Implementation Plan: atproto Slack (Historical R1–R12 Baseline)
 
-Status: core app implementation, scoped OAuth metadata and returning-workspace reauthorization, patched pinned PDS conformance (active R12 pin `6747610566` / `0.0.0-spaces-alpha-20261117141222` in [`docs/protocol/atproto-spaces-pin.md`](../protocol/atproto-spaces-pin.md)), real independent-app browser acceptance, two-PDS lifecycle recovery matrix, and the reaction-complete supported-size workload are complete. Both readers probe beyond the reaction cap to distinguish an exact-cap history from actual overflow; the post-fix 2026-09-26 workload passed with exact latest-page parity. Historical Phase 0–6 milestone readiness logs are preserved below. Production deployment and limited-workspace pilot evidence remain pending.
+> [!IMPORTANT]
+> **R13 `opensocial.group` Architectural Supersession Notice (2026-11-21):**
+> Phases 0–6 below document the **historical M0–M6 / R1–R12 execution plan** built on `com.atproto.memberspace.policy` workspace member-list fan-out. In **R13** ([`.ai/plans/r13-opensocial-groups.md`](../../.ai/plans/r13-opensocial-groups.md), [`PLAN.md`](../../PLAN.md), [`ARCHITECTURE.md`](../../ARCHITECTURE.md)), workspace governance was migrated hard-cut to **`opensocial.group` atmospheric groups (`1 Group == 1 DID` @ `8df0cc82eb7708f090aa43522adf1d3ada3ed7e7`)** hosted on `apps/group-host` (`42` SQLite tables, `group.opensocial.policy` flat union RBAC, `O(1)` `membership/<did>` writes, cross-PDS `group.opensocial.invites/self` invitations, `requestJoin`/`decideGroupJoinRequest`, ATProto-native `com.atproto.label.record` moderation, two-GroupHost Standard & Coordinated v1 migration, `pnpm backup:group-host`, and mandatory pre-launch `pnpm verify:lexicons`), retiring `reconcile-workspaces` and `listInboxWriters` while preserving personal-PDS sovereign Direct Messages (`new.flock.dm.*`) on `com.atproto.memberspace.policy`. For live architecture and operations, see [`ARCHITECTURE.md`](../../ARCHITECTURE.md), [`docs/protocol/operator-contract.md`](../protocol/operator-contract.md), and [`docs/operations.md`](../operations.md).
+
+Status: historical Phase 0–6 execution plan & receipts (superseded on workspace governance by R13 `opensocial.group` in [`.ai/plans/r13-opensocial-groups.md`](../../.ai/plans/r13-opensocial-groups.md) and [`PLAN.md`](../../PLAN.md)).
 Source: [atproto Slack PRD](./atproto-slack-clone.md)
 Date: 2026-09-26
 

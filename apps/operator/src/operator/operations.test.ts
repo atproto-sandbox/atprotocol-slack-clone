@@ -25,7 +25,16 @@ test("workspace creation is a journaled kind but is never submitted through exec
   // #then execute refuses it, and journal recovery reads it
   assert.throws(() => validateOperatorRequest(bootstrap, actor, "execute"), /unsupported operation kind/i);
   assert.equal(validateOperatorRequest(bootstrap, actor, "journal").kind.kind, "bootstrapWorkspace");
-  assert.throws(() => validateOperatorRequest({ kind: "bootstrapWorkspace", name: "Acme <script>" }, actor, "journal"), /1 to 60 plain-text characters/);
+  assert.throws(() => validateOperatorRequest({ kind: "bootstrapWorkspace", name: "a".repeat(65) }, actor, "journal"), /1 to 64 characters/);
+  assert.throws(() => validateOperatorRequest({ kind: "bootstrapWorkspace", name: "Acme\nInjected" }, actor, "journal"), /control characters/);
+  assert.deepEqual(
+    validateOperatorRequest({ kind: "decideGroupJoinRequest", member: "did:plc:applicant", decision: "approve", roles: ["member"] }, actor, "execute").request,
+    { kind: "decideGroupJoinRequest", member: "did:plc:applicant", decision: "approve", roles: ["member"] },
+  );
+  assert.throws(
+    () => validateOperatorRequest({ kind: "decideGroupJoinRequest", member: "did:plc:applicant", decision: "approve", roles: ["member", "member"] }, actor, "execute"),
+    /unique record keys/i,
+  );
 });
 
 test("a kind outside the table, a wrong lexicon type, or a wrongly typed field is refused", () => {

@@ -5,8 +5,11 @@ import { IndexedDbStore } from "@flock/client/indexeddb-store";
 import { LiveSpaces, Snapshots } from "@flock/client/views";
 import { DmClient } from "@flock/client/dm/dm-client";
 import { createBrowserDmStore, type BrowserDmStore } from "@flock/client/dm/browser-store";
+import { parseSpaceUri } from "@flock/protocol/keys";
+import { SPACE_TYPE } from "@flock/protocol/nsids";
 import { captureReturnTo, RETURN_TO_KEY } from "../lib/return-to";
 import { within } from "../lib/within";
+import { getGroupBrowserOAuthClient, type GroupBrowserOAuthClient } from "./group-session";
 import { ERASE_WITHIN_MS, signOutAccount, type SignOutResult } from "./sign-out";
 import { registerShellSession } from "./shell-lifecycle";
 import type { BrowserSessionConfig } from "./session";
@@ -16,12 +19,13 @@ const STORE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 export type BrowserSessionStatus = "disconnected" | "connecting" | "ready" | "error";
 
-/** What the signed-in account's browser session gives the UI: its DM client, its engine, and the engine's live views. */
+/** What the signed-in account's browser session gives the UI: its DM client, its engine, its Group OAuth client, and live views. */
 export type BrowserSessionState = {
   status: BrowserSessionStatus;
   client: DmClient | null;
   store: BrowserDmStore | null;
   engine: Engine | null;
+  groupOAuth: GroupBrowserOAuthClient | null;
   snapshots: Snapshots | null;
   live: LiveSpaces | null;
   needsNotifyScopeUpgrade: boolean;
@@ -30,10 +34,55 @@ export type BrowserSessionState = {
   signOut: () => Promise<SignOutResult>;
 };
 
+const inFlightOperatorReauth = new Set<string>();
+
+export async function runBrowserOperatorReauthorization(input: {
+  groupDid: string;
+  operator:
+    | { startAuthorityFlow(req: { purpose: "reauthorize"; authority: string }): Promise<{ url: string }> }
+    | undefined;
+  locationSearch: string;
+  storage?: Pick<Storage, "getItem" | "setItem"> & Partial<Pick<Storage, "removeItem">>;
+  navigate: (url: string) => void;
+}): Promise<boolean> {
+  if (!input.operator) return false;
+  const attemptKey = `spaces.reauthAttempted:${input.groupDid}`;
+  if (input.storage) {
+    const search = new URLSearchParams(input.locationSearch);
+    if (search.get("authority") === "failed") return false;
+    if (input.storage.getItem(attemptKey) === "1") return false;
+  }
+  if (inFlightOperatorReauth.has(input.groupDid)) return false;
+  inFlightOperatorReauth.add(input.groupDid);
+  try {
+    const started = await input.operator.startAuthorityFlow({
+      purpose: "reauthorize",
+      authority: input.groupDid,
+    });
+    if (typeof started?.url !== "string" || started.url.trim().length === 0) {
+      throw new Error("Operator did not return a valid authority authorization URL.");
+    }
+    if (input.storage) {
+      input.storage.setItem(attemptKey, "1");
+      input.storage.setItem("spaces.pendingReactivateGroup", input.groupDid);
+    }
+    input.navigate(started.url);
+    return true;
+  } catch (error) {
+    if (input.storage?.removeItem) {
+      input.storage.removeItem(attemptKey);
+    }
+    throw error;
+  } finally {
+    inFlightOperatorReauth.delete(input.groupDid);
+  }
+}
+
 type Built = {
   client: DmClient;
   store: BrowserDmStore;
   engine: Engine;
+  groupOAuth: GroupBrowserOAuthClient;
   snapshots: Snapshots;
   live: LiveSpaces;
   syncStore: IndexedDbStore;
@@ -48,7 +97,7 @@ type Built = {
  * runs outside the browser; space signing keys are non-extractable WebCrypto P-256 keys.
  */
 export function useBrowserSession(did: string, config: BrowserSessionConfig): BrowserSessionState {
-  const { appUrl, plcUrl, scope, serviceRef, operatorUrl, loopback } = config;
+  const { appUrl, plcUrl, scope, serviceRef, operatorUrl, groupHostUrl, loopback } = config;
   const [status, setStatus] = useState<BrowserSessionStatus>("connecting");
   const [built, setBuilt] = useState<Built | null>(null);
   const [error, setError] = useState("");
@@ -87,14 +136,46 @@ export function useBrowserSession(did: string, config: BrowserSessionConfig): Br
           setError("Another tab of this app signed out, or started another account, and closed this account's store. Reload to continue here.");
           setStatus("error");
         });
-        const engine = createEngine(transport, { store: syncStore, operator: { serviceRef, endpoint: operatorUrl } });
+        const groupOAuth = getGroupBrowserOAuthClient(did, {
+          appUrl,
+          plcUrl,
+          loopback,
+          groupHostUrl,
+        });
+        let engineRef: Engine | null = null;
+        const engine = createEngine(transport, {
+          store: syncStore,
+          operator: { serviceRef, endpoint: operatorUrl },
+          getGroupClient: async (groupDid) => {
+            const gc = await groupOAuth.restoreGroupClient(groupDid);
+            if (!gc) {
+              throw new Error(`Sign in to group ${groupDid} first to perform this action.`);
+            }
+            return gc;
+          },
+          reauthorizeOperator: async (groupDid) => {
+            if (typeof window === "undefined") return false;
+            return runBrowserOperatorReauthorization({
+              groupDid,
+              operator: engineRef?.operator,
+              locationSearch: window.location.search,
+              ...(typeof sessionStorage !== "undefined" ? { storage: sessionStorage } : {}),
+              navigate: (url) => window.location.assign(url),
+            });
+          },
+        });
+        engineRef = engine;
         // Spaces not opened for the retention period go, which bounds what is kept for spaces an account no longer reads.
         await engine.lifecycle.sweep(STORE_RETENTION_MS);
         const snapshots = new Snapshots();
         const live = new LiveSpaces(snapshots, {
           operator: engine.operator!,
           credentials: engine.credentials,
-          onSpaceChanged: (space) => engine.sync.markSpaceStale(space),
+          onSpaceChanged: (space) => {
+            // Channel reads advance incrementally via `listWriters(cursor=spaceRev)`, marking only moved writers stale.
+            if (parseSpaceUri(space)?.type === SPACE_TYPE.channel) return;
+            return engine.sync.markSpaceStale(space);
+          },
         });
         const store = createBrowserDmStore(did);
         if (epoch.current !== run) {
@@ -108,7 +189,7 @@ export function useBrowserSession(did: string, config: BrowserSessionConfig): Br
           store,
           ...(needsNotifyScopeUpgrade ? {} : { operator: engine.operator }),
         });
-        made = { client, store, engine, snapshots, live, syncStore, releaseLifecycle, needsNotifyScopeUpgrade };
+        made = { client, store, engine, groupOAuth, snapshots, live, syncStore, releaseLifecycle, needsNotifyScopeUpgrade };
         live.start();
         builtRef.current = made;
         setBuilt(made);
@@ -127,7 +208,7 @@ export function useBrowserSession(did: string, config: BrowserSessionConfig): Br
       made?.syncStore.close();
       if (builtRef.current === made) builtRef.current = null;
     };
-  }, [did, appUrl, plcUrl, scope, serviceRef, operatorUrl, loopback]);
+  }, [did, appUrl, plcUrl, scope, serviceRef, operatorUrl, groupHostUrl, loopback]);
 
   const connect = useCallback(() => {
     setStatus("connecting");
@@ -161,13 +242,18 @@ export function useBrowserSession(did: string, config: BrowserSessionConfig): Br
     current?.syncStore.close();
     setBuilt(null);
     setStatus("disconnected");
-    return signOutAccount(did, async () => (await import("./session")).signOut({ appUrl, plcUrl, scope, serviceRef, operatorUrl, loopback }));
-  }, [did, appUrl, plcUrl, scope, serviceRef, operatorUrl, loopback]);
+    return signOutAccount(
+      did,
+      async () => (await import("./session")).signOut({ appUrl, plcUrl, scope, serviceRef, operatorUrl, groupHostUrl, loopback }),
+      { config: { appUrl, plcUrl, loopback, groupHostUrl } },
+    );
+  }, [did, appUrl, plcUrl, scope, serviceRef, operatorUrl, groupHostUrl, loopback]);
 
   return {
     status, error, connect, signOut,
     client: built?.client ?? null, store: built?.store ?? null,
-    engine: built?.engine ?? null, snapshots: built?.snapshots ?? null, live: built?.live ?? null,
+    engine: built?.engine ?? null, groupOAuth: built?.groupOAuth ?? null,
+    snapshots: built?.snapshots ?? null, live: built?.live ?? null,
     needsNotifyScopeUpgrade: built?.needsNotifyScopeUpgrade ?? false,
   };
 }

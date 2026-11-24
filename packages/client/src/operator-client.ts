@@ -63,7 +63,16 @@ export function raceWithSignal<T>(promise: Promise<T>, signal?: AbortSignal): Pr
 
 export type ChangesAnswer = { head: string; changed: Array<{ space: string; cursor: string }>; denied: string[]; reset: string[] };
 
-export type CreatedWorkspace = { operationId: string; workspace: string; channel: string; state: string; completedSteps: string[]; error?: string };
+export type CreatedWorkspace = {
+  operationId: string;
+  groupDid: string;
+  workspace: string;
+  channel: string;
+  state: string;
+  completedSteps: string[];
+  takenOverBy?: string;
+  error?: string;
+};
 
 export type StalledWork = {
   operations: Array<{ actor: string; operationId: string; state: string; error?: string; updatedAt: string }>;
@@ -77,6 +86,7 @@ export type OperationView = {
   requestHash: string;
   state: string;
   completedSteps: string[];
+  takenOverBy?: string;
   error?: string;
   updatedAt: string;
 };
@@ -122,18 +132,30 @@ export function operatorResponseFailure(status: number, ok: boolean, body: { err
  * The operator's methods, called with a service token the member's own host issues for that one method and the operator's
  * audience. No cookie and no server session: what a browser, a bot or a test holds is enough.
  */
-/** What an authority flow is for, and for which workspace account (the caller's own when absent). */
-export type AuthorityFlowRequest = ({ purpose: "createWorkspace"; name: string } | { purpose: "reauthorize" }) & { authority?: string };
+/** What an authority flow is for, and for which OpenSocial group DID (`reauthorize` requires `authority`). */
+export type AuthorityFlowRequest =
+  | {
+      purpose: "createWorkspace";
+      name: string;
+      joinPolicy?: "open" | "approval" | "invite";
+      publicMeta?: boolean;
+      creationKey?: string;
+      authority?: string;
+    }
+  | {
+      purpose: "reauthorize";
+      authority: string;
+    };
 
 export type OperatorExecuteRequest =
-  | { kind: "inviteMember"; subject: string }
+  | { kind: "inviteMember"; subject: string; expiresAt?: string }
   | { kind: "removeMember"; subject: string }
   | { kind: "setAdmin"; subject: string; active: boolean }
   | { kind: "createChannel"; skey: string; name: string; visibility: "public" | "private"; members?: string[] }
   | { kind: "transitionChannel"; skey: string; visibility: "public" | "private"; members?: string[] }
   | { kind: "archiveChannel"; skey: string }
   | { kind: "decideJoinRequest"; request: string; requestId: string; decision: "approve" | "deny" }
-  | { kind: "leaveWorkspace" }
+  | { kind: "decideGroupJoinRequest"; member: string; decision: "approve" | "deny"; roles?: string[] }
   | { kind: "leaveChannel"; skey: string }
   | { kind: "reconcileWorkspace" }
   | { kind: "installApp"; subject: string; channels: Array<{ skey: string; write: boolean }> }
@@ -178,8 +200,25 @@ export class OperatorClient {
     }
   }
 
-  /** Creates the workspace `name` for the caller, under `authority` (a dedicated workspace account's DID) or their own account. */
-  createWorkspace(input: { name: string; operationId: string; authority?: string }): Promise<CreatedWorkspace> {
+  /** Requests a stateless per-caller PDS webhook notification target for personal `group.opensocial.invites/self` after proving credential possession. */
+  async getSpaceNotifyTarget(input: DmNotifyTargetInput, signal?: AbortSignal): Promise<DmNotifyTarget> {
+    const timeoutMs = this.options.notifyTimeoutMs ?? DEFAULT_DM_NOTIFY_TIMEOUT_MS;
+    const { signal: composedSignal, cleanup } = createTimeoutSignal(timeoutMs, signal);
+    try {
+      return await this.call(OPERATOR_METHOD.getSpaceNotifyTarget, { input }, composedSignal);
+    } finally {
+      cleanup();
+    }
+  }
+
+  /** Creates the Flock workspace inside the OpenSocial group authorized for `(name, operationId)` (or explicit `authority` DID). */
+  createWorkspace(input: {
+    name: string;
+    operationId: string;
+    authority?: string;
+    joinPolicy?: "open" | "approval" | "invite";
+    publicMeta?: boolean;
+  }): Promise<CreatedWorkspace> {
     return this.call(OPERATOR_METHOD.createWorkspace, { input });
   }
 
@@ -191,8 +230,16 @@ export class OperatorClient {
     return this.call(OPERATOR_METHOD.startAuthorityFlow, { input });
   }
 
-  listStalledOperations(workspace: string): Promise<StalledWork> {
-    return this.call(OPERATOR_METHOD.listStalledOperations, { params: { workspace } });
+  listStalledOperations(
+    workspace: string,
+    options?: { refreshRegistrations?: boolean },
+  ): Promise<StalledWork> {
+    return this.call(OPERATOR_METHOD.listStalledOperations, {
+      params: {
+        workspace,
+        ...(options?.refreshRegistrations ? { refreshRegistrations: "true" } : {}),
+      },
+    });
   }
 
   async execute(input: { workspace: string; operationId: string; request: OperatorExecuteRequest | Record<string, unknown> }): Promise<{ operation: OperationView }> {
@@ -211,10 +258,6 @@ export class OperatorClient {
 
   getOperation(workspace: string, operationId: string): Promise<{ operation: OperationView }> {
     return this.call(OPERATOR_METHOD.getOperation, { params: { workspace, operationId } });
-  }
-
-  listInboxWriters(workspace: string): Promise<{ writers: string[] }> {
-    return this.call(OPERATOR_METHOD.listInboxWriters, { params: { workspace } });
   }
 
   private async call<T>(method: OperatorMethod, input: { input?: unknown; params?: Record<string, string> }, signal?: AbortSignal): Promise<T> {

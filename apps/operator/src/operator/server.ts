@@ -6,8 +6,16 @@ import { describeRepoFailure } from "@flock/protocol/atproto/repo-failure";
 import { getConfig, isLoopback } from "@flock/deployment/config";
 import { OPERATOR_SECURITY_HEADERS } from "@flock/deployment/security-headers";
 import { oauthFlowCookieName } from "../auth/oauth-flow";
-import { AUTHORITY_FLOW_PATHS, authorityClientMetadata, authorityPublicJwks, beginAuthorityFlow, completeAuthorityFlow } from "./authority-grant";
+import {
+  AUTHORITY_FLOW_PATHS,
+  assertCredentialFreeOriginUrl,
+  authorityClientMetadata,
+  authorityPublicJwks,
+  beginAuthorityFlow,
+  completeAuthorityFlow,
+} from "./authority-grant";
 import { describeFailure, OPERATOR_METHODS, type OperatorMethodDefinition } from "./methods";
+import { refreshAuthorityWorkspaceRegistrations } from "./registrations";
 
 // The operator as its own service (R7): its XRPC methods on `@atproto/xrpc-server`, checked against the app's lexicons, and on
 // the same Express app the paths a browser navigates to (the authority flow) and the `did:web` document that names it.
@@ -21,6 +29,8 @@ const PREFLIGHT_MAX_AGE_SECONDS = 600;
  */
 export function createOperatorApp(methods: Readonly<Record<string, OperatorMethodDefinition>> = OPERATOR_METHODS): Express {
   const { appUrl, operatorUrl, operatorServiceRef } = getConfig();
+  const appOrigin = assertCredentialFreeOriginUrl(appUrl, "appUrl");
+  const operatorOrigin = assertCredentialFreeOriginUrl(operatorUrl, "operatorUrl");
   const app = express();
   app.disable("x-powered-by");
   // Express's own error page shows no stack, whatever NODE_ENV says: the operator is never a development server for Express.
@@ -37,7 +47,7 @@ export function createOperatorApp(methods: Readonly<Record<string, OperatorMetho
     res.set("cache-control", "public, max-age=300").json({
       "@context": ["https://www.w3.org/ns/did/v1", "https://w3id.org/security/suites/jws-2020/v1"],
       id,
-      service: [{ id: `${id}#${operatorServiceRef.slice(hash + 1)}`, type: "AtprotoFlockOperator", serviceEndpoint: operatorUrl.origin }],
+      service: [{ id: `${id}#${operatorServiceRef.slice(hash + 1)}`, type: "AtprotoFlockOperator", serviceEndpoint: operatorOrigin }],
     });
   });
   app.get(AUTHORITY_FLOW_PATHS.clientMetadata, (_req, res) => {
@@ -54,16 +64,29 @@ export function createOperatorApp(methods: Readonly<Record<string, OperatorMetho
   app.get(AUTHORITY_FLOW_PATHS.start, (req, res, next) => {
     const ticket = typeof req.query.ticket === "string" ? req.query.ticket : "";
     beginAuthorityFlow(ticket).then((flow) => {
+      if (
+        (flow.url.protocol !== "http:" && flow.url.protocol !== "https:") ||
+        flow.url.username !== "" ||
+        flow.url.password !== ""
+      ) {
+        res.redirect(new URL("/?authority=failed", appOrigin).toString());
+        return;
+      }
       res.cookie(flow.cookieName, flow.cookieValue, flowCookie(15 * 60 * 1000)).redirect(flow.url.toString());
-    }, () => res.redirect(new URL("/?authority=failed", appUrl).toString())).catch(next);
+    }, () => res.redirect(new URL("/?authority=failed", appOrigin).toString())).catch(next);
   });
   // The PDS returns here. Only a result code goes back to the web app; the grant stays with the operator.
   app.get(AUTHORITY_FLOW_PATHS.callback, (req, res, next) => {
     const params = new URLSearchParams(Object.entries(req.query).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
     const cookieName = oauthFlowCookieName(params.get("state") ?? "");
     completeAuthorityFlow(params, cookieOf(req, cookieName)).then(
-      () => new URL("/", appUrl),
-      () => new URL("/?authority=failed", appUrl),
+      async (completed) => {
+        if (completed.purpose.kind === "reauthorize") {
+          await refreshAuthorityWorkspaceRegistrations(completed.authorityDid).catch(() => undefined);
+        }
+        return new URL("/", appOrigin);
+      },
+      () => new URL("/?authority=failed", appOrigin),
     ).then((target) => res.cookie(cookieName, "", flowCookie(0)).redirect(target.toString())).catch(next);
   });
 

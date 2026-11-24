@@ -11,17 +11,30 @@ import Database from "better-sqlite3";
 import { inviteLinkFor } from "@flock/web/app/ui/client-api";
 import { AtprotoClient, XrpcError } from "@flock/protocol/atproto/xrpc";
 import { mintSpaceCredentialWith, SpaceCredential, SpaceCredentialError } from "@flock/protocol/atproto/space-credential-core";
-import { inboxUri, subjectKey } from "@flock/protocol/keys";
+import { channelUri, groupMembersUri, inboxUri } from "@flock/protocol/keys";
+import { COLLECTION } from "@flock/protocol/nsids";
 import type { Actor, AppWorld } from "./world";
+import {
+  clearGroupMembershipDeleteFault,
+  clearGroupMembershipWriteFault,
+  groupDidOf,
+  groupHasHumanMember,
+  groupPrivateChannelRoster,
+  groupSpaceMembers,
+  groupSpaceRecord,
+  groupSpaceRecords,
+  injectGroupMembershipDeleteFault,
+  injectGroupMembershipWriteFault,
+  resolvePdsOrigin,
+} from "./group-state";
 import { submitAndWait, type Executed } from "./operator-calls";
-import { memberspacePolicy } from "@flock/protocol/atproto/space-policy";
 import {
   waitForAdminControls, createWorkspaceAs, escapeRegExp, inviteMemberAs,
   joinFromInvitation, openInviteLinkAndSignIn,
 } from "./ui";
 
 // Helpers for the membership, privacy and archive lifecycle scenarios: what a person does in the app, plus the
-// independent PDS, credential and journal observations the lifecycle claims are checked against.
+// independent Group Host, PDS, credential and journal observations the lifecycle claims are checked against.
 
 export type Member = { did: string; read: boolean; write: boolean };
 export type ChannelRef = { name: string; skey: string; uri: string; visibility: string };
@@ -50,14 +63,13 @@ export function actorNamed(world: AppWorld, role: string): Actor {
 }
 
 export const workspaceSkey = (world: AppWorld): string => world.workspaceUri.split("/").at(-1)!;
-export const inboxOf = (world: AppWorld): string => inboxUri(actorNamed(world, "owner").did, workspaceSkey(world));
+export const inboxOf = (world: AppWorld): string => inboxUri(groupDidOf(world), workspaceSkey(world));
+export const membersSpaceOf = (world: AppWorld): string => groupMembersUri(groupDidOf(world));
 
-// --- Independent observations of the PDS -------------------------------------------------------------
+// --- Independent observations of Group Host & PDS ---------------------------------------------------
 
-export async function membersOf(world: AppWorld, as: Actor, space: string): Promise<Member[]> {
-  const result = await world.pdsGet<{ members?: Member[] }>(as, "com.atproto.memberspace.listMembers", { space, limit: "1000" });
-  assert.equal(result.status, 200, `listMembers ${space}: ${JSON.stringify(result.body)}`);
-  return result.body.members ?? [];
+export async function membersOf(world: AppWorld, _as: Actor, space: string): Promise<Member[]> {
+  return groupSpaceMembers(world, space);
 }
 
 export async function memberAccess(world: AppWorld, as: Actor, space: string, did: string): Promise<{ read: boolean; write: boolean } | undefined> {
@@ -65,46 +77,41 @@ export async function memberAccess(world: AppWorld, as: Actor, space: string, di
   return member && { read: member.read, write: member.write };
 }
 
-export async function authorityRecord(world: AppWorld, owner: Actor, space: string, collection: string, rkey: string): Promise<Record<string, unknown> | undefined> {
-  const result = await world.pdsGet<{ value?: Record<string, unknown>; error?: string }>(owner, "com.atproto.space.getRecord", { space, repo: owner.did, collection, rkey });
-  if (result.status === 200) return result.body.value;
-  assert.ok(result.status < 500, `getRecord ${collection}/${rkey}: ${JSON.stringify(result.body)}`);
-  return undefined;
+export async function authorityRecord(world: AppWorld, _owner: Actor, space: string, collection: string, rkey: string): Promise<Record<string, unknown> | undefined> {
+  return groupSpaceRecord(world, space, collection, rkey, groupDidOf(world));
 }
 
-export async function subjectRecordActive(world: AppWorld, owner: Actor, space: string, collection: string, did: string): Promise<boolean | undefined> {
-  const value = await authorityRecord(world, owner, space, collection, subjectKey(did));
-  return value === undefined ? undefined : value.active === true;
+export function hasActiveWorkspaceMembership(world: AppWorld, did: string): boolean {
+  return groupHasHumanMember(world, groupDidOf(world), did);
 }
 
-export async function directory(world: AppWorld, owner: Actor): Promise<ChannelRef[]> {
-  const result = await world.pdsGet<{ records?: Array<{ value: { skey: string; name: string; visibility: string } }> }>(
-    owner, "com.atproto.space.listRecords", { space: world.workspaceUri, repo: owner.did, collection: "new.flock.directory", limit: "100" },
-  );
-  assert.equal(result.status, 200, JSON.stringify(result.body));
-  return (result.body.records ?? []).map(({ value }) => ({
-    name: value.name, skey: value.skey, visibility: value.visibility, uri: `at://${owner.did}/space/new.flock.channel/${value.skey}`,
+export function hasActivePrivateChannelRole(world: AppWorld, channelSkey: string, did: string): boolean {
+  return groupPrivateChannelRoster(world, groupDidOf(world), channelSkey).includes(did);
+}
+
+export async function directory(world: AppWorld, _owner?: Actor): Promise<ChannelRef[]> {
+  void _owner;
+  const groupDid = groupDidOf(world);
+  const records = groupSpaceRecords(world, world.workspaceUri, COLLECTION.directory, groupDid);
+  return records.map(({ value }) => ({
+    name: String(value.name),
+    skey: String(value.skey),
+    visibility: String(value.visibility),
+    uri: channelUri(groupDid, String(value.skey)),
   }));
 }
 
-/** The scenario's account that owns the workspace: the one its URI names (the "owner", or a dedicated workspace account). */
-function workspaceAuthority(world: AppWorld): Actor {
-  const did = world.workspaceUri.split("/")[2];
-  const authority = [...world.actors.values()].find((actor) => actor.did === did);
-  assert.ok(authority, `no actor of this scenario owns ${world.workspaceUri}`);
-  return authority;
-}
-
 export async function channelNamed(world: AppWorld, name: string): Promise<ChannelRef> {
-  const channel = (await directory(world, workspaceAuthority(world))).find((entry) => entry.name === name);
+  const channel = (await directory(world)).find((entry) => entry.name === name);
   assert.ok(channel, `the directory has no channel named ${name}`);
   return channel;
 }
 
-/** Every space a removed member could have been in: workspace, inbox, and each channel the directory lists. */
+/** Every space a removed member could have been in: group members, workspace, inbox, and each channel the directory lists. */
 export async function allSpaces(world: AppWorld): Promise<Array<{ label: string; uri: string }>> {
-  const channels = await directory(world, actorNamed(world, "owner"));
+  const channels = await directory(world);
   return [
+    { label: "members", uri: membersSpaceOf(world) },
     { label: "workspace", uri: world.workspaceUri },
     { label: "inbox", uri: inboxOf(world) },
     ...channels.map((channel) => ({ label: `${channel.visibility} channel ${channel.name}`, uri: channel.uri })),
@@ -113,12 +120,6 @@ export async function allSpaces(world: AppWorld): Promise<Array<{ label: string;
 
 // --- Space credentials, minted the way an independent app does ---------------------------------------
 
-function accountFor(world: AppWorld, did: string): Actor {
-  const account = [...world.actors.values()].find((actor) => actor.did === did);
-  assert.ok(account, `no account in this scenario has DID ${did}`);
-  return account;
-}
-
 export async function mintAs(world: AppWorld, actor: Actor, space: string): Promise<SpaceCredential> {
   return mintSpaceCredentialWith({
     memberClient: new AtprotoClient(async (path, init) => {
@@ -126,7 +127,7 @@ export async function mintAs(world: AppWorld, actor: Actor, space: string): Prom
       headers.set("authorization", `Bearer ${actor.accessJwt}`);
       return fetch(new URL(path, actor.pdsUrl), { ...init, headers, redirect: "error" });
     }),
-    resolvePds: async (did) => accountFor(world, did).pdsUrl,
+    resolvePds: async (did) => resolvePdsOrigin(world, did),
     resolveKemKey: world.resolveKemKey,
     fetchEndpoint: (request) => fetch(request),
     generateKey: generateSpaceKey,
@@ -177,13 +178,14 @@ function presented(world: AppWorld, credential: SpaceCredential, token: string):
 
 /** The credential's header and claims re-signed by its authority with a new `exp`, keeping its jti and key binding: a genuinely expired (or not yet expired) copy that verifies. */
 export async function withSignedExpiry(world: AppWorld, credential: SpaceCredential, exp: number): Promise<SpaceCredential> {
-  const authority = accountFor(world, claimsOf(credential.token).iss);
-  const token = await world.fixture.resignSpaceCredential(authority.host, credential.token, { exp });
+  const iss = claimsOf(credential.token).iss;
+  const knownActor = [...world.actors.values()].find((actor) => actor.did === iss);
+  const token = await world.fixture.resignSpaceCredential(knownActor?.host ?? 0, credential.token, { exp });
   return presented(world, credential, token);
 }
 
 export async function readRecordsWith(world: AppWorld, credential: SpaceCredential, repoDid: string, collection: string): Promise<Array<{ rkey: string; value: Record<string, unknown> }>> {
-  const records = await credential.client(accountFor(world, repoDid).pdsUrl).query<{ records: Array<{ rkey: string; value: Record<string, unknown> }> }>(
+  const records = await credential.client(resolvePdsOrigin(world, repoDid)).query<{ records: Array<{ rkey: string; value: Record<string, unknown> }> }>(
     "com.atproto.space.listRecords", { space: credential.space, repo: repoDid, collection, limit: 100 },
   );
   return records.records;
@@ -191,7 +193,7 @@ export async function readRecordsWith(world: AppWorld, credential: SpaceCredenti
 
 export type ReadAttempt = { records: number } | { refused: { status: number; code: string } };
 
-/** A read with a held credential, reporting how the PDS answered instead of throwing when it refuses. */
+/** A read with a held credential, reporting how the host answered instead of throwing when it refuses. */
 export async function tryReadWith(world: AppWorld, credential: SpaceCredential, repoDid: string, collection: string): Promise<ReadAttempt> {
   try {
     return { records: (await readRecordsWith(world, credential, repoDid, collection)).length };
@@ -256,7 +258,6 @@ export async function joinWorkspaceAs(world: AppWorld, member: Actor): Promise<v
   await member.page.getByRole("heading", { name: world.workspaceName, exact: true }).waitFor({ state: "visible" });
 }
 
-
 /** An invited member's first visit: sign in from the invite link and join. */
 export async function inviteAndJoin(world: AppWorld, owner: Actor, member: Actor): Promise<void> {
   await showWorkspaceHome(world, owner);
@@ -304,7 +305,10 @@ export function sampleWhile<T>(read: () => Promise<T>): Sampler<T> {
   let running = true;
   let failure: unknown;
   const loop = (async () => {
-    while (running) samples.push(await read());
+    while (running) {
+      samples.push(await read());
+      await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    }
   })().catch((error: unknown) => { failure = error; });
   return {
     async stop() {
@@ -334,20 +338,24 @@ export async function withFinalReading<T>(samples: Array<Timed<T>>, read: () => 
   return [...samples, { startedAt, finishedAt: Date.now(), value }];
 }
 
-// --- Faults only the PDS owner can cause -------------------------------------------------------------
+// --- Group Host write faults for pending-operation & recovery scenarios ------------------------------
 
-/** The authority deletes a channel's space on its PDS, so every later write to that member list is refused. */
-export async function breakChannelSpace(world: AppWorld, owner: Actor, channel: ChannelRef): Promise<void> {
-  const result = await world.pdsPost(owner, "com.atproto.space.deleteSpace", { space: channel.uri });
-  assert.equal(result.status, 200, JSON.stringify(result.body));
+/** Blocks membership role updates so `transitionChannel` stops pending right after `channel-set-transitioning`. */
+export function breakMembershipWrites(world: AppWorld): void {
+  injectGroupMembershipWriteFault(world, groupDidOf(world));
 }
 
-/** Lifts the fault: the authority creates the channel space again, with the policies the app uses. */
-export async function repairChannelSpace(world: AppWorld, owner: Actor, channel: ChannelRef): Promise<void> {
-  const result = await world.pdsPost(owner, "com.atproto.space.createSpace", {
-    spaceType: "new.flock.channel", skey: channel.skey, policy: memberspacePolicy(),
-  });
-  assert.equal(result.status, 200, JSON.stringify(result.body));
+export function repairMembershipWrites(world: AppWorld): void {
+  clearGroupMembershipWriteFault(world, groupDidOf(world));
+}
+
+/** Blocks membership deletion so `removeMember` stops pending until lifted. */
+export function breakMembershipDeletes(world: AppWorld): void {
+  injectGroupMembershipDeleteFault(world, groupDidOf(world));
+}
+
+export function repairMembershipDeletes(world: AppWorld): void {
+  clearGroupMembershipDeleteFault(world, groupDidOf(world));
 }
 
 // --- An app instance a scenario can stop and start again ---------------------------------------------
@@ -415,7 +423,7 @@ async function terminate(child: ChildProcess): Promise<void> {
 }
 
 /**
- * Starts an app of its own on the scenario's PDS network, with an encryption key the scenario knows, so the
+ * Starts an app of its own on the scenario's PDS + Group Host network, with an encryption key the scenario knows, so the
  * app process can be stopped and a new one started against the same database, key and address.
  */
 export async function startOwnApp(world: AppWorld): Promise<OwnApp> {
@@ -428,7 +436,8 @@ export async function startOwnApp(world: AppWorld): Promise<OwnApp> {
   const environment: NodeJS.ProcessEnv = {
     PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? tmpdir(), TMPDIR: process.env.TMPDIR ?? tmpdir(),
     NODE_ENV: "production", NEXT_TELEMETRY_DISABLED: "1", ATPROTO_ACCEPTANCE_TEST: "true",
-    APP_URL: origin, OPERATOR_URL: operatorOrigin, DATABASE_PATH: databasePath, AUTH_ENCRYPTION_KEY: randomBytes(32).toString("hex"),
+    APP_URL: origin, OPERATOR_URL: operatorOrigin, GROUP_HOST_URL: world.fixture.groupHostUrl.origin,
+    DATABASE_PATH: databasePath, AUTH_ENCRYPTION_KEY: randomBytes(32).toString("hex"),
     PLC_URL: world.fixture.plcUrl, OPERATOR_SERVICE_REF: `did:web:localhost%3A${operatorPort}#atproto_flock_operator`,
   };
   let children = await launch(environment, port);
@@ -470,10 +479,24 @@ export type ReconcileRun = { exitCode: number | null; stdout: string; stderr: st
 
 const RECONCILE_DEADLINE_MS = 120_000;
 
-/** The scheduled reconcile job (`pnpm reconcile`), run as a new process against the app's database and key. Killed if it outlives its deadline or the cucumber process. */
-export async function runReconcileJob(app: OwnApp): Promise<ReconcileRun> {
-  const child = spawn(process.execPath, ["--import", "tsx", "apps/operator/scripts/reconcile-workspaces.ts"], {
-    cwd: process.cwd(), env: { ...app.environment }, stdio: ["ignore", "pipe", "pipe"],
+/** Runs journal recovery (`protocol-tests/recover-pending-operation.ts`) against `app`'s database and stored Group Host authority grant. */
+export async function runReconcileJob(
+  app: OwnApp,
+  params: { groupDid: string; actorDid: string; workspaceUri: string; memberDid: string; operationId: string },
+): Promise<ReconcileRun> {
+  const child = spawn(process.execPath, ["--import", "tsx", "protocol-tests/recover-pending-operation.ts"], {
+    cwd: process.cwd(),
+    env: {
+      ...app.environment,
+      RECOVERY_AUTHORITY_DID: params.groupDid,
+      RECOVERY_ACTOR_DID: params.actorDid,
+      RECOVERY_WORKSPACE: params.workspaceUri,
+      RECOVERY_MEMBER_DID: params.memberDid,
+      RECOVERY_OPERATION_ID: params.operationId,
+      RECOVERY_RESUME_ALL: "true",
+      RECOVERY_USE_STORED_AUTHORITY_GRANT: "true",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
   });
   runningApps.add(child);
   const deadline = setTimeout(() => child.kill("SIGKILL"), RECONCILE_DEADLINE_MS);

@@ -3,9 +3,24 @@ import test from "node:test";
 import type { WorkspaceSummary } from "@flock/protocol/workspace-summary";
 import { NO_WORKSPACE, shownChannel, shownWorkspace } from "./selection";
 
-const workspace = (skey: string, channels: WorkspaceSummary["channels"] = []): WorkspaceSummary => ({
-  uri: `at://did:plc:a/space/new.flock.workspace/${skey}`, authorityDid: "did:plc:a", skey, name: skey,
-  isAdmin: false, admins: [], members: [], channels, installs: [], degradedReasons: [],
+const workspace = (groupLabel: string, channels: WorkspaceSummary["channels"] = []): WorkspaceSummary => ({
+  uri: `at://did:plc:${groupLabel}/space/new.flock.workspace/self`,
+  authorityDid: `did:plc:${groupLabel}`,
+  groupDid: `did:plc:${groupLabel}`,
+  skey: "self",
+  name: groupLabel,
+  joinPolicy: "invite",
+  publicMeta: true,
+  isAdmin: false,
+  isModerator: false,
+  admins: [],
+  moderators: [],
+  members: [],
+  pendingMembers: [],
+  roles: [],
+  channels,
+  installs: [],
+  degradedReasons: [],
 });
 const general = { uri: "at://did:plc:a/space/new.flock.channel/general", skey: "general", name: "general", visibility: "public" };
 

@@ -15,6 +15,7 @@ import {
   postMessage, reactionCollection, requestChannelCredential, setUpRoster, settles, sidebarChannel, syncUntil, writeOwnRecords,
   type ChannelRef, type CredentialOutcome, type Member, type Roster,
 } from "../support/channels-ui";
+import { groupDidOf, groupSpaceUris } from "../support/group-state";
 
 const actorNamed = (world: AppWorld, role: string): Actor => {
   const actor = world.actors.get(role);
@@ -44,15 +45,15 @@ function watchPublication(world: AppWorld, authority: Actor, name: string, space
       const entry = (await directoryOf(world, authority)).find((channel) => channel.name === name);
       space ??= entry?.uri ?? (await listChannelSpaces(world, authority)).find((uri) => !spacesBefore.includes(uri));
       if (space) samples.push({ published: entry !== undefined, members: didsOf(await listMembers(world, authority, space)) });
+      await new Promise<void>((resolve) => setTimeout(resolve, 5));
     }
   })();
   return { samples, stop: async () => { running = false; await loop; } };
 }
 
-async function listChannelSpaces(world: AppWorld, authority: Actor): Promise<string[]> {
-  const listed = await world.pdsGet<{ spaces: Array<{ space: string }> }>(authority, "com.atproto.space.listSpaces", { spaceType: "new.flock.channel", limit: "100" });
-  assert.equal(listed.status, 200, JSON.stringify(listed.body));
-  return listed.body.spaces.map((entry) => entry.space);
+async function listChannelSpaces(world: AppWorld, _authority?: Actor): Promise<string[]> {
+  void _authority;
+  return groupSpaceUris(world, groupDidOf(world), "new.flock.channel");
 }
 
 Given("a workspace has current members", async function (this: AppWorld) {
@@ -65,7 +66,7 @@ Given("a workspace has current members", async function (this: AppWorld) {
   await removed.getByRole("button", { name: "Remove", exact: true }).click();
   await removed.waitFor({ state: "hidden", timeout: 60_000 });
   const members = await listMembers(this, admin, this.workspaceUri);
-  assert.deepEqual(didsOf(members), [actorNamed(this, "alice").did, actorNamed(this, "bob").did].sort(), "carol was removed, alice and bob are current");
+  assert.deepEqual(didsOf(members), [admin.did, actorNamed(this, "alice").did, actorNamed(this, "bob").did].sort(), "carol was removed, owner, alice and bob are current");
 });
 
 When("an admin creates a public channel", async function (this: AppWorld) {
@@ -85,7 +86,7 @@ Then("each current workspace member has channel read and write access", async fu
   const admin = owner(this);
   const channel = await channelNamed(this, admin, this.scratch.get("channelName") as string);
   const current = await listMembers(this, admin, this.workspaceUri);
-  assert.equal(current.length, 2, "the workspace has two current members");
+  assert.equal(current.length, 3, "the workspace has three current human members (owner, alice, bob)");
   const onChannel = await listMembers(this, admin, channel.uri);
   for (const member of current) {
     const entry = onChannel.find((candidate) => candidate.did === member.did);
@@ -94,7 +95,7 @@ Then("each current workspace member has channel read and write access", async fu
   assert.deepEqual(didsOf(onChannel), didsOf(current), "the channel lists exactly the current members: the removed account is not on it");
 });
 
-Then("the directory shows the channel as public only after membership is applied", async function (this: AppWorld) {
+Then("the directory shows the channel as public only after the channel space policy is applied", async function (this: AppWorld) {
   const admin = owner(this);
   const name = this.scratch.get("channelName") as string;
   const channel = await channelNamed(this, admin, name);
@@ -116,18 +117,16 @@ Then("the directory shows the channel as public only after membership is applied
   this.log(`publication sampler: ${samples.length} looks, ${applying.length} saw the channel's space before its directory entry`);
 
   const steps = completedOperationSteps(this, "createChannel", name);
+  const spaceStep = steps.indexOf("channel-space");
   const directoryStep = steps.indexOf("channel-directory");
   assert.ok(directoryStep >= 0, `the journal records the directory step: ${steps.join(", ")}`);
-  for (const did of current) {
-    const memberStep = steps.indexOf(`channel-member-${did}`);
-    assert.ok(memberStep >= 0 && memberStep < directoryStep, `membership for ${did} was applied before the directory entry (${steps.join(", ")})`);
-  }
+  assert.ok(spaceStep >= 0 && spaceStep < directoryStep, `the channel space policy granting members access was applied before the directory entry (${steps.join(", ")})`);
   assert.ok(steps.indexOf("channel-membership-verified") > directoryStep, "membership is verified after the directory entry is published");
 });
 
-// --- Private channels stay behind PDS read authorization -------------------------------------------
+// --- Private channels stay behind Group Host read authorization ------------------------------------
 
-Given("a member is absent from a private channel member list", async function (this: AppWorld) {
+Given("a member lacks a private channel role grant", async function (this: AppWorld) {
   const { owner: admin, invitee: outsider } = await ownerInvites(this, "outsider");
   const insider = await this.actor("insider", 0);
   await inviteMemberAs(admin, insider.did);
@@ -135,7 +134,7 @@ Given("a member is absent from a private channel member list", async function (t
   await createChannelAs(admin, name, { visibility: "private", members: [insider.did] });
   const channel = await channelNamed(this, admin, name);
   const members = await listMembers(this, admin, channel.uri);
-  assert.deepEqual(didsOf(members), [insider.did], "only the insider is on the private channel's member list");
+  assert.deepEqual(didsOf(members), [insider.did], "only the insider holds effective read/write access on the private channel");
 
   const link = await copyInviteLink(admin);
   for (const person of [outsider, insider]) {
@@ -159,17 +158,17 @@ When("that member opens the channel URI", async function (this: AppWorld) {
   this.scratch.set("credential", await requestChannelCredential(this, outsider, channel.uri));
 });
 
-Then("the PDS refuses a channel read credential", async function (this: AppWorld) {
+Then("the Group Host refuses a channel read credential", async function (this: AppWorld) {
   const outsider = actorNamed(this, "outsider");
   const channel = this.scratch.get("channel") as ChannelRef;
   const outcome = this.scratch.get("credential") as CredentialOutcome;
-  if (outcome.granted) assert.fail("the PDS must not hand a channel credential to an account missing from the member list");
+  if (outcome.granted) assert.fail("the Group Host must not hand a channel credential to an account lacking a channel role grant");
   assert.equal(outcome.status, 403);
-  assert.equal(outcome.code, "SpaceNotFound", "the authority answers a user the member list excludes exactly as it answers for a space that does not exist");
+  assert.equal(outcome.code, "SpaceNotFound", "the Group Host answers an unauthorized user with SpaceNotFound");
 
   await grantedCredential(this, actorNamed(this, "insider"), channel.uri);
 
-  assert.deepEqual([...new Set(this.scratch.get("appAnswers") as string[])], ["SpaceNotFound"], "the PDS refused every credential the app asked for this account, with the session's channel read permission granted");
+  assert.deepEqual([...new Set(this.scratch.get("appAnswers") as string[])], ["SpaceNotFound"], "the Group Host refused every credential the app asked for this account");
   await outsider.page.getByText("You are not on this channel’s active roster.").waitFor({ state: "visible" });
   const secret = this.scratch.get("secret") as string;
   assert.equal(await messageCards(outsider).count(), 0, "no message is shown to the account");

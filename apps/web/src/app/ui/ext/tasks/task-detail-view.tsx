@@ -7,12 +7,13 @@ import {
   type FieldVersion,
   type MergedTaskView,
   type ObservedEntityContext,
-  type TaskCommentView,
+  type TaskCommentWithLabels,
   type TaskPriority,
   type TaskScalarField,
   type TaskStatus,
 } from "@flock/client/ext/tasks";
 import { messageOf } from "../../client-api";
+import { ReportSubjectButton, type ReportRuleOption, type SubmitReportFn } from "../../report-subject-modal";
 import {
   buildTaskUpdatePatch,
   formatFieldValue,
@@ -31,7 +32,7 @@ type TaskDetailViewProps = {
   workspaceUri: string;
   viewerDid: string;
   task: MergedTaskView;
-  comments: readonly TaskCommentView[];
+  comments: readonly TaskCommentWithLabels[];
   allTasks: readonly MergedTaskView[];
   projects: ProjectDirectory;
   rosterMembers: readonly string[];
@@ -39,6 +40,8 @@ type TaskDetailViewProps = {
   manualSyncSeq?: number;
   onBack: () => void;
   onMutated: () => Promise<void>;
+  onReportSubject?: SubmitReportFn;
+  reportRules?: readonly ReportRuleOption[];
   onStatus: (message: string) => void;
   onError: (message: string) => void;
 };
@@ -55,6 +58,8 @@ export function TaskDetailView({
   manualSyncSeq = 0,
   onBack,
   onMutated,
+  onReportSubject,
+  reportRules = [],
   onStatus,
   onError,
 }: TaskDetailViewProps) {
@@ -75,6 +80,7 @@ export function TaskDetailView({
   const [commentBody, setCommentBody] = useState("");
   const [editingCommentUri, setEditingCommentUri] = useState<string | null>(null);
   const [editingCommentBody, setEditingCommentBody] = useState("");
+  const [revealedHiddenComments, setRevealedHiddenComments] = useState<ReadonlySet<string>>(() => new Set());
   const [busy, setBusy] = useState(false);
 
   const isDirty = dirtyState !== null;
@@ -329,6 +335,15 @@ export function TaskDetailView({
         </button>
         <div className="tasks-detail-meta">
           <span className="mono-note">{task.rkey}</span>
+          {onReportSubject && (
+            <ReportSubjectButton
+              subject={task.uri}
+              rules={reportRules}
+              onSubmitReport={onReportSubject}
+              onReported={() => onStatus("Report submitted to group moderators.")}
+              onError={onError}
+            />
+          )}
           {task.deleted ? (
             <button type="button" className="text-button" disabled={busy} onClick={() => void handleRestore()}>
               Restore task
@@ -593,31 +608,53 @@ export function TaskDetailView({
                       </button>
                     </div>
                   </form>
+                ) : comment.hidden && !revealedHiddenComments.has(comment.uri) ? (
+                  <p className="status-note">
+                    Hidden by group moderation —{" "}
+                    <button
+                      type="button"
+                      className="text-button"
+                      onClick={() => setRevealedHiddenComments((prev) => new Set([...prev, comment.uri]))}
+                    >
+                      Show
+                    </button>
+                  </p>
                 ) : (
                   <p>{comment.body}</p>
                 )}
-                {comment.repo === viewerDid && editingCommentUri !== comment.uri && (
-                  <div className="message-actions">
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={() => {
-                        setEditingCommentUri(comment.uri);
-                        setEditingCommentBody(comment.body);
-                      }}
-                    >
-                      Edit
-                    </button>
-                    <button
-                      type="button"
-                      className="danger"
-                      disabled={busy}
-                      onClick={() => void removeComment(comment.uri)}
-                    >
-                      Delete
-                    </button>
-                  </div>
-                )}
+                <div className="message-actions">
+                  {comment.repo === viewerDid && editingCommentUri !== comment.uri && (
+                    <>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => {
+                          setEditingCommentUri(comment.uri);
+                          setEditingCommentBody(comment.body);
+                        }}
+                      >
+                        Edit
+                      </button>
+                      <button
+                        type="button"
+                        className="danger"
+                        disabled={busy}
+                        onClick={() => void removeComment(comment.uri)}
+                      >
+                        Delete
+                      </button>
+                    </>
+                  )}
+                  {onReportSubject && (
+                    <ReportSubjectButton
+                      subject={comment.uri}
+                      rules={reportRules}
+                      onSubmitReport={onReportSubject}
+                      onReported={() => onStatus("Comment reported to group moderators.")}
+                      onError={onError}
+                    />
+                  )}
+                </div>
               </article>
             ))}
           </div>
