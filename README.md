@@ -84,17 +84,18 @@ Before serving users on public ATProto PDSes, publish `_lexicon.opensocial.group
 
 Set `ATPROTO_PINNED_CHECKOUT=../atproto-spaces-r12` (and `ATPROTO_PIN_CHECKOUT=../atproto-spaces-r12` for `codegen:lex`) when running pinned suites.
 
-## Conference deck (R12 historical baseline)
+## Conference deck (R13 + Flock Desk)
 
-GitHub's README cannot run interactive HTML slides directly; use **GitHub Pages** or open the HTML file locally. Note that this deck captures the **R12 pre-`opensocial.group` architecture** (annotated in-deck with an R13 supersession banner).
+GitHub's README cannot run interactive HTML slides directly; use **GitHub Pages** or open the HTML file locally.
 
-[![Conference deck overview](docs/presentation/overview.png)](https://atproto-sandbox.github.io/atprotocol-slack-clone/presentation/r12-atproto-conference-deck.html)
+[![Conference deck overview](docs/presentation/overview.png)](https://atproto-sandbox.github.io/atprotocol-slack-clone/presentation/r13-flock-conference-deck.html)
 
 | Format | Link |
 |---|---|
-| **Interactive slides** (arrow keys, fullscreen) | [GitHub Pages](https://atproto-sandbox.github.io/atprotocol-slack-clone/presentation/r12-atproto-conference-deck.html) |
-| **Source in repo** | [`docs/presentation/r12-atproto-conference-deck.html`](docs/presentation/r12-atproto-conference-deck.html) |
-| **UI demo video** (slide 1) | [GitHub Pages MP4](https://atproto-sandbox.github.io/atprotocol-slack-clone/media/bdd-session.mp4) · [`docs/media/bdd-session.mp4`](docs/media/bdd-session.mp4) |
+| **Interactive slides** (arrow keys, fullscreen) | [GitHub Pages](https://atproto-sandbox.github.io/atprotocol-slack-clone/presentation/r13-flock-conference-deck.html) |
+| **Source in repo** | [`docs/presentation/r13-flock-conference-deck.html`](docs/presentation/r13-flock-conference-deck.html) |
+| **Dual-client demo** (slide 1) | [GitHub Pages MP4](https://atproto-sandbox.github.io/atprotocol-slack-clone/media/flock-desk-e2e.mp4) · [`docs/media/flock-desk-e2e.mp4`](docs/media/flock-desk-e2e.mp4) |
+| **Full BDD session** | [bdd-session.mp4](https://atproto-sandbox.github.io/atprotocol-slack-clone/media/bdd-session.mp4) · [R12 historical deck](https://atproto-sandbox.github.io/atprotocol-slack-clone/presentation/r12-atproto-conference-deck.html) |
 
 ## Project notes
 
