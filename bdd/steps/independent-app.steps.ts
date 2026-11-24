@@ -8,11 +8,11 @@ import { expect, type Locator } from "@playwright/test";
 import { canonicalJson, channelUri, decisionRecordKey, groupMembersUri, groupMetaUri, inboxUri, requestDigest, spaceRecordUri, tidNow } from "@flock/protocol/keys";
 import { COLLECTION, OPENSOCIAL_COLLECTION } from "@flock/protocol/nsids";
 import { validateSpaceRecord } from "@flock/protocol/registry";
-import type { SecondApp } from "../../protocol-tests/support/app-fixture";
+import type { IndependentSecondApp, SecondApp } from "../../protocol-tests/support/app-fixture";
 import {
-  createChannelAs, insertJournalRow, joinWorkspaceAt, listWriters, observeWorkspace, onPrimaryApp, openViewer,
-  requestPrivateAccess, runProtocolTest, withIndependentReader, type ChildRun,
-  type AppViewer, type WorkspaceObservation, type WorkspaceRead, workspaceRead,
+  createChannelAs, insertJournalRow, joinWorkspaceAt, joinWorkspaceDeskAt, listWriters, observeWorkspace,
+  observeWorkspaceDesk, onPrimaryApp, openViewer, requestPrivateAccess, runProtocolTest, withIndependentReader,
+  type ChildRun, type AppViewer, type WorkspaceObservation, type WorkspaceRead, workspaceRead,
 } from "../support/independent-app-ui";
 import { browserStore } from "../support/browser-store";
 import { operatorAs } from "../support/engine";
@@ -111,14 +111,24 @@ Given("two apps use published lexicons, OAuth, and space credentials", { timeout
   const missing = (await localLexiconIds()).filter((id) => !published.has(id));
   assert.deepEqual(missing, [], "every lexicon the apps use is published to the lexicon authority");
 
-  const second = await this.fixture.startSecondApp();
+  const second: IndependentSecondApp =
+    process.env.BDD_SECOND_APP === "web"
+      ? await this.fixture.startSecondApp()
+      : await this.fixture.startDeskApp();
   this.scratch.set("secondApp", second);
   const metadata = await Promise.all([this.appOrigin, second.appUrl.origin].map(async (origin) =>
-    (await fetch(new URL("/oauth/client-metadata.json", origin))).json() as Promise<{ client_id: string; redirect_uris: string[] }>));
+    (await fetch(new URL("/oauth/client-metadata.json", origin))).json() as Promise<{ client_id: string; redirect_uris: string[]; scope?: string }>));
   assert.notEqual(metadata[0].client_id, metadata[1].client_id, "each app is its own OAuth client");
   for (const [client, origin] of [[metadata[0], this.appOrigin], [metadata[1], second.appUrl.origin]] as const) {
     assert.ok(client.redirect_uris.length > 0, `${origin} publishes OAuth redirect URIs`);
     assert.deepEqual(client.redirect_uris.filter((uri) => !uri.startsWith(origin)), [], `every redirect URI of ${origin} points back at it`);
+  }
+  if (second.kind === "desk") {
+    assert.equal(
+      (metadata[1].scope ?? "").includes("new.flock.operator."),
+      false,
+      "Flock Desk OAuth client metadata must request zero Operator RPC scopes",
+    );
   }
 
   const owner = onPrimaryApp(this, await this.actor("owner", 0));
@@ -139,12 +149,18 @@ Given("two apps use published lexicons, OAuth, and space credentials", { timeout
 });
 
 When("each app syncs the same workspace", { timeout: 900_000 }, async function (this: AppWorld) {
-  const second = this.scratch.get("secondApp") as SecondApp;
+  const second = this.scratch.get("secondApp") as IndependentSecondApp;
   const member = viewerNamed(this, "member");
   const onSecond = await openViewer(this, member, second.appUrl.origin, "member@second-app");
-  await joinWorkspaceAt(onSecond, this.workspaceUri, this.workspaceName);
-  this.scratch.set("observedFirst", await observeWorkspace(member, this.workspaceName, ["general", "Vault"]));
-  this.scratch.set("observedSecond", await observeWorkspace(onSecond, this.workspaceName, ["general", "Vault"]));
+  if (second.kind === "desk") {
+    await joinWorkspaceDeskAt(onSecond, this.workspaceUri, this.workspaceName);
+    this.scratch.set("observedFirst", await observeWorkspace(member, this.workspaceName, ["general", "Vault"]));
+    this.scratch.set("observedSecond", await observeWorkspaceDesk(onSecond, this.workspaceName, ["general", "Vault"]));
+  } else {
+    await joinWorkspaceAt(onSecond, this.workspaceUri, this.workspaceName);
+    this.scratch.set("observedFirst", await observeWorkspace(member, this.workspaceName, ["general", "Vault"]));
+    this.scratch.set("observedSecond", await observeWorkspace(onSecond, this.workspaceName, ["general", "Vault"]));
+  }
 });
 
 Then("both show the same directory, roster, messages, and private roster", async function (this: AppWorld) {
@@ -203,15 +219,52 @@ async function heldRecordKeys(viewer: AppViewer): Promise<string[]> {
 }
 
 Then("neither app reads the other's database or private cache", async function (this: AppWorld) {
-  const second = this.scratch.get("secondApp") as SecondApp;
+  const second = this.scratch.get("secondApp") as IndependentSecondApp;
+  const secondViewer = actorNamed(this, "member@second-app") as AppViewer;
+  const firstViewer = viewerNamed(this, "member");
+  const reaches = (viewer: AppViewer, origin: string) => viewer.requestUrls.filter((url) => new URL(url).origin === origin);
+
+  if (second.kind === "desk") {
+    assert.equal(second.databasePath, null, "Flock Desk runs with no server SQLite database");
+    assert.equal(second.operatorUrl, null, "Flock Desk runs with no Operator process");
+    assert.ok(existsSync(this.fixture.databasePath));
+    assert.deepEqual(memberSessionTablesIn(this.fixture.databasePath), []);
+
+    // Desk holds zero `@flock/client` IndexedDB protocol record caches.
+    const deskStore = await browserStore(secondViewer);
+    assert.deepEqual(deskStore.records, [], "Flock Desk holds zero IndexedDB protocol record caches");
+
+    // Prove directly from network XRPC logs that Desk listed workspace + general + Vault from the PDS/Group Host itself.
+    const listedSpaces = new Set(
+      secondViewer.xrpc
+        .filter((call) => call.path === "/xrpc/com.atproto.space.listRecords" && call.status === 200)
+        .map((call) => new URLSearchParams(call.query).get("space")),
+    );
+    const groupDid = groupDidOf(this);
+    const directory = directoryOf(this);
+    const general = directory.find((entry) => entry.name === "general");
+    const vault = directory.find((entry) => entry.name === "Vault");
+    assert.ok(general && vault, "directory names general and Vault");
+    assert.ok(listedSpaces.has(this.workspaceUri), "Desk listed workspace records directly from Group Host");
+    assert.ok(listedSpaces.has(channelUri(groupDid, general.skey)), "Desk listed general channel messages directly from writer PDSes");
+    assert.ok(listedSpaces.has(channelUri(groupDid, vault.skey)), "Desk listed Vault channel messages directly from writer PDSes");
+
+    assert.deepEqual(
+      [...reaches(secondViewer, this.appOrigin), ...reaches(secondViewer, this.operatorOrigin)],
+      [],
+      "Flock Desk pages never call @flock/web or Flock's Operator",
+    );
+    assert.deepEqual(reaches(firstViewer, second.appUrl.origin), [], "@flock/web pages never call Flock Desk");
+    assert.ok(reaches(secondViewer, second.appUrl.origin).length > 0);
+    return;
+  }
+
   assert.notEqual(second.databasePath, this.fixture.databasePath, "the apps run on different database files");
   assert.ok(existsSync(second.databasePath) && existsSync(this.fixture.databasePath));
 
   // Neither server knows who signed in to it: each browser holds its own session, in its own origin's store.
   for (const databasePath of [this.fixture.databasePath, second.databasePath]) assert.deepEqual(memberSessionTablesIn(databasePath), []);
 
-  const secondViewer = actorNamed(this, "member@second-app") as AppViewer;
-  const firstViewer = viewerNamed(this, "member");
   const firstHeld = await heldRecordKeys(firstViewer);
   const secondHeld = await heldRecordKeys(secondViewer);
   assert.ok(secondHeld.length > 0, "the second app's browser holds the channel records it read");
@@ -222,7 +275,6 @@ Then("neither app reads the other's database or private cache", async function (
     assert.ok(listedBySecond.has(key.split("|")[0]!), `the second app's browser listed ${key} from the PDS itself; nothing was copied from the other app`);
   }
 
-  const reaches = (viewer: AppViewer, origin: string) => viewer.requestUrls.filter((url) => new URL(url).origin === origin);
   assert.deepEqual([...reaches(secondViewer, this.appOrigin), ...reaches(secondViewer, this.operatorOrigin)], [], "the second app's pages never call the first app or its operator");
   assert.deepEqual([...reaches(firstViewer, second.appUrl.origin), ...reaches(firstViewer, second.operatorUrl.origin)], [], "the first app's pages never call the second app or its operator");
   assert.ok(reaches(secondViewer, second.appUrl.origin).length > 0);

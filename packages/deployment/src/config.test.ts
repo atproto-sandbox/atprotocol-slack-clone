@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { getConfig, isLoopback, resetConfigCacheForTest, serviceUrl } from "./config";
+import { DESK_ENV_FILE_KEYS, getConfig, getDeskConfig, isLoopback, resetConfigCacheForTest, serviceUrl } from "./config";
 
 test("a deployed web app names both its operator and group host: loopback defaults are for loopback development only", () => {
   resetConfigCacheForTest();
@@ -89,4 +89,64 @@ test("isLoopback accepts only localhost, 127.0.0.1, ::1, and [::1] and rejects *
     assert.equal(isLoopback(invalid), false, `expected ${invalid} not to be loopback`);
   }
   assert.throws(() => serviceUrl("GROUP_HOST_URL", "http://groups.localhost:3004"), /must use HTTPS/);
+});
+
+test("getDeskConfig works with zero Operator/secret env vars, defaults to :3005 in dev, fails closed in production when unset, prioritizes DESK_APP_URL, and enforces HTTPS outside loopback", () => {
+  const env: Record<string, string | undefined> = process.env;
+  const keys = ["NODE_ENV", "DESK_APP_URL", "APP_URL", "PLC_URL", "GROUP_HOST_URL", "OPERATOR_URL", "OPERATOR_SERVICE_REF", "AUTH_ENCRYPTION_KEY"] as const;
+  const saved = Object.fromEntries(keys.map((k) => [k, env[k]]));
+  try {
+    for (const k of keys) delete env[k];
+    resetConfigCacheForTest();
+
+    assert.deepEqual([...DESK_ENV_FILE_KEYS], ["DESK_APP_URL", "PLC_URL", "GROUP_HOST_URL"]);
+
+    // In production, missing DESK_APP_URL & APP_URL must fail closed instead of falling back to loopback.
+    env.NODE_ENV = "production";
+    resetConfigCacheForTest();
+    assert.throws(getDeskConfig, /DESK_APP_URL.*required in production/);
+
+    // Outside production, defaults cleanly to http://127.0.0.1:3005.
+    env.NODE_ENV = "development";
+    resetConfigCacheForTest();
+    const def = getDeskConfig();
+    assert.equal(def.appUrl.origin, "http://127.0.0.1:3005");
+    assert.equal(def.plcDirectoryUrl.origin, "https://plc.directory");
+    assert.equal(def.groupHostUrl?.origin, "http://127.0.0.1:3004");
+
+    // APP_URL fallback works when DESK_APP_URL is unset
+    env.APP_URL = "http://localhost:4100";
+    resetConfigCacheForTest();
+    assert.equal(getDeskConfig().appUrl.origin, "http://127.0.0.1:4100");
+
+    // DESK_APP_URL overrides APP_URL
+    env.DESK_APP_URL = "http://127.0.0.1:4200";
+    resetConfigCacheForTest();
+    assert.equal(getDeskConfig().appUrl.origin, "http://127.0.0.1:4200");
+
+    // HTTPS required outside loopback; GROUP_HOST_URL optional outside loopback
+    env.DESK_APP_URL = "http://desk.example.com";
+    resetConfigCacheForTest();
+    assert.throws(getDeskConfig, /must use HTTPS outside loopback development/);
+
+    env.DESK_APP_URL = "https://desk.example.com";
+    resetConfigCacheForTest();
+    const prod = getDeskConfig();
+    assert.equal(prod.appUrl.origin, "https://desk.example.com");
+    assert.equal(prod.groupHostUrl, undefined);
+
+    env.GROUP_HOST_URL = "http://groups.example.com";
+    resetConfigCacheForTest();
+    assert.throws(getDeskConfig, /GROUP_HOST_URL must use HTTPS outside loopback development/);
+
+    env.GROUP_HOST_URL = "https://groups.example.com";
+    resetConfigCacheForTest();
+    assert.equal(getDeskConfig().groupHostUrl?.origin, "https://groups.example.com");
+  } finally {
+    for (const k of keys) {
+      if (saved[k] === undefined) delete env[k];
+      else env[k] = saved[k];
+    }
+    resetConfigCacheForTest();
+  }
 });

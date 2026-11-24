@@ -16,6 +16,31 @@ export function startAppServer(port: number): Promise<AppServer> {
   );
 }
 
+/**
+ * Starts Flock Desk (`apps/desk`) on a dynamic or supplied origin, explicitly setting `DESK_APP_URL` and `APP_URL`
+ * to the bound origin so any developer root `.env` `DESK_APP_URL` never overrides the test origin.
+ */
+export async function startDeskServer(env: NodeJS.ProcessEnv = {}): Promise<AppServer> {
+  const configured = env.DESK_APP_URL ?? env.APP_URL;
+  const appUrl = configured ? new URL(configured) : new URL(`http://127.0.0.1:${await availablePort()}`);
+  const hostname = appUrl.hostname.replace(/^\[|\]$/g, "");
+  const port = appUrl.port || (appUrl.protocol === "https:" ? "443" : "80");
+  const mergedEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    NODE_ENV: "production",
+    NEXT_TELEMETRY_DISABLED: "1",
+    ...env,
+    DESK_APP_URL: appUrl.origin,
+    APP_URL: appUrl.origin,
+  };
+  return startServer(
+    ["apps/desk/node_modules/next/dist/bin/next", "start", "apps/desk", "--hostname", hostname, "--port", port],
+    appUrl.origin,
+    "/oauth/client-metadata.json",
+    mergedEnv,
+  );
+}
+
 /** The operator's process at `OPERATOR_URL`, with this process's environment; resolves once it serves its did:web document. */
 export function startOperatorServer(env: NodeJS.ProcessEnv = process.env): Promise<AppServer> {
   const url = env.OPERATOR_URL;

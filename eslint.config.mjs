@@ -11,7 +11,12 @@ import nextTs from "eslint-config-next/typescript";
 const WEB_REACT_VERSION = JSON.parse(readFileSync(new URL("./apps/web/package.json", import.meta.url), "utf8")).dependencies.react;
 
 /** Code that runs in a browser. */
-const BROWSER_CODE = ["packages/protocol/src/**/*.{ts,tsx}", "packages/client/src/**/*.{ts,tsx}", "apps/web/src/browser/**/*.{ts,tsx}"];
+const BROWSER_CODE = [
+  "packages/protocol/src/**/*.{ts,tsx}",
+  "packages/client/src/**/*.{ts,tsx}",
+  "packages/shell/src/**/*.{ts,tsx}",
+  "apps/web/src/browser/**/*.{ts,tsx}",
+];
 /** Tests and test fixtures, which run under Node's test runner and may use a package's dev dependencies. */
 const NODE_TESTS = [
   "**/*.test.{ts,tsx}",
@@ -22,7 +27,16 @@ const BROWSER_TEST_FILES = [
   "packages/protocol/src/**/*.test.{ts,tsx}",
   "packages/client/src/**/*.test.{ts,tsx}",
   "packages/client/src/testing/**/*.{ts,tsx}",
+  "packages/shell/src/**/*.test.{ts,tsx}",
   "apps/web/src/browser/**/*.test.{ts,tsx}",
+];
+/** Desk Next.js server entrypoints that are permitted to use server config (`@flock/deployment`) and `node:*`. */
+const DESK_SERVER_ENTRYPOINTS = [
+  "apps/desk/src/proxy.ts",
+  "apps/desk/src/lib/loopback-redirect.ts",
+  "apps/desk/src/app/**/layout.tsx",
+  "apps/desk/src/app/**/page.tsx",
+  "apps/desk/src/app/**/route.{ts,tsx}",
 ];
 /** The client's Node entry (`@flock/client/node/*`): an app's OAuth session and transport, for apps that run on Node. */
 const CLIENT_NODE_ENTRY = ["packages/client/src/node/**"];
@@ -90,6 +104,8 @@ const MEMBERSPACE_FULL_ALLOWLIST = [
 const MEMBERSPACE_LIST_ONLY_ALLOWLIST = [
   "packages/client/src/workspace-client.ts",
   "packages/client/src/workspace-client.test.ts",
+  "packages/shell/src/invites.ts",
+  "packages/shell/src/invites.test.ts",
 ];
 
 const NO_NODE_BUILTINS = {
@@ -133,6 +149,42 @@ const NO_EXTENSION_DYNAMIC_IMPORT = {
 const NO_COMPUTED_DYNAMIC_IMPORT = {
   selector: 'ImportExpression:not([source.type="Literal"]):not([source.type="TemplateLiteral"][source.expressions.length=0])',
   message: "D11.11: non-static dynamic import() specifiers are forbidden in boundary-restricted modules.",
+};
+const NO_DESK_FORBIDDEN_IMPORTS = {
+  group: [
+    "@flock/client", "@flock/client/*",
+    "@flock/web", "@flock/web/*",
+    "@flock/operator", "@flock/operator/*",
+    "@flock/group-host", "@flock/group-host/*",
+    "@flock/net", "@flock/net/*",
+  ],
+  message: "Flock Desk independence boundary: Desk and Shell must never import @flock/client, @flock/web, @flock/operator, @flock/group-host, or @flock/net.",
+};
+const NO_SHELL_EXTRA_FORBIDDEN_IMPORTS = {
+  group: [
+    "@flock/reader", "@flock/reader/*",
+    "@flock/deployment", "@flock/deployment/*",
+  ],
+  message: "Flock Shell independence boundary: @flock/shell must never import @flock/reader or @flock/deployment.",
+};
+const NO_DESK_CLIENT_SERVER_IMPORTS = {
+  group: ["node:*", "@flock/deployment", "@flock/deployment/*"],
+  message: "Desk browser/client modules must not import Node built-ins or @flock/deployment; pass public config via server page props.",
+};
+const NO_DESK_FORBIDDEN_DYNAMIC_IMPORT = {
+  selector:
+    "ImportExpression[source.value=/^@flock\\/(?:client|web|operator|group-host|net)(?:\\/|$)/], ImportExpression:has(TemplateElement[value.raw=/^@flock\\/(?:client|web|operator|group-host|net)(?:\\/|$)/]), ImportExpression:has(TemplateElement[value.cooked=/^@flock\\/(?:client|web|operator|group-host|net)(?:\\/|$)/])",
+  message: "Flock Desk independence boundary: dynamic import of @flock/client, @flock/web, @flock/operator, @flock/group-host, or @flock/net is forbidden.",
+};
+const NO_SHELL_EXTRA_DYNAMIC_IMPORT = {
+  selector:
+    "ImportExpression[source.value=/^@flock\\/(?:reader|deployment)(?:\\/|$)/], ImportExpression:has(TemplateElement[value.raw=/^@flock\\/(?:reader|deployment)(?:\\/|$)/]), ImportExpression:has(TemplateElement[value.cooked=/^@flock\\/(?:reader|deployment)(?:\\/|$)/])",
+  message: "Flock Shell independence boundary: dynamic import of @flock/reader or @flock/deployment is forbidden.",
+};
+const NO_DESK_CLIENT_SERVER_DYNAMIC_IMPORT = {
+  selector:
+    "ImportExpression[source.value=/^(?:node:|@flock\\/deployment(?:\\/|$))/], ImportExpression:has(TemplateElement[value.raw=/^(?:node:|@flock\\/deployment(?:\\/|$))/]), ImportExpression:has(TemplateElement[value.cooked=/^(?:node:|@flock\\/deployment(?:\\/|$))/])",
+  message: "Desk browser/client modules must not dynamically import Node built-ins or @flock/deployment.",
 };
 
 const ALL_THREE_DOTTED_RE = /com\.atproto\.memberspace\.(putMembers|removeMembers|listMembers)\b/;
@@ -222,7 +274,7 @@ export default defineConfig([
   ...nextVitals,
   ...nextTs,
   globalIgnores(["**/.next/**", "packages/protocol/src/lexicons/api/**", "**/next-env.d.ts"]),
-  { settings: { react: { version: WEB_REACT_VERSION }, next: { rootDir: "apps/web/" } } },
+  { settings: { react: { version: WEB_REACT_VERSION }, next: { rootDir: ["apps/web/", "apps/desk/"] } } },
   {
     files: ["packages/*/src/**/*.{ts,tsx}", "apps/*/src/**/*.{ts,tsx}", "apps/*/scripts/**/*.ts", "apps/*/next.config.ts"],
     rules: {
@@ -234,6 +286,18 @@ export default defineConfig([
     files: ["packages/client/src/eslint-boundaries.test.ts"],
     rules: {
       "import/no-extraneous-dependencies": ["error", { includeTypes: true, devDependencies: true, packageDir: [".", "./packages/client"] }],
+    },
+  },
+  {
+    files: ["packages/shell/src/boundary.test.ts"],
+    rules: {
+      "import/no-extraneous-dependencies": ["error", { includeTypes: true, devDependencies: true, packageDir: [".", "./packages/shell"] }],
+    },
+  },
+  {
+    files: ["apps/desk/src/boundary.test.ts"],
+    rules: {
+      "import/no-extraneous-dependencies": ["error", { includeTypes: true, devDependencies: true, packageDir: [".", "./apps/desk"] }],
     },
   },
   {
@@ -382,6 +446,74 @@ export default defineConfig([
     rules: restrictedBoundaryRules(
       [NO_DM_IMPORT, NO_CLIENT_NODE_ENTRY, NO_ENTITY_MERGE_IMPORT, NO_EXTENSION_IMPORT],
       [NO_ENTITY_MERGE_DYNAMIC_IMPORT, NO_EXTENSION_DYNAMIC_IMPORT, NO_COMPUTED_DYNAMIC_IMPORT],
+    ),
+  },
+  {
+    // Flock Shell production code: browser-pure, zero @flock/client/@flock/web/@flock/operator/@flock/group-host/@flock/net/@flock/reader/@flock/deployment.
+    files: ["packages/shell/src/**/*.{ts,tsx,mts}"],
+    ignores: NODE_TESTS,
+    rules: restrictedBoundaryRules(
+      [
+        NO_NODE_BUILTINS,
+        NO_SERVER_CONFIG,
+        NO_APP_LAYER,
+        NO_CLIENT_NODE_ENTRY,
+        NO_ENTITY_MERGE_IMPORT,
+        NO_EXTENSION_IMPORT,
+        NO_DESK_FORBIDDEN_IMPORTS,
+        NO_SHELL_EXTRA_FORBIDDEN_IMPORTS,
+      ],
+      [
+        NO_ENTITY_MERGE_DYNAMIC_IMPORT,
+        NO_EXTENSION_DYNAMIC_IMPORT,
+        NO_DESK_FORBIDDEN_DYNAMIC_IMPORT,
+        NO_SHELL_EXTRA_DYNAMIC_IMPORT,
+        NO_COMPUTED_DYNAMIC_IMPORT,
+      ],
+    ),
+  },
+  {
+    // Flock Shell tests: still forbid all restricted @flock/* packages and computed dynamic imports.
+    files: ["packages/shell/src/**/*.test.{ts,tsx,mts}"],
+    rules: restrictedBoundaryRules(
+      [
+        NO_SERVER_CONFIG,
+        NO_APP_LAYER,
+        NO_ENTITY_MERGE_IMPORT,
+        NO_EXTENSION_IMPORT,
+        NO_DESK_FORBIDDEN_IMPORTS,
+        NO_SHELL_EXTRA_FORBIDDEN_IMPORTS,
+      ],
+      [
+        NO_ENTITY_MERGE_DYNAMIC_IMPORT,
+        NO_EXTENSION_DYNAMIC_IMPORT,
+        NO_DESK_FORBIDDEN_DYNAMIC_IMPORT,
+        NO_SHELL_EXTRA_DYNAMIC_IMPORT,
+        NO_COMPUTED_DYNAMIC_IMPORT,
+      ],
+    ),
+  },
+  {
+    // Flock Desk server entrypoints & tests: forbid @flock/client, @flock/web, @flock/operator, @flock/group-host, @flock/net.
+    files: [...DESK_SERVER_ENTRYPOINTS, "apps/desk/src/**/*.test.{ts,tsx,mts}"],
+    rules: restrictedBoundaryRules(
+      [NO_ENTITY_MERGE_IMPORT, NO_EXTENSION_IMPORT, NO_DESK_FORBIDDEN_IMPORTS],
+      [NO_ENTITY_MERGE_DYNAMIC_IMPORT, NO_EXTENSION_DYNAMIC_IMPORT, NO_DESK_FORBIDDEN_DYNAMIC_IMPORT, NO_COMPUTED_DYNAMIC_IMPORT],
+    ),
+  },
+  {
+    // Flock Desk browser/client code (everything outside Next server entrypoints and tests): additionally forbid node:* and @flock/deployment.
+    files: ["apps/desk/src/**/*.{ts,tsx,mts}"],
+    ignores: [...DESK_SERVER_ENTRYPOINTS, ...NODE_TESTS],
+    rules: restrictedBoundaryRules(
+      [NO_ENTITY_MERGE_IMPORT, NO_EXTENSION_IMPORT, NO_DESK_FORBIDDEN_IMPORTS, NO_DESK_CLIENT_SERVER_IMPORTS],
+      [
+        NO_ENTITY_MERGE_DYNAMIC_IMPORT,
+        NO_EXTENSION_DYNAMIC_IMPORT,
+        NO_DESK_FORBIDDEN_DYNAMIC_IMPORT,
+        NO_DESK_CLIENT_SERVER_DYNAMIC_IMPORT,
+        NO_COMPUTED_DYNAMIC_IMPORT,
+      ],
     ),
   },
   {

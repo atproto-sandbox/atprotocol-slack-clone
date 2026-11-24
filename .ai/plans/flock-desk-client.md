@@ -1,6 +1,6 @@
 # Flock Desk — Independent OpenSocial & Spaces Browser Client
 
-**Status:** Planned (Rev 7 — R13 `opensocial.group` baseline; incorporates Round 1–6 Claude & Codex review fixes)  
+**Status:** Implemented (D0–D5, D7 complete on `feat/flock-desk-client`; D6 deferred to v1.1; verified via build, typecheck, ESLint, unit tests, `desk-csp.spec.ts`, `desk-parity.spec.ts`, BDD independent-app parity, and dual Claude Opus + Codex reviews)  
 **Protocol Baseline:**
 - ATProto Permissioned Spaces Proposal 0016 / `bluesky-social/atproto#5187` @ `6747610566eee1b6d743617bd8eb1136adccb362` (`0.0.0-spaces-alpha-20261117141222` + `strict-credential-expiry.patch`; see `docs/protocol/atproto-spaces-pin.md`)
 - `opensocial.group` Atmospheric Groups Proposal @ `8df0cc82eb7708f090aa43522adf1d3ada3ed7e7` (merged to `main` at `8ae87a5`)

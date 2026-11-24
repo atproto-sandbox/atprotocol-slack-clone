@@ -6,6 +6,8 @@ import { groupMembersUri, groupMetaUri } from "./keys";
 import { OPERATOR_METHOD } from "./nsids";
 import {
   appGrantScopes,
+  DESK_MODALITY_SCOPES,
+  deskMemberScopes,
   DM_BROWSER_SCOPES,
   effectiveMemberPermissions,
   expandGroupScopes,
@@ -21,6 +23,7 @@ import {
   OPEN_SOCIAL_PARTICIPATE_SCOPES,
   OPERATOR_METHODS,
   operatorMethodsScope,
+  PERSONAL_PDS_LIST_GROUP_MEMBERS_SPACES_SCOPE,
 } from "./scopes";
 
 const serviceRef = "did:web:slack.example#atproto_flock_operator";
@@ -72,6 +75,43 @@ test("appGrantScopes includes meta/self and members/self read plus Flock app mod
     "space:new.flock.app.inbox?authority=*&action=read",
     "rpc?lxm=new.flock.operator.getChanges&aud=did:web:operator.example%23atproto_flock_operator",
   ]);
+});
+
+test("deskMemberScopes is least-privilege, satisfies listSpaces(group.opensocial.members), and omits operator/unused scopes", () => {
+  const scopes = deskMemberScopes();
+  assert.deepEqual(scopes, [
+    "atproto",
+    ...OPEN_SOCIAL_PARTICIPATE_SCOPES,
+    PERSONAL_PDS_LIST_GROUP_MEMBERS_SPACES_SCOPE,
+    ...DESK_MODALITY_SCOPES,
+  ]);
+  const perms = expandGroupScopes(scopes);
+  assert.equal(
+    perms.allowsSpace(
+      { spaceType: "group.opensocial.members" as NsidString, authority: "*", skey: "*" },
+      { action: "read_self" },
+    ),
+    true,
+    "deskMemberScopes must satisfy real PDS listSpaces({ spaceType: 'group.opensocial.members' })",
+  );
+  assert.equal(
+    perms.allowsSpace(
+      { spaceDid: groupDid as DidString, spaceType: "new.flock.channel" as NsidString, skey: "general" as RecordKeyString },
+      { action: "create", collection: "new.flock.channel.message" as NsidString },
+    ),
+    true,
+  );
+  const joined = scopes.join(" ");
+  for (const forbidden of [
+    "new.flock.operator.",
+    "new.flock.inbox",
+    "new.flock.channel.reaction",
+    "new.flock.ext.tasks",
+    "new.flock.app.inbox",
+    "new.flock.dm.",
+  ]) {
+    assert.equal(joined.includes(forbidden), false, `deskMemberScopes must omit ${forbidden}`);
+  }
 });
 
 test("patched @atproto/oauth-scopes SpaceCollectionParam accepts '*' collection on space.importRepo checks (6747610566 parity)", () => {

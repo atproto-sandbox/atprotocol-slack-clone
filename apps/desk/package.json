@@ -1,0 +1,31 @@
+{
+  "name": "@flock/desk",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev --webpack --hostname 127.0.0.1 --port 3005",
+    "build": "next build --webpack",
+    "start": "next start --hostname 127.0.0.1 --port 3005"
+  },
+  "exports": {
+    "./*": "./src/*.ts"
+  },
+  "dependencies": {
+    "@astryxdesign/core": "0.7.17",
+    "@astryxdesign/theme-neutral": "0.7.17",
+    "@flock/deployment": "workspace:*",
+    "@flock/protocol": "workspace:*",
+    "@flock/reader": "workspace:*",
+    "@flock/shell": "workspace:*",
+    "@stylexjs/stylex": "0.19.2",
+    "next": "16.3.6",
+    "react": "19.2.3",
+    "react-dom": "19.2.3"
+  },
+  "devDependencies": {
+    "@flock/testing": "workspace:*",
+    "@types/react": "19.0.0",
+    "@types/react-dom": "19.0.0",
+    "fake-indexeddb": "6.2.6"
+  }
+}

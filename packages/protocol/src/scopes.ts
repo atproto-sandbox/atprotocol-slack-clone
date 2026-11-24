@@ -158,6 +158,29 @@ export const FLOCK_MEMBER_MODALITY_SPACE_SCOPES: readonly string[] = [
   `space:${SPACE_TYPE.appInbox}?authority=*&collection=${COLLECTION.appCommand}&collection=${COLLECTION.appAction}&action=create&action=delete`,
 ] as const;
 
+/**
+ * Least-privilege Flock modality space scopes for Flock Desk v1:
+ * workspace/self read, channel read, and channel message create/update/delete only.
+ * Explicitly omits Operator RPCs, legacy inbox joinRequest, reactions, tasks, appInbox, and DMs.
+ */
+export const DESK_MODALITY_SCOPES: readonly string[] = [
+  `space:${SPACE_TYPE.workspace}?authority=*&skey=self&action=read`,
+  `space:${SPACE_TYPE.channel}?authority=*&action=read`,
+  `space:${SPACE_TYPE.channel}?authority=*&collection=${COLLECTION.message}&action=create&action=update&action=delete`,
+] as const;
+
+/**
+ * Least-privilege Operator-free personal-PDS OAuth scopes for Flock Desk v1.
+ */
+export function deskMemberScopes(): string[] {
+  return [
+    "atproto",
+    ...OPEN_SOCIAL_PARTICIPATE_SCOPES,
+    PERSONAL_PDS_LIST_GROUP_MEMBERS_SPACES_SCOPE,
+    ...DESK_MODALITY_SCOPES,
+  ];
+}
+
 export const OPERATOR_METHODS = Object.values(OPERATOR_METHOD);
 
 /**

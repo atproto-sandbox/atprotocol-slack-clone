@@ -15,10 +15,49 @@ export type AppConfig = {
 /** The variables `getConfig` reads: everything the web app takes from its environment. */
 export const SHARED_ENVIRONMENT = ["APP_URL", "OPERATOR_URL", "GROUP_HOST_URL", "PLC_URL", "OPERATOR_SERVICE_REF"] as const;
 
+/**
+ * The root `.env` keys Flock Desk is allowed to inherit. Explicitly omits Web's `APP_URL`,
+ * `OPERATOR_URL`, `OPERATOR_SERVICE_REF`, and `AUTH_ENCRYPTION_KEY` so `@flock/web`'s local
+ * configuration and Operator secrets never leak into or hijack Desk.
+ */
+export const DESK_ENV_FILE_KEYS = ["DESK_APP_URL", "PLC_URL", "GROUP_HOST_URL"] as const;
+
+export type DeskConfig = {
+  appUrl: URL;
+  plcDirectoryUrl: URL;
+  groupHostUrl?: URL;
+};
+
 let cached: AppConfig | undefined;
+let cachedDesk: DeskConfig | undefined;
 
 export function resetConfigCacheForTest(): void {
   cached = undefined;
+  cachedDesk = undefined;
+}
+
+export function getDeskConfig(): DeskConfig {
+  if (cachedDesk) return cachedDesk;
+
+  const rawAppUrl =
+    process.env.DESK_APP_URL ??
+    process.env.APP_URL ??
+    (process.env.NODE_ENV !== "production" ? "http://127.0.0.1:3005" : undefined);
+  if (rawAppUrl === undefined) {
+    throw new Error("DESK_APP_URL (or APP_URL) is required in production.");
+  }
+  const appUrlName = process.env.DESK_APP_URL !== undefined ? "DESK_APP_URL" : "APP_URL";
+  const appUrl = serviceUrl(appUrlName, rawAppUrl);
+
+  const groupHostInput = process.env.GROUP_HOST_URL ?? (isLoopback(appUrl.hostname) ? "http://127.0.0.1:3004" : undefined);
+  const groupHostUrl = groupHostInput !== undefined ? serviceUrl("GROUP_HOST_URL", groupHostInput) : undefined;
+
+  cachedDesk = {
+    appUrl,
+    plcDirectoryUrl: plcOriginUrl("PLC_URL", process.env.PLC_URL ?? "https://plc.directory"),
+    ...(groupHostUrl !== undefined ? { groupHostUrl } : {}),
+  };
+  return cachedDesk;
 }
 
 export function getConfig(): AppConfig {

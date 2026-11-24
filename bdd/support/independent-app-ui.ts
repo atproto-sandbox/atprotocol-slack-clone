@@ -15,7 +15,7 @@ import {
   type GroupRoleRecord,
 } from "@flock/protocol/scopes";
 import { listingCalls, openChannel, workspaceChannels } from "./channels-ui";
-import { escapeRegExp, eventually, signInFromLoginFormAt, waitForOrigin } from "./ui";
+import { escapeRegExp, eventually, signInFromLoginFormAt, signInIfPrompted, waitForOrigin } from "./ui";
 import { PAGE_TIMEOUT_MS, type Actor, type AppWorld } from "./world";
 
 // Helpers for scenarios that compare, attack or stress the app from outside: a second app instance viewed through
@@ -79,6 +79,97 @@ export async function joinWorkspaceAt(viewer: AppViewer, workspaceUri: string, w
   await join.or(opened).first().waitFor({ state: "visible" });
   if (await join.isVisible()) await join.click();
   await opened.waitFor({ state: "visible" });
+}
+
+/** Signs a viewer in on Flock Desk using strictly Desk's `data-testid="desk-*"` contract. */
+export async function signInDeskAt(viewer: AppViewer): Promise<string[]> {
+  const page = viewer.page;
+  await page.getByTestId("desk-handle-input").fill(viewer.did);
+  await page.getByTestId("desk-signin-button").click();
+  await page.waitForURL(/\/oauth\/authorize\?/, { timeout: 30_000 });
+  const authorize = page.getByRole("button", { name: "Authorize", exact: true });
+  await page.locator("input[name=password]").or(authorize).first().waitFor({ state: "visible" });
+  await signInIfPrompted(viewer);
+  await authorize.waitFor({ state: "visible" });
+  const shown = await page.evaluate(() => (window as unknown as { __authorizeData?: { scope?: string } }).__authorizeData?.scope ?? "");
+  const scopes = shown.split(" ").filter(Boolean);
+  assert.ok(scopes.length > 0, "Expected non-empty OAuth scopes on Desk authorization prompt");
+  assert.ok(scopes.includes("atproto"), `Desk OAuth scopes must include 'atproto': ${shown}`);
+  assert.ok(scopes.some((s) => s.includes("new.flock.channel.message")), `Desk OAuth scopes must include channel message scope: ${shown}`);
+  assert.ok(scopes.some((s) => s.includes("group.opensocial.")), `Desk OAuth scopes must include OpenSocial group scopes: ${shown}`);
+  assert.equal(scopes.some((s) => s.includes("new.flock.operator.")), false, `Desk OAuth scopes must not include Operator scopes: ${shown}`);
+  assert.equal(scopes.some((s) => s.includes("new.flock.channel.reaction")), false, `Desk v1 OAuth scopes must not include deferred reaction scope: ${shown}`);
+  assert.equal(scopes.some((s) => s.includes("new.flock.dm.")), false, `Desk v1 OAuth scopes must not include deferred DM scope: ${shown}`);
+  assert.equal(scopes.some((s) => s.includes("new.flock.ext.tasks")), false, `Desk v1 OAuth scopes must not include deferred tasks scope: ${shown}`);
+  await authorize.click();
+  await waitForOrigin(viewer, viewer.origin);
+  await page.getByTestId("desk-shell").waitFor({ state: "visible", timeout: 60_000 });
+  return scopes;
+}
+
+/** Opens a workspace invite link on Flock Desk, completes personal-PDS OAuth, and joins/opens the workspace. */
+export async function joinWorkspaceDeskAt(viewer: AppViewer, workspaceUri: string, workspaceName: string): Promise<void> {
+  const page = viewer.page;
+  await page.goto(`${viewer.origin}/?invite=${encodeURIComponent(workspaceUri)}`);
+  await page.getByTestId("desk-invite-banner").waitFor({ state: "visible" });
+  await signInDeskAt(viewer);
+  const joinBtn = page.getByTestId("desk-join-button");
+  const opened = page.getByRole("heading", { name: workspaceName, exact: true });
+  await joinBtn.or(opened).first().waitFor({ state: "visible", timeout: 60_000 });
+  if (await joinBtn.isVisible()) {
+    await joinBtn.click();
+  }
+  await opened.waitFor({ state: "visible", timeout: 60_000 });
+}
+
+/** Observes Flock Desk's rendered workspace state and verifies direct Group Host listing via `workspaceRead()`. */
+export async function observeWorkspaceDesk(
+  viewer: AppViewer,
+  workspaceName: string,
+  channels: string[],
+): Promise<WorkspaceObservation> {
+  const page = viewer.page;
+  const since = viewer.xrpc.length;
+  await page.goto(viewer.origin);
+  await page.getByRole("heading", { name: workspaceName, exact: true }).waitFor({ state: "visible", timeout: 60_000 });
+  const summary = (await page.getByTestId("desk-workspace-summary").innerText()).trim();
+  const workspaceUri = (await page.getByTestId("desk-workspace-uri").innerText()).trim();
+  const state = await eventually(() => workspaceRead(viewer, workspaceUri, since), {
+    what: `${viewer.origin} (Flock Desk) to read the workspace's roster and admins directly from Group Host`,
+  });
+
+  const channelButtons = page.getByTestId("desk-channel-item");
+  const count = await channelButtons.count();
+  const directory: Array<{ name: string; visibility: "public" | "private" }> = [];
+  for (let i = 0; i < count; i += 1) {
+    const item = channelButtons.nth(i);
+    const name = (await item.getAttribute("data-channel-name")) ?? "";
+    const vis = (await item.getAttribute("data-channel-visibility")) === "private" ? "private" : "public";
+    directory.push({ name, visibility: vis });
+  }
+  directory.sort((left, right) => left.name.localeCompare(right.name));
+
+  const messages: Record<string, string[]> = {};
+  const privateRosters: Record<string, string[]> = {};
+  for (const channel of channels) {
+    const btn = page.locator(`[data-testid="desk-channel-item"][data-channel-name="${channel}"]`);
+    const targetSkey = await btn.getAttribute("data-channel-skey");
+    await btn.click();
+    await page
+      .locator(`[data-testid="desk-channel-view"][data-channel-skey="${targetSkey}"][data-ready="true"]`)
+      .waitFor({ state: "visible", timeout: 60_000 });
+    messages[channel] = (await page.getByTestId("desk-message-text").allInnerTexts()).map((t) => t.trim());
+    const roster = page.getByTestId("desk-private-roster");
+    privateRosters[channel] =
+      (await roster.count()) === 0
+        ? []
+        : (await roster.innerText())
+            .split(" · ")
+            .map((s) => s.trim())
+            .filter(Boolean)
+            .sort();
+  }
+  return { summary, state, directory, messages, privateRosters };
 }
 
 export async function createChannelAs(viewer: AppViewer, name: string, options: { privateMembers?: string[] } = {}): Promise<void> {
