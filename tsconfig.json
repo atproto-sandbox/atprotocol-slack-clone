@@ -25,10 +25,13 @@
   },
   "include": [
     "apps/web/next-env.d.ts",
+    "apps/desk/next-env.d.ts",
     "**/*.ts",
     "**/*.tsx",
     "apps/web/.next/types/**/*.ts",
-    "apps/web/.next/dev/types/**/*.ts"
+    "apps/web/.next/dev/types/**/*.ts",
+    "apps/desk/.next/types/**/*.ts",
+    "apps/desk/.next/dev/types/**/*.ts"
   ],
   "exclude": [
     "node_modules",

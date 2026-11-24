@@ -1,0 +1,18 @@
+{
+  "name": "@flock/shell",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts"
+  },
+  "dependencies": {
+    "@atproto/oauth-client-browser": "0.5.7",
+    "@flock/protocol": "workspace:*"
+  },
+  "devDependencies": {
+    "@atproto/crypto": "0.0.0-spaces-alpha-20261117141222",
+    "@flock/testing": "workspace:*",
+    "fake-indexeddb": "6.2.6"
+  }
+}

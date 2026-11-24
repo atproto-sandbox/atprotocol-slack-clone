@@ -334,3 +334,47 @@ test("D11.11: computed dynamic import() specifiers are blocked while static lite
     `export const s = import("./account-gate");\n`,
   );
 });
+
+test("Flock Desk & Shell independence boundaries enforce forbidden static/dynamic imports, browser purity, and narrow memberspace allowlist", async () => {
+  // Shell production files forbid @flock/client, @flock/web, @flock/operator, @flock/group-host, @flock/net, @flock/reader, @flock/deployment, and node:*
+  for (const forbidden of [
+    "@flock/client/workspace-client",
+    "@flock/web/browser/session",
+    "@flock/operator/config",
+    "@flock/group-host/server",
+    "@flock/net/safe-fetch",
+    "@flock/reader/independent",
+    "@flock/deployment/config",
+    "node:fs",
+  ]) {
+    await assertForbidden("packages/shell/src/membership.ts", `import x from "${forbidden}";\nvoid x;\n`);
+  }
+  await assertForbidden("packages/shell/src/membership.ts", `export const p = import("@flock/client/workspace-client");\n`);
+  await assertForbidden("packages/shell/src/membership.ts", `export const p = import("@flock/reader/independent");\n`);
+  await assertForbidden("packages/shell/src/membership.ts", `export async function f(s: string) { return import(s); }\n`, "non-static dynamic import()");
+
+  // Desk browser/client components forbid @flock/client/@flock/web/@flock/operator/@flock/group-host/@flock/net AND node:* AND @flock/deployment
+  for (const forbidden of [
+    "@flock/client/workspace-client",
+    "@flock/web/app/ui/channel-view",
+    "@flock/operator/config",
+    "@flock/group-host/server",
+    "@flock/net/safe-fetch",
+    "@flock/deployment/config",
+    "node:fs",
+  ]) {
+    await assertForbidden("apps/desk/src/app/ui/desk-client.tsx", `import x from "${forbidden}";\nvoid x;\n`);
+  }
+  await assertForbidden("apps/desk/src/app/ui/desk-client.tsx", `export const p = import("@flock/deployment/config");\n`);
+  await assertForbidden("apps/desk/src/app/ui/desk-client.tsx", `export const p = import("@flock/client/engine");\n`);
+
+  // Desk server entrypoints may import @flock/deployment, never @flock/client/@flock/web/@flock/operator
+  await assertAllowed("apps/desk/src/app/page.tsx", `import { getDeskConfig } from "@flock/deployment/config";\nvoid getDeskConfig;\n`);
+  await assertForbidden("apps/desk/src/app/page.tsx", `import { WorkspaceClient } from "@flock/client/workspace-client";\nvoid WorkspaceClient;\n`);
+
+  // `no-legacy-memberspace`: only `packages/shell/src/invites.ts` (+ test) allows `listMembers`; all other Shell/Desk files forbid all three
+  await assertAllowed("packages/shell/src/invites.ts", `export const m = "com.atproto.memberspace.listMembers";\n`);
+  await assertForbidden("packages/shell/src/invites.ts", `export const m = "com.atproto.memberspace.putMembers";\n`, "R13 OpenSocial hard-cut");
+  await assertForbidden("packages/shell/src/membership.ts", `export const m = "com.atproto.memberspace.listMembers";\n`, "R13 OpenSocial hard-cut");
+  await assertForbidden("apps/desk/src/app/ui/desk-client.tsx", `export const m = "com.atproto.memberspace.listMembers";\n`, "R13 OpenSocial hard-cut");
+});

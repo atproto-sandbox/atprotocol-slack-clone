@@ -164,6 +164,8 @@ All `99` upstream-vendored schemas (`27` `group.opensocial.*` + `72` `com.atprot
 | `apps/group-host/` | Reference `opensocial.group` Group Host (`:3004`): `42` SQLite tables, two-sided OAuth 2.1 AS, signed MST public repo, flat RBAC, moderation, Standard & Coordinated v1 host migration |
 | `apps/operator/` | Shared-session modality orchestrator (`:3001`), 18 journaled operation kinds, 1-webhook-per-space `notify` renewal, `dm1`/`inv1` wakes, `getChanges` |
 | `apps/web/` | Stateless Next.js UI (`:3000`); personal & Group-DID browser OAuth (`apps/web/src/browser/`) |
+| `apps/desk/` | Independent **Flock Desk** Astryx/Next.js browser client (`:3005`, `pnpm dev:desk`); talks directly to personal PDSes & Group Hosts via `@flock/shell` + `@flock/reader` with zero `@flock/client` and zero Operator |
+| `packages/shell/` | Browser-pure, Operator-free protocol adapter for Flock Desk (`did-resolver`, `session`, `invites`, `lifecycle-store`, `membership`, `channel`, `moderation`) |
 | `apps/echo-bot/`, `apps/webhooks/` | First-party non-roster bot apps built strictly on `@flock/client` |
 | `packages/protocol/` | `135` Lexicons, keys, runtime `Lexicons` validator, `@atproto/oauth-scopes` `effectiveMemberPermissions`, moderation, HPKE MAC & STAR verification, Tasks `entity-merge` |
 | `packages/net/` | `boundedSafeFetch` SSRF-safe DNS-pinned HTTP fetch |

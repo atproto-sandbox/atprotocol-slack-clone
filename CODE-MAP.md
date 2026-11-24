@@ -7,6 +7,7 @@
 | Layer | Technology |
 |-------|------------|
 | Frontend (`apps/web`) | React 19, Next.js 16 App Router, TypeScript 5.9 (stateless UI + browser IndexedDB/WebCrypto OAuth) |
+| Independent Client (`apps/desk` + `packages/shell`) | React 19, Next.js 16 App Router (`--webpack`, `:3005`), Astryx UI (`@astryxdesign/core`, `@astryxdesign/theme-neutral`, see [`apps/desk/AGENTS.md`](apps/desk/AGENTS.md)), `@flock/shell` + `@flock/reader` (zero `@flock/client`, zero `@flock/operator`) |
 | Group Host (`apps/group-host`) | Node.js 22, Express, `@atproto/xrpc-server`, `@atproto/repo`, `@atproto/space`, `@atproto/star`, `@atproto/oauth-scopes`, `@did-plc/lib`, `better-sqlite3` (`42` tables) |
 | Operator (`apps/operator`) | Node.js 22, Express, `@atproto/xrpc-server`, `@atproto/oauth-client-node`, Kysely + `better-sqlite3` |
 | Apps (`apps/echo-bot`, `apps/webhooks`) | Node.js 22, `@flock/client` (`@flock/client/node/*`) |
@@ -153,6 +154,9 @@ packages/                 Shared libraries. `protocol` and `client` (outside `cl
                               `browser-store.ts`, `ui-logic.ts`).
     src/testing/             `engine-fixture.ts` and `store-contract.ts` over `@flock/testing`.
   reader/  @flock/reader        Zero-lock-in independent readers (`independent.ts`, `independent-dm.ts`, `independent-tasks.ts`).
+  shell/  @flock/shell          Browser-pure, zero-Operator protocol adapter for Flock Desk (`did-resolver.ts`, `session.ts`,
+                                 `client-metadata.ts`, `invites.ts`, `lifecycle-store.ts`, `membership.ts`, `channel.ts`,
+                                 `moderation.ts`); zero dependency on `@flock/client`, `@flock/reader`, `@flock/operator`, or `node:*`.
   testing/  @flock/testing      In-memory multi-PDS + OpenSocial Group Host test network (`fake-network.ts`, `fake-group-host.ts`),
                               verified 1-for-1 against `apps/group-host` by `group-host-parity.test.ts`.
 
@@ -197,7 +201,7 @@ apps/
                               `getSpaceNotifyTarget` (`inv1` exclusively for `at://<callerDid>/space/group.opensocial.invites/self`),
                               ephemeral `dm-feed-wakes`, and `getChanges`.
     scripts/authority-grant.ts  `pnpm authority generate-key <kid> | revoke <did>`.
-  web/  @flock/web              Stateless Next.js UI (`pnpm dev` / `build` / `start`, `:3000`).
+  web/  @flock/web              Stateless Next.js UI (`pnpm dev` / `build:web` / `start`, `:3000`).
     src/browser/             `session.ts` (personal PDS OAuth), `group-session.ts` (`GroupBrowserOAuthClient`),
                               `client-metadata.ts`, `sign-out.ts` (clears personal store, DM store, and `flock-group-oauth:<did>`).
     src/app/oauth/           `/oauth/client-metadata.json`, `/oauth/callback`, `/oauth/group-client-metadata.json`,
@@ -206,6 +210,14 @@ apps/
                               join policy, join requests, outbound invite delivery status/retry, reactivation, deletion,
                               migration), `moderation-panel.tsx`, `report-subject-modal.tsx`, `invite-banner.tsx`,
                               `channel-view.tsx`, `apps-panel.tsx`, `extensions-panel.tsx`, `ext/tasks/*`, `dm-*.tsx`.
+  desk/  @flock/desk            Independent OpenSocial & Spaces browser client (`pnpm dev:desk` / `build:desk` / `start:desk`, `:3005`;
+                                 Astryx guide in [`apps/desk/AGENTS.md`](apps/desk/AGENTS.md)). Depends only on `@flock/shell`,
+                                 `@flock/reader`, `@flock/protocol`, and `@flock/deployment` (server entrypoints only) — zero
+                                 `@flock/client`, zero `@flock/web`, zero `@flock/operator`.
+    src/proxy.ts, src/lib/loopback-redirect.ts
+                             Nonce CSP (`configuredDeskAppUrl()?.origin`) and `localhost` -> `127.0.0.1` loopback redirect.
+    src/app/oauth/           `/oauth/client-metadata.json` (`deskMemberScopes()`), `/oauth/callback`.
+    src/app/ui/              `desk-client.tsx`, `desk-channel-view.tsx`, `desk-report-panel.tsx`, `desk-theme.tsx`, `pending-invite.ts`.
   echo-bot/  @flock/echo-bot    First-party bot app (`pnpm echo-bot sign-in <handle>` / `run`, `:3002`); depends on `@flock/client` only.
   webhooks/  @flock/webhooks    First-party incoming-webhooks app (`pnpm webhooks sign-in <handle>` / `run`, `:3003`); depends on `@flock/client` only.
 
@@ -239,15 +251,17 @@ One row per behavior that must have a single home. A second implementation of a 
 | SSRF-safe DNS-pinned HTTP fetch and `boundedSafeFetch` byte/MIME/deadline caps | `packages/net/src/safe-fetch.ts` | `apps/group-host/`, `apps/operator/`, `packages/client/src/node/` |
 | Atmospheric Group DID storage, two-sided Group OAuth 2.1 AS, OpenSocial RBAC/moderation XRPCs, and host migration | `apps/group-host/src/` | `apps/operator/`, `apps/web/` |
 | Shared-session multi-space modality journal, `operationAdminTakeover`, and `dm1`/`inv1` push-wake routing | `apps/operator/src/operator/` | `apps/group-host/`, `apps/web/` |
-| Personal `invites/self` provisioning (`ensureInvitesSpace`) and 3/5/4-phase leave/join/reactivation client journals | `packages/client/src/workspace-client.ts` | `apps/web/`, `packages/client/src/group-client.ts` |
+| Personal `invites/self` provisioning (`ensureInvitesSpace`) and 3/5/4-phase leave/join/reactivation client journals | `packages/client/src/workspace-client.ts` (Web), `packages/shell/src/invites.ts` & `packages/shell/src/membership.ts` (Desk — independent implementation enforcing the same 4 R13 invariants) | `apps/web/`, `apps/desk/`, `packages/client/src/group-client.ts` |
 | Browser personal-PDS OAuth vs isolated per-viewer Group-DID OAuth (`GroupBrowserOAuthClient`) | `apps/web/src/browser/{session,group-session}.ts` | `apps/web/src/app/ui/` |
-| `com.atproto.memberspace.{putMembers,removeMembers,listMembers}` usage (sovereign DMs + `ensureInvitesSpace` zero-member check) | `packages/client/src/dm/`, `packages/protocol/src/atproto/` | `apps/group-host/`, `apps/operator/`, workspace/channel client & UI (`no-legacy-memberspace` ESLint rule) |
+| `com.atproto.memberspace.{putMembers,removeMembers,listMembers}` usage (sovereign DMs + `ensureInvitesSpace` zero-member check) | `packages/client/src/dm/`, `packages/protocol/src/atproto/`, `packages/shell/src/invites.ts` (`listMembers` only) | `apps/group-host/`, `apps/operator/`, `apps/desk/`, workspace/channel client & UI (`no-legacy-memberspace` ESLint rule) |
+| Flock Desk Operator-free personal OAuth, SSRF-hardened browser DID/handle resolution, direct writes, and account-scoped lifecycle journal (`flock-desk-lifecycle:<did>`) | `packages/shell/src/` | `apps/desk/src/app/ui/`, `packages/client/`, `packages/reader/` |
 
 ## Entry points
 
 | Command | Target | Description |
 |---------|--------|-------------|
-| `pnpm dev` / `pnpm build` / `pnpm start` | `apps/web` (`:3000`) | Stateless Next.js UI and static browser/group OAuth metadata & callbacks |
+| `pnpm dev` / `pnpm build:web` / `pnpm start` | `apps/web` (`:3000`) | Stateless Next.js reference UI and browser/group OAuth metadata & callbacks |
+| `pnpm dev:desk` / `pnpm build:desk` / `pnpm start:desk` | `apps/desk` (`:3005`) | Independent Flock Desk Astryx UI (Operator-free; `pnpm build` builds both Web and Desk) |
 | `pnpm group-host` | `apps/group-host/src/main.ts` (`:3004`) | Reference `opensocial.group` Group Host (`GROUP_HOST_URL`) |
 | `pnpm operator` | `apps/operator/src/operator/main.ts` (`:3001`) | Shared-session modality operator, webhook renewal loop, and `getChanges` feed (`OPERATOR_URL`) |
 | `pnpm echo-bot` / `pnpm webhooks` | `apps/{echo-bot,webhooks}/src/main.ts` (`:3002`, `:3003`) | First-party non-roster bot apps (`sign-in <handle>`, then `run`) |

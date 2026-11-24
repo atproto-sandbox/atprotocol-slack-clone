@@ -2,6 +2,7 @@ packages:
   - packages/*
   - apps/*
 allowBuilds:
+  '@astryxdesign/core': true
   better-sqlite3: true
   core-js: true
   esbuild: true
@@ -29,6 +30,7 @@ minimumReleaseAgeExclude:
   - '@atproto/xrpc-server@0.0.0-spaces-alpha-20261117141222'
   - '@atproto/lex-rpc@0.0.0-spaces-alpha-20261117141222'
 onlyBuiltDependencies:
+  - "@astryxdesign/core"
   - better-sqlite3
   - core-js
   - esbuild

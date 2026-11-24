@@ -43,7 +43,11 @@ type TestNetwork = { pds: TestPds; extraPdses: TestPds[]; plc: { url: string }; 
 export type FixtureAccount = { handle: string; did: string; password: string; host: 0 | 1; pdsUrl: string; accessJwt: string };
 
 /** One app: its web process at `appUrl` and its operator's process at `operatorUrl`, with the operator's database. */
-export type SecondApp = { appUrl: URL; operatorUrl: URL; databasePath: string; serverOutput(): string };
+export type SecondWebApp = { kind: "web"; appUrl: URL; operatorUrl: URL; databasePath: string; serverOutput(): string };
+export type SecondApp = SecondWebApp;
+/** Flock Desk: standalone browser client with no Operator process and no server SQLite database. */
+export type DeskApp = { kind: "desk"; appUrl: URL; operatorUrl: null; databasePath: null; serverOutput(): string };
+export type IndependentSecondApp = SecondWebApp | DeskApp;
 
 export type AppFixture = {
   appUrl: URL;
@@ -56,8 +60,10 @@ export type AppFixture = {
   createAccount(handle: string, host: 0 | 1, password?: string): Promise<FixtureAccount>;
   /** An app account's own OAuth session with the app's grant, restored through the app's OAuth client and `stateFile`, as its sign-in leaves it. */
   appSession(account: FixtureAccount, serviceRef: string, stateFile: string): ReturnType<typeof mintAppSession>;
-  /** A second, fully independent app instance (own port, own database, own encryption key) on the same PDS + Group Host network. */
+  /** A second, fully independent `@flock/web` + Operator app instance on the same PDS + Group Host network. */
   startSecondApp(options?: { env?: Record<string, string> }): Promise<SecondApp>;
+  /** Starts Flock Desk (`apps/desk`) on a dynamic origin with zero Operator process and zero SQLite database. */
+  startDeskApp(options?: { env?: Record<string, string> }): Promise<DeskApp>;
   /** Re-signs a space credential with updated claims using either `<groupDid>`'s key on Group Host or a personal account's key on `authorityHost`. */
   resignSpaceCredential(authorityHost: 0 | 1, credential: string, claims: { exp: number }): Promise<string>;
   serverOutput(): string;
@@ -135,6 +141,17 @@ export async function startAppFixture(options: { preferredPort?: number } = {}):
       for (const child of app.children) servers.push({ child, output: app.serverOutput });
       return app;
     };
+    const launchDesk = async (extraEnv: Record<string, string> = {}): Promise<DeskApp> => {
+      const desk = await spawnDesk(net, projectRoot, groupHostUrl, groupHostChild.output, extraEnv);
+      servers.push({ child: desk.child, output: desk.serverOutput });
+      return {
+        kind: "desk",
+        appUrl: desk.appUrl,
+        operatorUrl: null,
+        databasePath: null,
+        serverOutput: desk.serverOutput,
+      };
+    };
     const primary = await launch("app", options.preferredPort);
 
     return {
@@ -156,6 +173,7 @@ export async function startAppFixture(options: { preferredPort?: number } = {}):
       appSession: (account, serviceRef, stateFile) =>
         mintAppSession(hosts[account.host], account.did, { serviceRef, plcUrl: net.plc.url, stateFile }, `app-${account.handle}`),
       startSecondApp: (secondOptions) => launch(`second-app-${servers.length}`, undefined, secondOptions?.env),
+      startDeskApp: (deskOptions) => launchDesk(deskOptions?.env),
       async resignSpaceCredential(authorityHost, credential, claims) {
         const [header, payload] = credential.split(".");
         if (!header || !payload) throw new Error("A space credential is a three-part JWT.");
@@ -292,7 +310,52 @@ async function spawnApp(
     await Promise.all([stopServer(child), stopServer(operator)]);
     throw error;
   }
-  return { appUrl, operatorUrl, databasePath, serverOutput, children: [child, operator] };
+  return { kind: "web", appUrl, operatorUrl, databasePath, serverOutput, children: [child, operator] };
+}
+
+async function spawnDesk(
+  network: TestNetwork,
+  projectRoot: string,
+  groupHostUrl: URL,
+  groupHostOutput: () => string,
+  extraEnv: Record<string, string> = {},
+): Promise<{ appUrl: URL; serverOutput: () => string; child: ChildProcess }> {
+  const port = await choosePort();
+  const appUrl = new URL(`http://127.0.0.1:${port}`);
+  const env: NodeJS.ProcessEnv = {
+    PATH: process.env.PATH ?? "",
+    HOME: process.env.HOME ?? tmpdir(),
+    TMPDIR: process.env.TMPDIR ?? tmpdir(),
+    NODE_ENV: "production",
+    NEXT_TELEMETRY_DISABLED: "1",
+    ATPROTO_ACCEPTANCE_TEST: "true",
+    PLC_URL: network.plc.url,
+    GROUP_HOST_URL: groupHostUrl.origin,
+    ...extraEnv,
+    // Always override DESK_APP_URL and APP_URL to the bound dynamic origin so developer `.env` cannot hijack it.
+    DESK_APP_URL: appUrl.origin,
+    APP_URL: appUrl.origin,
+  };
+  const child = spawn(
+    process.execPath,
+    [join(projectRoot, "apps/desk/node_modules/next/dist/bin/next"), "start", "apps/desk", "--hostname", "127.0.0.1", "--port", String(port)],
+    { cwd: projectRoot, env, stdio: ["ignore", "pipe", "pipe"] },
+  );
+  let output = "";
+  child.stdout?.on("data", (chunk: Buffer) => {
+    output = `${output}${chunk}`.slice(-20_000);
+  });
+  child.stderr?.on("data", (chunk: Buffer) => {
+    output = `${output}${chunk}`.slice(-20_000);
+  });
+  const serverOutput = () => `${output}\n--- group-host ---\n${groupHostOutput()}`;
+  try {
+    await waitForReady(new URL("/oauth/client-metadata.json", appUrl), child, serverOutput, "Flock Desk server");
+  } catch (error) {
+    await stopServer(child);
+    throw error;
+  }
+  return { appUrl, serverOutput, child };
 }
 
 async function choosePort(preferred?: number): Promise<number> {

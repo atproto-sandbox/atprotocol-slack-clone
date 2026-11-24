@@ -12,6 +12,7 @@ test-results/
 *.sqlite3
 *.log
 .DS_Store
+.worktrees/
 
 # The echo bot's and webhooks app's session and hooks files (apps/echo-bot, apps/webhooks): DPoP keys, tokens and hook hashes.
 .echo-bot-session.json*

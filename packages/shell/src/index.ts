@@ -1,0 +1,83 @@
+export {
+  buildDeskClientMetadata,
+  DESK_CLIENT_METADATA_PATH,
+  type DeskClientMetadata,
+} from "./client-metadata";
+export {
+  assertSafeBrowserEndpointUrl,
+  createBrowserDidResolver,
+  createBrowserSpaceCredentialDeps,
+  DidResolutionError,
+  isExactLoopbackHost,
+  UnsafeBrowserEndpointUrlError,
+  type BrowserDidResolver,
+  type BrowserDidResolverOptions,
+  type BrowserSpaceCredentialDepsConfig,
+  type DeskAuthSession,
+} from "./did-resolver";
+export {
+  createGuardedOAuthFetch,
+  DeskClientUnavailableError,
+  missingDeskScopes,
+  PENDING_INVITE_STORAGE_KEY,
+  restoreDeskSession,
+  signedInDeskDid,
+  signInDesk,
+  signOutDesk,
+  validateDeskLoginInput,
+  wellKnownHandleResolver,
+  type DeskSessionConfig,
+} from "./session";
+export {
+  ensureInvitesSpace,
+  IncompatibleInvitesSpacePolicyError,
+  type InvitesSpaceDeps,
+} from "./invites";
+export {
+  deskLifecycleDatabaseName,
+  DeskLifecycleStoreError,
+  IndexedDbLifecycleStore,
+  LifecycleActorMismatchError,
+  MemoryLifecycleStore,
+  PASSIVE_JOIN_PHASES,
+  POST_ADMISSION_JOIN_PHASES,
+  type DeskJoiningGroupEntry,
+  type DeskJoinPhase,
+  type DeskLeavePhase,
+  type DeskLeavingGroupEntry,
+  type DeskLifecycleStore,
+} from "./lifecycle-store";
+export {
+  acceptDirectMembership,
+  cancelPendingJoin,
+  dismissJoinOperation,
+  joinGroup,
+  JoinOperationQuotaExceededError,
+  leaveGroup,
+  parseJoinStatusResponse,
+  reconcileLifecycle,
+  retryJoinOperation,
+  TERMINAL_JOIN_XRPC_CODES,
+  UnsupportedJoinStatusError,
+  withGroupLifecycleLock,
+  type DeskShellDeps,
+  type JoinGroupResult,
+  type JoinStatusResponse,
+  type JoinStatusState,
+} from "./membership";
+export {
+  deleteChannelMessage,
+  editChannelMessage,
+  postChannelMessage,
+} from "./channel";
+export {
+  readGroupModerationConfig,
+  ReportPreconditionError,
+  reportSubject,
+  STANDARD_REPORT_REASON_TYPES,
+  validateReportPreconditions,
+  type GroupLabelerConfig,
+  type GroupModerationConfig,
+  type GroupModerationRule,
+  type ReportSubjectInput,
+} from "./moderation";
