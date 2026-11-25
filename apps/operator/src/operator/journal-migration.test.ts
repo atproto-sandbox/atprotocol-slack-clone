@@ -14,7 +14,7 @@ test("journal migration indexes legacy operation rows by workspace URI; an older
   const directory = mkdtempSync(join(tmpdir(), "slack-journal-migration-test-"));
   const databasePath = join(directory, "legacy.db");
   const workspaceDid = "did:plc:legacyowner";
-  const workspaceUri = `at://${workspaceDid}/space/new.flock.workspace/legacy`;
+  const workspaceUri = `at:space/${workspaceDid}/new.flock.workspace/legacy`;
   process.env.DATABASE_PATH = databasePath;
   process.env.AUTH_ENCRYPTION_KEY = "66".repeat(32);
   process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
@@ -62,7 +62,7 @@ test("journal migration indexes legacy operation rows by workspace URI; an older
     CREATE TABLE web_session (token_hash TEXT PRIMARY KEY, did TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL);
   `);
   const account = "did:plc:legacyreader";
-  const channel = `at://${workspaceDid}/space/new.flock.channel/general`;
+  const channel = `at:space/${workspaceDid}/new.flock.channel/general`;
   legacy.prepare(`INSERT INTO channel_record_cache
     (account_did,space_uri,repo_did,collection,rkey,uri,value_cipher,updated_at) VALUES (?,?,?,?,?,?,?,?)`)
     .run(account, channel, account, "new.flock.channel.message", "2222222222299", `at://${account}/new.flock.channel.message/2222222222299`, CHANNEL_CONTENT, now);

@@ -739,7 +739,7 @@ export function DeskClient({
               <TextInput
                 label="Workspace URI or Group DID"
                 isLabelHidden
-                placeholder="at://did:.../space/... or did:plc:..."
+                placeholder="at:space/did:.../... or did:plc:..."
                 value={joinTargetInput}
                 onChange={setJoinTargetInput}
                 width="100%"

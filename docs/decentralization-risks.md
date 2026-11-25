@@ -96,7 +96,7 @@ How can a user be sure they are seeing *every* message they should be? This spli
 
 | Dimension | Details |
 |---|---|
-| **Failure Mode** | Flock currently pins an alpha ATProto Spaces checkout (`6747610566` + `strict-credential-expiry.patch`) and OpenSocial Groups proposal (`8df0cc82`). Upstream breaking changes in `@atproto/space`, PDS endpoints, or `group.opensocial.*` before stabilization could break deployed independent clients; conversely, public PDSes must adopt Permissioned Spaces before general users can connect without custom PDSes. |
+| **Failure Mode** | Flock currently pins an alpha ATProto Spaces checkout (`f839c47e` + `strict-credential-expiry.patch`) and OpenSocial Groups proposal (`8df0cc82`). Upstream breaking changes in `@atproto/space`, PDS endpoints, or `group.opensocial.*` before stabilization could break deployed independent clients; conversely, public PDSes must adopt Permissioned Spaces before general users can connect without custom PDSes. |
 | **Already Mitigated Today** | Cryptographic pin verification (`verify-pinned-checkout.mjs`), tracked upstream protocol requests (`.ai/upstream/U1`–`U12`), and strict separation of `group.opensocial.*` vs `new.flock.*` lexicons. |
 | **Open Risk** | Production launch requires public DNS `_lexicon.*` publication, upstream landing of `strict-credential-expiry.patch` (and U1–U12 items), and a formal Lexicon versioning/deprecation policy before third-party clients ship to end users. |
 

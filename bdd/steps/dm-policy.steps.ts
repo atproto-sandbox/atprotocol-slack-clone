@@ -782,7 +782,7 @@ Given("people sign in to an app with its own database and create a workspace the
   await submitWorkspaceName(alice, uniqueWorkspaceName());
   await completeConsent(alice);
   await dmpWaitForOrigin(alice, second.appUrl.origin);
-  const wsNote = alice.page.locator(".mono-note").filter({ hasText: "at://" }).first();
+  const wsNote = alice.page.locator(".mono-note").filter({ hasText: "at:space/" }).first();
   await wsNote.waitFor({ state: "visible" });
   const parsedWs = parseWorkspaceUri((await wsNote.innerText()).trim());
   assert.ok(parsedWs, "expected created workspace URI on page");

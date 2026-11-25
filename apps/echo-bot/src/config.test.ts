@@ -8,8 +8,8 @@ const base = {
 };
 
 test("the echo bot's configuration: its workspaces listed, its port from its URL", () => {
-  const config = readEchoBotConfig({ ...base, ECHO_BOT_WORKSPACES: " at://did:plc:a/space/new.flock.workspace/one , at://did:plc:a/space/new.flock.workspace/two,", ECHO_BOT_DID: "did:plc:bot" });
-  assert.deepEqual(config.workspaces, ["at://did:plc:a/space/new.flock.workspace/one", "at://did:plc:a/space/new.flock.workspace/two"]);
+  const config = readEchoBotConfig({ ...base, ECHO_BOT_WORKSPACES: " at:space/did:plc:a/new.flock.workspace/one , at:space/did:plc:a/new.flock.workspace/two,", ECHO_BOT_DID: "did:plc:bot" });
+  assert.deepEqual(config.workspaces, ["at:space/did:plc:a/new.flock.workspace/one", "at:space/did:plc:a/new.flock.workspace/two"]);
   assert.deepEqual([config.host, config.port], ["127.0.0.1", 3002], "on loopback it listens on that address only");
   assert.equal(config.did, "did:plc:bot");
   assert.equal(readEchoBotConfig({ ...base, ECHO_BOT_URL: "http://127.0.0.1" }).port, 80);

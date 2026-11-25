@@ -44,7 +44,7 @@ const CAROL = "did:plc:carolaaaaaaaaaaaaaaaaaaa";
 
 function makeWorkspace(overrides: Partial<WorkspaceSummary> = {}): WorkspaceSummary {
   return {
-    uri: `at://${GROUP_DID}/space/new.flock.workspace/self`,
+    uri: `at:space/${GROUP_DID}/new.flock.workspace/self`,
     authorityDid: GROUP_DID,
     groupDid: GROUP_DID,
     skey: "self",
@@ -79,10 +79,10 @@ test("REPORT_REASON_TYPES uses OpenSocial 'nsfw' value instead of 'sexual'", () 
 });
 
 test("channelWatchedSpaces watches both the channel space and members/self for live account labels", () => {
-  const channelSpace = `at://${GROUP_DID}/space/new.flock.channel/general`;
+  const channelSpace = `at:space/${GROUP_DID}/new.flock.channel/general`;
   assert.deepEqual(channelWatchedSpaces(channelSpace, GROUP_DID), [
     channelSpace,
-    `at://${GROUP_DID}/space/group.opensocial.members/self`,
+    `at:space/${GROUP_DID}/group.opensocial.members/self`,
   ]);
   assert.deepEqual(channelWatchedSpaces(null, GROUP_DID), []);
   assert.deepEqual(channelWatchedSpaces(channelSpace, undefined), []);
@@ -97,7 +97,7 @@ test("buildVisibleWorkspaceRoster withholds takendownMembers from active and pen
 
 test("toPermalinkMessage preserves cid, hidden, and labels on out-of-window permalink messages", () => {
   const linked = toPermalinkMessage({
-    uri: `at://${GROUP_DID}/space/new.flock.channel/general/${BOB}/new.flock.channel.message/3lbl111111111`,
+    uri: `at:space/${GROUP_DID}/new.flock.channel/general/${BOB}/new.flock.channel.message/3lbl111111111`,
     cid: "bafyreipermalinkcid123",
     rkey: "3lbl111111111",
     repo: BOB,
@@ -313,7 +313,7 @@ test("fetchGovernanceSnapshot isolates independent governance requests via Promi
   const pendingReq = { member: BOB, createdAt: "2026-11-10T00:00:00.000Z", message: "Let me in" };
   const pendingDelivery = {
     inviteUri: "at://u1/inv/1",
-    spaceUri: "at://u1/space/group.opensocial.invites/self",
+    spaceUri: "at:space/u1/group.opensocial.invites/self",
     inviteeDid: CAROL,
     rkey: "3lbl111111111",
     repoRev: "rev1",
@@ -328,7 +328,7 @@ test("fetchGovernanceSnapshot isolates independent governance requests via Promi
       listRoles: async () => [
         {
           rkey: "moderator",
-          uri: `at://${GROUP_DID}/space/group.opensocial.members/self/${GROUP_DID}/group.opensocial.role/moderator`,
+          uri: `at:space/${GROUP_DID}/group.opensocial.members/self/${GROUP_DID}/group.opensocial.role/moderator`,
           displayName: "Moderator",
           default: false,
           scopes: [],
@@ -400,7 +400,7 @@ test("governance & moderation cursor pagination helpers deduplicate and append p
     [
       {
         inviteUri: "at://u1/inv/1",
-        spaceUri: "at://u1/space/group.opensocial.invites/self",
+        spaceUri: "at:space/u1/group.opensocial.invites/self",
         inviteeDid: BOB,
         rkey: "1",
         repoRev: "rev1",
@@ -413,7 +413,7 @@ test("governance & moderation cursor pagination helpers deduplicate and append p
     [
       {
         inviteUri: "at://u1/inv/1",
-        spaceUri: "at://u1/space/group.opensocial.invites/self",
+        spaceUri: "at:space/u1/group.opensocial.invites/self",
         inviteeDid: BOB,
         rkey: "1",
         repoRev: "rev1",
@@ -424,7 +424,7 @@ test("governance & moderation cursor pagination helpers deduplicate and append p
       },
       {
         inviteUri: "at://u2/inv/2",
-        spaceUri: "at://u2/space/group.opensocial.invites/self",
+        spaceUri: "at:space/u2/group.opensocial.invites/self",
         inviteeDid: CAROL,
         rkey: "2",
         repoRev: "rev2",
@@ -472,13 +472,13 @@ test("governance & moderation cursor pagination helpers deduplicate and append p
 test("fetchModerationSnapshot isolates listRules and listModSubjects via Promise.allSettled in both failure directions", async () => {
   const sampleRule = {
     rkey: "3lblrule00001",
-    uri: `at://${GROUP_DID}/space/group.opensocial.meta/self/${GROUP_DID}/group.opensocial.rule/3lblrule00001`,
+    uri: `at:space/${GROUP_DID}/group.opensocial.meta/self/${GROUP_DID}/group.opensocial.rule/3lblrule00001`,
     title: "Be respectful",
     text: "No harassment or spam.",
     order: 1,
   };
   const sampleSubject = {
-    subject: `at://${GROUP_DID}/space/new.flock.channel/general/${BOB}/new.flock.channel.message/3lblmsg00001`,
+    subject: `at:space/${GROUP_DID}/new.flock.channel/general/${BOB}/new.flock.channel.message/3lblmsg00001`,
     cid: "bafyreimodsub1",
     status: "open" as const,
     createdAt: "2026-11-10T00:00:00.000Z",
@@ -578,7 +578,7 @@ test("Round 9 Finding #4: executeBrowserWorkspaceCreation routes through durable
         return {
           operationId: opts?.operationId ?? "",
           groupDid: GROUP_DID,
-          workspace: `at://${GROUP_DID}/space/new.flock.workspace/self`,
+          workspace: `at:space/${GROUP_DID}/new.flock.workspace/self`,
           state: "pending",
           completedSteps: ["workspace-space", "inbox-space"],
           error: "Temporary outage",
@@ -588,7 +588,7 @@ test("Round 9 Finding #4: executeBrowserWorkspaceCreation routes through durable
       return {
         operationId: opts?.operationId ?? "",
         groupDid: GROUP_DID,
-        workspace: `at://${GROUP_DID}/space/new.flock.workspace/self`,
+        workspace: `at:space/${GROUP_DID}/new.flock.workspace/self`,
         state: "completed",
         completedSteps: ["workspace-space", "creator-admin", "general-directory"],
       };

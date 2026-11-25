@@ -70,7 +70,7 @@ const outcome = async (promise: Promise<unknown>): Promise<Outcome> => {
 const credentialAt = async (
   spaces: SpaceClient,
   actor: Actor,
-  space: `at://${string}`,
+  space: `at:space/${string}`,
   ownerPds: TestPds,
 ): Promise<SpaceCredential> => {
   const key = await P256Keypair.create()
@@ -150,7 +150,7 @@ describe('atproto Slack direct-message protocol conformance', () => {
 
       const aliceHalf = await spaces.createSpace(alice, { spaceType: CONVERSATION_TYPE, skey: convKey })
       await spaces.putMember(alice, aliceHalf, bob, READ_ONLY)
-      const bobHalf = `at://${bob.did}/space/${CONVERSATION_TYPE}/${convKey}` as const
+      const bobHalf = `at:space/${bob.did}/${CONVERSATION_TYPE}/${convKey}` as const
       await bob.client.call(
         com.atproto.space.createSpace,
         {
@@ -199,7 +199,7 @@ describe('atproto Slack direct-message protocol conformance', () => {
 
       // Outsiders are refused, and the refusal does not tell an existing space from a missing one.
       const existing = await outcome(credentialAt(spaces, eve, aliceHalf, pds1))
-      const missing = await outcome(credentialAt(spaces, eve, `at://${alice.did}/space/${CONVERSATION_TYPE}/3kdmmissing22`, pds1))
+      const missing = await outcome(credentialAt(spaces, eve, `at:space/${alice.did}/${CONVERSATION_TYPE}/3kdmmissing22`, pds1))
       console.log('DM-M0 existence oracle — existing:', JSON.stringify(existing), 'missing:', JSON.stringify(missing))
       // No existence oracle on the pinned PDS: a non-member is told SpaceNotFound for both,
       // with the same status and message, so the answer discloses nothing about the half.
@@ -376,8 +376,8 @@ describe('atproto Slack direct-message protocol conformance', () => {
       const bob = await spaces.createActor('bob', pds2)
       const convKey = '3kdmoauthconv'
 
-      const bobInbox = `at://${bob.did}/space/${INBOX_TYPE}/self`
-      const bobHalf = `at://${bob.did}/space/${CONVERSATION_TYPE}/${convKey}`
+      const bobInbox = `at:space/${bob.did}/${INBOX_TYPE}/self`
+      const bobHalf = `at:space/${bob.did}/${CONVERSATION_TYPE}/${convKey}`
       for (const [type, skey, policy] of [[INBOX_TYPE, 'self', PUBLIC_WRITE_POLICY], [CONVERSATION_TYPE, convKey, MEMBER_LIST_POLICY]] as const) {
         await bob.client.call(com.atproto.space.createSpace, {
           spaceType: type, skey, policy,
@@ -487,7 +487,7 @@ describe('atproto Slack direct-message protocol conformance', () => {
         spaceType: CONVERSATION_TYPE, skey: convKey,
         policy: MEMBER_LIST_POLICY,
       })
-      const aliceHalf = `at://${alice.did}/space/${CONVERSATION_TYPE}/${convKey}`
+      const aliceHalf = `at:space/${alice.did}/${CONVERSATION_TYPE}/${convKey}`
       await callAsOAuth(dmToken.access_token, 'com.atproto.memberspace.putMembers', { space: aliceHalf, members: [{ did: bob.did, ...READ_ONLY }] })
       await callAsOAuth(dmToken.access_token, 'com.atproto.space.createRecord', {
         space: aliceHalf, repo: alice.did, collection: MESSAGE,
@@ -539,7 +539,7 @@ describe('atproto Slack direct-message protocol conformance', () => {
       const convKey = '3kdmhundred22'
       const setupStarted = performance.now()
       const halves = await Promise.all(participants.map(async (owner) => {
-        const half = `at://${owner.did}/space/${CONVERSATION_TYPE}/${convKey}` as const
+        const half = `at:space/${owner.did}/${CONVERSATION_TYPE}/${convKey}` as const
         await owner.client.call(com.atproto.space.createSpace, {
           spaceType: CONVERSATION_TYPE, skey: convKey,
           policy: MEMBER_LIST_POLICY,
@@ -612,8 +612,8 @@ describe('atproto Slack direct-message protocol conformance', () => {
       const bob = await spaces.createActor('bob', pds2)
       const convKey = '3kdmscopetst1'
 
-      const bobInbox = `at://${bob.did}/space/${INBOX_TYPE}/self`
-      const bobHalf = `at://${bob.did}/space/${CONVERSATION_TYPE}/${convKey}`
+      const bobInbox = `at:space/${bob.did}/${INBOX_TYPE}/self`
+      const bobHalf = `at:space/${bob.did}/${CONVERSATION_TYPE}/${convKey}`
       for (const [type, skey, policy] of [[INBOX_TYPE, 'self', PUBLIC_WRITE_POLICY], [CONVERSATION_TYPE, convKey, MEMBER_LIST_POLICY]] as const) {
         await bob.client.call(com.atproto.space.createSpace, {
           spaceType: type, skey, policy,
@@ -714,7 +714,7 @@ describe('atproto Slack direct-message protocol conformance', () => {
       // --- capabilities DM_BROWSER_SCOPES grants ---
 
       // create its own inbox
-      const aliceInbox = `at://${alice.did}/space/${INBOX_TYPE}/self`
+      const aliceInbox = `at:space/${alice.did}/${INBOX_TYPE}/self`
       const createdInbox = await callAsOAuth(dmToken.access_token, 'com.atproto.space.createSpace', {
         spaceType: INBOX_TYPE, skey: 'self', policy: MEMBER_LIST_POLICY,
       })
@@ -728,7 +728,7 @@ describe('atproto Slack direct-message protocol conformance', () => {
       await callAsOAuth(dmToken.access_token, 'com.atproto.memberspace.removeMembers', { space: aliceInbox, dids: [bob.did] })
 
       // create its own half
-      const aliceHalf = `at://${alice.did}/space/${CONVERSATION_TYPE}/${convKey}`
+      const aliceHalf = `at:space/${alice.did}/${CONVERSATION_TYPE}/${convKey}`
       const createdHalf = await callAsOAuth(dmToken.access_token, 'com.atproto.space.createSpace', {
         spaceType: CONVERSATION_TYPE, skey: convKey, policy: MEMBER_LIST_POLICY,
       })

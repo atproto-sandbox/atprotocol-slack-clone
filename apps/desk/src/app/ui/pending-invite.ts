@@ -1,4 +1,4 @@
-import { isDid, parseWorkspaceUri, workspaceUri } from "@flock/protocol/keys";
+import { isDid, normalizeLegacySpaceUri, parseWorkspaceUri, workspaceUri } from "@flock/protocol/keys";
 import { PENDING_INVITE_STORAGE_KEY } from "@flock/shell";
 
 export { PENDING_INVITE_STORAGE_KEY };
@@ -13,7 +13,7 @@ export function parseInviteTarget(raw: string | null | undefined, options: { all
 } | null {
   const trimmed = raw?.trim();
   if (!trimmed) return null;
-  const parsedWs = parseWorkspaceUri(trimmed);
+  const parsedWs = parseWorkspaceUri(normalizeLegacySpaceUri(trimmed));
   if (parsedWs) {
     return { groupDid: parsedWs.authorityDid, workspaceUri: workspaceUri(parsedWs.authorityDid) };
   }
@@ -25,9 +25,10 @@ export function parseInviteTarget(raw: string | null | undefined, options: { all
 
 export function savePendingInvite(uri: string): void {
   if (typeof sessionStorage === "undefined") return;
-  if (!parseWorkspaceUri(uri)) return;
+  const normalized = normalizeLegacySpaceUri(uri.trim());
+  if (!parseWorkspaceUri(normalized)) return;
   try {
-    sessionStorage.setItem(PENDING_INVITE_STORAGE_KEY, uri);
+    sessionStorage.setItem(PENDING_INVITE_STORAGE_KEY, normalized);
   } catch {
     // ignore storage quota/privacy mode errors
   }
@@ -37,7 +38,9 @@ export function loadPendingInvite(): string | null {
   if (typeof sessionStorage === "undefined") return null;
   try {
     const raw = sessionStorage.getItem(PENDING_INVITE_STORAGE_KEY);
-    return raw && parseWorkspaceUri(raw) ? raw : null;
+    if (!raw) return null;
+    const normalized = normalizeLegacySpaceUri(raw.trim());
+    return parseWorkspaceUri(normalized) ? normalized : null;
   } catch {
     return null;
   }

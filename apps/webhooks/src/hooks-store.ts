@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { chmod, lstat, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import { normalizeLegacySpaceUri } from "@flock/client/workspace-client";
 
 const DUMMY_DIGEST = createHash("sha256").update("flock-webhooks-dummy-secret", "utf8").digest();
 const HOOK_ID_PATTERN = /^[A-Za-z0-9_-]{22}$/;
@@ -153,7 +154,11 @@ export class HooksStore {
       const parsed = JSON.parse(await readFile(this.path, "utf8")) as { hooks?: Record<string, StoredHook> };
       const raw = parsed.hooks ?? {};
       const clean: Record<string, StoredHook> = Object.create(null) as Record<string, StoredHook>;
-      for (const [key, value] of Object.entries(raw)) clean[key] = value;
+      for (const [key, value] of Object.entries(raw)) {
+        clean[key] = typeof value.workspace === "string"
+          ? { ...value, workspace: normalizeLegacySpaceUri(value.workspace) }
+          : value;
+      }
       return (this.cached ??= clean);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {

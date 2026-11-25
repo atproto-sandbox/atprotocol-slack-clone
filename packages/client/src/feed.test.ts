@@ -10,7 +10,7 @@ import type { ChangesAnswer, OperatorService } from "./operator-client";
 // Following spaces through the change feed: the order that loses nothing, and what the client does with changed, reset and
 // denied spaces.
 
-const SPACE = "at://did:plc:owner/space/new.flock.channel/general";
+const SPACE = "at:space/did:plc:owner/new.flock.channel/general";
 const ALICE = "did:plc:alice";
 
 /** An operator that answers each call from a queue, recording what it was asked. */
@@ -137,7 +137,7 @@ test("the long-poll token lasts fourteen minutes and is reused across polls; eve
       return Response.json(
         new URL(request.url).pathname.endsWith("getChanges")
           ? answer("1")
-          : { operation: { id: "op1", workspace: "at://did:plc:owner/space/new.flock.workspace/self", kind: "createChannel", state: "completed", completedSteps: [], createdAt: "2026-11-10T12:00:00.000Z", updatedAt: "2026-11-10T12:00:00.000Z" } },
+          : { operation: { id: "op1", workspace: "at:space/did:plc:owner/new.flock.workspace/self", kind: "createChannel", state: "completed", completedSteps: [], createdAt: "2026-11-10T12:00:00.000Z", updatedAt: "2026-11-10T12:00:00.000Z" } },
       );
     },
   }, { operator: service });
@@ -145,8 +145,8 @@ test("the long-poll token lasts fourteen minutes and is reused across polls; eve
   assert.equal(await issued(async () => { await engine.operator!.getChanges([]); await engine.operator!.getChanges([]); }), 1);
   assert.equal(expiries[0]! - Math.floor(network.now() / 1000), 14 * 60);
   assert.equal(await issued(async () => {
-    await engine.operator!.getOperation("at://did:plc:owner/space/new.flock.workspace/self", "op1");
-    await engine.operator!.getOperation("at://did:plc:owner/space/new.flock.workspace/self", "op1");
+    await engine.operator!.getOperation("at:space/did:plc:owner/new.flock.workspace/self", "op1");
+    await engine.operator!.getOperation("at:space/did:plc:owner/new.flock.workspace/self", "op1");
   }), 2);
   network.advanceClock(13.5 * 60 * 1000);
   assert.equal(await issued(() => engine.operator!.getChanges([])), 1, "renewed a minute before it runs out");

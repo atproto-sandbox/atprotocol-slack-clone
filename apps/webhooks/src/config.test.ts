@@ -6,7 +6,7 @@ const BASE = {
   WEBHOOKS_URL: "http://127.0.0.1:3003",
   WEBHOOKS_STATE_FILE: "./.webhooks-session.json",
   WEBHOOKS_DID: "did:plc:webhooks",
-  WEBHOOKS_WORKSPACES: "at://did:plc:a/space/new.flock.workspace/acme, at://did:plc:b/space/new.flock.workspace/beta",
+  WEBHOOKS_WORKSPACES: "at:space/did:plc:a/new.flock.workspace/acme, at:space/did:plc:b/new.flock.workspace/beta",
   PLC_URL: "https://plc.directory",
   OPERATOR_URL: "http://127.0.0.1:3001",
   OPERATOR_SERVICE_REF: "did:web:localhost%3A3001#atproto_flock_operator",
@@ -21,8 +21,8 @@ test("readWebhooksConfig derives port, loopback host, workspaces, and a separate
   assert.equal(cfg.trustProxy, false);
   assert.equal(cfg.hooksFile, "./.webhooks-session.json.hooks.json");
   assert.deepEqual(cfg.workspaces, [
-    "at://did:plc:a/space/new.flock.workspace/acme",
-    "at://did:plc:b/space/new.flock.workspace/beta",
+    "at:space/did:plc:a/new.flock.workspace/acme",
+    "at:space/did:plc:b/new.flock.workspace/beta",
   ]);
   assert.equal(readWebhooksConfig({ ...BASE, WEBHOOKS_TRUST_PROXY: "true" }).trustProxy, true);
 });

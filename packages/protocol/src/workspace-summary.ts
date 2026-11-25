@@ -5,6 +5,7 @@ import {
   groupMetaUri,
   isDid,
   isTid,
+  parseSpaceUri,
   parseWorkspaceUri,
   SELF_SKEY,
 } from "./keys";
@@ -341,16 +342,14 @@ export function summarizeWorkspace(uri: string, viewerDid: string, records: Work
   let missingCorePolicy = false;
   if (records.spacePolicies) {
     for (const [policySpaceUri, policy] of records.spacePolicies.entries()) {
-      const parsed = policySpaceUri.startsWith(`at://${groupDid}/space/`)
-        ? policySpaceUri.slice(`at://${groupDid}/space/`.length).split("/")
-        : null;
-      if (!parsed || parsed.length !== 2) {
+      const parsed = parseSpaceUri(policySpaceUri);
+      if (!parsed || parsed.authorityDid !== groupDid) {
         invalidPolicyCount += 1;
         continue;
       }
       const check = validateSpacePolicy(
         { $type: OPENSOCIAL_POLICY, ...policy },
-        { groupDid, spaceType: parsed[0]!, skey: parsed[1]! },
+        { groupDid, spaceType: parsed.type, skey: parsed.skey },
       );
       if (!check.valid) {
         invalidPolicyCount += 1;

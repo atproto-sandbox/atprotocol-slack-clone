@@ -7,14 +7,14 @@
     "./*": "./src/*.ts"
   },
   "dependencies": {
-    "@atproto/crypto": "0.0.0-spaces-alpha-20261117141222",
-    "@atproto/lex-data": "0.0.0-spaces-alpha-20261117141222",
-    "@atproto/lexicon": "0.0.0-spaces-alpha-20261117141222",
-    "@atproto/oauth-scopes": "0.0.0-spaces-alpha-20261117141222",
-    "@atproto/space": "0.0.0-spaces-alpha-20261117141222",
-    "@atproto/star": "0.0.0-spaces-alpha-20261117141222",
-    "@atproto/syntax": "0.0.0-spaces-alpha-20261117141222",
-    "@atproto/xrpc": "0.8.13",
+    "@atproto/crypto": "0.0.0-spaces-alpha-20261124235736",
+    "@atproto/lex-data": "0.1.11",
+    "@atproto/lexicon": "0.0.0-spaces-alpha-20261124235736",
+    "@atproto/oauth-scopes": "0.0.0-spaces-alpha-20261124235736",
+    "@atproto/space": "0.0.0-spaces-alpha-20261124235736",
+    "@atproto/star": "0.0.1",
+    "@atproto/syntax": "0.0.0-spaces-alpha-20261124235736",
+    "@atproto/xrpc": "0.0.0-spaces-alpha-20261124235736",
     "@noble/hashes": "1.8.0",
     "multiformats": "13.4.2"
   }

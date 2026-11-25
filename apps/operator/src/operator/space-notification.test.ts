@@ -31,7 +31,7 @@ beforeEach(() => {
   getRawDb().prepare("DELETE FROM notification_registration").run();
 });
 
-const CHANNEL = "at://did:plc:owner/space/new.flock.channel/alpha";
+const CHANNEL = "at:space/did:plc:owner/new.flock.channel/alpha";
 const ALICE = "did:plc:alice";
 const BOB = "did:plc:bob";
 const isWebhookRefusal = (error: unknown) => error instanceof WebhookAuthError && error.status === 400;
@@ -58,7 +58,7 @@ test("authenticateSpaceWebhook rejects missing, empty, mismatched, unregistered,
   assert.throws(() => authenticateSpaceWebhook(CHANNEL, ""), isWebhookRefusal);
   assert.throws(() => authenticateSpaceWebhook(CHANNEL, "wrong-token"), isWebhookRefusal);
   assert.throws(() => authenticateSpaceWebhook(CHANNEL, "operator-secret-token-1-extra"), isWebhookRefusal);
-  assert.throws(() => authenticateSpaceWebhook("at://did:plc:owner/space/new.flock.channel/unregistered", "operator-secret-token-1"), isWebhookRefusal);
+  assert.throws(() => authenticateSpaceWebhook("at:space/did:plc:owner/new.flock.channel/unregistered", "operator-secret-token-1"), isWebhookRefusal);
   assert.throws(() => authenticateSpaceWebhook("not-a-space", "operator-secret-token-1"), isWebhookRefusal);
   assert.throws(() => authenticateSpaceWebhook(CHANNEL, "x".repeat(513)), isWebhookRefusal);
 

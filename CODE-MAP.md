@@ -11,7 +11,7 @@
 | Group Host (`apps/group-host`) | Node.js 22, Express, `@atproto/xrpc-server`, `@atproto/repo`, `@atproto/space`, `@atproto/star`, `@atproto/oauth-scopes`, `@did-plc/lib`, `better-sqlite3` (`42` tables) |
 | Operator (`apps/operator`) | Node.js 22, Express, `@atproto/xrpc-server`, `@atproto/oauth-client-node`, Kysely + `better-sqlite3` |
 | Apps (`apps/echo-bot`, `apps/webhooks`) | Node.js 22, `@flock/client` (`@flock/client/node/*`) |
-| Testing & Verification | `node:test`, Playwright, Cucumber BDD (`features/*.feature`), `FakeNetwork` (`@flock/testing`), pinned `@atproto` Spaces (`6747610566`) & `opensocial.group` (`8df0cc82`) |
+| Testing & Verification | `node:test`, Playwright, Cucumber BDD (`features/*.feature`), `FakeNetwork` (`@flock/testing`), pinned `@atproto` Spaces (`f839c47e`) & `opensocial.group` (`8df0cc82`) |
 
 ## System boundaries
 
@@ -119,7 +119,7 @@ packages/                 Shared libraries. `protocol` and `client` (outside `cl
     src/extensions.ts, src/entity-merge.ts, src/bounded-json.ts, src/map-limited.ts
                              Declarative extension catalog (`tasks`), causal DAG/HLC/OR-Set merge (`entity-merge.ts`,
                               lint-isolated to Tasks + `independent-tasks`), bounded JSON reader, fixed-concurrency fan-out.
-    src/lexicons/api/        Generated XRPC schema dict & types (`ATPROTO_PIN_CHECKOUT=../atproto-spaces-r12 pnpm codegen:lex`).
+    src/lexicons/api/        Generated XRPC schema dict & types (`ATPROTO_PIN_CHECKOUT=../atproto-spaces-r14 pnpm codegen:lex`).
     src/atproto/             Isomorphic space protocol helpers: `xrpc.ts`, `space-key.ts`, `space-policy.ts`, `kem-key.ts`,
                               `repo-failure.ts`, `space-credential-core.ts` (`authorizeSpaceSync`, RFC 9421 credential PoP,
                               HPKE KEM-MAC verification, `fetchVerifiedRepoStar`), `record-pages.ts`, `valid-channel-messages.ts`.
@@ -198,7 +198,7 @@ apps/
                               `0`-step `aborted_actor_revoked`, and `>=1`-step audited `operationAdminTakeover`.
     src/operator/registrations.ts, space-notification.ts, dm-feed-wakes.ts, feed.ts, security.ts, methods.ts, server.ts
                              1-webhook-per-space `notify` renewal (`60s` loop + `30m` sweep), `getDmNotifyTarget` (`dm1`) &
-                              `getSpaceNotifyTarget` (`inv1` exclusively for `at://<callerDid>/space/group.opensocial.invites/self`),
+                              `getSpaceNotifyTarget` (`inv1` exclusively for `at:space/<callerDid>/group.opensocial.invites/self`),
                               ephemeral `dm-feed-wakes`, and `getChanges`.
     scripts/authority-grant.ts  `pnpm authority generate-key <kid> | revoke <did>`.
   web/  @flock/web              Stateless Next.js UI (`pnpm dev` / `build:web` / `start`, `:3000`).

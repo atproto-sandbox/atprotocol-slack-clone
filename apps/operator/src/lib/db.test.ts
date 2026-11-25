@@ -45,7 +45,7 @@ test("OPERATION_TAKEOVER_MIGRATION = 4 upgrades a pre-R13 6-state operation tabl
   `);
 
   const workspaceDid = "did:plc:rthirteenupgrd2222222222";
-  const workspaceUri = `at://${workspaceDid}/space/new.flock.workspace/self`;
+  const workspaceUri = `at:space/${workspaceDid}/new.flock.workspace/self`;
   r12.prepare(`INSERT INTO operation
     (workspace, workspace_uri, actor, operation_id, request_hash, request_json, state, steps_json, error, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)

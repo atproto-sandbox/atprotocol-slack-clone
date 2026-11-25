@@ -625,7 +625,7 @@ export function checkRoleAndAssignmentEscalation(params: {
 
   if (params.policyWrite) {
     const pw = params.policyWrite;
-    const spaceUri = pw.spaceUri ?? `at://${groupDid}/space/${pw.spaceType}/${pw.skey}`;
+    const spaceUri = pw.spaceUri ?? `at:space/${groupDid}/${pw.spaceType}/${pw.skey}`;
     const prevPolicy = pw.prevPolicy;
     const isEffAdmin = pw.isEffectiveAdmin ?? isEffectiveAdminMember(actorDid, preState, groupDid);
     const scopeTarget = { groupDid, spaceType: pw.spaceType, skey: pw.skey };

@@ -15,6 +15,7 @@ import {
   personalInvitesUri,
   requestDigest,
   requestRecordKey,
+  requireSpaceAuthority,
   spaceRecordUri,
   stableHash,
   tidNow,
@@ -87,7 +88,7 @@ function writePreKindTableRow(row: {
 }): void {
   const raw = getRawDb();
   const now = Math.floor(Date.now() / 1000) - 60;
-  const authority = row.workspace.split("/")[2]!;
+  const authority = requireSpaceAuthority(row.workspace);
   raw
     .prepare(
       `INSERT INTO operation (workspace, workspace_uri, actor, operation_id, request_hash, request_json, state, steps_json, error, created_at, updated_at)

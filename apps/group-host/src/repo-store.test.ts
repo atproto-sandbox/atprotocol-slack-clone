@@ -61,8 +61,8 @@ test("GroupRepoStore enforces public CAR/CAS, space auto-indexing, 129..512 skey
     const token = flow.tokenResponse!.access_token;
     const groupDid = flow.tokenResponse!.sub;
     const groupHandle = "core-repo.groups.localhost";
-    const metaSpace = `at://${groupDid}/space/group.opensocial.meta/self`;
-    const membersSpace = `at://${groupDid}/space/group.opensocial.members/self`;
+    const metaSpace = `at:space/${groupDid}/group.opensocial.meta/self`;
+    const membersSpace = `at:space/${groupDid}/group.opensocial.members/self`;
 
     // 1. Public repo handle `at-identifier`, blob upload, and `swapRecord` / `swapCommit` `InvalidSwap` CAS
     const getByHandle = await fetch(
@@ -154,8 +154,8 @@ test("GroupRepoStore enforces public CAR/CAS, space auto-indexing, 129..512 skey
     assert.equal(cr513.status, 400, "513-char skey must be rejected");
 
     // Verify `unlisted: false` auto-indexed `group.opensocial.space/<tid>` in `members/self`, and flipping `unlisted: true` removes it!
-    const chanUri129 = `at://${groupDid}/space/new.flock.channel/${skey129}`;
-    const chanUri512 = `at://${groupDid}/space/new.flock.channel/${skey512}`;
+    const chanUri129 = `at:space/${groupDid}/new.flock.channel/${skey129}`;
+    const chanUri512 = `at:space/${groupDid}/new.flock.channel/${skey512}`;
     const listIdx1 = await dpop.fetchWithDpop(
       `${gh.url}/xrpc/com.atproto.space.listRecords?space=${encodeURIComponent(membersSpace)}&repo=${encodeURIComponent(groupDid)}&collection=group.opensocial.space`,
       { method: "GET", accessToken: token },
@@ -244,7 +244,7 @@ test("GroupRepoStore enforces public CAR/CAS, space auto-indexing, 129..512 skey
     assert.equal(badUrlProf.status, 400);
 
     // `com.atproto.label.record`: non-TID rkey, `val: ""` (`EmptyLabelValue`), and `CrossSpaceLabel` rejected!
-    const chanSpace = `at://${groupDid}/space/new.flock.channel/${skey129}`;
+    const chanSpace = `at:space/${groupDid}/new.flock.channel/${skey129}`;
     const badLabelVal = await dpop.fetchWithDpop(`${gh.url}/xrpc/com.atproto.space.putRecord`, {
       method: "POST",
       accessToken: token,
@@ -352,7 +352,7 @@ test("GroupRepoStore enforces public CAR/CAS, space auto-indexing, 129..512 skey
     assert.equal(((await delAdminRole.json()) as { error: string }).error, "RoleInUse");
 
     // Create Flock workspace space `new.flock.workspace/self` + `new.flock.workspace/self` record to enable Flock invariants (`LastAdmin` + `known_app_subject`)
-    const wsSpace = `at://${groupDid}/space/new.flock.workspace/self`;
+    const wsSpace = `at:space/${groupDid}/new.flock.workspace/self`;
     await dpop.fetchWithDpop(`${gh.url}/xrpc/com.atproto.space.createSpace`, {
       method: "POST",
       accessToken: token,
@@ -473,7 +473,7 @@ test("authorizeSpaceSync, strict zero-skew space credentials, HPKE KEM-MAC, 105-
     const dpop = flow.dpop;
     const token = flow.tokenResponse!.access_token;
     const groupDid = flow.tokenResponse!.sub;
-    const membersSpace = `at://${groupDid}/space/group.opensocial.members/self`;
+    const membersSpace = `at:space/${groupDid}/group.opensocial.members/self`;
 
     // Admit Bob into `members/self`
     await dpop.fetchWithDpop(`${gh.url}/xrpc/com.atproto.space.putRecord`, {
@@ -694,7 +694,7 @@ test("authorizeSpaceSync, strict zero-skew space credentials, HPKE KEM-MAC, 105-
     assert.equal(importedMemRow?.incarnation, `legacy-cid:${legacyMemSer.cid.toString()}`);
 
     // Also import an empty external `invites/self` STAR and verify `group_invite_target` is reconstructed!
-    const emptyInvSpace = `at://${bob.did}/space/group.opensocial.invites/self`;
+    const emptyInvSpace = `at:space/${bob.did}/group.opensocial.invites/self`;
     const emptyInvChunks: Buffer[] = [];
     for await (const chunk of writeRepoStar(
       new RepoCommit().toCommit({
@@ -876,8 +876,8 @@ test("isPermissionSubset enforces exact structural wildcard containment and RBAC
     const adminDpop = createFlow.dpop;
     const adminTok = createFlow.tokenResponse!.access_token;
     const groupDid = createFlow.tokenResponse!.sub;
-    const membersSpace = `at://${groupDid}/space/group.opensocial.members/self`;
-    const secretChan = `at://${groupDid}/space/new.flock.channel/secret`;
+    const membersSpace = `at:space/${groupDid}/group.opensocial.members/self`;
+    const secretChan = `at:space/${groupDid}/new.flock.channel/secret`;
     const nowIso = new Date().toISOString();
 
     // Admin creates `helper`, `protected-role`, and `space-mgr` (assignable: ["helper"], NO read/write on secretChan initially)
@@ -1138,8 +1138,8 @@ test("Commit-time TOCTOU reauthorization and concurrent putRecord create-vs-upda
     const adminDpop = createFlow.dpop;
     const adminTok = createFlow.tokenResponse!.access_token;
     const groupDid = createFlow.tokenResponse!.sub;
-    const membersSpace = `at://${groupDid}/space/group.opensocial.members/self`;
-    const chanSpace = `at://${groupDid}/space/new.flock.channel/general`;
+    const membersSpace = `at:space/${groupDid}/group.opensocial.members/self`;
+    const chanSpace = `at:space/${groupDid}/new.flock.channel/general`;
     const nowIso = new Date().toISOString();
 
     // Create `creator-only` role with `create` ONLY (NO `update`!) on public post & channel message
@@ -1312,7 +1312,7 @@ test("Commit-time TOCTOU reauthorization and concurrent putRecord create-vs-upda
     //    - rejects unrelated external space before `groupDid` has a local `space_repo` (`403 Forbidden`)
     //    - enforces single-use `jti` (`401 ReplayDetected`), per-space revocation isolation, and `10,000`-row stored quota (`429 RateLimitExceeded`)
     const notifyJwt = await alice.signServiceJwt(groupDid, "com.atproto.space.notifyCredentialsRevoked");
-    const aliceSpace = `at://${alice.did}/space/group.opensocial.invites/self`;
+    const aliceSpace = `at:space/${alice.did}/group.opensocial.invites/self`;
     for (const invalidBody of [
       { space: aliceSpace, jtis: ["jti-legacy-only"] },
       { space: aliceSpace, credentials: [] },
@@ -1517,8 +1517,8 @@ test("Round 4 hardening: atomic meta publicRead <-> declaration/self coupling, s
     const dpop = flow.dpop;
     const token = flow.tokenResponse!.access_token;
     const groupDid = flow.tokenResponse!.sub;
-    const metaSpace = `at://${groupDid}/space/group.opensocial.meta/self`;
-    const membersSpace = `at://${groupDid}/space/group.opensocial.members/self`;
+    const metaSpace = `at:space/${groupDid}/group.opensocial.meta/self`;
+    const membersSpace = `at:space/${groupDid}/group.opensocial.members/self`;
 
     // 1. Atomic coupling between `meta/self` `policy.publicRead` and `group.opensocial.declaration/self`
     const initDeclRes = await fetch(
@@ -1641,7 +1641,7 @@ test("Round 4 hardening: atomic meta publicRead <-> declaration/self coupling, s
     });
     const wildDpop = wildFlow.dpop;
     const wildTok = wildFlow.tokenResponse!.access_token;
-    const bobInvSpace = `at://${bob.did}/space/group.opensocial.invites/self`;
+    const bobInvSpace = `at:space/${bob.did}/group.opensocial.invites/self`;
 
     const badExtCollectionRes = await wildDpop.fetchWithDpop(`${gh.url}/xrpc/com.atproto.space.putRecord`, {
       method: "POST",
@@ -1701,7 +1701,7 @@ test("Round 4 hardening: atomic meta publicRead <-> declaration/self coupling, s
     gh.db.prepare("UPDATE group_account SET activated = 1 WHERE did = ?").run(groupDid);
 
     // 3. Cryptographic `clientAttestation` verification on `http://localhost:...`!
-    const gatedChan = `at://${groupDid}/space/new.flock.channel/app-gated`;
+    const gatedChan = `at:space/${groupDid}/new.flock.channel/app-gated`;
     const mkGated = await dpop.fetchWithDpop(`${gh.url}/xrpc/com.atproto.space.createSpace`, {
       method: "POST",
       accessToken: token,
@@ -1843,7 +1843,7 @@ test("Round 7 hardening: anonymous publicRead credentials (writer_did IS NULL) f
     const dpop = flow.dpop;
     let token = flow.tokenResponse!.access_token;
     const groupDid = flow.tokenResponse!.sub;
-    const membersSpace = `at://${groupDid}/space/group.opensocial.members/self`;
+    const membersSpace = `at:space/${groupDid}/group.opensocial.members/self`;
 
     // Create `new.flock.workspace/self` so sole-member `leaveGroup` exercises Flock reversible deactivation!
     const createWsRes = await dpop.fetchWithDpop(`${gh.url}/xrpc/com.atproto.space.createSpace`, {
@@ -1888,7 +1888,7 @@ test("Round 7 hardening: anonymous publicRead credentials (writer_did IS NULL) f
       (JSON.parse(Buffer.from(credJwt.split(".")[1]!, "base64url").toString("utf8")) as { jti: string }).jti;
 
     const createPublicChannelWithWriter = async (skey: string, writer: typeof alice) => {
-      const chanUri = `at://${groupDid}/space/new.flock.channel/${skey}`;
+      const chanUri = `at:space/${groupDid}/new.flock.channel/${skey}`;
       const crRes = await dpop.fetchWithDpop(`${gh.url}/xrpc/com.atproto.space.createSpace`, {
         method: "POST",
         accessToken: token,
@@ -2245,7 +2245,7 @@ test("Round 9 hardening: streamed migration writes (importRepo, uploadBlob, impo
     const groupDid = flowSrc.tokenResponse!.sub;
     const srcSigKey = await ghSrc.repoStore.getGroupSigningKey(groupDid);
 
-    const metaSpace = `at://${groupDid}/space/group.opensocial.meta/self`;
+    const metaSpace = `at:space/${groupDid}/group.opensocial.meta/self`;
     const carBytes = new Uint8Array(
       await (await fetch(`${ghSrc.url}/xrpc/com.atproto.sync.getRepo?did=${encodeURIComponent(groupDid)}`)).arrayBuffer(),
     );

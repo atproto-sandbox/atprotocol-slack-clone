@@ -43,8 +43,8 @@ test("OpenSocial requestJoin 6-case decision table (with & without Idempotency-K
     const token = flow.tokenResponse!.access_token;
     const groupDid = flow.tokenResponse!.sub;
     const aud = `${groupDid}#atproto_pds`;
-    const metaSpace = `at://${groupDid}/space/group.opensocial.meta/self`;
-    const membersSpace = `at://${groupDid}/space/group.opensocial.members/self`;
+    const metaSpace = `at:space/${groupDid}/group.opensocial.meta/self`;
+    const membersSpace = `at:space/${groupDid}/group.opensocial.members/self`;
 
     // 0. Guard checks: `iss === groupDid` (`CannotTargetGroupSelf`), `75s` lifetime cap, and `service_jwt_jti` replay!
     const groupSigKey = await gh.repoStore.getGroupSigningKey(groupDid);
@@ -100,7 +100,7 @@ test("OpenSocial requestJoin 6-case decision table (with & without Idempotency-K
 
     // Case B + Invite Delivery Failure -> `retry-invite-delivery` -> Author-Scoped 4-Key Redemption!
     pds.failInviteDeliveryForDid.add(bob.did);
-    const bobInvSpace = `at://${bob.did}/space/group.opensocial.invites/self`;
+    const bobInvSpace = `at:space/${bob.did}/group.opensocial.invites/self`;
     const invRkey = "3jzfcijpj2z2a";
     const putInvRes = await dpop.fetchWithDpop(`${gh.url}/xrpc/com.atproto.space.putRecord`, {
       method: "POST",
@@ -435,8 +435,8 @@ test("leaveGroup If-Match-Membership-Incarnation, Flock sole-member reversible d
     const token = flockFlow.tokenResponse!.access_token;
     const groupDid = flockFlow.tokenResponse!.sub;
     const aud = `${groupDid}#atproto_pds`;
-    const wsSpace = `at://${groupDid}/space/new.flock.workspace/self`;
-    const chanSpace = `at://${groupDid}/space/new.flock.channel/general`;
+    const wsSpace = `at:space/${groupDid}/new.flock.workspace/self`;
+    const chanSpace = `at:space/${groupDid}/new.flock.channel/general`;
 
     await dpop.fetchWithDpop(`${gh.url}/xrpc/com.atproto.space.createSpace`, {
       method: "POST",
@@ -688,7 +688,7 @@ test("leaveGroup If-Match-Membership-Incarnation, Flock sole-member reversible d
       accessToken: nfTok,
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        space: `at://${nfDid}/space/group.opensocial.members/self`,
+        space: `at:space/${nfDid}/group.opensocial.members/self`,
         repo: nfDid,
         collection: "group.opensocial.membership",
         rkey: alice.did,
@@ -722,7 +722,7 @@ test("leaveGroup If-Match-Membership-Incarnation, Flock sole-member reversible d
         accessToken: nfTok,
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          space: `at://${nfDid}/space/group.opensocial.members/self`,
+          space: `at:space/${nfDid}/group.opensocial.members/self`,
           repo: nfDid,
           collection: "group.opensocial.membership",
           rkey: alice.did,
@@ -1107,8 +1107,8 @@ test("Round 9 hardening: verifyPersonalServiceJwt strictly resolves live PLC #at
       200,
     );
     for (const spUri of [
-      `at://${group1Did}/space/group.opensocial.meta/self`,
-      `at://${group1Did}/space/group.opensocial.members/self`,
+      `at:space/${group1Did}/group.opensocial.meta/self`,
+      `at:space/${group1Did}/group.opensocial.members/self`,
     ]) {
       const metaStar = new Uint8Array(
         await (

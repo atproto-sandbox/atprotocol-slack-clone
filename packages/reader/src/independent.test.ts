@@ -266,14 +266,14 @@ test("readIndependentChannelPage distinguishes authority RepoTakendown/Deactivat
 
   const baseMs = network.now();
   const parentRkey = tidNow(baseMs + 500);
-  const parentUri = `at://${AUTHORITY}/space/${SPACE_TYPE.channel}/${chSkey}/${AUTHORITY}/${COLLECTION.message}/${parentRkey}`;
+  const parentUri = `at:space/${AUTHORITY}/${SPACE_TYPE.channel}/${chSkey}/${AUTHORITY}/${COLLECTION.message}/${parentRkey}`;
   await network.writeAs(AUTHORITY, channel, COLLECTION.message, parentRkey, {
     text: "authority-msg",
     createdAt: TIMESTAMP,
   });
 
   const bobParentRkey = tidNow(baseMs + 1);
-  const bobParentUri = `at://${AUTHORITY}/space/${SPACE_TYPE.channel}/${chSkey}/${BOB}/${COLLECTION.message}/${bobParentRkey}`;
+  const bobParentUri = `at:space/${AUTHORITY}/${SPACE_TYPE.channel}/${chSkey}/${BOB}/${COLLECTION.message}/${bobParentRkey}`;
   await network.writeAs(BOB, channel, COLLECTION.message, bobParentRkey, {
     text: "bob-parent",
     createdAt: TIMESTAMP,

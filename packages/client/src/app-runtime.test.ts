@@ -23,9 +23,9 @@ import { AUTHORITY, createWorkspace, key, transportFor, writeMessage } from "./t
 const APP = "did:plc:appaaaaaaaaaaaaaaaaaaaaa";
 const OTHER_APP = "did:plc:otherappaaaaaaaaaaaaaaaa";
 const PERSON = "did:plc:personaaaaaaaaaaaaaaaaaa";
-const WORKSPACE = `at://${AUTHORITY}/space/new.flock.workspace/self`;
-const GENERAL = `at://${AUTHORITY}/space/new.flock.channel/general`;
-const SECRET = `at://${AUTHORITY}/space/new.flock.channel/secret`;
+const WORKSPACE = `at:space/${AUTHORITY}/new.flock.workspace/self`;
+const GENERAL = `at:space/${AUTHORITY}/new.flock.channel/general`;
+const SECRET = `at:space/${AUTHORITY}/new.flock.channel/secret`;
 const PAGE = 3;
 
 let clock = 0;

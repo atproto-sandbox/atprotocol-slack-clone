@@ -65,7 +65,7 @@ test("private visibility transitions require a selected member list", () => {
 });
 
 test("recovery keeps unreadable journal rows visible instead of silently skipping them", () => {
-  const workspace = "at://did:plc:owner/space/new.flock.workspace/team";
+  const workspace = "at:space/did:plc:owner/new.flock.workspace/team";
   const recoveringActor = { did: "did:plc:admin", workspace: { authorityDid: "did:plc:owner", uri: workspace } } as OperatorActor;
   const rows = [
     { actor: "did:plc:admin", operationId: "current", completedSteps: [], requestJson: JSON.stringify({ workspace, request: { kind: "reconcileWorkspace" } }) },

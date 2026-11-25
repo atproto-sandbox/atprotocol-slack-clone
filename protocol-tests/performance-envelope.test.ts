@@ -238,7 +238,7 @@ test(
         );
         const channelCreateAtEnvelopeMs = elapsed(channelCreateStartedAt);
         assert.equal(channelCreateOperation.state, "completed");
-        channels.push(`at://${groupDid}/space/new.flock.channel/scale-final`);
+        channels.push(`at:space/${groupDid}/new.flock.channel/scale-final`);
         assert.equal(channels.length, CHANNELS);
 
         const accountStartedAt = performance.now();

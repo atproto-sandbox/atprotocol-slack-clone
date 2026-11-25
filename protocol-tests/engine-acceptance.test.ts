@@ -152,10 +152,13 @@ test("the engine's channel page matches the independent reader on two real PDS h
 
 /** Waits until the authority lists every writer at the revision its own host reports, so a comparison does not race a write notice. */
 async function settled(pds: PdsNetwork, reader: NetworkActor, space: string, writers: readonly NetworkActor[]): Promise<void> {
-  const [{ mintSpaceCredentialWith }] = await Promise.all([import("@flock/protocol/atproto/space-credential-core")]);
+  const [{ mintSpaceCredentialWith }, { requireSpaceAuthority }] = await Promise.all([
+    import("@flock/protocol/atproto/space-credential-core"),
+    import("@flock/protocol/keys"),
+  ]);
   const transport = actorTransport(pds, reader);
   const credential = await mintSpaceCredentialWith(transport, space);
-  const authorityDid = space.slice("at://".length).split("/")[0]!;
+  const authorityDid = requireSpaceAuthority(space);
   const authority = credential.client(await transport.resolvePds(authorityDid));
   for (let attempt = 0; attempt < 200; attempt += 1) {
     const listed = await authority.query<{ repos: Array<{ $type?: string; repo: string; repoRev?: string }> }>(

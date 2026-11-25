@@ -894,7 +894,7 @@ test("overflowed membership envelope or malformed ext.install sets workspaceSnap
         $type: COLLECTION.extInstall,
         extId: "tasks",
         active: true,
-        space: `at://${groupDid}/space/${SPACE_TYPE.tasks}/non-canonical`,
+        space: `at:space/${groupDid}/${SPACE_TYPE.tasks}/non-canonical`,
         cleanupComplete: false,
         enabledBy: ALICE,
         enabledAt: TIMESTAMP,
@@ -1769,7 +1769,7 @@ test("readIndependentTasksSpace marks workspaceSnapshotComplete: false when memb
     authorityDid: AUTHORITY,
     workspaceSkey: "self",
     expectedTasksSpace: tasksSpace,
-    metaUri: `at://${AUTHORITY}/space/group.opensocial.meta/self`,
+    metaUri: `at:space/${AUTHORITY}/group.opensocial.meta/self`,
     membersUri: membersSpace,
     metaRecords: [
       {
@@ -1803,7 +1803,7 @@ test("readIndependentTasksSpace marks workspaceSnapshotComplete: false when memb
     authorityDid: AUTHORITY,
     workspaceSkey: "self",
     expectedTasksSpace: tasksSpace,
-    metaUri: `at://${AUTHORITY}/space/group.opensocial.meta/self`,
+    metaUri: `at:space/${AUTHORITY}/group.opensocial.meta/self`,
     membersUri: membersSpace,
     metaRecords: [
       {

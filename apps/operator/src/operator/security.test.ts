@@ -727,7 +727,7 @@ test("verifySpaceNotifyCredentialAndProof enforces personal group.opensocial.inv
     { space: aliceInvites, callerDid: bobDid },
     { space: workspaceUri(aliceDid), callerDid: aliceDid },
     { space: dmInboxUri(aliceDid), callerDid: aliceDid },
-    { space: `at://${aliceDid}/space/group.opensocial.invites/custom`, callerDid: aliceDid },
+    { space: `at:space/${aliceDid}/group.opensocial.invites/custom`, callerDid: aliceDid },
   ]) {
     await assert.rejects(
       verifySpaceNotifyCredentialAndProof(

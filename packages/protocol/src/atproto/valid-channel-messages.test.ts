@@ -4,7 +4,7 @@ import { selectValidChannelMessages, type ChannelMessageRecord } from "./valid-c
 import { spaceRecordUri } from "../keys";
 
 const authority = "did:plc:authority";
-const space = `at://${authority}/space/new.flock.channel/general`;
+const space = `at:space/${authority}/new.flock.channel/general`;
 const timestamp = "2026-01-01T00:00:00.000Z";
 
 function message(repo: string, rkey: string, value: Record<string, unknown>): ChannelMessageRecord {

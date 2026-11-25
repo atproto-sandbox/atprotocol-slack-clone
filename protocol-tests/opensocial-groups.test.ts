@@ -434,14 +434,25 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
           const redirectUri = "http://127.0.0.1:43901/callback";
           const clientId = `http://localhost?${new URLSearchParams({ scope: fullScope, redirect_uri: redirectUri }).toString()}`;
           const challenge = createHash("sha256").update(randomBytes(32)).digest("base64url");
+          const parDpop = await createGroupDpopClient();
+          const parRes = await parDpop.fetchWithDpop(`${actor.pds.url}/oauth/par`, {
+            method: "POST",
+            headers: { "content-type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({
+              client_id: clientId,
+              redirect_uri: redirectUri,
+              response_type: "code",
+              code_challenge: challenge,
+              code_challenge_method: "S256",
+              scope: fullScope,
+              state: `pos-${randomUUID()}`,
+            }).toString(),
+          });
+          assert.equal(parRes.status, 201, `PAR failed for published scopes: ${await parRes.clone().text()}`);
+          const { request_uri: requestUri } = (await parRes.json()) as { request_uri: string };
           const authUrl = new URL(`${actor.pds.url}/oauth/authorize`);
           authUrl.searchParams.set("client_id", clientId);
-          authUrl.searchParams.set("redirect_uri", redirectUri);
-          authUrl.searchParams.set("response_type", "code");
-          authUrl.searchParams.set("code_challenge", challenge);
-          authUrl.searchParams.set("code_challenge_method", "S256");
-          authUrl.searchParams.set("scope", fullScope);
-          authUrl.searchParams.set("state", `pos-${randomUUID()}`);
+          authUrl.searchParams.set("request_uri", requestUri);
 
           const cbUrl = await approveAtRealPersonalPds(actor, authUrl);
           assert.ok(new URL(cbUrl).searchParams.get("code"), "Published OpenSocial + Flock scopes succeed at real PDS");
@@ -453,16 +464,27 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
           const badRedirect = "http://127.0.0.1:43902/callback";
           const badClientId = `http://localhost?${new URLSearchParams({ scope: badScope, redirect_uri: badRedirect }).toString()}`;
           const challenge = createHash("sha256").update(randomBytes(32)).digest("base64url");
+          const badDpop = await createGroupDpopClient();
+          const badParRes = await badDpop.fetchWithDpop(`${alice.pds.url}/oauth/par`, {
+            method: "POST",
+            headers: { "content-type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({
+              client_id: badClientId,
+              redirect_uri: badRedirect,
+              response_type: "code",
+              code_challenge: challenge,
+              code_challenge_method: "S256",
+              scope: badScope,
+              state: "neg-unpublished",
+            }).toString(),
+          });
+          assert.equal(badParRes.status, 201, `PAR unexpectedly failed before authorize(): ${await badParRes.clone().text()}`);
+          const { request_uri: badRequestUri } = (await badParRes.json()) as { request_uri: string };
           await assert.rejects(
             alice.pds.ctx.oauthProvider!.authorize(
               {
                 client_id: badClientId,
-                redirect_uri: badRedirect,
-                response_type: "code",
-                code_challenge: challenge,
-                code_challenge_method: "S256",
-                scope: badScope,
-                state: "neg-unpublished",
+                request_uri: badRequestUri,
               },
               { deviceId: "dev-neg-check", deviceMetadata: { ipAddress: "127.0.0.1", userAgent: "flock-test" } },
             ),
@@ -2790,7 +2812,7 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
       async () => {
         const assertZeroGroupPurgedTables = (db: RunningGroupHost["db"], groupDid: string) => {
           assert.equal(SCHEMA_TABLE_CLASSIFICATION.GROUP_PURGED_TABLES.length, 39, "Expected exact 39 GROUP_PURGED_TABLES");
-          const ownSpaceLike = `at://${groupDid}/space/%`;
+          const ownSpaceLike = `at:space/${groupDid}/%`;
           const repoAndSpaceTables = new Set(["space_record", "space_oplog", "space_repo"]);
           const groupAndSpaceTables = new Set(["notify_registration", "space_record_blob", "space_writer"]);
           for (const table of SCHEMA_TABLE_CLASSIFICATION.GROUP_PURGED_TABLES) {
@@ -5363,7 +5385,7 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
           );
 
           for (const sp of srcSpacesList) {
-            if (sp.space.startsWith(`at://${gDid}/space/`)) {
+            if (sp.space.startsWith(`at:space/${gDid}/`)) {
               const expM = await dpopSrc.fetchWithDpop(
                 `${ghSource.url}/xrpc/com.atproto.space.exportSpaceMeta?space=${encodeURIComponent(sp.space)}`,
                 { method: "GET", accessToken: tokSrc },
@@ -5520,7 +5542,7 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
           let sampleMetaStar!: Uint8Array;
           let sampleRepoStar!: Uint8Array;
           for (const sp of srcSpacesList) {
-            if (sp.space.startsWith(`at://${gDid}/space/`)) {
+            if (sp.space.startsWith(`at:space/${gDid}/`)) {
               const mBytes = new Uint8Array(
                 await (
                   await dpopSrc.fetchWithDpop(

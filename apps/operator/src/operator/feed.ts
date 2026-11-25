@@ -1,4 +1,4 @@
-import { parseDmSpaceUri, parsePersonalInvitesUri } from "@flock/protocol/keys";
+import { parseDmSpaceUri, parsePersonalInvitesUri, parseSpaceUri } from "@flock/protocol/keys";
 import { mapLimited } from "@flock/protocol/map-limited";
 import { currentDmWakeHead, ensureDmWakeReady, onDmWake, readDmWakes, type DmCursor } from "./dm-feed-wakes";
 import { mayFollow } from "./member-access";
@@ -75,7 +75,7 @@ export function parseFollow(input: unknown): Follow[] {
   return follow.map((entry) => {
     if (typeof entry !== "object" || entry === null || Array.isArray(entry)) throw new FeedRequestError("Each followed space is an object.");
     const { space, after } = entry as { space?: unknown; after?: unknown };
-    if (typeof space !== "string" || !space.startsWith("at://") || space.length > 512) throw new FeedRequestError("Each followed space needs its URI.");
+    if (typeof space !== "string" || space.length > 512 || !parseSpaceUri(space)) throw new FeedRequestError("Each followed space needs its URI.");
     const parsed = parseCursorString(after);
     if (seen.has(space)) throw new FeedRequestError("Each space is followed once per call.");
     seen.add(space);

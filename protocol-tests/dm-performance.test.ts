@@ -99,7 +99,7 @@ test("DM read budget: 100 participants, 20,000 total messages, latest-100 read i
     const halfSetupStarted = performance.now();
     await mapLimited(participants, 16, async (owner) => {
       const client = rawClientFor(owner);
-      const half = `at://${owner.did}/space/new.flock.dm.conversation/${convKey}`;
+      const half = `at:space/${owner.did}/new.flock.dm.conversation/${convKey}`;
       await client.procedure("com.atproto.space.createSpace", {
         spaceType: "new.flock.dm.conversation", skey: convKey,
         policy: memberspacePolicy(),
@@ -128,7 +128,7 @@ test("DM read budget: 100 participants, 20,000 total messages, latest-100 read i
     let totalWritten = 0;
     await mapLimited(participants.map((owner, participantIndex) => ({ owner, participantIndex })), 16, async ({ owner, participantIndex }) => {
       const client = rawClientFor(owner);
-      const half = `at://${owner.did}/space/new.flock.dm.conversation/${convKey}`;
+      const half = `at:space/${owner.did}/new.flock.dm.conversation/${convKey}`;
       for (let batchStart = 0; batchStart < MESSAGES_PER_HALF; batchStart += APPLY_WRITES_BATCH) {
         const writes = Array.from({ length: Math.min(APPLY_WRITES_BATCH, MESSAGES_PER_HALF - batchStart) }, (_unused, offset) => {
           const sequence = batchStart + offset;

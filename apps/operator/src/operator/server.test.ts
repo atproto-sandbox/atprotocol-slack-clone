@@ -49,7 +49,7 @@ after(async () => {
 
 const EXECUTE = `${base}/xrpc/${OPERATOR_METHOD.execute}`;
 const executeBody = (request: Record<string, unknown>) => JSON.stringify({
-  workspace: "at://did:plc:authority/space/new.flock.workspace/team",
+  workspace: "at:space/did:plc:authority/new.flock.workspace/team",
   operationId: "3kabcdefghij2",
   request,
 });
@@ -91,7 +91,7 @@ test("a call without a service token is refused as an XRPC error, with the secur
   const response = await fetch(EXECUTE, {
     method: "POST",
     headers: { "content-type": "application/json", origin: WEB_ORIGIN },
-    body: executeBody({ kind: "decideJoinRequest", request: "at://did:plc:authority/space/new.flock.inbox/team/did:plc:member/new.flock.joinRequest/3kabcdefghij2", requestId: "3kabcdefghij3", decision: "approve" }),
+    body: executeBody({ kind: "decideJoinRequest", request: "at:space/did:plc:authority/new.flock.inbox/team/did:plc:member/new.flock.joinRequest/3kabcdefghij2", requestId: "3kabcdefghij3", decision: "approve" }),
   });
   assert.equal(response.status, 403);
   assert.deepEqual(await response.json(), { error: "Unauthorized", message: "Bearer service authorization is required." });
@@ -156,7 +156,7 @@ async function changeFeed(serve: OperatorMethodDefinition["serve"]): Promise<(fo
 }
 
 const NO_CHANGES = { head: "0", changed: [], denied: [], reset: [] };
-const A_SPACE = { space: "at://did:plc:authority/space/new.flock.channel/general", after: "0" };
+const A_SPACE = { space: "at:space/did:plc:authority/new.flock.channel/general", after: "0" };
 
 // The timeout turns a signal that never aborts into a failure rather than a hang.
 test("a long poll stops when its caller goes away, though it is a procedure, and a call that was answered is not aborted", { timeout: 10_000 }, async () => {
@@ -249,13 +249,13 @@ test("an operation's steps about one member are valid answers at their longest: 
 test("confirmRegistration and notifySpaceUpdate authenticate via inline token without bearer headers, enforce DM #registrationExpired 400 abandonment, and write zero DM rows to SQLite", async () => {
   resetDmFeedWakesForTests();
   const db = getRawDb();
-  const operatorSpace = "at://did:plc:authority/space/new.flock.channel/general";
+  const operatorSpace = "at:space/did:plc:authority/new.flock.channel/general";
   const operatorToken = "operator-inline-webhook-token-abc123";
   const serviceRef = "did:web:localhost%3A3001#atproto_flock_operator";
 
   // Seed staged placeholder registration (expires_at = 0)
   db.prepare("INSERT OR REPLACE INTO notification_registration (service_ref, space_uri, expires_at, workspace_uri, token, renew_at) VALUES (?, ?, 0, ?, ?, 0)")
-    .run(serviceRef, operatorSpace, "at://did:plc:authority/space/new.flock.workspace/team", operatorToken);
+    .run(serviceRef, operatorSpace, "at:space/did:plc:authority/new.flock.workspace/team", operatorToken);
 
   const postWebhook = (nsid: string, body: unknown) =>
     fetch(`${base}/xrpc/${nsid}`, {

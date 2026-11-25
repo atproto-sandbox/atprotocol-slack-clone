@@ -23,7 +23,7 @@
     "react-dom": "19.2.3"
   },
   "devDependencies": {
-    "@atproto/crypto": "0.0.0-spaces-alpha-20261117141222",
+    "@atproto/crypto": "0.0.0-spaces-alpha-20261124235736",
     "@types/react": "19.0.0",
     "@types/react-dom": "19.0.0",
     "fake-indexeddb": "6.2.6"

@@ -1642,7 +1642,7 @@ async function acceptOperatorCreateWorkspace(
     workspace: string;
   };
   assert.equal(result.state, "completed", "the operator restores the encrypted Group-DID authority grant and bootstraps against GroupHost");
-  assert.equal(result.workspace, `at://${opGroup.groupDid}/space/new.flock.workspace/self`);
+  assert.equal(result.workspace, `at:space/${opGroup.groupDid}/new.flock.workspace/self`);
 }
 
 async function runRestartRecovery(input: {

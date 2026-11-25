@@ -193,23 +193,23 @@ test("every request field a kind declares has a validation rule", () => {
 
 test("the kinds that create or archive spaces name them, so the operator registers or drops their change notices", () => {
   const owner = "did:plc:owner";
-  const actor = { did: owner, workspace: { uri: `at://${owner}/space/new.flock.workspace/self`, authorityDid: owner, skey: "self" } } as OperatorActor;
+  const actor = { did: owner, workspace: { uri: `at:space/${owner}/new.flock.workspace/self`, authorityDid: owner, skey: "self" } } as OperatorActor;
   assert.deepEqual(operationKind("bootstrapWorkspace")!.createsSpaces!(actor, { kind: "bootstrapWorkspace", name: "Acme" }), [
-    `at://${owner}/space/group.opensocial.meta/self`,
-    `at://${owner}/space/group.opensocial.members/self`,
-    `at://${owner}/space/new.flock.workspace/self`,
-    `at://${owner}/space/new.flock.inbox/self`,
-    `at://${owner}/space/new.flock.channel/general`,
+    `at:space/${owner}/group.opensocial.meta/self`,
+    `at:space/${owner}/group.opensocial.members/self`,
+    `at:space/${owner}/new.flock.workspace/self`,
+    `at:space/${owner}/new.flock.inbox/self`,
+    `at:space/${owner}/new.flock.channel/general`,
   ]);
   assert.deepEqual(operationKind("createWorkspace")!.createsSpaces!(actor, { kind: "createWorkspace", name: "Acme", creator: "did:plc:creator" }), [
-    `at://${owner}/space/group.opensocial.meta/self`,
-    `at://${owner}/space/group.opensocial.members/self`,
-    `at://${owner}/space/new.flock.workspace/self`,
-    `at://${owner}/space/new.flock.inbox/self`,
-    `at://${owner}/space/new.flock.channel/general`,
+    `at:space/${owner}/group.opensocial.meta/self`,
+    `at:space/${owner}/group.opensocial.members/self`,
+    `at:space/${owner}/new.flock.workspace/self`,
+    `at:space/${owner}/new.flock.inbox/self`,
+    `at:space/${owner}/new.flock.channel/general`,
   ]);
-  assert.deepEqual(operationKind("createChannel")!.createsSpaces!(actor, { kind: "createChannel", skey: "design" }), [`at://${owner}/space/new.flock.channel/design`]);
-  assert.deepEqual(operationKind("archiveChannel")!.archivesSpaces!(actor, { kind: "archiveChannel", skey: "design" }), [`at://${owner}/space/new.flock.channel/design`]);
+  assert.deepEqual(operationKind("createChannel")!.createsSpaces!(actor, { kind: "createChannel", skey: "design" }), [`at:space/${owner}/new.flock.channel/design`]);
+  assert.deepEqual(operationKind("archiveChannel")!.archivesSpaces!(actor, { kind: "archiveChannel", skey: "design" }), [`at:space/${owner}/new.flock.channel/design`]);
   assert.deepEqual(operationKind("installApp")!.createsSpaces!(actor, { kind: "installApp", subject: "did:plc:bot", channels: [] }), [appInboxUri(owner, "self", "did:plc:bot")]);
   assert.deepEqual(operationKind("updateAppAccess")!.createsSpaces!(actor, { kind: "updateAppAccess", subject: "did:plc:bot", channels: [] }), [appInboxUri(owner, "self", "did:plc:bot")]);
   assert.deepEqual(operationKind("uninstallApp")!.archivesSpaces!(actor, { kind: "uninstallApp", subject: "did:plc:bot" }), [appInboxUri(owner, "self", "did:plc:bot")]);

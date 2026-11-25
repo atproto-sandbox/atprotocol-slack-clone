@@ -377,10 +377,13 @@ export async function withIndependentReader<T>(
 /** The repos that have written to a space, listed the way the app lists them: with a PDS-issued space credential. */
 export async function listWriters(world: AppWorld, account: Actor, space: string): Promise<string[]> {
   return withIndependentReader(world, account, async (_reader, _deps, session) => {
-    const [{ mintSpaceCredential }, { resolvePds }, { listBoundedWriters }] = await Promise.all([
-      import("@flock/operator/atproto/space-credential"), import("@flock/operator/atproto/identity"), import("@flock/protocol/atproto/record-pages"),
+    const [{ mintSpaceCredential }, { resolvePds }, { listBoundedWriters }, { parseSpaceUri }] = await Promise.all([
+      import("@flock/operator/atproto/space-credential"),
+      import("@flock/operator/atproto/identity"),
+      import("@flock/protocol/atproto/record-pages"),
+      import("@flock/protocol/keys"),
     ]);
-    const authorityDid = /^at:\/\/([^/]+)\//.exec(space)?.[1];
+    const authorityDid = parseSpaceUri(space)?.authorityDid;
     assert.ok(authorityDid, `${space} is not a space URI`);
     const credential = await mintSpaceCredential(session, space);
     const scan = await listBoundedWriters(credential.client(await resolvePds(authorityDid)), { space, maxRepos: 500 });

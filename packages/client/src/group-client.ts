@@ -7,6 +7,7 @@ import {
   isDid,
   isRecordKey,
   isTid,
+  parseAnySpaceRecordUri,
   parseSpaceUri,
   personalInvitesUri,
   SELF_SKEY,
@@ -2810,6 +2811,5 @@ export class GroupClient {
 }
 
 function inferSpaceUriFromSubject(subjectUri: string): string | null {
-  const match = /^(at:\/\/[^/]+\/space\/[^/]+\/[^/]+)\//.exec(subjectUri);
-  return match ? match[1]! : null;
+  return parseAnySpaceRecordUri(subjectUri)?.spaceUri ?? null;
 }

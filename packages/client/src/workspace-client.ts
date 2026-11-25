@@ -18,6 +18,7 @@ import {
   inboxUri,
   isDid,
   isTid,
+  normalizeLegacySpaceUri,
   parseGroupMembersUri,
   parseWorkspaceUri,
   personalInvitesUri,
@@ -26,6 +27,7 @@ import {
   tidNow,
   workspaceUri,
 } from "@flock/protocol/keys";
+export { normalizeLegacySpaceUri };
 import { mapLimited } from "@flock/protocol/map-limited";
 import { isTakendown, projectActiveLabels } from "@flock/protocol/moderation";
 import {

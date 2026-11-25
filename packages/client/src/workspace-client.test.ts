@@ -1946,7 +1946,7 @@ test("Round 9 Finding #4: WorkspaceClient.createWorkspace keeps joiningGroups at
           channels: [{ skey: "general", visibility: "public" }],
         });
         // Simulate Operator bootstrap: membership/<creator> exists on Group Host, personal acceptance/self is NOT written by Operator!
-        await network.deleteAs(iss, `at://${pendingGroupDid}/space/group.opensocial.members/self`, OPENSOCIAL_COLLECTION.acceptance, SELF_SKEY);
+        await network.deleteAs(iss, `at:space/${pendingGroupDid}/group.opensocial.members/self`, OPENSOCIAL_COLLECTION.acceptance, SELF_SKEY);
         return {
           operationId: req.operationId,
           groupDid: pendingGroupDid,
@@ -1992,7 +1992,7 @@ test("Round 9 Finding #4: WorkspaceClient.createWorkspace keeps joiningGroups at
   // Personal PDS `acceptance/self` was NOT written while Operator was pending!
   await assert.rejects(
     network.clientFor(ALICE).query("com.atproto.space.getRecord", {
-      space: `at://${pendingGroupDid}/space/group.opensocial.members/self`,
+      space: `at:space/${pendingGroupDid}/group.opensocial.members/self`,
       repo: ALICE,
       collection: OPENSOCIAL_COLLECTION.acceptance,
       rkey: SELF_SKEY,
@@ -2013,7 +2013,7 @@ test("Round 9 Finding #4: WorkspaceClient.createWorkspace keeps joiningGroups at
   const ownAcceptance = await network.clientFor(ALICE).query<{ value: Record<string, unknown> }>(
     "com.atproto.space.getRecord",
     {
-      space: `at://${pendingGroupDid}/space/group.opensocial.members/self`,
+      space: `at:space/${pendingGroupDid}/group.opensocial.members/self`,
       repo: ALICE,
       collection: OPENSOCIAL_COLLECTION.acceptance,
       rkey: SELF_SKEY,
@@ -2038,7 +2038,7 @@ test("Round 9 Finding #4: WorkspaceClient.createWorkspace keeps joiningGroups at
             members: [iss],
             channels: [{ skey: "general", visibility: "public" }],
           });
-          await network.deleteAs(iss, `at://${crashedGroupDid}/space/group.opensocial.members/self`, OPENSOCIAL_COLLECTION.acceptance, SELF_SKEY);
+          await network.deleteAs(iss, `at:space/${crashedGroupDid}/group.opensocial.members/self`, OPENSOCIAL_COLLECTION.acceptance, SELF_SKEY);
           return {
             operationId: req.operationId,
             groupDid: crashedGroupDid,
@@ -2294,7 +2294,7 @@ test("Round 12 Finding #3 & #4: unknown-DID createWorkspace rekeys to groupDid l
             if (
               method === "com.atproto.space.putRecord" &&
               (input as { space?: string; collection?: string })?.space ===
-                `at://${createdGroupA}/space/group.opensocial.members/self` &&
+                `at:space/${createdGroupA}/group.opensocial.members/self` &&
               (input as { collection?: string })?.collection === OPENSOCIAL_COLLECTION.acceptance
             ) {
               leavePromiseDuringAccept = aliceA.workspaces.leaveGroup(createdGroupA);
@@ -2318,7 +2318,7 @@ test("Round 12 Finding #3 & #4: unknown-DID createWorkspace rekeys to groupDid l
           });
           await network.deleteAs(
             iss,
-            `at://${createdGroupA}/space/group.opensocial.members/self`,
+            `at:space/${createdGroupA}/group.opensocial.members/self`,
             OPENSOCIAL_COLLECTION.acceptance,
             SELF_SKEY,
           );
@@ -2349,7 +2349,7 @@ test("Round 12 Finding #3 & #4: unknown-DID createWorkspace rekeys to groupDid l
   // After `leaveGroup` finishes, `ALICE` MUST NOT have stale `acceptance/self` or membership!
   await assert.rejects(
     network.clientFor(ALICE).query("com.atproto.space.getRecord", {
-      space: `at://${createdGroupA}/space/group.opensocial.members/self`,
+      space: `at:space/${createdGroupA}/group.opensocial.members/self`,
       repo: ALICE,
       collection: OPENSOCIAL_COLLECTION.acceptance,
       rkey: SELF_SKEY,
@@ -2376,7 +2376,7 @@ test("Round 12 Finding #3 & #4: unknown-DID createWorkspace rekeys to groupDid l
         });
         await network.deleteAs(
           iss,
-          `at://${createdGroupB}/space/group.opensocial.members/self`,
+          `at:space/${createdGroupB}/group.opensocial.members/self`,
           OPENSOCIAL_COLLECTION.acceptance,
           SELF_SKEY,
         );
@@ -2407,7 +2407,7 @@ test("Round 12 Finding #3 & #4: unknown-DID createWorkspace rekeys to groupDid l
   assert.equal(await aliceB.sync.store.getJoiningGroup(createOpB), undefined, "superseded create journal cleaned up");
   await assert.rejects(
     network.clientFor(ALICE).query("com.atproto.space.getRecord", {
-      space: `at://${createdGroupB}/space/group.opensocial.members/self`,
+      space: `at:space/${createdGroupB}/group.opensocial.members/self`,
       repo: ALICE,
       collection: OPENSOCIAL_COLLECTION.acceptance,
       rkey: SELF_SKEY,

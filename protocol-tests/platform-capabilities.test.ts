@@ -310,7 +310,7 @@ async function memberGrantOperations(
     await outcome(async () => {
       const head = (await callOperator("new.flock.operator.getChanges", {}, { follow: [] })) as { head?: string };
       assert.match(head.head ?? "", /^[a-z][0-9a-z]{2}\.(0|[1-9a-z][0-9a-z]*)\.(0|[1-9a-z][0-9a-z]*)$/);
-      const elsewhere = `at://${member.did}/space/new.flock.channel/not-${operationId}`;
+      const elsewhere = `at:space/${member.did}/new.flock.channel/not-${operationId}`;
       const denied = (await callOperator("new.flock.operator.getChanges", {}, {
         follow: [{ space: elsewhere, after: head.head }],
       })) as { denied?: string[] };

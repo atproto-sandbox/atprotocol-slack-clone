@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { OAuthSession } from "@atproto/oauth-client-node";
 import type { DidString } from "@atproto/syntax";
 import { XrpcError } from "@flock/protocol/atproto/xrpc";
-import { groupMembersUri } from "@flock/protocol/keys";
+import { groupMembersUri, parseSpaceUri } from "@flock/protocol/keys";
 import {
   ATPROTO_SPACE_COLLECTION,
   OPENSOCIAL_COLLECTION,
@@ -88,14 +88,15 @@ function parseTarget(url: URL, init?: RequestInit): FakeGroupTarget {
     (typeof body.space === "string" ? body.space : undefined) ??
     url.searchParams.get("space") ??
     undefined;
+  const parsedSpace = space ? parseSpaceUri(space) : null;
   const spaceType =
     (typeof body.spaceType === "string" ? body.spaceType : undefined) ??
     url.searchParams.get("spaceType") ??
-    (space ? space.split("/")[4] : undefined);
+    parsedSpace?.type;
   const skey =
     (typeof body.skey === "string" ? body.skey : undefined) ??
     url.searchParams.get("skey") ??
-    (space ? space.split("/")[5] : undefined);
+    parsedSpace?.skey;
   const collection =
     (typeof body.collection === "string" ? body.collection : undefined) ??
     url.searchParams.get("collection") ??
@@ -119,7 +120,7 @@ function parseTarget(url: URL, init?: RequestInit): FakeGroupTarget {
 function formatWriteEntry(groupDid: string, target: FakeGroupTarget): string {
   switch (target.method) {
     case "com.atproto.space.createSpace": {
-      const uri = target.space ?? `at://${groupDid}/space/${target.spaceType}/${target.skey}`;
+      const uri = target.space ?? `at:space/${groupDid}/${target.spaceType}/${target.skey}`;
       return `createSpace ${uri}`;
     }
     case "com.atproto.space.updateSpace":
@@ -186,7 +187,7 @@ export async function fakeGroupHost(
     const url = new URL(path, "https://fake-pds.test/group-host");
     const target = parseTarget(url, init);
     if (target.space) {
-      const spaceOwner = target.space.split("/")[2];
+      const spaceOwner = parseSpaceUri(target.space)?.authorityDid;
       if (spaceOwner) ensurePersonalAccount(spaceOwner);
     }
     if (target.rkey && target.rkey.startsWith("did:")) ensurePersonalAccount(target.rkey);
@@ -265,7 +266,7 @@ export async function fakeGroupHost(
     rkey: string,
     record: Record<string, unknown>,
   ): Promise<void> => {
-    const spaceOwner = spaceUri.split("/")[2];
+    const spaceOwner = parseSpaceUri(spaceUri)?.authorityDid;
     if (spaceOwner) ensurePersonalAccount(spaceOwner);
     if (rkey.startsWith("did:")) ensurePersonalAccount(rkey);
     await selfClient.procedure("com.atproto.space.putRecord", {

@@ -96,7 +96,7 @@ test("classifyVerifiedRepoFailure treats unauthenticated RepoNotFound as transie
 });
 
 test("authority suspension on authority repo reads and authority endpoints is transient while non-authority writer takedowns stay permanent", () => {
-  const space = "at://did:plc:auth/space/new.flock.channel/general";
+  const space = "at:space/did:plc:auth/new.flock.channel/general";
   const authority = "did:plc:auth";
   const member = "did:plc:writer";
   for (const [code, reason] of [

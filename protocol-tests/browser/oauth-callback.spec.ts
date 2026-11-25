@@ -189,7 +189,7 @@ test("real browsers complete OAuth, workspace sharing, private-channel requests,
     await page.locator(".roster-row").filter({ hasText: memberDid }).waitFor({ state: "visible", timeout: 30_000 });
     assert.equal(await page.locator(".envelope-alert").count(), 0, "workspaces inside the supported envelope are not marked degraded");
     const workspaceUri = (await page.locator(".welcome-banner .mono-note").innerText()).trim();
-    assert.match(workspaceUri, /^at:\/\/did:plc:[a-z0-9]+\/space\/new\.flock\.workspace\/self$/, "the workspace home shows the canonical OpenSocial workspace URI");
+    assert.match(workspaceUri, /^at:space\/did:plc:[a-z0-9]+\/new\.flock\.workspace\/self$/, "the workspace home shows the canonical OpenSocial workspace URI");
 
     secondaryStack = await startStack(await stackEnv({ databasePath: join(scratchDirectory!, "independent-app.db"), encryptionKey: Buffer.alloc(32, 0x6b).toString("hex") }));
     secondaryAppUrl = secondaryStack.appUrl;

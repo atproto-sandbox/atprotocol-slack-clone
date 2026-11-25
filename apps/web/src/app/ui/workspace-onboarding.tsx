@@ -117,7 +117,7 @@ export function WorkspaceOnboarding({
         <h2>Join a group or accept an invitation</h2>
         <p>
           Paste a Group DID (<code>did:plc:…</code>) or workspace URI (
-          <code>{`at://did:…/space/${SPACE_TYPE.workspace}/self`}</code>) to join an open group, request moderator
+          <code>{`at:space/did:…/${SPACE_TYPE.workspace}/self`}</code>) to join an open group, request moderator
           approval, or accept an invitation.
         </p>
         <form className="inline-form" onSubmit={(e) => void beginAccept(e)}>
@@ -126,7 +126,7 @@ export function WorkspaceOnboarding({
             id="workspace-uri"
             value={inviteUri}
             onChange={(event) => setInviteUri(event.target.value)}
-            placeholder={`did:plc:… or at://did:…/space/${SPACE_TYPE.workspace}/self`}
+            placeholder={`did:plc:… or at:space/did:…/${SPACE_TYPE.workspace}/self`}
             required
           />
           <label htmlFor="workspace-join-message">Join message (optional, for approval groups)</label>

@@ -615,7 +615,7 @@ test("minting keeps a short-lived credential for its own lifetime and renews it 
     fetchEndpoint: async () => Response.json({ credential }),
     generateKey: async () => (await import("@flock/protocol/atproto/space-key")).generateSpaceKey(),
     now: () => 1_000_000,
-  }, "at://did:plc:owner/space/new.flock.channel/alpha");
+  }, "at:space/did:plc:owner/new.flock.channel/alpha");
 
   // #when each is minted at a fixed clock
   const short = await mintWith(jwtWith({ iat: 1_000, exp: 1_060 }));

@@ -18,7 +18,7 @@ test("journal retry skips completed steps and reuses the same operation", async 
   const actor = {
     did: "did:plc:admin",
     session: {} as OperatorActor["session"],
-    workspace: { uri: "at://did:plc:owner/space/new.flock.workspace/acme", authorityDid: "did:plc:owner", skey: "acme" },
+    workspace: { uri: "at:space/did:plc:owner/new.flock.workspace/acme", authorityDid: "did:plc:owner", skey: "acme" },
     canRecoverOperations: true,
   } satisfies OperatorActor;
   let first = 0;
@@ -49,7 +49,7 @@ test("journal retry skips completed steps and reuses the same operation", async 
     const now = Math.floor(Date.now() / 1000) - 600;
     const rows = [
       { operationId: "2222222222224", workspace: actor.workspace.uri },
-      { operationId: "2222222222225", workspace: "at://did:plc:owner/space/new.flock.workspace/other" },
+      { operationId: "2222222222225", workspace: "at:space/did:plc:owner/new.flock.workspace/other" },
     ];
     for (const row of rows) {
       raw.prepare(`INSERT INTO operation
@@ -64,7 +64,7 @@ test("journal retry skips completed steps and reuses the same operation", async 
     assert.equal(getActorOperation(actor, rows[1].operationId), null);
     assert.deepEqual(listJournaledWorkspaces(), [
       { authorityDid: actor.workspace.authorityDid, uri: actor.workspace.uri },
-      { authorityDid: actor.workspace.authorityDid, uri: "at://did:plc:owner/space/new.flock.workspace/other" },
+      { authorityDid: actor.workspace.authorityDid, uri: "at:space/did:plc:owner/new.flock.workspace/other" },
     ]);
     assert.deepEqual(listRecoverableOperations(actor.workspace.authorityDid, actor.workspace.uri).map((row) => row.operationId), [rows[0].operationId]);
     assert.deepEqual(listStalledOperations(actor.workspace.authorityDid, actor.workspace.uri).operations.map((row) => row.operationId), [rows[0].operationId]);
@@ -122,7 +122,7 @@ test("stalled-operation detection includes the exact five-minute cutoff", () => 
   process.env.DATABASE_PATH = join(directory, "stalled.db");
   process.env.AUTH_ENCRYPTION_KEY = "33".repeat(32);
   const workspaceDid = "did:plc:owner";
-  const workspaceUri = "at://did:plc:owner/space/new.flock.workspace/acme";
+  const workspaceUri = "at:space/did:plc:owner/new.flock.workspace/acme";
   const stableNow = Math.floor(Date.now() / 1000) + 60;
   const realDateNow = Date.now;
   Date.now = () => stableNow * 1000;
@@ -203,7 +203,7 @@ test("an operation past its time limit starts no further step, is left pending, 
   const actor = {
     did: "did:plc:owner",
     session: {} as OperatorActor["session"],
-    workspace: { uri: "at://did:plc:owner/space/new.flock.workspace/slow", authorityDid: "did:plc:owner", skey: "slow" },
+    workspace: { uri: "at:space/did:plc:owner/new.flock.workspace/slow", authorityDid: "did:plc:owner", skey: "slow" },
     canRecoverOperations: true,
   } satisfies OperatorActor;
   const realDateNow = Date.now;
@@ -259,7 +259,7 @@ test("a runner that lost the workspace lock cannot change its operation's state"
   const actor = {
     did: "did:plc:owner",
     session: {} as OperatorActor["session"],
-    workspace: { uri: "at://did:plc:owner/space/new.flock.workspace/lost", authorityDid: "did:plc:owner", skey: "lost" },
+    workspace: { uri: "at:space/did:plc:owner/new.flock.workspace/lost", authorityDid: "did:plc:owner", skey: "lost" },
     canRecoverOperations: true,
   } satisfies OperatorActor;
   const raw = getRawDb();
@@ -291,7 +291,7 @@ test("a missing scope discards an empty row for its submitter, keeps it on repla
   const actor = {
     did: "did:plc:admin",
     session: {} as OperatorActor["session"],
-    workspace: { uri: "at://did:plc:owner/space/new.flock.workspace/scope", authorityDid: "did:plc:owner", skey: "scope" },
+    workspace: { uri: "at:space/did:plc:owner/new.flock.workspace/scope", authorityDid: "did:plc:owner", skey: "scope" },
     canRecoverOperations: true,
   } satisfies OperatorActor;
   const scopeMissing = () => { throw new XrpcError(403, 'Missing required scope "space:new.flock.channel"', "ScopeMissingError"); };
@@ -337,8 +337,8 @@ test("discarding an empty operation keeps the catalog entry another operation ne
   process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
   process.env.APP_URL = "http://127.0.0.1:3000";
   const workspace = "did:plc:owner";
-  const sharedUri = "at://did:plc:owner/space/new.flock.workspace/shared";
-  const loneUri = "at://did:plc:owner/space/new.flock.workspace/lone";
+  const sharedUri = "at:space/did:plc:owner/new.flock.workspace/shared";
+  const loneUri = "at:space/did:plc:owner/new.flock.workspace/lone";
   const raw = getRawDb();
   const now = Math.floor(Date.now() / 1000);
   const insert = (workspaceUri: string, operationId: string, state: string, steps: string[]) => {
@@ -404,7 +404,7 @@ test("401 AccountTakedown and AccountDeactivated fail empty operations without r
   const actor = {
     did: "did:plc:admin",
     session: {} as OperatorActor["session"],
-    workspace: { uri: "at://did:plc:owner/space/new.flock.workspace/suspended", authorityDid: "did:plc:owner", skey: "suspended" },
+    workspace: { uri: "at:space/did:plc:owner/new.flock.workspace/suspended", authorityDid: "did:plc:owner", skey: "suspended" },
     canRecoverOperations: true,
   } satisfies OperatorActor;
   try {

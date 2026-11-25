@@ -4,7 +4,7 @@ import type * as ListMembers from "../lexicons/api/types/com/atproto/memberspace
 import type * as ListRecords from "../lexicons/api/types/com/atproto/space/listRecords";
 import type * as ListSpaces from "../lexicons/api/types/com/atproto/space/listSpaces";
 import type * as ListWriters from "../lexicons/api/types/com/atproto/space/listWriters";
-import { isDid, parseSpaceUri, spaceRecordUri } from "../keys";
+import { isDid, parseAnySpaceRecordUri, parseSpaceUri, spaceRecordUri } from "../keys";
 import { validateSpaceTypeKey } from "../registry";
 import { isInvalidCursorError, type AtprotoClient } from "./xrpc";
 
@@ -143,15 +143,10 @@ function isConsistentRecordUri(uri: unknown, collection: string, rkey: string, s
       return false;
     }
   }
-  const spaceIdx = uri.indexOf("/space/");
-  if (spaceIdx <= 0) return false;
-  const parts = uri.slice(spaceIdx + "/space/".length).split("/");
-  if (parts.length !== 5) return false;
-  const [spaceType, skey, uriRepo, uriCollection, uriRkey] = parts;
-  if (!spaceType || !skey || !uriRepo || uriCollection !== collection || uriRkey !== rkey) return false;
+  const parsed = parseAnySpaceRecordUri(uri);
+  if (!parsed || parsed.collection !== collection || parsed.rkey !== rkey) return false;
   try {
-    const baseSpace = `${uri.slice(0, spaceIdx)}/space/${spaceType}/${skey}`;
-    return spaceRecordUri(baseSpace, uriRepo, uriCollection, uriRkey) === uri;
+    return spaceRecordUri(parsed.spaceUri, parsed.repoDid, parsed.collection, parsed.rkey) === uri;
   } catch {
     return false;
   }

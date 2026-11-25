@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { parseConfirmRegistration, parseSpaceUpdateNotification, UPDATE_TYPE } from "./write-notification";
 
-const SPACE = "at://did:plc:authority/space/new.flock.workspace/team";
+const SPACE = "at:space/did:plc:authority/new.flock.workspace/team";
 const TOKEN = "stable-webhook-token-0123456789abcdef";
 const REPO = "did:plc:member";
 const REPO_REV = "3kabcdefghij2";

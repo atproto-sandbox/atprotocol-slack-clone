@@ -23,7 +23,7 @@ import { tasksWatchedSpaces } from "./use-tasks-space";
 
 const ALICE = "did:plc:alice111111111111111111";
 const BOB = "did:plc:bob22222222222222222222";
-const SPACE = "at://did:plc:auth/space/new.flock.ext.tasks/x-1";
+const SPACE = "at:space/did:plc:auth/new.flock.ext.tasks/x-1";
 
 function makeProject(overrides: Partial<MergedProjectView> = {}): MergedProjectView {
   const repo = overrides.repo ?? ALICE;
@@ -296,8 +296,8 @@ test("project editor diffs against opening baseline so concurrent remote additio
 });
 
 test("tasksWatchedSpaces includes workspaceUri alongside tasksSpaceUri so workspace mutations reload Tasks (Carbon H1)", () => {
-  const ws = "at://did:plc:auth/space/new.flock.workspace/acme";
-  const ts = "at://did:plc:auth/space/new.flock.ext.tasks/x-1";
+  const ws = "at:space/did:plc:auth/new.flock.workspace/acme";
+  const ts = "at:space/did:plc:auth/new.flock.ext.tasks/x-1";
   assert.deepEqual(tasksWatchedSpaces(ws, ts), [ws, ts]);
   assert.deepEqual(tasksWatchedSpaces(ws, null), [ws]);
   assert.deepEqual(tasksWatchedSpaces(null, ts), []);

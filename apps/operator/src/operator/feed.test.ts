@@ -38,8 +38,8 @@ after(() => {
 });
 
 const MEMBER = "did:plc:member";
-const GENERAL = "at://did:plc:owner/space/new.flock.channel/feed-general";
-const SECRET = "at://did:plc:owner/space/new.flock.channel/feed-secret";
+const GENERAL = "at:space/did:plc:owner/new.flock.channel/feed-general";
+const SECRET = "at:space/did:plc:owner/new.flock.channel/feed-secret";
 const notice = (space: string) => recordWriteNotification({ space, repo: "did:plc:writer", repoRev: "rev" });
 const dbHead = () => readNotices([]).head;
 const combinedHead = (did = MEMBER) => {
@@ -238,7 +238,7 @@ test("a cursor older than the notices kept for its space is reset, for that spac
 });
 
 test("parseFollow accepts <=200 spaces with legacy decimal or epoch cursors (<=16 chars) and rejects malformed cursors", () => {
-  const entry = (index: number) => ({ space: `at://did:plc:owner/space/new.flock.channel/c${index}`, after: "a1b.1z.0" });
+  const entry = (index: number) => ({ space: `at:space/did:plc:owner/new.flock.channel/c${index}`, after: "a1b.1z.0" });
   assert.equal(parseFollow({ follow: Array.from({ length: MAX_FOLLOWED_SPACES }, (_, index) => entry(index)) }).length, MAX_FOLLOWED_SPACES);
   assert.equal(parseFollow({ follow: [{ space: GENERAL, after: "0" }] })[0]?.dmCursor, null);
   assert.deepEqual(parseFollow({ follow: [{ space: GENERAL, after: "k9z.1a.2b" }] })[0], {
