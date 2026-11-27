@@ -11,6 +11,7 @@ import {
 } from "@did-plc/lib";
 import express from "express";
 import * as jose from "jose";
+import { parseSpaceUri } from "@flock/protocol/keys";
 import { createGroupGenesisPlcOp } from "./plc";
 import { startGroupHostServer, type RunningGroupHost } from "./server";
 
@@ -349,7 +350,7 @@ export async function startMockPersonalPds(plc: MockPlcServer): Promise<MockPers
   app.post("/xrpc/com.atproto.space.notifyRepoUpdate", (req, res) => {
     const space = String(req.body?.space ?? "");
     for (const did of failInviteDeliveryForDid) {
-      if (space.startsWith(`at://${did}/`)) {
+      if (parseSpaceUri(space)?.authorityDid === did) {
         res.status(503).json({ error: "UpstreamUnavailable", message: "Simulated invite delivery failure" });
         return;
       }

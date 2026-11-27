@@ -1,3 +1,5 @@
+import { normalizeLegacySpaceUri } from "@flock/protocol/keys";
+
 export type DeskJoinPhase =
   | "submitting"
   | "pending_approval"
@@ -80,7 +82,7 @@ export interface DeskLifecycleStore {
 }
 
 const DATABASE_PREFIX = "flock-desk-lifecycle:";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 export function deskLifecycleDatabaseName(viewerDid: string): string {
   return `${DATABASE_PREFIX}${viewerDid}`;
@@ -165,13 +167,29 @@ export class IndexedDbLifecycleStore implements DeskLifecycleStore {
     onClosedElsewhere?: () => void,
   ): Promise<IndexedDbLifecycleStore> {
     const opening = factory.open(deskLifecycleDatabaseName(viewerDid), DB_VERSION);
-    opening.onupgradeneeded = () => {
+    opening.onupgradeneeded = (event) => {
       const db = opening.result;
-      if (!db.objectStoreNames.contains("joiningGroups")) {
-        db.createObjectStore("joiningGroups", { keyPath: "operationId" });
-      }
+      const tx = opening.transaction;
+      const joining = db.objectStoreNames.contains("joiningGroups")
+        ? tx?.objectStore("joiningGroups")
+        : db.createObjectStore("joiningGroups", { keyPath: "operationId" });
       if (!db.objectStoreNames.contains("leavingGroups")) {
         db.createObjectStore("leavingGroups", { keyPath: "groupDid" });
+      }
+      if (event.oldVersion > 0 && event.oldVersion < 2 && joining) {
+        const cursorReq = joining.openCursor();
+        cursorReq.onsuccess = () => {
+          const cursor = cursorReq.result;
+          if (!cursor) return;
+          const row = cursor.value as DeskJoiningGroupEntry;
+          if (typeof row.inviteUri === "string") {
+            const normalized = normalizeLegacySpaceUri(row.inviteUri);
+            if (normalized !== row.inviteUri) {
+              cursor.update({ ...row, inviteUri: normalized });
+            }
+          }
+          cursor.continue();
+        };
       }
     };
     const db = await settle(opening);

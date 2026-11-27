@@ -1,6 +1,6 @@
 import { mintSpaceCredentialWith } from "@flock/protocol/atproto/space-credential-core";
 import { AtprotoClient } from "@flock/protocol/atproto/xrpc";
-import { groupMembersUri, tidNow } from "@flock/protocol/keys";
+import { groupMembersUri, requireSpaceAuthority, tidNow } from "@flock/protocol/keys";
 import { COLLECTION, OPENSOCIAL_COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
 import {
   acceptGroupMembership,
@@ -56,7 +56,7 @@ export class Probe {
   private async reported(did: string): Promise<string | null> {
     const transport = actorTransport(this.pds, this.reader);
     const credential = await mintSpaceCredentialWith(transport, this.space);
-    const authority = credential.client(await transport.resolvePds(this.space.slice("at://".length).split("/")[0]!));
+    const authority = credential.client(await transport.resolvePds(requireSpaceAuthority(this.space)));
     const listed = await authority.query<{ repos: Array<{ $type?: string; repo: string; repoRev?: string }> }>(
       "com.atproto.space.listWriters",
       { space: this.space, limit: 1000 },

@@ -218,7 +218,7 @@ const UPSTREAM_EXAMPLE_RECORDS: ReadonlyArray<{ collection: string; value: Recor
     collection: "group.opensocial.declaration",
     value: {
       $type: "group.opensocial.declaration",
-      meta: "at://did:plc:abcdefghijklmnopqrstuvwx/space/group.opensocial.meta/self",
+      meta: "at:space/did:plc:abcdefghijklmnopqrstuvwx/group.opensocial.meta/self",
     },
   },
   {
@@ -277,7 +277,7 @@ const UPSTREAM_EXAMPLE_RECORDS: ReadonlyArray<{ collection: string; value: Recor
     collection: "group.opensocial.space",
     value: {
       $type: "group.opensocial.space",
-      space: "at://did:plc:abcdefghijklmnopqrstuvwx/space/group.opensocial.meta/self",
+      space: "at:space/did:plc:abcdefghijklmnopqrstuvwx/group.opensocial.meta/self",
       createdAt: "2026-09-29T12:00:00.000Z",
     },
   },

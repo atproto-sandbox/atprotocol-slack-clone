@@ -9,7 +9,7 @@ import { mergeIndependentDmMessages, readIndependentDmConversation, type Indepen
 
 function record(ownerDid: string, rkey: string) {
   return {
-    uri: `at://${ownerDid}/space/new.flock.dm.conversation/conv/${ownerDid}/new.flock.dm.message/${rkey}`,
+    uri: `at:space/${ownerDid}/new.flock.dm.conversation/conv/${ownerDid}/new.flock.dm.message/${rkey}`,
     ownerDid,
     rkey,
     value: { text: `${ownerDid}-${rkey}`, createdAt: "2026-01-01T00:00:00.000Z" },

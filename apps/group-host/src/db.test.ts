@@ -16,8 +16,8 @@ import {
 const TEST_HEX_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 function seedGroupRowsAcrossAll39Tables(db: GroupHostDb, groupDid: string, suffix: string, nowMs: number): void {
-  const spaceUri = `at://${groupDid}/space/group.opensocial.meta/self`;
-  const externalInviteSpace = `at://did:plc:invitee${suffix}/space/group.opensocial.invites/self`;
+  const spaceUri = `at:space/${groupDid}/group.opensocial.meta/self`;
+  const externalInviteSpace = `at:space/did:plc:invitee${suffix}/group.opensocial.invites/self`;
   const nowSec = Math.floor(nowMs / 1000);
   const nowIso = new Date(nowMs).toISOString();
 
@@ -383,17 +383,17 @@ test("pruneExpiredHostState bounds sweeps to LIMIT 500 and preserves unexpired a
     })();
 
     db.prepare(
-      "INSERT INTO issued_credential (jti, group_did, space_uri, writer_did, cnf_kid, exp, created_at) VALUES ('ic-exp', 'did:plc:g', 'at://did:plc:g/space/group.opensocial.meta/self', 'did:plc:u', 'did:key:z1', ?, ?)",
+      "INSERT INTO issued_credential (jti, group_did, space_uri, writer_did, cnf_kid, exp, created_at) VALUES ('ic-exp', 'did:plc:g', 'at:space/did:plc:g/group.opensocial.meta/self', 'did:plc:u', 'did:key:z1', ?, ?)",
     ).run(nowSec - 1, nowMs - 600_000);
     db.prepare(
-      "INSERT INTO issued_credential (jti, group_did, space_uri, writer_did, cnf_kid, exp, created_at) VALUES ('ic-live', 'did:plc:g', 'at://did:plc:g/space/group.opensocial.meta/self', 'did:plc:u', 'did:key:z1', ?, ?)",
+      "INSERT INTO issued_credential (jti, group_did, space_uri, writer_did, cnf_kid, exp, created_at) VALUES ('ic-live', 'did:plc:g', 'at:space/did:plc:g/group.opensocial.meta/self', 'did:plc:u', 'did:key:z1', ?, ?)",
     ).run(nowSec + 60, nowMs);
 
     db.prepare(
-      "INSERT INTO revoked_credential (jti, group_did, space_uri, exp, revoked_at) VALUES ('rc-exp', 'did:plc:g', 'at://did:plc:g/space/group.opensocial.meta/self', ?, ?)",
+      "INSERT INTO revoked_credential (jti, group_did, space_uri, exp, revoked_at) VALUES ('rc-exp', 'did:plc:g', 'at:space/did:plc:g/group.opensocial.meta/self', ?, ?)",
     ).run(nowSec - 5, nowMs - 60_000);
     db.prepare(
-      "INSERT INTO revoked_credential (jti, group_did, space_uri, exp, revoked_at) VALUES ('rc-live', 'did:plc:g', 'at://did:plc:g/space/group.opensocial.meta/self', ?, ?)",
+      "INSERT INTO revoked_credential (jti, group_did, space_uri, exp, revoked_at) VALUES ('rc-live', 'did:plc:g', 'at:space/did:plc:g/group.opensocial.meta/self', ?, ?)",
     ).run(nowSec + 60, nowMs);
 
     db.prepare(
@@ -510,22 +510,22 @@ test("EXPLAIN QUERY PLAN uses composite indexes without full-table SCAN on all h
       {
         label: "space_record collection listing",
         sql: "SELECT rkey, cid, value FROM space_record WHERE space_uri = ? AND repo_did = ? AND collection = ? AND rkey > ? ORDER BY rkey ASC LIMIT 50",
-        params: ["at://did:plc:g/space/new.flock.channel/general", "did:plc:u", "new.flock.message", ""],
+        params: ["at:space/did:plc:g/new.flock.channel/general", "did:plc:u", "new.flock.message", ""],
       },
       {
         label: "space_oplog cursor replay",
         sql: "SELECT rev, idx, action, uri FROM space_oplog WHERE space_uri = ? AND repo_did = ? AND (rev > ? OR (rev = ? AND idx > ?)) ORDER BY rev ASC, idx ASC LIMIT 50",
-        params: ["at://did:plc:g/space/new.flock.channel/general", "did:plc:u", "3jzfcijpj2z2a", "3jzfcijpj2z2a", 0],
+        params: ["at:space/did:plc:g/new.flock.channel/general", "did:plc:u", "3jzfcijpj2z2a", "3jzfcijpj2z2a", 0],
       },
       {
         label: "space_writer listWriters",
         sql: "SELECT writer_did, space_rev FROM space_writer WHERE space_uri = ? AND space_rev > ? ORDER BY space_rev ASC",
-        params: ["at://did:plc:g/space/new.flock.channel/general", ""],
+        params: ["at:space/did:plc:g/new.flock.channel/general", ""],
       },
       {
         label: "notify_registration fanout",
         sql: "SELECT endpoint, token FROM notify_registration WHERE space_uri = ? AND expires_at > ?",
-        params: ["at://did:plc:g/space/new.flock.channel/general", 1_700_000_000_000],
+        params: ["at:space/did:plc:g/new.flock.channel/general", 1_700_000_000_000],
       },
       {
         label: "outbox_notice due queue",
@@ -575,8 +575,8 @@ test("pruneExpiredHostState sweeps up to 10,000 expired revoked_credential and s
     const insertRev = db.prepare(
       "INSERT INTO revoked_credential (jti, group_did, space_uri, exp, revoked_at) VALUES (?, ?, ?, ?, ?)",
     );
-    insertRev.run("shared-jti", "did:plc:g1", "at://did:plc:g1/space/group.opensocial.meta/self", nowSec + 300, nowMs);
-    insertRev.run("shared-jti", "did:plc:g2", "at://did:plc:g2/space/group.opensocial.meta/self", nowSec + 300, nowMs);
+    insertRev.run("shared-jti", "did:plc:g1", "at:space/did:plc:g1/group.opensocial.meta/self", nowSec + 300, nowMs);
+    insertRev.run("shared-jti", "did:plc:g2", "at:space/did:plc:g2/group.opensocial.meta/self", nowSec + 300, nowMs);
     const sharedRows = (
       db.prepare("SELECT COUNT(*) AS cnt FROM revoked_credential WHERE jti = 'shared-jti'").get() as { cnt: number }
     ).cnt;
@@ -591,7 +591,7 @@ test("pruneExpiredHostState sweeps up to 10,000 expired revoked_credential and s
         insertRev.run(
           `exp-rc-${i}`,
           "did:plc:g1",
-          "at://did:plc:g1/space/group.opensocial.meta/self",
+          "at:space/did:plc:g1/group.opensocial.meta/self",
           nowSec - 10,
           nowMs - 10_000,
         );
@@ -612,6 +612,62 @@ test("pruneExpiredHostState sweeps up to 10,000 expired revoked_credential and s
       db.prepare("SELECT jti FROM service_jwt_jti").all() as Array<{ jti: string }>
     ).map((r) => r.jti);
     assert.deepEqual(remainingJwt, ["credrev:did:plc:iss:live"]);
+  } finally {
+    db.close();
+  }
+});
+
+test("migrateLegacySpaceUrisSync idempotently rewrites Group Host space URIs while keeping space_record payloads/CBOR untouched", async () => {
+  const { migrateLegacySpaceUrisSync } = await import("./db");
+  const db = openGroupHostDb(":memory:");
+  try {
+    const groupDid = "did:plc:legacymig";
+    const oldSpace = `at://${groupDid}/space/new.flock.channel/general`;
+    const newSpace = `at:space/${groupDid}/new.flock.channel/general`;
+    const oldRec = `${oldSpace}/did:plc:alice/new.flock.channel.message/2222222222222`;
+    const newRec = `${newSpace}/did:plc:alice/new.flock.channel.message/2222222222222`;
+    const immutableValue = JSON.stringify({ text: "hello", parent: oldRec });
+    const immutableCbor = Buffer.from([1, 2, 3, 4]);
+
+    db.prepare(
+      "INSERT INTO group_space (space_uri, group_did, space_type, skey, policy_json, space_rev, created_at, updated_at) VALUES (?, ?, 'new.flock.channel', 'general', '{}', '2222222222222', 1, 1)",
+    ).run(oldSpace, groupDid);
+    db.prepare(
+      "INSERT INTO space_record (space_uri, repo_did, collection, rkey, uri, cid, value, cbor_bytes, repo_rev, indexed_at) VALUES (?, 'did:plc:alice', 'new.flock.channel.message', '2222222222222', ?, 'bafy1', ?, ?, '2222222222222', 1)",
+    ).run(oldSpace, oldRec, immutableValue, immutableCbor);
+    db.prepare(
+      "INSERT INTO mod_subject (group_did, subject, cid_key, status, report_count, created_at, updated_at) VALUES (?, ?, '', 'open', 1, '2026-11-20T00:00:00.000Z', '2026-11-20T00:00:00.000Z')",
+    ).run(groupDid, oldRec);
+    db.prepare(
+      "INSERT INTO outbox_notice (id, kind, group_did, coalesce_key, endpoint, space_uri, payload_json, status, next_attempt_at, expires_at, created_at) VALUES ('n1', 'syncer_update', ?, ?, 'https://op.test', ?, ?, 'pending', 1, 9999999999, 1)",
+    ).run(groupDid, `sync:${oldSpace}`, oldSpace, JSON.stringify({ space: oldSpace }));
+
+    migrateLegacySpaceUrisSync(db);
+    // Re-run must be idempotent
+    migrateLegacySpaceUrisSync(db);
+
+    const sp = db.prepare("SELECT space_uri FROM group_space WHERE group_did = ?").get(groupDid) as { space_uri: string };
+    assert.equal(sp.space_uri, newSpace);
+    const rec = db.prepare("SELECT space_uri, uri, value, cbor_bytes FROM space_record WHERE cid = 'bafy1'").get() as {
+      space_uri: string;
+      uri: string;
+      value: string;
+      cbor_bytes: Buffer;
+    };
+    assert.equal(rec.space_uri, newSpace);
+    assert.equal(rec.uri, newRec);
+    assert.equal(rec.value, immutableValue, "immutable record value must not be rewritten");
+    assert.deepEqual(rec.cbor_bytes, immutableCbor, "immutable record CBOR must not be rewritten");
+    const mod = db.prepare("SELECT subject FROM mod_subject WHERE group_did = ?").get(groupDid) as { subject: string };
+    assert.equal(mod.subject, newRec);
+    const outbox = db.prepare("SELECT space_uri, coalesce_key, payload_json FROM outbox_notice WHERE id = 'n1'").get() as {
+      space_uri: string;
+      coalesce_key: string;
+      payload_json: string;
+    };
+    assert.equal(outbox.space_uri, newSpace);
+    assert.equal(outbox.coalesce_key, `sync:${newSpace}`);
+    assert.deepEqual(JSON.parse(outbox.payload_json), { space: newSpace });
   } finally {
     db.close();
   }

@@ -701,7 +701,7 @@ test("setRequestMode keeps the other settings another client put on the inbox po
   await client("did:plc:bob").setRequestMode("everyone");
 
   // #then only publicWrite changed (and publicRead is forced off)
-  const reported = await network.clientFor("did:plc:bob").query<{ policy: Record<string, unknown> }>("com.atproto.space.getSpace", { space: "at://did:plc:bob/space/new.flock.dm.inbox/self" });
+  const reported = await network.clientFor("did:plc:bob").query<{ policy: Record<string, unknown> }>("com.atproto.space.getSpace", { space: "at:space/did:plc:bob/new.flock.dm.inbox/self" });
   assert.deepEqual(reported.policy, {
     $type: "com.atproto.memberspace.policy", publicRead: false, publicWrite: true,
     allowedApps: ["https://other.example/client.json"], publishMembers: true,
@@ -2045,7 +2045,7 @@ test("R12 Round 3 M3: aborted or timed-out ordinary CredentialCache mints never 
           && request.method === "POST"
         ) {
           const parsed = (await request.clone().json()) as { space?: string; notify?: unknown };
-          if (parsed.space?.startsWith("at://did:plc:bob/") && parsed.notify === undefined) {
+          if (parsed.space?.startsWith("at:space/did:plc:bob/") && parsed.notify === undefined) {
             sawOrdinaryRenewalSignal = Boolean(request.signal);
             request.signal.addEventListener("abort", () => {
               ordinaryRenewalAborted = true;

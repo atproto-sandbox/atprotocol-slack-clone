@@ -163,7 +163,7 @@ export function dropMemberList(space: string): void {
     return;
   }
   if (parsed.type === OPENSOCIAL_SPACE_TYPE.members) {
-    const prefix = `at://${parsed.authorityDid}/space/`;
+    const prefix = `at:space/${parsed.authorityDid}/`;
     for (const cached of lists.keys()) {
       if (cached.startsWith(prefix)) lists.delete(cached);
     }

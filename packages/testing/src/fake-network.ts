@@ -39,11 +39,11 @@ import {
   writeRepoStar,
   writeSpaceMetaStar,
 } from "@atproto/space";
-import type { DidString, NsidString, RecordKeyString, SpaceRefString } from "@atproto/syntax";
+import { isAtUriString, type DidString, type NsidString, type RecordKeyString, type SpaceRefString } from "@atproto/syntax";
 import { generateSpaceKey } from "@flock/protocol/atproto/space-key";
 import { MEMBERSPACE_POLICY } from "@flock/protocol/atproto/space-policy";
 import { AtprotoClient } from "@flock/protocol/atproto/xrpc";
-import { isDid, isRecordKey, isSkey, isTid, parseSpaceUri, tidTimestampUs } from "@flock/protocol/keys";
+import { isDid, isRecordKey, isSkey, isTid, parseSpaceUri, spaceUri as buildSpaceUri, tidTimestampUs } from "@flock/protocol/keys";
 import {
   computeCanonicalMigrationManifest,
   verifyMigrationManifestDigest,
@@ -2002,7 +2002,7 @@ export class FakeNetwork {
       }
       const actorDid = this.requireGroupSpaceManagePerm(auth, ownerDid, type, skey, "create");
       const normalized = normalizeOpenSocialPolicy(params.policy, { groupDid: ownerDid, spaceType: type, skey }, FakeXrpcError);
-      const uri = `at://${ownerDid}/space/${type}/${skey}`;
+      const uri = buildSpaceUri(ownerDid, type, skey);
       const existing = this.spaces.get(uri);
       if (existing && !existing.deleted) throw new FakeXrpcError(400, "SpaceAlreadyExists", "Space already exists");
 
@@ -2090,7 +2090,7 @@ export class FakeNetwork {
     }
 
     if (!isSkey(skey)) throw new FakeXrpcError(400, "InvalidRequest", "Invalid space key");
-    const uri = `at://${ownerDid}/space/${type}/${skey}`;
+    const uri = buildSpaceUri(ownerDid, type, skey);
     const existing = this.spaces.get(uri);
     if (existing && !existing.deleted) throw new FakeXrpcError(400, "SpaceAlreadyExists", "Space already exists");
     this.spaces.set(uri, {
@@ -10221,11 +10221,11 @@ function parseRepoOpsCursor(cursor: string): { rev: string; idx: number } {
 }
 
 function isSpaceRecordCursor(value: string): boolean {
-  return /^at:\/\/[^/\s]+\/[^/\s]+(?:\/[^/\s]+)*$/.test(value);
+  return isAtUriString(value);
 }
 
 function spaceUri(space: FakeSpace): string {
-  return `at://${space.ownerDid}/space/${space.type}/${space.skey}`;
+  return buildSpaceUri(space.ownerDid, space.type, space.skey);
 }
 
 function normalizeBaseUrl(url: string): string {

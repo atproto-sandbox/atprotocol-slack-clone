@@ -1,3 +1,4 @@
+import { normalizeLegacySpaceUri } from "@flock/protocol/keys";
 import {
   cloneActivityState,
   cloneJoiningGroupEntry,
@@ -32,7 +33,7 @@ import {
 // deletes one database and a different account's start deletes databases that are not its own.
 
 const DATABASE_PREFIX = "flock-sync-";
-const VERSION = 3;
+const VERSION = 4;
 const LAST = "￿";
 
 type Factory = Pick<IDBFactory, "open" | "deleteDatabase" | "databases">;
@@ -52,10 +53,12 @@ export class IndexedDbStore implements SyncStore {
    */
   static async open(did: string, factory: Factory = indexedDB, onClosedElsewhere?: () => void): Promise<IndexedDbStore> {
     const opening = factory.open(databaseName(did), VERSION);
-    opening.onupgradeneeded = () => {
+    opening.onupgradeneeded = (event) => {
       const db = opening.result;
       const upgradeTx = opening.transaction;
-      if (!db.objectStoreNames.contains("spaces")) db.createObjectStore("spaces", { keyPath: "space" });
+      const spaces = db.objectStoreNames.contains("spaces")
+        ? upgradeTx?.objectStore("spaces")
+        : db.createObjectStore("spaces", { keyPath: "space" });
       const writers = db.objectStoreNames.contains("writers")
         ? upgradeTx?.objectStore("writers")
         : db.createObjectStore("writers", { keyPath: ["space", "repo"] });
@@ -64,7 +67,9 @@ export class IndexedDbStore implements SyncStore {
         ? upgradeTx?.objectStore("records")
         : db.createObjectStore("records", { keyPath: ["space", "collection", "repo", "rkey"] });
       if (records && !records.indexNames.contains("writer")) records.createIndex("writer", ["space", "repo"]);
-      if (!db.objectStoreNames.contains("meta")) db.createObjectStore("meta", { keyPath: "key" });
+      const meta = db.objectStoreNames.contains("meta")
+        ? upgradeTx?.objectStore("meta")
+        : db.createObjectStore("meta", { keyPath: "key" });
       if (!db.objectStoreNames.contains("identities")) db.createObjectStore("identities", { keyPath: ["kind", "did"] });
       const activity = db.objectStoreNames.contains("activity")
         ? upgradeTx?.objectStore("activity")
@@ -75,8 +80,67 @@ export class IndexedDbStore implements SyncStore {
         : db.createObjectStore("clock", { keyPath: ["accountDid", "scope"] });
       if (clock && !clock.indexNames.contains("scope")) clock.createIndex("scope", "scope");
       if (!db.objectStoreNames.contains("leavingGroups")) db.createObjectStore("leavingGroups", { keyPath: "groupDid" });
-      if (!db.objectStoreNames.contains("joiningGroups")) db.createObjectStore("joiningGroups", { keyPath: "operationId" });
+      const joiningGroups = db.objectStoreNames.contains("joiningGroups")
+        ? upgradeTx?.objectStore("joiningGroups")
+        : db.createObjectStore("joiningGroups", { keyPath: "operationId" });
       if (!db.objectStoreNames.contains("reactivatingGroups")) db.createObjectStore("reactivatingGroups", { keyPath: "operationId" });
+
+      if (event.oldVersion > 0 && event.oldVersion < 4) {
+        if (spaces) {
+          rewriteStoreRows(spaces, (row: SpaceState) => {
+            const nextSpace = normalizeLegacySpaceUri(row.space);
+            const nextWorkspace = row.workspace === null ? null : normalizeLegacySpaceUri(row.workspace);
+            if (nextSpace === row.space && nextWorkspace === row.workspace) return null;
+            return { next: { ...row, space: nextSpace, workspace: nextWorkspace }, keyChanged: nextSpace !== row.space };
+          });
+        }
+        if (writers) {
+          rewriteStoreRows(writers, (row: WriterState) => {
+            const nextSpace = normalizeLegacySpaceUri(row.space);
+            if (nextSpace === row.space) return null;
+            return { next: { ...row, space: nextSpace }, keyChanged: true };
+          });
+        }
+        if (records) {
+          rewriteStoreRows(records, (row: StoredRecord) => {
+            const nextSpace = normalizeLegacySpaceUri(row.space);
+            const nextUri = normalizeLegacySpaceUri(row.uri);
+            if (nextSpace === row.space && nextUri === row.uri) return null;
+            return { next: { ...row, space: nextSpace, uri: nextUri }, keyChanged: nextSpace !== row.space };
+          });
+        }
+        if (meta) {
+          rewriteStoreRows(meta, (row: { key: string; value: unknown }) => {
+            if (!row.key.startsWith("purges ")) return null;
+            const rawSpace = row.key.slice("purges ".length);
+            const nextSpace = normalizeLegacySpaceUri(rawSpace);
+            if (nextSpace === rawSpace) return null;
+            return { next: { ...row, key: `purges ${nextSpace}` }, keyChanged: true };
+          });
+        }
+        if (activity) {
+          rewriteStoreRows(activity, (row: ActivityState) => {
+            const nextSpace = normalizeLegacySpaceUri(row.space);
+            if (nextSpace === row.space) return null;
+            return { next: { ...row, space: nextSpace }, keyChanged: true };
+          });
+        }
+        if (clock) {
+          rewriteStoreRows(clock, (row: ClockState) => {
+            const nextScope = normalizeLegacySpaceUri(row.scope);
+            if (nextScope === row.scope) return null;
+            return { next: { ...row, scope: nextScope }, keyChanged: true };
+          });
+        }
+        if (joiningGroups) {
+          rewriteStoreRows(joiningGroups, (row: JoiningGroupEntry) => {
+            if (typeof row.inviteUri !== "string") return null;
+            const nextInvite = normalizeLegacySpaceUri(row.inviteUri);
+            if (nextInvite === row.inviteUri) return null;
+            return { next: { ...row, inviteUri: nextInvite }, keyChanged: false };
+          });
+        }
+      }
     };
     const db = await settle(opening);
     const store = new IndexedDbStore(db);
@@ -596,6 +660,27 @@ async function epochOf(meta: IDBObjectStore, space: string): Promise<string> {
     settle<{ value: number } | undefined>(meta.get(`purges ${space}`)),
   ]);
   return `${clears?.value ?? 0}:${purges?.value ?? 0}`;
+}
+
+function rewriteStoreRows<T>(
+  store: IDBObjectStore,
+  transform: (row: T) => { next: T; keyChanged: boolean } | null,
+): void {
+  const req = store.openCursor();
+  req.onsuccess = () => {
+    const cursor = req.result;
+    if (!cursor) return;
+    const change = transform(cursor.value as T);
+    if (change) {
+      if (change.keyChanged) {
+        cursor.delete();
+        store.put(change.next);
+      } else {
+        cursor.update(change.next);
+      }
+    }
+    cursor.continue();
+  };
 }
 
 function settle<T>(request: IDBRequest<T> | IDBOpenDBRequest): Promise<T> {

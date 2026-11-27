@@ -117,7 +117,8 @@ test("Flock Desk end-to-end parity (D3/D5): direct-grant & expiring invites, cro
               pdsOrigins.has(parsedLoc.origin) &&
               (parsedLoc.pathname === "/oauth/par" ||
                 (parsedLoc.pathname === "/xrpc/com.atproto.space.getSpace" &&
-                  (parsedLoc.searchParams.get("space") ?? "").endsWith("/space/group.opensocial.invites/self")))
+                  (parsedLoc.searchParams.get("space") ?? "").startsWith("at:space/") &&
+                  (parsedLoc.searchParams.get("space") ?? "").endsWith("/group.opensocial.invites/self")))
             ) {
               return;
             }

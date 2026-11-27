@@ -163,7 +163,7 @@ export async function submitWorkspaceName(actor: Actor, name: string): Promise<v
 }
 
 export async function workspaceUriOnPage(actor: Actor): Promise<string> {
-  const text = await actor.page.locator(".mono-note").filter({ hasText: "at://" }).first().innerText();
+  const text = await actor.page.locator(".mono-note").filter({ hasText: "at:space/" }).first().innerText();
   return text.trim();
 }
 

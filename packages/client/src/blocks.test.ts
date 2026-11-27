@@ -43,7 +43,7 @@ test("validateMessageInput accepts { text, blocks? } only and rejects extra fiel
   assert.equal(validateMessageInput([]).valid, false);
   assert.equal(validateMessageInput({ text: "" }).valid, false);
   assert.equal(validateMessageInput({ text: "hello", blocks: null }).valid, false);
-  assert.equal(validateMessageInput({ text: "hello", parent: "at://did:plc:a/space/new.flock.channel/g/did:plc:a/new.flock.channel.message/2222222222222" }).valid, false);
+  assert.equal(validateMessageInput({ text: "hello", parent: "at:space/did:plc:a/new.flock.channel/g/did:plc:a/new.flock.channel.message/2222222222222" }).valid, false);
   assert.equal(validateMessageInput({ text: "hello", createdAt: "2026-01-01T00:00:00.000Z" }).valid, false);
   assert.equal(validateMessageInput({ text: "hello", extra: true }).valid, false);
   assert.equal(validateMessageInput({

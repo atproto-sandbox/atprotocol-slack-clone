@@ -38,7 +38,7 @@ const TEST_COLLECTION = "social.flock.dm.message";
 const PERSONAL_POLICY = { $type: "com.atproto.personalspace.policy" } as const;
 const STAR_MEDIA_TYPE = "application/vnd.dasl.star";
 
-type SpaceUri = `at://${Did}/space/${string}.${string}.${string}/${string}`;
+type SpaceUri = `at:space/${Did}/${string}.${string}.${string}/${string}`;
 type SpaceRecordUri = `${SpaceUri}/${Did}/${string}.${string}.${string}/${string}`;
 
 interface TestSetup {
@@ -202,7 +202,7 @@ test("space CRUD, field renames (space, spaceDid, repo), listSpaces metadata, an
     },
   );
   const space = created.space;
-  assert.equal(space, `at://${ALICE}/space/${TEST_SPACE_TYPE}/main`);
+  assert.equal(space, `at:space/${ALICE}/${TEST_SPACE_TYPE}/main`);
   assert.equal("record" in created, false);
   assert.equal("uri" in created, false);
 
@@ -221,7 +221,7 @@ test("space CRUD, field renames (space, spaceDid, repo), listSpaces metadata, an
   );
 
   // Non-authority calls on a nonexistent space fail with NotAuthorized BEFORE SpaceNotFound
-  const missingSpace = `at://${ALICE}/space/${TEST_SPACE_TYPE}/does-not-exist`;
+  const missingSpace = `at:space/${ALICE}/${TEST_SPACE_TYPE}/does-not-exist`;
   await assertXrpcError(bob.query("com.atproto.space.getSpace", { space: missingSpace }), 400, "NotAuthorized");
   await assertXrpcError(bob.query("com.atproto.memberspace.listMembers", { space: missingSpace }), 400, "NotAuthorized");
   await assertXrpcError(
@@ -501,7 +501,7 @@ test("authorizeSpaceSync: no OAuth auth, credentialKey JWT & 10-min exp, spaceRe
 
   // Non-existent space -> SpaceNotFound
   const missingSpaceFirst = await authorizeSync(network, ALICE, {
-    space: `at://${ALICE}/space/${TEST_SPACE_TYPE}/nonexistent`,
+    space: `at:space/${ALICE}/${TEST_SPACE_TYPE}/nonexistent`,
   });
   assert.equal(missingSpaceFirst.status, 400);
   assert.equal(missingSpaceFirst.error?.error, "SpaceNotFound");

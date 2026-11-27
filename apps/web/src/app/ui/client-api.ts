@@ -1,4 +1,4 @@
-import { isDid, parseWorkspaceUri as parseWorkspaceSpaceUri, SELF_SKEY, workspaceUri } from "@flock/protocol/keys";
+import { isDid, normalizeLegacySpaceUri, parseWorkspaceUri as parseWorkspaceSpaceUri, SELF_SKEY, workspaceUri } from "@flock/protocol/keys";
 import { SpaceCredentialError } from "@flock/protocol/atproto/space-credential-core";
 import { XrpcError } from "@flock/protocol/atproto/xrpc";
 import { ChannelUnavailableError } from "@flock/client/errors";
@@ -51,20 +51,21 @@ export function needsAuthorityApproval(error: unknown): boolean {
 export function isAccessFailure(error: unknown): boolean { return [401, 403, 409].includes(httpStatus(error) ?? 0); }
 export function messageOf(error: unknown): string { return error instanceof Error ? error.message : "Request failed."; }
 
-/** The protocol layer's `parseWorkspaceUri` for a link a person pasted: surrounding whitespace is ignored. */
+/** The protocol layer's `parseWorkspaceUri` for a link a person pasted: surrounding whitespace is ignored and legacy `at://<did>/space/...` links are normalized. */
 export function parsePastedWorkspaceUri(uri: string): { authorityDid: string; skey: string } | null {
-  return parseWorkspaceSpaceUri(uri.trim());
+  return parseWorkspaceSpaceUri(normalizeLegacySpaceUri(uri.trim()));
 }
 
-/** Parses either a bare Group DID (`did:plc:...` / `did:web:...`) or a canonical workspace space URI. */
+/** Parses either a bare Group DID (`did:plc:...` / `did:web:...`) or a workspace space URI (normalizing legacy links to `at:space/...`). */
 export function parsePastedGroupOrWorkspace(raw: string): { groupDid: string; workspaceUri: string } | null {
   const trimmed = raw.trim();
   if (!trimmed) return null;
   if (isDid(trimmed)) {
     return { groupDid: trimmed, workspaceUri: workspaceUri(trimmed, SELF_SKEY) };
   }
-  const parsed = parseWorkspaceSpaceUri(trimmed);
-  return parsed ? { groupDid: parsed.authorityDid, workspaceUri: trimmed } : null;
+  const normalized = normalizeLegacySpaceUri(trimmed);
+  const parsed = parseWorkspaceSpaceUri(normalized);
+  return parsed ? { groupDid: parsed.authorityDid, workspaceUri: normalized } : null;
 }
 
 export function withReactions(messages: Array<Omit<Message, "reactions">>, reactions: Reaction[], viewerDid: string): Message[] {
@@ -144,7 +145,9 @@ export function inviteLinkFor(origin: string, workspaceUri: string): string {
 /** The workspace an invite link names, or null when the query string has none or it is malformed. */
 export function workspaceFromInviteSearch(search: string): string | null {
   const value = new URLSearchParams(search).get("invite");
-  return value && parsePastedWorkspaceUri(value) ? value.trim() : null;
+  if (!value) return null;
+  const normalized = normalizeLegacySpaceUri(value.trim());
+  return parseWorkspaceSpaceUri(normalized) ? normalized : null;
 }
 
 /** Remembers an invite link across the sign-in redirects, and returns the workspace it names. */

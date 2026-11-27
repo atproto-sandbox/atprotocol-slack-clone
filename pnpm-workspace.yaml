@@ -9,26 +9,26 @@ allowBuilds:
   sharp: true
   unrs-resolver: true
 minimumReleaseAgeExclude:
-  - '@atproto/car@0.0.0-spaces-alpha-20261117141222'
-  - '@atproto/common@0.0.0-spaces-alpha-20261117141222'
-  - '@atproto/common-web@0.0.0-spaces-alpha-20261117141222'
-  - '@atproto/crypto@0.0.0-spaces-alpha-20261117141222'
-  - '@atproto/did@0.0.0-spaces-alpha-20261117141222'
-  - '@atproto/lex-cbor@0.0.0-spaces-alpha-20261117141222'
-  - '@atproto/lex-client@0.0.0-spaces-alpha-20261117141222'
-  - '@atproto/lex-data@0.0.0-spaces-alpha-20261117141222'
-  - '@atproto/lex-json@0.0.0-spaces-alpha-20261117141222'
-  - '@atproto/lex-schema@0.0.0-spaces-alpha-20261117141222'
-  - '@atproto/lexicon@0.0.0-spaces-alpha-20261117141222'
-  - '@atproto/oauth-scopes@0.0.0-spaces-alpha-20261117141222'
-  - '@atproto/repo@0.0.0-spaces-alpha-20261117141222'
-  - '@atproto/space@0.0.0-spaces-alpha-20261117141222'
-  - '@atproto/star@0.0.0-spaces-alpha-20261117141222'
-  - '@atproto/syntax@0.0.0-spaces-alpha-20261117141222'
-  - '@atproto/ws-client@0.0.0-spaces-alpha-20261117141222'
-  - '@atproto/xrpc@0.0.0-spaces-alpha-20261117141222'
-  - '@atproto/xrpc-server@0.0.0-spaces-alpha-20261117141222'
-  - '@atproto/lex-rpc@0.0.0-spaces-alpha-20261117141222'
+  - '@atproto/car@0.0.0-spaces-alpha-20261124235736'
+  - '@atproto/common@0.0.0-spaces-alpha-20261124235736'
+  - '@atproto/common-web@0.0.0-spaces-alpha-20261124235736'
+  - '@atproto/crypto@0.0.0-spaces-alpha-20261124235736'
+  - '@atproto/did@0.0.0-spaces-alpha-20261124235736'
+  - '@atproto/lex-cbor@0.1.11'
+  - '@atproto/lex-client@0.0.0-spaces-alpha-20261124235736'
+  - '@atproto/lex-data@0.1.11'
+  - '@atproto/lex-json@0.1.10'
+  - '@atproto/lex-rpc@0.0.0-spaces-alpha-20261124235736'
+  - '@atproto/lex-schema@0.0.0-spaces-alpha-20261124235736'
+  - '@atproto/lexicon@0.0.0-spaces-alpha-20261124235736'
+  - '@atproto/oauth-scopes@0.0.0-spaces-alpha-20261124235736'
+  - '@atproto/repo@0.0.0-spaces-alpha-20261124235736'
+  - '@atproto/space@0.0.0-spaces-alpha-20261124235736'
+  - '@atproto/star@0.0.1'
+  - '@atproto/syntax@0.0.0-spaces-alpha-20261124235736'
+  - '@atproto/ws-client@0.0.0-spaces-alpha-20261124235736'
+  - '@atproto/xrpc@0.0.0-spaces-alpha-20261124235736'
+  - '@atproto/xrpc-server@0.0.0-spaces-alpha-20261124235736'
 onlyBuiltDependencies:
   - "@astryxdesign/core"
   - better-sqlite3
@@ -36,26 +36,3 @@ onlyBuiltDependencies:
   - esbuild
   - sharp
   - unrs-resolver
-# The alpha snapshots depend on "^0.0.0-spaces-alpha-<stamp>" ranges. That range also matches stray 0.0.0 releases
-# (lex-cbor and lex-data list "workspace:*" dependencies and cannot install), so every alpha range is pinned to the snapshot.
-overrides:
-  "@atproto/car@^0.0.0-spaces-alpha-20261117141222": "0.0.0-spaces-alpha-20261117141222"
-  "@atproto/common@^0.0.0-spaces-alpha-20261117141222": "0.0.0-spaces-alpha-20261117141222"
-  "@atproto/common-web@^0.0.0-spaces-alpha-20261117141222": "0.0.0-spaces-alpha-20261117141222"
-  "@atproto/crypto@^0.0.0-spaces-alpha-20261117141222": "0.0.0-spaces-alpha-20261117141222"
-  "@atproto/did@^0.0.0-spaces-alpha-20261117141222": "0.0.0-spaces-alpha-20261117141222"
-  "@atproto/lexicon@^0.0.0-spaces-alpha-20261117141222": "0.0.0-spaces-alpha-20261117141222"
-  "@atproto/lex-client@^0.0.0-spaces-alpha-20261117141222": "0.0.0-spaces-alpha-20261117141222"
-  "@atproto/lex-rpc@^0.0.0-spaces-alpha-20261117141222": "0.0.0-spaces-alpha-20261117141222"
-  "@atproto/lex-schema@^0.0.0-spaces-alpha-20261117141222": "0.0.0-spaces-alpha-20261117141222"
-  "@atproto/oauth-scopes@^0.0.0-spaces-alpha-20261117141222": "0.0.0-spaces-alpha-20261117141222"
-  "@atproto/repo@^0.0.0-spaces-alpha-20261117141222": "0.0.0-spaces-alpha-20261117141222"
-  "@atproto/star@^0.0.0-spaces-alpha-20261117141222": "0.0.0-spaces-alpha-20261117141222"
-  "@atproto/syntax@^0.0.0-spaces-alpha-20261117141222": "0.0.0-spaces-alpha-20261117141222"
-  "@atproto/ws-client@^0.0.0-spaces-alpha-20261117141222": "0.0.0-spaces-alpha-20261117141222"
-  "@atproto/xrpc@^0.0.0-spaces-alpha-20261117141222": "0.0.0-spaces-alpha-20261117141222"
-  "@atproto/lex-cbor@^0.0.0-spaces-alpha-20261117141222": "0.0.0-spaces-alpha-20261117141222"
-  "@atproto/lex-data@^0.0.0-spaces-alpha-20261117141222": "0.0.0-spaces-alpha-20261117141222"
-  "@atproto/lex-json@^0.0.0-spaces-alpha-20261117141222": "0.0.0-spaces-alpha-20261117141222"
-patchedDependencies:
-  '@atproto/oauth-scopes@0.0.0-spaces-alpha-20261117141222': patches/@atproto__oauth-scopes@0.0.0-spaces-alpha-20261117141222.patch

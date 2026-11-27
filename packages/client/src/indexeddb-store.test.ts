@@ -17,7 +17,7 @@ storeContract("IndexedDB store", async () => IndexedDbStore.open(`did:plc:contra
 test("a store is per account, and starting as another account deletes the stores that are not its own", async () => {
   const factory = new IDBFactory();
   const alice = await IndexedDbStore.open("did:plc:alice", factory);
-  await alice.putSpace({ space: "at://did:plc:a/space/new.flock.channel/one", spaceRev: null, writers: [], writersListedAt: null, workspace: null, lastOpenedAt: 1 });
+  await alice.putSpace({ space: "at:space/did:plc:a/new.flock.channel/one", spaceRev: null, writers: [], writersListedAt: null, workspace: null, lastOpenedAt: 1 });
   alice.close();
   const bob = await IndexedDbStore.open("did:plc:bob", factory);
   assert.deepEqual(await bob.listSpaces(), [], "bob does not see alice's store");
@@ -49,7 +49,7 @@ test("signing out deletes the account's store and leaves another account's", asy
   // #given alice's store with a space in it, closed as sign-out closes it, and bob's
   const factory = new IDBFactory();
   const alice = await IndexedDbStore.open("did:plc:alice", factory);
-  await alice.putSpace({ space: "at://did:plc:a/space/new.flock.channel/one", spaceRev: null, writers: [], writersListedAt: null, workspace: null, lastOpenedAt: 1 });
+  await alice.putSpace({ space: "at:space/did:plc:a/new.flock.channel/one", spaceRev: null, writers: [], writersListedAt: null, workspace: null, lastOpenedAt: 1 });
   alice.close();
   (await IndexedDbStore.open("did:plc:bob", factory)).close();
 
@@ -224,7 +224,7 @@ test("deleteAccount wipes persisted activity and clock state alongside spaces wi
   reopenedBob.close();
 });
 
-test("onversionchange closes existing IndexedDbStore cleanly so a v4 upgrade does not wedge", async () => {
+test("onversionchange closes existing IndexedDbStore cleanly so a v5 upgrade does not wedge", async () => {
   const factory = new IDBFactory();
   const did = "did:plc:versionchange";
   let closedCount = 0;
@@ -232,22 +232,84 @@ test("onversionchange closes existing IndexedDbStore cleanly so a v4 upgrade doe
     closedCount++;
   });
 
-  // Upgrade the same database to version 4 from a second connection; store1 must close and unblock cleanly.
+  // Upgrade the same database to version 5 from a second connection; store1 must close and unblock cleanly.
   const upgraded = new Promise<IDBDatabase>((resolve, reject) => {
-    const req = factory.open(`flock-sync-${did}`, 4);
+    const req = factory.open(`flock-sync-${did}`, 5);
     req.onupgradeneeded = () => {
-      // No-op v4 upgrade.
+      // No-op v5 upgrade.
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
 
-  const v4Db = await Promise.race([
+  const v5Db = await Promise.race([
     upgraded,
-    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("v4 upgrade wedged waiting on store1")), 1_000)),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("v5 upgrade wedged waiting on store1")), 1_000)),
   ]);
-  v4Db.close();
+  v5Db.close();
 
   assert.equal(closedCount, 1);
   await assert.rejects(() => store1.listSpaces(), SyncStoreError);
+});
+
+test("v3 IndexedDB database upgrades cleanly to v4 rewriting legacy at://<did>/space/... keys across all stores", async () => {
+  const factory = new IDBFactory();
+  const did = "did:plc:migratev4";
+  const dbName = `flock-sync-${did}`;
+  const oldSpace = "at://did:plc:host/space/new.flock.channel/general";
+  const newSpace = "at:space/did:plc:host/new.flock.channel/general";
+  const oldWs = "at://did:plc:host/space/new.flock.workspace/self";
+  const newWs = "at:space/did:plc:host/new.flock.workspace/self";
+  const oldRec = `${oldSpace}/did:plc:alice/${COLLECTION.message}/2222222222222`;
+  const newRec = `${newSpace}/did:plc:alice/${COLLECTION.message}/2222222222222`;
+  const oldInvite = "at://did:plc:migratev4/space/group.opensocial.invites/self/did:plc:host/group.opensocial.invite/2222222222222";
+  const newInvite = "at:space/did:plc:migratev4/group.opensocial.invites/self/did:plc:host/group.opensocial.invite/2222222222222";
+
+  const v3Db = await new Promise<IDBDatabase>((resolve, reject) => {
+    const req = factory.open(dbName, 3);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      db.createObjectStore("spaces", { keyPath: "space" });
+      db.createObjectStore("writers", { keyPath: ["space", "repo"] }).createIndex("space", "space");
+      db.createObjectStore("records", { keyPath: ["space", "collection", "repo", "rkey"] }).createIndex("writer", ["space", "repo"]);
+      db.createObjectStore("meta", { keyPath: "key" });
+      db.createObjectStore("identities", { keyPath: ["kind", "did"] });
+      db.createObjectStore("activity", { keyPath: ["accountDid", "space"] }).createIndex("space", "space");
+      db.createObjectStore("clock", { keyPath: ["accountDid", "scope"] }).createIndex("scope", "scope");
+      db.createObjectStore("leavingGroups", { keyPath: "groupDid" });
+      db.createObjectStore("joiningGroups", { keyPath: "operationId" });
+      db.createObjectStore("reactivatingGroups", { keyPath: "operationId" });
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    const tx = v3Db.transaction(["spaces", "writers", "records", "meta", "activity", "clock", "joiningGroups"], "readwrite");
+    tx.objectStore("spaces").put({ space: oldSpace, spaceRev: "2222222222222", writers: ["did:plc:alice"], writersListedAt: 10, workspace: oldWs, lastOpenedAt: 20 });
+    tx.objectStore("writers").put({ space: oldSpace, repo: "did:plc:alice", generation: 1, syncedRev: "2222222222222", checkedAt: 30, stale: false, coverage: {} });
+    tx.objectStore("records").put({ space: oldSpace, collection: COLLECTION.message, repo: "did:plc:alice", rkey: "2222222222222", uri: oldRec, cid: "bafy1", value: { text: "hi" } });
+    tx.objectStore("meta").put({ key: `purges ${oldSpace}`, value: 7 });
+    tx.objectStore("activity").put({ accountDid: did, space: oldSpace, seenIds: ["e1"], dismissedIds: [], updatedAt: 50 });
+    tx.objectStore("clock").put({ accountDid: did, scope: oldSpace, lastTidMs: 100, lastHlcMs: 100, lastHlcCounter: 0 });
+    tx.objectStore("joiningGroups").put({ operationId: "op1", groupDid: "did:plc:host", mode: "invite", inviteUri: oldInvite, phase: "submitting", createdAt: 60 });
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+  v3Db.close();
+
+  const store = await IndexedDbStore.open(did, factory);
+  try {
+    assert.equal(await store.getSpace(oldSpace), undefined);
+    const sp = await store.getSpace(newSpace);
+    assert.equal(sp?.workspace, newWs);
+    assert.equal((await store.getWriter(newSpace, "did:plc:alice"))?.syncedRev, "2222222222222");
+    assert.equal((await store.getRecord(newSpace, "did:plc:alice", COLLECTION.message, "2222222222222"))?.uri, newRec);
+    assert.equal(await store.epoch(newSpace), "0:7");
+    assert.deepEqual((await store.getActivityState(did, newSpace))?.seenIds, ["e1"]);
+    assert.equal((await store.getClock(did, newSpace))?.lastTidMs, 100);
+    assert.equal((await store.getJoiningGroup("op1"))?.inviteUri, newInvite);
+  } finally {
+    store.close();
+  }
 });

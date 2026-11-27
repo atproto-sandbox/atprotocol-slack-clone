@@ -402,7 +402,7 @@ test("assertOperatorWorkspaceWithinEnvelope scans ext.install and enforces OpenS
     | "missing_workspace_policy_record"
     | "malformed_outer_wrapper"
     | "missing_channel_policy_record" = "semantically_invalid_get_space";
-  const generalChannelSpace = `at://${host.groupDid}/space/new.flock.channel/${owner.workspace.skey === "self" ? "general" : `${owner.workspace.skey}-general`}`;
+  const generalChannelSpace = `at:space/${host.groupDid}/new.flock.channel/${owner.workspace.skey === "self" ? "general" : `${owner.workspace.skey}-general`}`;
   host.network.interceptResponse = ({ method, params, response }) => {
     if (
       policyFaultMode === "semantically_invalid_get_space" &&

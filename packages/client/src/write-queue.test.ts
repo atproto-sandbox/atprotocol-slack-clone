@@ -34,9 +34,9 @@ test("concurrent writes to different entities reserve non-colliding TIDs & monot
       locks: null,
     });
 
-    const entityA = "at://did:plc:auth/space/new.flock.ext.tasks/x-1/did:plc:alice/new.flock.ext.tasks.task/a";
-    const entityB = "at://did:plc:auth/space/new.flock.ext.tasks/x-1/did:plc:alice/new.flock.ext.tasks.task/b";
-    const entityC = "at://did:plc:auth/space/new.flock.ext.tasks/x-1/did:plc:alice/new.flock.ext.tasks.task/c";
+    const entityA = "at:space/did:plc:auth/new.flock.ext.tasks/x-1/did:plc:alice/new.flock.ext.tasks.task/a";
+    const entityB = "at:space/did:plc:auth/new.flock.ext.tasks/x-1/did:plc:alice/new.flock.ext.tasks.task/b";
+    const entityC = "at:space/did:plc:auth/new.flock.ext.tasks/x-1/did:plc:alice/new.flock.ext.tasks.task/c";
 
     const gateA = createDeferred();
     const order: string[] = [];
@@ -133,7 +133,7 @@ test("WriteQueue handles navigator.locks === undefined cleanly and uses Web Lock
   };
 
   const queue = new WriteQueue({ store, now: () => BASE_MS, randomClockId: () => 7, locks: fakeLocks });
-  const entityUri = "at://did:plc:auth/space/new.flock.ext.tasks/x-1/did:plc:alice/new.flock.ext.tasks.task/t1";
+  const entityUri = "at:space/did:plc:auth/new.flock.ext.tasks/x-1/did:plc:alice/new.flock.ext.tasks.task/t1";
   await queue.withEntityLock(ALICE, entityUri, async () => {
     await queue.reserveStamp(ALICE);
   });
@@ -167,7 +167,7 @@ test("WriteQueue serializes same-(accountDid, entityUri) mutations and rolls ove
   assert.equal(stamp2.clockId, 9);
   assert.equal(randCalls, 1);
 
-  const entityUri = "at://did:plc:auth/space/new.flock.ext.tasks/x-1/did:plc:alice/new.flock.ext.tasks.task/same";
+  const entityUri = "at:space/did:plc:auth/new.flock.ext.tasks/x-1/did:plc:alice/new.flock.ext.tasks.task/same";
   const events: string[] = [];
   const gate1 = createDeferred();
 

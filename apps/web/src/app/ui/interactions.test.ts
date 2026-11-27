@@ -15,7 +15,7 @@ const ALICE = "did:plc:alice";
 const BOB = "did:plc:bob";
 const APP_ONE = "did:plc:appone";
 const APP_TWO = "did:plc:apptwo";
-const WORKSPACE_URI = `at://${AUTHORITY}/space/new.flock.workspace/self`;
+const WORKSPACE_URI = `at:space/${AUTHORITY}/new.flock.workspace/self`;
 
 function makeWorkspace(installs: WorkspaceSummary["installs"]): WorkspaceSummary {
   return {
@@ -37,9 +37,9 @@ function makeWorkspace(installs: WorkspaceSummary["installs"]): WorkspaceSummary
     pendingMembers: [],
     roles: [],
     channels: [
-      { uri: `at://${AUTHORITY}/space/new.flock.channel/acme-general`, skey: "acme-general", name: "general", visibility: "public" },
-      { uri: `at://${AUTHORITY}/space/new.flock.channel/acme-secret`, skey: "acme-secret", name: "secret", visibility: "private" },
-      { uri: `at://${AUTHORITY}/space/new.flock.channel/acme-moving`, skey: "acme-moving", name: "moving", visibility: "transitioning" },
+      { uri: `at:space/${AUTHORITY}/new.flock.channel/acme-general`, skey: "acme-general", name: "general", visibility: "public" },
+      { uri: `at:space/${AUTHORITY}/new.flock.channel/acme-secret`, skey: "acme-secret", name: "secret", visibility: "private" },
+      { uri: `at:space/${AUTHORITY}/new.flock.channel/acme-moving`, skey: "acme-moving", name: "moving", visibility: "transitioning" },
     ],
     installs,
     degradedReasons: [],
@@ -180,8 +180,8 @@ test("no command is offered where the viewer cannot read, on a transitioning cha
   assert.equal(movingCtx.canOffer, false);
 
   // Thread checks: allowed on top-level message, blocked on a reply or missing message.
-  const topUri = "at://did:plc:authority/space/new.flock.channel/acme-secret/did:plc:alice/new.flock.channel.message/2222222222222";
-  const replyUri = "at://did:plc:authority/space/new.flock.channel/acme-secret/did:plc:alice/new.flock.channel.message/2222222222223";
+  const topUri = "at:space/did:plc:authority/new.flock.channel/acme-secret/did:plc:alice/new.flock.channel.message/2222222222222";
+  const replyUri = "at:space/did:plc:authority/new.flock.channel/acme-secret/did:plc:alice/new.flock.channel.message/2222222222223";
   const threadContent = {
     messages: [
       { uri: topUri, rkey: "2222222222222", repo: ALICE, value: { text: "top" } },

@@ -386,7 +386,7 @@ test("Group Host OAuth serves RFC metadata, DID overlap rotation, public & confi
 
     // 7. Live `effectiveMemberPermissions` narrowing on role demotion!
     // Add `bob` with `admin` role, mint a moderator/admin session for `bob`, then demote `bob` to `member`!
-    const membersSpace = `at://${pubGroupDid}/space/group.opensocial.members/self`;
+    const membersSpace = `at:space/${pubGroupDid}/group.opensocial.members/self`;
     const putBobAdmin = await createdPublic.dpop.fetchWithDpop(`${gh.url}/xrpc/com.atproto.space.putRecord`, {
       method: "POST",
       accessToken: createdPublic.tokenResponse.access_token,
@@ -802,7 +802,7 @@ test("OAuth code replay cascade, 5-min creation code expiry -> existing-group re
       accessToken: recTok,
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        space: `at://${groupDid}/space/group.opensocial.meta/self`,
+        space: `at:space/${groupDid}/group.opensocial.meta/self`,
         repo: groupDid,
         collection: "group.opensocial.profile",
         rkey: "self",

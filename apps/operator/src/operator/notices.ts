@@ -34,8 +34,8 @@ export function recordWriteNotification(notification: WriteNotification, now = M
   }
   const db = getRawDb();
   const type = spaceTypeOf(space);
-  // `at://<authority>/` as an index range on space_uri: every URI under it sorts from the prefix up to the same text ending in `0`, the next character after `/`.
-  const authorityStart = `at://${requireSpaceAuthority(space)}/`;
+  // `at:space/<authority>/` as an index range on space_uri: every URI under it sorts from the prefix up to the same text ending in `0`, the next character after `/`.
+  const authorityStart = `at:space/${requireSpaceAuthority(space)}/`;
   const authorityEnd = `${authorityStart.slice(0, -1)}0`;
   db.transaction(() => {
     const { seq } = db.prepare("SELECT COALESCE(MAX(type_seq), 0) + 1 AS seq FROM space_notification WHERE space_type=?").get(type) as { seq: number };

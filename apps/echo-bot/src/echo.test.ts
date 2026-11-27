@@ -3,8 +3,8 @@ import test from "node:test";
 import { validateMessageInput } from "@flock/client/blocks";
 import { ECHO_BOT_COMMANDS, echoActionReply, echoCommandReply, echoReply } from "./echo";
 
-const channel = { workspace: "at://did:plc:a/space/new.flock.workspace/self", skey: "general" };
-const uri = "at://did:plc:a/space/new.flock.channel/general/did:plc:p/new.flock.channel.message/3m2222222222a";
+const channel = { workspace: "at:space/did:plc:a/new.flock.workspace/self", skey: "general" };
+const uri = "at:space/did:plc:a/new.flock.channel/general/did:plc:p/new.flock.channel.message/3m2222222222a";
 
 test("the echo bot answers a message with its text, in its thread", () => {
   assert.deepEqual(echoReply({ channel, canWrite: true, message: { uri, repo: "did:plc:p", rkey: "3m2222222222a", value: { text: " hello " } } }), { text: "echo: hello", parent: uri });

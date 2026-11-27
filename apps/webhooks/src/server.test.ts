@@ -27,7 +27,7 @@ const FOUNDER = "did:plc:founder";
 const ADMIN = "did:plc:admin";
 const OUTSIDER_ADMIN = "did:plc:outsideradmin";
 const APP_DID = "did:plc:webhooksapp";
-const WORKSPACE = `at://${GROUP_DID}/space/new.flock.workspace/self`;
+const WORKSPACE = `at:space/${GROUP_DID}/new.flock.workspace/self`;
 
 type TestSummary = WorkspaceSummary & { takendownMembers?: string[] };
 
@@ -71,9 +71,9 @@ async function startTestHarness(overrides: Partial<WebhooksHandlerDeps> & {
       pendingMembers: [],
       roles: [],
       channels: [
-        { uri: `at://${GROUP_DID}/space/new.flock.channel/general`, skey: "general", name: "general", visibility: "public" },
-        { uri: `at://${GROUP_DID}/space/new.flock.channel/secret`, skey: "secret", name: "secret", visibility: "private" },
-        { uri: `at://${GROUP_DID}/space/new.flock.channel/moving`, skey: "moving", name: "moving", visibility: "transitioning" },
+        { uri: `at:space/${GROUP_DID}/new.flock.channel/general`, skey: "general", name: "general", visibility: "public" },
+        { uri: `at:space/${GROUP_DID}/new.flock.channel/secret`, skey: "secret", name: "secret", visibility: "private" },
+        { uri: `at:space/${GROUP_DID}/new.flock.channel/moving`, skey: "moving", name: "moving", visibility: "transitioning" },
       ],
       installs: [
         {
@@ -140,7 +140,7 @@ async function startTestHarness(overrides: Partial<WebhooksHandlerDeps> & {
       },
       send: async (ref: { workspace: string; skey: string }, text: string, _parent?: string, blocks?: unknown) => {
         state.sendCalls.push({ workspace: ref.workspace, skey: ref.skey, text, ...(blocks ? { blocks } : {}) });
-        return { uri: `at://${GROUP_DID}/space/new.flock.channel/${ref.skey}/${APP_DID}/new.flock.channel.message/2222222222222`, rkey: "2222222222222" };
+        return { uri: `at:space/${GROUP_DID}/new.flock.channel/${ref.skey}/${APP_DID}/new.flock.channel.message/2222222222222`, rkey: "2222222222222" };
       },
     } as never,
   };
@@ -433,8 +433,8 @@ test("every request re-checks admin AND roster membership, takendownMembers deni
     h.state.summary = {
       ...h.state.summary,
       channels: [
-        { uri: `at://${GROUP_DID}/space/new.flock.channel/general`, skey: "general", name: "general", visibility: "public" },
-        { uri: `at://${GROUP_DID}/space/new.flock.channel/secret`, skey: "secret", name: "secret", visibility: "transitioning" },
+        { uri: `at:space/${GROUP_DID}/new.flock.channel/general`, skey: "general", name: "general", visibility: "public" },
+        { uri: `at:space/${GROUP_DID}/new.flock.channel/secret`, skey: "secret", name: "secret", visibility: "transitioning" },
       ],
     };
     const transitioningPrivateHtml = await (await fetch(`${h.origin}/admin`, { headers: { cookie: authSession.cookie } })).text();
@@ -444,8 +444,8 @@ test("every request re-checks admin AND roster membership, takendownMembers deni
     h.state.summary = {
       ...h.state.summary,
       channels: [
-        { uri: `at://${GROUP_DID}/space/new.flock.channel/general`, skey: "general", name: "general", visibility: "public" },
-        { uri: `at://${GROUP_DID}/space/new.flock.channel/secret`, skey: "secret", name: "secret", visibility: "private" },
+        { uri: `at:space/${GROUP_DID}/new.flock.channel/general`, skey: "general", name: "general", visibility: "public" },
+        { uri: `at:space/${GROUP_DID}/new.flock.channel/secret`, skey: "secret", name: "secret", visibility: "private" },
       ],
     };
     h.state.rosterError = new WorkspaceEnvelopeError("private channel roster exceeds supported envelope");
@@ -471,7 +471,7 @@ test("every request re-checks admin AND roster membership, takendownMembers deni
     // Archiving #secret (removing it from directory) causes POST /hooks/<secretHookId>/<secretHookSecret> to return 404.
     h.state.summary = {
       ...h.state.summary,
-      channels: [{ uri: `at://${GROUP_DID}/space/new.flock.channel/general`, skey: "general", name: "general", visibility: "public" }],
+      channels: [{ uri: `at:space/${GROUP_DID}/new.flock.channel/general`, skey: "general", name: "general", visibility: "public" }],
       installs: [{ did: APP_DID, channels: [{ skey: "general", write: true }, { skey: "secret", write: true }] }],
     };
     const archivedPrivatePost = await fetch(`${h.origin}/hooks/${secretHookId}/${secretHookSecret}`, {
@@ -672,7 +672,7 @@ test("hook endpoint enforces constant-time identical 404s, rate-limit order, syn
 
     h.state.summary = {
       ...h.state.summary,
-      channels: [{ uri: `at://${GROUP_DID}/space/new.flock.channel/general`, skey: "general", name: "general", visibility: "transitioning" }],
+      channels: [{ uri: `at:space/${GROUP_DID}/new.flock.channel/general`, skey: "general", name: "general", visibility: "transitioning" }],
       installs: [{ did: APP_DID, channels: [{ skey: "general", write: true }] }],
     };
     const transitioningRes = await fetch(`${h.origin}/hooks/${id1}/${secret1}`, {

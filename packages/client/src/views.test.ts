@@ -6,8 +6,8 @@ import { LiveSpaces, Snapshots } from "./views";
 
 // The engine's views for the UI: snapshots per key with a subscription, kept live by the change feed.
 
-const GENERAL = "at://did:plc:owner/space/new.flock.channel/acme-general";
-const RANDOM = "at://did:plc:owner/space/new.flock.channel/acme-random";
+const GENERAL = "at:space/did:plc:owner/new.flock.channel/acme-general";
+const RANDOM = "at:space/did:plc:owner/new.flock.channel/acme-random";
 const answer = (head: string, parts: Partial<ChangesAnswer> = {}): ChangesAnswer => ({ head, changed: [], denied: [], reset: [], ...parts });
 
 test("a snapshot keeps its identity until its key changes, keeps the last value while loading, and keeps it on an error", async () => {

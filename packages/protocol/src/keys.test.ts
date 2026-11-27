@@ -20,6 +20,8 @@ import {
   isRecordKey,
   isSkey,
   isTid,
+  normalizeLegacySpaceUri,
+  parseAnySpaceRecordUri,
   parseAppInboxUri,
   parseChannelUri,
   parseDmConversationUri,
@@ -58,18 +60,18 @@ test("stable hashes and appRoleKey use UTF-8 SHA-256 and lowercase unpadded base
   assert.match(roleKey, /^app-[a-z2-7]{52}$/);
   assert.equal(isRecordKey(roleKey), true);
   assert.equal(channelRoleKey("general"), "channel-general");
-  assert.equal(requestRecordKey("at://did:plc:owner/space/new.flock.channel/general", "did:plc:alice"),
-    `r-${recordKeyHash("at://did:plc:owner/space/new.flock.channel/general\u0000did:plc:alice")}`);
-  const messageUri = spaceRecordUri("at://did:plc:owner/space/new.flock.channel/general", "did:plc:alice", "new.flock.channel.message", "abc");
+  assert.equal(requestRecordKey("at:space/did:plc:owner/new.flock.channel/general", "did:plc:alice"),
+    `r-${recordKeyHash("at:space/did:plc:owner/new.flock.channel/general\u0000did:plc:alice")}`);
+  const messageUri = spaceRecordUri("at:space/did:plc:owner/new.flock.channel/general", "did:plc:alice", "new.flock.channel.message", "abc");
   assert.equal(reactionRecordKey(messageUri, "💜", "did:plc:alice"),
     `x-${recordKeyHash(`${messageUri}\u0000💜\u0000did:plc:alice`)}`);
-  const requestUri = spaceRecordUri("at://did:plc:owner/space/new.flock.inbox/self", "did:plc:alice", "new.flock.joinRequest", "r-abc");
+  const requestUri = spaceRecordUri("at:space/did:plc:owner/new.flock.inbox/self", "did:plc:alice", "new.flock.joinRequest", "r-abc");
   assert.equal(decisionRecordKey(requestUri), `q-${recordKeyHash(requestUri)}`);
-  assert.deepEqual(parseSpaceRecordUri(messageUri, "at://did:plc:owner/space/new.flock.channel/general", "new.flock.channel.message"), {
+  assert.deepEqual(parseSpaceRecordUri(messageUri, "at:space/did:plc:owner/new.flock.channel/general", "new.flock.channel.message"), {
     repo: "did:plc:alice", rkey: "abc",
   });
-  assert.equal(parseSpaceRecordUri("at://did:plc:alice/new.flock.channel.message/abc", "at://did:plc:owner/space/new.flock.channel/general", "new.flock.channel.message"), null);
-  assert.equal(parseSpaceRecordUri(messageUri, "at://did:plc:owner/space/new.flock.channel/other", "new.flock.channel.message"), null);
+  assert.equal(parseSpaceRecordUri("at://did:plc:alice/new.flock.channel.message/abc", "at:space/did:plc:owner/new.flock.channel/general", "new.flock.channel.message"), null);
+  assert.equal(parseSpaceRecordUri(messageUri, "at:space/did:plc:owner/new.flock.channel/other", "new.flock.channel.message"), null);
 });
 
 test("hash outputs are byte-identical to fixed SHA-256 vectors", () => {
@@ -100,44 +102,44 @@ test("isRecordKey and parseSpaceUri accept 1..512-character protocol record keys
   assert.equal(isSkey("."), false);
   assert.equal(isSkey(".."), false);
 
-  assert.deepEqual(parseSpaceUri(`at://did:plc:owner/space/third.party.modality/${key129}`), {
+  assert.deepEqual(parseSpaceUri(`at:space/did:plc:owner/third.party.modality/${key129}`), {
     authorityDid: "did:plc:owner",
     type: "third.party.modality",
     skey: key129,
   });
-  assert.deepEqual(parseSpaceUri(`at://did:plc:owner/space/third.party.modality/${key512}`), {
+  assert.deepEqual(parseSpaceUri(`at:space/did:plc:owner/third.party.modality/${key512}`), {
     authorityDid: "did:plc:owner",
     type: "third.party.modality",
     skey: key512,
   });
-  assert.equal(parseSpaceUri(`at://did:plc:owner/space/third.party.modality/${key513}`), null);
-  assert.equal(parseSpaceUri("at://did:plc:owner/space/third.party.modality/."), null);
-  assert.equal(parseSpaceUri("at://did:plc:owner/space/third.party.modality/.."), null);
+  assert.equal(parseSpaceUri(`at:space/did:plc:owner/third.party.modality/${key513}`), null);
+  assert.equal(parseSpaceUri("at:space/did:plc:owner/third.party.modality/."), null);
+  assert.equal(parseSpaceUri("at:space/did:plc:owner/third.party.modality/.."), null);
 });
 
 test("OpenSocial and Flock literal:self space URIs enforce self keys strictly", () => {
-  assert.equal(groupMetaUri("did:plc:grp"), "at://did:plc:grp/space/group.opensocial.meta/self");
-  assert.equal(groupMembersUri("did:plc:grp"), "at://did:plc:grp/space/group.opensocial.members/self");
-  assert.equal(personalInvitesUri("did:plc:alice"), "at://did:plc:alice/space/group.opensocial.invites/self");
-  assert.equal(workspaceUri("did:plc:grp"), "at://did:plc:grp/space/new.flock.workspace/self");
-  assert.equal(inboxUri("did:plc:grp"), "at://did:plc:grp/space/new.flock.inbox/self");
+  assert.equal(groupMetaUri("did:plc:grp"), "at:space/did:plc:grp/group.opensocial.meta/self");
+  assert.equal(groupMembersUri("did:plc:grp"), "at:space/did:plc:grp/group.opensocial.members/self");
+  assert.equal(personalInvitesUri("did:plc:alice"), "at:space/did:plc:alice/group.opensocial.invites/self");
+  assert.equal(workspaceUri("did:plc:grp"), "at:space/did:plc:grp/new.flock.workspace/self");
+  assert.equal(inboxUri("did:plc:grp"), "at:space/did:plc:grp/new.flock.inbox/self");
 
-  assert.deepEqual(parseGroupMetaUri("at://did:plc:grp/space/group.opensocial.meta/self"), { groupDid: "did:plc:grp" });
-  assert.equal(parseGroupMetaUri("at://did:plc:grp/space/group.opensocial.meta/other"), null);
-  assert.deepEqual(parseGroupMembersUri("at://did:plc:grp/space/group.opensocial.members/self"), { groupDid: "did:plc:grp" });
-  assert.equal(parseGroupMembersUri("at://did:plc:grp/space/group.opensocial.members/other"), null);
-  assert.deepEqual(parsePersonalInvitesUri("at://did:plc:alice/space/group.opensocial.invites/self"), { userDid: "did:plc:alice" });
-  assert.equal(parsePersonalInvitesUri("at://did:plc:alice/space/group.opensocial.invites/other"), null);
+  assert.deepEqual(parseGroupMetaUri("at:space/did:plc:grp/group.opensocial.meta/self"), { groupDid: "did:plc:grp" });
+  assert.equal(parseGroupMetaUri("at:space/did:plc:grp/group.opensocial.meta/other"), null);
+  assert.deepEqual(parseGroupMembersUri("at:space/did:plc:grp/group.opensocial.members/self"), { groupDid: "did:plc:grp" });
+  assert.equal(parseGroupMembersUri("at:space/did:plc:grp/group.opensocial.members/other"), null);
+  assert.deepEqual(parsePersonalInvitesUri("at:space/did:plc:alice/group.opensocial.invites/self"), { userDid: "did:plc:alice" });
+  assert.equal(parsePersonalInvitesUri("at:space/did:plc:alice/group.opensocial.invites/other"), null);
 
-  assert.deepEqual(parseWorkspaceUri("at://did:plc:owner/space/new.flock.workspace/self"), { authorityDid: "did:plc:owner", skey: "self" });
-  assert.equal(parseWorkspaceUri("at://did:plc:owner/space/new.flock.workspace/team"), null);
-  assert.deepEqual(parseInboxUri("at://did:plc:owner/space/new.flock.inbox/self"), { authorityDid: "did:plc:owner", skey: "self" });
-  assert.equal(parseInboxUri("at://did:plc:owner/space/new.flock.inbox/team"), null);
+  assert.deepEqual(parseWorkspaceUri("at:space/did:plc:owner/new.flock.workspace/self"), { authorityDid: "did:plc:owner", skey: "self" });
+  assert.equal(parseWorkspaceUri("at:space/did:plc:owner/new.flock.workspace/team"), null);
+  assert.deepEqual(parseInboxUri("at:space/did:plc:owner/new.flock.inbox/self"), { authorityDid: "did:plc:owner", skey: "self" });
+  assert.equal(parseInboxUri("at:space/did:plc:owner/new.flock.inbox/team"), null);
 
-  assert.deepEqual(parseChannelUri("at://did:plc:owner/space/new.flock.channel/general"), { authorityDid: "did:plc:owner", skey: "general" });
-  assert.equal(parseChannelUri(`at://did:plc:owner/space/new.flock.channel/${"x".repeat(129)}`), null);
-  assert.equal(requireSpaceAuthority("at://did:plc:owner/space/new.flock.inbox/self"), "did:plc:owner");
-  assert.throws(() => requireSpaceAuthority("at://did:plc:owner/space/new.flock.inbox/.."), /Invalid permissioned space URI/);
+  assert.deepEqual(parseChannelUri("at:space/did:plc:owner/new.flock.channel/general"), { authorityDid: "did:plc:owner", skey: "general" });
+  assert.equal(parseChannelUri(`at:space/did:plc:owner/new.flock.channel/${"x".repeat(129)}`), null);
+  assert.equal(requireSpaceAuthority("at:space/did:plc:owner/new.flock.inbox/self"), "did:plc:owner");
+  assert.throws(() => requireSpaceAuthority("at:space/did:plc:owner/new.flock.inbox/.."), /Invalid permissioned space URI/);
 });
 
 test("isTid enforces canonical pinned isValidTid first-character [234567abcdefghij] rule and rejects leading k..z", () => {
@@ -175,16 +177,16 @@ test("canonical JSON sorts keys and rejects values outside its JSON domain", () 
 
 test("DM inbox and conversation URIs are fixed-shape and reject invalid owners or keys", () => {
   assert.equal(DM_INBOX_SKEY, "self");
-  assert.equal(dmInboxUri("did:plc:alice"), "at://did:plc:alice/space/new.flock.dm.inbox/self");
+  assert.equal(dmInboxUri("did:plc:alice"), "at:space/did:plc:alice/new.flock.dm.inbox/self");
   assert.throws(() => dmInboxUri("alice"), /Invalid DM inbox owner DID/);
   const convKey = "2222222222222";
-  assert.equal(dmConversationUri("did:plc:alice", convKey), `at://did:plc:alice/space/new.flock.dm.conversation/${convKey}`);
+  assert.equal(dmConversationUri("did:plc:alice", convKey), `at:space/did:plc:alice/new.flock.dm.conversation/${convKey}`);
   assert.throws(() => dmConversationUri("alice", convKey), /Invalid DM conversation owner DID/);
   assert.throws(() => dmConversationUri("did:plc:alice", "short"), /Invalid DM conversation key/);
   assert.throws(() => dmConversationUri("did:plc:alice", "k222222222222"), /Invalid DM conversation key/);
-  assert.deepEqual(parseDmConversationUri(`at://did:plc:alice/space/new.flock.dm.conversation/${convKey}`), { ownerDid: "did:plc:alice", convKey });
-  assert.deepEqual(parseDmInboxUri("at://did:plc:alice/space/new.flock.dm.inbox/self"), { ownerDid: "did:plc:alice" });
-  assert.deepEqual(parseDmSpaceUri("at://did:plc:alice/space/new.flock.dm.inbox/self"), { kind: "inbox", ownerDid: "did:plc:alice" });
+  assert.deepEqual(parseDmConversationUri(`at:space/did:plc:alice/new.flock.dm.conversation/${convKey}`), { ownerDid: "did:plc:alice", convKey });
+  assert.deepEqual(parseDmInboxUri("at:space/did:plc:alice/new.flock.dm.inbox/self"), { ownerDid: "did:plc:alice" });
+  assert.deepEqual(parseDmSpaceUri("at:space/did:plc:alice/new.flock.dm.inbox/self"), { kind: "inbox", ownerDid: "did:plc:alice" });
   const rkey = "234567abcdefh";
   const uri = spaceRecordUri(dmConversationUri("did:plc:alice", convKey), "did:plc:alice", "new.flock.dm.message", rkey);
   assert.deepEqual(parseDmMessageUri(uri), { ownerDid: "did:plc:alice", convKey, repo: "did:plc:alice", rkey });
@@ -204,4 +206,46 @@ test("canonical participants, appInboxUri, and extSpaceSkey preserve determinist
     type: "new.flock.ext.tasks",
     skey: tasksKey,
   });
+});
+
+test("at:space/ URIs round-trip strictly for space refs and space records, support did:web underscores, and reject legacy/handle forms", () => {
+  const webDid = "did:web:my_team.example.com";
+  const sp = workspaceUri(webDid);
+  assert.equal(sp, "at:space/did:web:my_team.example.com/new.flock.workspace/self");
+  assert.deepEqual(parseSpaceUri(sp), {
+    authorityDid: webDid,
+    type: "new.flock.workspace",
+    skey: "self",
+  });
+
+  const rec = spaceRecordUri(sp, "did:plc:alice", "new.flock.directory", "general");
+  assert.equal(rec, "at:space/did:web:my_team.example.com/new.flock.workspace/self/did:plc:alice/new.flock.directory/general");
+  assert.deepEqual(parseAnySpaceRecordUri(rec), {
+    spaceUri: sp,
+    authorityDid: webDid,
+    spaceType: "new.flock.workspace",
+    skey: "self",
+    repoDid: "did:plc:alice",
+    collection: "new.flock.directory",
+    rkey: "general",
+  });
+
+  // Strict rejection of legacy at://<did>/space/..., handles, and invalid lengths
+  assert.equal(parseSpaceUri("at://did:plc:owner/space/new.flock.workspace/self"), null);
+  assert.equal(parseAnySpaceRecordUri("at://did:plc:owner/space/new.flock.channel/gen/did:plc:alice/new.flock.channel.message/2222222222222"), null);
+  assert.equal(parseSpaceUri("at:space/alice.bsky.social/new.flock.workspace/self"), null);
+  assert.equal(parseSpaceUri("at:space/did:plc:owner/new.flock.workspace"), null);
+  assert.equal(parseAnySpaceRecordUri(`${sp}/did:plc:alice/new.flock.directory`), null);
+
+  // Explicit legacy normalizer rewrites old-form URIs idempotently and leaves canonical/non-space URIs intact
+  assert.equal(
+    normalizeLegacySpaceUri("at://did:plc:owner/space/new.flock.workspace/self"),
+    "at:space/did:plc:owner/new.flock.workspace/self",
+  );
+  assert.equal(
+    normalizeLegacySpaceUri("at://did:plc:owner/space/new.flock.channel/gen/did:plc:alice/new.flock.channel.message/2222222222222"),
+    "at:space/did:plc:owner/new.flock.channel/gen/did:plc:alice/new.flock.channel.message/2222222222222",
+  );
+  assert.equal(normalizeLegacySpaceUri(sp), sp);
+  assert.equal(normalizeLegacySpaceUri("at://did:plc:owner/app.bsky.feed.post/2222222222222"), "at://did:plc:owner/app.bsky.feed.post/2222222222222");
 });

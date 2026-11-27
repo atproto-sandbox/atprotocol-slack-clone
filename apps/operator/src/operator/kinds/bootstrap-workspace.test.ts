@@ -40,7 +40,7 @@ function sessionWith(createSpace: (type: SpaceType, skey: string) => Response): 
   } as unknown as OAuthSession;
 }
 
-const created = (type: SpaceType, skey: string) => Response.json({ space: `at://${OWNER}/space/${type}/${skey}` });
+const created = (type: SpaceType, skey: string) => Response.json({ space: `at:space/${OWNER}/${type}/${skey}` });
 
 test("non-self workspace space URIs are rejected by parseWorkspaceRef, and a bootstrap replayed into a non-self key fails before creating anything", async () => {
   const nonSelfUri = workspaceUri(OWNER, "not-self-key");

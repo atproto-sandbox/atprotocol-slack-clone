@@ -93,7 +93,7 @@ test("a DM inbox is followed only by its owner, a conversation half by anyone, a
   assert.equal(await mayFollow(dmInboxUri(MEMBER), MEMBER, access), true);
   assert.equal(await mayFollow(dmInboxUri(MEMBER), OUTSIDER, access), false);
   assert.equal(await mayFollow(dmConversationUri(MEMBER, "3jzfcijpj2z2a"), OUTSIDER, access), true);
-  assert.equal(await mayFollow("at://did:plc:owner/space/com.example.other/x", OWNER, access), false);
+  assert.equal(await mayFollow("at:space/did:plc:owner/com.example.other/x", OWNER, access), false);
   assert.deepEqual(reads, [], "none of these reads a member list");
 });
 

@@ -176,7 +176,7 @@ export function groupGovernanceState(
     const knownAppSubjects = new Set<string>(appRows.map((row) => row.subject_did));
     const installRows = db
       .prepare("SELECT value FROM space_record WHERE space_uri = ? AND repo_did = ? AND collection = ?")
-      .all(`at://${groupDid}/space/new.flock.workspace/self`, groupDid, COLLECTION.appInstall) as Array<{ value: string }>;
+      .all(`at:space/${groupDid}/new.flock.workspace/self`, groupDid, COLLECTION.appInstall) as Array<{ value: string }>;
     for (const row of installRows) {
       const parsed = JSON.parse(row.value) as { subject?: unknown };
       if (typeof parsed.subject === "string") knownAppSubjects.add(parsed.subject);

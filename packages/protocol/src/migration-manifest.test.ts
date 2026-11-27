@@ -19,13 +19,13 @@ test("computeCanonicalMigrationManifest produces deterministic UTF-16 sorted RFC
     blobs: ["cid-b", "cid-a", "cid-b"],
     spaces: [
       {
-        spaceUri: "at://did:plc:group1/space/group.opensocial.meta/self",
+        spaceUri: "at:space/did:plc:group1/group.opensocial.meta/self",
         isOwnAuthority: true,
         spaceMetaSha256: "aa".repeat(32),
         repoRootDataHex: "BB".repeat(32),
       },
       {
-        spaceUri: "at://did:plc:invitee/space/group.opensocial.invites/self",
+        spaceUri: "at:space/did:plc:invitee/group.opensocial.invites/self",
         isOwnAuthority: false,
         spaceMetaSha256: "ignored",
         repoRootDataHex: "cc".repeat(32),

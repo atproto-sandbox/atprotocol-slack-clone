@@ -247,7 +247,7 @@ function spaceEntry(space: string, id = 1) {
 
 test("bounded space lookahead distinguishes an exact limit from actual overflow", async () => {
   const owner = "did:plc:a";
-  const uri = (skey: string) => `at://${owner}/space/new.flock.dm.conversation/${skey}`;
+  const uri = (skey: string) => `at:space/${owner}/new.flock.dm.conversation/${skey}`;
   const exact = fakeClient([
     { spaces: [spaceEntry(uri("2222222222222"), 1), spaceEntry(uri("2222222222223"), 2)], cursor: "page-two" },
     { spaces: [] },
@@ -410,7 +410,7 @@ function fakeClient(pages: Array<Record<string, unknown>>) {
 
 test("workspace discovery returns every space URI at the exact limit and refuses to hide some when there are more", async () => {
   // #given an account with exactly as many channels as the limit, and another with one more
-  const uri = (skey: string) => `at://did:plc:a/space/new.flock.channel/${skey}`;
+  const uri = (skey: string) => `at:space/did:plc:a/new.flock.channel/${skey}`;
   const exact = fakeClient([{ spaces: [spaceEntry(uri("a"), 1), spaceEntry(uri("b"), 2)], cursor: "next" }, { spaces: [] }]);
   const overflow = fakeClient([{ spaces: [spaceEntry(uri("a"), 1), spaceEntry(uri("b"), 2)], cursor: "next" }, { spaces: [spaceEntry(uri("c"), 3)] }]);
 
@@ -423,13 +423,13 @@ test("workspace discovery returns every space URI at the exact limit and refuses
 });
 
 test("a space whose URI exceeds record-key limits or fails literal:self is skipped, not a reason to fail the whole listing", async () => {
-  const uri = (skey: string) => `at://did:plc:a/space/new.flock.channel/${skey}`;
+  const uri = (skey: string) => `at:space/did:plc:a/new.flock.channel/${skey}`;
   const page = fakeClient([
     {
       spaces: [
         spaceEntry(uri("a"), 1),
         spaceEntry(uri("k".repeat(513)), 2),
-        spaceEntry("at://did:plc:a/space/new.flock.workspace/not-self", 3),
+        spaceEntry("at:space/did:plc:a/new.flock.workspace/not-self", 3),
         spaceEntry("not-a-space-uri", 4),
         spaceEntry(uri("b"), 5),
       ],
@@ -442,8 +442,8 @@ test("a space whose URI exceeds record-key limits or fails literal:self is skipp
 });
 
 test("an unparseable space past the limit is not overflow, and a usable one behind it still is", async () => {
-  const uri = (skey: string) => `at://did:plc:a/space/new.flock.dm.conversation/${skey}`;
-  const junk = spaceEntry(`at://did:plc:a/space/new.flock.dm.conversation/${"k".repeat(200)}`, 99);
+  const uri = (skey: string) => `at:space/did:plc:a/new.flock.dm.conversation/${skey}`;
+  const junk = spaceEntry(`at:space/did:plc:a/new.flock.dm.conversation/${"k".repeat(200)}`, 99);
 
   // #given exactly two usable spaces, then an entry the app cannot parse and nothing after it
   const exact = fakeClient([
@@ -468,7 +468,7 @@ test("an unparseable space past the limit is not overflow, and a usable one behi
 });
 
 test("skipped spaces do not count toward the limit, across pages", async () => {
-  const uri = (skey: string) => `at://did:plc:a/space/new.flock.channel/${skey}`;
+  const uri = (skey: string) => `at:space/did:plc:a/new.flock.channel/${skey}`;
   const pages = fakeClient([
     { spaces: [spaceEntry(uri("a"), 1), spaceEntry("not-a-space-uri", 2)], cursor: "p2" },
     { spaces: [spaceEntry(uri("b"), 3)] },
@@ -493,16 +493,16 @@ test("the writers changed since a space revision are read page by page, a short 
       return { repos: page, ...(page.length > 0 ? { cursor: page.at(-1)!.spaceRev } : {}) };
     },
   } as unknown as AtprotoClient;
-  const changed = await listWritersSince(client, { space: "at://did:plc:a/space/new.flock.channel/x", since: null, maxRepos: 1_000 });
+  const changed = await listWritersSince(client, { space: "at:space/did:plc:a/new.flock.channel/x", since: null, maxRepos: 1_000 });
   assert.equal(changed.fullReconcile, false);
   assert.equal(changed.updates.length, 150);
   assert.equal(changed.spaceRev, entries.at(-1)!.spaceRev);
   assert.equal(requests.length, 2, "the second page is short, so no third request asks for an empty one");
-  await assert.rejects(listWritersSince(client, { space: "at://did:plc:a/space/new.flock.channel/x", since: null, maxRepos: 99 }), /scan limit/);
+  await assert.rejects(listWritersSince(client, { space: "at:space/did:plc:a/new.flock.channel/x", since: null, maxRepos: 99 }), /scan limit/);
 });
 
 test("listWritersSince handles removals and falls back to full reconcile on InvalidCursor or >72h cursor age", async () => {
-  const space = "at://did:plc:a/space/new.flock.channel/x";
+  const space = "at:space/did:plc:a/new.flock.channel/x";
   const now = 1_760_000_000_000;
   const recentTid = tidAtMs(now - 60_000);
   const expiredTid = tidAtMs(now - WRITER_CURSOR_MAX_AGE_MS - 1_000);
@@ -613,7 +613,7 @@ test("listWritersSince handles removals and falls back to full reconcile on Inva
 });
 
 test("fetchRepoOpsPages verifies commit presence on every page, passes RepoNotFound through, and strips/bounds fields", async () => {
-  const space = "at://did:plc:a/space/new.flock.channel/x";
+  const space = "at:space/did:plc:a/new.flock.channel/x";
   const repo = "did:plc:writer1";
   const commitFor = (rev: string) => ({
     ver: 1,
@@ -717,7 +717,7 @@ test("fetchRepoOpsPages verifies commit presence on every page, passes RepoNotFo
 });
 
 test("omitted collection allows shared rkeys across collections while rejecting duplicate (collection, rkey)", async () => {
-  const space = "at://did:plc:auth/space/new.flock.workspace/ws";
+  const space = "at:space/did:plc:auth/new.flock.workspace/ws";
   const repo = "did:plc:auth";
   // Same rkey "d-alice" in roster and admin is valid across collections.
   assert.doesNotThrow(() =>
@@ -780,7 +780,7 @@ test("omitted collection allows shared rkeys across collections while rejecting 
 });
 
 test("excludeValues allows omitted value on metadata pages while !excludeValues rejects missing values", async () => {
-  const space = "at://did:plc:auth/space/new.flock.channel/general";
+  const space = "at:space/did:plc:auth/new.flock.channel/general";
   const repo = "did:plc:writer";
   // excludeValues: true allows omitted value, requires valid cid.
   assert.doesNotThrow(() =>
@@ -826,7 +826,7 @@ test("excludeValues allows omitted value on metadata pages while !excludeValues 
 });
 
 test("record page validation checks collection NSID syntax and optional record.uri consistency", () => {
-  const space = "at://did:plc:auth/space/new.flock.workspace/ws";
+  const space = "at:space/did:plc:auth/new.flock.workspace/ws";
   const repo = "did:plc:writer";
   assert.throws(
     () => assertBoundedRecordPage({ records: [{ collection: "badnsid", rkey: "a", value: {} }] }, { limit: 5 }),

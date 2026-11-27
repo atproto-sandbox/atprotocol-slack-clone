@@ -155,7 +155,7 @@ export async function listOwnGroupSpaceUris(session: OAuthSession): Promise<stri
       if (scanned > WORKSPACE_ENVELOPE.authorityRecordScan) {
         throw new WorkspaceEnvelopeError(`Group space count exceeds the ${WORKSPACE_ENVELOPE.authorityRecordScan}-space scan limit.`);
       }
-      if (entry.space.startsWith(`at://${session.did}/space/`)) {
+      if (parseSpaceUri(entry.space)?.authorityDid === session.did) {
         ownUris.push(entry.space);
       }
     }

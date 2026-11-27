@@ -8,7 +8,7 @@ import { HooksStore, sha256Hex } from "./hooks-store";
 const directory = mkdtempSync(join(tmpdir(), "webhooks-store-test-"));
 after(() => rmSync(directory, { recursive: true, force: true }));
 
-const WORKSPACE = "at://did:plc:authority/space/new.flock.workspace/acme";
+const WORKSPACE = "at:space/did:plc:authority/new.flock.workspace/acme";
 
 test("HooksStore stores only sha256(secret) with 0o600 permissions, rotates and revokes cleanly, and verifies in constant time", async () => {
   const path = join(directory, "hooks.json");
@@ -70,4 +70,32 @@ test("HooksStore narrows overly wide permissions and refuses symlinks", async ()
   });
   unlinkSync(cachedPath);
   assert.equal((await cachedStore.verifySecret(hook.id, secret))?.id, hook.id, "serves from memory cache without disk read");
+});
+
+test("HooksStore normalizes legacy at://<did>/space/... workspace URIs on cold load", async () => {
+  const legacyPath = join(directory, "legacy-hooks.json");
+  const legacyWorkspace = "at://did:plc:authority/space/new.flock.workspace/acme";
+  writeFileSync(
+    legacyPath,
+    JSON.stringify({
+      hooks: {
+        legacyHookId0123456789: {
+          id: "legacyHookId0123456789",
+          workspace: legacyWorkspace,
+          channelSkey: "general",
+          channelName: "general",
+          privateChannel: false,
+          secretSha256: sha256Hex("secret"),
+          createdBy: "did:plc:admin",
+          createdAt: "2026-11-20T00:00:00.000Z",
+          updatedAt: "2026-11-20T00:00:00.000Z",
+        },
+      },
+    }),
+    { mode: 0o600 },
+  );
+  const store = new HooksStore(legacyPath);
+  const active = await store.listActiveForWorkspace(WORKSPACE);
+  assert.equal(active.length, 1);
+  assert.equal(active[0]?.workspace, WORKSPACE);
 });

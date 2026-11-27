@@ -15,7 +15,7 @@ import {
   TASK_STATUSES,
   type ClosureInputOp,
 } from "@flock/protocol/entity-merge";
-import { groupMembersUri, SELF_SKEY, spaceRecordUri, tasksSpaceUri, tidNow } from "@flock/protocol/keys";
+import { groupMembersUri, requireSpaceAuthority, SELF_SKEY, spaceRecordUri, tasksSpaceUri, tidNow } from "@flock/protocol/keys";
 import { mapLimited } from "@flock/protocol/map-limited";
 import { COLLECTION, OPENSOCIAL_COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
 import { WORKSPACE_ENVELOPE } from "@flock/protocol/workspace-summary";
@@ -291,7 +291,7 @@ async function settled(
 ): Promise<void> {
   const transport = actorTransport({ plcUrl }, reader);
   const credential = await mintSpaceCredentialWith(transport, space);
-  const authorityDid = space.slice("at://".length).split("/")[0]!;
+  const authorityDid = requireSpaceAuthority(space);
   const authority = credential.client(await transport.resolvePds(authorityDid));
   for (let attempt = 0; attempt < 400; attempt += 1) {
     const listed = await authority.query<{ repos: Array<{ $type?: string; repo: string; repoRev?: string }> }>(

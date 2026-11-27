@@ -1,4 +1,4 @@
-import { isValidRecordKey, isValidTid } from "@atproto/syntax";
+import { fromLegacySpaceUri, isValidRecordKey, isValidTid } from "@atproto/syntax";
 import { sha256 } from "@noble/hashes/sha2";
 import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils";
 import { COLLECTION, NAMESPACE, OPENSOCIAL_SPACE_TYPE, SPACE_TYPE } from "./nsids";
@@ -86,7 +86,16 @@ export function decisionRecordKey(requestUri: string): string {
 }
 
 export function spaceUri(authorityDid: string, type: string, skey: string): string {
-  return `at://${authorityDid}/space/${type}/${skey}`;
+  return `at:space/${authorityDid}/${type}/${skey}`;
+}
+
+/**
+ * Rewrites a legacy alpha space or space-record URI (`at://<did>/space/...`) to canonical `at:space/<did>/...`.
+ * Intended ONLY for persisted state migrations, pasted links, and legacy URLs — never for XRPC params, tokens,
+ * MAC headers, or STAR archives.
+ */
+export function normalizeLegacySpaceUri(uri: string): string {
+  return fromLegacySpaceUri(uri) ?? uri;
 }
 
 export function groupMetaUri(groupDid: string): string {
@@ -170,7 +179,7 @@ export function parseDmConversationUri(uri: string): { ownerDid: string; convKey
 
 export function parseDmMessageUri(value: unknown): { ownerDid: string; convKey: string; repo: string; rkey: string } | null {
   if (typeof value !== "string") return null;
-  const match = /^(at:\/\/[^/\s]+\/space\/[^/\s]+\/[^/\s]+)\/[^/\s]+\/[^/\s]+\/[^/\s]+$/.exec(value);
+  const match = /^(at:space\/[^/\s]+\/[^/\s]+\/[^/\s]+)\/[^/\s]+\/[^/\s]+\/[^/\s]+$/.exec(value);
   const conversation = match ? parseDmConversationUri(match[1]!) : null;
   if (!match || !conversation) return null;
   const record = parseSpaceRecordUri(value, match[1]!, COLLECTION.dmMessage);
@@ -187,7 +196,7 @@ export function canonicalParticipants(dids: readonly string[]): string[] {
   return unique;
 }
 
-const SPACE_URI_PATTERN = /^at:\/\/(did:[^/\s]+)\/space\/([A-Za-z0-9.-]+)\/([A-Za-z0-9._~:-]{1,512})$/;
+const SPACE_URI_PATTERN = /^at:space\/(did:[^/\s]+)\/([A-Za-z0-9.-]+)\/([A-Za-z0-9._~:-]{1,512})$/;
 
 export function parseSpaceUri(uri: string): { authorityDid: Did; type: string; skey: string } | null {
   const match = SPACE_URI_PATTERN.exec(uri);
@@ -303,7 +312,7 @@ export function parseAnySpaceRecordUri(
   uri: unknown,
 ): { spaceUri: string; authorityDid: Did; spaceType: string; skey: string; repoDid: Did; collection: string; rkey: string } | null {
   if (typeof uri !== "string") return null;
-  const match = /^(at:\/\/[^/\s]+\/space\/[^/\s]+\/[^/\s]+)\/([^/\s]+)\/([A-Za-z0-9.-]+)\/([^/\s]+)$/.exec(uri);
+  const match = /^(at:space\/[^/\s]+\/[^/\s]+\/[^/\s]+)\/([^/\s]+)\/([A-Za-z0-9.-]+)\/([^/\s]+)$/.exec(uri);
   if (!match) return null;
   const [, rawSpaceUri, rawRepoDid, collection, rkey] = match;
   const parsedSpace = parseSpaceUri(rawSpaceUri);

@@ -2,6 +2,7 @@ import BetterSqlite3 from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { Kysely, SqliteDialect } from "kysely";
+import { normalizeLegacySpaceUri } from "@flock/protocol/keys";
 import { NAMESPACE } from "@flock/protocol/nsids";
 import { getOperatorConfig, resetOperatorConfigCacheForTest } from "../config";
 
@@ -15,6 +16,7 @@ export type OperationState =
   | "aborted_actor_revoked";
 
 export const OPERATION_TAKEOVER_MIGRATION = 4;
+export const SPACE_URI_MIGRATION = 5;
 
 export interface SlackDb {
   oauth_request_lock: { name: string; token: string; expires_at: number };
@@ -302,6 +304,13 @@ export function getDb(): Kysely<SlackDb> {
         .prepare("INSERT INTO schema_migration (version, applied_at) VALUES (?, ?)")
         .run(OPERATION_TAKEOVER_MIGRATION, Math.floor(Date.now() / 1000));
     }
+    const spaceUriMigration = rawDatabase.prepare("SELECT 1 FROM schema_migration WHERE version = ?").get(SPACE_URI_MIGRATION);
+    if (!spaceUriMigration) {
+      migrateOperatorLegacySpaceUrisSync(rawDatabase);
+      rawDatabase
+        .prepare("INSERT INTO schema_migration (version, applied_at) VALUES (?, ?)")
+        .run(SPACE_URI_MIGRATION, Math.floor(Date.now() / 1000));
+    }
     rawDatabase.exec(`CREATE INDEX IF NOT EXISTS operation_workspace_recovery
       ON operation(workspace, workspace_uri, state, created_at);
       CREATE INDEX IF NOT EXISTS operation_workspace_stalled
@@ -325,6 +334,99 @@ export const MEMBER_SESSION_TABLES: readonly string[] = ["oauth_state", "oauth_s
 
 /** The `schema_migration` version recorded once those tables are gone and the file was rebuilt without them. */
 const MEMBER_SESSION_DROPPED = 3;
+
+const OPERATOR_LEGACY_SPACE_URI_COLUMNS: ReadonlyArray<readonly [table: string, column: string]> = [
+  ["operation", "workspace_uri"],
+  ["operation_workspace_catalog", "workspace_uri"],
+  ["notification_registration", "space_uri"],
+  ["notification_registration", "workspace_uri"],
+  ["notification_registration_failure", "space_uri"],
+  ["notification_registration_failure", "workspace_uri"],
+  ["space_notification", "space_uri"],
+  ["space_notification_space_floor", "space_uri"],
+];
+
+const OPERATOR_LEGACY_SPACE_URI_INLINE_RE = /at:\/\/(did:[^/"'\s\\]+)\/space\//g;
+
+function rewriteOperatorJsonLegacySpaceUris(raw: string): string {
+  if (!raw.includes("/space/")) return raw;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    const visit = (value: unknown): unknown => {
+      if (typeof value === "string") {
+        const normalized = normalizeLegacySpaceUri(value);
+        return normalized !== value ? normalized : value.replace(OPERATOR_LEGACY_SPACE_URI_INLINE_RE, "at:space/$1/");
+      }
+      if (Array.isArray(value)) return value.map(visit);
+      if (value && typeof value === "object") {
+        const out: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+          out[normalizeLegacySpaceUri(k)] = visit(v);
+        }
+        return out;
+      }
+      return value;
+    };
+    return JSON.stringify(visit(parsed));
+  } catch {
+    return raw.replace(OPERATOR_LEGACY_SPACE_URI_INLINE_RE, "at:space/$1/");
+  }
+}
+
+/**
+ * Idempotently rewrites pre-Nov-24 `at://<did>/space/...` URIs to canonical `at:space/<did>/...` across
+ * Operator SQLite tables and resets rewritten webhook registrations so startup renews them immediately.
+ */
+export function migrateOperatorLegacySpaceUrisSync(db: BetterSqlite3.Database): void {
+  // Force immediate renewal on any registration whose space_uri or workspace_uri is still in legacy form.
+  db.exec(`
+    UPDATE notification_registration
+    SET expires_at = 0, renew_at = 0
+    WHERE (substr(space_uri, 1, 5) = 'at://' AND substr(space_uri, instr(substr(space_uri, 6), '/') + 5, 7) = '/space/')
+       OR (workspace_uri IS NOT NULL AND substr(workspace_uri, 1, 5) = 'at://' AND substr(workspace_uri, instr(substr(workspace_uri, 6), '/') + 5, 7) = '/space/')
+  `);
+
+  for (const [table, column] of OPERATOR_LEGACY_SPACE_URI_COLUMNS) {
+    db.exec(`
+      UPDATE ${table}
+      SET ${column} = 'at:space/' || substr(${column}, 6, instr(substr(${column}, 6), '/') - 1) || '/'
+        || substr(${column}, instr(substr(${column}, 6), '/') + 12)
+      WHERE ${column} IS NOT NULL
+        AND substr(${column}, 1, 5) = 'at://'
+        AND substr(${column}, instr(substr(${column}, 6), '/') + 5, 7) = '/space/'
+    `);
+  }
+
+  const opRows = db
+    .prepare(
+      "SELECT workspace, actor, operation_id, request_json, steps_json FROM operation WHERE request_json LIKE '%at://%/space/%' OR steps_json LIKE '%at://%/space/%'",
+    )
+    .all() as Array<{ workspace: string; actor: string; operation_id: string; request_json: string; steps_json: string }>;
+  if (opRows.length > 0) {
+    const updOp = db.prepare(
+      "UPDATE operation SET request_json = ?, steps_json = ? WHERE workspace = ? AND actor = ? AND operation_id = ?",
+    );
+    for (const row of opRows) {
+      updOp.run(
+        rewriteOperatorJsonLegacySpaceUris(row.request_json),
+        rewriteOperatorJsonLegacySpaceUris(row.steps_json),
+        row.workspace,
+        row.actor,
+        row.operation_id,
+      );
+    }
+  }
+
+  const auditRows = db
+    .prepare("SELECT id, details_json FROM audit_event WHERE details_json LIKE '%at://%/space/%'")
+    .all() as Array<{ id: number; details_json: string }>;
+  if (auditRows.length > 0) {
+    const updAudit = db.prepare("UPDATE audit_event SET details_json = ? WHERE id = ?");
+    for (const row of auditRows) {
+      updAudit.run(rewriteOperatorJsonLegacySpaceUris(row.details_json), row.id);
+    }
+  }
+}
 
 function dropMemberSessionTables(db: BetterSqlite3.Database): void {
   if (db.prepare("SELECT 1 FROM schema_migration WHERE version = ?").get(MEMBER_SESSION_DROPPED)) return;

@@ -60,7 +60,7 @@ When("they enable DMs", async function (this: AppWorld) {
 
 Then("a DM inbox space with the fixed self key exists on their own PDS", async function (this: AppWorld) {
   const user = dmcActor(this, "user");
-  assert.deepEqual(await dmcInboxUris(this, user), [`at://${user.did}/space/new.flock.dm.inbox/self`]);
+  assert.deepEqual(await dmcInboxUris(this, user), [`at:space/${user.did}/new.flock.dm.inbox/self`]);
   const space = await this.pdsGet(user, "com.atproto.space.getSpace", { space: dmcInboxOf(user) });
   assert.equal(space.status, 200, JSON.stringify(space.body));
 });

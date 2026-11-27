@@ -50,27 +50,27 @@ test("route builders and parsers round-trip every grammar route including did:pl
       kind: "workspace",
       authority,
       workspaceSkey: "self",
-      workspaceUri: `at://${authority}/space/new.flock.workspace/self`,
+      workspaceUri: `at:space/${authority}/new.flock.workspace/self`,
     });
 
-    const chUrl = channelRoute({ authority, workspaceSkey: "self", channelSkey: "general", thread: `at://${authority}/space/new.flock.channel/general/${DID_BOB}/new.flock.channel.message/${TID}` });
+    const chUrl = channelRoute({ authority, workspaceSkey: "self", channelSkey: "general", thread: `at:space/${authority}/new.flock.channel/general/${DID_BOB}/new.flock.channel.message/${TID}` });
     const [chPath, chSearch = ""] = chUrl.split("?");
     const parsedCh = parseRoute(chPath!, `?${chSearch}`);
     assert.equal(parsedCh?.kind, "channel");
     assert.equal(parsedCh?.kind === "channel" && parsedCh.authority, authority);
     assert.equal(parsedCh?.kind === "channel" && parsedCh.channelSkey, "general");
-    assert.equal(parsedCh?.kind === "channel" && parsedCh.thread, `at://${authority}/space/new.flock.channel/general/${DID_BOB}/new.flock.channel.message/${TID}`);
+    assert.equal(parsedCh?.kind === "channel" && parsedCh.thread, `at:space/${authority}/new.flock.channel/general/${DID_BOB}/new.flock.channel.message/${TID}`);
 
     const msgUrl = messageRoute({ authority, workspaceSkey: "self", channelSkey: "general", repo: DID_WEB_PORT, rkey: TID });
     assert.deepEqual(parseRoute(msgUrl), {
       kind: "message",
       authority,
       workspaceSkey: "self",
-      workspaceUri: `at://${authority}/space/new.flock.workspace/self`,
+      workspaceUri: `at:space/${authority}/new.flock.workspace/self`,
       channelSkey: "general",
       repo: DID_WEB_PORT,
       rkey: TID,
-      messageUri: `at://${authority}/space/new.flock.channel/general/${DID_WEB_PORT}/new.flock.channel.message/${TID}`,
+      messageUri: `at:space/${authority}/new.flock.channel/general/${DID_WEB_PORT}/new.flock.channel.message/${TID}`,
     });
 
     for (const view of [undefined, "list", "board", "activity"] as const) {
@@ -80,7 +80,7 @@ test("route builders and parsers round-trip every grammar route including did:pl
         view: view ?? "default",
         authority,
         workspaceSkey: "self",
-        workspaceUri: `at://${authority}/space/new.flock.workspace/self`,
+        workspaceUri: `at:space/${authority}/new.flock.workspace/self`,
       });
     }
 
@@ -213,7 +213,7 @@ test("sentThreadCleanupRoute clears ?thread= only when still on that channel wit
   const sent = {
     authority: DID_PLC,
     workspaceSkey: "self",
-    workspaceUri: `at://${DID_PLC}/space/new.flock.workspace/self`,
+    workspaceUri: `at:space/${DID_PLC}/new.flock.workspace/self`,
     channelSkey: "general",
   };
   assert.equal(

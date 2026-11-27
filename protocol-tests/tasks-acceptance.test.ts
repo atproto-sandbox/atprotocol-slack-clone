@@ -12,7 +12,7 @@ import { mintSpaceCredentialWith } from "@flock/protocol/atproto/space-credentia
 import { AtprotoClient } from "@flock/protocol/atproto/xrpc";
 import { opRef } from "@flock/protocol/entity-merge";
 import { extSpaceUriFor } from "@flock/protocol/extensions";
-import { requestDigest, tidNow } from "@flock/protocol/keys";
+import { requestDigest, requireSpaceAuthority, tidNow } from "@flock/protocol/keys";
 import { COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
 import { groupAdminScopes } from "@flock/protocol/scopes";
 import { readIndependentTasksSpace, type IndependentTasksReadResult } from "@flock/reader/independent-tasks";
@@ -141,7 +141,7 @@ async function settled(
 ): Promise<void> {
   const transport = actorTransport(pds, reader);
   const credential = await mintSpaceCredentialWith(transport, space);
-  const authorityDid = space.slice("at://".length).split("/")[0]!;
+  const authorityDid = requireSpaceAuthority(space);
   const authority = credential.client(await transport.resolvePds(authorityDid));
   for (let attempt = 0; attempt < 240; attempt += 1) {
     const listed = await authority.query<{ repos: Array<{ $type?: string; repo: string; repoRev?: string }> }>(

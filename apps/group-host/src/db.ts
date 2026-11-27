@@ -1,6 +1,7 @@
 import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import Database from "better-sqlite3";
+import { normalizeLegacySpaceUri } from "@flock/protocol/keys";
 
 export const SCHEMA_TABLE_CLASSIFICATION = {
   GROUP_PURGED_TABLES: [
@@ -635,7 +636,106 @@ export function openGroupHostDb(databasePath: string): GroupHostDb {
       db.exec(`ALTER TABLE ${tbl} ADD COLUMN login_step_up_at INTEGER`);
     }
   }
+  migrateLegacySpaceUrisSync(db);
   return db;
+}
+
+const LEGACY_SPACE_URI_COLUMNS: ReadonlyArray<readonly [table: string, column: string]> = [
+  ["group_space", "space_uri"],
+  ["space_writer", "space_uri"],
+  ["space_repo", "space_uri"],
+  ["space_record", "space_uri"],
+  ["space_record", "uri"],
+  ["space_oplog", "space_uri"],
+  ["space_oplog", "uri"],
+  ["space_record_blob", "space_uri"],
+  ["space_record_blob", "record_uri"],
+  ["notify_registration", "space_uri"],
+  ["group_invite_target", "space_uri"],
+  ["invite_delivery", "invite_uri"],
+  ["invite_delivery", "space_uri"],
+  ["mod_subject", "subject"],
+  ["mod_event", "subject"],
+  ["issued_credential", "space_uri"],
+  ["revoked_credential", "space_uri"],
+  ["outbox_notice", "space_uri"],
+];
+
+const LEGACY_SPACE_URI_INLINE_RE = /at:\/\/(did:[^/"'\s\\]+)\/space\//g;
+
+function rewriteInlineLegacySpaceUris(raw: string): string {
+  return raw.replace(LEGACY_SPACE_URI_INLINE_RE, "at:space/$1/");
+}
+
+function rewriteJsonLegacySpaceUris(raw: string): string {
+  if (!raw.includes("/space/")) return raw;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    const visit = (value: unknown): unknown => {
+      if (typeof value === "string") {
+        const normalized = normalizeLegacySpaceUri(value);
+        return normalized !== value ? normalized : rewriteInlineLegacySpaceUris(value);
+      }
+      if (Array.isArray(value)) return value.map(visit);
+      if (value && typeof value === "object") {
+        const out: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+          out[normalizeLegacySpaceUri(k)] = visit(v);
+        }
+        return out;
+      }
+      return value;
+    };
+    return JSON.stringify(visit(parsed));
+  } catch {
+    return rewriteInlineLegacySpaceUris(raw);
+  }
+}
+
+/**
+ * Idempotently rewrites pre-Nov-24 `at://<did>/space/...` URIs to canonical `at:space/<did>/...` across
+ * Group Host operational tables. Immutable record payloads (`space_record.value` and `space_record.cbor_bytes`)
+ * are intentionally left untouched so record CIDs remain intact.
+ */
+export function migrateLegacySpaceUrisSync(db: GroupHostDb): void {
+  const tx = db.transaction(() => {
+    for (const [table, column] of LEGACY_SPACE_URI_COLUMNS) {
+      db.exec(`
+        UPDATE ${table}
+        SET ${column} = 'at:space/' || substr(${column}, 6, instr(substr(${column}, 6), '/') - 1) || '/'
+          || substr(${column}, instr(substr(${column}, 6), '/') + 12)
+        WHERE substr(${column}, 1, 5) = 'at://'
+          AND substr(${column}, instr(substr(${column}, 6), '/') + 5, 7) = '/space/'
+      `);
+    }
+
+    const outboxRows = db
+      .prepare(
+        "SELECT id, coalesce_key, payload_json FROM outbox_notice WHERE coalesce_key LIKE '%at://%/space/%' OR payload_json LIKE '%at://%/space/%'",
+      )
+      .all() as Array<{ id: string; coalesce_key: string | null; payload_json: string }>;
+    if (outboxRows.length > 0) {
+      const updOutbox = db.prepare(
+        "UPDATE outbox_notice SET coalesce_key = ?, payload_json = ? WHERE id = ?",
+      );
+      for (const row of outboxRows) {
+        const nextCoalesce = row.coalesce_key === null ? null : rewriteInlineLegacySpaceUris(row.coalesce_key);
+        const nextPayload = rewriteJsonLegacySpaceUris(row.payload_json);
+        updOutbox.run(nextCoalesce, nextPayload, row.id);
+      }
+    }
+
+    const modEventRows = db
+      .prepare("SELECT seq, event_json FROM mod_event WHERE event_json LIKE '%at://%/space/%'")
+      .all() as Array<{ seq: number; event_json: string }>;
+    if (modEventRows.length > 0) {
+      const updModEvent = db.prepare("UPDATE mod_event SET event_json = ? WHERE seq = ?");
+      for (const row of modEventRows) {
+        updModEvent.run(rewriteJsonLegacySpaceUris(row.event_json), row.seq);
+      }
+    }
+  });
+  tx.immediate();
 }
 
 /**
@@ -643,7 +743,7 @@ export function openGroupHostDb(databasePath: string): GroupHostDb {
  * Caller MUST invoke inside an active transaction or under `withGroupRepoLock(groupDid, ...)`.
  */
 export function purgeGroupDataSync(db: GroupHostDb, groupDid: string): void {
-  const ownSpacePrefix = `at://${groupDid}/space/%`;
+  const ownSpacePrefix = `at:space/${groupDid}/%`;
   db.prepare("DELETE FROM notify_registration WHERE group_did = ? OR space_uri LIKE ?").run(groupDid, ownSpacePrefix);
   db.prepare("DELETE FROM space_record_blob WHERE group_did = ? OR space_uri LIKE ?").run(groupDid, ownSpacePrefix);
   db.prepare("DELETE FROM space_record WHERE repo_did = ? OR space_uri LIKE ?").run(groupDid, ownSpacePrefix);

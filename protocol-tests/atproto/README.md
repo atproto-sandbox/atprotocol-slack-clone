@@ -1,10 +1,10 @@
 # Pinned `@atproto` Spaces Conformance & Scale Suites
 
-These suites verify protocol-level invariants directly against real `@atproto/dev-env` `TestNetworkNoAppView` / `TestPds` instances loaded from the pinned `bluesky-social/atproto` checkout (`6747610566eee1b6d743617bd8eb1136adccb362` + `strict-credential-expiry.patch`). Their source pin, cryptographic preflight (`scripts/verify-pinned-checkout.mjs`), and build instructions are documented in [`docs/protocol/atproto-spaces-pin.md`](../../docs/protocol/atproto-spaces-pin.md).
+These suites verify protocol-level invariants directly against real `@atproto/dev-env` `TestNetworkNoAppView` / `TestPds` instances loaded from the pinned `bluesky-social/atproto` checkout (`f839c47e6523a1a7adb367ef70513a3c6688c38b` + `strict-credential-expiry.patch`). Their source pin, cryptographic preflight (`scripts/verify-pinned-checkout.mjs`), and build instructions are documented in [`docs/protocol/atproto-spaces-pin.md`](../../docs/protocol/atproto-spaces-pin.md).
 
 ## Contents of `protocol-tests/atproto/`
 
-- **[`strict-credential-expiry.patch`](./strict-credential-expiry.patch)** (SHA-256 `3f413baa779473b5466e8e6ca9edc92335f5056edbd13aa3d4bfc57a509b32dd`): Applied to the pinned `6747610566` checkout before building `@atproto/space` and `@atproto/dev-env`. Enforces zero-skew expiry (`type === 'credential' ? 0 : CLOCK_SKEW_SEC`) on `Atproto-Space-Credential` tokens while preserving the 5-second clock-skew allowance on delegation tokens and client attestations. Verified unconditionally by `scripts/verify-pinned-checkout.mjs` before codegen and test runs.
+- **[`strict-credential-expiry.patch`](./strict-credential-expiry.patch)** (SHA-256 `a92f94fd95fd44f445b8de7f0c4f158352f8f578ce020942d10dee3e781f3cf7`): Applied to the pinned `f839c47e` checkout before building `@atproto/space` and `@atproto/dev-env`. Enforces zero-skew expiry (`type === 'credential' ? 0 : CLOCK_SKEW_SEC`) on `Atproto-Space-Credential` tokens while preserving the 5-second clock-skew allowance on delegation tokens and client attestations. Verified unconditionally by `scripts/verify-pinned-checkout.mjs` before codegen and test runs.
 - **[`slack-dm-conformance.test.ts`](./slack-dm-conformance.test.ts):** Verifies personal-PDS sovereign Direct Message (`new.flock.dm.*`) conformance on `com.atproto.memberspace.policy` — cross-host symmetric conversation halves, closed existence oracle (`SpaceNotFound` vs `SpaceDeleted` + public `new.flock.dm.declaration`), public-write vs allowlist policy transitions (`putMembers` / `removeMembers` `#repoRemoved` + dormant allowlist reactivation under `publicWrite: true`), browser public OAuth (`token_endpoint_auth_method: "none"`) with non-extractable WebCrypto DPoP, RFC 9421 `Atproto-Space-Credential` PoP + HPKE KEM-MAC verification, 100-participant scaling, and strict zero-skew credential expiry.
 - **[`platform-spike-k2-confidential-client.test.ts`](./platform-spike-k2-confidential-client.test.ts):** Verifies confidential `private_key_jwt` OAuth client authentication, JWKS rotation, DPoP proof binding, and token refresh against real pinned PDS OAuth providers.
 - **[`platform-spike-k5-oplog.test.ts`](./platform-spike-k5-oplog.test.ts):** Verifies per-page signed/MAC-authenticated `listRepoOps`, `getRepo` `application/vnd.dasl.star` (`@atproto/star`), `LtHash` set-hash verification, and `RepoNotFound` semantics on real pinned PDSes.
@@ -17,10 +17,10 @@ In R13, all three `protocol-tests/atproto/*.test.ts` files run **directly in-pla
 
 ```sh
 # Run all 16 acceptance & pinned conformance suites (including the 3 protocol-tests/atproto/*.test.ts files):
-ATPROTO_PINNED_CHECKOUT=../atproto-spaces-r12 corepack pnpm test:acceptance
+ATPROTO_PINNED_CHECKOUT=../atproto-spaces-r14 corepack pnpm test:acceptance
 
 # Or run just the 3 pinned PDS conformance suites directly in-place:
-ATPROTO_PINNED_CHECKOUT=../atproto-spaces-r12 node --import tsx --test \
+ATPROTO_PINNED_CHECKOUT=../atproto-spaces-r14 node --import tsx --test \
   protocol-tests/atproto/slack-dm-conformance.test.ts \
   protocol-tests/atproto/platform-spike-k2-confidential-client.test.ts \
   protocol-tests/atproto/platform-spike-k5-oplog.test.ts
@@ -31,9 +31,9 @@ ATPROTO_PINNED_CHECKOUT=../atproto-spaces-r12 node --import tsx --test \
 Run the numeric sync-budget and supported-envelope performance suites against the same pinned checkout:
 
 ```sh
-ATPROTO_PINNED_CHECKOUT=../atproto-spaces-r12 corepack pnpm test:sync-budget
-ATPROTO_PINNED_CHECKOUT=../atproto-spaces-r12 corepack pnpm test:sync-budget:browser
-ATPROTO_PINNED_CHECKOUT=../atproto-spaces-r12 corepack pnpm test:performance
+ATPROTO_PINNED_CHECKOUT=../atproto-spaces-r14 corepack pnpm test:sync-budget
+ATPROTO_PINNED_CHECKOUT=../atproto-spaces-r14 corepack pnpm test:sync-budget:browser
+ATPROTO_PINNED_CHECKOUT=../atproto-spaces-r14 corepack pnpm test:performance
 ```
 
 `pnpm test:performance` runs:

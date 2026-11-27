@@ -105,7 +105,7 @@ test("Two-GroupHost Coordinated v1 migration (A -> B) + Standard return-to-prior
     assert.equal(upBlobRes.status, 200);
     const uploadedBlob = ((await upBlobRes.json()) as { blob: Record<string, unknown> }).blob;
 
-    const metaSpace = `at://${groupDid}/space/group.opensocial.meta/self`;
+    const metaSpace = `at:space/${groupDid}/group.opensocial.meta/self`;
     const putProfBlob = await dpopA.fetchWithDpop(`${ghA.url}/xrpc/com.atproto.space.putRecord`, {
       method: "POST",
       accessToken: tokA,
@@ -127,7 +127,7 @@ test("Two-GroupHost Coordinated v1 migration (A -> B) + Standard return-to-prior
     assert.equal(putProfBlob.status, 200);
 
     // Create an external invite for Bob so external `invites/self` STAR migration runs too!
-    const bobInvSpace = `at://${bob.did}/space/group.opensocial.invites/self`;
+    const bobInvSpace = `at:space/${bob.did}/group.opensocial.invites/self`;
     await dpopA.fetchWithDpop(`${ghA.url}/xrpc/com.atproto.space.putRecord`, {
       method: "POST",
       accessToken: tokA,
@@ -312,7 +312,7 @@ test("Two-GroupHost Coordinated v1 migration (A -> B) + Standard return-to-prior
     assert.ok(spaces.some((s) => s.space === bobInvSpace), "listSpaces must include external invites/self repos");
 
     for (const sp of spaces) {
-      if (sp.space.startsWith(`at://${groupDid}/space/`)) {
+      if (sp.space.startsWith(`at:space/${groupDid}/`)) {
         const metaStarRes = await dpopA.fetchWithDpop(
           `${ghA.url}/xrpc/com.atproto.space.exportSpaceMeta?space=${encodeURIComponent(sp.space)}`,
           { method: "GET", accessToken: tokA },
@@ -1187,9 +1187,9 @@ test("Lazy prepared-lease reap aborts target staging (coordinated & standard), s
 
     // Stage meta/self & members/self on `ghB` so `getRecommendedDidCredentials` succeeds
     for (const spUri of [
-      `at://${groupDid}/space/group.opensocial.meta/self`,
-      `at://${groupDid}/space/group.opensocial.members/self`,
-      `at://${groupDid}/space/new.flock.workspace/self`,
+      `at:space/${groupDid}/group.opensocial.meta/self`,
+      `at:space/${groupDid}/group.opensocial.members/self`,
+      `at:space/${groupDid}/new.flock.workspace/self`,
     ]) {
       const metaStar = new Uint8Array(
         await (
@@ -1417,9 +1417,9 @@ test("Lazy prepared-lease reap aborts target staging (coordinated & standard), s
     const stageCutToks = (await stageCutRes.json()) as { accessJwt: string };
 
     for (const spUri of [
-      `at://${groupDid}/space/group.opensocial.meta/self`,
-      `at://${groupDid}/space/group.opensocial.members/self`,
-      `at://${groupDid}/space/new.flock.workspace/self`,
+      `at:space/${groupDid}/group.opensocial.meta/self`,
+      `at:space/${groupDid}/group.opensocial.members/self`,
+      `at:space/${groupDid}/new.flock.workspace/self`,
     ]) {
       const metaStar = new Uint8Array(
         await (
@@ -1993,8 +1993,8 @@ test("Round 7 hardening: signPlcOperation validates all preconditions before rev
     const dpopA = flowA.dpop;
     const tokA = flowA.tokenResponse!.access_token;
     const groupDid = flowA.tokenResponse!.sub;
-    const membersSpace = `at://${groupDid}/space/group.opensocial.members/self`;
-    const metaSpace = `at://${groupDid}/space/group.opensocial.meta/self`;
+    const membersSpace = `at:space/${groupDid}/group.opensocial.members/self`;
+    const metaSpace = `at:space/${groupDid}/group.opensocial.meta/self`;
 
     // Add an external sovereign PLC rotation key (`sovKey`) so we can test `SovereignRotationKeyDropped` too
     const sovKey = await P256Keypair.create({ exportable: true });
@@ -2809,8 +2809,8 @@ test("Round 9 hardening: strict target cleanup on explicit source abort, withGro
     const stageRevRaceToks = (await stageRevRace.json()) as { accessJwt: string };
 
     for (const spUri of [
-      `at://${groupDid}/space/group.opensocial.meta/self`,
-      `at://${groupDid}/space/group.opensocial.members/self`,
+      `at:space/${groupDid}/group.opensocial.meta/self`,
+      `at:space/${groupDid}/group.opensocial.members/self`,
     ]) {
       const metaStar = new Uint8Array(
         await (
@@ -3153,8 +3153,8 @@ test("Round 11 hardening: submitPlcOperation crash after PLC commit + deadline e
     assert.equal(upBlobSrc.status, 200);
     const { blob: avatarBlob } = (await upBlobSrc.json()) as { blob: { ref: { $link: string } } };
 
-    const metaSpace = `at://${groupDid}/space/group.opensocial.meta/self`;
-    const membersSpace = `at://${groupDid}/space/group.opensocial.members/self`;
+    const metaSpace = `at:space/${groupDid}/group.opensocial.meta/self`;
+    const membersSpace = `at:space/${groupDid}/group.opensocial.members/self`;
     const putProfRes = await dpopSrc.fetchWithDpop(`${ghSource.url}/xrpc/com.atproto.space.putRecord`, {
       method: "POST",
       accessToken: tokSrc,
@@ -3566,8 +3566,8 @@ test("Round 12 hardening (1a): delayed in-flight PLC commit (live head === pendi
       );
 
       for (const spUri of [
-        `at://${groupDid}/space/group.opensocial.meta/self`,
-        `at://${groupDid}/space/group.opensocial.members/self`,
+        `at:space/${groupDid}/group.opensocial.meta/self`,
+        `at:space/${groupDid}/group.opensocial.members/self`,
       ]) {
         const metaBytes = new Uint8Array(
           await (
@@ -3894,8 +3894,8 @@ test("Round 12 hardening (1b): markerless direct PLC cutover + PLC 503 outage + 
       200,
     );
     for (const spUri of [
-      `at://${groupDid}/space/group.opensocial.meta/self`,
-      `at://${groupDid}/space/group.opensocial.members/self`,
+      `at:space/${groupDid}/group.opensocial.meta/self`,
+      `at:space/${groupDid}/group.opensocial.members/self`,
     ]) {
       const metaBytes = new Uint8Array(
         await (

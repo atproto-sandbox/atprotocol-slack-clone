@@ -124,7 +124,7 @@ export function ReportSubjectButton({
         ) : (
           <input
             aria-label="Violated rule URI"
-            placeholder="at://did:plc:…/space/group.opensocial.meta/self/…/group.opensocial.rule/…"
+            placeholder="at:space/did:plc:…/group.opensocial.meta/self/…/group.opensocial.rule/…"
             value={ruleUri}
             onChange={(e) => setRuleUri(e.target.value)}
             required

@@ -24,7 +24,7 @@ test("a cursor between two records with one key keeps the second for the next pa
 });
 
 test("a cursor survives as one opaque string, and a malformed one is refused", () => {
-  const cursor = { key: "3jzfcijpj2z2a", uri: "at://did:plc:a/space/new.flock.channel/x/did:plc:b/new.flock.channel.message/3jzfcijpj2z2a" };
+  const cursor = { key: "3jzfcijpj2z2a", uri: "at:space/did:plc:a/new.flock.channel/x/did:plc:b/new.flock.channel.message/3jzfcijpj2z2a" };
   assert.deepEqual(decodeCursor(encodeCursor(cursor)), cursor);
   assert.equal(decodeCursor(undefined), undefined);
   for (const value of ["", "no-separator", " leading", "trailing "]) assert.throws(() => decodeCursor(value), RangeError, value);

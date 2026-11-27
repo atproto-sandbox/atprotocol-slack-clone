@@ -739,7 +739,7 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
     if (busy || !engine) return;
     const parsed = parsePastedGroupOrWorkspace(rawInput);
     if (!parsed) {
-      setError(`Paste a Group DID (did:plc:…) or workspace URI in the form at://DID/space/${SPACE_TYPE.workspace}/self.`);
+      setError(`Paste a Group DID (did:plc:…) or workspace URI in the form at:space/DID/${SPACE_TYPE.workspace}/self.`);
       return;
     }
     const trimmedMessage = joinMessage.trim();

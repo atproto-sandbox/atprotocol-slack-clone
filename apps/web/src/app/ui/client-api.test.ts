@@ -4,7 +4,7 @@ import { OperatorRemoteError } from "@flock/client/operator-client";
 import { ChannelUnavailableError } from "@flock/client/errors";
 import { captureInviteLink, clearAccountScopedState, INVITE_LINK_KEY, inviteLinkFor, RETURN_TO_KEY, resolveScopedReplyTo, workspaceFromInviteSearch, isAccessFailure, needsAuthorityApproval, makeTid, mergeMessages, threadMessages, workspaceCreationFrom, workspaceOperationIdFor, parsePastedWorkspaceUri, splitDids, toSlug, withReactions, type Message } from "./client-api";
 
-const message = (rkey: string): Message => ({ uri: `at://did:plc:a/space/x/${rkey}`, rkey, repo: "did:plc:a", value: { text: rkey } });
+const message = (rkey: string): Message => ({ uri: `at:space/did:plc:a/x/${rkey}`, rkey, repo: "did:plc:a", value: { text: rkey } });
 
 test("withReactions counts per emoji and marks the viewer's own reactions", () => {
   const [first, second] = withReactions([message("2"), message("1")], [
@@ -23,9 +23,9 @@ test("mergeMessages dedupes by URI and sorts newest first", () => {
 });
 
 test("client helpers parse workspace URIs, DID lists, slugs, TIDs, and access failures", () => {
-  assert.deepEqual(parsePastedWorkspaceUri(" at://did:plc:abc/space/new.flock.workspace/self "), { authorityDid: "did:plc:abc", skey: "self" });
-  assert.equal(parsePastedWorkspaceUri("at://did:plc:abc/space/new.flock.workspace/team"), null);
-  assert.equal(parsePastedWorkspaceUri("at://did:plc:abc/space/new.flock.channel/team"), null);
+  assert.deepEqual(parsePastedWorkspaceUri(" at:space/did:plc:abc/new.flock.workspace/self "), { authorityDid: "did:plc:abc", skey: "self" });
+  assert.equal(parsePastedWorkspaceUri("at:space/did:plc:abc/new.flock.workspace/team"), null);
+  assert.equal(parsePastedWorkspaceUri("at:space/did:plc:abc/new.flock.channel/team"), null);
   assert.deepEqual(splitDids(" did:plc:a, did:plc:b\n"), ["did:plc:a", "did:plc:b"]);
   assert.equal(toSlug("  Project Room!! "), "project-room");
   assert.equal(toSlug("!!!"), "channel");
@@ -62,12 +62,22 @@ test("the creation form keys a trimmed name, and the person's own DID as no work
   assert.deepEqual(workspaceCreationFrom({ name: "Acme", account: "" }, "did:plc:me"), { name: "Acme", account: "" });
 });
 
-test("invite links round-trip a workspace URI and reject anything that is not one", () => {
-  const uri = "at://did:plc:abc/space/new.flock.workspace/self";
+test("invite links round-trip a workspace URI, normalize legacy alpha links, and reject anything else", () => {
+  const uri = "at:space/did:plc:abc/new.flock.workspace/self";
   const link = inviteLinkFor("http://127.0.0.1:3000", uri);
-  assert.equal(link, "http://127.0.0.1:3000/?invite=at%3A%2F%2Fdid%3Aplc%3Aabc%2Fspace%2Fnew.flock.workspace%2Fself");
+  assert.equal(link, "http://127.0.0.1:3000/?invite=at%3Aspace%2Fdid%3Aplc%3Aabc%2Fnew.flock.workspace%2Fself");
   assert.equal(workspaceFromInviteSearch(new URL(link).search), uri);
-  for (const search of ["", "?invite=", "?invite=hello", "?invite=at%3A%2F%2Fdid%3Aplc%3Aabc%2Fspace%2Fnew.flock.channel%2Fgeneral", "?other=1", "?invite=javascript%3Aalert(1)"]) {
+  assert.equal(
+    workspaceFromInviteSearch("?invite=at%3A%2F%2Fdid%3Aplc%3Aabc%2Fspace%2Fnew.flock.workspace%2Fself"),
+    uri,
+    "legacy alpha invite links normalize to canonical at:space/ URI",
+  );
+  assert.deepEqual(
+    parsePastedWorkspaceUri("at://did:plc:abc/space/new.flock.workspace/self"),
+    { authorityDid: "did:plc:abc", skey: "self" },
+    "pasted legacy workspace URIs normalize on entry",
+  );
+  for (const search of ["", "?invite=", "?invite=hello", "?invite=at%3Aspace%2Fdid%3Aplc%3Aabc%2Fnew.flock.channel%2Fgeneral", "?other=1", "?invite=javascript%3Aalert(1)"]) {
     assert.equal(workspaceFromInviteSearch(search), null, search);
   }
 });
@@ -77,21 +87,21 @@ test("captureInviteLink stores only a valid workspace, so sign-in redirects cann
   const storage = { setItem: (key: string, value: string) => { stored.set(key, value); } };
   assert.equal(captureInviteLink("?invite=nonsense", storage), null);
   assert.equal(stored.size, 0);
-  const uri = "at://did:plc:abc/space/new.flock.workspace/self";
+  const uri = "at:space/did:plc:abc/new.flock.workspace/self";
   assert.equal(captureInviteLink(new URL(inviteLinkFor("http://x", uri)).search, storage), uri);
   assert.equal(stored.get(INVITE_LINK_KEY), uri);
 });
 
 test("workspace URIs must have the exact shape the server accepts, so a hostile link cannot render odd text", () => {
-  const valid = "at://did:plc:abc/space/new.flock.workspace/self";
+  const valid = "at:space/did:plc:abc/new.flock.workspace/self";
   assert.deepEqual(parsePastedWorkspaceUri(valid), { authorityDid: "did:plc:abc", skey: "self" });
   for (const bad of [
     "at://did:plc:ab\u202ec/space/new.flock.workspace/self",
     "at://did:plc:abc d/space/new.flock.workspace/self",
     `at://did:plc:${"a".repeat(600)}/space/new.flock.workspace/self`,
-    "at://did:PLC:abc/space/new.flock.workspace/self",
-    "at://did:plc:abc/space/new.flock.workspace/",
-    "at://did:plc:abc/space/new.flock.workspace/acme-1",
+    "at:space/did:PLC:abc/new.flock.workspace/self",
+    "at:space/did:plc:abc/new.flock.workspace/",
+    "at:space/did:plc:abc/new.flock.workspace/acme-1",
   ]) assert.equal(parsePastedWorkspaceUri(bad), null, bad);
 });
 
@@ -120,7 +130,7 @@ test("signing in clears a previous account's half-finished actions but keeps the
 test("threadMessages places each reply under its parent, oldest reply first, and leaves orphan replies in place", () => {
   // #given messages newest first, with two replies to "2" and one reply whose parent is not loaded
   const reply = (rkey: string, parent: string): Message => ({ ...message(rkey), value: { text: rkey, parent } });
-  const incoming = [message("5"), reply("4b", message("2").uri), reply("orphan", "at://did:plc:a/space/x/unloaded"), reply("4a", message("2").uri), message("2"), message("1")];
+  const incoming = [message("5"), reply("4b", message("2").uri), reply("orphan", "at:space/did:plc:a/x/unloaded"), reply("4a", message("2").uri), message("2"), message("1")];
 
   // #when
   const threaded = threadMessages(incoming);

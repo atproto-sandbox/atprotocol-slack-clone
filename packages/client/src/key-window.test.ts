@@ -4,7 +4,7 @@ import { tidNow } from "@flock/protocol/keys";
 import { KeyWindow, type WindowClock, type WindowItem, type WindowPage } from "./key-window";
 import type { SetAside } from "./sync";
 
-const SPACE = "at://did:plc:authority/space/new.flock.channel/acme-general";
+const SPACE = "at:space/did:plc:authority/new.flock.channel/acme-general";
 const PERSON = "did:plc:person";
 const PAGE = 3;
 

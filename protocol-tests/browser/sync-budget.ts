@@ -22,7 +22,7 @@ import { BROWSER_CLIENT_METADATA_PATH } from "@flock/web/browser/client-metadata
 //    - warm reload <= 12 XRPC calls
 //    - 1-message live wake <= 6 XRPC calls and <= 2,000 ms
 //
-// Run: pnpm build && ATPROTO_PINNED_CHECKOUT=../atproto-spaces-r12 node --import tsx protocol-tests/browser/sync-budget.ts [runs]
+// Run: pnpm build && ATPROTO_PINNED_CHECKOUT=../atproto-spaces-r14 node --import tsx protocol-tests/browser/sync-budget.ts [runs]
 
 const RUNS = Number(process.argv[2] ?? 5);
 const WORKSPACE_NAME = "Budget";

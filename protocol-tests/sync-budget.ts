@@ -13,7 +13,7 @@ import { createChannel, deleteMessage, MESSAGES_PER_WRITER, percentile, Probe, p
 // delay before the authority lists a new write (what a change-feed tick waits on) is reported separately from the
 // reader's own cost.
 //
-// Run: ATPROTO_PINNED_CHECKOUT=../atproto-spaces-r12 node --import tsx protocol-tests/sync-budget.ts [runs]
+// Run: ATPROTO_PINNED_CHECKOUT=../atproto-spaces-r14 node --import tsx protocol-tests/sync-budget.ts [runs]
 
 const PAGE = 100;
 const PER_ORIGIN_CONNECTIONS = 6;

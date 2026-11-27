@@ -31,7 +31,7 @@ test("Flock Desk D0 CSP gate: Astryx renders under strict per-request nonces, ze
     assert.equal(meta.scope.includes("new.flock.operator."), false, "Desk metadata must include zero Operator scopes");
 
     // 2. localhost -> 127.0.0.1 loopback redirect preserving path and query.
-    const inviteQuery = "/?invite=at%3A%2F%2Fdid%3Aplc%3Aexample%2Fspace%2Fnew.flock.workspace%2Fself";
+    const inviteQuery = "/?invite=at%3Aspace%2Fdid%3Aplc%3Aexample%2Fnew.flock.workspace%2Fself";
     const redirectRes = await fetch(`http://localhost:${port}${inviteQuery}`, { redirect: "manual" });
     assert.ok(redirectRes.status === 307 || redirectRes.status === 308, `Expected 307/308 redirect, got ${redirectRes.status}`);
     assert.equal(redirectRes.headers.get("location"), `${origin}${inviteQuery}`);

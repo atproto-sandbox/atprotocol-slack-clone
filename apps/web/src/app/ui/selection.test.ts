@@ -4,7 +4,7 @@ import type { WorkspaceSummary } from "@flock/protocol/workspace-summary";
 import { NO_WORKSPACE, shownChannel, shownWorkspace } from "./selection";
 
 const workspace = (groupLabel: string, channels: WorkspaceSummary["channels"] = []): WorkspaceSummary => ({
-  uri: `at://did:plc:${groupLabel}/space/new.flock.workspace/self`,
+  uri: `at:space/did:plc:${groupLabel}/new.flock.workspace/self`,
   authorityDid: `did:plc:${groupLabel}`,
   groupDid: `did:plc:${groupLabel}`,
   skey: "self",
@@ -22,7 +22,7 @@ const workspace = (groupLabel: string, channels: WorkspaceSummary["channels"] = 
   installs: [],
   degradedReasons: [],
 });
-const general = { uri: "at://did:plc:a/space/new.flock.channel/general", skey: "general", name: "general", visibility: "public" };
+const general = { uri: "at:space/did:plc:a/new.flock.channel/general", skey: "general", name: "general", visibility: "public" };
 
 test("shownWorkspace keeps the chosen workspace while it is listed, else shows the first; choosing none shows none", () => {
   const [first, second] = [workspace("one"), workspace("two")];

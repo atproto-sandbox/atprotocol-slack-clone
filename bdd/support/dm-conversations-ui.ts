@@ -27,8 +27,8 @@ export type DmcTraffic = {
 const MODE_LABELS: Record<DmRequestMode, string> = { everyone: "Everyone", allowlist: "Only people I allow", nobody: "Nobody" };
 const SLOW_UI_MS = 60_000;
 
-export const dmcInboxOf = (account: FixtureAccount): string => `at://${account.did}/space/new.flock.dm.inbox/self`;
-export const dmcHalfOf = (account: FixtureAccount, convKey: string): string => `at://${account.did}/space/new.flock.dm.conversation/${convKey}`;
+export const dmcInboxOf = (account: FixtureAccount): string => `at:space/${account.did}/new.flock.dm.inbox/self`;
+export const dmcHalfOf = (account: FixtureAccount, convKey: string): string => `at:space/${account.did}/new.flock.dm.conversation/${convKey}`;
 
 // --- Facts read straight from a PDS ---------------------------------------------------------------------
 
@@ -50,7 +50,7 @@ export async function dmcMembers(world: AppWorld, owner: FixtureAccount, space: 
 export async function dmcHalfUris(world: AppWorld, as: FixtureAccount): Promise<string[]> {
   const result = await world.pdsGet<{ spaces?: Array<{ space: string }> }>(as, "com.atproto.space.listSpaces", { spaceType: "new.flock.dm.conversation", limit: "100" });
   assert.equal(result.status, 200, `listSpaces: ${JSON.stringify(result.body)}`);
-  return (result.body.spaces ?? []).map((entry) => entry.space).filter((uri) => uri.startsWith(`at://${as.did}/`)).sort();
+  return (result.body.spaces ?? []).map((entry) => entry.space).filter((uri) => uri.startsWith(`at:space/${as.did}/`)).sort();
 }
 
 export async function dmcInboxUris(world: AppWorld, as: FixtureAccount): Promise<string[]> {

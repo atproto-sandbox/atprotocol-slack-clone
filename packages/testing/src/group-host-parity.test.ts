@@ -4623,7 +4623,7 @@ test("FakeNetwork & GroupHostServer Round 6 parity: per-issuer clientAttestation
 
       // Grant `bobDid` `member` access in `members/self` so cross-issuer delegationToken JTI isolation can be tested too!
       await d.adminClient.procedure("com.atproto.space.putRecord", {
-        space: `at://${d.groupDid}/space/group.opensocial.members/self`,
+        space: `at:space/${d.groupDid}/group.opensocial.members/self`,
         repo: d.groupDid,
         collection: "group.opensocial.membership",
         rkey: d.bobDid,
@@ -5335,7 +5335,7 @@ test("FakeNetwork & GroupHostServer Round 7 parity: signPlcOperation pre-side-ef
         {},
       );
       for (const sp of listSp.spaces) {
-        if (sp.space.startsWith(`at://${d.groupDid}/space/`)) {
+        if (sp.space.startsWith(`at:space/${d.groupDid}/`)) {
           const metaStar = await d.groupHttpCall({
             path: `/xrpc/com.atproto.space.exportSpaceMeta?space=${encodeURIComponent(sp.space)}`,
             method: "GET",

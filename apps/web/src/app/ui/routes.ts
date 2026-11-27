@@ -1,4 +1,4 @@
-import { channelUri, isDid, isSkey, isTid, SELF_SKEY, spaceRecordUri, tasksSpaceUri, workspaceUri } from "@flock/protocol/keys";
+import { channelUri, isDid, isSkey, isTid, normalizeLegacySpaceUri, SELF_SKEY, spaceRecordUri, tasksSpaceUri, workspaceUri } from "@flock/protocol/keys";
 import { COLLECTION } from "@flock/protocol/nsids";
 
 export { captureReturnTo, consumeReturnTo, RETURN_TO_KEY, sanitizeReturnTo, validateReturnTo } from "../../lib/return-to";
@@ -181,7 +181,8 @@ export function parseDecodedSegments(segments: readonly string[], search = ""): 
     if (!isSkey(channelSkey)) return null;
     if (segments.length === 5) {
       const rawThread = new URLSearchParams(search).get("thread");
-      const thread = rawThread && rawThread.trim().length > 0 ? rawThread : undefined;
+      const trimmedThread = rawThread?.trim();
+      const thread = trimmedThread ? normalizeLegacySpaceUri(trimmedThread) : undefined;
       return { kind: "channel", authority, workspaceSkey, workspaceUri: wsUri, channelSkey, ...(thread ? { thread } : {}) };
     }
     if (segments.length === 8 && segments[5] === "m") {

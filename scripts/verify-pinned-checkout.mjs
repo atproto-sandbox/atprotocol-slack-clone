@@ -5,25 +5,25 @@ import { join, posix, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const EXPECTED_PIN = {
-  commit: "6747610566eee1b6d743617bd8eb1136adccb362",
+  commit: "f839c47e6523a1a7adb367ef70513a3c6688c38b",
   patchPath: "protocol-tests/atproto/strict-credential-expiry.patch",
-  patchSha256: "3f413baa779473b5466e8e6ca9edc92335f5056edbd13aa3d4bfc57a509b32dd",
+  patchSha256: "a92f94fd95fd44f445b8de7f0c4f158352f8f578ce020942d10dee3e781f3cf7",
   porcelainStatus: " M packages/space/src/credential.test.ts\n M packages/space/src/credential.ts\n",
   headObjects: {
     "packages/space/src/credential.ts": "3ee86eb9c38e80d0137920551d91fd7153499694a6367ef24548ffbb8d0002d8",
-    "packages/space/src/credential.test.ts": "3e2bf642dcc9648ccadc6a253e25c9771d7c203a2ef9d5c6b67574db033b35b6",
+    "packages/space/src/credential.test.ts": "4f6056ebaa05439de6a1551f33223599968bcac5b2f88a0832d577000cc89841",
   },
   workingTreeFiles: {
     "packages/space/src/credential.ts": "45b91e701942459675c923af665f5039f8d525c5ce3b5c01462f37606b48494d",
-    "packages/space/src/credential.test.ts": "5fd14a9d04b4ca3ebcca1583e10348fee1bf8414d1aeb4c3f82d301c70b08eb3",
-    "pnpm-lock.yaml": "a519b31150d0b978dd8c59c9ec3276a6f5418a98c5b118f6d6b1bcf269570864",
+    "packages/space/src/credential.test.ts": "af8394c5a361ef9dfe2e9ea329286a158394aef589611a1d75dca265739e4158",
+    "pnpm-lock.yaml": "9ec7f22274e92778e14c8fa7a494c844b6512c8a43857cf96722211d9bccf298",
     "packages/lex-cli/dist/index.js": "3ee9586459253b4c337c398713ce3dc4d0b6f547ef80469c38735f3eb6b10249",
     "packages/space/dist/credential.js": "c7a97d2c3d354b10495458846b359d720aa2b1f17a32015d923615c75d3b95b6",
     "packages/star/dist/index.js": "8a44a47fc614b50244c59dd25346f74edabd46eb487d5bd2eb7b6d441795f415",
     "packages/dev-env/dist/index.js": "a8c9c16cfe2c5125ff1935b45a16ca23fb8e93fb184432df6064d00cefd5a62c",
   },
-  distFileCount: 19_163,
-  distManifestSha256: "308383a44a5df954b98384fd254806e7c9997a75348635decc9f9c9f2f738a73",
+  distFileCount: 19_251,
+  distManifestSha256: "18275cb74339aaefc232cc085d9b201fd5a04f6e4481e64ec714261473592439",
 };
 
 const DIST_EXTENSIONS = new Set([".js", ".mjs", ".ts", ".mts", ".json", ".map", ".css", ".html"]);

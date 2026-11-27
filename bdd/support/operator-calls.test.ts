@@ -7,7 +7,7 @@ import type { ApiCall } from "./world";
 // How a step reads the operator's answer to an `execute` the page made, including when the browser would not hand over the
 // answer's body (Playwright records that as "navigated-away", whether the page left or Chromium dropped the body).
 
-const REQUEST = JSON.stringify({ workspace: "at://did:plc:owner/space/new.flock.workspace/team", operationId: "3kabcdefghij2", request: { kind: "createChannel", skey: "room" } });
+const REQUEST = JSON.stringify({ workspace: "at:space/did:plc:owner/new.flock.workspace/team", operationId: "3kabcdefghij2", request: { kind: "createChannel", skey: "room" } });
 const COMPLETED: OperationView = { operationId: "3kabcdefghij2", requestHash: "a".repeat(64), state: "completed", completedSteps: ["channel-space"], updatedAt: "2026-11-11T10:00:00.000Z" };
 
 const call = (status: number, body: ApiCall["body"], responseBody = ""): ApiCall =>

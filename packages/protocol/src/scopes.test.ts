@@ -114,7 +114,7 @@ test("deskMemberScopes is least-privilege, satisfies listSpaces(group.opensocial
   }
 });
 
-test("patched @atproto/oauth-scopes SpaceCollectionParam accepts '*' collection on space.importRepo checks (6747610566 parity)", () => {
+test("@atproto/oauth-scopes SpaceCollectionParam accepts '*' collection on space.importRepo checks", () => {
   const wildcardPerm = SpacePermission.fromString(
     "space:*?collection=*&action=read&action=create&action=update&action=delete",
   )!.withResolvedAuthority(groupDid as DidString);
@@ -269,7 +269,7 @@ test("effectiveMemberPermissions unions role.scopes AND space-clamped policy.gra
     [bobDid, { roles: ["channel-mod"], createdAt: "2026-11-20T00:00:00.000Z" }],
   ]);
 
-  const generalChannelUri = `at://${groupDid}/space/new.flock.channel/general`;
+  const generalChannelUri = `at:space/${groupDid}/new.flock.channel/general`;
   const spacePolicies = new Map([
     [
       groupMembersUri(groupDid),

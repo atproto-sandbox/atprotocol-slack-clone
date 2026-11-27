@@ -273,7 +273,7 @@ export async function createWorkspace(
   const workspace = workspaceUri(groupDid);
   const inbox = inboxUri(groupDid, SELF_SKEY);
   const membersSpace = groupMembersUri(groupDid);
-  const metaSpace = `at://${groupDid}/space/group.opensocial.meta/self`;
+  const metaSpace = `at:space/${groupDid}/group.opensocial.meta/self`;
 
   await owner.procedure("com.atproto.space.createSpace", {
     spaceType: SPACE_TYPE.workspace,
