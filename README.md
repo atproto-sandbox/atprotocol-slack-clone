@@ -6,18 +6,18 @@ There is no proprietary application database of record for content or membership
 
 **Links:** [**Conference deck (R13 + Flock Desk)**](https://atproto-sandbox.github.io/atprotocol-slack-clone/presentation/r13-flock-conference-deck.html) · [**R12 baseline deck**](https://atproto-sandbox.github.io/atprotocol-slack-clone/presentation/r12-atproto-conference-deck.html) · [**Dual-client demo (MP4)**](https://atproto-sandbox.github.io/atprotocol-slack-clone/media/flock-desk-e2e.mp4) · [**Full E2E video**](https://atproto-sandbox.github.io/atprotocol-slack-clone/media/bdd-session.mp4) · [**Developer Onboarding**](docs/dev-onboarding.md) · [**Architecture**](ARCHITECTURE.md)
 
-> **Status: alpha (R13 `opensocial.group` atmospheric groups).** Targets ATProto Spaces proposal 0016 ([PR #5187](https://github.com/bluesky-social/atproto/pull/5187), commit `6747610566eee1b6d743617bd8eb1136adccb362`, npm snapshot `0.0.0-spaces-alpha-20261117141222` + `strict-credential-expiry.patch`) and [`opensocial.group/proposal`](https://tangled.org/opensocial.group/proposal) (`8df0cc82eb7708f090aa43522adf1d3ada3ed7e7`). Both upstream specs are draft; expect breaking changes when upstream moves, and run `pnpm verify:lexicons` before serving public ATProto PDSes.
+> **Status: alpha (R14 `at:space/` URIs + R13 `opensocial.group` atmospheric groups).** Targets ATProto Spaces proposal 0016 ([PR #5187](https://github.com/bluesky-social/atproto/pull/5187), commit `f839c47e6523a1a7adb367ef70513a3c6688c38b`, npm snapshot `0.0.0-spaces-alpha-20261124235736` + `@atproto/star@0.0.1` + `strict-credential-expiry.patch`) and [`opensocial.group/proposal`](https://tangled.org/opensocial.group/proposal) (`8df0cc82eb7708f090aa43522adf1d3ada3ed7e7`). Both upstream specs are draft; expect breaking changes when upstream moves, and run `pnpm verify:lexicons` before serving public ATProto PDSes.
 
 ## End-to-end demo
 
 [![Watch the end-to-end BDD session recording](docs/media/bdd-session-preview.gif)](https://atproto-sandbox.github.io/atprotocol-slack-clone/media/bdd-session.mp4)
 
-Full 30.4-minute 1080p Chromium/Playwright E2E session recording covering **86/86 passing tests** (all 11 real-browser Playwright E2E specs starting with `opensocial-groups.spec.ts`, followed by all 75 Cucumber Gherkin BDD scenarios) on R13 `opensocial.group` atmospheric groups: [**stream on GitHub Pages**](https://atproto-sandbox.github.io/atprotocol-slack-clone/media/bdd-session.mp4) or view [`docs/media/bdd-session.mp4`](docs/media/bdd-session.mp4) (Git LFS).
+Full 26.5-minute 1080p Chrome/Playwright E2E session recording covering **75/75 passing Flock web app BDD scenarios** on `f839c47e` (`at:space/` URIs): [**stream on GitHub Pages**](https://atproto-sandbox.github.io/atprotocol-slack-clone/media/bdd-session.mp4) or view [`docs/media/bdd-session.mp4`](docs/media/bdd-session.mp4) (Git LFS). For the **8/8 passing Flock Web + Flock Desk** dual-client recording (2.6 minutes), view [`docs/media/flock-desk-e2e.mp4`](docs/media/flock-desk-e2e.mp4).
 
 ## What it does
 
 - **Atmospheric `opensocial.group` workspaces & channels:** Each workspace is an OpenSocial group (`did:plc:...`) with `admin`, `moderator`, `member`, and per-private-channel `channel-<skey>` roles (`O(1)` single-record `membership/<did>` updates across up to 100 channels), `open` / `approval` / `invite` join policies, public & private channels, rich message blocks, one-level replies, per-author emoji reactions, message permalinks, private-channel join requests (`decideJoinRequest`), group join requests (`requestJoin` / `cancelJoinRequest` / `listJoinRequests` / `decideGroupJoinRequest`), incarnation-guarded leave (`If-Match-Membership-Incarnation`), sole-member reversible deactivation & 4-phase reactivation, pre-tombstone zero-residue `deleteAccount`, and two-GroupHost Standard & Coordinated v1 migration.
-- **Cross-PDS invitations (`group.opensocial.invites/self`):** Clients idempotently provision `at://<viewerDid>/space/group.opensocial.invites/self` on each user's personal PDS (`WorkspaceClient.ensureInvitesSpace()`). Inviting groups write `group.opensocial.invite/<tid>` into `<groupDid>`'s repo inside the invitee's `invites/self` space with tracked `notifyRepoUpdate` delivery (`pending` / `delivered` / `failed` + retry) and real-time `inv1` push wakes (`new.flock.operator.getSpaceNotifyTarget`), alongside shareable invite links.
+- **Cross-PDS invitations (`group.opensocial.invites/self`):** Clients idempotently provision `at:space/<viewerDid>/group.opensocial.invites/self` on each user's personal PDS (`WorkspaceClient.ensureInvitesSpace()`). Inviting groups write `group.opensocial.invite/<tid>` into `<groupDid>`'s repo inside the invitee's `invites/self` space with tracked `notifyRepoUpdate` delivery (`pending` / `delivered` / `failed` + retry) and real-time `inv1` push wakes (`new.flock.operator.getSpaceNotifyTarget`), alongside shareable invite links.
 - **ATProto-native moderation:** Members report messages, reactions, tasks, or accounts via `group.opensocial.createReport`; moderators review `listModSubjects` / `getModSubjectHistory` / `resolveModSubject` via per-user Group-DID OAuth (`GroupBrowserOAuthClient` / `GroupClient`) and publish `<groupDid>`-authored `com.atproto.label.record` (`!takedown`, `!hide`, custom `labeler/self` values) projected identically across web, reader, bots, and webhooks.
 - **Direct messages (`new.flock.dm.*`):** Sovereign 1:1 and group conversations (up to 100 participants) on each participant's personal PDS (`com.atproto.memberspace.policy`). Live updates use `authorizeSpaceSync` with stateless `dm1` webhook tokens (`getDmNotifyTarget`) gated by RFC 9421 space-credential proof-of-possession; both Operator and Group Host store **zero DM rows** in SQLite.
 - **Apps, slash commands & incoming webhooks:** Non-roster app service principals (`apps/echo-bot`, `apps/webhooks`, role `appRoleKey(appDid)`) run under narrow `appGrantScopes` with per-app inboxes, `/command` dispatch, interactive block actions, and secret-authenticated incoming webhooks.
@@ -36,7 +36,7 @@ New to **atproto Spaces** and **`opensocial.group`**? Start with [`docs/dev-onbo
 
 Requires Node `22.17` (`.nvmrc`) and `pnpm@11.11.0` (`corepack pnpm`). The local playground spins up two in-memory personal PDS hosts, an `opensocial.group` Group Host, a PLC directory, the Operator, and the Next.js web app against the pinned `@atproto` checkout.
 
-1. Check out and build the pinned `@atproto` Spaces revision (`6747610566eee1b6d743617bd8eb1136adccb362`) next to this repo as `atproto-spaces-r12` and apply `protocol-tests/atproto/strict-credential-expiry.patch` (`scripts/verify-pinned-checkout.mjs` verifies the exact tree and `19,163` compiled `dist` files). Full steps: [`docs/protocol/atproto-spaces-pin.md`](docs/protocol/atproto-spaces-pin.md).
+1. Check out and build the pinned `@atproto` Spaces revision (`f839c47e6523a1a7adb367ef70513a3c6688c38b`) next to this repo as `atproto-spaces-r14` and apply `protocol-tests/atproto/strict-credential-expiry.patch` (`scripts/verify-pinned-checkout.mjs` verifies the exact tree and `19,251` compiled `dist` files). Full steps: [`docs/protocol/atproto-spaces-pin.md`](docs/protocol/atproto-spaces-pin.md).
 2. Install and build:
 
    ```sh
@@ -47,7 +47,7 @@ Requires Node `22.17` (`.nvmrc`) and `pnpm@11.11.0` (`corepack pnpm`). The local
 3. Start the playground:
 
    ```sh
-   ATPROTO_PINNED_CHECKOUT=../atproto-spaces-r12 corepack pnpm playground
+   ATPROTO_PINNED_CHECKOUT=../atproto-spaces-r14 corepack pnpm playground
    ```
 
    It prints the local web URL, PDS/Group-Host/PLC endpoints, and four ready-made personal accounts (`alice.test`, `bob.test2`, `carol.test2`, `dave.test`), all with password `playground-pass`. Enter the account's DID into the sign-in box. State lives in memory and a temporary folder that disappears on exit.
@@ -82,7 +82,7 @@ Before serving users on public ATProto PDSes, publish `_lexicon.opensocial.group
 
 *(Note: R12's `pnpm reconcile` / `reconcile-workspaces.ts` was retired in R13 because `group.opensocial.policy` evaluates live `role/*` and `membership/*` records directly without per-space member-list fan-out drift.)*
 
-Set `ATPROTO_PINNED_CHECKOUT=../atproto-spaces-r12` (and `ATPROTO_PIN_CHECKOUT=../atproto-spaces-r12` for `codegen:lex`) when running pinned suites.
+Set `ATPROTO_PINNED_CHECKOUT=../atproto-spaces-r14` (and `ATPROTO_PIN_CHECKOUT=../atproto-spaces-r14` for `codegen:lex`) when running pinned suites.
 
 ## Conference deck (R13 + Flock Desk)
 
