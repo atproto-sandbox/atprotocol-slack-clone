@@ -17,7 +17,7 @@ import {
   tasksSpaceUri,
   workspaceUri,
 } from "@flock/protocol/keys";
-import { COLLECTION, OPENSOCIAL_POLICY, SPACE_TYPE } from "@flock/protocol/nsids";
+import { COLLECTION, ATGRP_POLICY, SPACE_TYPE } from "@flock/protocol/nsids";
 import { closeDb, getRawDb } from "../lib/db";
 import type { SpaceNotifyTarget } from "../atproto/space-credential";
 import { parseWorkspaceRef, type OperatorActor } from "./actor";
@@ -511,7 +511,7 @@ async function createOpenSocialSpace(host: Awaited<ReturnType<typeof fakeGroupHo
     spaceType,
     skey,
     policy: {
-      $type: OPENSOCIAL_POLICY,
+      $type: ATGRP_POLICY,
       publicRead: false,
       unlisted: spaceType === SPACE_TYPE.appInbox,
       grants: [{ role: "member", read: true, write: true }],

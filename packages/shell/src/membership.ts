@@ -15,10 +15,10 @@ import {
   workspaceUri,
 } from "@flock/protocol/keys";
 import {
+  ATGRP_COLLECTION,
+  ATGRP_METHOD,
+  ATGRP_SPACE_TYPE,
   FLOCK_EXTENSION_FIELD,
-  OPENSOCIAL_COLLECTION,
-  OPENSOCIAL_METHOD,
-  OPENSOCIAL_SPACE_TYPE,
 } from "@flock/protocol/nsids";
 import { validateSpaceRecord } from "@flock/protocol/registry";
 import { DidResolutionError } from "./did-resolver";
@@ -254,7 +254,7 @@ async function queryJoinStatusAt(
     "com.atproto.server.getServiceAuth",
     {
       aud: `${groupDid}#atproto_pds`,
-      lxm: OPENSOCIAL_METHOD.requestJoin,
+      lxm: ATGRP_METHOD.requestJoin,
     },
   );
   const url = new URL("/group-member/join-status", endpoint);
@@ -281,6 +281,10 @@ async function queryJoinStatusAt(
   return parseJoinStatusResponse(body);
 }
 
+function isUnsupportedJoinStatusExtension(error: unknown): boolean {
+  return error instanceof XrpcError && (error.status === 404 || error.status === 501);
+}
+
 async function readOwnAcceptanceRecord(
   deps: DeskShellDeps,
   groupDid: string,
@@ -291,7 +295,7 @@ async function readOwnAcceptanceRecord(
       {
         space: groupMembersUri(groupDid),
         repo: deps.did,
-        collection: OPENSOCIAL_COLLECTION.acceptance,
+        collection: ATGRP_COLLECTION.confirmation,
         rkey: SELF_SKEY,
       },
     );
@@ -311,11 +315,11 @@ async function writeOwnAcceptance(
 ): Promise<string> {
   const membersUri = groupMembersUri(groupDid);
   const record: Record<string, unknown> = {
-    $type: OPENSOCIAL_COLLECTION.acceptance,
+    $type: ATGRP_COLLECTION.confirmation,
     createdAt: new Date(nowOf(deps)).toISOString(),
     ...(incarnation !== undefined ? { [FLOCK_EXTENSION_FIELD.incarnation]: incarnation } : {}),
   };
-  const validation = validateSpaceRecord(OPENSOCIAL_COLLECTION.acceptance, record, {
+  const validation = validateSpaceRecord(ATGRP_COLLECTION.confirmation, record, {
     authorityDid: groupDid,
     spaceUri: membersUri,
     repoDid: deps.did,
@@ -326,7 +330,7 @@ async function writeOwnAcceptance(
   const result = await deps.memberClient.procedure<unknown, { uri: string }>("com.atproto.space.putRecord", {
     space: membersUri,
     repo: deps.did,
-    collection: OPENSOCIAL_COLLECTION.acceptance,
+    collection: ATGRP_COLLECTION.confirmation,
     rkey: SELF_SKEY,
     record,
   });
@@ -344,7 +348,7 @@ async function verifyLiveGroupMembershipIncarnation(
     cred.client(endpoint).query<{ cid?: string; value: Record<string, unknown> }>("com.atproto.space.getRecord", {
       space: membersUri,
       repo: groupDid,
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: deps.did,
     });
 
@@ -468,7 +472,7 @@ async function driveJoiningGroupPhases(
         deps,
         groupDid,
         authorityEndpoint,
-        OPENSOCIAL_METHOD.requestJoin,
+        ATGRP_METHOD.requestJoin,
         {
           group: groupDid,
           ...(entry.inviteUri !== undefined ? { invite: entry.inviteUri } : {}),
@@ -509,7 +513,30 @@ async function driveJoiningGroupPhases(
   // Phase 2: `pending_approval` (NEVER re-calls `requestJoin`!)
   if (entry.phase === "pending_approval") {
     const currentEndpoint = await deps.resolvePds(groupDid, true);
-    const joinStatus = await queryJoinStatusAt(deps, groupDid, currentEndpoint, entry.operationId);
+    let joinStatus: JoinStatusResponse | null = null;
+    try {
+      joinStatus = await queryJoinStatusAt(deps, groupDid, currentEndpoint, entry.operationId);
+    } catch (probeErr) {
+      if (!isUnsupportedJoinStatusExtension(probeErr)) {
+        throw probeErr;
+      }
+      // Spec-only host without Flock's `/group-member/join-status` extension: probe `org.atgrp.members/self` directly
+      // without ever resubmitting `requestJoin`.
+      try {
+        const liveIncarnation = await verifyLiveGroupMembershipIncarnation(deps, groupDid);
+        joinStatus = {
+          state: "admitted",
+          ...(liveIncarnation !== undefined ? { currentIncarnation: liveIncarnation } : {}),
+        };
+      } catch (liveErr) {
+        const notMemberYet =
+          isMissingXrpcResource(liveErr) ||
+          (liveErr instanceof SpaceCredentialError && (liveErr.status === 401 || liveErr.status === 403)) ||
+          (liveErr instanceof XrpcError && (liveErr.status === 401 || liveErr.status === 403 || liveErr.status === 404));
+        if (!notMemberYet) throw liveErr;
+        return { status: "pending", groupDid, workspaceUri: workspaceUri(groupDid), operationId };
+      }
+    }
 
     if (joinStatus.state === "admitted") {
       entry = {
@@ -583,13 +610,13 @@ async function driveJoiningGroupPhases(
     const membersUri = groupMembersUri(groupDid);
     const [spaces, ownAcc] = await Promise.all([
       listAllSpaceUris(deps.memberClient, {
-        spaceType: OPENSOCIAL_SPACE_TYPE.members,
+        spaceType: ATGRP_SPACE_TYPE.members,
         maxSpaces: MAX_DISCOVERABLE_WORKSPACES,
       }),
       readOwnAcceptanceRecord(deps, groupDid),
     ]);
     if (!spaces.includes(membersUri) || !ownAcc) {
-      throw new Error(`Discovery verification for ${groupDid} did not observe ${membersUri} and acceptance/self.`);
+      throw new Error(`Discovery verification for ${groupDid} did not observe ${membersUri} and confirmation/self.`);
     }
     await store.deleteJoiningGroup(entry.operationId);
   }
@@ -730,7 +757,7 @@ export async function cancelPendingJoin(
 
     let confirmedTerminalAbsent = false;
     try {
-      await callPersonalGroupProcedure(deps, groupDid, endpoint, OPENSOCIAL_METHOD.cancelJoinRequest, {
+      await callPersonalGroupProcedure(deps, groupDid, endpoint, ATGRP_METHOD.cancelJoinRequest, {
         group: groupDid,
       });
       confirmedTerminalAbsent = true;
@@ -749,7 +776,7 @@ export async function cancelPendingJoin(
       try {
         joinStatus = await queryJoinStatusAt(deps, groupDid, endpoint, pendingApprovalRows[0]?.operationId);
       } catch (probeErr) {
-        if (!(probeErr instanceof XrpcError && probeErr.status === 404)) {
+        if (!isUnsupportedJoinStatusExtension(probeErr)) {
           throw probeErr;
         }
       }
@@ -922,6 +949,9 @@ async function resolveCurrentLeaveIncarnation(
   try {
     status = await queryJoinStatusAt(deps, groupDid, endpoint);
   } catch (error) {
+    if (isUnsupportedJoinStatusExtension(error)) {
+      return { kind: "ready", expectedIncarnation: ownIncarnation };
+    }
     const outcome = await interpretJoinStatusError(error, endpoint, true);
     if (outcome.kind !== "status") {
       return outcome;
@@ -950,11 +980,12 @@ async function safeQueryLiveJoinStatus(
     return await queryJoinStatusAt(deps, groupDid, endpoint);
   } catch (error) {
     if (
-      error instanceof XrpcError &&
-      (error.code === "RepoNotFound" ||
-        error.code === "GroupNotFound" ||
-        error.code === "RepoTakendown" ||
-        error.code === "RepoDeactivated")
+      isUnsupportedJoinStatusExtension(error) ||
+      (error instanceof XrpcError &&
+        (error.code === "RepoNotFound" ||
+          error.code === "GroupNotFound" ||
+          error.code === "RepoTakendown" ||
+          error.code === "RepoDeactivated"))
     ) {
       return null;
     }
@@ -993,7 +1024,7 @@ async function executeLeavingGroupPhases(
           deps,
           groupDid,
           endpoint,
-          OPENSOCIAL_METHOD.leaveGroup,
+          ATGRP_METHOD.leaveGroup,
           { group: groupDid },
           entry!.expectedIncarnation !== undefined
             ? { "if-match-membership-incarnation": entry!.expectedIncarnation }
@@ -1108,7 +1139,7 @@ async function executeLeavingGroupPhases(
         await deps.memberClient.procedure("com.atproto.space.deleteRecord", {
           space: groupMembersUri(groupDid),
           repo: deps.did,
-          collection: OPENSOCIAL_COLLECTION.acceptance,
+          collection: ATGRP_COLLECTION.confirmation,
           rkey: SELF_SKEY,
         });
       } catch (error) {

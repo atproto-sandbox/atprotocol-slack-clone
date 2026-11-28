@@ -1,10 +1,11 @@
 import { fromLegacySpaceUri, isValidRecordKey, isValidTid } from "@atproto/syntax";
 import { sha256 } from "@noble/hashes/sha2";
 import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils";
-import { COLLECTION, NAMESPACE, OPENSOCIAL_SPACE_TYPE, SPACE_TYPE } from "./nsids";
+import { ATGRP_SPACE_TYPE, COLLECTION, NAMESPACE, SPACE_TYPE } from "./nsids";
 
 const BASE32 = "abcdefghijklmnopqrstuvwxyz234567";
 const TID_BASE32 = "234567abcdefghijklmnopqrstuvwxyz";
+const ALPHA_HEX = "abcdefghijklmnop";
 
 export const SELF_SKEY = "self";
 export const DM_INBOX_SKEY = "self";
@@ -23,6 +24,19 @@ export function isRecordKey(value: unknown): value is string {
     value !== ".." &&
     isValidRecordKey(value)
   );
+}
+
+/**
+ * Atmosphere Groups role ID syntax: label-value alphabet (`[a-z-]+`), min 3 characters,
+ * bounded by ATProto's 512-character `record-key` maximum (`org.atgrp.role` / `org.atgrp.policy`).
+ */
+export function isValidRoleId(value: unknown): value is string {
+  return typeof value === "string" && /^[a-z-]{3,512}$/.test(value) && isRecordKey(value);
+}
+
+/** Atmosphere Groups moderator tag syntax: label-value alphabet (`[a-z-]+`), 1..128 characters. */
+export function isValidModTag(value: unknown): value is string {
+  return typeof value === "string" && /^[a-z-]{1,128}$/.test(value);
 }
 
 /** A Flock-created UI/Operator space key: record-key syntax (rejecting `.` and `..`), capped at 128 characters. */
@@ -62,15 +76,30 @@ export function subjectKey(did: string): string {
   return `d-${recordKeyHash(did)}`;
 }
 
-/** Non-roster service-principal role key: `"app-" + base32Lower(sha256(utf8(appDid))).slice(0, 52)` (56 chars, full 256-bit digest). */
-export function appRoleKey(appDid: string): string {
-  return `app-${stableHash(appDid).slice(0, 52)}`;
+function encodeAlphaNibbles(bytes: Uint8Array): string {
+  let out = "";
+  for (const byte of bytes) {
+    out += ALPHA_HEX[(byte >>> 4) & 0x0f]! + ALPHA_HEX[byte & 0x0f]!;
+  }
+  return out;
 }
 
-/** Per-private-channel role key assigned on `group.opensocial.membership`. */
+/**
+ * Non-roster service-principal role key: `"app-" + alphaNibbles(sha256(utf8(appDid)))`
+ * (68 chars, full 256-bit SHA-256 digest, strictly matching `[a-z-]{3,512}`).
+ */
+export function appRoleKey(appDid: string): string {
+  return `app-${encodeAlphaNibbles(sha256(utf8ToBytes(appDid)))}`;
+}
+
+/**
+ * Per-private-channel role key assigned on `org.atgrp.membership`:
+ * `"channel-" + alphaNibbles(utf8(channelSkey))` (bijective, strictly `[a-z-]{3,512}`,
+ * 34 chars for a 13-char TID, 130 chars for a 61-char skey, 264 chars for a 128-char skey).
+ */
 export function channelRoleKey(channelSkey: string): string {
   if (!isSkey(channelSkey)) throw new TypeError("Invalid private channel key.");
-  return `channel-${channelSkey}`;
+  return `channel-${encodeAlphaNibbles(utf8ToBytes(channelSkey))}`;
 }
 
 export function requestRecordKey(channelUri: string, requesterDid: string): string {
@@ -100,17 +129,17 @@ export function normalizeLegacySpaceUri(uri: string): string {
 
 export function groupMetaUri(groupDid: string): string {
   if (!isDid(groupDid)) throw new TypeError("Invalid group DID.");
-  return spaceUri(groupDid, OPENSOCIAL_SPACE_TYPE.meta, SELF_SKEY);
+  return spaceUri(groupDid, ATGRP_SPACE_TYPE.meta, SELF_SKEY);
 }
 
 export function groupMembersUri(groupDid: string): string {
   if (!isDid(groupDid)) throw new TypeError("Invalid group DID.");
-  return spaceUri(groupDid, OPENSOCIAL_SPACE_TYPE.members, SELF_SKEY);
+  return spaceUri(groupDid, ATGRP_SPACE_TYPE.members, SELF_SKEY);
 }
 
-export function personalInvitesUri(userDid: string): string {
+export function personalInboxUri(userDid: string): string {
   if (!isDid(userDid)) throw new TypeError("Invalid user DID.");
-  return spaceUri(userDid, OPENSOCIAL_SPACE_TYPE.invites, SELF_SKEY);
+  return spaceUri(userDid, ATGRP_SPACE_TYPE.inbox, SELF_SKEY);
 }
 
 export function workspaceUri(authorityDid: string, skey = SELF_SKEY): string {
@@ -214,21 +243,21 @@ export function requireSpaceAuthority(space: string): Did {
 
 export function parseGroupMetaUri(uri: string): { groupDid: Did } | null {
   const parsed = parseSpaceUri(uri);
-  return parsed?.type === OPENSOCIAL_SPACE_TYPE.meta && parsed.skey === SELF_SKEY
+  return parsed?.type === ATGRP_SPACE_TYPE.meta && parsed.skey === SELF_SKEY
     ? { groupDid: parsed.authorityDid }
     : null;
 }
 
 export function parseGroupMembersUri(uri: string): { groupDid: Did } | null {
   const parsed = parseSpaceUri(uri);
-  return parsed?.type === OPENSOCIAL_SPACE_TYPE.members && parsed.skey === SELF_SKEY
+  return parsed?.type === ATGRP_SPACE_TYPE.members && parsed.skey === SELF_SKEY
     ? { groupDid: parsed.authorityDid }
     : null;
 }
 
-export function parsePersonalInvitesUri(uri: string): { userDid: Did } | null {
+export function parsePersonalInboxUri(uri: string): { userDid: Did } | null {
   const parsed = parseSpaceUri(uri);
-  return parsed?.type === OPENSOCIAL_SPACE_TYPE.invites && parsed.skey === SELF_SKEY
+  return parsed?.type === ATGRP_SPACE_TYPE.inbox && parsed.skey === SELF_SKEY
     ? { userDid: parsed.authorityDid }
     : null;
 }

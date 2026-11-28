@@ -12,7 +12,7 @@ import {
   subjectKey,
   tidNow,
 } from "@flock/protocol/keys";
-import { ATPROTO_SPACE_COLLECTION, COLLECTION, OPENSOCIAL_COLLECTION, OPENSOCIAL_POLICY, SPACE_TYPE } from "@flock/protocol/nsids";
+import { ATPROTO_SPACE_COLLECTION, COLLECTION, ATGRP_COLLECTION, ATGRP_POLICY, SPACE_TYPE } from "@flock/protocol/nsids";
 import { FakeNetwork } from "@flock/testing/fake-network";
 import { AppAccessLostError, AppRuntime, publishAppDeclaration, type AppAction, type AppCommand, type AppMessage } from "./app-runtime";
 import { actionsBlock, button, sectionBlock } from "./blocks";
@@ -697,14 +697,14 @@ async function inboxFixture(options: {
     await owner.procedure("com.atproto.space.putRecord", {
       space: fixture.members,
       repo: AUTHORITY,
-      collection: OPENSOCIAL_COLLECTION.role,
+      collection: ATGRP_COLLECTION.role,
       rkey: role,
       record: {
-        $type: OPENSOCIAL_COLLECTION.role,
+        $type: ATGRP_COLLECTION.role,
         displayName: `Bot ${did}`,
-        scopes: [
-          "space:group.opensocial.meta?authority=self&skey=self&action=read",
-          "space:group.opensocial.members?authority=self&skey=self&action=read",
+        permissions: [
+          "space:org.atgrp.meta?authority=self&skey=self&action=read",
+          "space:org.atgrp.members?authority=self&skey=self&action=read",
           "space:new.flock.workspace?authority=self&skey=self&action=read",
         ],
       },
@@ -731,9 +731,9 @@ async function inboxFixture(options: {
     await owner.procedure("com.atproto.space.putRecord", {
       space: fixture.members,
       repo: AUTHORITY,
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: did,
-      record: { $type: OPENSOCIAL_COLLECTION.membership, roles: [role], createdAt: "2026-11-10T12:00:00.000Z" },
+      record: { $type: ATGRP_COLLECTION.membership, roles: [role], createdAt: "2026-11-10T12:00:00.000Z" },
     });
   }
 
@@ -741,7 +741,7 @@ async function inboxFixture(options: {
   await owner.procedure("com.atproto.space.updateSpace", {
     space: fixture.meta,
     policy: {
-      $type: OPENSOCIAL_POLICY,
+      $type: ATGRP_POLICY,
       publicRead: true,
       unlisted: false,
       grants: [
@@ -756,7 +756,7 @@ async function inboxFixture(options: {
   await owner.procedure("com.atproto.space.updateSpace", {
     space: fixture.members,
     policy: {
-      $type: OPENSOCIAL_POLICY,
+      $type: ATGRP_POLICY,
       publicRead: false,
       unlisted: false,
       grants: [
@@ -771,7 +771,7 @@ async function inboxFixture(options: {
   await owner.procedure("com.atproto.space.updateSpace", {
     space: fixture.workspace,
     policy: {
-      $type: OPENSOCIAL_POLICY,
+      $type: ATGRP_POLICY,
       publicRead: false,
       unlisted: false,
       grants: [
@@ -788,7 +788,7 @@ async function inboxFixture(options: {
   await owner.procedure("com.atproto.space.updateSpace", {
     space: fixture.channels.general!,
     policy: {
-      $type: OPENSOCIAL_POLICY,
+      $type: ATGRP_POLICY,
       publicRead: false,
       unlisted: false,
       grants: [
@@ -803,7 +803,7 @@ async function inboxFixture(options: {
   await owner.procedure("com.atproto.space.updateSpace", {
     space: fixture.channels.secret!,
     policy: {
-      $type: OPENSOCIAL_POLICY,
+      $type: ATGRP_POLICY,
       publicRead: false,
       unlisted: true,
       grants: [
@@ -818,7 +818,7 @@ async function inboxFixture(options: {
     spaceType: SPACE_TYPE.appInbox,
     skey: appInboxSkey(SELF_SKEY, appDid),
     policy: {
-      $type: OPENSOCIAL_POLICY,
+      $type: ATGRP_POLICY,
       publicRead: false,
       unlisted: true,
       grants: [
@@ -904,7 +904,7 @@ test("optional handlers decide what is followed: no inbox without command/action
   await owner.procedure("com.atproto.space.deleteRecord", {
     space: withoutMessage.fixture.members,
     repo: AUTHORITY,
-    collection: OPENSOCIAL_COLLECTION.membership,
+    collection: ATGRP_COLLECTION.membership,
     rkey: withoutMessage.appDid,
   });
   await withoutMessage.writeInstall(withoutMessage.appDid, false, []);
@@ -993,7 +993,7 @@ test("onCommand checks declared name, fresh roster, same-workspace channel, visi
   await env.network.clientFor(AUTHORITY).procedure("com.atproto.space.deleteRecord", {
     space: env.fixture.members,
     repo: AUTHORITY,
-    collection: OPENSOCIAL_COLLECTION.membership,
+    collection: ATGRP_COLLECTION.membership,
     rkey: env.bob,
   });
   env.change(env.inbox);
@@ -1228,9 +1228,9 @@ test("AppRuntime with followRepoOps isolates failed initial writers, admits pend
     await env.network.clientFor(AUTHORITY).procedure("com.atproto.space.putRecord", {
       space: env.fixture.members,
       repo: AUTHORITY,
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: carol,
-      record: { $type: OPENSOCIAL_COLLECTION.membership, roles: ["member"], createdAt: "2026-11-10T12:00:00.000Z" },
+      record: { $type: ATGRP_COLLECTION.membership, roles: ["member"], createdAt: "2026-11-10T12:00:00.000Z" },
     });
     const carolEngine = createEngine(transportFor(env.network, carol));
     await carolEngine.appInboxes.sendCommand(generalRef, env.appDid, "echo", "carol-immediate-cmd");

@@ -49,9 +49,17 @@ import {
   verifyMigrationManifestDigest,
   type MigrationSpaceManifestEntry,
 } from "@flock/protocol/migration-manifest";
-import { OPENSOCIAL_METHOD, REPO_COLLECTION } from "@flock/protocol/nsids";
 import {
-  canonicalOpenSocialPolicyKey,
+  ATGRP_METHOD,
+  ATGRP_MOD_EVENT_TYPE,
+  ATGRP_MOD_REASON,
+  ATGRP_NAMESPACE,
+  FLOCK_GROUP_METHOD,
+  REPO_COLLECTION,
+} from "@flock/protocol/nsids";
+import { projectActiveLabels } from "@flock/protocol/moderation";
+import {
+  canonicalAtgrpPolicyKey,
   MANDATORY_VALIDATED_SPACE_COLLECTIONS,
   validatePublicRecord,
   validateSpacePolicy,
@@ -64,7 +72,7 @@ import {
   expandGroupScopes,
   groupAdminScopes,
   type GroupMembershipRecord,
-  type GroupOpenSocialPolicy,
+  type GroupAtgrpPolicy,
   type GroupRoleRecord,
 } from "@flock/protocol/scopes";
 import {
@@ -83,12 +91,12 @@ import {
   isValidIdempotencyKey,
   lexDataToPlainJsonLocal,
   liveRoleGrantsAccess,
-  normalizeOpenSocialPolicy,
-  OPENSOCIAL_COLLECTION,
-  OPENSOCIAL_POLICY,
-  OPENSOCIAL_SPACE_TYPE,
+  normalizeAtgrpPolicy,
+  ATGRP_COLLECTION,
+  ATGRP_POLICY,
+  ATGRP_SPACE_TYPE,
   parseAnySpaceRecordUri,
-  personalInvitesUri,
+  personalInboxUri,
   plainJsonToLexDataLocal,
   randomUUID,
   SELF_SKEY,
@@ -182,7 +190,7 @@ type FakeSpace = {
     publicRead: boolean;
     publicWrite: boolean;
     unlisted?: boolean;
-    grants?: Array<{ role: string; read?: boolean; write?: boolean; scopes?: string[] }>;
+    grants?: Array<{ role: string; read?: boolean; write?: boolean; permissions?: string[] }>;
     allowedApps?: string[];
     publishPolicy?: boolean;
     publishMembers?: boolean;
@@ -868,6 +876,7 @@ export class FakeNetwork {
       joinOperations: new Map(),
       inviteDeliveries: new Map(),
       modSubjects: new Map(),
+      modEjectionEligibility: new Map(),
       modEvents: [],
       nextModSeq: 1,
       actionTokens: new Map(),
@@ -882,10 +891,10 @@ export class FakeNetwork {
 
     await this.createSpace(
       {
-        spaceType: OPENSOCIAL_SPACE_TYPE.meta,
+        spaceType: ATGRP_SPACE_TYPE.meta,
         skey: SELF_SKEY,
         policy: {
-          $type: OPENSOCIAL_POLICY,
+          $type: ATGRP_POLICY,
           publicRead: opts.publicMeta === true,
           unlisted: false,
           grants: [
@@ -902,15 +911,15 @@ export class FakeNetwork {
 
     await this.createSpace(
       {
-        spaceType: OPENSOCIAL_SPACE_TYPE.members,
+        spaceType: ATGRP_SPACE_TYPE.members,
         skey: SELF_SKEY,
         policy: {
-          $type: OPENSOCIAL_POLICY,
+          $type: ATGRP_POLICY,
           publicRead: false,
           unlisted: false,
           grants: [
             { role: "admin", read: true, write: true },
-            { role: "moderator", read: true },
+            { role: "moderator", read: true, write: true },
             { role: "member", read: true, write: true },
           ],
         },
@@ -924,19 +933,46 @@ export class FakeNetwork {
     const metaSpace = groupMetaUri(groupDid);
     const roles = defaultBootstrapRoles(groupDid);
     for (const [rkey, roleVal] of Object.entries(roles)) {
-      await this.putGroupSpaceRecordInternal(groupDid, groupDid, membersSpace, OPENSOCIAL_COLLECTION.role, rkey, roleVal, deliveries, true);
+      await this.putGroupSpaceRecordInternal(groupDid, groupDid, membersSpace, ATGRP_COLLECTION.role, rkey, roleVal, deliveries, true);
     }
 
     await this.putGroupSpaceRecordInternal(
       groupDid,
       groupDid,
-      metaSpace,
-      OPENSOCIAL_COLLECTION.profile,
+      membersSpace,
+      ATGRP_COLLECTION.labeler,
       SELF_SKEY,
       {
-        $type: OPENSOCIAL_COLLECTION.profile,
+        $type: ATGRP_COLLECTION.labeler,
+        policies: { labelValues: ["!hide", "!takedown"] },
+      },
+      deliveries,
+      true,
+    );
+
+    await this.putGroupSpaceRecordInternal(
+      groupDid,
+      groupDid,
+      metaSpace,
+      ATGRP_COLLECTION.about,
+      SELF_SKEY,
+      {
+        $type: ATGRP_COLLECTION.about,
         displayName: opts.name ?? "Group",
         ...(opts.description !== undefined ? { description: opts.description } : {}),
+      },
+      deliveries,
+      true,
+    );
+
+    await this.putGroupSpaceRecordInternal(
+      groupDid,
+      groupDid,
+      metaSpace,
+      ATGRP_COLLECTION.config,
+      SELF_SKEY,
+      {
+        $type: ATGRP_COLLECTION.config,
         joinPolicy: opts.joinPolicy ?? "invite",
       },
       deliveries,
@@ -951,8 +987,6 @@ export class FakeNetwork {
           rkey: SELF_SKEY,
           record: {
             $type: REPO_COLLECTION.groupDeclaration,
-            meta: metaSpace,
-            createdAt: nowIso,
           },
         },
         selfAuth,
@@ -964,10 +998,10 @@ export class FakeNetwork {
         groupDid,
         groupDid,
         membersSpace,
-        OPENSOCIAL_COLLECTION.membership,
+        ATGRP_COLLECTION.membership,
         opts.creatorDid,
         {
-          $type: OPENSOCIAL_COLLECTION.membership,
+          $type: ATGRP_COLLECTION.membership,
           roles: ["admin", "member"],
           createdAt: nowIso,
         },
@@ -1182,7 +1216,14 @@ export class FakeNetwork {
         ? nonXrpcMatch[2]!
         : url.pathname.replace(/^\/+/, "");
     const params: Record<string, unknown> = {};
-    for (const [key, value] of url.searchParams.entries()) params[key] = value;
+    for (const [key, value] of url.searchParams.entries()) {
+      if (key in params) {
+        const existing = params[key];
+        params[key] = Array.isArray(existing) ? [...existing, value] : [existing, value];
+      } else {
+        params[key] = value;
+      }
+    }
     const bodyParams: Record<string, unknown> = {};
     if (typeof init.body === "string" && init.body.length > 0) {
       const parsedBody = JSON.parse(init.body) as Record<string, unknown>;
@@ -1363,15 +1404,17 @@ export class FakeNetwork {
       case "com.atproto.space.listRepoOps": return this.listRepoOps(params, auth, requestHeaders);
       case "com.atproto.space.notifyRepoUpdate": return this.handleInboundNotifyRepoUpdate(params, auth, deliveries);
       case "com.atproto.space.notifyCredentialsRevoked": return this.handleInboundNotifyCredentialsRevoked(params, auth, requestUrl);
-      case OPENSOCIAL_METHOD.requestJoin: return this.handleFakeRequestJoin(params, auth, requestHeaders, deliveries);
-      case OPENSOCIAL_METHOD.cancelJoinRequest: return this.handleFakeCancelJoinRequest(params, auth);
-      case OPENSOCIAL_METHOD.denyJoinRequest: return this.handleFakeDenyJoinRequest(params, auth);
-      case OPENSOCIAL_METHOD.listJoinRequests: return this.handleFakeListJoinRequests(params, auth);
-      case OPENSOCIAL_METHOD.leaveGroup: return this.handleFakeLeaveGroup(params, auth, requestHeaders, deliveries);
-      case OPENSOCIAL_METHOD.createReport: return this.handleFakeCreateReport(params, auth);
-      case OPENSOCIAL_METHOD.listModSubjects: return this.handleFakeListModSubjects(params, auth);
-      case OPENSOCIAL_METHOD.getModSubjectHistory: return this.handleFakeGetModSubjectHistory(params, auth);
-      case OPENSOCIAL_METHOD.resolveModSubject: return this.handleFakeResolveModSubject(params, auth);
+      case ATGRP_METHOD.requestJoin: return this.handleFakeRequestJoin(params, auth, requestHeaders, deliveries);
+      case ATGRP_METHOD.cancelJoinRequest: return this.handleFakeCancelJoinRequest(params, auth);
+      case ATGRP_METHOD.denyJoinRequest: return this.handleFakeDenyJoinRequest(params, auth);
+      case ATGRP_METHOD.listJoinRequests: return this.handleFakeListJoinRequests(params, auth);
+      case ATGRP_METHOD.leaveGroup: return this.handleFakeLeaveGroup(params, auth, requestHeaders, deliveries);
+      case ATGRP_METHOD.modSubmitReport: return this.handleFakeSubmitReport(params, auth);
+      case ATGRP_METHOD.modSubmitAppeal: return this.handleFakeSubmitAppeal(params, auth);
+      case ATGRP_METHOD.modQuerySubjects: return this.handleFakeQueryModSubjects(params, auth);
+      case ATGRP_METHOD.modQuerySubjectHistory: return this.handleFakeQueryModSubjectHistory(params, auth);
+      case ATGRP_METHOD.modQuerySelfHistory: return this.handleFakeQuerySelfModHistory(params, auth);
+      case ATGRP_METHOD.modUpdateSubject: return this.handleFakeUpdateModSubject(params, auth);
       case "group-member/join-status": return this.handleFakeJoinStatus(params, auth);
       case "group-admin/migration-info": return this.getFakeMigrationInfo(hostSlug);
       case "group-admin/public-group-keys": return this.getFakePublicGroupKeys(params);
@@ -1936,7 +1979,7 @@ export class FakeNetwork {
       const result = await this.checkManagedAccess(space, repo, clientId);
       return result[access];
     }
-    if (space.policy.$type === OPENSOCIAL_POLICY) {
+    if (space.policy.$type === ATGRP_POLICY) {
       const state = this.loadFakeGovernanceState(space.ownerDid);
       return liveRoleGrantsAccess(state, spaceUri(space), repo, space.ownerDid, access);
     }
@@ -2001,7 +2044,7 @@ export class FakeNetwork {
         throw new FakeXrpcError(400, keyCheck.code ?? "InvalidSpaceKey", keyCheck.reason);
       }
       const actorDid = this.requireGroupSpaceManagePerm(auth, ownerDid, type, skey, "create");
-      const normalized = normalizeOpenSocialPolicy(params.policy, { groupDid: ownerDid, spaceType: type, skey }, FakeXrpcError);
+      const normalized = normalizeAtgrpPolicy(params.policy, { groupDid: ownerDid, spaceType: type, skey }, FakeXrpcError);
       const uri = buildSpaceUri(ownerDid, type, skey);
       const existing = this.spaces.get(uri);
       if (existing && !existing.deleted) throw new FakeXrpcError(400, "SpaceAlreadyExists", "Space already exists");
@@ -2039,7 +2082,7 @@ export class FakeNetwork {
         skey,
         ownerDid,
         policy: {
-          $type: OPENSOCIAL_POLICY,
+          $type: ATGRP_POLICY,
           publicRead: normalized.publicRead === true,
           publicWrite: false,
           unlisted: normalized.unlisted === true,
@@ -2047,7 +2090,7 @@ export class FakeNetwork {
             role: g.role,
             ...(g.read !== undefined ? { read: g.read } : {}),
             ...(g.write !== undefined ? { write: g.write } : {}),
-            ...(g.scopes ? { scopes: [...g.scopes] } : {}),
+            ...(g.permissions ? { permissions: [...g.permissions] } : {}),
           })),
         },
         members: new Map(),
@@ -2067,7 +2110,7 @@ export class FakeNetwork {
         skipGroupBootstrapChecks,
       );
 
-      const isCore = type === OPENSOCIAL_SPACE_TYPE.meta || type === OPENSOCIAL_SPACE_TYPE.members;
+      const isCore = type === ATGRP_SPACE_TYPE.meta || type === ATGRP_SPACE_TYPE.members;
       if (!isCore && normalized.unlisted !== true) {
         const idxRkey = this.nextRev();
         groupState.spaceIndexRkeys.set(uri, idxRkey);
@@ -2075,10 +2118,10 @@ export class FakeNetwork {
           ownerDid,
           ownerDid,
           groupMembersUri(ownerDid),
-          OPENSOCIAL_COLLECTION.space,
+          ATGRP_COLLECTION.space,
           idxRkey,
           {
-            $type: OPENSOCIAL_COLLECTION.space,
+            $type: ATGRP_COLLECTION.space,
             space: uri,
             createdAt: new Date(this.now()).toISOString(),
           },
@@ -2122,7 +2165,7 @@ export class FakeNetwork {
         this.assertNoActiveFakeMigrationLease(groupState);
         const currentSpace = this.requireActiveSpace(params.space);
         const actorDid = this.requireGroupSpaceManagePerm(auth, did, currentSpace.type, currentSpace.skey, "update");
-        const normalized = normalizeOpenSocialPolicy(
+        const normalized = normalizeAtgrpPolicy(
           params.policy,
           { groupDid: did, spaceType: currentSpace.type, skey: currentSpace.skey },
           FakeXrpcError,
@@ -2158,15 +2201,9 @@ export class FakeNetwork {
               existingDecl?.value && typeof existingDecl.value === "object"
                 ? (existingDecl.value as Record<string, unknown>)
                 : null;
-            if (!prevDecl || prevDecl.$type !== REPO_COLLECTION.groupDeclaration || prevDecl.meta !== uri) {
+            if (!prevDecl || prevDecl.$type !== REPO_COLLECTION.groupDeclaration) {
               const declValue: Record<string, unknown> = {
-                ...(prevDecl ?? {}),
                 $type: REPO_COLLECTION.groupDeclaration,
-                meta: uri,
-                createdAt:
-                  typeof prevDecl?.createdAt === "string"
-                    ? prevDecl.createdAt
-                    : new Date(this.now()).toISOString(),
               };
               const { cid: declCid } = await serializeRecord(
                 REPO_COLLECTION.groupDeclaration as NsidString,
@@ -2181,7 +2218,7 @@ export class FakeNetwork {
         }
 
         currentSpace.policy = {
-          $type: OPENSOCIAL_POLICY,
+          $type: ATGRP_POLICY,
           publicRead: normalized.publicRead === true,
           publicWrite: false,
           unlisted: normalized.unlisted === true,
@@ -2189,7 +2226,7 @@ export class FakeNetwork {
             role: g.role,
             ...(g.read !== undefined ? { read: g.read } : {}),
             ...(g.write !== undefined ? { write: g.write } : {}),
-            ...(g.scopes ? { scopes: [...g.scopes] } : {}),
+            ...(g.permissions ? { permissions: [...g.permissions] } : {}),
           })),
         };
 
@@ -2212,7 +2249,7 @@ export class FakeNetwork {
           false,
         );
 
-        const isCore = currentSpace.type === OPENSOCIAL_SPACE_TYPE.meta || currentSpace.type === OPENSOCIAL_SPACE_TYPE.members;
+        const isCore = currentSpace.type === ATGRP_SPACE_TYPE.meta || currentSpace.type === ATGRP_SPACE_TYPE.members;
         if (!isCore) {
           const existingIdxRkey = groupState.spaceIndexRkeys.get(uri);
           if (!normalized.unlisted && !existingIdxRkey) {
@@ -2222,10 +2259,10 @@ export class FakeNetwork {
               did,
               did,
               groupMembersUri(did),
-              OPENSOCIAL_COLLECTION.space,
+              ATGRP_COLLECTION.space,
               idxRkey,
               {
-                $type: OPENSOCIAL_COLLECTION.space,
+                $type: ATGRP_COLLECTION.space,
                 space: uri,
                 createdAt: new Date(this.now()).toISOString(),
               },
@@ -2237,7 +2274,7 @@ export class FakeNetwork {
             await this.deleteGroupSpaceRecordInternal(
               did,
               groupMembersUri(did),
-              OPENSOCIAL_COLLECTION.space,
+              ATGRP_COLLECTION.space,
               existingIdxRkey,
               deliveries,
             );
@@ -2348,7 +2385,7 @@ export class FakeNetwork {
     if (groupState) {
       this.assertNoActiveFakeMigrationLease(groupState);
       this.requireGroupSpaceManagePerm(auth, did, space.type, space.skey, "delete");
-      if (space.type === OPENSOCIAL_SPACE_TYPE.meta || space.type === OPENSOCIAL_SPACE_TYPE.members) {
+      if (space.type === ATGRP_SPACE_TYPE.meta || space.type === ATGRP_SPACE_TYPE.members) {
         throw new FakeXrpcError(400, "CannotDeleteCoreSpace", `Core OpenSocial space ${space.type} cannot be deleted`);
       }
       if (uri === workspaceUri(did) && groupState.knownAppSubjects.size > 0) {
@@ -2365,7 +2402,7 @@ export class FakeNetwork {
         await this.deleteGroupSpaceRecordInternal(
           did,
           groupMembersUri(did),
-          OPENSOCIAL_COLLECTION.space,
+          ATGRP_COLLECTION.space,
           idxRkey,
           deliveries,
         );
@@ -2492,7 +2529,7 @@ export class FakeNetwork {
             throw new FakeXrpcError(
               400,
               "InvalidRequest",
-              "Cannot publish group.opensocial.declaration while group.opensocial.meta/self has publicRead=false.",
+              "Cannot publish org.atgrp.declaration while org.atgrp.meta/self has publicRead=false.",
             );
           }
         }
@@ -2928,7 +2965,7 @@ export class FakeNetwork {
       const accountRepo = this.accountRepos.get(did)?.get(spaceUriStr);
       const deleteOps: Array<{ action: "delete"; collection: string; rkey: string }> = [];
       for (const [col, entries] of accountRepo?.collections ?? []) {
-        if (col === ATPROTO_SPACE_COLLECTION.spacePolicy || col === OPENSOCIAL_COLLECTION.space) continue;
+        if (col === ATPROTO_SPACE_COLLECTION.spacePolicy || col === ATGRP_COLLECTION.space) continue;
         for (const rkey of entries.keys()) {
           deleteOps.push({ action: "delete", collection: col, rkey });
         }
@@ -2999,8 +3036,8 @@ export class FakeNetwork {
         const isOwnAuthority = parsedSpace.authorityDid === did;
         if (isOwnAuthority) {
           this.assertOwnSpaceExistsForWrite(parsed.commit.space, did);
-        } else if (this.groups.has(did) && parsedSpace.type !== OPENSOCIAL_SPACE_TYPE.invites) {
-          throw new FakeXrpcError(400, "InvalidRepoFile", "External space repo must be group.opensocial.invites/self");
+        } else if (this.groups.has(did) && parsedSpace.type !== ATGRP_SPACE_TYPE.inbox) {
+          throw new FakeXrpcError(400, "InvalidRepoFile", "External space repo must be org.atgrp.inbox/self");
         }
         const imported = new Map<string, Map<string, RecordEntry>>();
         const pendingKnownApps: string[] = [];
@@ -3011,14 +3048,14 @@ export class FakeNetwork {
           let incarnation: string | null | undefined = undefined;
           if (groupState) {
             if (!isOwnAuthority) {
-              if (entry.collection !== OPENSOCIAL_COLLECTION.invite) {
+              if (entry.collection !== ATGRP_COLLECTION.invite) {
                 throw new FakeXrpcError(
                   400,
                   "InvalidRepoFile",
-                  "External group.opensocial.invites/self STAR archives may only contain group.opensocial.invite records",
+                  "External org.atgrp.inbox/self STAR archives may only contain org.atgrp.invite records",
                 );
               }
-              const check = validateSpaceRecord(OPENSOCIAL_COLLECTION.invite, plainJson, {
+              const check = validateSpaceRecord(ATGRP_COLLECTION.invite, plainJson, {
                 authorityDid: parsedSpace.authorityDid,
                 spaceUri: parsed.commit.space,
                 repoDid: did,
@@ -3048,6 +3085,7 @@ export class FakeNetwork {
                 groupDid: did,
                 spaceType: parsedSpace.type,
                 skey: parsedSpace.skey,
+                importMode: true,
               });
               if (!polCheck.valid) {
                 throw new FakeXrpcError(400, polCheck.code ?? "InvalidSpacePolicy", polCheck.reason);
@@ -3058,12 +3096,18 @@ export class FakeNetwork {
                 spaceUri: parsed.commit.space,
                 repoDid: did,
                 rkey: entry.rkey,
+                importMode: true,
               });
-              if (!check.valid && (check.reason !== "unknown collection" || MANDATORY_VALIDATED_SPACE_COLLECTIONS.has(entry.collection))) {
+              if (
+                !check.valid &&
+                (check.reason !== "unknown collection" ||
+                  MANDATORY_VALIDATED_SPACE_COLLECTIONS.has(entry.collection) ||
+                  entry.collection.startsWith(`${ATGRP_NAMESPACE}.`))
+              ) {
                 throw new FakeXrpcError(400, check.code ?? "InvalidRepoFile", check.reason);
               }
             }
-            if (parsed.commit.space === groupMembersUri(did) && entry.collection === OPENSOCIAL_COLLECTION.membership) {
+            if (parsed.commit.space === groupMembersUri(did) && entry.collection === ATGRP_COLLECTION.membership) {
               incarnation = typeof plainJson[FLOCK_EXTENSION_FIELD.incarnation] === "string"
                 ? (plainJson[FLOCK_EXTENSION_FIELD.incarnation] as string)
                 : `legacy-cid:${entry.cid.toString()}`;
@@ -3071,7 +3115,7 @@ export class FakeNetwork {
             if (parsed.commit.space === workspaceUri(did) && entry.collection === COLLECTION.appInstall) {
               pendingKnownApps.push(String(plainJson.subject));
             }
-            if (parsed.commit.space === groupMembersUri(did) && entry.collection === OPENSOCIAL_COLLECTION.space) {
+            if (parsed.commit.space === groupMembersUri(did) && entry.collection === ATGRP_COLLECTION.space) {
               pendingSpaceIndex.push([String(plainJson.space), entry.rkey]);
             }
           }
@@ -3150,7 +3194,7 @@ export class FakeNetwork {
       }
       this.requireGroupRpcPerm(auth, did, aud, lxm ?? "*");
       const isTargetMigrationLxm =
-        lxm === "com.atproto.server.createAccount" || lxm === "group.opensocial.abortMigration";
+        lxm === "com.atproto.server.createAccount" || lxm === FLOCK_GROUP_METHOD.abortMigration;
       let unleasedTargetVerified = false;
       for (let attempt = 0; attempt < 2; attempt += 1) {
         if (isTargetMigrationLxm) {
@@ -3650,7 +3694,7 @@ export class FakeNetwork {
     if (
       this.groups.has(repo) &&
       spaceUriStr === groupMembersUri(repo) &&
-      collection === OPENSOCIAL_COLLECTION.membership
+      collection === ATGRP_COLLECTION.membership
     ) {
       const inc =
         record.incarnation ??
@@ -3849,7 +3893,7 @@ export class FakeNetwork {
         throw new FakeXrpcError(400, keyCheck.code ?? "InvalidSpaceMeta", keyCheck.reason);
       }
       const plainPolicy = lexDataToPlainJsonLocal(archive.policy);
-      const normalized = normalizeOpenSocialPolicy(
+      const normalized = normalizeAtgrpPolicy(
         plainPolicy,
         { groupDid: did, spaceType: parsed.type, skey: parsed.skey },
         FakeXrpcError,
@@ -3872,7 +3916,7 @@ export class FakeNetwork {
           skey: parsed.skey,
           ownerDid: did,
           policy: {
-            $type: OPENSOCIAL_POLICY,
+            $type: ATGRP_POLICY,
             publicRead: normalized.publicRead === true,
             publicWrite: false,
             unlisted: normalized.unlisted === true,
@@ -3880,7 +3924,7 @@ export class FakeNetwork {
               role: g.role,
               ...(g.read !== undefined ? { read: g.read } : {}),
               ...(g.write !== undefined ? { write: g.write } : {}),
-              ...(g.scopes ? { scopes: [...g.scopes] } : {}),
+              ...(g.permissions ? { permissions: [...g.permissions] } : {}),
             })),
           },
           members: new Map(),
@@ -4083,7 +4127,7 @@ export class FakeNetwork {
       if (member) return member.write;
       return space.policy.publicWrite;
     }
-    if (space.policy.$type === OPENSOCIAL_POLICY) {
+    if (space.policy.$type === ATGRP_POLICY) {
       const state = this.loadFakeGovernanceState(space.ownerDid);
       return liveRoleGrantsAccess(state, spaceUri(space), did, space.ownerDid, "write");
     }
@@ -4099,14 +4143,14 @@ export class FakeNetwork {
     const membersSpace = groupMembersUri(groupDid);
     const flockWsSpace = workspaceUri(groupDid);
 
-    const spacePolicies = new Map<string, GroupOpenSocialPolicy>();
+    const spacePolicies = new Map<string, GroupAtgrpPolicy>();
     let hasFlockWorkspace = false;
     for (const [uri, sp] of this.spaces) {
       if (sp.ownerDid !== groupDid || sp.deleted) continue;
       if (uri === flockWsSpace) hasFlockWorkspace = true;
-      if (sp.policy.$type === OPENSOCIAL_POLICY) {
+      if (sp.policy.$type === ATGRP_POLICY) {
         spacePolicies.set(uri, {
-          $type: OPENSOCIAL_POLICY,
+          $type: ATGRP_POLICY,
           publicRead: sp.policy.publicRead,
           unlisted: sp.policy.unlisted === true,
           grants: (sp.policy.grants ?? []).map((g) => ({ ...g })),
@@ -4116,12 +4160,12 @@ export class FakeNetwork {
 
     const roles = new Map<string, GroupRoleRecord>();
     const membersRepo = this.accountRepos.get(groupDid)?.get(membersSpace);
-    for (const [rkey, entry] of membersRepo?.collections.get(OPENSOCIAL_COLLECTION.role) ?? []) {
+    for (const [rkey, entry] of membersRepo?.collections.get(ATGRP_COLLECTION.role) ?? []) {
       roles.set(rkey, entry.value as unknown as GroupRoleRecord);
     }
 
     const memberships = new Map<string, GroupMembershipRecord>();
-    for (const [rkey, entry] of membersRepo?.collections.get(OPENSOCIAL_COLLECTION.membership) ?? []) {
+    for (const [rkey, entry] of membersRepo?.collections.get(ATGRP_COLLECTION.membership) ?? []) {
       memberships.set(rkey, entry.value as unknown as GroupMembershipRecord);
     }
 
@@ -4409,7 +4453,7 @@ export class FakeNetwork {
   ): void {
     const grp = this.groups.get(groupDid);
     for (const [uri, space] of this.spaces) {
-      if (space.ownerDid !== groupDid || space.deleted || space.policy.$type !== OPENSOCIAL_POLICY) continue;
+      if (space.ownerDid !== groupDid || space.deleted || space.policy.$type !== ATGRP_POLICY) continue;
       for (const [writerDid, entry] of space.writers) {
         if (writerDid === groupDid || entry.removed) continue;
         if (!liveRoleGrantsAccess(postState, uri, writerDid, groupDid, "write")) {
@@ -4456,7 +4500,7 @@ export class FakeNetwork {
     if (!col) accountRepo.collections.set(collection, col = new Map());
     const prevEntry = col.get(rkey);
 
-    if (spaceUriStr === groupMembersUri(groupDid) && collection === OPENSOCIAL_COLLECTION.membership) {
+    if (spaceUriStr === groupMembersUri(groupDid) && collection === ATGRP_COLLECTION.membership) {
       if (!prevEntry) {
         const freshInc = typeof recordValue[FLOCK_EXTENSION_FIELD.incarnation] === "string"
           ? (recordValue[FLOCK_EXTENSION_FIELD.incarnation] as string)
@@ -4579,8 +4623,8 @@ export class FakeNetwork {
     const isOwnSpace = parsedSpace.authorityDid === params.groupDid;
     const keyCheck = validateSpaceTypeKey(parsedSpace.type, parsedSpace.skey, { isGroupHostOwnSpace: isOwnSpace });
     if (!keyCheck.valid) throw new FakeXrpcError(400, keyCheck.code ?? "InvalidSpaceKey", keyCheck.reason);
-    if (!isOwnSpace && parsedSpace.type !== OPENSOCIAL_SPACE_TYPE.invites) {
-      throw new FakeXrpcError(400, "InvalidRequest", "Group can only write to own spaces or external group.opensocial.invites/self");
+    if (!isOwnSpace && parsedSpace.type !== ATGRP_SPACE_TYPE.inbox) {
+      throw new FakeXrpcError(400, "InvalidRequest", "Group can only write to own spaces or external org.atgrp.inbox/self");
     }
 
     return this.withRepoLock(params.spaceUri, params.groupDid, async () => {
@@ -4623,14 +4667,14 @@ export class FakeNetwork {
         if (w.collection === ATPROTO_SPACE_COLLECTION.spacePolicy) {
           throw new FakeXrpcError(400, "InvalidRequest", "com.atproto.space.policy is host-published via createSpace/updateSpace");
         }
-        if (w.collection === OPENSOCIAL_COLLECTION.space) {
-          throw new FakeXrpcError(400, "IndexHostMaintained", "group.opensocial.space is host-maintained");
+        if (w.collection === ATGRP_COLLECTION.space) {
+          throw new FakeXrpcError(400, "IndexHostMaintained", "org.atgrp.space is host-maintained");
         }
-        if (!isOwnSpace && w.collection !== OPENSOCIAL_COLLECTION.invite) {
+        if (!isOwnSpace && w.collection !== ATGRP_COLLECTION.invite) {
           throw new FakeXrpcError(
             400,
             "InvalidRequest",
-            "External group.opensocial.invites/self spaces only accept group.opensocial.invite records",
+            "External org.atgrp.inbox/self spaces only accept org.atgrp.invite records",
           );
         }
 
@@ -4648,10 +4692,10 @@ export class FakeNetwork {
           if (!params.isPutRecord && !existing) {
             throw new FakeXrpcError(400, "RecordNotFound", `Record not found: ${w.collection}/${rkey}`);
           }
-          if (params.spaceUri === membersSpace && w.collection === OPENSOCIAL_COLLECTION.role) {
+          if (params.spaceUri === membersSpace && w.collection === ATGRP_COLLECTION.role) {
             postRoles.delete(rkey);
             deletedRoles.add(rkey);
-          } else if (params.spaceUri === membersSpace && w.collection === OPENSOCIAL_COLLECTION.membership) {
+          } else if (params.spaceUri === membersSpace && w.collection === ATGRP_COLLECTION.membership) {
             if (existing) {
               membershipDiffs.push({ prevRoles: (existing.value.roles as string[]) ?? [], nextRoles: [] });
             }
@@ -4684,7 +4728,7 @@ export class FakeNetwork {
         let recordValue: Record<string, unknown> = { $type: w.collection, ...(w.value ?? {}) };
         let incarnation: string | undefined;
 
-        if (params.spaceUri === membersSpace && w.collection === OPENSOCIAL_COLLECTION.membership) {
+        if (params.spaceUri === membersSpace && w.collection === ATGRP_COLLECTION.membership) {
           const callerExt = decodeFlockMembershipExtensions(recordValue);
           if (!callerExt.valid) {
             throw new FakeXrpcError(400, callerExt.code, callerExt.reason);
@@ -4719,7 +4763,11 @@ export class FakeNetwork {
           }
         }
 
-        const mustValidate = !isOwnSpace || w.validate !== false || MANDATORY_VALIDATED_SPACE_COLLECTIONS.has(w.collection);
+        const mustValidate =
+          !isOwnSpace ||
+          w.validate !== false ||
+          MANDATORY_VALIDATED_SPACE_COLLECTIONS.has(w.collection) ||
+          w.collection.startsWith(`${ATGRP_NAMESPACE}.`);
         if (mustValidate) {
           const check = validateSpaceRecord(w.collection, recordValue, {
             authorityDid: parsedSpace.authorityDid,
@@ -4729,17 +4777,20 @@ export class FakeNetwork {
           });
           if (
             !check.valid &&
-            (!isOwnSpace || check.reason !== "unknown collection" || MANDATORY_VALIDATED_SPACE_COLLECTIONS.has(w.collection))
+            (!isOwnSpace ||
+              check.reason !== "unknown collection" ||
+              MANDATORY_VALIDATED_SPACE_COLLECTIONS.has(w.collection) ||
+              w.collection.startsWith(`${ATGRP_NAMESPACE}.`))
           ) {
             throw new FakeXrpcError(400, check.code ?? "InvalidRequest", check.reason);
           }
         }
 
-        if (params.spaceUri === membersSpace && w.collection === OPENSOCIAL_COLLECTION.role) {
+        if (params.spaceUri === membersSpace && w.collection === ATGRP_COLLECTION.role) {
           const nextRole = recordValue as unknown as GroupRoleRecord;
           roleWrites.push({ rkey, role: nextRole });
           postRoles.set(rkey, nextRole);
-        } else if (params.spaceUri === membersSpace && w.collection === OPENSOCIAL_COLLECTION.membership) {
+        } else if (params.spaceUri === membersSpace && w.collection === ATGRP_COLLECTION.membership) {
           const prevRoles = existing ? ((existing.value.roles as string[]) ?? []) : undefined;
           const nextRoles = recordValue.roles as string[];
           membershipDiffs.push({ ...(prevRoles !== undefined ? { prevRoles } : {}), nextRoles });
@@ -4759,7 +4810,7 @@ export class FakeNetwork {
           else postActiveApps.delete(subj);
         }
 
-        if (params.ifJoinRequestPresent && params.spaceUri === membersSpace && w.collection === OPENSOCIAL_COLLECTION.membership) {
+        if (params.ifJoinRequestPresent && params.spaceUri === membersSpace && w.collection === ATGRP_COLLECTION.membership) {
           if (!grp.joinRequests.has(rkey)) {
             throw new FakeXrpcError(409, "JoinRequestNotFound", `No active join request found for ${rkey}`);
           }
@@ -4863,9 +4914,10 @@ export class FakeNetwork {
           grp.knownAppSubjects.add(String(p.value.subject));
         }
 
-        if (params.spaceUri === membersSpace && p.collection === OPENSOCIAL_COLLECTION.membership) {
+        if (params.spaceUri === membersSpace && p.collection === ATGRP_COLLECTION.membership) {
           if (p.action !== "delete" && p.cid) {
             grp.joinRequests.delete(p.rkey);
+            grp.modEjectionEligibility.delete(p.rkey);
             const admittedResp = JSON.stringify({
               status: "admitted",
               membership: { uri: p.uri, cid: p.cid.toString() },
@@ -4887,19 +4939,24 @@ export class FakeNetwork {
               const removed = this.removeWriterEntry(membersSp, p.rkey);
               if (removed) params.deliveries.push(this.deliverSpaceUpdate(membersSp, removed));
             }
+            grp.modEjectionEligibility.set(p.rkey, nowIso);
             const modKey = `${p.rkey}\u0000`;
             const modSubj = grp.modSubjects.get(modKey);
             if (modSubj) {
               modSubj.updatedAt = nowIso;
-              grp.modEvents.push({
-                seq: grp.nextModSeq++,
-                subject: p.rkey,
-                cidKey: "",
-                createdAt: nowIso,
-                createdBy: params.actorDid,
-                event: { $type: "group.opensocial.defs#ejectEvent" },
-              });
             }
+            const seq = grp.nextModSeq++;
+            grp.modEvents.push({
+              seq,
+              eventId: `ev-${sha256Hex(`${params.groupDid}\u0000${seq}`).slice(0, 20)}`,
+              subject: p.rkey,
+              cidKey: "",
+              subjectOwnerDid: p.rkey,
+              isSelfVisible: true,
+              createdAt: nowIso,
+              createdBy: params.actorDid,
+              event: { $type: ATGRP_MOD_EVENT_TYPE.eject },
+            });
           }
         }
 
@@ -4915,20 +4972,26 @@ export class FakeNetwork {
                 cidKey,
                 status: "open",
                 reportCount: 0,
+                tags: new Set(),
                 createdAt: nowIso,
                 updatedAt: nowIso,
               });
             } else {
               existingMod.updatedAt = nowIso;
             }
+            const parsedOwner = isDid(labelVal.uri) ? labelVal.uri : parseAnySpaceRecordUri(labelVal.uri)?.repoDid ?? params.groupDid;
+            const seq = grp.nextModSeq++;
             grp.modEvents.push({
-              seq: grp.nextModSeq++,
+              seq,
+              eventId: `ev-${sha256Hex(`${params.groupDid}\u0000${seq}`).slice(0, 20)}`,
               subject: labelVal.uri,
               cidKey,
+              subjectOwnerDid: parsedOwner,
+              isSelfVisible: true,
               createdAt: nowIso,
               createdBy: params.actorDid,
               event: {
-                $type: "group.opensocial.defs#labelEvent",
+                $type: ATGRP_MOD_EVENT_TYPE.label,
                 uri: p.uri,
                 val: labelVal.val,
                 ...(p.action === "delete" ? { deleted: true } : {}),
@@ -4937,7 +5000,7 @@ export class FakeNetwork {
           }
         }
 
-        if (!isOwnSpace && parsedSpace.type === OPENSOCIAL_SPACE_TYPE.invites && p.collection === OPENSOCIAL_COLLECTION.invite) {
+        if (!isOwnSpace && parsedSpace.type === ATGRP_SPACE_TYPE.inbox && p.collection === ATGRP_COLLECTION.invite) {
           const inviteeDid = parsedSpace.authorityDid;
           if (p.action === "delete") {
             grp.inviteDeliveries.delete(p.uri);
@@ -5126,21 +5189,21 @@ export class FakeNetwork {
     nowMs: number,
   ): { inviteSpaceUri: string; rkey: string } {
     const parsed = parseAnySpaceRecordUri(inviteUri);
-    const expectedSpace = personalInvitesUri(callerDid);
+    const expectedSpace = personalInboxUri(callerDid);
     if (
       !parsed ||
       parsed.authorityDid !== callerDid ||
-      parsed.spaceType !== OPENSOCIAL_SPACE_TYPE.invites ||
+      parsed.spaceType !== ATGRP_SPACE_TYPE.inbox ||
       parsed.skey !== SELF_SKEY ||
       parsed.spaceUri !== expectedSpace ||
       parsed.repoDid !== groupDid ||
-      parsed.collection !== OPENSOCIAL_COLLECTION.invite ||
+      parsed.collection !== ATGRP_COLLECTION.invite ||
       !isTid(parsed.rkey) ||
-      inviteUri !== `${expectedSpace}/${groupDid}/${OPENSOCIAL_COLLECTION.invite}/${parsed.rkey}`
+      inviteUri !== `${expectedSpace}/${groupDid}/${ATGRP_COLLECTION.invite}/${parsed.rkey}`
     ) {
       throw new FakeXrpcError(400, "InvalidInvite", "Invite URI is malformed or does not target caller");
     }
-    const entry = this.accountRepos.get(groupDid)?.get(expectedSpace)?.collections.get(OPENSOCIAL_COLLECTION.invite)?.get(parsed.rkey);
+    const entry = this.accountRepos.get(groupDid)?.get(expectedSpace)?.collections.get(ATGRP_COLLECTION.invite)?.get(parsed.rkey);
     if (!entry) throw new FakeXrpcError(400, "InvalidInvite", "Invite not found or already redeemed/revoked");
     const val = entry.value as { group?: string; expiresAt?: string };
     if (val.group && val.group !== groupDid) {
@@ -5163,7 +5226,7 @@ export class FakeNetwork {
     inviteUri: string,
     deliveries: Promise<void>[],
   ): Promise<void> {
-    await this.deleteGroupSpaceRecordInternal(grp.did, inviteSpaceUri, OPENSOCIAL_COLLECTION.invite, rkey, deliveries, true);
+    await this.deleteGroupSpaceRecordInternal(grp.did, inviteSpaceUri, ATGRP_COLLECTION.invite, rkey, deliveries, true);
     grp.inviteDeliveries.delete(inviteUri);
     const repo = this.accountRepos.get(grp.did)?.get(inviteSpaceUri);
     if (repo) {
@@ -5178,7 +5241,7 @@ export class FakeNetwork {
     deliveries: Promise<void>[],
   ): Promise<Record<string, unknown>> {
     const groupDid = String(params.group ?? "");
-    const callerDid = await this.verifyFakePersonalServiceJwt(auth, groupDid, OPENSOCIAL_METHOD.requestJoin);
+    const callerDid = await this.verifyFakePersonalServiceJwt(auth, groupDid, ATGRP_METHOD.requestJoin);
     const grp = this.requireActiveFakeGroup(groupDid);
     this.assertNoActiveFakeMigrationLease(grp);
     const nowMs = this.now();
@@ -5200,9 +5263,9 @@ export class FakeNetwork {
       : null;
 
     const membersSpace = groupMembersUri(groupDid);
-    const existingMem = this.accountRepos.get(groupDid)?.get(membersSpace)?.collections.get(OPENSOCIAL_COLLECTION.membership)?.get(callerDid);
+    const existingMem = this.accountRepos.get(groupDid)?.get(membersSpace)?.collections.get(ATGRP_COLLECTION.membership)?.get(callerDid);
     const existingMemRef = existingMem
-      ? { uri: `${membersSpace}/${groupDid}/${OPENSOCIAL_COLLECTION.membership}/${callerDid}`, cid: existingMem.cid.toString() }
+      ? { uri: `${membersSpace}/${groupDid}/${ATGRP_COLLECTION.membership}/${callerDid}`, cid: existingMem.cid.toString() }
       : undefined;
 
     if (idempotencyKey !== undefined && reqHash !== null) {
@@ -5282,13 +5345,14 @@ export class FakeNetwork {
         groupDid,
         groupDid,
         membersSpace,
-        OPENSOCIAL_COLLECTION.membership,
+        ATGRP_COLLECTION.membership,
         callerDid,
-        { $type: OPENSOCIAL_COLLECTION.membership, roles: defaultRoles, createdAt: nowIso },
+        { $type: ATGRP_COLLECTION.membership, roles: defaultRoles, createdAt: nowIso },
         deliveries,
       );
       await this.redeemFakeInvite(grp, callerDid, validated.inviteSpaceUri, validated.rkey, invite, deliveries);
       grp.joinRequests.delete(callerDid);
+      grp.modEjectionEligibility.delete(callerDid);
       const resp = { status: "admitted", membership: { uri: written.uri, cid: written.cid } };
       for (const op of grp.joinOperations.values()) {
         if (op.requesterDid === callerDid && op.state === "pending") {
@@ -5301,12 +5365,12 @@ export class FakeNetwork {
       return resp;
     }
 
-    const profEntry = this.accountRepos
+    const cfgEntry = this.accountRepos
       .get(groupDid)
       ?.get(groupMetaUri(groupDid))
-      ?.collections.get(OPENSOCIAL_COLLECTION.profile)
+      ?.collections.get(ATGRP_COLLECTION.config)
       ?.get(SELF_SKEY);
-    const joinPolicy = (profEntry?.value as { joinPolicy?: string } | undefined)?.joinPolicy;
+    const joinPolicy = (cfgEntry?.value as { joinPolicy?: string } | undefined)?.joinPolicy;
 
     // Case C: open
     if (joinPolicy === "open") {
@@ -5316,12 +5380,13 @@ export class FakeNetwork {
         groupDid,
         groupDid,
         membersSpace,
-        OPENSOCIAL_COLLECTION.membership,
+        ATGRP_COLLECTION.membership,
         callerDid,
-        { $type: OPENSOCIAL_COLLECTION.membership, roles: defaultRoles, createdAt: nowIso },
+        { $type: ATGRP_COLLECTION.membership, roles: defaultRoles, createdAt: nowIso },
         deliveries,
       );
       grp.joinRequests.delete(callerDid);
+      grp.modEjectionEligibility.delete(callerDid);
       const resp = { status: "admitted", membership: { uri: written.uri, cid: written.cid } };
       for (const op of grp.joinOperations.values()) {
         if (op.requesterDid === callerDid && op.state === "pending") {
@@ -5379,7 +5444,7 @@ export class FakeNetwork {
 
   private async handleFakeCancelJoinRequest(params: Record<string, unknown>, auth: FakeAuth): Promise<Record<string, never>> {
     const groupDid = String(params.group ?? "");
-    const callerDid = await this.verifyFakePersonalServiceJwt(auth, groupDid, OPENSOCIAL_METHOD.cancelJoinRequest);
+    const callerDid = await this.verifyFakePersonalServiceJwt(auth, groupDid, ATGRP_METHOD.cancelJoinRequest);
     const grp = this.requireActiveFakeGroup(groupDid);
     this.assertNoActiveFakeMigrationLease(grp);
     const nowMs = this.now();
@@ -5400,7 +5465,7 @@ export class FakeNetwork {
     const groupDid = this.requireSelf(auth, { scopes: "full", checkTakedown: true, checkDeactivated: true });
     const grp = this.requireActiveFakeGroup(groupDid);
     this.assertNoActiveFakeMigrationLease(grp);
-    this.requireGroupRpcPerm(auth, groupDid, groupDid, OPENSOCIAL_METHOD.denyJoinRequest);
+    this.requireGroupRpcPerm(auth, groupDid, groupDid, ATGRP_METHOD.denyJoinRequest);
     const memberDid = String(params.member ?? "");
     if (memberDid === groupDid) throw new FakeXrpcError(400, "CannotTargetGroupSelf", "Cannot target group self DID");
     const nowMs = this.now();
@@ -5420,7 +5485,7 @@ export class FakeNetwork {
   private handleFakeListJoinRequests(params: Record<string, unknown>, auth: FakeAuth) {
     const groupDid = this.requireSelf(auth, { scopes: "full", checkTakedown: true, checkDeactivated: true });
     const grp = this.requireActiveFakeGroup(groupDid);
-    this.requireGroupRpcPerm(auth, groupDid, groupDid, OPENSOCIAL_METHOD.listJoinRequests);
+    this.requireGroupRpcPerm(auth, groupDid, groupDid, ATGRP_METHOD.listJoinRequests);
     const nowMs = this.now();
     this.pruneFakeExpiredJoinState(grp, nowMs);
 
@@ -5470,7 +5535,7 @@ export class FakeNetwork {
     deliveries: Promise<void>[],
   ): Promise<Record<string, never>> {
     const groupDid = String(params.group ?? "");
-    const callerDid = await this.verifyFakePersonalServiceJwt(auth, groupDid, OPENSOCIAL_METHOD.leaveGroup);
+    const callerDid = await this.verifyFakePersonalServiceJwt(auth, groupDid, ATGRP_METHOD.leaveGroup);
     const grp = this.groups.get(groupDid);
     if (!grp || this.unavailable.get(groupDid) === "RepoNotFound") {
       throw new FakeXrpcError(400, "GroupNotFound", "Group not hosted here");
@@ -5487,7 +5552,7 @@ export class FakeNetwork {
     const memEntry = this.accountRepos
       .get(groupDid)
       ?.get(membersSpace)
-      ?.collections.get(OPENSOCIAL_COLLECTION.membership)
+      ?.collections.get(ATGRP_COLLECTION.membership)
       ?.get(callerDid);
     if (!memEntry) return {};
 
@@ -5529,7 +5594,7 @@ export class FakeNetwork {
     grp.priorEjectCounts.set(callerDid, { count: prevEject.count + 1, lastEvictedRepoRev: lastRev ?? prevEject.lastEvictedRepoRev });
 
     const suppress = isSoleMember && preState.hasFlockWorkspace;
-    await this.deleteGroupSpaceRecordInternal(groupDid, membersSpace, OPENSOCIAL_COLLECTION.membership, callerDid, deliveries, suppress);
+    await this.deleteGroupSpaceRecordInternal(groupDid, membersSpace, ATGRP_COLLECTION.membership, callerDid, deliveries, suppress);
     if (isSoleMember && preState.hasFlockWorkspace) {
       // Revoke & fan out `notifyCredentialsRevoked` BEFORE `reconcileGroupSpaceWriters` marks writers `removed = true`!
       this.revokeGroupCredentialsForSpace(groupDid, undefined, undefined, deliveries);
@@ -5555,7 +5620,7 @@ export class FakeNetwork {
   private handleFakeJoinStatus(params: Record<string, unknown>, auth: FakeAuth): Promise<Record<string, unknown>> {
     return (async () => {
       const groupDid = String(params.group ?? "");
-      const callerDid = await this.verifyFakePersonalServiceJwt(auth, groupDid, OPENSOCIAL_METHOD.requestJoin);
+      const callerDid = await this.verifyFakePersonalServiceJwt(auth, groupDid, ATGRP_METHOD.requestJoin);
       const operationId = typeof params.operationId === "string" ? params.operationId : undefined;
       if (operationId !== undefined && !isValidIdempotencyKey(operationId)) {
         throw new FakeXrpcError(400, "InvalidIdempotencyKey", "Invalid operationId");
@@ -5579,14 +5644,14 @@ export class FakeNetwork {
         const memEntry = this.accountRepos
           .get(groupDid)
           ?.get(membersSpace)
-          ?.collections.get(OPENSOCIAL_COLLECTION.membership)
+          ?.collections.get(ATGRP_COLLECTION.membership)
           ?.get(callerDid);
         if (memEntry) {
           return {
             state: "admitted",
             currentIncarnation: memEntry.incarnation ?? null,
             membership: {
-              uri: `${membersSpace}/${groupDid}/${OPENSOCIAL_COLLECTION.membership}/${callerDid}`,
+              uri: `${membersSpace}/${groupDid}/${ATGRP_COLLECTION.membership}/${callerDid}`,
               cid: memEntry.cid.toString(),
             },
           };
@@ -5607,7 +5672,7 @@ export class FakeNetwork {
   private handleFakeListInviteDeliveries(auth: FakeAuth) {
     const groupDid = this.requireSelf(auth, { scopes: "full", checkTakedown: true, checkDeactivated: true });
     const grp = this.requireActiveFakeGroup(groupDid);
-    this.requireGroupSpaceRecordPerm(auth, groupDid, personalInvitesUri("did:plc:probeaaaaaaaaaaaaaaaaaa2"), OPENSOCIAL_COLLECTION.invite, "create");
+    this.requireGroupSpaceRecordPerm(auth, groupDid, personalInboxUri("did:plc:probeaaaaaaaaaaaaaaaaaa2"), ATGRP_COLLECTION.invite, "create");
     const sorted = [...grp.inviteDeliveries.values()].sort((a, b) => b.updatedAt - a.updatedAt);
     return {
       deliveries: sorted.map((d) => ({
@@ -5636,7 +5701,7 @@ export class FakeNetwork {
     const inviteUri = String(params.inviteUri ?? "");
     const row = grp.inviteDeliveries.get(inviteUri);
     if (!row) throw new FakeXrpcError(400, "InviteNotFound", `Invite delivery not found: ${inviteUri}`);
-    this.requireGroupSpaceRecordPerm(auth, groupDid, row.spaceUri, OPENSOCIAL_COLLECTION.invite, "create");
+    this.requireGroupSpaceRecordPerm(auth, groupDid, row.spaceUri, ATGRP_COLLECTION.invite, "create");
     const repo = this.accountRepos.get(groupDid)?.get(row.spaceUri);
     if (!repo) throw new FakeXrpcError(400, "InviteNotFound", "Invite repo missing");
     const res = this.deliverFakeInviteToSpace(groupDid, row.inviteeDid, row.spaceUri, repo, deliveries);
@@ -5650,9 +5715,9 @@ export class FakeNetwork {
     };
   }
 
-  private async handleFakeCreateReport(params: Record<string, unknown>, auth: FakeAuth) {
+  private async handleFakeSubmitReport(params: Record<string, unknown>, auth: FakeAuth) {
     const groupDid = String(params.group ?? "");
-    const callerDid = await this.verifyFakePersonalServiceJwt(auth, groupDid, OPENSOCIAL_METHOD.createReport);
+    const callerDid = await this.verifyFakePersonalServiceJwt(auth, groupDid, ATGRP_METHOD.modSubmitReport);
     const grp = this.requireActiveFakeGroup(groupDid);
     this.assertNoActiveFakeMigrationLease(grp);
     const nowMs = this.now();
@@ -5663,16 +5728,23 @@ export class FakeNetwork {
     const reasonType = String(params.reasonType ?? "");
     const reason = typeof params.reason === "string" ? params.reason : undefined;
     const rule = typeof params.rule === "string" ? params.rule : undefined;
+    if (params.reason !== undefined && typeof params.reason !== "string") {
+      throw new FakeXrpcError(400, "InvalidRequest", "reason must be a string");
+    }
+    if (reason !== undefined && (reason.length > 20_000 || [...reason].length > 2_000)) {
+      throw new FakeXrpcError(400, "InvalidRequest", "reason exceeds maximum length");
+    }
 
     const state = this.loadFakeGovernanceState(groupDid);
-    const metaSpaceUri = groupMetaUri(groupDid);
     const membersSpaceUri = groupMembersUri(groupDid);
 
     let subjectType: "account" | "record";
     let subjectCollection: string | undefined;
+    let subjectOwnerDid: string;
 
     if (isDid(subject)) {
       subjectType = "account";
+      subjectOwnerDid = subject;
       if (cid !== undefined) throw new FakeXrpcError(400, "InvalidRequest", "Account DID reports cannot include a cid");
       if (!liveRoleGrantsAccess(state, membersSpaceUri, callerDid, groupDid, "read")) {
         throw new FakeXrpcError(400, "InvalidSubject", "The subject isn't in this group.");
@@ -5687,6 +5759,7 @@ export class FakeNetwork {
         throw new FakeXrpcError(400, "InvalidSubject", "The subject isn't in this group.");
       }
       subjectCollection = parsed.collection;
+      subjectOwnerDid = parsed.repoDid;
       const targetSpace = this.spaces.get(parsed.spaceUri);
       if (!targetSpace || targetSpace.deleted || !liveRoleGrantsAccess(state, parsed.spaceUri, callerDid, groupDid, "read")) {
         throw new FakeXrpcError(400, "InvalidSubject", "The subject isn't in this group.");
@@ -5713,8 +5786,8 @@ export class FakeNetwork {
 
     const labelerEntry = this.accountRepos
       .get(groupDid)
-      ?.get(metaSpaceUri)
-      ?.collections.get(OPENSOCIAL_COLLECTION.labeler)
+      ?.get(membersSpaceUri)
+      ?.collections.get(ATGRP_COLLECTION.labeler)
       ?.get(SELF_SKEY);
     if (labelerEntry) {
       const labeler = labelerEntry.value as {
@@ -5733,19 +5806,19 @@ export class FakeNetwork {
       }
     }
 
-    if (reasonType === "violation" && !rule) {
-      throw new FakeXrpcError(400, "InvalidRequest", "reasonType 'violation' requires citing 'rule'");
+    if (reasonType === ATGRP_MOD_REASON.violation && !rule) {
+      throw new FakeXrpcError(400, "InvalidRequest", "reasonType violation requires citing 'rule'");
     }
     if (rule !== undefined) {
       const parsedRule = parseAnySpaceRecordUri(rule);
       if (
         !parsedRule ||
-        parsedRule.spaceUri !== metaSpaceUri ||
+        parsedRule.spaceUri !== membersSpaceUri ||
         parsedRule.repoDid !== groupDid ||
-        parsedRule.collection !== OPENSOCIAL_COLLECTION.rule ||
-        !this.accountRepos.get(groupDid)?.get(metaSpaceUri)?.collections.get(OPENSOCIAL_COLLECTION.rule)?.has(parsedRule.rkey)
+        parsedRule.collection !== ATGRP_COLLECTION.rule ||
+        !this.accountRepos.get(groupDid)?.get(membersSpaceUri)?.collections.get(ATGRP_COLLECTION.rule)?.has(parsedRule.rkey)
       ) {
-        throw new FakeXrpcError(400, "InvalidRequest", "Cited rule does not exist in meta/self");
+        throw new FakeXrpcError(400, "InvalidRequest", "Cited rule does not exist in members/self");
       }
     }
 
@@ -5758,6 +5831,7 @@ export class FakeNetwork {
         cidKey,
         status: "open",
         reportCount: 1,
+        tags: new Set(),
         createdAt: nowIso,
         updatedAt: nowIso,
       });
@@ -5768,84 +5842,231 @@ export class FakeNetwork {
     }
 
     const seq = grp.nextModSeq++;
+    const eventId = `ev-${sha256Hex(`${groupDid}\u0000${seq}`).slice(0, 20)}`;
     grp.modEvents.push({
       seq,
+      eventId,
       subject,
       cidKey,
+      subjectOwnerDid,
+      isSelfVisible: false,
       createdAt: nowIso,
       createdBy: callerDid,
       event: {
-        $type: "group.opensocial.defs#reportEvent",
+        $type: ATGRP_MOD_EVENT_TYPE.report,
         reasonType,
         ...(reason !== undefined ? { reason } : {}),
         ...(rule !== undefined ? { rule } : {}),
       },
     });
-    return { id: String(seq), createdAt: nowIso };
+    return { eventId, createdAt: nowIso };
   }
 
-  private handleFakeListModSubjects(params: Record<string, unknown>, auth: FakeAuth) {
+  private async handleFakeSubmitAppeal(params: Record<string, unknown>, auth: FakeAuth) {
+    const groupDid = String(params.group ?? "");
+    const callerDid = await this.verifyFakePersonalServiceJwt(auth, groupDid, ATGRP_METHOD.modSubmitAppeal);
+    const grp = this.requireActiveFakeGroup(groupDid);
+    this.assertNoActiveFakeMigrationLease(grp);
+    const nowMs = this.now();
+    const nowIso = new Date(nowMs).toISOString();
+
+    const subject = String(params.subject ?? "");
+    const reason = typeof params.reason === "string" ? params.reason : undefined;
+    if (params.reason !== undefined && typeof params.reason !== "string") {
+      throw new FakeXrpcError(400, "InvalidRequest", "reason must be a string");
+    }
+    if (reason !== undefined && (reason.length > 20_000 || [...reason].length > 2_000)) {
+      throw new FakeXrpcError(400, "InvalidRequest", "reason exceeds maximum length");
+    }
+
+    const membersSpaceUri = groupMembersUri(groupDid);
+    let labelSpaceUri: string;
+    if (isDid(subject)) {
+      if (subject !== callerDid) {
+        throw new FakeXrpcError(400, "InvalidSubject", "You may only appeal moderation actions on your own account or records.");
+      }
+      labelSpaceUri = membersSpaceUri;
+    } else {
+      const parsed = parseAnySpaceRecordUri(subject);
+      if (!parsed || parsed.authorityDid !== groupDid || parsed.repoDid !== callerDid) {
+        throw new FakeXrpcError(400, "InvalidSubject", "You may only appeal moderation actions on your own account or records.");
+      }
+      labelSpaceUri = parsed.spaceUri;
+    }
+
+    const labelCol = this.accountRepos.get(groupDid)?.get(labelSpaceUri)?.collections.get(ATPROTO_SPACE_COLLECTION.label);
+    const liveLabels = labelCol
+      ? [...labelCol.entries()].map(([rkey, entry]) => ({ repoDid: groupDid, rkey, value: entry.value }))
+      : [];
+    const activeLabels = projectActiveLabels(liveLabels, { groupDid, spaceUri: labelSpaceUri, nowMs }).filter(
+      (l) => l.uri === subject,
+    );
+    const isEjectedEligible = isDid(subject) && grp.modEjectionEligibility.has(callerDid);
+
+    if (activeLabels.length === 0 && !isEjectedEligible) {
+      throw new FakeXrpcError(400, "NotAppealable", "This subject has no active moderation action eligible for appeal.");
+    }
+
+    const modKey = `${subject}\u0000`;
+    const existing = grp.modSubjects.get(modKey);
+    if (!existing) {
+      grp.modSubjects.set(modKey, {
+        subject,
+        cidKey: "",
+        status: "open",
+        reportCount: 0,
+        tags: new Set(),
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      });
+    } else {
+      existing.status = "open";
+      existing.updatedAt = nowIso;
+    }
+
+    const seq = grp.nextModSeq++;
+    const eventId = `ev-${sha256Hex(`${groupDid}\u0000${seq}`).slice(0, 20)}`;
+    grp.modEvents.push({
+      seq,
+      eventId,
+      subject,
+      cidKey: "",
+      subjectOwnerDid: callerDid,
+      isSelfVisible: true,
+      createdAt: nowIso,
+      createdBy: callerDid,
+      event: {
+        $type: ATGRP_MOD_EVENT_TYPE.appeal,
+        ...(reason !== undefined ? { reason } : {}),
+      },
+    });
+    return { eventId, createdAt: nowIso };
+  }
+
+  private handleFakeQueryModSubjects(params: Record<string, unknown>, auth: FakeAuth) {
     const groupDid = this.requireSelf(auth, { scopes: "full", checkTakedown: true, checkDeactivated: true });
     const grp = this.requireActiveFakeGroup(groupDid);
-    this.requireGroupRpcPerm(auth, groupDid, groupDid, OPENSOCIAL_METHOD.listModSubjects);
+    this.requireGroupRpcPerm(auth, groupDid, groupDid, ATGRP_METHOD.modQuerySubjects);
 
-    const status = (typeof params.status === "string" ? params.status : "open") as "open" | "escalated" | "resolved";
+    const allowedKeys = new Set(["status", "tags", "sort", "limit", "cursor"]);
+    for (const k of Object.keys(params)) {
+      if (!allowedKeys.has(k)) {
+        throw new FakeXrpcError(400, "InvalidRequest", `Unknown query parameter '${k}'`);
+      }
+    }
+
+    const status = params.status === undefined ? undefined : String(params.status);
+    if (status !== undefined && status !== "open" && status !== "resolved") {
+      throw new FakeXrpcError(400, "InvalidRequest", "status must be 'open' or 'resolved'");
+    }
+    const sort = params.sort === undefined ? "oldest" : String(params.sort);
+    if (sort !== "oldest" && sort !== "newest" && sort !== "updated") {
+      throw new FakeXrpcError(400, "InvalidRequest", "sort must be 'oldest', 'newest', or 'updated'");
+    }
+    let tagsFilter: string[] | undefined;
+    if (params.tags !== undefined) {
+      const rawTags = Array.isArray(params.tags) ? params.tags : [params.tags];
+      if (!rawTags.every((t) => typeof t === "string" && /^[a-z-]{1,128}$/.test(t))) {
+        throw new FakeXrpcError(400, "InvalidRequest", "Invalid tags filter");
+      }
+      tagsFilter = [...new Set(rawTags as string[])].sort(compareLex);
+    }
     const limit = clampLimit(params.limit, 50, 100);
+    const fHash = sha256Hex(JSON.stringify({ status: status ?? null, tags: tagsFilter ?? null })).slice(0, 16);
 
-    let cursorDecoded: { updatedAt: string; subject: string; cidKey: string } | null = null;
+    let cursorDecoded: { ts: string; subject: string; cidKey: string } | null = null;
     if (params.cursor !== undefined) {
       try {
         const raw = JSON.parse(Buffer.from(String(params.cursor), "base64url").toString("utf8")) as Record<string, unknown>;
-        if (typeof raw?.updatedAt !== "string" || typeof raw?.subject !== "string" || typeof raw?.cidKey !== "string") {
+        if (
+          raw?.v !== 1 ||
+          raw.ep !== "querySubjects" ||
+          raw.groupDid !== groupDid ||
+          raw.sort !== sort ||
+          raw.filtersHash !== fHash ||
+          typeof raw.ts !== "string" ||
+          typeof raw.subject !== "string" ||
+          typeof raw.cidKey !== "string"
+        ) {
           throw new Error("bad");
         }
-        cursorDecoded = { updatedAt: raw.updatedAt, subject: raw.subject, cidKey: raw.cidKey };
+        cursorDecoded = { ts: raw.ts, subject: raw.subject, cidKey: raw.cidKey };
       } catch {
-        throw new FakeXrpcError(400, "InvalidCursor", "Malformed listModSubjects cursor");
+        throw new FakeXrpcError(400, "InvalidCursor", "Malformed querySubjects cursor");
       }
     }
 
     const matching = [...grp.modSubjects.values()]
-      .filter((s) => s.status === status)
+      .filter((s) => (status === undefined || s.status === status) && (!tagsFilter || tagsFilter.some((t) => s.tags.has(t))))
       .sort((a, b) => {
-        if (a.updatedAt !== b.updatedAt) return compareLex(b.updatedAt, a.updatedAt);
+        const aTs = sort === "updated" ? a.updatedAt : a.createdAt;
+        const bTs = sort === "updated" ? b.updatedAt : b.createdAt;
+        if (aTs !== bTs) return sort === "oldest" ? compareLex(aTs, bTs) : compareLex(bTs, aTs);
         if (a.subject !== b.subject) return compareLex(a.subject, b.subject);
         return compareLex(a.cidKey, b.cidKey);
       });
 
     const filtered = cursorDecoded
-      ? matching.filter(
-          (s) =>
-            s.updatedAt < cursorDecoded!.updatedAt ||
-            (s.updatedAt === cursorDecoded!.updatedAt && s.subject > cursorDecoded!.subject) ||
-            (s.updatedAt === cursorDecoded!.updatedAt && s.subject === cursorDecoded!.subject && s.cidKey > cursorDecoded!.cidKey),
-        )
+      ? matching.filter((s) => {
+          const ts = sort === "updated" ? s.updatedAt : s.createdAt;
+          if (sort === "oldest") {
+            return (
+              ts > cursorDecoded!.ts ||
+              (ts === cursorDecoded!.ts && s.subject > cursorDecoded!.subject) ||
+              (ts === cursorDecoded!.ts && s.subject === cursorDecoded!.subject && s.cidKey > cursorDecoded!.cidKey)
+            );
+          }
+          return (
+            ts < cursorDecoded!.ts ||
+            (ts === cursorDecoded!.ts && s.subject > cursorDecoded!.subject) ||
+            (ts === cursorDecoded!.ts && s.subject === cursorDecoded!.subject && s.cidKey > cursorDecoded!.cidKey)
+          );
+        })
       : matching;
 
     const page = filtered.slice(0, limit);
     const last = page.at(-1);
     const nextCursor =
       filtered.length > limit && last
-        ? Buffer.from(JSON.stringify({ updatedAt: last.updatedAt, subject: last.subject, cidKey: last.cidKey }), "utf8").toString("base64url")
+        ? Buffer.from(
+            JSON.stringify({
+              v: 1,
+              ep: "querySubjects",
+              groupDid,
+              sort,
+              filtersHash: fHash,
+              ts: sort === "updated" ? last.updatedAt : last.createdAt,
+              subject: last.subject,
+              cidKey: last.cidKey,
+            }),
+            "utf8",
+          ).toString("base64url")
         : undefined;
 
-    return {
-      subjects: page.map((r) => ({
-        subject: r.subject,
-        ...(r.cidKey !== "" ? { cid: r.cidKey } : {}),
-        status: r.status,
-        createdAt: r.createdAt,
-        updatedAt: r.updatedAt,
-        reportCount: r.reportCount,
-      })),
-      ...(nextCursor ? { cursor: nextCursor } : {}),
-    };
+    return new WithHeaders(
+      {
+        subjects: page.map((r) => {
+          const tags = [...r.tags].sort(compareLex);
+          return {
+            subject: r.subject,
+            ...(r.cidKey !== "" ? { cid: r.cidKey } : {}),
+            status: r.status,
+            createdAt: r.createdAt,
+            updatedAt: r.updatedAt,
+            ...(r.reportCount > 0 ? { reportCount: r.reportCount } : {}),
+            ...(tags.length > 0 ? { tags } : {}),
+          };
+        }),
+        ...(nextCursor ? { cursor: nextCursor } : {}),
+      },
+      { "cache-control": "no-store" },
+    );
   }
 
-  private handleFakeGetModSubjectHistory(params: Record<string, unknown>, auth: FakeAuth) {
+  private handleFakeQueryModSubjectHistory(params: Record<string, unknown>, auth: FakeAuth) {
     const groupDid = this.requireSelf(auth, { scopes: "full", checkTakedown: true, checkDeactivated: true });
     const grp = this.requireActiveFakeGroup(groupDid);
-    this.requireGroupRpcPerm(auth, groupDid, groupDid, OPENSOCIAL_METHOD.getModSubjectHistory);
+    this.requireGroupRpcPerm(auth, groupDid, groupDid, ATGRP_METHOD.modQuerySubjectHistory);
 
     const subject = String(params.subject ?? "");
     if (!isDid(subject)) {
@@ -5855,36 +6076,187 @@ export class FakeNetwork {
       }
     }
     const cidFilter = typeof params.cid === "string" ? params.cid : undefined;
+    const sort = params.sort === undefined ? "newest" : String(params.sort);
+    if (sort !== "newest" && sort !== "oldest") {
+      throw new FakeXrpcError(400, "InvalidRequest", "sort must be 'newest' or 'oldest'");
+    }
     const limit = clampLimit(params.limit, 50, 100);
-    let afterSeq = 0;
+    const fHash = sha256Hex(JSON.stringify({ subject, cid: cidFilter ?? null })).slice(0, 16);
+
+    let cursorSeq: number | null = null;
     if (params.cursor !== undefined) {
-      if (!/^[1-9][0-9]{0,15}$/.test(String(params.cursor))) {
-        throw new FakeXrpcError(400, "InvalidCursor", "Malformed getModSubjectHistory cursor");
+      try {
+        const raw = JSON.parse(Buffer.from(String(params.cursor), "base64url").toString("utf8")) as Record<string, unknown>;
+        if (
+          raw?.v !== 1 ||
+          raw.ep !== "querySubjectHistory" ||
+          raw.groupDid !== groupDid ||
+          raw.sort !== sort ||
+          raw.filtersHash !== fHash ||
+          typeof raw.seq !== "number"
+        ) {
+          throw new Error("bad");
+        }
+        cursorSeq = raw.seq;
+      } catch {
+        throw new FakeXrpcError(400, "InvalidCursor", "Malformed querySubjectHistory cursor");
       }
-      afterSeq = Number(params.cursor);
     }
 
-    const matching = grp.modEvents.filter(
-      (e) => e.subject === subject && (cidFilter === undefined || e.cidKey === cidFilter) && e.seq > afterSeq,
-    );
+    const matching = grp.modEvents
+      .filter(
+        (e) =>
+          e.subject === subject &&
+          (cidFilter === undefined || e.cidKey === cidFilter) &&
+          (cursorSeq === null || (sort === "newest" ? e.seq < cursorSeq : e.seq > cursorSeq)),
+      )
+      .sort((a, b) => (sort === "newest" ? b.seq - a.seq : a.seq - b.seq));
+
     const page = matching.slice(0, limit);
     const last = page.at(-1);
-    return {
-      events: page.map((e) => ({
-        id: String(e.seq),
-        createdAt: e.createdAt,
-        ...(e.createdBy !== null ? { createdBy: e.createdBy } : {}),
-        event: e.event,
-      })),
-      ...(matching.length > limit && last ? { cursor: String(last.seq) } : {}),
-    };
+    const nextCursor =
+      matching.length > limit && last
+        ? Buffer.from(
+            JSON.stringify({
+              v: 1,
+              ep: "querySubjectHistory",
+              groupDid,
+              sort,
+              filtersHash: fHash,
+              seq: last.seq,
+            }),
+            "utf8",
+          ).toString("base64url")
+        : undefined;
+
+    return new WithHeaders(
+      {
+        events: page.map((e) => ({
+          eventId: e.eventId,
+          createdAt: e.createdAt,
+          subject: e.subject,
+          ...(e.cidKey !== "" ? { cid: e.cidKey } : {}),
+          ...(e.createdBy !== null ? { createdBy: e.createdBy } : {}),
+          event: e.event,
+        })),
+        ...(nextCursor ? { cursor: nextCursor } : {}),
+      },
+      { "cache-control": "no-store" },
+    );
   }
 
-  private handleFakeResolveModSubject(params: Record<string, unknown>, auth: FakeAuth) {
+  private async handleFakeQuerySelfModHistory(params: Record<string, unknown>, auth: FakeAuth) {
+    const groupDid = String(params.group ?? "");
+    const callerDid = await this.verifyFakePersonalServiceJwt(auth, groupDid, ATGRP_METHOD.modQuerySelfHistory);
+    const grp = this.requireActiveFakeGroup(groupDid);
+
+    const subjectFilter = typeof params.subject === "string" ? params.subject : undefined;
+    if (subjectFilter !== undefined) {
+      if (isDid(subjectFilter)) {
+        if (subjectFilter !== callerDid) {
+          throw new FakeXrpcError(400, "InvalidSubject", "You may only query moderation history for your own account or records.");
+        }
+      } else {
+        const parsed = parseAnySpaceRecordUri(subjectFilter);
+        if (!parsed || parsed.authorityDid !== groupDid || parsed.repoDid !== callerDid) {
+          throw new FakeXrpcError(400, "InvalidSubject", "You may only query moderation history for your own account or records.");
+        }
+      }
+    }
+    const sort = params.sort === undefined ? "newest" : String(params.sort);
+    if (sort !== "newest" && sort !== "oldest") {
+      throw new FakeXrpcError(400, "InvalidRequest", "sort must be 'newest' or 'oldest'");
+    }
+    const limit = clampLimit(params.limit, 50, 100);
+    const fHash = sha256Hex(JSON.stringify({ callerDid, subject: subjectFilter ?? null })).slice(0, 16);
+
+    let cursorSeq: number | null = null;
+    if (params.cursor !== undefined) {
+      try {
+        const raw = JSON.parse(Buffer.from(String(params.cursor), "base64url").toString("utf8")) as Record<string, unknown>;
+        if (
+          raw?.v !== 1 ||
+          raw.ep !== "querySelfHistory" ||
+          raw.groupDid !== groupDid ||
+          raw.sort !== sort ||
+          raw.filtersHash !== fHash ||
+          typeof raw.seq !== "number"
+        ) {
+          throw new Error("bad");
+        }
+        cursorSeq = raw.seq;
+      } catch {
+        throw new FakeXrpcError(400, "InvalidCursor", "Malformed querySelfHistory cursor");
+      }
+    }
+
+    const matching = grp.modEvents
+      .filter(
+        (e) =>
+          e.subjectOwnerDid === callerDid &&
+          e.isSelfVisible &&
+          (subjectFilter === undefined || e.subject === subjectFilter) &&
+          (cursorSeq === null || (sort === "newest" ? e.seq < cursorSeq : e.seq > cursorSeq)),
+      )
+      .sort((a, b) => (sort === "newest" ? b.seq - a.seq : a.seq - b.seq));
+
+    const page = matching.slice(0, limit);
+    const last = page.at(-1);
+    const nextCursor =
+      matching.length > limit && last
+        ? Buffer.from(
+            JSON.stringify({
+              v: 1,
+              ep: "querySelfHistory",
+              groupDid,
+              sort,
+              filtersHash: fHash,
+              seq: last.seq,
+            }),
+            "utf8",
+          ).toString("base64url")
+        : undefined;
+
+    const projectSelfEvent = (ev: Record<string, unknown>): Record<string, unknown> => {
+      switch (ev.$type) {
+        case ATGRP_MOD_EVENT_TYPE.appeal:
+          return { $type: ATGRP_MOD_EVENT_TYPE.appeal };
+        case ATGRP_MOD_EVENT_TYPE.status:
+          return { $type: ATGRP_MOD_EVENT_TYPE.status, status: ev.status };
+        case ATGRP_MOD_EVENT_TYPE.label:
+          return {
+            $type: ATGRP_MOD_EVENT_TYPE.label,
+            uri: ev.uri,
+            val: ev.val,
+            ...(ev.deleted === true ? { deleted: true } : {}),
+          };
+        case ATGRP_MOD_EVENT_TYPE.eject:
+          return { $type: ATGRP_MOD_EVENT_TYPE.eject };
+        default:
+          throw new Error(`Unexpected self-visible event type: ${String(ev.$type)}`);
+      }
+    };
+
+    return new WithHeaders(
+      {
+        events: page.map((e) => ({
+          eventId: e.eventId,
+          createdAt: e.createdAt,
+          subject: e.subject,
+          ...(e.cidKey !== "" ? { cid: e.cidKey } : {}),
+          event: projectSelfEvent(e.event),
+        })),
+        ...(nextCursor ? { cursor: nextCursor } : {}),
+      },
+      { "cache-control": "no-store" },
+    );
+  }
+
+  private handleFakeUpdateModSubject(params: Record<string, unknown>, auth: FakeAuth) {
     const groupDid = this.requireSelf(auth, { scopes: "full", checkTakedown: true, checkDeactivated: true });
     const grp = this.requireActiveFakeGroup(groupDid);
     this.assertNoActiveFakeMigrationLease(grp);
-    const actorDid = this.requireGroupRpcPerm(auth, groupDid, groupDid, OPENSOCIAL_METHOD.resolveModSubject);
+    const actorDid = this.requireGroupRpcPerm(auth, groupDid, groupDid, ATGRP_METHOD.modUpdateSubject);
 
     const subject = String(params.subject ?? "");
     if (!isDid(subject)) {
@@ -5893,37 +6265,101 @@ export class FakeNetwork {
         throw new FakeXrpcError(400, "InvalidSubject", "Subject is not an account DID or space record URI of this group");
       }
     }
-    const status = params.status as "resolved" | "escalated";
-    if (status !== "resolved" && status !== "escalated") {
-      throw new FakeXrpcError(400, "InvalidRequest", "status must be resolved or escalated");
+    const status = params.status as "open" | "resolved" | undefined;
+    if (status !== undefined && status !== "open" && status !== "resolved") {
+      throw new FakeXrpcError(400, "InvalidRequest", "status must be 'open' or 'resolved'");
     }
+    if (params.note !== undefined && typeof params.note !== "string") {
+      throw new FakeXrpcError(400, "InvalidRequest", "note must be a string");
+    }
+    const note = typeof params.note === "string" ? params.note : undefined;
+    if (note !== undefined && (note.length > 20_000 || [...note].length > 2_000)) {
+      throw new FakeXrpcError(400, "InvalidRequest", "note exceeds maximum length");
+    }
+
+    const parseTags = (raw: unknown, label: string): string[] => {
+      if (raw === undefined) return [];
+      if (!Array.isArray(raw) || !raw.every((t) => typeof t === "string" && /^[a-z-]{1,128}$/.test(t))) {
+        throw new FakeXrpcError(400, "InvalidRequest", `Invalid ${label}`);
+      }
+      return [...new Set(raw as string[])];
+    };
+    const addTags = parseTags(params.addTags, "addTags");
+    const removeTags = parseTags(params.removeTags, "removeTags");
+    const addSet = new Set(addTags);
+    for (const t of removeTags) {
+      if (addSet.has(t)) {
+        throw new FakeXrpcError(400, "InvalidRequest", `Tag '${t}' cannot appear in both addTags and removeTags`);
+      }
+    }
+    if (status === undefined && addTags.length === 0 && removeTags.length === 0) {
+      throw new FakeXrpcError(400, "InvalidRequest", "updateSubject requires at least status, addTags, or removeTags");
+    }
+
     const cidKey = typeof params.cid === "string" ? params.cid : "";
     const existing = grp.modSubjects.get(`${subject}\u0000${cidKey}`);
     if (!existing) {
       throw new FakeXrpcError(400, "SubjectNotFound", "The subject has never been reported.");
     }
+
+    const nextTags = new Set(existing.tags);
+    for (const t of removeTags) nextTags.delete(t);
+    for (const t of addTags) nextTags.add(t);
+    if (nextTags.size > 100) {
+      throw new FakeXrpcError(400, "InvalidRequest", "A moderation subject may have at most 100 tags");
+    }
+
     const nowIso = new Date(this.now()).toISOString();
-    existing.status = status;
+    const subjectOwnerDid = isDid(subject) ? subject : parseAnySpaceRecordUri(subject)!.repoDid;
+    if (status !== undefined) {
+      existing.status = status;
+      const seq = grp.nextModSeq++;
+      grp.modEvents.push({
+        seq,
+        eventId: `ev-${sha256Hex(`${groupDid}\u0000${seq}`).slice(0, 20)}`,
+        subject,
+        cidKey,
+        subjectOwnerDid,
+        isSelfVisible: true,
+        createdAt: nowIso,
+        createdBy: actorDid,
+        event: {
+          $type: ATGRP_MOD_EVENT_TYPE.status,
+          status,
+          ...(note !== undefined ? { note } : {}),
+        },
+      });
+    }
+    if (addTags.length > 0 || removeTags.length > 0) {
+      existing.tags = nextTags;
+      const seq = grp.nextModSeq++;
+      grp.modEvents.push({
+        seq,
+        eventId: `ev-${sha256Hex(`${groupDid}\u0000${seq}`).slice(0, 20)}`,
+        subject,
+        cidKey,
+        subjectOwnerDid,
+        isSelfVisible: false,
+        createdAt: nowIso,
+        createdBy: actorDid,
+        event: {
+          $type: ATGRP_MOD_EVENT_TYPE.tag,
+          ...(addTags.length > 0 ? { add: addTags } : {}),
+          ...(removeTags.length > 0 ? { remove: removeTags } : {}),
+          ...(status === undefined && note !== undefined ? { note } : {}),
+        },
+      });
+    }
     existing.updatedAt = nowIso;
-    grp.modEvents.push({
-      seq: grp.nextModSeq++,
-      subject,
-      cidKey,
-      createdAt: nowIso,
-      createdBy: actorDid,
-      event: {
-        $type: "group.opensocial.defs#statusEvent",
-        status,
-        ...(typeof params.note === "string" ? { note: params.note } : {}),
-      },
-    });
+    const sortedTags = [...existing.tags].sort(compareLex);
     return {
       subject: existing.subject,
       ...(existing.cidKey !== "" ? { cid: existing.cidKey } : {}),
       status: existing.status,
       createdAt: existing.createdAt,
       updatedAt: existing.updatedAt,
-      reportCount: existing.reportCount,
+      ...(existing.reportCount > 0 ? { reportCount: existing.reportCount } : {}),
+      ...(sortedTags.length > 0 ? { tags: sortedTags } : {}),
     };
   }
 
@@ -6036,7 +6472,7 @@ export class FakeNetwork {
             const abortJwt = await this.signFakeServiceJwt({
               issDid: grp.did,
               aud: lease.targetServiceDid,
-              lxm: "group.opensocial.abortMigration",
+              lxm: FLOCK_GROUP_METHOD.abortMigration,
             });
             const abortUrl = `${lease.targetEndpoint}/group-admin/abort-migration`;
             const abortInit: RequestInit = {
@@ -6562,9 +6998,9 @@ export class FakeNetwork {
       if (!keyCheck.valid) {
         throw new FakeXrpcError(400, keyCheck.code ?? "InvalidSpaceKey", keyCheck.reason);
       }
-      const rawGrants = (sp.policy as unknown as { grants?: GroupOpenSocialPolicy["grants"] }).grants;
-      const stagedMetaPolicy: GroupOpenSocialPolicy = {
-        $type: OPENSOCIAL_POLICY,
+      const rawGrants = (sp.policy as unknown as { grants?: GroupAtgrpPolicy["grants"] }).grants;
+      const stagedMetaPolicy: GroupAtgrpPolicy = {
+        $type: ATGRP_POLICY,
         publicRead: sp.policy.publicRead === true,
         unlisted: sp.policy.unlisted === true,
         grants: Array.isArray(rawGrants) ? rawGrants : [],
@@ -6620,8 +7056,8 @@ export class FakeNetwork {
         throw new FakeXrpcError(400, pubPolCheck.code ?? "InvalidSpacePolicy", pubPolCheck.reason);
       }
       if (
-        canonicalOpenSocialPolicyKey(stagedMetaPolicy) !==
-        canonicalOpenSocialPolicyKey(publishedRec.policy as GroupOpenSocialPolicy)
+        canonicalAtgrpPolicyKey(stagedMetaPolicy) !==
+        canonicalAtgrpPolicyKey(publishedRec.policy as GroupAtgrpPolicy)
       ) {
         throw new FakeXrpcError(
           400,
@@ -6631,13 +7067,41 @@ export class FakeNetwork {
       }
     }
 
-    const profileEntry = this.accountRepos
+    const aboutEntry = this.accountRepos
       .get(did)
       ?.get(metaSpace)
-      ?.collections.get(OPENSOCIAL_COLLECTION.profile)
+      ?.collections.get(ATGRP_COLLECTION.about)
       ?.get(SELF_SKEY);
-    if (!profileEntry) {
-      throw new FakeXrpcError(400, "MissingGroupProfile", "group.opensocial.profile/self is required in meta/self.");
+    if (!aboutEntry) {
+      throw new FakeXrpcError(400, "MissingGroupProfile", "org.atgrp.about/self is required in meta/self.");
+    }
+    const aboutCheck = validateSpaceRecord(ATGRP_COLLECTION.about, aboutEntry.value, {
+      authorityDid: did,
+      spaceUri: metaSpace,
+      repoDid: did,
+      rkey: SELF_SKEY,
+      importMode: true,
+    });
+    if (!aboutCheck.valid) {
+      throw new FakeXrpcError(400, aboutCheck.code ?? "InvalidRequest", aboutCheck.reason);
+    }
+    const configEntry = this.accountRepos
+      .get(did)
+      ?.get(metaSpace)
+      ?.collections.get(ATGRP_COLLECTION.config)
+      ?.get(SELF_SKEY);
+    if (!configEntry) {
+      throw new FakeXrpcError(400, "MissingGroupConfig", "org.atgrp.config/self is required in meta/self.");
+    }
+    const configCheck = validateSpaceRecord(ATGRP_COLLECTION.config, configEntry.value, {
+      authorityDid: did,
+      spaceUri: metaSpace,
+      repoDid: did,
+      rkey: SELF_SKEY,
+      importMode: true,
+    });
+    if (!configCheck.valid) {
+      throw new FakeXrpcError(400, configCheck.code ?? "InvalidRequest", configCheck.reason);
     }
 
     const refs = this.collectAllGroupBlobCids(did);
@@ -6650,7 +7114,7 @@ export class FakeNetwork {
     const indexedCol = this.accountRepos
       .get(did)
       ?.get(membersSpace)
-      ?.collections.get(OPENSOCIAL_COLLECTION.space);
+      ?.collections.get(ATGRP_COLLECTION.space);
     const indexedSpaceUris = new Set<string>();
     if (indexedCol) {
       for (const entry of indexedCol.values()) {
@@ -6659,27 +7123,27 @@ export class FakeNetwork {
           throw new FakeXrpcError(
             400,
             "InvalidSpaceIndex",
-            "Duplicate or malformed group.opensocial.space index entry.",
+            "Duplicate or malformed org.atgrp.space index entry.",
           );
         }
         indexedSpaceUris.add(spVal.space);
       }
     }
     for (const [spUri, sp] of ownSpaces) {
-      const isCore = sp.type === OPENSOCIAL_SPACE_TYPE.meta || sp.type === OPENSOCIAL_SPACE_TYPE.members;
+      const isCore = sp.type === ATGRP_SPACE_TYPE.meta || sp.type === ATGRP_SPACE_TYPE.members;
       if (isCore) continue;
       const shouldBeIndexed = sp.policy.unlisted !== true;
       if (shouldBeIndexed !== indexedSpaceUris.has(spUri)) {
         throw new FakeXrpcError(
           400,
           "SpaceIndexParityMismatch",
-          `group.opensocial.space index parity mismatch for ${spUri}.`,
+          `org.atgrp.space index parity mismatch for ${spUri}.`,
         );
       }
       indexedSpaceUris.delete(spUri);
     }
     if (indexedSpaceUris.size > 0) {
-      throw new FakeXrpcError(400, "SpaceIndexParityMismatch", "Dangling group.opensocial.space index entry.");
+      throw new FakeXrpcError(400, "SpaceIndexParityMismatch", "Dangling org.atgrp.space index entry.");
     }
   }
 
@@ -6722,10 +7186,10 @@ export class FakeNetwork {
         did,
         did,
         groupMembersUri(did),
-        OPENSOCIAL_COLLECTION.membership,
+        ATGRP_COLLECTION.membership,
         grp.recoveryAdmin.recoveryDid,
         {
-          $type: OPENSOCIAL_COLLECTION.membership,
+          $type: ATGRP_COLLECTION.membership,
           roles: grp.recoveryAdmin.roles,
           createdAt: new Date(this.now()).toISOString(),
         },
@@ -6881,8 +7345,8 @@ export class FakeNetwork {
   ): boolean {
     return (doc.service ?? []).some((s) => {
       if (
-        (s.id !== "#opensocial_group" && (doc.id === undefined || s.id !== `${doc.id}#opensocial_group`)) ||
-        s.type !== "OpenSocialGroupHost" ||
+        (s.id !== "#atgrp_host" && (doc.id === undefined || s.id !== `${doc.id}#atgrp_host`)) ||
+        s.type !== "AtmosphereGroupHostV1" ||
         typeof s.serviceEndpoint !== "string"
       ) {
         return false;
@@ -6987,7 +7451,7 @@ export class FakeNetwork {
         migInfoRes = res;
       }
     } catch {
-      // Endpoint absent; fall through to Attempt 2 (`describeServer` + `#opensocial_group`)
+      // Endpoint absent; fall through to Attempt 2 (`describeServer` + `#atgrp_host`)
     }
 
     if (migInfoRes !== null) {
@@ -7004,7 +7468,7 @@ export class FakeNetwork {
         typeof info.did !== "string" ||
         !isDid(info.did) ||
         !Array.isArray(info.supportedSpacePolicies) ||
-        !info.supportedSpacePolicies.includes(OPENSOCIAL_POLICY) ||
+        !info.supportedSpacePolicies.includes(ATGRP_POLICY) ||
         typeof info.capabilityProofJwt !== "string" ||
         info.capabilityProofJwt.length === 0 ||
         info.capabilityProofJwt.length > 8_192
@@ -7104,7 +7568,7 @@ export class FakeNetwork {
         claims.exp - claims.iat > 300 ||
         normalizedClaimEndpoint !== targetEndpoint ||
         !Array.isArray(claims.supportedSpacePolicies) ||
-        !claims.supportedSpacePolicies.includes(OPENSOCIAL_POLICY)
+        !claims.supportedSpacePolicies.includes(ATGRP_POLICY)
       ) {
         throw new FakeXrpcError(400, "UnsupportedGroupHostTarget", "Invalid capabilityProofJwt claims or lifetime");
       }
@@ -7152,7 +7616,7 @@ export class FakeNetwork {
     throw new FakeXrpcError(
       400,
       "UnsupportedGroupHostTarget",
-      `Target host ${targetEndpoint} does not advertise verifiable OpenSocial group.opensocial.policy capability`,
+      `Target host ${targetEndpoint} does not advertise verifiable OpenSocial org.atgrp.policy capability`,
     );
   }
 
@@ -7177,7 +7641,7 @@ export class FakeNetwork {
         { id: "#atproto_pds", type: "AtprotoPersonalDataServer", serviceEndpoint: endpoint },
         ...(isPersonalPds
           ? []
-          : [{ id: "#opensocial_group", type: "OpenSocialGroupHost", serviceEndpoint: endpoint }]),
+          : [{ id: "#atgrp_host", type: "AtmosphereGroupHostV1", serviceEndpoint: endpoint }]),
       ],
     };
   }
@@ -7219,7 +7683,7 @@ export class FakeNetwork {
       iat: nowSec,
       exp: nowSec + 300,
       endpoint,
-      supportedSpacePolicies: [OPENSOCIAL_POLICY],
+      supportedSpacePolicies: [ATGRP_POLICY],
       atomicMigrationVersion: 1,
     };
     const signingInput = `${jsonToB64Url(header)}.${jsonToB64Url(payload)}`;
@@ -7227,7 +7691,7 @@ export class FakeNetwork {
     const capabilityProofJwt = `${signingInput}.${toBase64(sig, "base64url")}`;
     return {
       did: svcDid,
-      supportedSpacePolicies: [OPENSOCIAL_POLICY],
+      supportedSpacePolicies: [ATGRP_POLICY],
       blobUploadLimit: 10 * 1024 * 1024,
       migrationBlobUploadLimit: 100 * 1024 * 1024,
       maxRepoImportSize: 100 * 1024 * 1024,
@@ -8264,6 +8728,7 @@ export class FakeNetwork {
         joinOperations: new Map(),
         modSubjects: new Map(),
         modEvents: [],
+        modEjectionEligibility: new Map(),
         nextModSeq: 1,
         inviteDeliveries: new Map(),
         recoveryAdmin: null,
@@ -8539,7 +9004,7 @@ export class FakeNetwork {
       },
       services: {
         atproto_pds: { type: "AtprotoPersonalDataServer", endpoint },
-        opensocial_group: { type: "OpenSocialGroupHost", endpoint },
+        atgrp_host: { type: "AtmosphereGroupHostV1", endpoint },
       },
     };
   }
@@ -8593,7 +9058,7 @@ export class FakeNetwork {
       const defaultAka = [`at://${grp.handle}`];
       const defaultServices: Record<string, { type: string; endpoint: string }> = {
         atproto_pds: { type: "AtprotoPersonalDataServer", endpoint: defaultEndpoint },
-        opensocial_group: { type: "OpenSocialGroupHost", endpoint: defaultEndpoint },
+        atgrp_host: { type: "AtmosphereGroupHostV1", endpoint: defaultEndpoint },
       };
 
       const proposedRotKeys = Array.isArray(params.rotationKeys) ? (params.rotationKeys as string[]) : defaultRotKeys;
@@ -8924,7 +9389,7 @@ export class FakeNetwork {
       throw new FakeXrpcError(400, "InvalidRequest", "group DID is required");
     }
 
-    // Target-side abort: migration staging token OR `<groupDid>` Bearer service JWT (`aud = targetServiceDid`, `lxm = group.opensocial.abortMigration`)!
+    // Target-side abort: migration staging token OR `<groupDid>` Bearer service JWT (`aud = targetServiceDid`, `lxm = FLOCK_GROUP_METHOD.abortMigration`)!
     if (auth.kind === "migration" || auth.kind === "raw-token") {
       const nowMs = this.now();
       const nowSec = Math.floor(nowMs / 1000);
@@ -8947,7 +9412,7 @@ export class FakeNetwork {
         verifiedSvcJwt = await this.verifyFakePeerServiceJwt(auth, {
           expectedIss: groupDid,
           expectedAud: this.hostServiceDid(hostSlug),
-          expectedLxm: "group.opensocial.abortMigration",
+          expectedLxm: FLOCK_GROUP_METHOD.abortMigration,
           deferConsume: true,
           replayNamespace: "abort-jwt",
           hostSlug,
@@ -9190,7 +9655,7 @@ export class FakeNetwork {
         const abortJwt = await this.signFakeServiceJwt({
           issDid: groupDid,
           aud: lease.targetServiceDid,
-          lxm: "group.opensocial.abortMigration",
+          lxm: FLOCK_GROUP_METHOD.abortMigration,
         });
         const abortUrl = `${lease.targetEndpoint}/group-admin/abort-migration`;
         const abortInit: RequestInit = {
@@ -10335,16 +10800,16 @@ function toPublicPolicy(policy: FakeSpace["policy"]): Record<string, unknown> {
       publishPolicy: policy.publishPolicy === true,
     };
   }
-  if (policy.$type === OPENSOCIAL_POLICY) {
+  if (policy.$type === ATGRP_POLICY) {
     return {
-      $type: OPENSOCIAL_POLICY,
+      $type: ATGRP_POLICY,
       publicRead: policy.publicRead === true,
       unlisted: policy.unlisted === true,
       grants: (policy.grants ?? []).map((g) => ({
         role: g.role,
         ...(g.read !== undefined ? { read: g.read } : {}),
         ...(g.write !== undefined ? { write: g.write } : {}),
-        ...(g.scopes ? { scopes: [...g.scopes] } : {}),
+        ...(g.permissions ? { permissions: [...g.permissions] } : {}),
       })),
     };
   }

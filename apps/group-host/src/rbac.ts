@@ -1,15 +1,6 @@
-import {
-  AccountPermission,
-  BlobPermission,
-  IdentityPermission,
-  RepoPermission,
-  RpcPermission,
-  ScopePermissions,
-  SpacePermission,
-} from "@atproto/oauth-scopes";
-import type { DidString } from "@atproto/syntax";
+import { ScopePermissions } from "@atproto/oauth-scopes";
 import { appRoleKey, groupMembersUri, parseSpaceUri, spaceUri as makeSpaceUri, workspaceUri } from "@flock/protocol/keys";
-import { COLLECTION, OPENSOCIAL_COLLECTION } from "@flock/protocol/nsids";
+import { ATGRP_COLLECTION, ATGRP_POLICY, COLLECTION } from "@flock/protocol/nsids";
 import { validateSpacePolicy } from "@flock/protocol/registry";
 import {
   effectiveHumanAdmins,
@@ -17,10 +8,10 @@ import {
   expandGroupScopes,
   expandPolicyGrantScopes,
   isEffectiveAdminMember,
-  SPACE_DECLARED_COLLECTIONS,
+  isPermissionSubset,
   type EffectiveGovernanceState,
+  type GroupAtgrpPolicy,
   type GroupMembershipRecord,
-  type GroupOpenSocialPolicy,
   type GroupRoleRecord,
 } from "@flock/protocol/scopes";
 import type { GroupHostDb } from "./db";
@@ -163,14 +154,14 @@ export function loadLiveGovernanceState(db: GroupHostDb, groupDid: string): Live
     )
     .all(groupDid) as Array<{ space_uri: string; space_type: string; skey: string; policy_json: string }>;
 
-  const spacePolicies = new Map<string, GroupOpenSocialPolicy>();
+  const spacePolicies = new Map<string, GroupAtgrpPolicy>();
   let hasFlockWorkspace = false;
   for (const row of spaceRows) {
     if (row.space_uri === flockWsSpace) {
       hasFlockWorkspace = true;
     }
     try {
-      const parsed = JSON.parse(row.policy_json) as GroupOpenSocialPolicy;
+      const parsed = JSON.parse(row.policy_json) as GroupAtgrpPolicy;
       spacePolicies.set(row.space_uri, parsed);
     } catch {
       // Ignore corrupt policy JSON (prevented at write/import time)
@@ -181,7 +172,7 @@ export function loadLiveGovernanceState(db: GroupHostDb, groupDid: string): Live
     .prepare(
       "SELECT rkey, value FROM space_record WHERE space_uri = ? AND repo_did = ? AND collection = ?",
     )
-    .all(membersSpace, groupDid, OPENSOCIAL_COLLECTION.role) as Array<{ rkey: string; value: string }>;
+    .all(membersSpace, groupDid, ATGRP_COLLECTION.role) as Array<{ rkey: string; value: string }>;
   const roles = new Map<string, GroupRoleRecord>();
   for (const row of roleRows) {
     const val = JSON.parse(row.value) as GroupRoleRecord;
@@ -192,7 +183,7 @@ export function loadLiveGovernanceState(db: GroupHostDb, groupDid: string): Live
     .prepare(
       "SELECT rkey, value FROM space_record WHERE space_uri = ? AND repo_did = ? AND collection = ?",
     )
-    .all(membersSpace, groupDid, OPENSOCIAL_COLLECTION.membership) as Array<{ rkey: string; value: string }>;
+    .all(membersSpace, groupDid, ATGRP_COLLECTION.membership) as Array<{ rkey: string; value: string }>;
   const memberships = new Map<string, GroupMembershipRecord>();
   for (const row of memRows) {
     const val = JSON.parse(row.value) as GroupMembershipRecord;
@@ -341,7 +332,7 @@ export function assignableSetForActor(
   const allowed = new Set<string>();
   for (const roleKey of membership.roles) {
     const role = state.roles.get(roleKey);
-    for (const item of role?.assignable ?? []) {
+    for (const item of role?.canAssign ?? []) {
       if (item === "*") return { all: true, roles: new Set(["*"]) };
       allowed.add(item);
     }
@@ -375,165 +366,7 @@ export function assertCanAssignRoleDiff(
   }
 }
 
-/**
- * Checks that every permission inside `candidatePerms` is structurally contained within `actorPerms`.
- */
-export function isPermissionSubset(
-  candidatePerms: ScopePermissions,
-  actorPerms: ScopePermissions,
-  groupDid: string,
-): boolean {
-  const actorBlobPerms: BlobPermission[] = [];
-  const actorRepoPerms: RepoPermission[] = [];
-  const actorRpcPerms: RpcPermission[] = [];
-  const actorSpacePerms: SpacePermission[] = [];
-
-  for (const actorToken of actorPerms.scopes) {
-    if (actorToken.startsWith("blob:") || actorToken.startsWith("blob?")) {
-      const bp = BlobPermission.fromString(actorToken);
-      if (bp) actorBlobPerms.push(bp);
-    } else if (actorToken.startsWith("repo:") || actorToken.startsWith("repo?")) {
-      const rp = RepoPermission.fromString(actorToken);
-      if (rp) actorRepoPerms.push(rp);
-    } else if (actorToken.startsWith("rpc:") || actorToken.startsWith("rpc?")) {
-      const rpcp = RpcPermission.fromString(actorToken);
-      if (rpcp) actorRpcPerms.push(rpcp);
-    } else if (actorToken.startsWith("space:") || actorToken.startsWith("space?")) {
-      let sp = SpacePermission.fromString(actorToken);
-      if (sp) {
-        if (sp.spaceType !== "*" && !sp.hasCollections) {
-          const declared = SPACE_DECLARED_COLLECTIONS[sp.spaceType] ?? (["*"] as const);
-          sp = sp.withDefaultCollections(declared);
-        }
-        actorSpacePerms.push(
-          sp.isSelfAuthority ? sp.withResolvedAuthority(groupDid as DidString) : sp,
-        );
-      }
-    }
-  }
-
-  for (const token of candidatePerms.scopes) {
-    if (token === "atproto") continue;
-
-    if (token.startsWith("account:") || token.startsWith("account?")) {
-      const p = AccountPermission.fromString(token);
-      if (!p) return false;
-      for (const action of p.action) {
-        if (!actorPerms.allowsAccount({ attr: p.attr, action })) return false;
-      }
-      continue;
-    }
-
-    if (token.startsWith("identity:") || token.startsWith("identity?")) {
-      const p = IdentityPermission.fromString(token);
-      if (!p) return false;
-      if (!actorPerms.allowsIdentity({ attr: p.attr })) return false;
-      continue;
-    }
-
-    if (token.startsWith("blob:") || token.startsWith("blob?")) {
-      const p = BlobPermission.fromString(token);
-      if (!p) return false;
-      for (const accept of p.accept) {
-        if (accept === "*/*") {
-          if (!actorBlobPerms.some((ab) => ab.accept.includes("*/*"))) {
-            return false;
-          }
-        } else if (accept.endsWith("/*")) {
-          if (!actorBlobPerms.some((ab) => ab.accept.includes("*/*") || ab.accept.includes(accept))) {
-            return false;
-          }
-        } else if (!actorPerms.allowsBlob({ mime: accept as `${string}/${string}` })) {
-          return false;
-        }
-      }
-      continue;
-    }
-
-    if (token.startsWith("repo:") || token.startsWith("repo?")) {
-      const p = RepoPermission.fromString(token);
-      if (!p) return false;
-      for (const col of p.collection) {
-        for (const action of p.action) {
-          const covered = actorRepoPerms.some(
-            (ar) =>
-              ar.action.includes(action) &&
-              (ar.collection.includes("*") || (col !== "*" && ar.collection.includes(col))),
-          );
-          if (!covered) return false;
-        }
-      }
-      continue;
-    }
-
-    if (token.startsWith("rpc:") || token.startsWith("rpc?")) {
-      const p = RpcPermission.fromString(token);
-      if (!p) return false;
-      for (const lxm of p.lxm) {
-        const covered = actorRpcPerms.some(
-          (arpc) =>
-            (arpc.aud === "*" || (p.aud !== "*" && arpc.aud === p.aud)) &&
-            (arpc.lxm.includes("*") || (lxm !== "*" && arpc.lxm.includes(lxm))),
-        );
-        if (!covered) return false;
-      }
-      continue;
-    }
-
-    if (token.startsWith("space:") || token.startsWith("space?")) {
-      let rawSp = SpacePermission.fromString(token);
-      if (!rawSp) return false;
-      if (rawSp.spaceType !== "*" && !rawSp.hasCollections) {
-        const declared = SPACE_DECLARED_COLLECTIONS[rawSp.spaceType] ?? (["*"] as const);
-        rawSp = rawSp.withDefaultCollections(declared);
-      }
-      const p = rawSp.isSelfAuthority ? rawSp.withResolvedAuthority(groupDid as DidString) : rawSp;
-      const matchesTarget = (asp: SpacePermission): boolean =>
-        (asp.spaceType === "*" || (p.spaceType !== "*" && asp.spaceType === p.spaceType)) &&
-        (asp.authority === "*" || (p.authority !== "*" && asp.authority === p.authority)) &&
-        (asp.skey === "*" || (p.skey !== "*" && asp.skey === p.skey));
-
-      if (p.manage) {
-        for (const manage of p.manage) {
-          const covered = actorSpacePerms.some(
-            (asp) => matchesTarget(asp) && asp.manage != null && asp.manage.includes(manage),
-          );
-          if (!covered) return false;
-        }
-      }
-      for (const action of p.action) {
-        if (action === "read") {
-          const covered = actorSpacePerms.some(
-            (asp) => matchesTarget(asp) && asp.action.includes("read"),
-          );
-          if (!covered) return false;
-        } else if (action === "read_self") {
-          const covered = actorSpacePerms.some(
-            (asp) =>
-              matchesTarget(asp) &&
-              (asp.action.includes("read") || asp.action.includes("read_self")),
-          );
-          if (!covered) return false;
-        } else if (p.collection) {
-          for (const col of p.collection) {
-            const covered = actorSpacePerms.some(
-              (asp) =>
-                matchesTarget(asp) &&
-                asp.action.includes(action) &&
-                asp.collection != null &&
-                (asp.collection.includes("*") || (col !== "*" && asp.collection.includes(col))),
-            );
-            if (!covered) return false;
-          }
-        }
-      }
-      continue;
-    }
-
-    return false;
-  }
-  return true;
-}
+export { isPermissionSubset };
 
 export function assertRoleWriteAntiEscalation(
   actorDid: string,
@@ -554,12 +387,12 @@ export function assertRoleWriteAntiEscalation(
   if (!nextRole) return;
 
   const prevRole = preState.roles.get(roleRkey);
-  const prevAssignable = new Set(prevRole?.assignable ?? []);
-  for (const targetRole of nextRole.assignable ?? []) {
-    if (prevAssignable.has(targetRole)) continue;
+  const prevCanAssign = new Set(prevRole?.canAssign ?? []);
+  for (const targetRole of nextRole.canAssign ?? []) {
+    if (prevCanAssign.has(targetRole)) continue;
     if (targetRole === "*") {
       if (!assignable.all) {
-        throw new GroupHostHttpError(403, "PrivilegeEscalation", "Cannot grant assignable '*' without holding '*'.");
+        throw new GroupHostHttpError(403, "PrivilegeEscalation", "Cannot grant canAssign '*' without holding '*'.");
       }
     } else if (!assignable.all && !assignable.roles.has(targetRole)) {
       throw new GroupHostHttpError(
@@ -569,11 +402,11 @@ export function assertRoleWriteAntiEscalation(
       );
     }
   }
-  if (nextRole.scopes && nextRole.scopes.length > 0) {
-    const prevExpanded = prevRole?.scopes?.length
-      ? new Set(expandGroupScopes(prevRole.scopes, groupDid).scopes)
+  if (nextRole.permissions && nextRole.permissions.length > 0) {
+    const prevExpanded = prevRole?.permissions?.length
+      ? new Set(expandGroupScopes(prevRole.permissions, groupDid).scopes)
       : new Set<string>();
-    const nextExpanded = expandGroupScopes(nextRole.scopes, groupDid);
+    const nextExpanded = expandGroupScopes(nextRole.permissions, groupDid);
     const addedScopes = [...nextExpanded.scopes].filter((s) => !prevExpanded.has(s));
     if (addedScopes.length > 0) {
       const actorPerms = effectiveMemberPermissions(preState, groupDid, actorDid);
@@ -582,7 +415,7 @@ export function assertRoleWriteAntiEscalation(
         throw new GroupHostHttpError(
           403,
           "PrivilegeEscalation",
-          `Role '${roleRkey}' grants scopes exceeding caller ${actorDid}'s own effective permissions.`,
+          `Role '${roleRkey}' grants permissions exceeding caller ${actorDid}'s own effective permissions.`,
         );
       }
     }
@@ -595,7 +428,7 @@ export function assertPolicyWriteAntiEscalation(
   groupDid: string,
   spaceType: string,
   skey: string,
-  policy: GroupOpenSocialPolicy,
+  policy: GroupAtgrpPolicy,
 ): void {
   if (actorDid === groupDid) return;
 
@@ -618,7 +451,7 @@ export function assertPolicyWriteAntiEscalation(
     prevGrantsByRole.set(prevGrant.role, {
       read: Boolean(prevGrant.read),
       write: Boolean(prevGrant.write),
-      canonicalScopes: canonicalizeGrantScopes(prevGrant.scopes),
+      canonicalScopes: canonicalizeGrantScopes(prevGrant.permissions),
     });
   }
 
@@ -630,7 +463,7 @@ export function assertPolicyWriteAntiEscalation(
     nextGrantsByRole.set(grant.role, {
       read: Boolean(grant.read),
       write: Boolean(grant.write),
-      canonicalScopes: canonicalizeGrantScopes(grant.scopes),
+      canonicalScopes: canonicalizeGrantScopes(grant.permissions),
     });
   }
 
@@ -735,6 +568,7 @@ export function assertPostGovernanceInvariants(
   options: {
     allowSoleMemberDeactivation?: boolean;
     deletedRoles?: ReadonlySet<string>;
+    importMode?: boolean;
   } = {},
 ): void {
   // 1. Group self-DID cannot have explicit membership or app install
@@ -751,8 +585,8 @@ export function assertPostGovernanceInvariants(
     const parsed = parseSpaceUri(spaceUri);
     if (parsed) {
       const polCheck = validateSpacePolicy(
-        { $type: "group.opensocial.policy", ...policy },
-        { groupDid, spaceType: parsed.type, skey: parsed.skey },
+        { $type: ATGRP_POLICY, ...policy },
+        { groupDid, spaceType: parsed.type, skey: parsed.skey, importMode: options.importMode },
       );
       if (!polCheck.valid) {
         throw new GroupHostHttpError(400, polCheck.code ?? "InvalidRequest", polCheck.reason);
@@ -772,10 +606,10 @@ export function assertPostGovernanceInvariants(
   }
 
   for (const [roleKey, role] of postState.roles.entries()) {
-    for (const target of role.assignable ?? []) {
+    for (const target of role.canAssign ?? []) {
       if (target !== "*" && target !== roleKey && !postState.roles.has(target)) {
         const code = deletedRoles.has(target) ? "RoleInUse" : "UnknownRole";
-        throw new GroupHostHttpError(400, code, `Role '${roleKey}' assignable list references missing role '${target}'.`);
+        throw new GroupHostHttpError(400, code, `Role '${roleKey}' canAssign list references missing role '${target}'.`);
       }
     }
   }

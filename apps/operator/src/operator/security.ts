@@ -7,12 +7,12 @@ import {
   groupMetaUri,
   isDid,
   parseDmSpaceUri,
-  parsePersonalInvitesUri,
+  parsePersonalInboxUri,
   parseSpaceUri,
-  personalInvitesUri,
+  personalInboxUri,
   requireSpaceAuthority,
 } from "@flock/protocol/keys";
-import { OPENSOCIAL_COLLECTION, OPERATOR_METHOD } from "@flock/protocol/nsids";
+import { ATGRP_COLLECTION, OPERATOR_METHOD } from "@flock/protocol/nsids";
 import { effectiveMemberPermissions, isEffectiveAdminMember } from "@flock/protocol/scopes";
 import { getIdResolver, resolveSigningKey as cachedResolveSigningKey } from "../atproto/identity";
 import { getOperatorConfig } from "../config";
@@ -210,8 +210,8 @@ export async function verifyDmNotifyCredentialAndProof(
 }
 
 /**
- * Verifies `OPERATOR_METHOD.getSpaceNotifyTarget` for `at://<callerDid>/space/group.opensocial.invites/self`:
- * - Rejects (`400 InvalidRequest` via plain `Error`) any space other than `personalInvitesUri(callerDid)`.
+ * Verifies `OPERATOR_METHOD.getSpaceNotifyTarget` for `at://<callerDid>/space/org.atgrp.inbox/self`:
+ * - Rejects (`400 InvalidRequest` via plain `Error`) any space other than `personalInboxUri(callerDid)`.
  * - Verifies `SPACE_CREDENTIAL_TYP` (`iss === callerDid`, `sub === space`, `nowSec < exp`, `exp - iat <= 600`) against `callerDid` `#atproto`.
  * - Verifies RFC 9421 PoP (`"atproto-space-audience": operatorServiceRef`) + single-use replay lock.
  */
@@ -227,9 +227,9 @@ export async function verifySpaceNotifyCredentialAndProof(
   if (!parseSpaceUri(input.space)) {
     throw new Error("Invalid permissioned space URI.");
   }
-  const parsedInvites = parsePersonalInvitesUri(input.space);
-  if (!parsedInvites || parsedInvites.userDid !== input.callerDid || input.space !== personalInvitesUri(input.callerDid)) {
-    throw new Error("getSpaceNotifyTarget only accepts the caller's own group.opensocial.invites/self space.");
+  const parsedInvites = parsePersonalInboxUri(input.space);
+  if (!parsedInvites || parsedInvites.userDid !== input.callerDid || input.space !== personalInboxUri(input.callerDid)) {
+    throw new Error("getSpaceNotifyTarget only accepts the caller's own org.atgrp.inbox/self space.");
   }
 
   await verifyCredentialJwtAndProof(
@@ -608,7 +608,7 @@ export async function requireWorkspaceOperator(workspaceUri: string): Promise<Op
   const profile = await getOwnerRecord(
     session,
     groupMetaUri(workspace.authorityDid),
-    OPENSOCIAL_COLLECTION.profile,
+    ATGRP_COLLECTION.about,
     "self",
   );
   if (!profile) throw new OperatorAuthError("The authority's grant does not read this group.");

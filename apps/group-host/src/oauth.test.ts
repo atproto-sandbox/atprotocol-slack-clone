@@ -85,7 +85,7 @@ test("Group Host OAuth serves RFC metadata, DID overlap rotation, public & confi
     assert.ok(vmIds.includes(`${didDoc.id}#atproto`));
     assert.ok(vmIds.includes(`${didDoc.id}#atproto-rot-primary`));
     assert.ok(vmIds.includes(`${didDoc.id}#atproto-rot-prev`));
-    assert.ok(didDoc.service.some((s) => s.id.endsWith("#opensocial_group") && s.type === "OpenSocialGroupHost"));
+    assert.ok(didDoc.service.some((s) => s.id.endsWith("#atgrp_host") && s.type === "AtmosphereGroupHostV1"));
 
     const asMetaRes = await fetch(`${gh.url}/.well-known/oauth-authorization-server`);
     assert.equal(asMetaRes.status, 200);
@@ -213,15 +213,15 @@ test("Group Host OAuth serves RFC metadata, DID overlap rotation, public & confi
     const pubGroupDid = createdPublic.tokenResponse.sub;
     const privGroupDid = createdPrivate.tokenResponse.sub;
 
-    // `publicMeta: true` publishes `group.opensocial.declaration/self` in public repo; `publicMeta: false` omits it!
+    // `publicMeta: true` publishes `org.atgrp.declaration/self` in public repo; `publicMeta: false` omits it!
     const pubDeclRes = await fetch(
-      `${gh.url}/xrpc/com.atproto.repo.getRecord?repo=${encodeURIComponent(pubGroupDid)}&collection=group.opensocial.declaration&rkey=self`,
+      `${gh.url}/xrpc/com.atproto.repo.getRecord?repo=${encodeURIComponent(pubGroupDid)}&collection=org.atgrp.declaration&rkey=self`,
     );
     assert.equal(pubDeclRes.status, 200);
     const privDeclRes = await fetch(
-      `${gh.url}/xrpc/com.atproto.repo.getRecord?repo=${encodeURIComponent(privGroupDid)}&collection=group.opensocial.declaration&rkey=self`,
+      `${gh.url}/xrpc/com.atproto.repo.getRecord?repo=${encodeURIComponent(privGroupDid)}&collection=org.atgrp.declaration&rkey=self`,
     );
-    assert.equal(privDeclRes.status, 400, "publicMeta=false must omit public group.opensocial.declaration/self");
+    assert.equal(privDeclRes.status, 400, "publicMeta=false must omit public org.atgrp.declaration/self");
 
     // 4. Verify `HEAD /oauth/upstream-callback` returns `405 Method Not Allowed`!
     const headRes = await fetch(`${gh.url}/oauth/upstream-callback?state=any&code=any`, { method: "HEAD" });
@@ -324,10 +324,11 @@ test("Group Host OAuth serves RFC metadata, DID overlap rotation, public & confi
       .join("; ");
     const confirmHtml = await (await fetch(ghCb.headers.get("location")!, { headers: { cookie: consentCookie } })).text();
     const confirmCsrf = /name="csrf_token"\s+value="([^"]+)"/.exec(confirmHtml)![1]!;
+    const confirmSnapshot = /name="consent_snapshot"\s+value="([^"]+)"/.exec(confirmHtml)?.[1] ?? "";
     const confirmApproved = await fetch(`${gh.url}/oauth/confirm-action`, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded", cookie: consentCookie },
-      body: new URLSearchParams({ csrf_token: confirmCsrf, decision: "approve" }).toString(),
+      body: new URLSearchParams({ csrf_token: confirmCsrf, consent_snapshot: confirmSnapshot, decision: "approve" }).toString(),
       redirect: "manual",
     });
     const confCode = new URL(confirmApproved.headers.get("location")!).searchParams.get("code")!;
@@ -386,7 +387,7 @@ test("Group Host OAuth serves RFC metadata, DID overlap rotation, public & confi
 
     // 7. Live `effectiveMemberPermissions` narrowing on role demotion!
     // Add `bob` with `admin` role, mint a moderator/admin session for `bob`, then demote `bob` to `member`!
-    const membersSpace = `at:space/${pubGroupDid}/group.opensocial.members/self`;
+    const membersSpace = `at:space/${pubGroupDid}/org.atgrp.members/self`;
     const putBobAdmin = await createdPublic.dpop.fetchWithDpop(`${gh.url}/xrpc/com.atproto.space.putRecord`, {
       method: "POST",
       accessToken: createdPublic.tokenResponse.access_token,
@@ -394,10 +395,10 @@ test("Group Host OAuth serves RFC metadata, DID overlap rotation, public & confi
       body: JSON.stringify({
         space: membersSpace,
         repo: pubGroupDid,
-        collection: "group.opensocial.membership",
+        collection: "org.atgrp.membership",
         rkey: bob.did,
         record: {
-          $type: "group.opensocial.membership",
+          $type: "org.atgrp.membership",
           roles: ["admin"],
           createdAt: new Date().toISOString(),
         },
@@ -415,7 +416,7 @@ test("Group Host OAuth serves RFC metadata, DID overlap rotation, public & confi
     assert.ok(bobSession.tokenResponse);
 
     // Before demotion, Bob can call `listModSubjects` (`200`)
-    const modOk = await bobSession.dpop.fetchWithDpop(`${gh.url}/xrpc/group.opensocial.listModSubjects`, {
+    const modOk = await bobSession.dpop.fetchWithDpop(`${gh.url}/xrpc/org.atgrp.mod.querySubjects`, {
       method: "GET",
       accessToken: bobSession.tokenResponse.access_token,
     });
@@ -429,10 +430,10 @@ test("Group Host OAuth serves RFC metadata, DID overlap rotation, public & confi
       body: JSON.stringify({
         space: membersSpace,
         repo: pubGroupDid,
-        collection: "group.opensocial.membership",
+        collection: "org.atgrp.membership",
         rkey: bob.did,
         record: {
-          $type: "group.opensocial.membership",
+          $type: "org.atgrp.membership",
           roles: ["member"],
           createdAt: new Date().toISOString(),
         },
@@ -441,7 +442,7 @@ test("Group Host OAuth serves RFC metadata, DID overlap rotation, public & confi
     assert.equal(demoteBob.status, 200);
 
     // Immediately on the next request, Bob's existing access token is live-narrowed and denied (`403`)!
-    const modAfterDemote = await bobSession.dpop.fetchWithDpop(`${gh.url}/xrpc/group.opensocial.listModSubjects`, {
+    const modAfterDemote = await bobSession.dpop.fetchWithDpop(`${gh.url}/xrpc/org.atgrp.mod.querySubjects`, {
       method: "GET",
       accessToken: bobSession.tokenResponse.access_token,
     });
@@ -802,11 +803,11 @@ test("OAuth code replay cascade, 5-min creation code expiry -> existing-group re
       accessToken: recTok,
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        space: `at:space/${groupDid}/group.opensocial.meta/self`,
+        space: `at:space/${groupDid}/org.atgrp.meta/self`,
         repo: groupDid,
-        collection: "group.opensocial.profile",
+        collection: "org.atgrp.about",
         rkey: "self",
-        record: { $type: "group.opensocial.profile", displayName: "Blocked", createdAt: new Date().toISOString() },
+        record: { $type: "org.atgrp.about", displayName: "Blocked" },
       }),
     });
     assert.equal(forbiddenWrite.status, 403);
@@ -1106,17 +1107,19 @@ test("OAuth binds family revocation to client+DPoP, preserves loopback redirect_
     const html2 = await (await fetch(tab2.confirmUrl, { headers: { cookie: sharedBrowserCookies } })).text();
     const csrf1 = /name="csrf_token"\s+value="([^"]+)"/.exec(html1)![1]!;
     const csrf2 = /name="csrf_token"\s+value="([^"]+)"/.exec(html2)![1]!;
+    const snap1 = /name="consent_snapshot"\s+value="([^"]+)"/.exec(html1)?.[1] ?? "";
+    const snap2 = /name="consent_snapshot"\s+value="([^"]+)"/.exec(html2)?.[1] ?? "";
 
     const approve1 = await fetch(`${gh.url}/oauth/confirm-action`, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded", cookie: sharedBrowserCookies },
-      body: new URLSearchParams({ csrf_token: csrf1, decision: "approve" }).toString(),
+      body: new URLSearchParams({ csrf_token: csrf1, consent_snapshot: snap1, decision: "approve" }).toString(),
       redirect: "manual",
     });
     const approve2 = await fetch(`${gh.url}/oauth/confirm-action`, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded", cookie: sharedBrowserCookies },
-      body: new URLSearchParams({ csrf_token: csrf2, decision: "approve" }).toString(),
+      body: new URLSearchParams({ csrf_token: csrf2, consent_snapshot: snap2, decision: "approve" }).toString(),
       redirect: "manual",
     });
     assert.equal(approve1.status, 303);
@@ -1731,6 +1734,274 @@ test("OAuth binds family revocation to client+DPoP, preserves loopback redirect_
     );
   } finally {
     await new Promise<void>((resolve) => metaServer.close(() => resolve()));
+    await gh.close();
+    await pds.close();
+    await plc.close();
+  }
+});
+
+test("R15 OAuth include-set narrowing, server-side oauth_consent_snapshot tamper/replay, 40-scope grant + overflow cap, and prompt=create reviewed_scope retry", async () => {
+  const plc = await startMockPlcServer();
+  const pds = await startMockPersonalPds(plc);
+  const gh = await startTestGroupHost({ plc });
+
+  try {
+    const alice = await pds.registerUser("alice-r15-oauth.test");
+    const bob = await pds.registerUser("bob-r15-oauth.test");
+    const adminScopeStr = groupAdminScopes().join(" ");
+
+    // Create group as Alice
+    const created = await completeGroupOAuthFlow({
+      groupHost: gh,
+      pds,
+      user: alice,
+      scope: adminScopeStr,
+      prompt: "create",
+      createParams: {
+        displayName: "R15 OAuth Narrowing",
+        handle: "r15-oauth.groups.localhost",
+        joinPolicy: "invite",
+        publicMeta: true,
+      },
+    });
+    const groupDid = created.tokenResponse!.sub;
+    const membersSpace = `at:space/${groupDid}/org.atgrp.members/self`;
+    const metaSpace = `at:space/${groupDid}/org.atgrp.meta/self`;
+
+    // Add a `basic-editor` role holding ONLY `include:org.atgrp.authManageBasic` and assign Bob to it
+    const putRoleRes = await created.dpop.fetchWithDpop(`${gh.url}/xrpc/com.atproto.space.putRecord`, {
+      method: "POST",
+      accessToken: created.tokenResponse!.access_token,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        space: membersSpace,
+        repo: groupDid,
+        collection: "org.atgrp.role",
+        rkey: "basic-editor",
+        record: {
+          $type: "org.atgrp.role",
+          displayName: "Basic Editor",
+          permissions: ["include:org.atgrp.authManageBasic"],
+        },
+      }),
+    });
+    assert.equal(putRoleRes.status, 200);
+
+    const putBobRes = await created.dpop.fetchWithDpop(`${gh.url}/xrpc/com.atproto.space.putRecord`, {
+      method: "POST",
+      accessToken: created.tokenResponse!.access_token,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        space: membersSpace,
+        repo: groupDid,
+        collection: "org.atgrp.membership",
+        rkey: bob.did,
+        record: {
+          $type: "org.atgrp.membership",
+          roles: ["member", "basic-editor"],
+          createdAt: new Date().toISOString(),
+        },
+      }),
+    });
+    assert.equal(putBobRes.status, 200);
+
+    // 1. Include-set narrowing: Bob requests `atproto include:org.atgrp.authManageAdmin` (upper bound!).
+    //    Must SUCCEED and narrow down to ONLY Bob's live Basic permissions (can edit `about/self`, CANNOT query mod subjects or write `role`)!
+    const narrowedBob = await completeGroupOAuthFlow({
+      groupHost: gh,
+      pds,
+      user: bob,
+      scope: "atproto include:org.atgrp.authManageAdmin",
+      loginHint: groupDid,
+    });
+    assert.ok(narrowedBob.tokenResponse);
+    assert.ok(narrowedBob.tokenResponse.scope.includes("org.atgrp.about"));
+    assert.ok(!narrowedBob.tokenResponse.scope.includes("org.atgrp.role"));
+    assert.ok(!narrowedBob.tokenResponse.scope.includes("org.atgrp.mod.querySubjects"));
+
+    const bobEditAbout = await narrowedBob.dpop.fetchWithDpop(`${gh.url}/xrpc/com.atproto.space.putRecord`, {
+      method: "POST",
+      accessToken: narrowedBob.tokenResponse.access_token,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        space: metaSpace,
+        repo: groupDid,
+        collection: "org.atgrp.about",
+        rkey: "self",
+        record: { $type: "org.atgrp.about", displayName: "Updated by Basic Editor" },
+      }),
+    });
+    assert.equal(bobEditAbout.status, 200);
+
+    const bobBlockedMod = await narrowedBob.dpop.fetchWithDpop(`${gh.url}/xrpc/org.atgrp.mod.querySubjects`, {
+      method: "GET",
+      accessToken: narrowedBob.tokenResponse.access_token,
+    });
+    assert.equal(bobBlockedMod.status, 403);
+
+    // 2. Explicit excess permission STILL fails closed with 403 access_denied!
+    await assert.rejects(
+      () =>
+        completeGroupOAuthFlow({
+          groupHost: gh,
+          pds,
+          user: bob,
+          scope: "atproto space:org.atgrp.members?skey=self&collection=org.atgrp.role&action=create",
+          loginHint: groupDid,
+        }),
+      /403/,
+    );
+
+    // 3. Server-side `oauth_consent_snapshot`: tampered snapshot rejected; replay after consumption rejected!
+    const snapDpop = await createDpopTestClient();
+    const snapPkce = createPkcePair();
+    const snapRedir = "http://127.0.0.1:43991/cb";
+    const snapScope = "atproto include:org.atgrp.authManageBasic";
+    const snapClientId = `http://localhost?redirect_uri=${encodeURIComponent(snapRedir)}&scope=${encodeURIComponent(snapScope)}`;
+    const snapPar = await snapDpop.fetchWithDpop(`${gh.url}/oauth/par`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        client_id: snapClientId,
+        redirect_uri: snapRedir,
+        response_type: "code",
+        code_challenge: snapPkce.challenge,
+        code_challenge_method: "S256",
+        scope: snapScope,
+        login_hint: groupDid,
+        prompt: "consent",
+      }).toString(),
+    });
+    assert.equal(snapPar.status, 201);
+    const { request_uri: snapReqUri } = (await snapPar.json()) as { request_uri: string };
+    const snapAuthHtml = await (
+      await fetch(`${gh.url}/oauth/authorize?client_id=${encodeURIComponent(snapClientId)}&request_uri=${encodeURIComponent(snapReqUri)}`)
+    ).text();
+    const snapAuthCsrf = /name="csrf_token"\s+value="([^"]+)"/.exec(snapAuthHtml)![1]!;
+    const snapAuthPost = await fetch(`${gh.url}/oauth/authorize`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        client_id: snapClientId,
+        request_uri: snapReqUri,
+        csrf_token: snapAuthCsrf,
+        actor: bob.did,
+        decision: "approve",
+      }).toString(),
+      redirect: "manual",
+    });
+    const snapFlowCookie = snapAuthPost.headers.getSetCookie().map((c) => c.split(";")[0]!).join("; ");
+    const snapUp = new URL(snapAuthPost.headers.get("location")!);
+    snapUp.searchParams.set("as_did", bob.did);
+    const snapPdsCb = (await fetch(snapUp.toString(), { redirect: "manual" })).headers.get("location")!;
+    const snapGhCb = await fetch(snapPdsCb, { headers: { cookie: snapFlowCookie }, redirect: "manual" });
+    const snapConsentCookie = snapGhCb.headers
+      .getSetCookie()
+      .filter((c) => !c.includes("Max-Age=0"))
+      .map((c) => c.split(";")[0]!)
+      .join("; ");
+    const snapConfirmHtml = await (
+      await fetch(snapGhCb.headers.get("location")!, { headers: { cookie: snapConsentCookie } })
+    ).text();
+    const snapCsrf = /name="csrf_token"\s+value="([^"]+)"/.exec(snapConfirmHtml)![1]!;
+    const snapToken = /name="consent_snapshot"\s+value="([^"]+)"/.exec(snapConfirmHtml)![1]!;
+
+    // Tampered snapshot token -> 400
+    const tamperedSnapRes = await fetch(`${gh.url}/oauth/confirm-action`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded", cookie: snapConsentCookie },
+      body: new URLSearchParams({
+        csrf_token: snapCsrf,
+        consent_snapshot: `${snapToken}x`,
+        decision: "approve",
+      }).toString(),
+      redirect: "manual",
+    });
+    assert.equal(tamperedSnapRes.status, 400, "Tampered consent_snapshot must be rejected");
+
+    // Legit approve succeeds (303)
+    const validSnapRes = await fetch(`${gh.url}/oauth/confirm-action`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded", cookie: snapConsentCookie },
+      body: new URLSearchParams({
+        csrf_token: snapCsrf,
+        consent_snapshot: snapToken,
+        decision: "approve",
+      }).toString(),
+      redirect: "manual",
+    });
+    assert.equal(validSnapRes.status, 303);
+
+    // Replaying consumed snapshot fails
+    const replaySnapRes = await fetch(`${gh.url}/oauth/confirm-action`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded", cookie: snapConsentCookie },
+      body: new URLSearchParams({
+        csrf_token: snapCsrf,
+        consent_snapshot: snapToken,
+        decision: "approve",
+      }).toString(),
+      redirect: "manual",
+    });
+    assert.equal(replaySnapRes.status, 400, "Consumed consent_snapshot replay must be rejected");
+
+    // 4. 40-scope explicit grant succeeds cleanly (server-side snapshot avoids cookie size limits), while >200 tokens returns 400!
+    const fortyScopes = [
+      "atproto",
+      ...Array.from({ length: 40 }, (_, i) => `repo:app.example.col${i}?action=create`),
+    ].join(" ");
+    const fortyFlow = await completeGroupOAuthFlow({
+      groupHost: gh,
+      pds,
+      user: alice,
+      scope: fortyScopes,
+      loginHint: groupDid,
+    });
+    assert.ok(fortyFlow.tokenResponse);
+    assert.equal(fortyFlow.tokenResponse.scope.split(" ").length, 41);
+
+    const overCapScopes = [
+      "atproto",
+      ...Array.from({ length: 205 }, (_, i) => `repo:app.example.overflow${i}?action=create`),
+    ].join(" ");
+    await assert.rejects(
+      () =>
+        completeGroupOAuthFlow({
+          groupHost: gh,
+          pds,
+          user: alice,
+          scope: overCapScopes,
+          loginHint: groupDid,
+        }),
+      /400/,
+    );
+
+    // 5. `prompt=create` persists `reviewed_scope` on `group_creation_journal` across creation retries!
+    const retryCreationKey = `ck-r15-reviewed-scope-${randomUUID()}`;
+    const createScopedFlow = await completeGroupOAuthFlow({
+      groupHost: gh,
+      pds,
+      user: alice,
+      scope: "atproto include:org.atgrp.authManageBasic",
+      prompt: "create",
+      createParams: {
+        creationKey: retryCreationKey,
+        displayName: "Reviewed Scope Group",
+        handle: "r15-reviewed.groups.localhost",
+        joinPolicy: "invite",
+        publicMeta: true,
+      },
+    });
+    assert.ok(createScopedFlow.tokenResponse);
+    const jRow = gh.db
+      .prepare("SELECT reviewed_scope FROM group_creation_journal WHERE creation_key = ?")
+      .get(retryCreationKey) as { reviewed_scope: string | null } | undefined;
+    assert.equal(
+      jRow?.reviewed_scope,
+      "atproto include:org.atgrp.authManageBasic",
+      "group_creation_journal must persist symbolic reviewed_scope",
+    );
+  } finally {
     await gh.close();
     await pds.close();
     await plc.close();

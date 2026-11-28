@@ -3,12 +3,12 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { COLLECTION, OPERATOR_METHOD, SPACE_TYPE } from "./nsids";
 import {
+  ATGRP_PARTICIPATE_SCOPES,
   DM_BROWSER_SCOPES,
   FLOCK_MEMBER_MODALITY_SPACE_SCOPES,
   LEGACY_OPERATOR_METHODS,
   legacyMemberGrantScopes,
   memberGrantScopes,
-  OPEN_SOCIAL_PARTICIPATE_SCOPES,
   OPERATOR_METHODS,
 } from "./scopes";
 
@@ -31,9 +31,9 @@ function readFlockPermissionSet(name: string): LexPermission[] {
   return document.defs.main.permissions;
 }
 
-function readOpenSocialPermissionSet(name: string): LexPermission[] {
+function readAtgrpPermissionSet(name: string): LexPermission[] {
   const document = JSON.parse(
-    readFileSync(new URL(`../lexicons/group/opensocial/${name}.json`, import.meta.url), "utf8"),
+    readFileSync(new URL(`../lexicons/org/atgrp/${name}.json`, import.meta.url), "utf8"),
   ) as { defs: { main: { permissions: LexPermission[] } } };
   return document.defs.main.permissions;
 }
@@ -69,19 +69,19 @@ function fromScopeString(scope: string): string {
   });
 }
 
-test("OPEN_SOCIAL_PARTICIPATE_SCOPES matches group.opensocial.authParticipate 1-for-1", () => {
-  const permissions = readOpenSocialPermissionSet("authParticipate");
+test("ATGRP_PARTICIPATE_SCOPES matches org.atgrp.authParticipate 1-for-1", () => {
+  const permissions = readAtgrpPermissionSet("authParticipate");
   const publishedSpaces = permissions
     .filter((p) => p.resource === "space")
     .map((p) => normalized({ ...p, type: p.spaceType }))
     .sort();
-  const runtimeSpaces = OPEN_SOCIAL_PARTICIPATE_SCOPES.filter((s) => s.startsWith("space:"))
+  const runtimeSpaces = ATGRP_PARTICIPATE_SCOPES.filter((s) => s.startsWith("space:"))
     .map(fromScopeString)
     .sort();
   assert.deepEqual(publishedSpaces, runtimeSpaces);
 
   const publishedRpc = [...permissions.find((p) => p.resource === "rpc")!.lxm!].sort();
-  const runtimeRpcQuery = OPEN_SOCIAL_PARTICIPATE_SCOPES.find((s) => s.startsWith("rpc?"))!.split("?")[1]!;
+  const runtimeRpcQuery = ATGRP_PARTICIPATE_SCOPES.find((s) => s.startsWith("rpc?"))!.split("?")[1]!;
   const runtimeParams = new URLSearchParams(runtimeRpcQuery);
   assert.equal(runtimeParams.get("aud"), "*");
   assert.deepEqual(runtimeParams.getAll("lxm").sort(), publishedRpc);

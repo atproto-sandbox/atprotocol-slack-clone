@@ -4,12 +4,12 @@ import {
   channelRoleKey,
   channelUri,
   groupMembersUri,
-  personalInvitesUri,
+  personalInboxUri,
   SELF_SKEY,
   tidNow,
   workspaceUri,
 } from "@flock/protocol/keys";
-import { COLLECTION, OPENSOCIAL_COLLECTION, OPENSOCIAL_POLICY, SPACE_TYPE } from "@flock/protocol/nsids";
+import { ATGRP_COLLECTION, ATGRP_POLICY, COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
 import {
   listIndependentWorkspaces,
   readIndependentChannelPage,
@@ -48,7 +48,7 @@ test("createBrowserSpaceCredentialDeps from @flock/shell integrates seamlessly w
   const vaultRole = channelRoleKey("vault");
 
   const openPolicy = {
-    $type: OPENSOCIAL_POLICY,
+    $type: ATGRP_POLICY,
     publicRead: false,
     unlisted: false,
     grants: [
@@ -62,15 +62,15 @@ test("createBrowserSpaceCredentialDeps from @flock/shell integrates seamlessly w
   await owner.procedure("com.atproto.space.putRecord", {
     space: membersUri,
     repo: GROUP,
-    collection: OPENSOCIAL_COLLECTION.role,
+    collection: ATGRP_COLLECTION.role,
     rkey: vaultRole,
-    record: { $type: OPENSOCIAL_COLLECTION.role, displayName: "Vault members" },
+    record: { $type: ATGRP_COLLECTION.role, displayName: "Vault members" },
   });
   await owner.procedure("com.atproto.space.createSpace", {
     spaceType: SPACE_TYPE.channel,
     skey: "vault",
     policy: {
-      $type: OPENSOCIAL_POLICY,
+      $type: ATGRP_POLICY,
       publicRead: false,
       unlisted: true,
       grants: [{ role: vaultRole, read: true, write: true }],
@@ -93,9 +93,9 @@ test("createBrowserSpaceCredentialDeps from @flock/shell integrates seamlessly w
     await owner.procedure("com.atproto.space.putRecord", {
       space: membersUri,
       repo: GROUP,
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: did,
-      record: { $type: OPENSOCIAL_COLLECTION.membership, roles: [...roles], createdAt: "2026-11-20T00:00:00.000Z" },
+      record: { $type: ATGRP_COLLECTION.membership, roles: [...roles], createdAt: "2026-11-20T00:00:00.000Z" },
     });
   }
 
@@ -150,12 +150,12 @@ test("createBrowserSpaceCredentialDeps from @flock/shell integrates seamlessly w
   // Provision invites space & seed an expiring cross-PDS invite
   await ensureInvitesSpace(bobDeps);
   await owner.procedure("com.atproto.space.putRecord", {
-    space: personalInvitesUri(BOB),
+    space: personalInboxUri(BOB),
     repo: GROUP,
-    collection: OPENSOCIAL_COLLECTION.invite,
+    collection: ATGRP_COLLECTION.invite,
     rkey: tidNow(net.now()),
     record: {
-      $type: OPENSOCIAL_COLLECTION.invite,
+      $type: ATGRP_COLLECTION.invite,
       group: GROUP,
       message: "Welcome to Desk Parity",
       expiresAt: new Date(net.now() + 3_600_000).toISOString(),

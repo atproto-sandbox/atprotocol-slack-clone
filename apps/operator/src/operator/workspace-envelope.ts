@@ -1,8 +1,8 @@
 import { listBoundedRecords, listBoundedWriters } from "@flock/protocol/atproto/record-pages";
 import { groupMembersUri, groupMetaUri } from "@flock/protocol/keys";
 import { mapLimited } from "@flock/protocol/map-limited";
-import { ATPROTO_SPACE_COLLECTION, COLLECTION, OPENSOCIAL_COLLECTION } from "@flock/protocol/nsids";
-import { canonicalOpenSocialPolicyKey } from "@flock/protocol/registry";
+import { ATPROTO_SPACE_COLLECTION, COLLECTION, ATGRP_COLLECTION } from "@flock/protocol/nsids";
+import { canonicalAtgrpPolicyKey } from "@flock/protocol/registry";
 import {
   assertWorkspaceWithinEnvelope,
   extractGroupSpacePolicyRecord,
@@ -31,7 +31,8 @@ export async function assertOperatorWorkspaceWithinEnvelope(actor: OperatorActor
     listBoundedRecords(client, { space, repo: groupDid, collection, maxRecords });
 
   const [
-    profiles,
+    abouts,
+    configs,
     metaPolicyScan,
     roles,
     memberships,
@@ -44,10 +45,11 @@ export async function assertOperatorWorkspaceWithinEnvelope(actor: OperatorActor
     wsPolicyScan,
     governance,
   ] = await Promise.all([
-    scan(metaSpace, OPENSOCIAL_COLLECTION.profile, 1),
+    scan(metaSpace, ATGRP_COLLECTION.about, 1),
+    scan(metaSpace, ATGRP_COLLECTION.config, 1),
     scan(metaSpace, ATPROTO_SPACE_COLLECTION.spacePolicy, 1),
-    scan(membersSpace, OPENSOCIAL_COLLECTION.role, WORKSPACE_ENVELOPE.authorityRecordScan),
-    scan(membersSpace, OPENSOCIAL_COLLECTION.membership, WORKSPACE_ENVELOPE.authorityRecordScan),
+    scan(membersSpace, ATGRP_COLLECTION.role, WORKSPACE_ENVELOPE.authorityRecordScan),
+    scan(membersSpace, ATGRP_COLLECTION.membership, WORKSPACE_ENVELOPE.authorityRecordScan),
     scan(membersSpace, ATPROTO_SPACE_COLLECTION.spacePolicy, 1),
     scan(membersSpace, ATPROTO_SPACE_COLLECTION.label, WORKSPACE_ENVELOPE.authorityRecordScan),
     (async () => {
@@ -90,7 +92,7 @@ export async function assertOperatorWorkspaceWithinEnvelope(actor: OperatorActor
       !extracted.valid ||
       !extracted.policy ||
       !livePolicy ||
-      canonicalOpenSocialPolicyKey(extracted.policy) !== canonicalOpenSocialPolicyKey(livePolicy)
+      canonicalAtgrpPolicyKey(extracted.policy) !== canonicalAtgrpPolicyKey(livePolicy)
     ) {
       invalidPolicyScan = true;
     } else {
@@ -99,7 +101,8 @@ export async function assertOperatorWorkspaceWithinEnvelope(actor: OperatorActor
   }
 
   const summary = summarizeWorkspace(uri, groupDid, {
-    profiles,
+    abouts,
+    configs,
     roles,
     memberships,
     directory,

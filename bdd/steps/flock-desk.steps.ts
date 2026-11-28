@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { Given, Then, When } from "@cucumber/cucumber";
 import { expect } from "@playwright/test";
 import { channelUri } from "@flock/protocol/keys";
-import { COLLECTION } from "@flock/protocol/nsids";
+import { ATGRP_MOD_REASON, COLLECTION } from "@flock/protocol/nsids";
 import type { DeskApp } from "../../protocol-tests/support/app-fixture";
 import { openChannel, postMessage } from "../support/channels-ui";
 import { groupDidOf } from "../support/group-state";
@@ -39,7 +39,7 @@ function assertNoOperatorCalls(world: AppWorld, viewer: AppViewer): void {
 }
 
 async function connectGroupGovernance(owner: AppViewer): Promise<void> {
-  const governanceSection = owner.page.getByRole("region", { name: "OpenSocial group governance" });
+  const governanceSection = owner.page.getByRole("region", { name: "Atmosphere group governance" });
   await governanceSection.getByRole("button", { name: "Sign in as group admin →" }).click();
   await completeConsent(owner);
   await governanceSection.getByRole("button", { name: "Disconnect group session", exact: true }).waitFor({
@@ -183,7 +183,7 @@ When(
     await inviteeDesk.page.goto(desk.appUrl.origin);
     await signInDeskAt(inviteeDesk);
 
-    const governanceSection = owner.page.getByRole("region", { name: "OpenSocial group governance" });
+    const governanceSection = owner.page.getByRole("region", { name: "Atmosphere group governance" });
     await governanceSection.getByLabel("Cross-PDS invitee DID").fill(inviteeDesk.did);
     await governanceSection.getByRole("button", { name: "Send cross-PDS invite →" }).click();
     await owner.page
@@ -426,7 +426,7 @@ When(
     this.scratch.set("modHideUri", hideUri);
     await hideItem.getByTestId("desk-report-message-button").click();
     await reporterDesk.page.getByTestId("desk-report-panel").waitFor({ state: "visible" });
-    await reporterDesk.page.getByTestId("desk-report-reason-type").selectOption("violation");
+    await reporterDesk.page.getByTestId("desk-report-reason-type").selectOption(ATGRP_MOD_REASON.violation);
     await reporterDesk.page.getByTestId("desk-report-rule-select").waitFor({ state: "visible" });
     await reporterDesk.page.getByTestId("desk-report-reason-input").fill("Spoiler reported from Desk");
     await reporterDesk.page.getByTestId("desk-report-submit-button").click();
@@ -437,7 +437,7 @@ When(
     assert.ok(tdUri);
     this.scratch.set("modTakedownUri", tdUri);
     await tdItem.getByTestId("desk-report-message-button").click();
-    await reporterDesk.page.getByTestId("desk-report-reason-type").selectOption("spam");
+    await reporterDesk.page.getByTestId("desk-report-reason-type").selectOption(ATGRP_MOD_REASON.spam);
     await reporterDesk.page.getByTestId("desk-report-submit-button").click();
     await reporterDesk.page.getByTestId("desk-report-confirmation").waitFor({ state: "visible" });
   },

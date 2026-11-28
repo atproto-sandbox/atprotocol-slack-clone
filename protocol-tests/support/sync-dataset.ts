@@ -1,7 +1,7 @@
 import { mintSpaceCredentialWith } from "@flock/protocol/atproto/space-credential-core";
 import { AtprotoClient } from "@flock/protocol/atproto/xrpc";
 import { groupMembersUri, requireSpaceAuthority, tidNow } from "@flock/protocol/keys";
-import { COLLECTION, OPENSOCIAL_COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
+import { ATGRP_COLLECTION, COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
 import {
   acceptGroupMembership,
   actorTransport,
@@ -141,7 +141,7 @@ export async function createChannel(
   if (neededActors.length > 0) {
     const nowIso = new Date().toISOString();
     await mapLimited(neededActors, 16, async (actor) => {
-      await putAuthorityRecord(owner, membersSpace, OPENSOCIAL_COLLECTION.membership, actor.did, {
+      await putAuthorityRecord(owner, membersSpace, ATGRP_COLLECTION.membership, actor.did, {
         roles: ["member"],
         createdAt: nowIso,
       });

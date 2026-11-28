@@ -4,7 +4,7 @@ import { WRITER_CURSOR_MAX_AGE_MS } from "@flock/protocol/atproto/record-pages";
 import { isAccessLost, LTHASH_STATE_BYTES, RepoCommit, serializedRecordBytes, SpaceMacError } from "@flock/protocol/atproto/space-credential-core";
 import { extSpaceUriFor } from "@flock/protocol/extensions";
 import { channelRoleKey, groupMembersUri, SELF_SKEY, subjectKey, tasksSpaceUri, tidNow } from "@flock/protocol/keys";
-import { COLLECTION, OPENSOCIAL_COLLECTION, OPENSOCIAL_POLICY, SPACE_TYPE } from "@flock/protocol/nsids";
+import { COLLECTION, ATGRP_COLLECTION, ATGRP_POLICY, SPACE_TYPE } from "@flock/protocol/nsids";
 import { FakeNetwork } from "@flock/testing/fake-network";
 import { createEngine } from "./engine";
 import { MAX_HOLD_MS } from "./key-window";
@@ -103,10 +103,10 @@ test("a writer with no records and a new writer are both read", async () => {
   await network.clientFor(AUTHORITY).procedure("com.atproto.space.putRecord", {
     space: groupMembersUri(AUTHORITY),
     repo: AUTHORITY,
-    collection: OPENSOCIAL_COLLECTION.membership,
+    collection: ATGRP_COLLECTION.membership,
     rkey: dave,
     record: {
-      $type: OPENSOCIAL_COLLECTION.membership,
+      $type: ATGRP_COLLECTION.membership,
       roles: ["member", channelRoleKey("general")],
       createdAt: "2026-11-10T12:00:00.000Z",
     },
@@ -467,9 +467,9 @@ test("syncVerifiedWorkspaceSnapshot verifies authority records via STAR and 404 
     await network.clientFor(AUTHORITY).procedure("com.atproto.space.putRecord", {
       space: members,
       repo: AUTHORITY,
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: extraDid,
-      record: { $type: OPENSOCIAL_COLLECTION.membership, roles: ["member"], createdAt: "2026-11-10T12:00:00.000Z" },
+      record: { $type: ATGRP_COLLECTION.membership, roles: ["member"], createdAt: "2026-11-10T12:00:00.000Z" },
     });
   }
   await core.markSpaceStale(members);
@@ -498,7 +498,7 @@ test("syncVerifiedSpace cold STAR, warm reopen with 0 writer calls, and incremen
     spaceType: SPACE_TYPE.tasks,
     skey: tasksSpace.split("/").at(-1)!,
     policy: {
-      $type: OPENSOCIAL_POLICY,
+      $type: ATGRP_POLICY,
       publicRead: false,
       unlisted: false,
       grants: [{ role: "member", read: true, write: true }],
@@ -689,7 +689,7 @@ test("D14 purge waits for both listRepos and verifiedRosterMembers, and RepoNotF
   await network.clientFor(AUTHORITY).procedure("com.atproto.space.deleteRecord", {
     space: groupMembersUri(AUTHORITY),
     repo: AUTHORITY,
-    collection: OPENSOCIAL_COLLECTION.membership,
+    collection: ATGRP_COLLECTION.membership,
     rkey: ALICE,
   });
   network.advanceClock(core.options.truthIntervalMs);
@@ -743,7 +743,7 @@ test("D14 purge waits for both listRepos and verifiedRosterMembers, and RepoNotF
   await network.clientFor(AUTHORITY).procedure("com.atproto.space.deleteRecord", {
     space: groupMembersUri(AUTHORITY),
     repo: AUTHORITY,
-    collection: OPENSOCIAL_COLLECTION.membership,
+    collection: ATGRP_COLLECTION.membership,
     rkey: BOB,
   });
   await core.markSpaceStale(channels.tasks!);
@@ -1302,7 +1302,7 @@ test("cold in-flight generation-0 syncVerifiedWorkspaceSnapshot cannot commit st
     spaceType: "new.flock.ext.tasks",
     skey: tasksSpace.split("/").at(-1)!,
     policy: {
-      $type: OPENSOCIAL_POLICY,
+      $type: ATGRP_POLICY,
       publicRead: false,
       unlisted: false,
       grants: [{ role: "member", read: true, write: true }],
@@ -1396,10 +1396,10 @@ test("followRepoOps isolates failed initial writers from new joiners, tracks per
     await network.clientFor(AUTHORITY).procedure("com.atproto.space.putRecord", {
       space: groupMembersUri(AUTHORITY),
       repo: AUTHORITY,
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: CAROL,
       record: {
-        $type: OPENSOCIAL_COLLECTION.membership,
+        $type: ATGRP_COLLECTION.membership,
         roles: ["member", channelRoleKey("r2h2-trace1")],
         createdAt: "2026-11-10T12:00:00.000Z",
       },
@@ -1969,7 +1969,7 @@ test("R12 D12.4: listWriters incremental #repoRemoved evicts writer rows and fol
     await network.clientFor(AUTHORITY).procedure("com.atproto.space.deleteRecord", {
       space: groupMembersUri(AUTHORITY),
       repo: AUTHORITY,
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: BOB,
     });
     let bobRepoCalls = 0;
@@ -1995,10 +1995,10 @@ test("R12 D12.4: listWriters incremental #repoRemoved evicts writer rows and fol
     await network.clientFor(AUTHORITY).procedure("com.atproto.space.putRecord", {
       space: groupMembersUri(AUTHORITY),
       repo: AUTHORITY,
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: BOB,
       record: {
-        $type: OPENSOCIAL_COLLECTION.membership,
+        $type: ATGRP_COLLECTION.membership,
         roles: ["member", channelRoleKey("r12-repo-removed")],
         createdAt: "2026-11-10T12:00:00.000Z",
       },
@@ -2078,7 +2078,7 @@ test("R12 D12.4: listWriters incremental #repoRemoved evicts writer rows and fol
     await network.clientFor(AUTHORITY).procedure("com.atproto.space.deleteRecord", {
       space: groupMembersUri(AUTHORITY),
       repo: AUTHORITY,
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: BOB,
     });
     network.interceptResponse = ({ method, params, response }) => {
@@ -2196,7 +2196,7 @@ test("R12 D12.6.2 (N3): authority RepoTakendown/RepoDeactivated is transient sus
     assert.equal(snapDuringWarmSuspension.summary?.name, "Workspace acme", "local profile preserved during authority suspension");
     assert.equal(snapDuringWarmSuspension.summary?.channels.length, 1, "local directory preserved during authority suspension");
     assert.equal(snapDuringWarmSuspension.rosterMembers.has(ALICE), true, "local membership preserved during authority suspension");
-    assert.ok((await alice.sync.store.records(fixture.members, OPENSOCIAL_COLLECTION.membership, AUTHORITY)).length >= 2, "local membership records preserved");
+    assert.ok((await alice.sync.store.records(fixture.members, ATGRP_COLLECTION.membership, AUTHORITY)).length >= 2, "local membership records preserved");
 
     const channelVerifiedDuringSuspension = await alice.sync.syncVerifiedSpace({
       space: general,
@@ -2256,7 +2256,7 @@ test("Round 16 Fix #3: delayed writer scan excluding B superseded by invalidatio
   await network.clientFor(AUTHORITY).procedure("com.atproto.space.deleteRecord", {
     space: groupMembersUri(AUTHORITY),
     repo: AUTHORITY,
-    collection: OPENSOCIAL_COLLECTION.membership,
+    collection: ATGRP_COLLECTION.membership,
     rkey: BOB,
   });
 
@@ -2287,10 +2287,10 @@ test("Round 16 Fix #3: delayed writer scan excluding B superseded by invalidatio
   await network.clientFor(AUTHORITY).procedure("com.atproto.space.putRecord", {
     space: groupMembersUri(AUTHORITY),
     repo: AUTHORITY,
-    collection: OPENSOCIAL_COLLECTION.membership,
+    collection: ATGRP_COLLECTION.membership,
     rkey: BOB,
     record: {
-      $type: OPENSOCIAL_COLLECTION.membership,
+      $type: ATGRP_COLLECTION.membership,
       roles: ["member", channelRoleKey("r16-writer-race")],
       createdAt: "2026-11-10T12:05:00.000Z",
     },

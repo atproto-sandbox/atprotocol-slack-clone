@@ -20,6 +20,8 @@ import {
   isRecordKey,
   isSkey,
   isTid,
+  isValidModTag,
+  isValidRoleId,
   normalizeLegacySpaceUri,
   parseAnySpaceRecordUri,
   parseAppInboxUri,
@@ -32,12 +34,12 @@ import {
   parseGroupMembersUri,
   parseGroupMetaUri,
   parseInboxUri,
-  parsePersonalInvitesUri,
+  parsePersonalInboxUri,
   parseSpaceRecordUri,
   parseSpaceUri,
   parseTasksSpaceUri,
   parseWorkspaceUri,
-  personalInvitesUri,
+  personalInboxUri,
   reactionRecordKey,
   recordKeyHash,
   requestDigest,
@@ -51,15 +53,46 @@ import {
   workspaceUri,
 } from "./keys";
 
-test("stable hashes and appRoleKey use UTF-8 SHA-256 and lowercase unpadded base32", () => {
+test("stable hashes, appRoleKey, channelRoleKey, isValidRoleId, and isValidModTag follow Atmosphere Groups constraints", () => {
   assert.equal(stableHash("abc"), "xj4bnp4pahh6uqkbidpf3lrceoyagyndsylxvhfucd7wd4qacwwq");
   assert.equal(recordKeyHash("abc"), "x:j:4:b:n:p:4:p:a:h:h:6:u:q:k:b:i:d:p:f:3:l:r:c:e:o:y:a:g:y:n:d:s:y:l:x:v:h:f:u:c:d:7:w:d:4:q:a:c:w:w:q");
   assert.equal(subjectKey("did:plc:alice"), `d-${recordKeyHash("did:plc:alice")}`);
   const roleKey = appRoleKey("did:plc:bot1");
-  assert.equal(roleKey.length, 56);
-  assert.match(roleKey, /^app-[a-z2-7]{52}$/);
+  assert.equal(roleKey.length, 68);
+  assert.match(roleKey, /^app-[a-p]{64}$/);
+  assert.equal(isValidRoleId(roleKey), true);
   assert.equal(isRecordKey(roleKey), true);
-  assert.equal(channelRoleKey("general"), "channel-general");
+
+  // Bijective alpha-nibble channelRoleKey works for short, 61-char, and max 128-char skeys
+  const genRole = channelRoleKey("general");
+  assert.match(genRole, /^channel-[a-p]+$/);
+  assert.equal(isValidRoleId(genRole), true);
+  assert.notEqual(channelRoleKey("general"), channelRoleKey("General"));
+  assert.notEqual(channelRoleKey("a_b"), channelRoleKey("a-b"));
+  const key61Role = channelRoleKey("c".repeat(61));
+  assert.equal(key61Role.length, 8 + 61 * 2);
+  assert.equal(isValidRoleId(key61Role), true);
+  const key128Role = channelRoleKey("k".repeat(128));
+  assert.equal(key128Role.length, 8 + 128 * 2);
+  assert.equal(isValidRoleId(key128Role), true);
+
+  // Role ID syntax: [a-z-]{3,512}
+  assert.equal(isValidRoleId("mod"), true);
+  assert.equal(isValidRoleId("a-b"), true);
+  assert.equal(isValidRoleId("ab"), false);
+  assert.equal(isValidRoleId("Mod"), false);
+  assert.equal(isValidRoleId("mod1"), false);
+  assert.equal(isValidRoleId("a".repeat(512)), true);
+  assert.equal(isValidRoleId("a".repeat(513)), false);
+
+  // Mod tag syntax: [a-z-]{1,128}
+  assert.equal(isValidModTag("a"), true);
+  assert.equal(isValidModTag("needs-review"), true);
+  assert.equal(isValidModTag(""), false);
+  assert.equal(isValidModTag("BadTag"), false);
+  assert.equal(isValidModTag("tag1"), false);
+  assert.equal(isValidModTag("a".repeat(128)), true);
+  assert.equal(isValidModTag("a".repeat(129)), false);
   assert.equal(requestRecordKey("at:space/did:plc:owner/new.flock.channel/general", "did:plc:alice"),
     `r-${recordKeyHash("at:space/did:plc:owner/new.flock.channel/general\u0000did:plc:alice")}`);
   const messageUri = spaceRecordUri("at:space/did:plc:owner/new.flock.channel/general", "did:plc:alice", "new.flock.channel.message", "abc");
@@ -117,19 +150,19 @@ test("isRecordKey and parseSpaceUri accept 1..512-character protocol record keys
   assert.equal(parseSpaceUri("at:space/did:plc:owner/third.party.modality/.."), null);
 });
 
-test("OpenSocial and Flock literal:self space URIs enforce self keys strictly", () => {
-  assert.equal(groupMetaUri("did:plc:grp"), "at:space/did:plc:grp/group.opensocial.meta/self");
-  assert.equal(groupMembersUri("did:plc:grp"), "at:space/did:plc:grp/group.opensocial.members/self");
-  assert.equal(personalInvitesUri("did:plc:alice"), "at:space/did:plc:alice/group.opensocial.invites/self");
+test("Atmosphere Groups and Flock literal:self space URIs enforce self keys strictly", () => {
+  assert.equal(groupMetaUri("did:plc:grp"), "at:space/did:plc:grp/org.atgrp.meta/self");
+  assert.equal(groupMembersUri("did:plc:grp"), "at:space/did:plc:grp/org.atgrp.members/self");
+  assert.equal(personalInboxUri("did:plc:alice"), "at:space/did:plc:alice/org.atgrp.inbox/self");
   assert.equal(workspaceUri("did:plc:grp"), "at:space/did:plc:grp/new.flock.workspace/self");
   assert.equal(inboxUri("did:plc:grp"), "at:space/did:plc:grp/new.flock.inbox/self");
 
-  assert.deepEqual(parseGroupMetaUri("at:space/did:plc:grp/group.opensocial.meta/self"), { groupDid: "did:plc:grp" });
-  assert.equal(parseGroupMetaUri("at:space/did:plc:grp/group.opensocial.meta/other"), null);
-  assert.deepEqual(parseGroupMembersUri("at:space/did:plc:grp/group.opensocial.members/self"), { groupDid: "did:plc:grp" });
-  assert.equal(parseGroupMembersUri("at:space/did:plc:grp/group.opensocial.members/other"), null);
-  assert.deepEqual(parsePersonalInvitesUri("at:space/did:plc:alice/group.opensocial.invites/self"), { userDid: "did:plc:alice" });
-  assert.equal(parsePersonalInvitesUri("at:space/did:plc:alice/group.opensocial.invites/other"), null);
+  assert.deepEqual(parseGroupMetaUri("at:space/did:plc:grp/org.atgrp.meta/self"), { groupDid: "did:plc:grp" });
+  assert.equal(parseGroupMetaUri("at:space/did:plc:grp/org.atgrp.meta/other"), null);
+  assert.deepEqual(parseGroupMembersUri("at:space/did:plc:grp/org.atgrp.members/self"), { groupDid: "did:plc:grp" });
+  assert.equal(parseGroupMembersUri("at:space/did:plc:grp/org.atgrp.members/other"), null);
+  assert.deepEqual(parsePersonalInboxUri("at:space/did:plc:alice/org.atgrp.inbox/self"), { userDid: "did:plc:alice" });
+  assert.equal(parsePersonalInboxUri("at:space/did:plc:alice/org.atgrp.inbox/other"), null);
 
   assert.deepEqual(parseWorkspaceUri("at:space/did:plc:owner/new.flock.workspace/self"), { authorityDid: "did:plc:owner", skey: "self" });
   assert.equal(parseWorkspaceUri("at:space/did:plc:owner/new.flock.workspace/team"), null);

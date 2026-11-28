@@ -13,19 +13,19 @@ test("computeCanonicalMigrationManifest produces deterministic UTF-16 sorted RFC
     sourceLocalRotationKey: "did:key:zDnaerx9CtbPJ1q36T5Ln5wYt3MQYeGRG5ehnPAmxcf5mDZpv",
     publicRepoDataRootCid: "bafyreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku",
     publicRecords: [
-      { collection: "group.opensocial.declaration", rkey: "self", cid: "cid-1" },
+      { collection: "org.atgrp.declaration", rkey: "self", cid: "cid-1" },
       { collection: "app.bsky.actor.profile", rkey: "self", cid: "cid-2" },
     ],
     blobs: ["cid-b", "cid-a", "cid-b"],
     spaces: [
       {
-        spaceUri: "at:space/did:plc:group1/group.opensocial.meta/self",
+        spaceUri: "at:space/did:plc:group1/org.atgrp.meta/self",
         isOwnAuthority: true,
         spaceMetaSha256: "aa".repeat(32),
         repoRootDataHex: "BB".repeat(32),
       },
       {
-        spaceUri: "at:space/did:plc:invitee/group.opensocial.invites/self",
+        spaceUri: "at:space/did:plc:invitee/org.atgrp.inbox/self",
         isOwnAuthority: false,
         spaceMetaSha256: "ignored",
         repoRootDataHex: "cc".repeat(32),

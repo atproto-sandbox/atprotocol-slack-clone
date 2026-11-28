@@ -1,4 +1,4 @@
-import { normalizeLegacySpaceUri } from "@flock/protocol/keys";
+import type {} from "@flock/protocol/keys";
 
 export type DeskJoinPhase =
   | "submitting"
@@ -82,7 +82,7 @@ export interface DeskLifecycleStore {
 }
 
 const DATABASE_PREFIX = "flock-desk-lifecycle:";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 export function deskLifecycleDatabaseName(viewerDid: string): string {
   return `${DATABASE_PREFIX}${viewerDid}`;
@@ -173,23 +173,13 @@ export class IndexedDbLifecycleStore implements DeskLifecycleStore {
       const joining = db.objectStoreNames.contains("joiningGroups")
         ? tx?.objectStore("joiningGroups")
         : db.createObjectStore("joiningGroups", { keyPath: "operationId" });
-      if (!db.objectStoreNames.contains("leavingGroups")) {
-        db.createObjectStore("leavingGroups", { keyPath: "groupDid" });
-      }
-      if (event.oldVersion > 0 && event.oldVersion < 2 && joining) {
-        const cursorReq = joining.openCursor();
-        cursorReq.onsuccess = () => {
-          const cursor = cursorReq.result;
-          if (!cursor) return;
-          const row = cursor.value as DeskJoiningGroupEntry;
-          if (typeof row.inviteUri === "string") {
-            const normalized = normalizeLegacySpaceUri(row.inviteUri);
-            if (normalized !== row.inviteUri) {
-              cursor.update({ ...row, inviteUri: normalized });
-            }
-          }
-          cursor.continue();
-        };
+      const leaving = db.objectStoreNames.contains("leavingGroups")
+        ? tx?.objectStore("leavingGroups")
+        : db.createObjectStore("leavingGroups", { keyPath: "groupDid" });
+      if (event.oldVersion > 0 && event.oldVersion < 3) {
+        // Clear pre-R15 DID-only lifecycle rows so legacy OpenSocial entries cannot resume against R15 org.atgrp.* endpoints.
+        joining?.clear();
+        leaving?.clear();
       }
     };
     const db = await settle(opening);

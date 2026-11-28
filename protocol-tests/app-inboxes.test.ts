@@ -46,7 +46,7 @@ test("app inboxes on the pinned PDS: member command writes, app-only reads, remo
       { recordWriteNotification },
       { getRawDb },
       keys,
-      { OPENSOCIAL_COLLECTION, OPENSOCIAL_PERMISSION_SET, OPENSOCIAL_POLICY, SPACE_TYPE },
+      { ATGRP_COLLECTION, ATGRP_PERMISSION_SET, ATGRP_POLICY, SPACE_TYPE },
     ] = await Promise.all([
       import("@flock/operator/operator/authority-grant"),
       import("@flock/operator/operator/kinds/create-workspace"),
@@ -231,7 +231,7 @@ test("app inboxes on the pinned PDS: member command writes, app-only reads, remo
           installedAt: nowIso,
           updatedAt: nowIso,
         });
-        await putAuthorityRecord(grant, membersSpace, OPENSOCIAL_COLLECTION.role, rKey, {
+        await putAuthorityRecord(grant, membersSpace, ATGRP_COLLECTION.role, rKey, {
           displayName: `App: ${app.did}`,
         });
         await putMembershipRoles(grant, group.groupDid, app.did, [rKey]);
@@ -251,7 +251,7 @@ test("app inboxes on the pinned PDS: member command writes, app-only reads, remo
       // Store a narrower group authority grant (omitting `space:new.flock.app.inbox` and `collection=new.flock.app.install` write).
       const preR10Scope = [
         "atproto",
-        `include:${OPENSOCIAL_PERMISSION_SET.authManageGroup}`,
+        `include:${ATGRP_PERMISSION_SET.authManageAdmin}`,
         "repo:*",
         "blob:*/*",
         "identity:*",
@@ -265,7 +265,7 @@ test("app inboxes on the pinned PDS: member command writes, app-only reads, remo
       ].join(" ");
       await storeGroupAuthorityGrant(pds, adminActor, group.groupDid, "r10-prer10-grant", { scope: preR10Scope });
 
-      // O(1) OpenSocial inviteMember and removeMember succeed cleanly under the narrower grant.
+      // O(1) Atmosphere Groups inviteMember and removeMember succeed cleanly under the narrower grant.
       const extraMember = await pds.createActor("r10extra", 0);
       assert.equal((await execute(keys.tidNow(), { kind: "inviteMember", subject: extraMember.did })).operation?.state, "completed");
       assert.equal((await execute(keys.tidNow(), { kind: "removeMember", subject: extraMember.did })).operation?.state, "completed");
@@ -281,7 +281,7 @@ test("app inboxes on the pinned PDS: member command writes, app-only reads, remo
       // Introduce channel policy drift (stripping `member` grant on `#general`) -> `reconcileWorkspace` under `preR10Scope`
       // repairs `#general` policy and then surfaces `AuthoritySessionUnavailable` when reaching missing `app.inbox` spaces!
       await updateOpenSocialSpacePolicy(await restoreAuthorityGrant(group.groupDid), created.channel, {
-        $type: OPENSOCIAL_POLICY,
+        $type: ATGRP_POLICY,
         publicRead: false,
         unlisted: false,
         grants: [{ role: "admin", read: true, write: true }],
@@ -359,7 +359,7 @@ test("envelope: 20 active installs at a 200-person roster finish reconcileWorksp
       { humanMemberDids, liveSpaceAccess, readGroupGovernanceState },
       { mapLimited },
       keys,
-      { OPENSOCIAL_COLLECTION },
+      { ATGRP_COLLECTION },
     ] = await Promise.all([
       import("@flock/operator/operator/authority-grant"),
       import("@flock/operator/operator/kinds/create-workspace"),
@@ -396,10 +396,10 @@ test("envelope: 20 active installs at a 200-person roster finish reconcileWorksp
       repo: group.groupDid,
       writes: people.map((person) => ({
         $type: "com.atproto.space.applyWrites#create",
-        collection: OPENSOCIAL_COLLECTION.membership,
+        collection: ATGRP_COLLECTION.membership,
         rkey: person.did,
         value: {
-          $type: OPENSOCIAL_COLLECTION.membership,
+          $type: ATGRP_COLLECTION.membership,
           roles: ["member"],
           createdAt: nowIso,
         },

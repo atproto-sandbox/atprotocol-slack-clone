@@ -19,7 +19,7 @@ import { WorkspaceEnvelopeError } from "@flock/protocol/workspace-summary";
 import {
   channelUri,
   decisionRecordKey,
-  personalInvitesUri,
+  personalInboxUri,
   requestRecordKey,
   SELF_SKEY,
   spaceRecordUri,
@@ -29,9 +29,9 @@ import {
   ATPROTO_SPACE_COLLECTION,
   COLLECTION,
   FLOCK_EXTENSION_FIELD,
-  OPENSOCIAL_COLLECTION,
-  OPENSOCIAL_POLICY,
-  OPENSOCIAL_SPACE_TYPE,
+  ATGRP_COLLECTION,
+  ATGRP_POLICY,
+  ATGRP_SPACE_TYPE,
   OPERATOR_METHOD,
   REPO_COLLECTION,
   SPACE_TYPE,
@@ -83,14 +83,14 @@ test("discover lists readable workspaces, turns a refused one into an invitation
   await network.clientFor(removed.groupDid).procedure("com.atproto.space.deleteRecord", {
     space: removed.members,
     repo: removed.groupDid,
-    collection: OPENSOCIAL_COLLECTION.membership,
+    collection: ATGRP_COLLECTION.membership,
     rkey: ALICE,
   });
   await network.clientFor(deleted.groupDid).procedure("com.atproto.space.deleteSpace", { space: deleted.workspace });
   await network.clientFor(invalid.groupDid).procedure("com.atproto.space.deleteRecord", {
     space: invalid.meta,
     repo: invalid.groupDid,
-    collection: OPENSOCIAL_COLLECTION.profile,
+    collection: ATGRP_COLLECTION.about,
     rkey: SELF_SKEY,
   });
 
@@ -120,7 +120,7 @@ test("a workspace no longer listed after discovery is dropped with its channels,
   await network.clientFor(AUTHORITY).procedure("com.atproto.space.deleteRecord", {
     space: fixture.members,
     repo: AUTHORITY,
-    collection: OPENSOCIAL_COLLECTION.membership,
+    collection: ATGRP_COLLECTION.membership,
     rkey: ALICE,
   });
   network.advanceClock(11 * 60 * 1000);
@@ -152,16 +152,16 @@ test("accept writes group.opensocial.acceptance/self only while membership is cu
   await owner.procedure("com.atproto.space.putRecord", {
     space: fixture.members,
     repo: AUTHORITY,
-    collection: OPENSOCIAL_COLLECTION.membership,
+    collection: ATGRP_COLLECTION.membership,
     rkey: ALICE,
-    record: { $type: OPENSOCIAL_COLLECTION.membership, roles: ["member"], createdAt: "2026-11-10T12:00:00.000Z" },
+    record: { $type: ATGRP_COLLECTION.membership, roles: ["member"], createdAt: "2026-11-10T12:00:00.000Z" },
   });
   const accepted = await alice.workspaces.accept(fixture.workspace);
-  assert.match(accepted.marker, new RegExp(`/${OPENSOCIAL_COLLECTION.acceptance}/self$`));
+  assert.match(accepted.marker, new RegExp(`/${ATGRP_COLLECTION.confirmation}/self$`));
   const ownAcc = await network.clientFor(ALICE).query<{ value: Record<string, unknown> }>("com.atproto.space.getRecord", {
     space: fixture.members,
     repo: ALICE,
-    collection: OPENSOCIAL_COLLECTION.acceptance,
+    collection: ATGRP_COLLECTION.confirmation,
     rkey: SELF_SKEY,
   });
   assert.equal(typeof ownAcc.value["new.flock.incarnation"], "string");
@@ -351,7 +351,7 @@ test("WorkspaceClient discovers extensions, tracks completeness flags against in
     spaceType: SPACE_TYPE.tasks,
     skey: SELF_SKEY,
     policy: {
-      $type: OPENSOCIAL_POLICY,
+      $type: ATGRP_POLICY,
       publicRead: false,
       unlisted: false,
       grants: [{ role: "member", read: true, write: true }],
@@ -406,13 +406,13 @@ test("WorkspaceClient discovers extensions, tracks completeness flags against in
       const url = new URL(request.url);
       if (url.pathname === "/xrpc/com.atproto.space.listRecords") {
         const col = url.searchParams.get("collection");
-        if (injectMalformed && col === OPENSOCIAL_COLLECTION.membership) {
+        if (injectMalformed && col === ATGRP_COLLECTION.membership) {
           const upstream = await baseTransport.fetchEndpoint(request);
           const json = (await upstream.json()) as { records: unknown[] };
           return Response.json({
             records: [
               ...json.records,
-              { collection: OPENSOCIAL_COLLECTION.membership, rkey: "not-a-did", value: { roles: [], createdAt: nowIso } },
+              { collection: ATGRP_COLLECTION.membership, rkey: "not-a-did", value: { roles: [], createdAt: nowIso } },
             ],
           });
         }
@@ -499,7 +499,7 @@ test("WorkspaceClient discovers extensions, tracks completeness flags against in
   await owner.procedure("com.atproto.space.deleteRecord", {
     space: fixture.members,
     repo: AUTHORITY,
-    collection: OPENSOCIAL_COLLECTION.membership,
+    collection: ATGRP_COLLECTION.membership,
     rkey: ALICE,
   });
   network.advanceClock(11 * 60 * 1000);
@@ -513,7 +513,7 @@ test("ensureInvitesSpace provisions fresh PDS invites/self, deduplicates concurr
     const network = new FakeNetwork();
     network.createAccount(ALICE, "pds1");
     const alice = createEngine(transportFor(network, ALICE));
-    const expectedUri = personalInvitesUri(ALICE);
+    const expectedUri = personalInboxUri(ALICE);
 
     const firstCalls = await countCalls(network, async () => {
       const uri = await alice.workspaces.ensureInvitesSpace();
@@ -556,7 +556,7 @@ test("ensureInvitesSpace provisions fresh PDS invites/self, deduplicates concurr
         },
       } as ClientTransport["memberClient"],
     });
-    assert.equal(await racing.workspaces.ensureInvitesSpace(), personalInvitesUri(ALICE));
+    assert.equal(await racing.workspaces.ensureInvitesSpace(), personalInboxUri(ALICE));
     assert.equal(interceptedCreate, true);
   }
 
@@ -572,12 +572,12 @@ test("ensureInvitesSpace provisions fresh PDS invites/self, deduplicates concurr
     network.createAccount(BOB, "pds1");
     const ownClient = network.clientFor(ALICE);
     await ownClient.procedure("com.atproto.space.createSpace", {
-      spaceType: OPENSOCIAL_SPACE_TYPE.invites,
+      spaceType: ATGRP_SPACE_TYPE.inbox,
       skey: SELF_SKEY,
       policy: badCase.policy,
     });
     if (badCase.addMember) {
-      network.seedPersonalSpaceMembers(ALICE, personalInvitesUri(ALICE), [
+      network.seedPersonalSpaceMembers(ALICE, personalInboxUri(ALICE), [
         { did: BOB, read: true, write: true },
       ]);
     }
@@ -647,24 +647,24 @@ test("listInvites reads cross-PDS invites, redirects across PLC host migration o
   const rawInv1 = await network.clientFor(group1.groupDid).query<{ value: Record<string, unknown> }>(
     "com.atproto.space.getRecord",
     {
-      space: personalInvitesUri(ALICE),
+      space: personalInboxUri(ALICE),
       repo: group1.groupDid,
-      collection: OPENSOCIAL_COLLECTION.invite,
+      collection: ATGRP_COLLECTION.invite,
       rkey: createdInv1.rkey,
     },
   );
-  assert.equal("group" in rawInv1.value, false, "standards-conformant group.opensocial.invite omits group property");
+  assert.equal("group" in rawInv1.value, false, "standards-conformant org.atgrp.invite omits group property");
   assert.equal(rawInv1.value.message, "Join Group 1!");
 
   // Spoofed invite record claiming a mismatched `group` DID is rejected, while legacy matching `group` is accepted!
   const spoofRkey = key(601);
   await network.clientFor(group1.groupDid).procedure("com.atproto.space.putRecord", {
-    space: personalInvitesUri(ALICE),
+    space: personalInboxUri(ALICE),
     repo: group1.groupDid,
-    collection: OPENSOCIAL_COLLECTION.invite,
+    collection: ATGRP_COLLECTION.invite,
     rkey: spoofRkey,
     record: {
-      $type: OPENSOCIAL_COLLECTION.invite,
+      $type: ATGRP_COLLECTION.invite,
       group: group2.groupDid,
       createdAt: "2026-11-10T12:00:00.000Z",
     },
@@ -704,7 +704,7 @@ test("listInvites reads cross-PDS invites, redirects across PLC host migration o
   tombstonedGroups.add(group2.groupDid);
   invites = await aliceMigration.workspaces.listInvites();
   assert.deepEqual(invites.map((i) => i.groupDid), [group1.groupDid]);
-  assert.deepEqual(await alice.sync.store.records(personalInvitesUri(ALICE), OPENSOCIAL_COLLECTION.invite, group2.groupDid), []);
+  assert.deepEqual(await alice.sync.store.records(personalInboxUri(ALICE), ATGRP_COLLECTION.invite, group2.groupDid), []);
 });
 
 test("3-phase leavingGroups preserves acceptance/self on LastAdmin and MembershipIncarnationMismatch, and reconciles cross-device rejoin in reconciling_post_delete", async () => {
@@ -720,7 +720,7 @@ test("3-phase leavingGroups preserves acceptance/self on LastAdmin and Membershi
   const intactAcc = await network.clientFor(ALICE).query<{ value: Record<string, unknown> }>("com.atproto.space.getRecord", {
     space: soleAdminWs.members,
     repo: ALICE,
-    collection: OPENSOCIAL_COLLECTION.acceptance,
+    collection: ATGRP_COLLECTION.confirmation,
     rkey: SELF_SKEY,
   });
   assert.equal(typeof intactAcc.value.createdAt, "string", "own-PDS acceptance/self stayed untouched on LastAdmin");
@@ -738,7 +738,7 @@ test("3-phase leavingGroups preserves acceptance/self on LastAdmin and Membershi
   const newerAcc = await network.clientFor(ALICE).query<{ value: Record<string, unknown> }>("com.atproto.space.getRecord", {
     space: group2.members,
     repo: ALICE,
-    collection: OPENSOCIAL_COLLECTION.acceptance,
+    collection: ATGRP_COLLECTION.confirmation,
     rkey: SELF_SKEY,
   });
   assert.notEqual(newerAcc.value["new.flock.incarnation"], "stale-incarnation-from-old-device");
@@ -748,7 +748,7 @@ test("3-phase leavingGroups preserves acceptance/self on LastAdmin and Membershi
   const memBefore = await network.clientFor(group3.groupDid).query<{ value: Record<string, unknown> }>("com.atproto.space.getRecord", {
     space: group3.members,
     repo: group3.groupDid,
-    collection: OPENSOCIAL_COLLECTION.membership,
+    collection: ATGRP_COLLECTION.membership,
     rkey: ALICE,
   });
   const liveInc = String(memBefore.value["new.flock.incarnation"]);
@@ -756,7 +756,7 @@ test("3-phase leavingGroups preserves acceptance/self on LastAdmin and Membershi
   await network.clientFor(ALICE).procedure("com.atproto.space.deleteRecord", {
     space: group3.members,
     repo: ALICE,
-    collection: OPENSOCIAL_COLLECTION.acceptance,
+    collection: ATGRP_COLLECTION.confirmation,
     rkey: SELF_SKEY,
   });
   await alice.sync.store.putLeavingGroup({
@@ -771,7 +771,7 @@ test("3-phase leavingGroups preserves acceptance/self on LastAdmin and Membershi
   const restoredAcc = await network.clientFor(ALICE).query<{ value: Record<string, unknown> }>("com.atproto.space.getRecord", {
     space: group3.members,
     repo: ALICE,
-    collection: OPENSOCIAL_COLLECTION.acceptance,
+    collection: ATGRP_COLLECTION.confirmation,
     rkey: SELF_SKEY,
   });
   assert.equal(restoredAcc.value["new.flock.incarnation"], liveInc);
@@ -783,7 +783,7 @@ test("3-phase leavingGroups preserves acceptance/self on LastAdmin and Membershi
     network.clientFor(ALICE).query("com.atproto.space.getRecord", {
       space: group3.members,
       repo: ALICE,
-      collection: OPENSOCIAL_COLLECTION.acceptance,
+      collection: ATGRP_COLLECTION.confirmation,
       rkey: SELF_SKEY,
     }),
   );
@@ -840,9 +840,9 @@ test("5-phase joiningGroups handles open, invite, approval (pending survival, or
       body: JSON.stringify({
         space: appWs.members,
         repo: appWs.groupDid,
-        collection: OPENSOCIAL_COLLECTION.membership,
+        collection: ATGRP_COLLECTION.membership,
         rkey: ALICE,
-        record: { $type: OPENSOCIAL_COLLECTION.membership, roles: ["member"], createdAt: "2026-11-10T12:00:00.000Z" },
+        record: { $type: ATGRP_COLLECTION.membership, roles: ["member"], createdAt: "2026-11-10T12:00:00.000Z" },
       }),
     }),
   );
@@ -896,7 +896,7 @@ test("5-phase joiningGroups handles open, invite, approval (pending survival, or
   const mockedAlice = createEngine({
     ...base,
     fetchEndpoint: async (req) => {
-      if (new URL(req.url).pathname === "/xrpc/group.opensocial.requestJoin") {
+      if (new URL(req.url).pathname === "/xrpc/org.atgrp.requestJoin") {
         requestJoinCalls += 1;
         if (mockJoinMode === "unsupported") {
           return Response.json({ status: "waitlisted_v2" });
@@ -1035,7 +1035,7 @@ test("leaveGroup preserves leaving_group journal on 409 MigrationInProgress and 
   const alice = createEngine({
     ...base,
     fetchEndpoint: async (req) => {
-      if (migrationActive && new URL(req.url).pathname === "/xrpc/group.opensocial.leaveGroup") {
+      if (migrationActive && new URL(req.url).pathname === "/xrpc/org.atgrp.leaveGroup") {
         return Response.json(
           { error: "MigrationInProgress", message: "group repository frozen during host migration" },
           { status: 409 },
@@ -1199,7 +1199,7 @@ test("leaveGroup fails closed on incarnation read failures and parks RepoTakendo
       if (failJoinStatus && url.pathname === "/group-member/join-status") {
         return Response.json({ error: "UpstreamFailure", message: "join-status temporarily unavailable" }, { status: 503 });
       }
-      if (url.pathname === "/xrpc/group.opensocial.leaveGroup") {
+      if (url.pathname === "/xrpc/org.atgrp.leaveGroup") {
         leaveHeadersSeen.push(req.headers.get("if-match-membership-incarnation"));
       }
       return base.fetchEndpoint(req);
@@ -1221,11 +1221,11 @@ test("leaveGroup fails closed on incarnation read failures and parks RepoTakendo
       ...base,
       fetchEndpoint: async (req) => {
         const url = new URL(req.url);
-        if (takendownActive && url.pathname === "/xrpc/group.opensocial.leaveGroup") {
+        if (takendownActive && url.pathname === "/xrpc/org.atgrp.leaveGroup") {
           leaveHeadersSeen.push(req.headers.get("if-match-membership-incarnation"));
           return Response.json({ error: "RepoTakendown", message: "group temporarily taken down" }, { status: 400 });
         }
-        if (url.pathname === "/xrpc/group.opensocial.leaveGroup") {
+        if (url.pathname === "/xrpc/org.atgrp.leaveGroup") {
           leaveHeadersSeen.push(req.headers.get("if-match-membership-incarnation"));
         }
         return base.fetchEndpoint(req);
@@ -1249,7 +1249,7 @@ test("leaveGroup fails closed on incarnation read failures and parks RepoTakendo
     {
       space: ws.members,
       repo: ALICE,
-      collection: OPENSOCIAL_COLLECTION.acceptance,
+      collection: ATGRP_COLLECTION.confirmation,
       rkey: SELF_SKEY,
     },
   );
@@ -1268,7 +1268,7 @@ test("leaveGroup fails closed on incarnation read failures and parks RepoTakendo
     network.clientFor(ALICE).query("com.atproto.space.getRecord", {
       space: ws.members,
       repo: ALICE,
-      collection: OPENSOCIAL_COLLECTION.acceptance,
+      collection: ATGRP_COLLECTION.confirmation,
       rkey: SELF_SKEY,
     }),
   );
@@ -1353,8 +1353,8 @@ test("WorkspaceClient.summary withholds roster on truncated accountLabelScan, li
   const initialInvites = await aliceInvites.workspaces.listInvites();
   assert.equal(initialInvites.length, 2);
   const initialGroupBCached = await aliceInvites.sync.store.records(
-    personalInvitesUri(ALICE),
-    OPENSOCIAL_COLLECTION.invite,
+    personalInboxUri(ALICE),
+    ATGRP_COLLECTION.invite,
     invGroupB.groupDid,
   );
   assert.equal(initialGroupBCached.length, 1);
@@ -1372,7 +1372,7 @@ test("WorkspaceClient.summary withholds roster on truncated accountLabelScan, li
         const url = new URL(req.url);
         if (
           url.pathname === "/xrpc/com.atproto.space.listWriters" &&
-          url.searchParams.get("space") === personalInvitesUri(ALICE)
+          url.searchParams.get("space") === personalInboxUri(ALICE)
         ) {
           const offset = Number((url.searchParams.get("cursor") ?? "w-0").replace("w-", "")) || 0;
           const limit = Number(url.searchParams.get("limit") ?? "100");
@@ -1407,8 +1407,8 @@ test("WorkspaceClient.summary withholds roster on truncated accountLabelScan, li
   assert.equal(
     (
       await aliceInvites.sync.store.records(
-        personalInvitesUri(ALICE),
-        OPENSOCIAL_COLLECTION.invite,
+        personalInboxUri(ALICE),
+        ATGRP_COLLECTION.invite,
         invGroupB.groupDid,
       )
     ).length,
@@ -1419,8 +1419,8 @@ test("WorkspaceClient.summary withholds roster on truncated accountLabelScan, li
   // Per-writer record scan truncation (> 100 records) ALSO rejects with WorkspaceEnvelopeError while retaining cached records!
   const initialGroupACachedRkey = (
     await aliceInvites.sync.store.records(
-      personalInvitesUri(ALICE),
-      OPENSOCIAL_COLLECTION.invite,
+      personalInboxUri(ALICE),
+      ATGRP_COLLECTION.invite,
       invGroupA.groupDid,
     )
   )[0]!.rkey;
@@ -1432,9 +1432,9 @@ test("WorkspaceClient.summary withholds roster on truncated accountLabelScan, li
         const url = new URL(req.url);
         if (
           url.pathname === "/xrpc/com.atproto.space.listRecords" &&
-          url.searchParams.get("space") === personalInvitesUri(ALICE) &&
+          url.searchParams.get("space") === personalInboxUri(ALICE) &&
           url.searchParams.get("repo") === invGroupA.groupDid &&
-          url.searchParams.get("collection") === OPENSOCIAL_COLLECTION.invite
+          url.searchParams.get("collection") === ATGRP_COLLECTION.invite
         ) {
           const offset = Number((url.searchParams.get("cursor") ?? "r-0").replace("r-", "")) || 0;
           const limit = Number(url.searchParams.get("limit") ?? "100");
@@ -1443,11 +1443,11 @@ test("WorkspaceClient.summary withholds roster on truncated accountLabelScan, li
           const records = Array.from({ length: count }, (_, idx) => {
             const rkey = key(20_000 + offset + idx);
             return {
-              uri: `${personalInvitesUri(ALICE)}/${invGroupA.groupDid}/${OPENSOCIAL_COLLECTION.invite}/${rkey}`,
+              uri: `${personalInboxUri(ALICE)}/${invGroupA.groupDid}/${ATGRP_COLLECTION.invite}/${rkey}`,
               cid: "bafyreiinv",
-              collection: OPENSOCIAL_COLLECTION.invite,
+              collection: ATGRP_COLLECTION.invite,
               rkey,
-              value: { $type: OPENSOCIAL_COLLECTION.invite, createdAt: "2026-11-10T12:00:00.000Z" },
+              value: { $type: ATGRP_COLLECTION.invite, createdAt: "2026-11-10T12:00:00.000Z" },
             };
           });
           return Response.json({
@@ -1468,8 +1468,8 @@ test("WorkspaceClient.summary withholds roster on truncated accountLabelScan, li
       /exceeded bounded scan limits; invitation list is incomplete/.test(err.message),
   );
   const mergedGroupACached = await aliceInvites.sync.store.records(
-    personalInvitesUri(ALICE),
-    OPENSOCIAL_COLLECTION.invite,
+    personalInboxUri(ALICE),
+    ATGRP_COLLECTION.invite,
     invGroupA.groupDid,
   );
   assert.equal(
@@ -1567,7 +1567,7 @@ test("imported unversioned STAR memberships complete bilateral acceptance via le
     limit: 100,
   });
   const baseNonMemberships = baseListing.records
-    .filter((rec) => rec.collection !== OPENSOCIAL_COLLECTION.membership)
+    .filter((rec) => rec.collection !== ATGRP_COLLECTION.membership)
     .map((rec) => {
       const { $type: _type, ...rest } = rec.value;
       void _type;
@@ -1578,17 +1578,17 @@ test("imported unversioned STAR memberships complete bilateral acceptance via le
   await network.importRepoAs(ws.groupDid, ws.members, [
     ...baseNonMemberships,
     {
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: BOB,
       value: { roles: ["admin", "member"], createdAt: "2026-01-01T00:00:00.000Z" },
     },
     {
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: ALICE,
       value: { roles: ["member"], createdAt: "2026-01-01T00:00:00.000Z" },
     },
     {
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: CAROL,
       value: { roles: ["member"], createdAt: "2026-01-01T00:00:00.000Z" },
     },
@@ -1600,7 +1600,7 @@ test("imported unversioned STAR memberships complete bilateral acceptance via le
   }>("com.atproto.space.getRecord", {
     space: ws.members,
     repo: ws.groupDid,
-    collection: OPENSOCIAL_COLLECTION.membership,
+    collection: ATGRP_COLLECTION.membership,
     rkey: ALICE,
   });
   assert.equal(importedAliceMem.value[FLOCK_EXTENSION_FIELD.incarnation], undefined);
@@ -1622,7 +1622,7 @@ test("imported unversioned STAR memberships complete bilateral acceptance via le
     {
       space: ws.members,
       repo: ALICE,
-      collection: OPENSOCIAL_COLLECTION.acceptance,
+      collection: ATGRP_COLLECTION.confirmation,
       rkey: SELF_SKEY,
     },
   );
@@ -1648,17 +1648,17 @@ test("imported unversioned STAR memberships complete bilateral acceptance via le
   await network.importRepoAs(ws.groupDid, ws.members, [
     ...baseNonMemberships,
     {
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: BOB,
       value: { roles: ["admin", "member"], createdAt: "2026-01-01T00:00:00.000Z" },
     },
     {
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: ALICE,
       value: { roles: ["member"], createdAt: "2026-02-01T00:00:00.000Z" },
     },
     {
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: CAROL,
       value: { roles: ["member"], createdAt: "2026-01-01T00:00:00.000Z" },
     },
@@ -1757,14 +1757,14 @@ test("cancelJoinRequest deletes ONLY pending_approval journals while preserving 
     });
     // Simulate crash before bilateral acceptance completed (or right after acceptance for discovery_verified)
     if (postPhase !== "discovery_verified") {
-      await network.deleteAs(ALICE, postWs.members, OPENSOCIAL_COLLECTION.acceptance, SELF_SKEY);
+      await network.deleteAs(ALICE, postWs.members, ATGRP_COLLECTION.confirmation, SELF_SKEY);
     }
     const memRec = await network.clientFor(postWs.groupDid).query<{ value: Record<string, unknown> }>(
       "com.atproto.space.getRecord",
       {
         space: postWs.members,
         repo: postWs.groupDid,
-        collection: OPENSOCIAL_COLLECTION.membership,
+        collection: ATGRP_COLLECTION.membership,
         rkey: ALICE,
       },
     );
@@ -1824,9 +1824,9 @@ test("cancelJoinRequest deletes ONLY pending_approval journals while preserving 
       body: JSON.stringify({
         space: raceWs.members,
         repo: raceWs.groupDid,
-        collection: OPENSOCIAL_COLLECTION.membership,
+        collection: ATGRP_COLLECTION.membership,
         rkey: ALICE,
-        record: { $type: OPENSOCIAL_COLLECTION.membership, roles: ["member"], createdAt: "2026-11-10T12:00:00.000Z" },
+        record: { $type: ATGRP_COLLECTION.membership, roles: ["member"], createdAt: "2026-11-10T12:00:00.000Z" },
       }),
     }),
   );
@@ -1866,9 +1866,9 @@ test("cancelJoinRequest deletes ONLY pending_approval journals while preserving 
       body: JSON.stringify({
         space: transientWs.members,
         repo: transientWs.groupDid,
-        collection: OPENSOCIAL_COLLECTION.membership,
+        collection: ATGRP_COLLECTION.membership,
         rkey: ALICE,
-        record: { $type: OPENSOCIAL_COLLECTION.membership, roles: ["member"], createdAt: "2026-11-10T12:00:00.000Z" },
+        record: { $type: ATGRP_COLLECTION.membership, roles: ["member"], createdAt: "2026-11-10T12:00:00.000Z" },
       }),
     }),
   );
@@ -1946,7 +1946,7 @@ test("Round 9 Finding #4: WorkspaceClient.createWorkspace keeps joiningGroups at
           channels: [{ skey: "general", visibility: "public" }],
         });
         // Simulate Operator bootstrap: membership/<creator> exists on Group Host, personal acceptance/self is NOT written by Operator!
-        await network.deleteAs(iss, `at:space/${pendingGroupDid}/group.opensocial.members/self`, OPENSOCIAL_COLLECTION.acceptance, SELF_SKEY);
+        await network.deleteAs(iss, `at:space/${pendingGroupDid}/org.atgrp.members/self`, ATGRP_COLLECTION.confirmation, SELF_SKEY);
         return {
           operationId: req.operationId,
           groupDid: pendingGroupDid,
@@ -1992,9 +1992,9 @@ test("Round 9 Finding #4: WorkspaceClient.createWorkspace keeps joiningGroups at
   // Personal PDS `acceptance/self` was NOT written while Operator was pending!
   await assert.rejects(
     network.clientFor(ALICE).query("com.atproto.space.getRecord", {
-      space: `at:space/${pendingGroupDid}/group.opensocial.members/self`,
+      space: `at:space/${pendingGroupDid}/org.atgrp.members/self`,
       repo: ALICE,
-      collection: OPENSOCIAL_COLLECTION.acceptance,
+      collection: ATGRP_COLLECTION.confirmation,
       rkey: SELF_SKEY,
     }),
   );
@@ -2013,9 +2013,9 @@ test("Round 9 Finding #4: WorkspaceClient.createWorkspace keeps joiningGroups at
   const ownAcceptance = await network.clientFor(ALICE).query<{ value: Record<string, unknown> }>(
     "com.atproto.space.getRecord",
     {
-      space: `at:space/${pendingGroupDid}/group.opensocial.members/self`,
+      space: `at:space/${pendingGroupDid}/org.atgrp.members/self`,
       repo: ALICE,
-      collection: OPENSOCIAL_COLLECTION.acceptance,
+      collection: ATGRP_COLLECTION.confirmation,
       rkey: SELF_SKEY,
     },
   );
@@ -2038,7 +2038,7 @@ test("Round 9 Finding #4: WorkspaceClient.createWorkspace keeps joiningGroups at
             members: [iss],
             channels: [{ skey: "general", visibility: "public" }],
           });
-          await network.deleteAs(iss, `at:space/${crashedGroupDid}/group.opensocial.members/self`, OPENSOCIAL_COLLECTION.acceptance, SELF_SKEY);
+          await network.deleteAs(iss, `at:space/${crashedGroupDid}/org.atgrp.members/self`, ATGRP_COLLECTION.confirmation, SELF_SKEY);
           return {
             operationId: req.operationId,
             groupDid: crashedGroupDid,
@@ -2056,7 +2056,7 @@ test("Round 9 Finding #4: WorkspaceClient.createWorkspace keeps joiningGroups at
           if (
             failAcceptanceWriteOnce &&
             nsid === "com.atproto.space.putRecord" &&
-            (reqBody as { collection?: string })?.collection === OPENSOCIAL_COLLECTION.acceptance
+            (reqBody as { collection?: string })?.collection === ATGRP_COLLECTION.confirmation
           ) {
             failAcceptanceWriteOnce = false;
             throw new XrpcError(503, "Tab crashed / transient PDS write failure before acceptance", "ServiceUnavailable");
@@ -2128,7 +2128,7 @@ test("Round 9 Finding #5: discoverCore() and discover() rethrow transient accept
           if (
             injectedError !== null &&
             nsid === "com.atproto.space.getRecord" &&
-            params?.collection === OPENSOCIAL_COLLECTION.acceptance
+            params?.collection === ATGRP_COLLECTION.confirmation
           ) {
             throw injectedError;
           }
@@ -2200,9 +2200,9 @@ test("Round 9 Finding #7: queryJoinStatusAt rejects schema-invalid 2xx JSON and 
       body: JSON.stringify({
         space: raceWs.members,
         repo: raceWs.groupDid,
-        collection: OPENSOCIAL_COLLECTION.membership,
+        collection: ATGRP_COLLECTION.membership,
         rkey: ALICE,
-        record: { $type: OPENSOCIAL_COLLECTION.membership, roles: ["member"], createdAt: "2026-11-10T12:00:00.000Z" },
+        record: { $type: ATGRP_COLLECTION.membership, roles: ["member"], createdAt: "2026-11-10T12:00:00.000Z" },
       }),
     }),
   );
@@ -2294,8 +2294,8 @@ test("Round 12 Finding #3 & #4: unknown-DID createWorkspace rekeys to groupDid l
             if (
               method === "com.atproto.space.putRecord" &&
               (input as { space?: string; collection?: string })?.space ===
-                `at:space/${createdGroupA}/group.opensocial.members/self` &&
-              (input as { collection?: string })?.collection === OPENSOCIAL_COLLECTION.acceptance
+                `at:space/${createdGroupA}/org.atgrp.members/self` &&
+              (input as { collection?: string })?.collection === ATGRP_COLLECTION.confirmation
             ) {
               leavePromiseDuringAccept = aliceA.workspaces.leaveGroup(createdGroupA);
               // Yield macrotask so `leaveGroup` attempts to enter `withGroupLifecycleLock(createdGroupA)` while Phase 4 is mid-flight!
@@ -2318,8 +2318,8 @@ test("Round 12 Finding #3 & #4: unknown-DID createWorkspace rekeys to groupDid l
           });
           await network.deleteAs(
             iss,
-            `at:space/${createdGroupA}/group.opensocial.members/self`,
-            OPENSOCIAL_COLLECTION.acceptance,
+            `at:space/${createdGroupA}/org.atgrp.members/self`,
+            ATGRP_COLLECTION.confirmation,
             SELF_SKEY,
           );
           return {
@@ -2349,9 +2349,9 @@ test("Round 12 Finding #3 & #4: unknown-DID createWorkspace rekeys to groupDid l
   // After `leaveGroup` finishes, `ALICE` MUST NOT have stale `acceptance/self` or membership!
   await assert.rejects(
     network.clientFor(ALICE).query("com.atproto.space.getRecord", {
-      space: `at:space/${createdGroupA}/group.opensocial.members/self`,
+      space: `at:space/${createdGroupA}/org.atgrp.members/self`,
       repo: ALICE,
-      collection: OPENSOCIAL_COLLECTION.acceptance,
+      collection: ATGRP_COLLECTION.confirmation,
       rkey: SELF_SKEY,
     }),
     "concurrent leaveGroup queued behind groupDid lock must remove acceptance/self cleanly",
@@ -2376,8 +2376,8 @@ test("Round 12 Finding #3 & #4: unknown-DID createWorkspace rekeys to groupDid l
         });
         await network.deleteAs(
           iss,
-          `at:space/${createdGroupB}/group.opensocial.members/self`,
-          OPENSOCIAL_COLLECTION.acceptance,
+          `at:space/${createdGroupB}/org.atgrp.members/self`,
+          ATGRP_COLLECTION.confirmation,
           SELF_SKEY,
         );
         // Simulate another tab running `leaveGroup(createdGroupB)` to completion right as `operator.createWorkspace` returns!
@@ -2407,9 +2407,9 @@ test("Round 12 Finding #3 & #4: unknown-DID createWorkspace rekeys to groupDid l
   assert.equal(await aliceB.sync.store.getJoiningGroup(createOpB), undefined, "superseded create journal cleaned up");
   await assert.rejects(
     network.clientFor(ALICE).query("com.atproto.space.getRecord", {
-      space: `at:space/${createdGroupB}/group.opensocial.members/self`,
+      space: `at:space/${createdGroupB}/org.atgrp.members/self`,
       repo: ALICE,
-      collection: OPENSOCIAL_COLLECTION.acceptance,
+      collection: ATGRP_COLLECTION.confirmation,
       rkey: SELF_SKEY,
     }),
     "must NEVER write stale acceptance/self after interleaved leaveGroup",
@@ -2519,7 +2519,7 @@ test("round-13: dismissJoinOperation and retryJoinOperation serialize under with
         typeof body === "object" &&
         body !== null &&
         (body as { space?: string; collection?: string }).space === raceJoinWs.members &&
-        (body as { collection?: string }).collection === OPENSOCIAL_COLLECTION.acceptance
+        (body as { collection?: string }).collection === ATGRP_COLLECTION.confirmation
       ) {
         notifyAcceptanceGateReached();
         await acceptanceWriteGate;
@@ -2577,7 +2577,7 @@ test("round-13: dismissJoinOperation and retryJoinOperation serialize under with
   const ownAcc = await network.clientFor(ALICE).query("com.atproto.space.getRecord", {
     space: raceJoinWs.members,
     repo: ALICE,
-    collection: OPENSOCIAL_COLLECTION.acceptance,
+    collection: ATGRP_COLLECTION.confirmation,
     rkey: SELF_SKEY,
   });
   assert.ok(ownAcc);
@@ -2659,7 +2659,7 @@ test("Round 17 hardening: listInvites serializes concurrent scans and guards wri
   const network = new FakeNetwork();
   network.createAccount(ALICE, "pds1");
   const aliceBase = transportFor(network, ALICE);
-  const invitesUri = personalInvitesUri(ALICE);
+  const invitesUri = personalInboxUri(ALICE);
 
   const group1 = await createWorkspace(network, { skey: "r17inv1", admins: [BOB], members: [BOB], channels: [] });
   const group2 = await createWorkspace(network, { skey: "r17inv2", admins: [BOB], members: [BOB], channels: [] });
@@ -2748,20 +2748,20 @@ test("Round 17 hardening: listInvites serializes concurrent scans and guards wri
       checkedAt: network.now(),
       stale: false,
       coverage: {
-        [OPENSOCIAL_COLLECTION.invite]: { strategy: "all", lowest: null, complete: true, cursor: null },
+        [ATGRP_COLLECTION.invite]: { strategy: "all", lowest: null, complete: true, cursor: null },
       },
     },
     replace: {
-      [OPENSOCIAL_COLLECTION.invite]: [
+      [ATGRP_COLLECTION.invite]: [
         {
           space: invitesUri,
           repo: group2.groupDid,
-          collection: OPENSOCIAL_COLLECTION.invite,
+          collection: ATGRP_COLLECTION.invite,
           rkey: freshRkey,
-          uri: spaceRecordUri(invitesUri, group2.groupDid, OPENSOCIAL_COLLECTION.invite, freshRkey),
+          uri: spaceRecordUri(invitesUri, group2.groupDid, ATGRP_COLLECTION.invite, freshRkey),
           cid: "",
           value: {
-            $type: OPENSOCIAL_COLLECTION.invite,
+            $type: ATGRP_COLLECTION.invite,
             message: "G2 fresh generation",
             createdAt: "2026-11-16T00:00:00.000Z",
           },
@@ -2812,7 +2812,7 @@ test("Round 17 hardening: listInvites serializes concurrent scans and guards wri
   await alice.sync.store.invalidateSpace(invitesUri);
   releaseSingle();
   await casScan;
-  const survivingGroup1Records = await alice.sync.store.records(invitesUri, OPENSOCIAL_COLLECTION.invite, group1.groupDid);
+  const survivingGroup1Records = await alice.sync.store.records(invitesUri, ATGRP_COLLECTION.invite, group1.groupDid);
   assert.equal(survivingGroup1Records.length, 1, "Superseded listInvites scan must NOT purge cached writer records after invalidationSeq advance");
 
   // Part B (Round 17 Fix #5): Missing, non-`self`, or malformed outer `com.atproto.space.policy` record marks workspace degraded (`rosterComplete === false`)!
@@ -2845,7 +2845,7 @@ test("Round 17 hardening: listInvites serializes concurrent scans and guards wri
                 value: {
                   $type: ATPROTO_SPACE_COLLECTION.spacePolicy,
                   policy: {
-                    $type: OPENSOCIAL_POLICY,
+                    $type: ATGRP_POLICY,
                     publicRead: false,
                     unlisted: false,
                     grants: [{ role: "member", read: true }],
@@ -2863,7 +2863,7 @@ test("Round 17 hardening: listInvites serializes concurrent scans and guards wri
               value: {
                 $type: "wrong.wrapper.type",
                 policy: {
-                  $type: OPENSOCIAL_POLICY,
+                  $type: ATGRP_POLICY,
                   publicRead: false,
                   unlisted: false,
                   grants: [{ role: "member", read: true }],

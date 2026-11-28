@@ -61,12 +61,12 @@ test("GroupRepoStore enforces public CAR/CAS, space auto-indexing, 129..512 skey
     const token = flow.tokenResponse!.access_token;
     const groupDid = flow.tokenResponse!.sub;
     const groupHandle = "core-repo.groups.localhost";
-    const metaSpace = `at:space/${groupDid}/group.opensocial.meta/self`;
-    const membersSpace = `at:space/${groupDid}/group.opensocial.members/self`;
+    const metaSpace = `at:space/${groupDid}/org.atgrp.meta/self`;
+    const membersSpace = `at:space/${groupDid}/org.atgrp.members/self`;
 
     // 1. Public repo handle `at-identifier`, blob upload, and `swapRecord` / `swapCommit` `InvalidSwap` CAS
     const getByHandle = await fetch(
-      `${gh.url}/xrpc/com.atproto.repo.getRecord?repo=${encodeURIComponent(groupHandle)}&collection=group.opensocial.declaration&rkey=self`,
+      `${gh.url}/xrpc/com.atproto.repo.getRecord?repo=${encodeURIComponent(groupHandle)}&collection=org.atgrp.declaration&rkey=self`,
     );
     assert.equal(getByHandle.status, 200);
     const declRec = (await getByHandle.json()) as { cid: string; uri: string };
@@ -78,10 +78,10 @@ test("GroupRepoStore enforces public CAR/CAS, space auto-indexing, 129..512 skey
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         repo: groupHandle,
-        collection: "group.opensocial.declaration",
+        collection: "org.atgrp.declaration",
         rkey: "self",
         swapRecord: "bafyreiaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        record: { $type: "group.opensocial.declaration", createdAt: new Date().toISOString() },
+        record: { $type: "org.atgrp.declaration" },
       }),
     });
     assert.equal(badSwapPub.status, 400);
@@ -105,15 +105,15 @@ test("GroupRepoStore enforces public CAR/CAS, space auto-indexing, 129..512 skey
     assert.equal(getBlobRes.status, 200);
     assert.deepEqual(Buffer.from(await getBlobRes.arrayBuffer()), blobBytes);
 
-    // 2. Space key validation (`129` & `512` accepted on `key: "any"`, `513` & non-`self` on `literal:self` rejected) + `group.opensocial.space` auto-index
+    // 2. Space key validation (`129` & `512` accepted on `key: "any"`, `513` & non-`self` on `literal:self` rejected) + `org.atgrp.space` auto-index
     const badMetaSkey = await dpop.fetchWithDpop(`${gh.url}/xrpc/com.atproto.space.createSpace`, {
       method: "POST",
       accessToken: token,
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        spaceType: "group.opensocial.meta",
+        spaceType: "org.atgrp.meta",
         skey: "other",
-        policy: { $type: "group.opensocial.policy", publicRead: true },
+        policy: { $type: "org.atgrp.policy", publicRead: true },
       }),
     });
     assert.equal(badMetaSkey.status, 400);
@@ -131,7 +131,7 @@ test("GroupRepoStore enforces public CAR/CAS, space auto-indexing, 129..512 skey
           spaceType: "new.flock.channel",
           skey: validLongKey,
           policy: {
-            $type: "group.opensocial.policy",
+            $type: "org.atgrp.policy",
             publicRead: false,
             unlisted: false,
             grants: [{ role: "member", read: true, write: true }],
@@ -148,16 +148,16 @@ test("GroupRepoStore enforces public CAR/CAS, space auto-indexing, 129..512 skey
       body: JSON.stringify({
         spaceType: "new.flock.channel",
         skey: skey513,
-        policy: { $type: "group.opensocial.policy", publicRead: false },
+        policy: { $type: "org.atgrp.policy", publicRead: false },
       }),
     });
     assert.equal(cr513.status, 400, "513-char skey must be rejected");
 
-    // Verify `unlisted: false` auto-indexed `group.opensocial.space/<tid>` in `members/self`, and flipping `unlisted: true` removes it!
+    // Verify `unlisted: false` auto-indexed `org.atgrp.space/<tid>` in `members/self`, and flipping `unlisted: true` removes it!
     const chanUri129 = `at:space/${groupDid}/new.flock.channel/${skey129}`;
     const chanUri512 = `at:space/${groupDid}/new.flock.channel/${skey512}`;
     const listIdx1 = await dpop.fetchWithDpop(
-      `${gh.url}/xrpc/com.atproto.space.listRecords?space=${encodeURIComponent(membersSpace)}&repo=${encodeURIComponent(groupDid)}&collection=group.opensocial.space`,
+      `${gh.url}/xrpc/com.atproto.space.listRecords?space=${encodeURIComponent(membersSpace)}&repo=${encodeURIComponent(groupDid)}&collection=org.atgrp.space`,
       { method: "GET", accessToken: token },
     );
     assert.equal(listIdx1.status, 200);
@@ -172,7 +172,7 @@ test("GroupRepoStore enforces public CAR/CAS, space auto-indexing, 129..512 skey
       body: JSON.stringify({
         space: chanUri129,
         policy: {
-          $type: "group.opensocial.policy",
+          $type: "org.atgrp.policy",
           publicRead: false,
           unlisted: true,
           grants: [{ role: "member", read: true, write: true }],
@@ -182,11 +182,11 @@ test("GroupRepoStore enforces public CAR/CAS, space auto-indexing, 129..512 skey
     assert.equal(updUnlisted.status, 200);
 
     const listIdx2 = await dpop.fetchWithDpop(
-      `${gh.url}/xrpc/com.atproto.space.listRecords?space=${encodeURIComponent(membersSpace)}&repo=${encodeURIComponent(groupDid)}&collection=group.opensocial.space`,
+      `${gh.url}/xrpc/com.atproto.space.listRecords?space=${encodeURIComponent(membersSpace)}&repo=${encodeURIComponent(groupDid)}&collection=org.atgrp.space`,
       { method: "GET", accessToken: token },
     );
     const idxRecs2 = ((await listIdx2.json()) as { records: Array<{ value: { space: string } }> }).records;
-    assert.equal(idxRecs2.some((r) => r.value.space === chanUri129), false, "unlisted: true must remove group.opensocial.space index record");
+    assert.equal(idxRecs2.some((r) => r.value.space === chanUri129), false, "unlisted: true must remove org.atgrp.space index record");
     assert.equal(idxRecs2.some((r) => r.value.space === chanUri512), true);
 
     // `CannotDeleteCoreSpace` on `meta/self` & `members/self`
@@ -201,7 +201,7 @@ test("GroupRepoStore enforces public CAR/CAS, space auto-indexing, 129..512 skey
 
     // 3. Space `swapRecord` CAS, `clearRecords` `keep`, `profile.url`, labels, RBAC, Flock `LastAdmin` & `known_app_subject`!
     const profGet = await dpop.fetchWithDpop(
-      `${gh.url}/xrpc/com.atproto.space.getRecord?space=${encodeURIComponent(metaSpace)}&repo=${encodeURIComponent(groupDid)}&collection=group.opensocial.profile&rkey=self`,
+      `${gh.url}/xrpc/com.atproto.space.getRecord?space=${encodeURIComponent(metaSpace)}&repo=${encodeURIComponent(groupDid)}&collection=org.atgrp.about&rkey=self`,
       { method: "GET", accessToken: token },
     );
     assert.equal(profGet.status, 200);
@@ -214,16 +214,16 @@ test("GroupRepoStore enforces public CAR/CAS, space auto-indexing, 129..512 skey
       body: JSON.stringify({
         space: metaSpace,
         repo: groupDid,
-        collection: "group.opensocial.profile",
+        collection: "org.atgrp.about",
         rkey: "self",
         swapRecord: "bafyreiaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        record: { $type: "group.opensocial.profile", displayName: "Updated", createdAt: new Date().toISOString() },
+        record: { $type: "org.atgrp.about", displayName: "Updated" },
       }),
     });
     assert.equal(badSpaceSwap.status, 400);
     assert.equal(((await badSpaceSwap.json()) as { error: string }).error, "InvalidSwap");
 
-    // `profile.url` javascript: scheme rejected (`400 InvalidRequest`)
+    // `about.website` javascript: scheme rejected (`400 InvalidRequest`)
     const badUrlProf = await dpop.fetchWithDpop(`${gh.url}/xrpc/com.atproto.space.putRecord`, {
       method: "POST",
       accessToken: token,
@@ -231,13 +231,12 @@ test("GroupRepoStore enforces public CAR/CAS, space auto-indexing, 129..512 skey
       body: JSON.stringify({
         space: metaSpace,
         repo: groupDid,
-        collection: "group.opensocial.profile",
+        collection: "org.atgrp.about",
         rkey: "self",
         record: {
-          $type: "group.opensocial.profile",
+          $type: "org.atgrp.about",
           displayName: "Bad URL",
-          url: "javascript:alert(1)",
-          createdAt: new Date().toISOString(),
+          website: "javascript:alert(1)",
         },
       }),
     });
@@ -277,7 +276,7 @@ test("GroupRepoStore enforces public CAR/CAS, space auto-indexing, 129..512 skey
         record: {
           $type: "com.atproto.label.record",
           src: groupDid,
-          uri: `${metaSpace}/${groupDid}/group.opensocial.profile/self`,
+          uri: `${metaSpace}/${groupDid}/org.atgrp.about/self`,
           val: "!hide",
           cts: new Date().toISOString(),
         },
@@ -293,9 +292,9 @@ test("GroupRepoStore enforces public CAR/CAS, space auto-indexing, 129..512 skey
       body: JSON.stringify({
         space: membersSpace,
         repo: groupDid,
-        collection: "group.opensocial.membership",
+        collection: "org.atgrp.membership",
         rkey: groupDid,
-        record: { $type: "group.opensocial.membership", roles: ["member"], createdAt: new Date().toISOString() },
+        record: { $type: "org.atgrp.membership", roles: ["member"], createdAt: new Date().toISOString() },
       }),
     });
     assert.equal(selfMem.status, 400);
@@ -308,9 +307,9 @@ test("GroupRepoStore enforces public CAR/CAS, space auto-indexing, 129..512 skey
       body: JSON.stringify({
         space: membersSpace,
         repo: groupDid,
-        collection: "group.opensocial.membership",
+        collection: "org.atgrp.membership",
         rkey: bob.did,
-        record: { $type: "group.opensocial.membership", roles: [], createdAt: new Date().toISOString() },
+        record: { $type: "org.atgrp.membership", roles: [], createdAt: new Date().toISOString() },
       }),
     });
     assert.equal(emptyRolesMem.status, 400);
@@ -324,10 +323,10 @@ test("GroupRepoStore enforces public CAR/CAS, space auto-indexing, 129..512 skey
       body: JSON.stringify({
         space: membersSpace,
         repo: groupDid,
-        collection: "group.opensocial.membership",
+        collection: "org.atgrp.membership",
         rkey: bob.did,
         record: {
-          $type: "group.opensocial.membership",
+          $type: "org.atgrp.membership",
           roles: ["member"],
           createdAt: new Date().toISOString(),
           "new.flock.admittedSpaceRev": "zzzzzzzzzzzzz",
@@ -344,7 +343,7 @@ test("GroupRepoStore enforces public CAR/CAS, space auto-indexing, 129..512 skey
       body: JSON.stringify({
         space: membersSpace,
         repo: groupDid,
-        collection: "group.opensocial.role",
+        collection: "org.atgrp.role",
         rkey: "admin",
       }),
     });
@@ -360,7 +359,7 @@ test("GroupRepoStore enforces public CAR/CAS, space auto-indexing, 129..512 skey
       body: JSON.stringify({
         spaceType: "new.flock.workspace",
         skey: "self",
-        policy: { $type: "group.opensocial.policy", publicRead: false, grants: [{ role: "member", read: true, write: false }] },
+        policy: { $type: "org.atgrp.policy", publicRead: false, grants: [{ role: "member", read: true, write: false }] },
       }),
     });
     const putWsRec = await dpop.fetchWithDpop(`${gh.url}/xrpc/com.atproto.space.putRecord`, {
@@ -385,9 +384,9 @@ test("GroupRepoStore enforces public CAR/CAS, space auto-indexing, 129..512 skey
       body: JSON.stringify({
         space: membersSpace,
         repo: groupDid,
-        collection: "group.opensocial.membership",
+        collection: "org.atgrp.membership",
         rkey: alice.did,
-        record: { $type: "group.opensocial.membership", roles: ["member"], createdAt: new Date().toISOString() },
+        record: { $type: "org.atgrp.membership", roles: ["member"], createdAt: new Date().toISOString() },
       }),
     });
     assert.equal(demoteSelf.status, 400);
@@ -473,7 +472,7 @@ test("authorizeSpaceSync, strict zero-skew space credentials, HPKE KEM-MAC, 105-
     const dpop = flow.dpop;
     const token = flow.tokenResponse!.access_token;
     const groupDid = flow.tokenResponse!.sub;
-    const membersSpace = `at:space/${groupDid}/group.opensocial.members/self`;
+    const membersSpace = `at:space/${groupDid}/org.atgrp.members/self`;
 
     // Admit Bob into `members/self`
     await dpop.fetchWithDpop(`${gh.url}/xrpc/com.atproto.space.putRecord`, {
@@ -483,9 +482,9 @@ test("authorizeSpaceSync, strict zero-skew space credentials, HPKE KEM-MAC, 105-
       body: JSON.stringify({
         space: membersSpace,
         repo: groupDid,
-        collection: "group.opensocial.membership",
+        collection: "org.atgrp.membership",
         rkey: bob.did,
-        record: { $type: "group.opensocial.membership", roles: ["member"], createdAt: new Date().toISOString() },
+        record: { $type: "org.atgrp.membership", roles: ["member"], createdAt: new Date().toISOString() },
       }),
     });
 
@@ -529,7 +528,7 @@ test("authorizeSpaceSync, strict zero-skew space credentials, HPKE KEM-MAC, 105-
     const groupKemDidKey = gh.plc.extractKemDidKey(groupDoc as Parameters<typeof gh.plc.extractKemDidKey>[0]) as DidString;
     const encRec = await encapsulate(groupKemDidKey);
 
-    const getRecUrl = `${gh.url}/xrpc/com.atproto.space.getRecord?space=${encodeURIComponent(membersSpace)}&repo=${encodeURIComponent(groupDid)}&collection=group.opensocial.membership&rkey=${encodeURIComponent(bob.did)}`;
+    const getRecUrl = `${gh.url}/xrpc/com.atproto.space.getRecord?space=${encodeURIComponent(membersSpace)}&repo=${encodeURIComponent(groupDid)}&collection=org.atgrp.membership&rkey=${encodeURIComponent(bob.did)}`;
     const { headers: sigHeadersRec } = await createSpaceSigHeaders({
       keypair: lastCredKeypair,
       authorization: `Atproto-Space-Credential ${lastCred}`,
@@ -617,7 +616,7 @@ test("authorizeSpaceSync, strict zero-skew space credentials, HPKE KEM-MAC, 105-
       body: JSON.stringify({
         space: membersSpace,
         repo: groupDid,
-        collection: "group.opensocial.membership",
+        collection: "org.atgrp.membership",
         rkey: bob.did,
       }),
     });
@@ -652,20 +651,20 @@ test("authorizeSpaceSync, strict zero-skew space credentials, HPKE KEM-MAC, 105-
       }) as LexMap,
     );
     const legacyRoleSer = await serializeRecord(
-      "group.opensocial.role" as NsidString,
+      "org.atgrp.role" as NsidString,
       "admin" as RecordKeyString,
       jsonToLex({
-        $type: "group.opensocial.role",
+        $type: "org.atgrp.role",
         displayName: "Admin",
-        assignable: ["*"],
-        scopes: groupAdminScopes(groupDid),
+        canAssign: ["*"],
+        permissions: groupAdminScopes(groupDid),
       }) as LexMap,
     );
     const legacyMemSer = await serializeRecord(
-      "group.opensocial.membership" as NsidString,
+      "org.atgrp.membership" as NsidString,
       alice.did as RecordKeyString,
       jsonToLex({
-        $type: "group.opensocial.membership",
+        $type: "org.atgrp.membership",
         roles: ["admin"],
         createdAt: "2026-01-01T00:00:00.000Z",
         // Intentionally NO "new.flock.incarnation" field!
@@ -689,12 +688,12 @@ test("authorizeSpaceSync, strict zero-skew space credentials, HPKE KEM-MAC, 105-
       starStream: [Buffer.concat(legacyStarChunks)],
     });
     const importedMemRow = gh.db
-      .prepare("SELECT incarnation FROM space_record WHERE space_uri = ? AND repo_did = ? AND collection = 'group.opensocial.membership' AND rkey = ?")
+      .prepare("SELECT incarnation FROM space_record WHERE space_uri = ? AND repo_did = ? AND collection = 'org.atgrp.membership' AND rkey = ?")
       .get(membersSpace, groupDid, alice.did) as { incarnation: string | null } | undefined;
     assert.equal(importedMemRow?.incarnation, `legacy-cid:${legacyMemSer.cid.toString()}`);
 
     // Also import an empty external `invites/self` STAR and verify `group_invite_target` is reconstructed!
-    const emptyInvSpace = `at:space/${bob.did}/group.opensocial.invites/self`;
+    const emptyInvSpace = `at:space/${bob.did}/org.atgrp.inbox/self`;
     const emptyInvChunks: Buffer[] = [];
     for await (const chunk of writeRepoStar(
       new RepoCommit().toCommit({
@@ -876,21 +875,21 @@ test("isPermissionSubset enforces exact structural wildcard containment and RBAC
     const adminDpop = createFlow.dpop;
     const adminTok = createFlow.tokenResponse!.access_token;
     const groupDid = createFlow.tokenResponse!.sub;
-    const membersSpace = `at:space/${groupDid}/group.opensocial.members/self`;
+    const membersSpace = `at:space/${groupDid}/org.atgrp.members/self`;
     const secretChan = `at:space/${groupDid}/new.flock.channel/secret`;
     const nowIso = new Date().toISOString();
 
-    // Admin creates `helper`, `protected-role`, and `space-mgr` (assignable: ["helper"], NO read/write on secretChan initially)
+    // Admin creates `helper`, `protected-role`, and `space-mgr` (canAssign: ["helper"], NO read/write on secretChan initially)
     for (const [rkey, roleRec] of [
-      ["helper", { displayName: "Helper", scopes: [] }],
-      ["protected-role", { displayName: "Protected", scopes: [] }],
+      ["helper", { displayName: "Helper", permissions: [] }],
+      ["protected-role", { displayName: "Protected", permissions: [] }],
       [
         "space-mgr",
         {
           displayName: "Space Manager",
-          assignable: ["helper"],
-          scopes: [
-            "space:group.opensocial.members?skey=self&collection=group.opensocial.role&action=read&action=create&action=update&action=delete",
+          canAssign: ["helper"],
+          permissions: [
+            "space:org.atgrp.members?skey=self&collection=org.atgrp.role&action=read&action=create&action=update&action=delete",
             "space:new.flock.channel?skey=secret&action=read_self&manage=update",
             "space:new.flock.channel?skey=secret&collection=new.flock.message&action=read",
           ],
@@ -904,7 +903,7 @@ test("isPermissionSubset enforces exact structural wildcard containment and RBAC
         body: JSON.stringify({
           space: membersSpace,
           repo: groupDid,
-          collection: "group.opensocial.role",
+          collection: "org.atgrp.role",
           rkey,
           record: roleRec,
         }),
@@ -917,7 +916,7 @@ test("isPermissionSubset enforces exact structural wildcard containment and RBAC
       role: "admin",
       read: true,
       write: true,
-      scopes: [
+      permissions: [
         "space:new.flock.channel?skey=secret&collection=*&action=read&action=create&action=update&action=delete&manage=update",
       ],
     };
@@ -929,7 +928,7 @@ test("isPermissionSubset enforces exact structural wildcard containment and RBAC
         spaceType: "new.flock.channel",
         skey: "secret",
         policy: {
-          $type: "group.opensocial.policy",
+          $type: "org.atgrp.policy",
           publicRead: false,
           unlisted: true,
           grants: [adminChanGrant],
@@ -946,7 +945,7 @@ test("isPermissionSubset enforces exact structural wildcard containment and RBAC
       body: JSON.stringify({
         space: membersSpace,
         repo: groupDid,
-        collection: "group.opensocial.membership",
+        collection: "org.atgrp.membership",
         rkey: bob.did,
         record: { roles: ["space-mgr", "member"], createdAt: nowIso },
       }),
@@ -955,7 +954,7 @@ test("isPermissionSubset enforces exact structural wildcard containment and RBAC
 
     const bobScopes = [
       "atproto",
-      "space:group.opensocial.members?skey=self&collection=group.opensocial.role&action=read&action=create&action=update&action=delete",
+      "space:org.atgrp.members?skey=self&collection=org.atgrp.role&action=read&action=create&action=update&action=delete",
       "space:new.flock.channel?skey=secret&action=read_self&manage=update",
       "space:new.flock.channel?skey=secret&collection=new.flock.message&action=read",
     ].join(" ");
@@ -977,9 +976,9 @@ test("isPermissionSubset enforces exact structural wildcard containment and RBAC
       body: JSON.stringify({
         space: membersSpace,
         repo: groupDid,
-        collection: "group.opensocial.role",
+        collection: "org.atgrp.role",
         rkey: "protected-role",
-        record: { displayName: "Hijacked", scopes: [] },
+        record: { displayName: "Hijacked", permissions: [] },
       }),
     });
     assert.equal(editUnassignable.status, 403);
@@ -992,7 +991,7 @@ test("isPermissionSubset enforces exact structural wildcard containment and RBAC
       body: JSON.stringify({
         space: membersSpace,
         repo: groupDid,
-        collection: "group.opensocial.role",
+        collection: "org.atgrp.role",
         rkey: "protected-role",
       }),
     });
@@ -1006,7 +1005,7 @@ test("isPermissionSubset enforces exact structural wildcard containment and RBAC
       body: JSON.stringify({
         space: membersSpace,
         repo: groupDid,
-        collections: ["group.opensocial.role"],
+        collections: ["org.atgrp.role"],
       }),
     });
     assert.equal(clearUnassignableRoles.status, 403);
@@ -1020,9 +1019,9 @@ test("isPermissionSubset enforces exact structural wildcard containment and RBAC
       body: JSON.stringify({
         space: membersSpace,
         repo: groupDid,
-        collection: "group.opensocial.role",
+        collection: "org.atgrp.role",
         rkey: "helper",
-        record: { displayName: "Helper", assignable: ["space-mgr"], scopes: [] },
+        record: { displayName: "Helper", canAssign: ["space-mgr"], permissions: [] },
       }),
     });
     assert.equal(addUnassignableToHelper.status, 403);
@@ -1031,31 +1030,31 @@ test("isPermissionSubset enforces exact structural wildcard containment and RBAC
     // (b) Policy updates on `secretChan`: Bob lacks `read`/`write` on `secretChan`, so granting `read`, `write`, `publicRead`, or flipping `unlisted` is `403 PrivilegeEscalation`!
     for (const illegalPolicy of [
       {
-        $type: "group.opensocial.policy",
+        $type: "org.atgrp.policy",
         publicRead: false,
         unlisted: true,
         grants: [adminChanGrant, { role: "helper", read: true }],
       },
       {
-        $type: "group.opensocial.policy",
+        $type: "org.atgrp.policy",
         publicRead: false,
         unlisted: true,
         grants: [adminChanGrant, { role: "helper", write: true }],
       },
       {
-        $type: "group.opensocial.policy",
+        $type: "org.atgrp.policy",
         publicRead: true,
         unlisted: true,
         grants: [adminChanGrant],
       },
       {
-        $type: "group.opensocial.policy",
+        $type: "org.atgrp.policy",
         publicRead: false,
         unlisted: false,
         grants: [adminChanGrant],
       },
       {
-        $type: "group.opensocial.policy",
+        $type: "org.atgrp.policy",
         publicRead: false,
         unlisted: true,
         grants: [{ ...adminChanGrant, write: false }],
@@ -1079,7 +1078,7 @@ test("isPermissionSubset enforces exact structural wildcard containment and RBAC
       body: JSON.stringify({
         space: secretChan,
         policy: {
-          $type: "group.opensocial.policy",
+          $type: "org.atgrp.policy",
           publicRead: false,
           unlisted: true,
           grants: [adminChanGrant, { role: "space-mgr", read: true }],
@@ -1095,7 +1094,7 @@ test("isPermissionSubset enforces exact structural wildcard containment and RBAC
       body: JSON.stringify({
         space: secretChan,
         policy: {
-          $type: "group.opensocial.policy",
+          $type: "org.atgrp.policy",
           publicRead: false,
           unlisted: true,
           grants: [
@@ -1104,7 +1103,7 @@ test("isPermissionSubset enforces exact structural wildcard containment and RBAC
             {
               role: "helper",
               read: true,
-              scopes: ["space:new.flock.channel?skey=secret&collection=new.flock.message&action=read"],
+              permissions: ["space:new.flock.channel?skey=secret&collection=new.flock.message&action=read"],
             },
           ],
         },
@@ -1138,7 +1137,7 @@ test("Commit-time TOCTOU reauthorization and concurrent putRecord create-vs-upda
     const adminDpop = createFlow.dpop;
     const adminTok = createFlow.tokenResponse!.access_token;
     const groupDid = createFlow.tokenResponse!.sub;
-    const membersSpace = `at:space/${groupDid}/group.opensocial.members/self`;
+    const membersSpace = `at:space/${groupDid}/org.atgrp.members/self`;
     const chanSpace = `at:space/${groupDid}/new.flock.channel/general`;
     const nowIso = new Date().toISOString();
 
@@ -1150,11 +1149,11 @@ test("Commit-time TOCTOU reauthorization and concurrent putRecord create-vs-upda
       body: JSON.stringify({
         space: membersSpace,
         repo: groupDid,
-        collection: "group.opensocial.role",
+        collection: "org.atgrp.role",
         rkey: "creator-only",
         record: {
           displayName: "Creator Only",
-          scopes: [
+          permissions: [
             "repo:app.bsky.feed.post?action=create",
             "space:new.flock.channel?skey=general&collection=new.flock.message&action=read&action=create",
           ],
@@ -1170,7 +1169,7 @@ test("Commit-time TOCTOU reauthorization and concurrent putRecord create-vs-upda
         spaceType: "new.flock.channel",
         skey: "general",
         policy: {
-          $type: "group.opensocial.policy",
+          $type: "org.atgrp.policy",
           publicRead: false,
           grants: [{ role: "creator-only", read: true, write: true }],
         },
@@ -1184,7 +1183,7 @@ test("Commit-time TOCTOU reauthorization and concurrent putRecord create-vs-upda
       body: JSON.stringify({
         space: membersSpace,
         repo: groupDid,
-        collection: "group.opensocial.membership",
+        collection: "org.atgrp.membership",
         rkey: bob.did,
         record: { roles: ["creator-only", "member"], createdAt: nowIso },
       }),
@@ -1277,10 +1276,10 @@ test("Commit-time TOCTOU reauthorization and concurrent putRecord create-vs-upda
       gh.db
         .prepare("UPDATE space_record SET value = ? WHERE space_uri = ? AND repo_did = ? AND collection = ? AND rkey = ?")
         .run(
-          JSON.stringify({ $type: "group.opensocial.membership", roles: ["member"], createdAt: nowIso }),
+          JSON.stringify({ $type: "org.atgrp.membership", roles: ["member"], createdAt: nowIso }),
           membersSpace,
           groupDid,
-          "group.opensocial.membership",
+          "org.atgrp.membership",
           bob.did,
         );
     });
@@ -1312,7 +1311,7 @@ test("Commit-time TOCTOU reauthorization and concurrent putRecord create-vs-upda
     //    - rejects unrelated external space before `groupDid` has a local `space_repo` (`403 Forbidden`)
     //    - enforces single-use `jti` (`401 ReplayDetected`), per-space revocation isolation, and `10,000`-row stored quota (`429 RateLimitExceeded`)
     const notifyJwt = await alice.signServiceJwt(groupDid, "com.atproto.space.notifyCredentialsRevoked");
-    const aliceSpace = `at:space/${alice.did}/group.opensocial.invites/self`;
+    const aliceSpace = `at:space/${alice.did}/org.atgrp.inbox/self`;
     for (const invalidBody of [
       { space: aliceSpace, jtis: ["jti-legacy-only"] },
       { space: aliceSpace, credentials: [] },
@@ -1357,7 +1356,7 @@ test("Commit-time TOCTOU reauthorization and concurrent putRecord create-vs-upda
       body: JSON.stringify({
         space: aliceSpace,
         repo: groupDid,
-        collection: "group.opensocial.invite",
+        collection: "org.atgrp.invite",
         rkey: "3jzfcijpj2z2d",
         record: { createdAt: nowIso },
       }),
@@ -1517,12 +1516,12 @@ test("Round 4 hardening: atomic meta publicRead <-> declaration/self coupling, s
     const dpop = flow.dpop;
     const token = flow.tokenResponse!.access_token;
     const groupDid = flow.tokenResponse!.sub;
-    const metaSpace = `at:space/${groupDid}/group.opensocial.meta/self`;
-    const membersSpace = `at:space/${groupDid}/group.opensocial.members/self`;
+    const metaSpace = `at:space/${groupDid}/org.atgrp.meta/self`;
+    const membersSpace = `at:space/${groupDid}/org.atgrp.members/self`;
 
-    // 1. Atomic coupling between `meta/self` `policy.publicRead` and `group.opensocial.declaration/self`
+    // 1. Atomic coupling between `meta/self` `policy.publicRead` and `org.atgrp.declaration/self`
     const initDeclRes = await fetch(
-      `${gh.url}/xrpc/com.atproto.repo.getRecord?repo=${encodeURIComponent(groupDid)}&collection=group.opensocial.declaration&rkey=self`,
+      `${gh.url}/xrpc/com.atproto.repo.getRecord?repo=${encodeURIComponent(groupDid)}&collection=org.atgrp.declaration&rkey=self`,
     );
     assert.equal(initDeclRes.status, 200);
 
@@ -1534,7 +1533,7 @@ test("Round 4 hardening: atomic meta publicRead <-> declaration/self coupling, s
       body: JSON.stringify({
         space: metaSpace,
         policy: {
-          $type: "group.opensocial.policy",
+          $type: "org.atgrp.policy",
           publicRead: false,
           grants: [{ role: "member", read: true }],
         },
@@ -1543,7 +1542,7 @@ test("Round 4 hardening: atomic meta publicRead <-> declaration/self coupling, s
     assert.equal(setPrivateRes.status, 200);
 
     const afterPrivDecl = await fetch(
-      `${gh.url}/xrpc/com.atproto.repo.getRecord?repo=${encodeURIComponent(groupDid)}&collection=group.opensocial.declaration&rkey=self`,
+      `${gh.url}/xrpc/com.atproto.repo.getRecord?repo=${encodeURIComponent(groupDid)}&collection=org.atgrp.declaration&rkey=self`,
     );
     assert.equal(afterPrivDecl.status, 400);
     assert.equal(((await afterPrivDecl.json()) as { error: string }).error, "RecordNotFound");
@@ -1555,19 +1554,17 @@ test("Round 4 hardening: atomic meta publicRead <-> declaration/self coupling, s
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         repo: groupDid,
-        collection: "group.opensocial.declaration",
+        collection: "org.atgrp.declaration",
         rkey: "self",
         record: {
-          $type: "group.opensocial.declaration",
-          meta: metaSpace,
-          createdAt: new Date().toISOString(),
+          $type: "org.atgrp.declaration",
         },
       }),
     });
     assert.equal(illegalPutDecl.status, 400);
     assert.equal(((await illegalPutDecl.json()) as { error: string }).error, "InvalidRequest");
 
-    // Flipping `meta/self` back to `publicRead: true` atomically creates `declaration/self` and preserves `createdAt` across subsequent `publicRead: true` updates!
+    // Flipping `meta/self` back to `publicRead: true` atomically creates `declaration/self` and keeps CID stable across subsequent `publicRead: true` updates!
     const setPublicRes = await dpop.fetchWithDpop(`${gh.url}/xrpc/com.atproto.space.updateSpace`, {
       method: "POST",
       accessToken: token,
@@ -1575,7 +1572,7 @@ test("Round 4 hardening: atomic meta publicRead <-> declaration/self coupling, s
       body: JSON.stringify({
         space: metaSpace,
         policy: {
-          $type: "group.opensocial.policy",
+          $type: "org.atgrp.policy",
           publicRead: true,
           grants: [{ role: "member", read: true }],
         },
@@ -1585,10 +1582,10 @@ test("Round 4 hardening: atomic meta publicRead <-> declaration/self coupling, s
 
     const restoredDecl = (await (
       await fetch(
-        `${gh.url}/xrpc/com.atproto.repo.getRecord?repo=${encodeURIComponent(groupDid)}&collection=group.opensocial.declaration&rkey=self`,
+        `${gh.url}/xrpc/com.atproto.repo.getRecord?repo=${encodeURIComponent(groupDid)}&collection=org.atgrp.declaration&rkey=self`,
       )
-    ).json()) as { value: { meta: string; createdAt: string } };
-    assert.equal(restoredDecl.value.meta, metaSpace);
+    ).json()) as { cid: string; value: { $type: string } };
+    assert.equal(restoredDecl.value.$type, "org.atgrp.declaration");
 
     await new Promise((r) => setTimeout(r, 15));
     const setPublicAgainRes = await dpop.fetchWithDpop(`${gh.url}/xrpc/com.atproto.space.updateSpace`, {
@@ -1598,7 +1595,7 @@ test("Round 4 hardening: atomic meta publicRead <-> declaration/self coupling, s
       body: JSON.stringify({
         space: metaSpace,
         policy: {
-          $type: "group.opensocial.policy",
+          $type: "org.atgrp.policy",
           publicRead: true,
           grants: [
             { role: "admin", read: true },
@@ -1610,24 +1607,24 @@ test("Round 4 hardening: atomic meta publicRead <-> declaration/self coupling, s
     assert.equal(setPublicAgainRes.status, 200);
     const preservedDecl = (await (
       await fetch(
-        `${gh.url}/xrpc/com.atproto.repo.getRecord?repo=${encodeURIComponent(groupDid)}&collection=group.opensocial.declaration&rkey=self`,
+        `${gh.url}/xrpc/com.atproto.repo.getRecord?repo=${encodeURIComponent(groupDid)}&collection=org.atgrp.declaration&rkey=self`,
       )
-    ).json()) as { value: { createdAt: string } };
-    assert.equal(preservedDecl.value.createdAt, restoredDecl.value.createdAt);
+    ).json()) as { cid: string; value: { $type: string } };
+    assert.equal(preservedDecl.cid, restoredDecl.cid);
 
-    // 2. Reject unknown collections in external `group.opensocial.invites/self` (even with `collection=*` scope & `validate: false`, and in `importRepo`)!
+    // 2. Reject unknown collections in external `org.atgrp.inbox/self` (even with `collection=*` scope & `validate: false`, and in `importRepo`)!
     const wildcardInviteScope =
-      "space:group.opensocial.invites?authority=*&skey=self&collection=*&action=create&action=update&action=delete";
+      "space:org.atgrp.inbox?authority=*&skey=self&collection=*&action=create&action=update&action=delete";
     gh.db
       .prepare(
-        "UPDATE space_record SET value = ? WHERE space_uri = ? AND repo_did = ? AND collection = 'group.opensocial.role' AND rkey = 'admin'",
+        "UPDATE space_record SET value = ? WHERE space_uri = ? AND repo_did = ? AND collection = 'org.atgrp.role' AND rkey = 'admin'",
       )
       .run(
         JSON.stringify({
-          $type: "group.opensocial.role",
+          $type: "org.atgrp.role",
           displayName: "Admin",
-          assignable: ["*"],
-          scopes: [...groupAdminScopes(groupDid).filter((s) => s !== "atproto"), wildcardInviteScope],
+          canAssign: ["*"],
+          permissions: [...groupAdminScopes(groupDid).filter((s) => s !== "atproto"), wildcardInviteScope],
         }),
         membersSpace,
         groupDid,
@@ -1641,7 +1638,7 @@ test("Round 4 hardening: atomic meta publicRead <-> declaration/self coupling, s
     });
     const wildDpop = wildFlow.dpop;
     const wildTok = wildFlow.tokenResponse!.access_token;
-    const bobInvSpace = `at:space/${bob.did}/group.opensocial.invites/self`;
+    const bobInvSpace = `at:space/${bob.did}/org.atgrp.inbox/self`;
 
     const badExtCollectionRes = await wildDpop.fetchWithDpop(`${gh.url}/xrpc/com.atproto.space.putRecord`, {
       method: "POST",
@@ -1710,7 +1707,7 @@ test("Round 4 hardening: atomic meta publicRead <-> declaration/self coupling, s
         spaceType: "new.flock.channel",
         skey: "app-gated",
         policy: {
-          $type: "group.opensocial.policy",
+          $type: "org.atgrp.policy",
           publicRead: false,
           allowedApps: [localhostClientId],
           grants: [{ role: "admin", read: true, write: true }],
@@ -1843,7 +1840,7 @@ test("Round 7 hardening: anonymous publicRead credentials (writer_did IS NULL) f
     const dpop = flow.dpop;
     let token = flow.tokenResponse!.access_token;
     const groupDid = flow.tokenResponse!.sub;
-    const membersSpace = `at:space/${groupDid}/group.opensocial.members/self`;
+    const membersSpace = `at:space/${groupDid}/org.atgrp.members/self`;
 
     // Create `new.flock.workspace/self` so sole-member `leaveGroup` exercises Flock reversible deactivation!
     const createWsRes = await dpop.fetchWithDpop(`${gh.url}/xrpc/com.atproto.space.createSpace`, {
@@ -1854,7 +1851,7 @@ test("Round 7 hardening: anonymous publicRead credentials (writer_did IS NULL) f
         spaceType: "new.flock.workspace",
         skey: "self",
         policy: {
-          $type: "group.opensocial.policy",
+          $type: "org.atgrp.policy",
           publicRead: false,
           grants: [
             { role: "admin", read: true, write: true },
@@ -1873,10 +1870,10 @@ test("Round 7 hardening: anonymous publicRead credentials (writer_did IS NULL) f
       body: JSON.stringify({
         space: membersSpace,
         repo: groupDid,
-        collection: "group.opensocial.membership",
+        collection: "org.atgrp.membership",
         rkey: bob.did,
         record: {
-          $type: "group.opensocial.membership",
+          $type: "org.atgrp.membership",
           roles: ["member"],
           createdAt: new Date().toISOString(),
         },
@@ -1897,7 +1894,7 @@ test("Round 7 hardening: anonymous publicRead credentials (writer_did IS NULL) f
           spaceType: "new.flock.channel",
           skey,
           policy: {
-            $type: "group.opensocial.policy",
+            $type: "org.atgrp.policy",
             publicRead: true,
             grants: [
               { role: "admin", read: true, write: true },
@@ -2095,7 +2092,7 @@ test("Round 7 hardening: anonymous publicRead credentials (writer_did IS NULL) f
         },
         services: {
           atproto_pds: { type: "AtprotoPersonalDataServer", endpoint: ghTarget.url },
-          opensocial_group: { type: "OpenSocialGroupHost", endpoint: ghTarget.url },
+          atgrp_host: { type: "AtmosphereGroupHostV1", endpoint: ghTarget.url },
         },
       }),
     });
@@ -2123,7 +2120,7 @@ test("Round 7 hardening: anonymous publicRead credentials (writer_did IS NULL) f
       body: JSON.stringify({
         space: membersSpace,
         repo: groupDid,
-        collection: "group.opensocial.membership",
+        collection: "org.atgrp.membership",
         rkey: bob.did,
       }),
     });
@@ -2132,8 +2129,8 @@ test("Round 7 hardening: anonymous publicRead credentials (writer_did IS NULL) f
 
     const anonJtiSoleLeave = await mintAnonymousPublicCredential(pubChan2);
     pdsA.receivedCredentialsRevoked.length = 0;
-    const leaveJwt = await alice.signServiceJwt(`${groupDid}#atproto_pds`, "group.opensocial.leaveGroup");
-    const soleLeaveRes = await fetch(`${gh.url}/xrpc/group.opensocial.leaveGroup`, {
+    const leaveJwt = await alice.signServiceJwt(`${groupDid}#atproto_pds`, "org.atgrp.leaveGroup");
+    const soleLeaveRes = await fetch(`${gh.url}/xrpc/org.atgrp.leaveGroup`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${leaveJwt}` },
       body: JSON.stringify({ group: groupDid }),
@@ -2245,7 +2242,7 @@ test("Round 9 hardening: streamed migration writes (importRepo, uploadBlob, impo
     const groupDid = flowSrc.tokenResponse!.sub;
     const srcSigKey = await ghSrc.repoStore.getGroupSigningKey(groupDid);
 
-    const metaSpace = `at:space/${groupDid}/group.opensocial.meta/self`;
+    const metaSpace = `at:space/${groupDid}/org.atgrp.meta/self`;
     const carBytes = new Uint8Array(
       await (await fetch(`${ghSrc.url}/xrpc/com.atproto.sync.getRepo?did=${encodeURIComponent(groupDid)}`)).arrayBuffer(),
     );
@@ -2570,6 +2567,188 @@ test("Round 13 Fix #3: sweepIncompleteDeletionJournals paginates past >20 and >2
       "Second sweep MUST resume past 200 failing journals and tombstone + purge groupDidB",
     );
     assert.equal((await fetch(`${plc.url}/${encodeURIComponent(groupDidB)}`)).status, 410);
+  } finally {
+    await gh.close();
+    await pds.close();
+    await plc.close();
+  }
+});
+
+test("R15 full org.atgrp.* namespace reservation (public, space validate:false, importRepo) and write-strict vs import-lenient role keys", async () => {
+  const plc = await startMockPlcServer();
+  const pds = await startMockPersonalPds(plc);
+  const gh = await startTestGroupHost({ plc });
+
+  try {
+    const alice = await pds.registerUser("alice-r15-ns.test");
+    const flow = await completeGroupOAuthFlow({
+      groupHost: gh,
+      pds,
+      user: alice,
+      scope: groupAdminScopes().join(" "),
+      prompt: "create",
+      createParams: {
+        displayName: "Namespace Reservation Group",
+        handle: "r15-ns.groups.localhost",
+        joinPolicy: "invite",
+        publicMeta: true,
+      },
+    });
+    const dpop = flow.dpop;
+    const token = flow.tokenResponse!.access_token;
+    const groupDid = flow.tokenResponse!.sub;
+    const metaSpace = `at:space/${groupDid}/org.atgrp.meta/self`;
+    const membersSpace = `at:space/${groupDid}/org.atgrp.members/self`;
+    const chanSpace = `at:space/${groupDid}/new.flock.channel/general`;
+
+    await dpop.fetchWithDpop(`${gh.url}/xrpc/com.atproto.space.createSpace`, {
+      method: "POST",
+      accessToken: token,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        spaceType: "new.flock.channel",
+        skey: "general",
+        policy: { $type: "org.atgrp.policy", publicRead: false, grants: [{ role: "admin", read: true, write: true }] },
+      }),
+    });
+
+    // 1. Unknown `org.atgrp.forged` rejected on public repo AND in modality spaces even with `validate: false`!
+    const pubForged = await dpop.fetchWithDpop(`${gh.url}/xrpc/com.atproto.repo.putRecord`, {
+      method: "POST",
+      accessToken: token,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        repo: groupDid,
+        collection: "org.atgrp.forged",
+        rkey: "self",
+        validate: false,
+        record: { $type: "org.atgrp.forged" },
+      }),
+    });
+    assert.equal(pubForged.status, 400);
+
+    const spaceForged = await dpop.fetchWithDpop(`${gh.url}/xrpc/com.atproto.space.putRecord`, {
+      method: "POST",
+      accessToken: token,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        space: chanSpace,
+        repo: groupDid,
+        collection: "org.atgrp.forged",
+        rkey: "3jzfcijpj2z2a",
+        validate: false,
+        record: { $type: "org.atgrp.forged" },
+      }),
+    });
+    assert.equal(spaceForged.status, 400);
+
+    // 2. `org.atgrp.declaration` rejected in spaces; `org.atgrp.rule` and `org.atgrp.labeler` rejected in `meta/self`!
+    for (const [space, collection, rkey, record] of [
+      [metaSpace, "org.atgrp.declaration", "self", { $type: "org.atgrp.declaration" }],
+      [metaSpace, "org.atgrp.rule", "3jzfcijpj2z2a", { $type: "org.atgrp.rule", title: "Wrong Space", createdAt: new Date().toISOString() }],
+      [metaSpace, "org.atgrp.labeler", "self", { $type: "org.atgrp.labeler", policies: { labelValues: ["!hide"] } }],
+    ] as const) {
+      const res = await dpop.fetchWithDpop(`${gh.url}/xrpc/com.atproto.space.putRecord`, {
+        method: "POST",
+        accessToken: token,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ space, repo: groupDid, collection, rkey, validate: false, record }),
+      });
+      assert.equal(res.status, 400, `Expected ${collection} in ${space} to be rejected`);
+    }
+
+    // 3. Write-strict `isValidRoleId`: `"Mod1"` rejected on live write, `"custom-mod"` accepted!
+    const badRoleLive = await dpop.fetchWithDpop(`${gh.url}/xrpc/com.atproto.space.putRecord`, {
+      method: "POST",
+      accessToken: token,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        space: membersSpace,
+        repo: groupDid,
+        collection: "org.atgrp.role",
+        rkey: "Mod1",
+        record: { $type: "org.atgrp.role", displayName: "Lax Key", permissions: [] },
+      }),
+    });
+    assert.equal(badRoleLive.status, 400, "Live writes must enforce strict isValidRoleId");
+
+    // 4. Import-lenient `importSpaceRepoStarStream`: accepts lax ATProto record-key role `"Mod1"`, STILL rejects `org.atgrp.forged`!
+    gh.db.prepare("UPDATE group_account SET activated = 0 WHERE did = ?").run(groupDid);
+    gh.db
+      .prepare(
+        `INSERT INTO migration_session (
+           id, group_did, mode, source_endpoint, source_plc_rotation_keys_json, preserved_sovereign_keys_json,
+           access_jti, refresh_jti, auth_epoch, absolute_deadline_at, created_at
+         ) VALUES ('mig-r15-ns', ?, 'standard', 'https://src.example', '[]', '[]', 'aj-ns', 'rj-ns', 1, ?, ?)`,
+      )
+      .run(groupDid, Date.now() + 600_000, Date.now());
+
+    const membersPolicyRow = gh.db
+      .prepare("SELECT policy_json FROM group_space WHERE space_uri = ?")
+      .get(membersSpace) as { policy_json: string };
+    const polSer = await serializeRecord(
+      "com.atproto.space.policy" as NsidString,
+      "self" as RecordKeyString,
+      jsonToLex({ $type: "com.atproto.space.policy", policy: JSON.parse(membersPolicyRow.policy_json) }) as LexMap,
+    );
+    const adminRoleSer = await serializeRecord(
+      "org.atgrp.role" as NsidString,
+      "admin" as RecordKeyString,
+      jsonToLex({ $type: "org.atgrp.role", displayName: "Admin", canAssign: ["*"], permissions: groupAdminScopes(groupDid) }) as LexMap,
+    );
+    const laxRoleSer = await serializeRecord(
+      "org.atgrp.role" as NsidString,
+      "Mod1" as RecordKeyString,
+      jsonToLex({ $type: "org.atgrp.role", displayName: "Imported Lax Mod", permissions: [] }) as LexMap,
+    );
+    const memSer = await serializeRecord(
+      "org.atgrp.membership" as NsidString,
+      alice.did as RecordKeyString,
+      jsonToLex({ $type: "org.atgrp.membership", roles: ["admin", "Mod1"], createdAt: "2026-01-01T00:00:00.000Z" }) as LexMap,
+    );
+    const laxChunks: Buffer[] = [];
+    const sortedLaxRecs = [polSer, memSer, laxRoleSer, adminRoleSer];
+    for await (const chunk of writeRepoStar(
+      RepoCommit.fromRecords(sortedLaxRecs).toCommit({
+        space: membersSpace as SpaceRefString,
+        repo: groupDid as DidString,
+        rev: "3kzzzzzzzzzzz",
+      }),
+      sortedLaxRecs,
+    )) {
+      laxChunks.push(Buffer.from(chunk));
+    }
+    await gh.repoStore.importSpaceRepoStarStream({
+      groupDid,
+      migrationSessionId: "mig-r15-ns",
+      starStream: [Buffer.concat(laxChunks)],
+    });
+
+    const forgedSer = await serializeRecord(
+      "org.atgrp.forged" as NsidString,
+      "self" as RecordKeyString,
+      jsonToLex({ $type: "org.atgrp.forged" }) as LexMap,
+    );
+    const forgedChunks: Buffer[] = [];
+    for await (const chunk of writeRepoStar(
+      RepoCommit.fromRecords([forgedSer]).toCommit({
+        space: chanSpace as SpaceRefString,
+        repo: groupDid as DidString,
+        rev: "3kzzzzzzzzzzz",
+      }),
+      [forgedSer],
+    )) {
+      forgedChunks.push(Buffer.from(chunk));
+    }
+    await assert.rejects(
+      () =>
+        gh.repoStore.importSpaceRepoStarStream({
+          groupDid,
+          migrationSessionId: "mig-r15-ns",
+          starStream: [Buffer.concat(forgedChunks)],
+        }),
+      (err: unknown) => (err as { status?: number }).status === 400,
+    );
   } finally {
     await gh.close();
     await pds.close();

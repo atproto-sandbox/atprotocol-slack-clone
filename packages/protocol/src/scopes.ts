@@ -1,7 +1,11 @@
 import {
+  AccountPermission,
+  BlobPermission,
+  IdentityPermission,
   IncludeScope,
   isAtprotoOauthScope,
   normalizeAtprotoOauthScopeValue,
+  RepoPermission,
   RpcPermission,
   ScopePermissions,
   SpacePermission,
@@ -9,41 +13,43 @@ import {
   type SpaceCollectionParam,
 } from "@atproto/oauth-scopes";
 import type { DidString, NsidString, RecordKeyString } from "@atproto/syntax";
-import authManageGroupDoc from "../lexicons/group/opensocial/authManageGroup.json";
-import authManageProfileDoc from "../lexicons/group/opensocial/authManageProfile.json";
-import authModerateDoc from "../lexicons/group/opensocial/authModerate.json";
-import authParticipateDoc from "../lexicons/group/opensocial/authParticipate.json";
-import invitesSpaceDoc from "../lexicons/group/opensocial/invites.json";
-import membersSpaceDoc from "../lexicons/group/opensocial/members.json";
-import metaSpaceDoc from "../lexicons/group/opensocial/meta.json";
+import authManageAdminDoc from "../lexicons/org/atgrp/authManageAdmin.json";
+import authManageBasicDoc from "../lexicons/org/atgrp/authManageBasic.json";
+import authManageMembersDoc from "../lexicons/org/atgrp/authManageMembers.json";
+import authModerateDoc from "../lexicons/org/atgrp/authModerate.json";
+import authParticipateDoc from "../lexicons/org/atgrp/authParticipate.json";
+import inboxSpaceDoc from "../lexicons/org/atgrp/inbox.json";
+import membersSpaceDoc from "../lexicons/org/atgrp/members.json";
+import metaSpaceDoc from "../lexicons/org/atgrp/meta.json";
 import appInboxSpaceDoc from "../lexicons/new/flock/app/inbox.json";
 import channelSpaceDoc from "../lexicons/new/flock/channel.json";
 import dmConversationSpaceDoc from "../lexicons/new/flock/dm/conversation.json";
 import dmInboxSpaceDoc from "../lexicons/new/flock/dm/inbox.json";
 import tasksSpaceDoc from "../lexicons/new/flock/ext/tasks.json";
-import inboxSpaceDoc from "../lexicons/new/flock/inbox.json";
+import flockInboxSpaceDoc from "../lexicons/new/flock/inbox.json";
 import flockMemberPermDoc from "../lexicons/new/flock/permissions/member.json";
 import workspaceSpaceDoc from "../lexicons/new/flock/workspace.json";
 import { groupMembersUri, isDid, parseSpaceUri } from "./keys";
 import {
+  ATGRP_COLLECTION,
+  ATGRP_METHOD,
+  ATGRP_PERMISSION_SET,
+  ATGRP_SPACE_TYPE,
   ATPROTO_SPACE_COLLECTION,
   COLLECTION,
+  FLOCK_GROUP_METHOD,
   FLOCK_PERMISSION_SET,
-  OPENSOCIAL_COLLECTION,
-  OPENSOCIAL_METHOD,
-  OPENSOCIAL_PERMISSION_SET,
-  OPENSOCIAL_SPACE_TYPE,
   OPERATOR_METHOD,
   REPO_COLLECTION,
   SPACE_TYPE,
 } from "./nsids";
 
 export type GroupRoleRecord = {
-  displayName: string;
+  displayName?: string;
   description?: string;
   default?: boolean;
-  scopes?: readonly string[];
-  assignable?: readonly string[];
+  permissions?: readonly string[];
+  canAssign?: readonly string[];
 };
 
 export type GroupMembershipRecord = {
@@ -52,24 +58,24 @@ export type GroupMembershipRecord = {
   [key: string]: unknown;
 };
 
-export type GroupOpenSocialGrant = {
+export type GroupAtgrpGrant = {
   role: string;
   read?: boolean;
   write?: boolean;
-  scopes?: readonly string[];
+  permissions?: readonly string[];
 };
 
-export type GroupOpenSocialPolicy = {
+export type GroupAtgrpPolicy = {
   $type?: string;
   publicRead?: boolean;
   unlisted?: boolean;
-  grants: readonly GroupOpenSocialGrant[];
+  grants: readonly GroupAtgrpGrant[];
 };
 
 export type EffectiveGovernanceState = {
   roles: ReadonlyMap<string, GroupRoleRecord>;
   memberships: ReadonlyMap<string, GroupMembershipRecord>;
-  spacePolicies: ReadonlyMap<string, GroupOpenSocialPolicy>;
+  spacePolicies: ReadonlyMap<string, GroupAtgrpPolicy>;
   knownAppSubjects?: ReadonlySet<string>;
 };
 
@@ -83,6 +89,16 @@ export class InvalidScopeError extends Error {
   }
 }
 
+export class UnauthorizedScopeError extends Error {
+  readonly status = 403;
+  readonly code = "access_denied";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "UnauthorizedScopeError";
+  }
+}
+
 export class InvalidSpacePolicyScopeError extends Error {
   readonly status = 400;
   readonly code = "InvalidSpacePolicyScope";
@@ -93,24 +109,39 @@ export class InvalidSpacePolicyScopeError extends Error {
   }
 }
 
+/** Hard ceiling on issued OAuth scope tokens after include-set narrowing and absorption. */
+export const MAX_ISSUED_SCOPE_TOKENS = 200;
+
 function extractPermissionSet(doc: { defs: { main: unknown } }): LexiconPermissionSet {
   return doc.defs.main as LexiconPermissionSet;
 }
 
 export const VENDORED_PERMISSION_SETS: Readonly<Record<string, LexiconPermissionSet>> = {
-  [OPENSOCIAL_PERMISSION_SET.authParticipate]: extractPermissionSet(authParticipateDoc),
-  [OPENSOCIAL_PERMISSION_SET.authManageProfile]: extractPermissionSet(authManageProfileDoc),
-  [OPENSOCIAL_PERMISSION_SET.authModerate]: extractPermissionSet(authModerateDoc),
-  [OPENSOCIAL_PERMISSION_SET.authManageGroup]: extractPermissionSet(authManageGroupDoc),
+  [ATGRP_PERMISSION_SET.authParticipate]: extractPermissionSet(authParticipateDoc),
+  [ATGRP_PERMISSION_SET.authManageBasic]: extractPermissionSet(authManageBasicDoc),
+  [ATGRP_PERMISSION_SET.authManageMembers]: extractPermissionSet(authManageMembersDoc),
+  [ATGRP_PERMISSION_SET.authModerate]: extractPermissionSet(authModerateDoc),
+  [ATGRP_PERMISSION_SET.authManageAdmin]: extractPermissionSet(authManageAdminDoc),
   [FLOCK_PERMISSION_SET.member]: extractPermissionSet(flockMemberPermDoc),
 };
 
+/**
+ * Default record collections materialized for bare `space:<type>` permissions.
+ * Excludes `com.atproto.space.policy` on `org.atgrp.{meta,members}` because hosts reject direct
+ * policy record writes (`updateSpace` manages policies).
+ */
+function writableSpaceCollections(collections: readonly string[]): readonly SpaceCollectionParam[] {
+  return collections.filter(
+    (col) => col !== ATPROTO_SPACE_COLLECTION.spacePolicy,
+  ) as readonly SpaceCollectionParam[];
+}
+
 export const SPACE_DECLARED_COLLECTIONS: Readonly<Record<string, readonly SpaceCollectionParam[]>> = {
-  [OPENSOCIAL_SPACE_TYPE.meta]: metaSpaceDoc.defs.main.collections as readonly SpaceCollectionParam[],
-  [OPENSOCIAL_SPACE_TYPE.members]: membersSpaceDoc.defs.main.collections as readonly SpaceCollectionParam[],
-  [OPENSOCIAL_SPACE_TYPE.invites]: invitesSpaceDoc.defs.main.collections as readonly SpaceCollectionParam[],
+  [ATGRP_SPACE_TYPE.meta]: writableSpaceCollections(metaSpaceDoc.defs.main.collections),
+  [ATGRP_SPACE_TYPE.members]: writableSpaceCollections(membersSpaceDoc.defs.main.collections),
+  [ATGRP_SPACE_TYPE.inbox]: inboxSpaceDoc.defs.main.collections as readonly SpaceCollectionParam[],
   [SPACE_TYPE.workspace]: workspaceSpaceDoc.defs.main.collections as readonly SpaceCollectionParam[],
-  [SPACE_TYPE.inbox]: inboxSpaceDoc.defs.main.collections as readonly SpaceCollectionParam[],
+  [SPACE_TYPE.inbox]: flockInboxSpaceDoc.defs.main.collections as readonly SpaceCollectionParam[],
   [SPACE_TYPE.channel]: channelSpaceDoc.defs.main.collections as readonly SpaceCollectionParam[],
   [SPACE_TYPE.appInbox]: appInboxSpaceDoc.defs.main.collections as readonly SpaceCollectionParam[],
   [SPACE_TYPE.tasks]: tasksSpaceDoc.defs.main.collections as readonly SpaceCollectionParam[],
@@ -129,23 +160,23 @@ export const DM_BROWSER_SCOPES: readonly string[] = [
 ] as const;
 
 /**
- * Exact spelled-out 1-for-1 expansion of `group.opensocial.authParticipate` for personal PDSes,
- * avoiding `include:group.opensocial.authParticipate` DNS permission-set resolution.
+ * Exact spelled-out 1-for-1 expansion of `org.atgrp.authParticipate` for personal PDSes,
+ * avoiding `include:org.atgrp.authParticipate` DNS permission-set resolution.
  */
-export const OPEN_SOCIAL_PARTICIPATE_SCOPES: readonly string[] = [
-  `space:${OPENSOCIAL_SPACE_TYPE.meta}?authority=*&skey=self&action=read`,
-  `space:${OPENSOCIAL_SPACE_TYPE.members}?authority=*&skey=self&collection=${OPENSOCIAL_COLLECTION.acceptance}&action=read&action=create&action=update&action=delete`,
-  `space:${OPENSOCIAL_SPACE_TYPE.invites}?authority=self&skey=self&action=read&manage=create`,
-  `rpc?aud=*&lxm=${OPENSOCIAL_METHOD.cancelJoinRequest}&lxm=${OPENSOCIAL_METHOD.createReport}&lxm=${OPENSOCIAL_METHOD.leaveGroup}&lxm=${OPENSOCIAL_METHOD.requestJoin}`,
+export const ATGRP_PARTICIPATE_SCOPES: readonly string[] = [
+  `space:${ATGRP_SPACE_TYPE.meta}?authority=*&skey=self&action=read`,
+  `space:${ATGRP_SPACE_TYPE.members}?authority=*&skey=self&collection=${ATGRP_COLLECTION.confirmation}&action=read&action=create&action=update&action=delete`,
+  `space:${ATGRP_SPACE_TYPE.inbox}?authority=self&skey=self&action=read&manage=create`,
+  `rpc?aud=*&lxm=${ATGRP_METHOD.cancelJoinRequest}&lxm=${ATGRP_METHOD.leaveGroup}&lxm=${ATGRP_METHOD.modQuerySelfHistory}&lxm=${ATGRP_METHOD.modSubmitAppeal}&lxm=${ATGRP_METHOD.modSubmitReport}&lxm=${ATGRP_METHOD.requestJoin}`,
 ] as const;
 
 /**
- * Personal-PDS scope allowing `com.atproto.space.listSpaces({ spaceType: "group.opensocial.members" })`
+ * Personal-PDS scope allowing `com.atproto.space.listSpaces({ spaceType: "org.atgrp.members" })`
  * (pinned `@atproto/pds` asserts `skey: "*"` with `action: "read_self"` on `listSpaces`, whereas upstream
- * `group.opensocial.authParticipate` constrains `skey=self`; see `protocol-authors-feedback.md`).
+ * `org.atgrp.authParticipate` constrains `skey=self`; see `protocol-authors-feedback.md`).
  */
 export const PERSONAL_PDS_LIST_GROUP_MEMBERS_SPACES_SCOPE =
-  `space:${OPENSOCIAL_SPACE_TYPE.members}?authority=*&action=read_self` as const;
+  `space:${ATGRP_SPACE_TYPE.members}?authority=*&action=read_self` as const;
 
 export const FLOCK_MEMBER_MODALITY_SPACE_SCOPES: readonly string[] = [
   `space:${SPACE_TYPE.workspace}?authority=*&skey=self&action=read`,
@@ -175,7 +206,7 @@ export const DESK_MODALITY_SCOPES: readonly string[] = [
 export function deskMemberScopes(): string[] {
   return [
     "atproto",
-    ...OPEN_SOCIAL_PARTICIPATE_SCOPES,
+    ...ATGRP_PARTICIPATE_SCOPES,
     PERSONAL_PDS_LIST_GROUP_MEMBERS_SPACES_SCOPE,
     ...DESK_MODALITY_SCOPES,
   ];
@@ -192,7 +223,7 @@ export const LEGACY_OPERATOR_METHODS = OPERATOR_METHODS.filter(
 );
 
 /**
- * Browser personal-PDS OAuth grant: DM scopes + OpenSocial participation scopes + Flock modality scopes + Operator RPC methods.
+ * Browser personal-PDS OAuth grant: DM scopes + Atmosphere Groups participation scopes + Flock modality scopes + Operator RPC methods.
  */
 export function memberGrantScopes(serviceRef: string): string[] {
   return memberScopesFor(OPERATOR_METHODS, serviceRef);
@@ -205,7 +236,7 @@ export function legacyMemberGrantScopes(serviceRef: string): string[] {
 function memberScopesFor(operatorMethods: readonly string[], serviceRef: string): string[] {
   return [
     ...DM_BROWSER_SCOPES,
-    ...OPEN_SOCIAL_PARTICIPATE_SCOPES,
+    ...ATGRP_PARTICIPATE_SCOPES,
     PERSONAL_PDS_LIST_GROUP_MEMBERS_SPACES_SCOPE,
     ...FLOCK_MEMBER_MODALITY_SPACE_SCOPES,
     operatorMethodsScope(operatorMethods, serviceRef),
@@ -219,16 +250,16 @@ export function operatorMethodsScope(methods: readonly string[], serviceRef: str
 
 /**
  * Personal-PDS OAuth grant for installed bot/app accounts:
- * reads OpenSocial `meta/self` + `members/self` and Flock `workspace/self`, `channel/*`, `app.inbox/*`,
+ * reads Atmosphere Groups `meta/self` + `members/self` and Flock `workspace/self`, `channel/*`, `app.inbox/*`,
  * writes channel messages/reactions and public `app.declaration`, and polls `operator.getChanges`.
  */
 export function appGrantScopes(serviceRef: string): string[] {
   return [
     "atproto",
     `repo:${REPO_COLLECTION.appDeclaration}?action=create&action=update`,
-    `space:${OPENSOCIAL_SPACE_TYPE.meta}?authority=*&skey=self&action=read`,
+    `space:${ATGRP_SPACE_TYPE.meta}?authority=*&skey=self&action=read`,
     PERSONAL_PDS_LIST_GROUP_MEMBERS_SPACES_SCOPE,
-    `space:${OPENSOCIAL_SPACE_TYPE.members}?authority=*&skey=self&action=read`,
+    `space:${ATGRP_SPACE_TYPE.members}?authority=*&skey=self&action=read`,
     `space:${SPACE_TYPE.workspace}?authority=*&skey=self&action=read`,
     `space:${SPACE_TYPE.channel}?authority=*&action=read`,
     `space:${SPACE_TYPE.channel}?authority=*&collection=${COLLECTION.message}&collection=${COLLECTION.reaction}&action=create&action=update&action=delete`,
@@ -244,7 +275,7 @@ export function appGrantScopes(serviceRef: string): string[] {
 export function groupAdminScopes(groupDid?: string): string[] {
   return [
     "atproto",
-    `include:${OPENSOCIAL_PERMISSION_SET.authManageGroup}`,
+    `include:${ATGRP_PERMISSION_SET.authManageAdmin}`,
     "repo:*",
     "blob:*/*",
     "identity:*",
@@ -255,24 +286,37 @@ export function groupAdminScopes(groupDid?: string): string[] {
     ...(groupDid
       ? [RpcPermission.scopeNeededFor({ aud: `${groupDid}#atproto_pds` as `${DidString}#${string}`, lxm: "*" as NsidString })]
       : []),
-    "rpc?aud=*&lxm=com.atproto.server.createAccount&lxm=group.opensocial.abortMigration&lxm=com.atproto.space.notifyCredentialsRevoked&lxm=com.atproto.space.notifyRepoUpdate",
+    `rpc?aud=*&lxm=com.atproto.server.createAccount&lxm=${FLOCK_GROUP_METHOD.abortMigration}&lxm=com.atproto.space.notifyCredentialsRevoked&lxm=com.atproto.space.notifyRepoUpdate`,
   ];
 }
 
-/** Group-DID moderator OAuth scopes (`role/moderator` and moderator browser sessions). */
+/**
+ * Group-DID moderator OAuth scopes (`role/moderator` and moderator browser sessions).
+ * Wildcard label grant is intentionally write-only (`create`/`update`/`delete`, no `action=read`)
+ * because `@atproto/oauth-scopes` ignores `collection` on `action=read` — adding `read` on `space:*`
+ * would expose private modality spaces. `authModerate` already grants `read` on `meta/self` and `members/self`.
+ */
 export function groupModeratorScopes(): string[] {
   return [
     "atproto",
-    `include:${OPENSOCIAL_PERMISSION_SET.authModerate}`,
-    `space:*?collection=${ATPROTO_SPACE_COLLECTION.label}&action=read&action=create&action=update&action=delete`,
+    `include:${ATGRP_PERMISSION_SET.authModerate}`,
+    `space:*?collection=${ATPROTO_SPACE_COLLECTION.label}&action=create&action=update&action=delete`,
   ];
 }
 
-/** Group-DID profile-editor OAuth scopes. */
-export function groupProfileEditorScopes(): string[] {
+/** Group-DID member-manager OAuth scopes (`authManageMembers`: memberships, invites, join requests). */
+export function groupMembersManagerScopes(): string[] {
   return [
     "atproto",
-    `include:${OPENSOCIAL_PERMISSION_SET.authManageProfile}`,
+    `include:${ATGRP_PERMISSION_SET.authManageMembers}`,
+  ];
+}
+
+/** Group-DID basic-editor OAuth scopes (`authManageBasic`: group `about` and `rule` records). */
+export function groupBasicEditorScopes(): string[] {
+  return [
+    "atproto",
+    `include:${ATGRP_PERMISSION_SET.authManageBasic}`,
   ];
 }
 
@@ -305,6 +349,31 @@ function expandRawIncludeTokens(rawScopes: readonly string[], onInvalid: (msg: s
   return expanded;
 }
 
+function normalizeScopeToken(token: string, groupDid: string | undefined, onInvalid: (msg: string) => never): string {
+  if (!isAtprotoOauthScope(token)) {
+    onInvalid(`Invalid ATProto OAuth scope syntax: ${token}`);
+  }
+  if (token.startsWith("space:")) {
+    let sp = SpacePermission.fromString(token);
+    if (!sp) {
+      onInvalid(`Invalid space permission syntax: ${token}`);
+    }
+    if (sp.spaceType !== "*" && !sp.hasCollections) {
+      const declared = SPACE_DECLARED_COLLECTIONS[sp.spaceType] ?? (["*"] as const);
+      sp = sp.withDefaultCollections(declared);
+    }
+    if (groupDid !== undefined && sp.isSelfAuthority) {
+      sp = sp.withResolvedAuthority(groupDid as DidString);
+    }
+    return sp.toString();
+  }
+  const norm = normalizeAtprotoOauthScopeValue(token);
+  if (!norm) {
+    onInvalid(`Could not normalize scope token: ${token}`);
+  }
+  return norm;
+}
+
 /**
  * Expands `include:` tokens against `VENDORED_PERMISSION_SETS`, resolves `authority=self` to `groupDid`
  * (when supplied) and materializes space default collections on bare `space:<type>` grants, returning a
@@ -317,37 +386,16 @@ export function expandGroupScopes(rawScopes: readonly string[], groupDid?: strin
   const tokens = expandRawIncludeTokens(rawScopes, (msg) => {
     throw new InvalidScopeError(msg);
   });
-  const normalized: string[] = [];
-  for (const token of tokens) {
-    if (!isAtprotoOauthScope(token)) {
-      throw new InvalidScopeError(`Invalid ATProto OAuth scope syntax: ${token}`);
-    }
-    if (token.startsWith("space:")) {
-      let sp = SpacePermission.fromString(token);
-      if (!sp) {
-        throw new InvalidScopeError(`Invalid space permission syntax: ${token}`);
-      }
-      if (sp.spaceType !== "*" && !sp.hasCollections) {
-        const declared = SPACE_DECLARED_COLLECTIONS[sp.spaceType] ?? (["*"] as const);
-        sp = sp.withDefaultCollections(declared);
-      }
-      if (groupDid !== undefined && sp.isSelfAuthority) {
-        sp = sp.withResolvedAuthority(groupDid as DidString);
-      }
-      normalized.push(sp.toString());
-    } else {
-      const norm = normalizeAtprotoOauthScopeValue(token);
-      if (!norm) {
-        throw new InvalidScopeError(`Could not normalize scope token: ${token}`);
-      }
-      normalized.push(norm);
-    }
-  }
+  const normalized = tokens.map((token) =>
+    normalizeScopeToken(token, groupDid, (msg) => {
+      throw new InvalidScopeError(msg);
+    }),
+  );
   return new ScopePermissions(normalized);
 }
 
 /**
- * Validates and clamps `group.opensocial.policy` `grant.scopes` entries to concrete `(spaceType, groupDid, skey)`.
+ * Validates and clamps `org.atgrp.policy` `grant.permissions` entries to concrete `(spaceType, groupDid, skey)`.
  * Rejects non-`space:` permissions, `manage=create`, or cross-space `(spaceType, authority, skey)` targets with
  * `InvalidSpacePolicyScopeError` (`400 InvalidSpacePolicyScope`), ensuring policy grants never leak across spaces.
  */
@@ -365,7 +413,7 @@ export function expandPolicyGrantScopes(
   for (const token of tokens) {
     if (!token.startsWith("space:")) {
       throw new InvalidSpacePolicyScopeError(
-        `Space policy grant scopes may only contain space: permissions (got ${token}).`,
+        `Space policy grant permissions may only contain space: permissions (got ${token}).`,
       );
     }
     const sp = SpacePermission.fromString(token);
@@ -374,7 +422,7 @@ export function expandPolicyGrantScopes(
     }
     if (sp.manage?.includes("create")) {
       throw new InvalidSpacePolicyScopeError(
-        `Space policy grant scopes cannot include manage=create (${token}).`,
+        `Space policy grant permissions cannot include manage=create (${token}).`,
       );
     }
     if (sp.spaceType !== "*" && sp.spaceType !== target.spaceType) {
@@ -407,8 +455,351 @@ export function expandPolicyGrantScopes(
 }
 
 /**
+ * Checks whether every permission in `candidatePerms` is covered by `actorPerms` for `groupDid`.
+ * Shared across RBAC anti-escalation, OAuth include-set narrowing, and live session enforcement.
+ */
+export function isPermissionSubset(
+  candidatePerms: ScopePermissions,
+  actorPerms: ScopePermissions,
+  groupDid: string,
+): boolean {
+  const actorBlobPerms: BlobPermission[] = [];
+  const actorRepoPerms: RepoPermission[] = [];
+  const actorRpcPerms: RpcPermission[] = [];
+  const actorSpacePerms: SpacePermission[] = [];
+
+  for (const actorToken of actorPerms.scopes) {
+    if (actorToken.startsWith("blob:") || actorToken.startsWith("blob?")) {
+      const bp = BlobPermission.fromString(actorToken);
+      if (bp) actorBlobPerms.push(bp);
+    } else if (actorToken.startsWith("repo:") || actorToken.startsWith("repo?")) {
+      const rp = RepoPermission.fromString(actorToken);
+      if (rp) actorRepoPerms.push(rp);
+    } else if (actorToken.startsWith("rpc:") || actorToken.startsWith("rpc?")) {
+      const rpcp = RpcPermission.fromString(actorToken);
+      if (rpcp) actorRpcPerms.push(rpcp);
+    } else if (actorToken.startsWith("space:") || actorToken.startsWith("space?")) {
+      let sp = SpacePermission.fromString(actorToken);
+      if (sp) {
+        if (sp.spaceType !== "*" && !sp.hasCollections) {
+          const declared = SPACE_DECLARED_COLLECTIONS[sp.spaceType] ?? (["*"] as const);
+          sp = sp.withDefaultCollections(declared);
+        }
+        actorSpacePerms.push(
+          sp.isSelfAuthority ? sp.withResolvedAuthority(groupDid as DidString) : sp,
+        );
+      }
+    }
+  }
+
+  for (const token of candidatePerms.scopes) {
+    if (token === "atproto") continue;
+
+    if (token.startsWith("account:") || token.startsWith("account?")) {
+      const p = AccountPermission.fromString(token);
+      if (!p) return false;
+      for (const action of p.action) {
+        if (!actorPerms.allowsAccount({ attr: p.attr, action })) return false;
+      }
+      continue;
+    }
+
+    if (token.startsWith("identity:") || token.startsWith("identity?")) {
+      const p = IdentityPermission.fromString(token);
+      if (!p) return false;
+      if (!actorPerms.allowsIdentity({ attr: p.attr })) return false;
+      continue;
+    }
+
+    if (token.startsWith("blob:") || token.startsWith("blob?")) {
+      const p = BlobPermission.fromString(token);
+      if (!p) return false;
+      for (const accept of p.accept) {
+        if (accept === "*/*") {
+          if (!actorBlobPerms.some((ab) => ab.accept.includes("*/*"))) {
+            return false;
+          }
+        } else if (accept.endsWith("/*")) {
+          if (!actorBlobPerms.some((ab) => ab.accept.includes("*/*") || ab.accept.includes(accept))) {
+            return false;
+          }
+        } else if (!actorPerms.allowsBlob({ mime: accept as `${string}/${string}` })) {
+          return false;
+        }
+      }
+      continue;
+    }
+
+    if (token.startsWith("repo:") || token.startsWith("repo?")) {
+      const p = RepoPermission.fromString(token);
+      if (!p) return false;
+      for (const col of p.collection) {
+        for (const action of p.action) {
+          const covered = actorRepoPerms.some(
+            (ar) =>
+              ar.action.includes(action) &&
+              (ar.collection.includes("*") || (col !== "*" && ar.collection.includes(col))),
+          );
+          if (!covered) return false;
+        }
+      }
+      continue;
+    }
+
+    if (token.startsWith("rpc:") || token.startsWith("rpc?")) {
+      const p = RpcPermission.fromString(token);
+      if (!p) return false;
+      for (const lxm of p.lxm) {
+        const covered = actorRpcPerms.some(
+          (arpc) =>
+            (arpc.aud === "*" || (p.aud !== "*" && arpc.aud === p.aud)) &&
+            (arpc.lxm.includes("*") || (lxm !== "*" && arpc.lxm.includes(lxm))),
+        );
+        if (!covered) return false;
+      }
+      continue;
+    }
+
+    if (token.startsWith("space:") || token.startsWith("space?")) {
+      let rawSp = SpacePermission.fromString(token);
+      if (!rawSp) return false;
+      if (rawSp.spaceType !== "*" && !rawSp.hasCollections) {
+        const declared = SPACE_DECLARED_COLLECTIONS[rawSp.spaceType] ?? (["*"] as const);
+        rawSp = rawSp.withDefaultCollections(declared);
+      }
+      const p = rawSp.isSelfAuthority ? rawSp.withResolvedAuthority(groupDid as DidString) : rawSp;
+      const matchesTarget = (asp: SpacePermission): boolean =>
+        (asp.spaceType === "*" || (p.spaceType !== "*" && asp.spaceType === p.spaceType)) &&
+        (asp.authority === "*" || (p.authority !== "*" && asp.authority === p.authority)) &&
+        (asp.skey === "*" || (p.skey !== "*" && asp.skey === p.skey));
+
+      if (p.manage) {
+        for (const manage of p.manage) {
+          const covered = actorSpacePerms.some(
+            (asp) => matchesTarget(asp) && asp.manage != null && asp.manage.includes(manage),
+          );
+          if (!covered) return false;
+        }
+      }
+      for (const action of p.action) {
+        if (action === "read") {
+          const covered = actorSpacePerms.some(
+            (asp) => matchesTarget(asp) && asp.action.includes("read"),
+          );
+          if (!covered) return false;
+        } else if (action === "read_self") {
+          const covered = actorSpacePerms.some(
+            (asp) =>
+              matchesTarget(asp) &&
+              (asp.action.includes("read") || asp.action.includes("read_self")),
+          );
+          if (!covered) return false;
+        } else if (p.collection) {
+          for (const col of p.collection) {
+            const covered = actorSpacePerms.some(
+              (asp) =>
+                matchesTarget(asp) &&
+                asp.action.includes(action) &&
+                asp.collection != null &&
+                (asp.collection.includes("*") || (col !== "*" && asp.collection.includes(col))),
+            );
+            if (!covered) return false;
+          }
+        }
+      }
+      continue;
+    }
+
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Splits a single normalized permission token originating from an `include:` permission set
+ * into atomic units so each individual `(space, collection, action)`, `(space, manage)`,
+ * or `(rpc, aud, lxm)` entry can be filtered cleanly against `actorPerms`.
+ */
+function atomizeIncludePermission(normalizedToken: string, groupDid: string): string[] {
+  if (normalizedToken === "atproto") return ["atproto"];
+  if (normalizedToken.startsWith("space:") || normalizedToken.startsWith("space?")) {
+    const sp = SpacePermission.fromString(normalizedToken);
+    if (!sp) return [normalizedToken];
+    const resolved = sp.isSelfAuthority ? sp.withResolvedAuthority(groupDid as DidString) : sp;
+    const atoms: string[] = [];
+    if (resolved.manage) {
+      for (const manage of resolved.manage) {
+        const manageOnly = SpacePermission.fromString(
+          `space:${resolved.spaceType}?authority=${resolved.authority}&skey=${resolved.skey}&manage=${manage}`,
+        );
+        if (manageOnly) atoms.push(manageOnly.toString());
+      }
+    }
+    for (const action of resolved.action) {
+      if (action === "read" || action === "read_self") {
+        atoms.push(
+          new SpacePermission(
+            resolved.spaceType,
+            resolved.authority,
+            resolved.skey,
+            undefined,
+            [action],
+            undefined,
+          ).toString(),
+        );
+      } else if (resolved.collection && resolved.collection.length > 0) {
+        for (const col of resolved.collection) {
+          atoms.push(
+            new SpacePermission(
+              resolved.spaceType,
+              resolved.authority,
+              resolved.skey,
+              [col],
+              [action],
+              undefined,
+            ).toString(),
+          );
+        }
+      }
+    }
+    return atoms;
+  }
+  if (normalizedToken.startsWith("rpc:") || normalizedToken.startsWith("rpc?")) {
+    const rp = RpcPermission.fromString(normalizedToken);
+    if (!rp) return [normalizedToken];
+    return rp.lxm.map((lxm) => new RpcPermission(rp.aud, [lxm]).toString());
+  }
+  if (normalizedToken.startsWith("repo:") || normalizedToken.startsWith("repo?")) {
+    const rp = RepoPermission.fromString(normalizedToken);
+    if (!rp) return [normalizedToken];
+    const atoms: string[] = [];
+    for (const col of rp.collection) {
+      for (const action of rp.action) {
+        atoms.push(new RepoPermission([col], [action]).toString());
+      }
+    }
+    return atoms;
+  }
+  return [normalizedToken];
+}
+
+/**
+ * Resolves a requested OAuth scope string/token list against an authorizer's live `actorPerms`:
+ * - `include:` permission sets act as upper bounds (Atmosphere Groups spec §Permission sets):
+ *   each expanded atomic permission is retained iff covered by `actorPerms`.
+ * - Explicit (non-`include:`) permissions must each be covered by `actorPerms`, otherwise
+ *   `UnauthorizedScopeError` (`403 access_denied`) is thrown (spec §Writing as the Group Account).
+ * - Explicit `atproto`-only requests succeed for eligible members; requests containing
+ *   non-`atproto` permissions that narrow to zero effective permissions throw `403 access_denied`.
+ * - Redundant tokens subsumed by other retained tokens are absorbed, and issued token count is
+ *   capped at `MAX_ISSUED_SCOPE_TOKENS`.
+ */
+export function resolveAuthorizedGroupScope(
+  requestedTokens: readonly string[],
+  actorPerms: ScopePermissions,
+  groupDid: string,
+  options: { ceilingPerms?: ScopePermissions } = {},
+): { scope: string; tokens: string[]; permissions: ScopePermissions } {
+  if (!isDid(groupDid)) {
+    throw new InvalidScopeError(`Invalid group DID for scope resolution: ${groupDid}`);
+  }
+  const effectiveCeiling = options.ceilingPerms;
+  const isAllowed = (candidate: ScopePermissions): boolean =>
+    isPermissionSubset(candidate, actorPerms, groupDid) &&
+    (!effectiveCeiling || isPermissionSubset(candidate, effectiveCeiling, groupDid));
+
+  let hasAtproto = false;
+  let requestedNonAtproto = false;
+  const retained: string[] = [];
+
+  for (const raw of requestedTokens) {
+    if (typeof raw !== "string" || raw.trim().length === 0) {
+      throw new InvalidScopeError("Scope token must be a non-empty string.");
+    }
+    if (raw === "atproto") {
+      hasAtproto = true;
+      continue;
+    }
+    requestedNonAtproto = true;
+
+    if (raw.startsWith("include:")) {
+      const expandedRaw = expandRawIncludeTokens([raw], (msg) => {
+        throw new InvalidScopeError(msg);
+      });
+      const normalizedSet = expandedRaw.map((t) =>
+        normalizeScopeToken(t, groupDid, (msg) => {
+          throw new InvalidScopeError(msg);
+        }),
+      );
+      // Fast path: if the entire expanded permission set is already allowed, retain its normalized entries compactly.
+      if (isAllowed(new ScopePermissions(normalizedSet))) {
+        retained.push(...normalizedSet);
+      } else {
+        for (const normToken of normalizedSet) {
+          const single = new ScopePermissions([normToken]);
+          if (isAllowed(single)) {
+            retained.push(normToken);
+            continue;
+          }
+          for (const atom of atomizeIncludePermission(normToken, groupDid)) {
+            if (isAllowed(new ScopePermissions([atom]))) {
+              retained.push(atom);
+            }
+          }
+        }
+      }
+    } else {
+      const norm = normalizeScopeToken(raw, groupDid, (msg) => {
+        throw new InvalidScopeError(msg);
+      });
+      if (!isAllowed(new ScopePermissions([norm]))) {
+        throw new UnauthorizedScopeError(
+          `Requested permission '${raw}' exceeds the authorizing user's live group roles.`,
+        );
+      }
+      retained.push(norm);
+    }
+  }
+
+  // Deduplicate and absorb any token subsumed by another retained token.
+  const unique = [...new Set(retained)];
+  const minimized: string[] = [];
+  for (let i = 0; i < unique.length; i += 1) {
+    const candidate = unique[i]!;
+    const others = unique.filter((_, idx) => idx !== i);
+    if (others.length > 0 && isPermissionSubset(new ScopePermissions([candidate]), new ScopePermissions(others), groupDid)) {
+      // Only drop if strictly absorbed by another token (if identical, dedupe already handled it;
+      // guard against mutual subsumption by checking against already-kept + remaining unvisited).
+      const remaining = [...minimized, ...unique.slice(i + 1)];
+      if (remaining.length > 0 && isPermissionSubset(new ScopePermissions([candidate]), new ScopePermissions(remaining), groupDid)) {
+        continue;
+      }
+    }
+    minimized.push(candidate);
+  }
+
+  if (requestedNonAtproto && minimized.length === 0) {
+    throw new UnauthorizedScopeError(
+      "None of the requested group permissions are granted by the authorizing user's live roles.",
+    );
+  }
+
+  const finalTokens = [...(hasAtproto ? ["atproto"] : []), ...minimized];
+  if (finalTokens.length > MAX_ISSUED_SCOPE_TOKENS) {
+    throw new InvalidScopeError(
+      `Resolved OAuth scope exceeds the maximum of ${MAX_ISSUED_SCOPE_TOKENS} permission tokens.`,
+    );
+  }
+  return {
+    scope: finalTokens.join(" "),
+    tokens: finalTokens,
+    permissions: new ScopePermissions(finalTokens),
+  };
+}
+
+/**
  * Single canonical effective permission union for a member acting as `groupDid`:
- * unions `expandGroupScopes` across all assigned `role.scopes` PLUS `expandPolicyGrantScopes`
+ * unions `expandGroupScopes` across all assigned `role.permissions` PLUS `expandPolicyGrantScopes`
  * across every non-deleted space's `policy.grants` matching `membership.roles`.
  */
 export function effectiveMemberPermissions(
@@ -428,22 +819,22 @@ export function effectiveMemberPermissions(
     return new ScopePermissions([]);
   }
   const assignedRoles = new Set(membership.roles);
-  const rawRoleScopes: string[] = [];
+  const rawRolePerms: string[] = [];
   for (const roleKey of assignedRoles) {
     const role = state.roles.get(roleKey);
-    if (role?.scopes) {
-      rawRoleScopes.push(...role.scopes);
+    if (role?.permissions) {
+      rawRolePerms.push(...role.permissions);
     }
   }
-  const rolePerms = expandGroupScopes(rawRoleScopes, groupDid);
+  const rolePerms = expandGroupScopes(rawRolePerms, groupDid);
   const unionTokens = new Set<string>(rolePerms.scopes);
 
   for (const [rawSpaceUri, policy] of state.spacePolicies.entries()) {
     const parsed = parseSpaceUri(rawSpaceUri);
     if (!parsed || parsed.authorityDid !== groupDid) continue;
     for (const grant of policy.grants ?? []) {
-      if (!assignedRoles.has(grant.role) || !grant.scopes || grant.scopes.length === 0) continue;
-      const clamped = expandPolicyGrantScopes(grant.scopes, {
+      if (!assignedRoles.has(grant.role) || !grant.permissions || grant.permissions.length === 0) continue;
+      const clamped = expandPolicyGrantScopes(grant.permissions, {
         groupDid,
         spaceType: parsed.type,
         skey: parsed.skey,
@@ -459,6 +850,7 @@ export function effectiveMemberPermissions(
 
 /**
  * Canonical check whether `memberDid` holds full effective administrative governance over `groupDid`.
+ * Checks `read` and `write` on `org.atgrp.members/self` independently across assigned roles (flat union).
  */
 export function isEffectiveAdminMember(
   memberDid: string,
@@ -470,34 +862,35 @@ export function isEffectiveAdminMember(
     return false;
   }
   const assignedRoles = new Set(membership.roles);
-  let hasWildcardAssignable = false;
+  let hasWildcardCanAssign = false;
   for (const roleKey of assignedRoles) {
     const role = state.roles.get(roleKey);
-    if (role?.assignable?.includes("*")) {
-      hasWildcardAssignable = true;
+    if (role?.canAssign?.includes("*")) {
+      hasWildcardCanAssign = true;
       break;
     }
   }
-  if (!hasWildcardAssignable) return false;
+  if (!hasWildcardCanAssign) return false;
 
   const membersUri = groupMembersUri(groupDid);
   const membersPolicy = state.spacePolicies.get(membersUri);
-  const hasMembersReadWrite = Boolean(
-    membersPolicy?.grants?.some(
-      (grant) => assignedRoles.has(grant.role) && grant.read === true && grant.write === true,
-    ),
+  const hasMembersRead = Boolean(
+    membersPolicy?.grants?.some((grant) => assignedRoles.has(grant.role) && grant.read === true),
   );
-  if (!hasMembersReadWrite) return false;
+  const hasMembersWrite = Boolean(
+    membersPolicy?.grants?.some((grant) => assignedRoles.has(grant.role) && grant.write === true),
+  );
+  if (!hasMembersRead || !hasMembersWrite) return false;
 
   const perms = effectiveMemberPermissions(state, groupDid, memberDid);
   const membersTarget = {
     spaceDid: groupDid as DidString,
-    spaceType: OPENSOCIAL_SPACE_TYPE.members as NsidString,
+    spaceType: ATGRP_SPACE_TYPE.members as NsidString,
     skey: "self" as RecordKeyString,
   };
   const metaTarget = {
     spaceDid: groupDid as DidString,
-    spaceType: OPENSOCIAL_SPACE_TYPE.meta as NsidString,
+    spaceType: ATGRP_SPACE_TYPE.meta as NsidString,
     skey: "self" as RecordKeyString,
   };
   const wildcardTarget = {
@@ -508,7 +901,12 @@ export function isEffectiveAdminMember(
 
   if (!perms.allowsSpace(membersTarget, { action: "read" })) return false;
   if (!perms.allowsSpace(membersTarget, { manage: "update" })) return false;
-  for (const col of [OPENSOCIAL_COLLECTION.role, OPENSOCIAL_COLLECTION.membership] as const) {
+  for (const col of [
+    ATGRP_COLLECTION.role,
+    ATGRP_COLLECTION.membership,
+    ATGRP_COLLECTION.rule,
+    ATGRP_COLLECTION.labeler,
+  ] as const) {
     for (const action of ["create", "update", "delete"] as const) {
       if (!perms.allowsSpace(membersTarget, { action, collection: col as NsidString })) return false;
     }
@@ -516,11 +914,7 @@ export function isEffectiveAdminMember(
 
   if (!perms.allowsSpace(metaTarget, { action: "read" })) return false;
   if (!perms.allowsSpace(metaTarget, { manage: "update" })) return false;
-  for (const col of [
-    OPENSOCIAL_COLLECTION.profile,
-    OPENSOCIAL_COLLECTION.rule,
-    OPENSOCIAL_COLLECTION.labeler,
-  ] as const) {
+  for (const col of [ATGRP_COLLECTION.about, ATGRP_COLLECTION.config] as const) {
     for (const action of ["create", "update", "delete"] as const) {
       if (!perms.allowsSpace(metaTarget, { action, collection: col as NsidString })) return false;
     }
@@ -555,7 +949,8 @@ export function effectiveHumanAdmins(state: EffectiveGovernanceState, groupDid: 
 }
 
 /**
- * Checks whether `memberDid` holds effective moderation capability (in-space label CRUD + moderation RPCs).
+ * Checks whether `memberDid` holds effective moderation capability:
+ * label CRUD in `org.atgrp.members/self` (where account labels live) + `mod.querySubjects` + `mod.updateSubject`.
  */
 export function isEffectiveModeratorMember(
   memberDid: string,
@@ -566,24 +961,24 @@ export function isEffectiveModeratorMember(
   const membership = state.memberships.get(memberDid);
   if (!membership || membership.roles.length === 0) return false;
   const perms = effectiveMemberPermissions(state, groupDid, memberDid);
-  const metaTarget = {
+  const membersTarget = {
     spaceDid: groupDid as DidString,
-    spaceType: OPENSOCIAL_SPACE_TYPE.meta as NsidString,
+    spaceType: ATGRP_SPACE_TYPE.members as NsidString,
     skey: "self" as RecordKeyString,
   };
   const groupAud = `${groupDid}#atproto_pds` as const;
   return (
-    perms.allowsSpace(metaTarget, {
+    perms.allowsSpace(membersTarget, {
       action: "create",
       collection: ATPROTO_SPACE_COLLECTION.label as NsidString,
     }) &&
     perms.allowsRpc({
       aud: groupAud,
-      lxm: OPENSOCIAL_METHOD.listModSubjects as NsidString,
+      lxm: ATGRP_METHOD.modQuerySubjects as NsidString,
     }) &&
     perms.allowsRpc({
       aud: groupAud,
-      lxm: OPENSOCIAL_METHOD.resolveModSubject as NsidString,
+      lxm: ATGRP_METHOD.modUpdateSubject as NsidString,
     })
   );
 }
@@ -616,4 +1011,3 @@ export function permissionsAllowRpc(
     lxm: lxm as NsidString,
   });
 }
-

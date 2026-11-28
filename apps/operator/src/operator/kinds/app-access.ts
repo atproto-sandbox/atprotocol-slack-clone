@@ -6,7 +6,7 @@ import {
   channelUri,
   groupMembersUri,
 } from "@flock/protocol/keys";
-import { OPENSOCIAL_COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
+import { ATGRP_COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
 import { WORKSPACE_ENVELOPE } from "@flock/protocol/workspace-summary";
 import {
   appInboxState,
@@ -112,7 +112,7 @@ async function installApp(
   // and ensure `role/${roleKey}` exists in `members/self` BEFORE space policies reference `roleKey`!
   await context.step("app-install-record", async () => {
     await writeInstall(actor, install);
-    await putAuthorityRecord(actor.session, membersSpace, OPENSOCIAL_COLLECTION.role, roleKey, {
+    await putAuthorityRecord(actor.session, membersSpace, ATGRP_COLLECTION.role, roleKey, {
       displayName: `App: ${subject}`,
     });
   });
@@ -150,7 +150,7 @@ async function updateAppAccess(
 
   await context.step("app-access-record", async () => {
     await writeInstall(actor, install);
-    await putAuthorityRecord(actor.session, membersSpace, OPENSOCIAL_COLLECTION.role, roleKey, {
+    await putAuthorityRecord(actor.session, membersSpace, ATGRP_COLLECTION.role, roleKey, {
       displayName: `App: ${subject}`,
     });
   });
@@ -321,7 +321,7 @@ async function uninstallApp(actor: OperatorActor, context: OperationContext, sub
       }
     }
     await deleteMembershipRecord(actor.session, groupDid, subject);
-    await deleteAuthorityRecord(actor.session, membersSpace, OPENSOCIAL_COLLECTION.role, roleKey);
+    await deleteAuthorityRecord(actor.session, membersSpace, ATGRP_COLLECTION.role, roleKey);
     await writeInstall(actor, inactiveInstall);
   });
 

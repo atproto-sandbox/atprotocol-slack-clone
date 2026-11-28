@@ -17,7 +17,7 @@ import {
   tidNow,
 } from "@flock/protocol/keys";
 import { isHidden, isTakendown, labelsForResource, projectActiveLabels, type ActiveSpaceLabel } from "@flock/protocol/moderation";
-import { ATPROTO_SPACE_COLLECTION, COLLECTION, OPENSOCIAL_COLLECTION } from "@flock/protocol/nsids";
+import { ATGRP_COLLECTION, ATPROTO_SPACE_COLLECTION, COLLECTION } from "@flock/protocol/nsids";
 import { validateSpaceRecord } from "@flock/protocol/registry";
 import { extractGroupSpacePolicyRecord, WorkspaceEnvelopeError } from "@flock/protocol/workspace-summary";
 import type { MessageBlock } from "./blocks";
@@ -421,8 +421,8 @@ export class ChannelClient {
   }
 
   /**
-   * The human members of a private channel, derived from `group.opensocial.membership` in `members/self`
-   * intersected with `group.opensocial.policy` read grants on the private channel space (`channel-<skey>`).
+   * The human members of a private channel, derived from `org.atgrp.membership` in `members/self`
+   * intersected with `org.atgrp.policy` read grants on the private channel space (`channel-<skey>`).
    */
   async roster(ref: ChannelRef): Promise<string[]> {
     const { authorityDid, space, visibility } = await this.readable(ref);
@@ -446,7 +446,7 @@ export class ChannelClient {
       listBoundedRecords(membersClient, {
         space: membersSpace,
         repo: authorityDid,
-        collection: OPENSOCIAL_COLLECTION.membership,
+        collection: ATGRP_COLLECTION.membership,
         maxRecords: MAX_PRIVATE_ROSTER_SCAN,
       }),
       listBoundedRecords(membersClient, {
@@ -509,7 +509,7 @@ export class ChannelClient {
     for (const rec of membershipsScan.records) {
       if (!isDid(rec.rkey) || rec.rkey === authorityDid || knownAppSubjects.has(rec.rkey)) continue;
       if (isTakendown(accountLabels, rec.rkey)) continue;
-      const valid = validateSpaceRecord(OPENSOCIAL_COLLECTION.membership, rec.value, {
+      const valid = validateSpaceRecord(ATGRP_COLLECTION.membership, rec.value, {
         authorityDid,
         spaceUri: membersSpace,
         repoDid: authorityDid,

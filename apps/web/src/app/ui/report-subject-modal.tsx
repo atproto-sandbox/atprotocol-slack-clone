@@ -1,15 +1,16 @@
 "use client";
 
 import { useState, type FormEvent } from "react";
+import { ATGRP_MOD_REASON } from "@flock/protocol/nsids";
 import { messageOf } from "./client-api";
 
 export const REPORT_REASON_TYPES = [
-  { value: "spam", label: "Spam" },
-  { value: "violation", label: "Rule violation" },
-  { value: "misleading", label: "Misleading" },
-  { value: "nsfw", label: "Unwanted sexual / NSFW content" },
-  { value: "rude", label: "Anti-social / rude" },
-  { value: "other", label: "Other" },
+  { value: ATGRP_MOD_REASON.spam, label: "Spam" },
+  { value: ATGRP_MOD_REASON.violation, label: "Rule violation" },
+  { value: ATGRP_MOD_REASON.misleading, label: "Misleading" },
+  { value: ATGRP_MOD_REASON.nsfw, label: "Unwanted sexual / NSFW content" },
+  { value: ATGRP_MOD_REASON.rude, label: "Anti-social / rude" },
+  { value: ATGRP_MOD_REASON.other, label: "Other" },
 ] as const;
 
 export type ReportRuleOption = {
@@ -36,8 +37,8 @@ type ReportSubjectButtonProps = {
 };
 
 /**
- * Inline toggleable report form (`group.opensocial.createReport`) for messages, tasks, comments, or accounts.
- * Requires selecting a group rule URI when `reasonType === "violation"` (`createReport.json:38`).
+ * Inline toggleable report form (`org.atgrp.mod.submitReport`) for messages, tasks, comments, or accounts.
+ * Requires selecting a group rule URI when `reasonType === ATGRP_MOD_REASON.violation`.
  */
 export function ReportSubjectButton({
   subject,
@@ -49,14 +50,16 @@ export function ReportSubjectButton({
   onError,
 }: ReportSubjectButtonProps) {
   const [open, setOpen] = useState(false);
-  const [reasonType, setReasonType] = useState<string>("spam");
+  const [reasonType, setReasonType] = useState<string>(ATGRP_MOD_REASON.spam);
   const [ruleUri, setRuleUri] = useState<string>(rules[0]?.uri ?? "");
   const [reason, setReason] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
+  const needsRule = reasonType === ATGRP_MOD_REASON.violation;
+
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
-    if (reasonType === "violation" && !ruleUri.trim()) {
+    if (needsRule && !ruleUri.trim()) {
       onError?.("Select or enter the group rule URI violated by this subject.");
       return;
     }
@@ -66,7 +69,7 @@ export function ReportSubjectButton({
         subject,
         ...(cid ? { cid } : {}),
         reasonType,
-        ...(reasonType === "violation" ? { rule: ruleUri.trim() } : {}),
+        ...(needsRule ? { rule: ruleUri.trim() } : {}),
         ...(reason.trim() ? { reason: reason.trim() } : {}),
       });
       setOpen(false);
@@ -104,7 +107,7 @@ export function ReportSubjectButton({
           ))}
         </select>
       </label>
-      {reasonType === "violation" &&
+      {needsRule &&
         (rules.length > 0 ? (
           <label>
             Violated rule
@@ -124,7 +127,7 @@ export function ReportSubjectButton({
         ) : (
           <input
             aria-label="Violated rule URI"
-            placeholder="at:space/did:plc:…/group.opensocial.meta/self/…/group.opensocial.rule/…"
+            placeholder="at:space/did:plc:…/org.atgrp.members/self/…/org.atgrp.rule/…"
             value={ruleUri}
             onChange={(e) => setRuleUri(e.target.value)}
             required

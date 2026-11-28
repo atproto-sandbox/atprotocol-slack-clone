@@ -1,7 +1,7 @@
 import { memberspacePolicy, readMemberspacePolicy } from "@flock/protocol/atproto/space-policy";
 import { isMissingXrpcResource, isSpaceAlreadyExists, XrpcError, type AtprotoClient } from "@flock/protocol/atproto/xrpc";
-import { isDid, personalInvitesUri, SELF_SKEY } from "@flock/protocol/keys";
-import { OPENSOCIAL_SPACE_TYPE } from "@flock/protocol/nsids";
+import { isDid, personalInboxUri, SELF_SKEY } from "@flock/protocol/keys";
+import { ATGRP_SPACE_TYPE } from "@flock/protocol/nsids";
 
 export class IncompatibleInvitesSpacePolicyError extends Error {
   constructor(message: string) {
@@ -18,10 +18,10 @@ export type InvitesSpaceDeps = {
 const inFlightByViewer = new Map<string, Promise<string>>();
 
 /**
- * Idempotently provisions and verifies the viewer's personal `group.opensocial.invites/self` space:
+ * Idempotently provisions and verifies the viewer's personal `org.atgrp.inbox/self` space:
  * - Serialized across tabs via `navigator.locks` (`flock-desk-invites-provision:<viewerDid>`) when available,
  *   and single-flight deduplicated in-memory per `viewerDid`.
- * - Fails closed with `IncompatibleInvitesSpacePolicyError` unless ALL four R13 invariants hold:
+ * - Fails closed with `IncompatibleInvitesSpacePolicyError` unless ALL four invariants hold:
  *   1. `settings.publicWrite === true`
  *   2. `settings.publicRead === false`
  *   3. `settings.allowedApps === undefined` (rejects even `[]`)
@@ -36,7 +36,7 @@ export function ensureInvitesSpace(deps: InvitesSpaceDeps): Promise<string> {
   const existingInFlight = inFlightByViewer.get(viewerDid);
   if (existingInFlight) return existingInFlight;
 
-  const invitesSpace = personalInvitesUri(viewerDid);
+  const invitesSpace = personalInboxUri(viewerDid);
 
   const execute = async (): Promise<string> => {
     let existing: { policy: unknown };
@@ -50,7 +50,7 @@ export function ensureInvitesSpace(deps: InvitesSpaceDeps): Promise<string> {
       if (!isSpaceNotFound) throw error;
       try {
         await deps.memberClient.procedure("com.atproto.space.createSpace", {
-          spaceType: OPENSOCIAL_SPACE_TYPE.invites,
+          spaceType: ATGRP_SPACE_TYPE.inbox,
           skey: SELF_SKEY,
           policy: memberspacePolicy({ publicWrite: true }),
         });
@@ -79,7 +79,7 @@ export function ensureInvitesSpace(deps: InvitesSpaceDeps): Promise<string> {
       (memberPage.members?.length ?? 0) !== 0
     ) {
       throw new IncompatibleInvitesSpacePolicyError(
-        "Personal group.opensocial.invites/self space has an incompatible policy or non-empty member list.",
+        "Personal org.atgrp.inbox/self space has an incompatible policy or non-empty member list.",
       );
     }
 

@@ -23,20 +23,41 @@ export const MIGRATION_MODE_OPTIONS = [
   { value: "standard", label: "Standard ATProto" },
 ] as const;
 
+export function safeWebsiteUrl(raw: string | undefined): string | null {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === "https:" || parsed.protocol === "http:") {
+      return parsed.toString();
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export async function saveGroupProfileChanges(
   groupClient: Pick<GroupClient, "updateProfile" | "setPublicMeta">,
   input: {
     displayName: string;
     description: string;
+    website?: string;
     joinPolicy: "invite" | "approval" | "open";
     publicMeta: boolean;
     loadedPublicMeta: boolean;
     publicMetaConsistent?: boolean;
   },
 ): Promise<boolean> {
+  const trimmedWebsite = input.website?.trim() ?? "";
+  if (trimmedWebsite.length > 0 && !safeWebsiteUrl(trimmedWebsite)) {
+    throw new Error("Group website URL must use http:// or https://.");
+  }
   await groupClient.updateProfile({
     displayName: input.displayName.trim(),
     description: input.description.trim() ? input.description.trim() : null,
+    ...(input.website !== undefined ? { website: trimmedWebsite ? trimmedWebsite : null } : {}),
     joinPolicy: input.joinPolicy,
   });
   if (input.publicMeta !== input.loadedPublicMeta || input.publicMetaConsistent === false) {
@@ -103,7 +124,7 @@ export async function fetchGovernanceSnapshot(
 
   const [rolesSettled, joinSettled, deliveriesSettled, publicMetaSettled] = await Promise.allSettled([
     (async () => groupClient.listRoles())(),
-    (async () => groupClient.listJoinRequests())(),
+    options.isAdmin ? (async () => groupClient.listJoinRequests())() : Promise.resolve({ requests: [] as GroupJoinRequestItem[], cursor: undefined as string | undefined }),
     options.isAdmin ? (async () => groupClient.listInviteDeliveries())() : Promise.resolve(undefined),
     (async () => readPublicMetaStatus())(),
   ]);
@@ -156,11 +177,11 @@ type GroupGovernancePanelProps = {
 };
 
 /**
- * Per-user OpenSocial Group Governance panel (`proposal.md:95-99`, `.ai/plans/r13-opensocial-groups.md` Wave 5):
- * - Group-DID OAuth connect/disconnect (`admin` / `moderator`)
- * - Profile (`displayName`, `description`, `joinPolicy`: `open` | `approval` | `invite`) & `publicMeta` editor
- * - Role & `assignable` editor (`group.opensocial.role/*`) + direct member role assignment (`putMembership`)
- * - Pending OpenSocial group join requests (`listJoinRequests` -> `decideGroupJoinRequest` / `approveJoinRequest` / `denyJoinRequest`)
+ * Per-user Atmosphere Groups Governance panel (`org.atgrp.*`):
+ * - Group-DID OAuth connect/disconnect (`admin` / `members` / `moderator` / `basic`)
+ * - Profile (`displayName`, `description`, `website`, `joinPolicy`: `open` | `approval` | `invite`) & `publicMeta` editor
+ * - Role & `canAssign` / `permissions` editor (`org.atgrp.role/*`) + direct member role assignment (`putMembership`)
+ * - Pending group join requests (`listJoinRequests` -> `decideGroupJoinRequest` / `approveJoinRequest` / `denyJoinRequest`)
  * - Cross-PDS invitations (`createInvite`) + live delivery status badges (`pending` / `delivered` / `failed`) + `"Retry Delivery"`
  * - Group Host migration (`Standard` / `Coordinated` `migrateToHost`)
  * - 2-step `prompt=login` permanent group deletion (`requestAccountDelete` -> `claimActionToken` -> `deleteAccount`)
@@ -180,13 +201,17 @@ export function GroupGovernancePanel({
   const { groupDid } = activeWorkspace;
   const [busy, setBusy] = useState(false);
 
-  // Profile state
+  // About & Config state
   const [displayName, setDisplayName] = useState(activeWorkspace.name);
   const [description, setDescription] = useState(activeWorkspace.description ?? "");
+  const [website, setWebsite] = useState(activeWorkspace.website ?? "");
   const [joinPolicy, setJoinPolicy] = useState<"invite" | "approval" | "open">(
     activeWorkspace.joinPolicy === "open" || activeWorkspace.joinPolicy === "approval"
       ? activeWorkspace.joinPolicy
       : "invite",
+  );
+  const [selectedRoleScope, setSelectedRoleScope] = useState<"admin" | "members" | "moderator" | "basic">(
+    activeWorkspace.isAdmin ? "admin" : "moderator",
   );
   const [publicMeta, setPublicMeta] = useState(activeWorkspace.publicMeta === true);
   const [loadedPublicMeta, setLoadedPublicMeta] = useState(activeWorkspace.publicMeta === true);
@@ -281,7 +306,7 @@ export function GroupGovernancePanel({
   }, [groupClient, activeWorkspace.isAdmin, applyGovernanceSnapshot, setError]);
 
   async function startGroupSignIn(options: {
-    roleScope: "admin" | "moderator";
+    roleScope: "admin" | "members" | "moderator" | "basic";
     prompt?: "login";
     claimPurpose?: GroupClaimPurpose;
   }) {
@@ -331,6 +356,7 @@ export function GroupGovernancePanel({
       const nextLoaded = await saveGroupProfileChanges(groupClient, {
         displayName,
         description,
+        website,
         joinPolicy,
         publicMeta,
         loadedPublicMeta,
@@ -355,10 +381,10 @@ export function GroupGovernancePanel({
     setError("");
     try {
       await groupClient.putRole(newRoleKey.trim(), {
-        displayName: newRoleName.trim(),
+        ...(newRoleName.trim() ? { displayName: newRoleName.trim() } : {}),
         default: newRoleDefault,
-        assignable: splitDids(newRoleAssignable),
-        scopes: newRoleScopes
+        canAssign: splitDids(newRoleAssignable),
+        permissions: newRoleScopes
           .split(/[\s,]+/)
           .map((s) => s.trim())
           .filter(Boolean),
@@ -593,10 +619,10 @@ export function GroupGovernancePanel({
   }
 
   return (
-    <section aria-label="OpenSocial group governance">
+    <section aria-label="Atmosphere group governance">
       <div className="section-heading">
         <div>
-          <span className="eyebrow">OPENSOCIAL GROUP GOVERNANCE</span>
+          <span className="eyebrow">ATMOSPHERE GROUP GOVERNANCE</span>
           <h2>Group settings, roles &amp; invitations</h2>
         </div>
         <div>
@@ -610,14 +636,27 @@ export function GroupGovernancePanel({
               </button>
             </>
           ) : (
-            <button
-              type="button"
-              className="primary-button"
-              disabled={busy}
-              onClick={() => void startGroupSignIn({ roleScope: activeWorkspace.isAdmin ? "admin" : "moderator" })}
-            >
-              Sign in as group {activeWorkspace.isAdmin ? "admin" : "moderator"} →
-            </button>
+            <div className="inline-form">
+              <select
+                aria-label="Group OAuth permission set"
+                value={selectedRoleScope}
+                onChange={(e) => setSelectedRoleScope(e.target.value as "admin" | "members" | "moderator" | "basic")}
+                disabled={busy}
+              >
+                <option value="admin">Admin (authManageAdmin)</option>
+                <option value="members">Members (authManageMembers)</option>
+                <option value="moderator">Moderator (authModerate)</option>
+                <option value="basic">Basic (authManageBasic)</option>
+              </select>
+              <button
+                type="button"
+                className="primary-button"
+                disabled={busy}
+                onClick={() => void startGroupSignIn({ roleScope: selectedRoleScope })}
+              >
+                Sign in as group {selectedRoleScope} →
+              </button>
+            </div>
           )}
         </div>
       </div>
@@ -625,9 +664,17 @@ export function GroupGovernancePanel({
       {!groupClient ? (
         <div className="starter-card permission-box">
           <p>
-            Group DID: <code>{groupDid}</code> · Join policy: <b>{activeWorkspace.joinPolicy}</b>. Connect a per-user
-            Group OAuth session to edit group profile, roles, cross-PDS invitations, join requests, migration, or
-            lifecycle settings.
+            Group DID: <code>{groupDid}</code> · Join policy: <b>{activeWorkspace.joinPolicy}</b>
+            {safeWebsiteUrl(activeWorkspace.website) ? (
+              <>
+                {" · "}
+                <a href={safeWebsiteUrl(activeWorkspace.website)!} target="_blank" rel="noopener noreferrer">
+                  {safeWebsiteUrl(activeWorkspace.website)}
+                </a>
+              </>
+            ) : null}
+            . Connect a per-user Group OAuth session to edit group metadata, roles, cross-PDS invitations, join requests,
+            migration, or lifecycle settings.
           </p>
         </div>
       ) : (
@@ -635,7 +682,7 @@ export function GroupGovernancePanel({
           {activeWorkspace.isAdmin && (
             <div className="starter-grid">
               <article className="starter-card">
-                <h3>Group profile &amp; join policy</h3>
+                <h3>Group about &amp; config</h3>
                 <form className="inline-form" onSubmit={(e) => void handleSaveProfile(e)}>
                   <label>
                     Display name
@@ -655,6 +702,17 @@ export function GroupGovernancePanel({
                       value={description}
                       onChange={(e) => setDescription(e.target.value)}
                       maxLength={300}
+                      disabled={busy}
+                    />
+                  </label>
+                  <label>
+                    Website (https://)
+                    <input
+                      aria-label="Group website"
+                      placeholder="https://example.org"
+                      value={website}
+                      onChange={(e) => setWebsite(e.target.value)}
+                      maxLength={500}
                       disabled={busy}
                     />
                   </label>
@@ -698,7 +756,7 @@ export function GroupGovernancePanel({
 
               <article className="starter-card">
                 <h3>Send cross-PDS invite</h3>
-                <p>Writes a signed <code>group.opensocial.invite</code> into the invitee&rsquo;s personal invites space.</p>
+                <p>Writes a signed <code>org.atgrp.invite</code> into the invitee&rsquo;s personal inbox space.</p>
                 <form className="inline-form" onSubmit={(e) => void handleSendCrossPdsInvite(e)}>
                   <input
                     aria-label="Cross-PDS invitee DID"
@@ -766,55 +824,57 @@ export function GroupGovernancePanel({
             </div>
           )}
 
-          <div className="starter-card">
-            <h3>Group join requests (approval policy)</h3>
-            {joinRequestsError ? (
-              <p className="form-error" role="alert">
-                Failed to load join requests: {joinRequestsError}
-              </p>
-            ) : joinRequests.length === 0 ? (
-              <p>No pending group join requests.</p>
-            ) : (
-              <div className="roster-list">
-                {joinRequests.map((req) => (
-                  <div className="roster-row" key={req.member}>
-                    <span>
-                      <code>{req.member}</code>
-                      {req.message ? ` — “${req.message}”` : ""} · {req.createdAt}
-                    </span>
-                    <div>
-                      <button
-                        type="button"
-                        className="primary-button"
-                        disabled={busy}
-                        onClick={() => void handleJoinDecision(req.member, "approve")}
-                      >
-                        Approve join
-                      </button>
-                      <button
-                        type="button"
-                        className="text-button danger"
-                        disabled={busy}
-                        onClick={() => void handleJoinDecision(req.member, "deny")}
-                      >
-                        Deny join
-                      </button>
+          {activeWorkspace.isAdmin && (
+            <div className="starter-card">
+              <h3>Group join requests (approval policy)</h3>
+              {joinRequestsError ? (
+                <p className="form-error" role="alert">
+                  Failed to load join requests: {joinRequestsError}
+                </p>
+              ) : joinRequests.length === 0 ? (
+                <p>No pending group join requests.</p>
+              ) : (
+                <div className="roster-list">
+                  {joinRequests.map((req) => (
+                    <div className="roster-row" key={req.member}>
+                      <span>
+                        <code>{req.member}</code>
+                        {req.message ? ` — “${req.message}”` : ""} · {req.createdAt}
+                      </span>
+                      <div>
+                        <button
+                          type="button"
+                          className="primary-button"
+                          disabled={busy}
+                          onClick={() => void handleJoinDecision(req.member, "approve")}
+                        >
+                          Approve join
+                        </button>
+                        <button
+                          type="button"
+                          className="text-button danger"
+                          disabled={busy}
+                          onClick={() => void handleJoinDecision(req.member, "deny")}
+                        >
+                          Deny join
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                ))}
-              </div>
-            )}
-            {joinRequestsCursor && (
-              <button
-                type="button"
-                className="text-button"
-                disabled={busy}
-                onClick={() => void handleLoadMoreJoinRequests()}
-              >
-                Load more join requests
-              </button>
-            )}
-          </div>
+                  ))}
+                </div>
+              )}
+              {joinRequestsCursor && (
+                <button
+                  type="button"
+                  className="text-button"
+                  disabled={busy}
+                  onClick={() => void handleLoadMoreJoinRequests()}
+                >
+                  Load more join requests
+                </button>
+              )}
+            </div>
+          )}
 
           {activeWorkspace.isAdmin && (
             <>
@@ -831,7 +891,7 @@ export function GroupGovernancePanel({
                       <span>
                         <strong>{role.displayName}</strong> (<code>{role.rkey}</code>)
                         {role.default ? " · default" : ""}
-                        {role.assignable.length > 0 ? ` · assignable: ${role.assignable.join(", ")}` : ""}
+                        {role.canAssign.length > 0 ? ` · canAssign: ${role.canAssign.join(", ")}` : ""}
                       </span>
                       {!["admin", "moderator", "member"].includes(role.rkey) && (
                         <button

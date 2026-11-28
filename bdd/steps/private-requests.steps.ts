@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { Given, Then, When } from "@cucumber/cucumber";
 import { groupMembersUri, requestRecordKey } from "@flock/protocol/keys";
-import { OPENSOCIAL_COLLECTION } from "@flock/protocol/nsids";
+import { ATGRP_COLLECTION } from "@flock/protocol/nsids";
 import { eventually, inviteMemberAs } from "../support/ui";
 import type { Actor, AppWorld } from "../support/world";
 import { listingCalls, openChannel, postMessage } from "../support/channels-ui";
@@ -417,7 +417,7 @@ When("they open the channel roster", async function (this: AppWorld) {
   const since = alpha.xrpc.length;
   stateOf(this).rosterShown = await openChannelRoster(alpha, channelOf(this));
   assert.ok(
-    listingCalls(alpha, OPENSOCIAL_COLLECTION.membership, since).some(
+    listingCalls(alpha, ATGRP_COLLECTION.membership, since).some(
       ({ call, query }) => call.status === 200 && query.get("space") === groupMembersUri(groupDidOf(this)),
     ),
     "the app read the private channel's role memberships from the group authority's records",

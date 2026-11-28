@@ -8,7 +8,7 @@ import {
   groupMembersUri,
   groupMetaUri,
   inboxUri,
-  personalInvitesUri,
+  personalInboxUri,
   reactionRecordKey,
   requestRecordKey,
   spaceRecordUri,
@@ -18,21 +18,24 @@ import {
 } from "./keys";
 import {
   ALL_SPACE_TYPE,
+  ATGRP_COLLECTION,
+  ATGRP_MOD_REASON,
+  ATGRP_POLICY,
+  ATGRP_SPACE_TYPE,
   ATPROTO_SPACE_COLLECTION,
   BLOCK_TYPE,
   COLLECTION,
   FLOCK_EXTENSION_FIELD,
-  OPENSOCIAL_COLLECTION,
-  OPENSOCIAL_POLICY,
-  OPENSOCIAL_SPACE_TYPE,
   SPACE_TYPE,
 } from "./nsids";
 import {
-  decodeFlockAcceptanceExtensions,
+  decodeFlockConfirmationExtensions,
   decodeFlockMembershipExtensions,
+  isHttpOrHttpsUrl,
   spaceCollections,
   validateDmHeaderMatchesRequest,
   validateGroupDeclaration,
+  validatePublicRecord,
   validateSpacePolicy,
   validateSpaceRecord,
   validateSpaceTypeKey,
@@ -47,11 +50,11 @@ const channel = channelUri(authorityDid, "general");
 const otherChannel = channelUri(authorityDid, "private");
 const now = "2026-09-24T12:00:00.000Z";
 
-test("validateSpaceTypeKey enforces literal:self, tid, 1..512 record-key rules, and rejects group-owned invites spaces", () => {
+test("validateSpaceTypeKey enforces literal:self, tid, 1..512 record-key rules, and rejects group-owned inbox spaces", () => {
   for (const selfType of [
-    OPENSOCIAL_SPACE_TYPE.meta,
-    OPENSOCIAL_SPACE_TYPE.members,
-    OPENSOCIAL_SPACE_TYPE.invites,
+    ATGRP_SPACE_TYPE.meta,
+    ATGRP_SPACE_TYPE.members,
+    ATGRP_SPACE_TYPE.inbox,
     SPACE_TYPE.workspace,
     SPACE_TYPE.inbox,
     SPACE_TYPE.dmInbox,
@@ -60,9 +63,9 @@ test("validateSpaceTypeKey enforces literal:self, tid, 1..512 record-key rules, 
     assert.equal(validateSpaceTypeKey(selfType, "foo").valid, false, `${selfType}/foo must fail`);
   }
 
-  // Group Host cannot own group.opensocial.invites
+  // Group Host cannot own org.atgrp.inbox
   assert.equal(
-    validateSpaceTypeKey(OPENSOCIAL_SPACE_TYPE.invites, "self", { isGroupHostOwnSpace: true }).valid,
+    validateSpaceTypeKey(ATGRP_SPACE_TYPE.inbox, "self", { isGroupHostOwnSpace: true }).valid,
     false,
   );
 
@@ -78,7 +81,7 @@ test("validateSpaceTypeKey enforces literal:self, tid, 1..512 record-key rules, 
   assert.equal(validateSpaceTypeKey(SPACE_TYPE.dmConversation, "k222222222222").valid, false);
 });
 
-test("decodeFlockMembershipExtensions and decodeFlockAcceptanceExtensions strictly validate types and canonical TIDs", () => {
+test("decodeFlockMembershipExtensions and decodeFlockConfirmationExtensions strictly validate types and canonical TIDs", () => {
   assert.deepEqual(
     decodeFlockMembershipExtensions({
       [FLOCK_EXTENSION_FIELD.incarnation]: "inc-1",
@@ -99,7 +102,6 @@ test("decodeFlockMembershipExtensions and decodeFlockAcceptanceExtensions strict
     true,
   );
 
-  // Reject wrong types and leading k..z TIDs
   for (const bad of [
     { [FLOCK_EXTENSION_FIELD.incarnation]: 42 },
     { [FLOCK_EXTENSION_FIELD.incarnation]: "has space" },
@@ -114,19 +116,21 @@ test("decodeFlockMembershipExtensions and decodeFlockAcceptanceExtensions strict
   }
 
   assert.deepEqual(
-    decodeFlockAcceptanceExtensions({ [FLOCK_EXTENSION_FIELD.incarnation]: "inc-1" }),
+    decodeFlockConfirmationExtensions({ [FLOCK_EXTENSION_FIELD.incarnation]: "inc-1" }),
     { valid: true, incarnation: "inc-1" },
   );
-  assert.equal(decodeFlockAcceptanceExtensions({ [FLOCK_EXTENSION_FIELD.incarnation]: "" }).valid, false);
-  assert.equal(decodeFlockAcceptanceExtensions({ [FLOCK_EXTENSION_FIELD.incarnation]: 123 }).valid, false);
+  assert.equal(decodeFlockConfirmationExtensions({ [FLOCK_EXTENSION_FIELD.incarnation]: "" }).valid, false);
+  assert.equal(decodeFlockConfirmationExtensions({ [FLOCK_EXTENSION_FIELD.incarnation]: 123 }).valid, false);
 });
 
-test("OpenSocial profile, membership, acceptance, invite, policy, declaration, and label validation enforce all semantic rules", () => {
-  // Profile http/https URL check
+test("Atmosphere Groups about, config, rule, labeler, role, membership, confirmation, invite, policy, declaration, prefix reservation, and label validation", () => {
+  // About http/https website check
+  assert.equal(isHttpOrHttpsUrl("https://acme.example/"), true);
+  assert.equal(isHttpOrHttpsUrl("javascript:alert(1)"), false);
   assert.equal(
     validateSpaceRecord(
-      OPENSOCIAL_COLLECTION.profile,
-      { displayName: "Acme", joinPolicy: "open", url: "https://acme.example/" },
+      ATGRP_COLLECTION.about,
+      { displayName: "Acme", website: "https://acme.example/" },
       { authorityDid, spaceUri: metaSpace, repoDid: authorityDid, rkey: "self" },
     ).valid,
     true,
@@ -134,8 +138,8 @@ test("OpenSocial profile, membership, acceptance, invite, policy, declaration, a
   for (const badUrl of ["javascript:alert(1)", "data:text/html,hi", "ftp://acme.example/"]) {
     assert.equal(
       validateSpaceRecord(
-        OPENSOCIAL_COLLECTION.profile,
-        { displayName: "Acme", joinPolicy: "open", url: badUrl },
+        ATGRP_COLLECTION.about,
+        { displayName: "Acme", website: badUrl },
         { authorityDid, spaceUri: metaSpace, repoDid: authorityDid, rkey: "self" },
       ).valid,
       false,
@@ -143,10 +147,80 @@ test("OpenSocial profile, membership, acceptance, invite, policy, declaration, a
     );
   }
 
-  // Membership: rejects self DID, empty roles, non-DID rkey, and leading-'k' TID extension
+  // Config accepts knownValues and custom strings
   assert.equal(
     validateSpaceRecord(
-      OPENSOCIAL_COLLECTION.membership,
+      ATGRP_COLLECTION.config,
+      { joinPolicy: "open" },
+      { authorityDid, spaceUri: metaSpace, repoDid: authorityDid, rkey: "self" },
+    ).valid,
+    true,
+  );
+  assert.equal(
+    validateSpaceRecord(
+      ATGRP_COLLECTION.config,
+      { joinPolicy: "custom-future-policy" },
+      { authorityDid, spaceUri: metaSpace, repoDid: authorityDid, rkey: "self" },
+    ).valid,
+    true,
+  );
+
+  // Rule & Labeler live in org.atgrp.members/self ONLY (rejected in meta/self!)
+  assert.equal(
+    validateSpaceRecord(
+      ATGRP_COLLECTION.rule,
+      { title: "Be kind", text: "Respect everyone" },
+      { authorityDid, spaceUri: membersSpace, repoDid: authorityDid, rkey: "2222222222222" },
+    ).valid,
+    true,
+  );
+  assert.equal(
+    validateSpaceRecord(
+      ATGRP_COLLECTION.rule,
+      { title: "Be kind", text: "Respect everyone" },
+      { authorityDid, spaceUri: metaSpace, repoDid: authorityDid, rkey: "2222222222222" },
+    ).valid,
+    false,
+  );
+  assert.equal(
+    validateSpaceRecord(
+      ATGRP_COLLECTION.labeler,
+      { policies: { labelValues: ["!hide"] }, reasonTypes: [ATGRP_MOD_REASON.spam, "org.example.custom#reason"] },
+      { authorityDid, spaceUri: membersSpace, repoDid: authorityDid, rkey: "self" },
+    ).valid,
+    true,
+  );
+  assert.equal(
+    validateSpaceRecord(
+      ATGRP_COLLECTION.labeler,
+      { policies: { labelValues: ["!hide"] } },
+      { authorityDid, spaceUri: metaSpace, repoDid: authorityDid, rkey: "self" },
+    ).valid,
+    false,
+  );
+
+  // Role: write-strict [a-z-]{3,512} vs importMode-lenient record-key
+  assert.equal(
+    validateSpaceRecord(
+      ATGRP_COLLECTION.role,
+      { permissions: ["include:org.atgrp.authModerate"] },
+      { authorityDid, spaceUri: membersSpace, repoDid: authorityDid, rkey: "Mods" },
+    ).valid,
+    false,
+  );
+  assert.equal(
+    validateSpaceRecord(
+      ATGRP_COLLECTION.role,
+      { permissions: ["include:org.atgrp.authModerate"] },
+      { authorityDid, spaceUri: membersSpace, repoDid: authorityDid, rkey: "Mods", importMode: true },
+    ).valid,
+    true,
+  );
+
+  // Membership: rejects self DID, empty roles, non-DID rkey, and invalid role IDs (write-strict vs import-lenient)
+  assert.equal(
+    validateSpaceRecord(
+      ATGRP_COLLECTION.membership,
       { roles: ["member"], createdAt: now },
       { authorityDid, spaceUri: membersSpace, repoDid: authorityDid, rkey: memberDid },
     ).valid,
@@ -154,7 +228,23 @@ test("OpenSocial profile, membership, acceptance, invite, policy, declaration, a
   );
   assert.equal(
     validateSpaceRecord(
-      OPENSOCIAL_COLLECTION.membership,
+      ATGRP_COLLECTION.membership,
+      { roles: ["Mod1"], createdAt: now },
+      { authorityDid, spaceUri: membersSpace, repoDid: authorityDid, rkey: memberDid },
+    ).valid,
+    false,
+  );
+  assert.equal(
+    validateSpaceRecord(
+      ATGRP_COLLECTION.membership,
+      { roles: ["Mod1"], createdAt: now },
+      { authorityDid, spaceUri: membersSpace, repoDid: authorityDid, rkey: memberDid, importMode: true },
+    ).valid,
+    true,
+  );
+  assert.equal(
+    validateSpaceRecord(
+      ATGRP_COLLECTION.membership,
       { roles: ["member"], createdAt: now },
       { authorityDid, spaceUri: membersSpace, repoDid: authorityDid, rkey: authorityDid },
     ).valid,
@@ -162,17 +252,17 @@ test("OpenSocial profile, membership, acceptance, invite, policy, declaration, a
   );
   assert.equal(
     validateSpaceRecord(
-      OPENSOCIAL_COLLECTION.membership,
+      ATGRP_COLLECTION.membership,
       { roles: [], createdAt: now },
       { authorityDid, spaceUri: membersSpace, repoDid: authorityDid, rkey: memberDid },
     ).valid,
     false,
   );
 
-  // Acceptance: member-authored in members/self, rejects groupDid author
+  // Confirmation: member-authored in members/self, rejects groupDid author
   assert.equal(
     validateSpaceRecord(
-      OPENSOCIAL_COLLECTION.acceptance,
+      ATGRP_COLLECTION.confirmation,
       { createdAt: now, [FLOCK_EXTENSION_FIELD.incarnation]: "inc-1" },
       { authorityDid, spaceUri: membersSpace, repoDid: memberDid, rkey: "self" },
     ).valid,
@@ -180,18 +270,18 @@ test("OpenSocial profile, membership, acceptance, invite, policy, declaration, a
   );
   assert.equal(
     validateSpaceRecord(
-      OPENSOCIAL_COLLECTION.acceptance,
+      ATGRP_COLLECTION.confirmation,
       { createdAt: now },
       { authorityDid, spaceUri: membersSpace, repoDid: authorityDid, rkey: "self" },
     ).valid,
     false,
   );
 
-  // Invite: external groupDid writing into personalInvitesUri(memberDid)
-  const inviteSpace = personalInvitesUri(memberDid);
+  // Invite: external groupDid writing into personalInboxUri(memberDid)
+  const inviteSpace = personalInboxUri(memberDid);
   assert.equal(
     validateSpaceRecord(
-      OPENSOCIAL_COLLECTION.invite,
+      ATGRP_COLLECTION.invite,
       { createdAt: now, message: "Welcome!" },
       { authorityDid: memberDid, spaceUri: inviteSpace, repoDid: authorityDid, rkey: "2222222222222" },
     ).valid,
@@ -199,24 +289,68 @@ test("OpenSocial profile, membership, acceptance, invite, policy, declaration, a
   );
   assert.equal(
     validateSpaceRecord(
-      OPENSOCIAL_COLLECTION.invite,
+      ATGRP_COLLECTION.invite,
       { createdAt: now },
       { authorityDid: memberDid, spaceUri: inviteSpace, repoDid: memberDid, rkey: "2222222222222" },
     ).valid,
     false,
   );
 
-  // Space policy: rejects duplicate role grants and cross-space / non-space scopes
+  // Full org.atgrp.* prefix reservation in both spaces and public repos!
+  assert.equal(
+    validateSpaceRecord(
+      "org.atgrp.forged",
+      { anything: true },
+      { authorityDid, spaceUri: channel, repoDid: authorityDid, rkey: "self" },
+    ).valid,
+    false,
+  );
+  assert.equal(
+    validateSpaceRecord(
+      "org.atgrp.declaration",
+      { $type: "org.atgrp.declaration" },
+      { authorityDid, spaceUri: metaSpace, repoDid: authorityDid, rkey: "self" },
+    ).valid,
+    false,
+  );
+  assert.equal(
+    validatePublicRecord("org.atgrp.declaration", { $type: "org.atgrp.declaration" }, { repoDid: authorityDid, rkey: "self" }).valid,
+    true,
+  );
+  assert.equal(
+    validatePublicRecord("org.atgrp.about", { displayName: "Nope" }, { repoDid: authorityDid, rkey: "self" }).valid,
+    false,
+  );
+  assert.equal(
+    validatePublicRecord("org.atgrp.forged", { foo: "bar" }, { repoDid: authorityDid, rkey: "self" }).valid,
+    false,
+  );
+
+  // Space policy: rejects duplicate role grants, non-spec role IDs (write-strict), and cross-space / non-space permissions
   assert.equal(
     validateSpacePolicy(
-      { $type: OPENSOCIAL_POLICY, grants: [{ role: "member", read: true, write: true }] },
+      { $type: ATGRP_POLICY, grants: [{ role: "member", read: true, write: true }] },
       { groupDid: authorityDid, spaceType: SPACE_TYPE.channel, skey: "general" },
     ).valid,
     true,
   );
   assert.equal(
     validateSpacePolicy(
-      { $type: OPENSOCIAL_POLICY, grants: [{ role: "member" }, { role: "member" }] },
+      { $type: ATGRP_POLICY, grants: [{ role: "Mods", read: true }] },
+      { groupDid: authorityDid, spaceType: SPACE_TYPE.channel, skey: "general" },
+    ).valid,
+    false,
+  );
+  assert.equal(
+    validateSpacePolicy(
+      { $type: ATGRP_POLICY, grants: [{ role: "Mods", read: true }] },
+      { groupDid: authorityDid, spaceType: SPACE_TYPE.channel, skey: "general", importMode: true },
+    ).valid,
+    true,
+  );
+  assert.equal(
+    validateSpacePolicy(
+      { $type: ATGRP_POLICY, grants: [{ role: "member" }, { role: "member" }] },
       { groupDid: authorityDid, spaceType: SPACE_TYPE.channel, skey: "general" },
     ).valid,
     false,
@@ -224,21 +358,21 @@ test("OpenSocial profile, membership, acceptance, invite, policy, declaration, a
   assert.equal(
     validateSpacePolicy(
       {
-        $type: OPENSOCIAL_POLICY,
-        grants: [{ role: "member", scopes: ["space:new.flock.channel?skey=other&action=read"] }],
+        $type: ATGRP_POLICY,
+        grants: [{ role: "member", permissions: ["space:new.flock.channel?skey=other&action=read"] }],
       },
       { groupDid: authorityDid, spaceType: SPACE_TYPE.channel, skey: "general" },
     ).valid,
     false,
   );
 
-  // Group declaration
+  // Group declaration (empty marker record)
   assert.equal(
-    validateGroupDeclaration({ $type: "group.opensocial.declaration", meta: metaSpace }, authorityDid).valid,
+    validateGroupDeclaration({ $type: "org.atgrp.declaration" }, authorityDid).valid,
     true,
   );
   assert.equal(
-    validateGroupDeclaration({ $type: "group.opensocial.declaration", meta: channel }, authorityDid).valid,
+    validateGroupDeclaration({ $type: "org.atgrp.wrong" }, authorityDid).valid,
     false,
   );
 
@@ -394,20 +528,20 @@ test("no source module spells new.flock.* literally: every one comes from nsids.
   assert.deepEqual(offenders, []);
 });
 
-test("every Flock and OpenSocial space lexicon lists exactly the collections registered for its space type", async () => {
+test("every Flock and Atmosphere Groups space lexicon lists exactly the collections registered for its space type", async () => {
   const { readdirSync, readFileSync } = await import("node:fs");
   const { join } = await import("node:path");
   const { fileURLToPath } = await import("node:url");
 
   const flockRoot = fileURLToPath(new URL("../lexicons/new/flock", import.meta.url));
-  const openSocialRoot = fileURLToPath(new URL("../lexicons/group/opensocial", import.meta.url));
+  const atgrpRoot = fileURLToPath(new URL("../lexicons/org/atgrp", import.meta.url));
   const readSpaces = (root: string) =>
     (readdirSync(root, { recursive: true }) as string[])
       .filter((file) => file.endsWith(".json"))
       .map((file) => JSON.parse(readFileSync(join(root, file), "utf8")) as { id: string; defs: { main?: { type?: string; title?: string; name?: string; collections?: string[] } } })
       .filter((doc) => doc.defs.main?.type === "space");
 
-  const spaceMains = [...readSpaces(flockRoot), ...readSpaces(openSocialRoot)];
+  const spaceMains = [...readSpaces(flockRoot), ...readSpaces(atgrpRoot)];
   const spaceDocs = new Map(spaceMains.map((doc) => [doc.id, doc.defs.main!.collections ?? []]));
 
   assert.deepEqual([...spaceDocs.keys()].sort(), Object.values(ALL_SPACE_TYPE).sort(), "every space type has a space lexicon");
@@ -416,6 +550,14 @@ test("every Flock and OpenSocial space lexicon lists exactly the collections reg
     assert.equal(doc.defs.main?.name, undefined, `${doc.id} no longer declares deprecated name`);
   }
   for (const spaceType of Object.values(ALL_SPACE_TYPE)) {
-    assert.deepEqual([...(spaceDocs.get(spaceType) ?? [])].sort(), [...spaceCollections(spaceType)].sort(), spaceType);
+    const lexCols = [...(spaceDocs.get(spaceType) ?? [])]
+      .filter((col) =>
+        !(
+          (spaceType === ATGRP_SPACE_TYPE.meta || spaceType === ATGRP_SPACE_TYPE.members) &&
+          col === ATPROTO_SPACE_COLLECTION.spacePolicy
+        ),
+      )
+      .sort();
+    assert.deepEqual(lexCols, [...spaceCollections(spaceType)].sort(), spaceType);
   }
 });

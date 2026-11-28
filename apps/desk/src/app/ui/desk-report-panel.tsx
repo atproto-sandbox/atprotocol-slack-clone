@@ -2,12 +2,26 @@
 
 import { useState } from "react";
 import { Banner, Button, Card, Heading, HStack, Text, TextArea, VStack } from "@astryxdesign/core";
+import { ATGRP_MOD_REASON } from "@flock/protocol/nsids";
 import {
   reportSubject,
   STANDARD_REPORT_REASON_TYPES,
   type DeskShellDeps,
   type GroupModerationConfig,
 } from "@flock/shell";
+
+const REASON_LABELS: Readonly<Record<string, string>> = {
+  [ATGRP_MOD_REASON.spam]: "Spam",
+  [ATGRP_MOD_REASON.violation]: "Rule violation",
+  [ATGRP_MOD_REASON.misleading]: "Misleading",
+  [ATGRP_MOD_REASON.nsfw]: "Unwanted sexual / NSFW content",
+  [ATGRP_MOD_REASON.rude]: "Anti-social / rude",
+  [ATGRP_MOD_REASON.other]: "Other",
+};
+
+function reasonLabelFor(token: string): string {
+  return REASON_LABELS[token] ?? token;
+}
 
 export type ReportTarget = {
   subject: string;
@@ -42,7 +56,7 @@ export function DeskReportPanel({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const needsRule = reasonType === "violation";
+  const needsRule = reasonType === ATGRP_MOD_REASON.violation;
   const canSubmit = hasAllowedReasons && !submitting && reasonType.length > 0 && (!needsRule || selectedRule.length > 0);
 
   async function handleSubmit(event: React.FormEvent) {
@@ -58,7 +72,7 @@ export function DeskReportPanel({
         ...(reason.trim().length > 0 ? { reason: reason.trim() } : {}),
         ...(needsRule && selectedRule ? { rule: selectedRule } : {}),
       });
-      onSubmitted(res.id);
+      onSubmitted(res.eventId);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not submit report.");
     } finally {
@@ -92,7 +106,7 @@ export function DeskReportPanel({
               >
                 {allowedReasons.map((rt) => (
                   <option key={rt} value={rt}>
-                    {rt}
+                    {reasonLabelFor(rt)}
                   </option>
                 ))}
               </select>
@@ -126,7 +140,7 @@ export function DeskReportPanel({
             ) : (
               <Banner
                 status="warning"
-                title="No group rules are published in meta/self; select another reason category."
+                title="No group rules are published in members/self; select another reason category."
               />
             )
           ) : null}

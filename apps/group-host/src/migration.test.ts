@@ -105,7 +105,7 @@ test("Two-GroupHost Coordinated v1 migration (A -> B) + Standard return-to-prior
     assert.equal(upBlobRes.status, 200);
     const uploadedBlob = ((await upBlobRes.json()) as { blob: Record<string, unknown> }).blob;
 
-    const metaSpace = `at:space/${groupDid}/group.opensocial.meta/self`;
+    const metaSpace = `at:space/${groupDid}/org.atgrp.meta/self`;
     const putProfBlob = await dpopA.fetchWithDpop(`${ghA.url}/xrpc/com.atproto.space.putRecord`, {
       method: "POST",
       accessToken: tokA,
@@ -113,21 +113,19 @@ test("Two-GroupHost Coordinated v1 migration (A -> B) + Standard return-to-prior
       body: JSON.stringify({
         space: metaSpace,
         repo: groupDid,
-        collection: "group.opensocial.profile",
+        collection: "org.atgrp.about",
         rkey: "self",
         record: {
-          $type: "group.opensocial.profile",
+          $type: "org.atgrp.about",
           displayName: "Migrating Team",
           avatar: uploadedBlob,
-          joinPolicy: "invite",
-          createdAt: new Date().toISOString(),
         },
       }),
     });
     assert.equal(putProfBlob.status, 200);
 
     // Create an external invite for Bob so external `invites/self` STAR migration runs too!
-    const bobInvSpace = `at:space/${bob.did}/group.opensocial.invites/self`;
+    const bobInvSpace = `at:space/${bob.did}/org.atgrp.inbox/self`;
     await dpopA.fetchWithDpop(`${ghA.url}/xrpc/com.atproto.space.putRecord`, {
       method: "POST",
       accessToken: tokA,
@@ -135,10 +133,10 @@ test("Two-GroupHost Coordinated v1 migration (A -> B) + Standard return-to-prior
       body: JSON.stringify({
         space: bobInvSpace,
         repo: groupDid,
-        collection: "group.opensocial.invite",
+        collection: "org.atgrp.invite",
         rkey: "3jzfcijpj2z2a",
         record: {
-          $type: "group.opensocial.invite",
+          $type: "org.atgrp.invite",
           createdBy: alice.did,
           createdAt: new Date().toISOString(),
         },
@@ -154,7 +152,7 @@ test("Two-GroupHost Coordinated v1 migration (A -> B) + Standard return-to-prior
     );
     assert.equal(protAuthRes.status, 400);
 
-    //    (b) `prepare-migration` against bare personal PDS (`pds.url`, lacking `OpenSocialGroupHost` capability) -> `400 UnsupportedGroupHostTarget`!
+    //    (b) `prepare-migration` against bare personal PDS (`pds.url`, lacking `AtmosphereGroupHostV1` capability) -> `400 UnsupportedGroupHostTarget`!
     const badTargetPrep = await dpopA.fetchWithDpop(`${ghA.url}/group-admin/prepare-migration`, {
       method: "POST",
       accessToken: tokA,
@@ -208,11 +206,11 @@ test("Two-GroupHost Coordinated v1 migration (A -> B) + Standard return-to-prior
       accessToken: tokA,
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        space: metaSpace,
+        space: `at:space/${groupDid}/org.atgrp.members/self`,
         repo: groupDid,
-        collection: "group.opensocial.rule",
+        collection: "org.atgrp.rule",
         rkey: "3jzfcijpj2z2a",
-        record: { $type: "group.opensocial.rule", title: "Frozen", createdAt: new Date().toISOString() },
+        record: { $type: "org.atgrp.rule", title: "Frozen", createdAt: new Date().toISOString() },
       }),
     });
     assert.equal(frozenWrite.status, 409);
@@ -684,7 +682,7 @@ test("Target abort-migration blocks confused-deputy JWTs, flushBackgroundWork re
     const wrongAudJwt = await createServiceJwt({
       iss: groupDid,
       aud: ghA.config.serviceDid,
-      lxm: "group.opensocial.abortMigration",
+      lxm: "new.flock.group.abortMigration",
       keypair: groupSigKey,
     });
     const wrongAudRes = await fetch(`${ghB.url}/group-admin/abort-migration`, {
@@ -698,7 +696,7 @@ test("Target abort-migration blocks confused-deputy JWTs, flushBackgroundWork re
     const missingOpJwt = await createServiceJwt({
       iss: groupDid,
       aud: ghB.config.serviceDid,
-      lxm: "group.opensocial.abortMigration",
+      lxm: "new.flock.group.abortMigration",
       keypair: groupSigKey,
     });
     const missingOpRes = await fetch(`${ghB.url}/group-admin/abort-migration`, {
@@ -712,7 +710,7 @@ test("Target abort-migration blocks confused-deputy JWTs, flushBackgroundWork re
     const missingTicketJwt = await createServiceJwt({
       iss: groupDid,
       aud: ghB.config.serviceDid,
-      lxm: "group.opensocial.abortMigration",
+      lxm: "new.flock.group.abortMigration",
       keypair: groupSigKey,
     });
     const missingTicketRes = await fetch(`${ghB.url}/group-admin/abort-migration`, {
@@ -726,7 +724,7 @@ test("Target abort-migration blocks confused-deputy JWTs, flushBackgroundWork re
     const staleAbortJwt = await createServiceJwt({
       iss: groupDid,
       aud: ghB.config.serviceDid,
-      lxm: "group.opensocial.abortMigration",
+      lxm: "new.flock.group.abortMigration",
       keypair: groupSigKey,
     });
     const supersededRes = await fetch(`${ghB.url}/group-admin/abort-migration`, {
@@ -738,11 +736,11 @@ test("Target abort-migration blocks confused-deputy JWTs, flushBackgroundWork re
     assert.equal(((await supersededRes.json()) as { status: string }).status, "superseded");
     assert.ok(ghB.db.prepare("SELECT 1 FROM migration_session WHERE group_did = ?").get(groupDid));
 
-    // Valid `group.opensocial.abortMigration` JWT -> 200 `{ status: "purged" }`, and JTI replay -> 401 `ReplayDetected`!
+    // Valid `new.flock.group.abortMigration` JWT -> 200 `{ status: "purged" }`, and JTI replay -> 401 `ReplayDetected`!
     const validAbortJwt = await createServiceJwt({
       iss: groupDid,
       aud: ghB.config.serviceDid,
-      lxm: "group.opensocial.abortMigration",
+      lxm: "new.flock.group.abortMigration",
       keypair: groupSigKey,
     });
     const validAbortRes = await fetch(`${ghB.url}/group-admin/abort-migration`, {
@@ -957,7 +955,7 @@ test("Lazy prepared-lease reap aborts target staging (coordinated & standard), s
       const badAbortJwt = await signCustomServiceJwt(groupSigKeyA, badSpec.header, {
         iss: groupDid,
         aud: ghB.config.serviceDid,
-        lxm: "group.opensocial.abortMigration",
+        lxm: "new.flock.group.abortMigration",
         ...badSpec.claims,
       });
       const abRes = await fetch(`${ghB.url}/group-admin/abort-migration`, {
@@ -1003,8 +1001,8 @@ test("Lazy prepared-lease reap aborts target staging (coordinated & standard), s
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         repo: groupDid,
-        collection: "group.opensocial.rule",
-        record: { $type: "group.opensocial.rule", title: "Thawed Write", createdAt: new Date().toISOString() },
+        collection: "app.bsky.feed.post",
+        record: { $type: "app.bsky.feed.post", text: "Thawed Write", createdAt: new Date().toISOString() },
       }),
     });
     assert.equal(thawWriteRes.status, 200, "Ordinary write must lazily reap expired prepared lease and succeed");
@@ -1121,7 +1119,7 @@ test("Lazy prepared-lease reap aborts target staging (coordinated & standard), s
     const delayedOldOpAbortJwt = await createServiceJwt({
       iss: groupDid,
       aud: ghB.config.serviceDid,
-      lxm: "group.opensocial.abortMigration",
+      lxm: "new.flock.group.abortMigration",
       keypair: groupSigKeyA,
     });
     const delayedOldOpAbortRes = await fetch(`${ghB.url}/group-admin/abort-migration`, {
@@ -1153,8 +1151,8 @@ test("Lazy prepared-lease reap aborts target staging (coordinated & standard), s
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         repo: groupDid,
-        collection: "group.opensocial.rule",
-        record: { $type: "group.opensocial.rule", title: "Thawed Std Write", createdAt: new Date().toISOString() },
+        collection: "app.bsky.feed.post",
+        record: { $type: "app.bsky.feed.post", text: "Thawed Std Write", createdAt: new Date().toISOString() },
       }),
     });
     assert.equal(thawStdWriteRes.status, 200);
@@ -1187,8 +1185,8 @@ test("Lazy prepared-lease reap aborts target staging (coordinated & standard), s
 
     // Stage meta/self & members/self on `ghB` so `getRecommendedDidCredentials` succeeds
     for (const spUri of [
-      `at:space/${groupDid}/group.opensocial.meta/self`,
-      `at:space/${groupDid}/group.opensocial.members/self`,
+      `at:space/${groupDid}/org.atgrp.meta/self`,
+      `at:space/${groupDid}/org.atgrp.members/self`,
       `at:space/${groupDid}/new.flock.workspace/self`,
     ]) {
       const metaStar = new Uint8Array(
@@ -1324,7 +1322,7 @@ test("Lazy prepared-lease reap aborts target staging (coordinated & standard), s
     const delayedAgainstNullJwt = await createServiceJwt({
       iss: groupDid,
       aud: ghB.config.serviceDid,
-      lxm: "group.opensocial.abortMigration",
+      lxm: "new.flock.group.abortMigration",
       keypair: groupSigKeyA,
     });
     const delayedAgainstNullRes = await fetch(`${ghB.url}/group-admin/abort-migration`, {
@@ -1417,8 +1415,8 @@ test("Lazy prepared-lease reap aborts target staging (coordinated & standard), s
     const stageCutToks = (await stageCutRes.json()) as { accessJwt: string };
 
     for (const spUri of [
-      `at:space/${groupDid}/group.opensocial.meta/self`,
-      `at:space/${groupDid}/group.opensocial.members/self`,
+      `at:space/${groupDid}/org.atgrp.meta/self`,
+      `at:space/${groupDid}/org.atgrp.members/self`,
       `at:space/${groupDid}/new.flock.workspace/self`,
     ]) {
       const metaStar = new Uint8Array(
@@ -1608,7 +1606,7 @@ test("Round 5 hardening: operation-ID tombstones block same-ID reuse and pre-arr
       createServiceJwt({
         iss: groupDid,
         aud: ghB.config.serviceDid,
-        lxm: "group.opensocial.abortMigration",
+        lxm: "new.flock.group.abortMigration",
         keypair: groupSigKeyA,
       });
 
@@ -1993,8 +1991,8 @@ test("Round 7 hardening: signPlcOperation validates all preconditions before rev
     const dpopA = flowA.dpop;
     const tokA = flowA.tokenResponse!.access_token;
     const groupDid = flowA.tokenResponse!.sub;
-    const membersSpace = `at:space/${groupDid}/group.opensocial.members/self`;
-    const metaSpace = `at:space/${groupDid}/group.opensocial.meta/self`;
+    const membersSpace = `at:space/${groupDid}/org.atgrp.members/self`;
+    const metaSpace = `at:space/${groupDid}/org.atgrp.meta/self`;
 
     // Add an external sovereign PLC rotation key (`sovKey`) so we can test `SovereignRotationKeyDropped` too
     const sovKey = await P256Keypair.create({ exportable: true });
@@ -2041,12 +2039,12 @@ test("Round 7 hardening: signPlcOperation validates all preconditions before rev
       body: JSON.stringify({
         space: membersSpace,
         repo: groupDid,
-        collection: "group.opensocial.role",
+        collection: "org.atgrp.role",
         rkey: "id-viewer",
         record: {
-          $type: "group.opensocial.role",
+          $type: "org.atgrp.role",
           displayName: "Identity Viewer",
-          scopes: ["identity:*"],
+          permissions: ["identity:*"],
         },
       }),
     });
@@ -2058,10 +2056,10 @@ test("Round 7 hardening: signPlcOperation validates all preconditions before rev
       body: JSON.stringify({
         space: membersSpace,
         repo: groupDid,
-        collection: "group.opensocial.membership",
+        collection: "org.atgrp.membership",
         rkey: bob.did,
         record: {
-          $type: "group.opensocial.membership",
+          $type: "org.atgrp.membership",
           roles: ["member", "id-viewer"],
           createdAt: new Date().toISOString(),
         },
@@ -2101,7 +2099,7 @@ test("Round 7 hardening: signPlcOperation validates all preconditions before rev
           iat: nowSecCap,
           exp: nowSecCap + 300,
           endpoint: ghB.url,
-          supportedSpacePolicies: ["group.opensocial.policy"],
+          supportedSpacePolicies: ["org.atgrp.policy"],
           atomicMigrationVersion: 1,
         },
       },
@@ -2114,7 +2112,7 @@ test("Round 7 hardening: signPlcOperation validates all preconditions before rev
           iat: nowSecCap,
           exp: nowSecCap + 300,
           endpoint: ghB.url,
-          supportedSpacePolicies: ["group.opensocial.policy"],
+          supportedSpacePolicies: ["org.atgrp.policy"],
           atomicMigrationVersion: 1,
         },
       },
@@ -2127,7 +2125,7 @@ test("Round 7 hardening: signPlcOperation validates all preconditions before rev
           iat: nowSecCap,
           exp: nowSecCap + 300,
           endpoint: ghB.url,
-          supportedSpacePolicies: ["group.opensocial.policy"],
+          supportedSpacePolicies: ["org.atgrp.policy"],
           atomicMigrationVersion: 1,
         },
       },
@@ -2140,7 +2138,7 @@ test("Round 7 hardening: signPlcOperation validates all preconditions before rev
           iat: nowSecCap,
           exp: nowSecCap + 300,
           endpoint: ghB.url,
-          supportedSpacePolicies: ["group.opensocial.policy"],
+          supportedSpacePolicies: ["org.atgrp.policy"],
           atomicMigrationVersion: 1,
         },
       },
@@ -2153,7 +2151,7 @@ test("Round 7 hardening: signPlcOperation validates all preconditions before rev
           iat: nowSecCap,
           exp: nowSecCap + 300,
           endpoint: ghB.url,
-          supportedSpacePolicies: ["group.opensocial.policy"],
+          supportedSpacePolicies: ["org.atgrp.policy"],
           atomicMigrationVersion: 1,
         },
       },
@@ -2165,7 +2163,7 @@ test("Round 7 hardening: signPlcOperation validates all preconditions before rev
           iss: targetDid,
           exp: nowSecCap + 300,
           endpoint: ghB.url,
-          supportedSpacePolicies: ["group.opensocial.policy"],
+          supportedSpacePolicies: ["org.atgrp.policy"],
           atomicMigrationVersion: 1,
         },
       },
@@ -2178,7 +2176,7 @@ test("Round 7 hardening: signPlcOperation validates all preconditions before rev
           iat: nowSecCap + 30,
           exp: nowSecCap + 300,
           endpoint: ghB.url,
-          supportedSpacePolicies: ["group.opensocial.policy"],
+          supportedSpacePolicies: ["org.atgrp.policy"],
           atomicMigrationVersion: 1,
         },
       },
@@ -2191,7 +2189,7 @@ test("Round 7 hardening: signPlcOperation validates all preconditions before rev
           iat: nowSecCap - 120,
           exp: nowSecCap,
           endpoint: ghB.url,
-          supportedSpacePolicies: ["group.opensocial.policy"],
+          supportedSpacePolicies: ["org.atgrp.policy"],
           atomicMigrationVersion: 1,
         },
       },
@@ -2204,7 +2202,7 @@ test("Round 7 hardening: signPlcOperation validates all preconditions before rev
           iat: nowSecCap + 3,
           exp: nowSecCap + 2,
           endpoint: ghB.url,
-          supportedSpacePolicies: ["group.opensocial.policy"],
+          supportedSpacePolicies: ["org.atgrp.policy"],
           atomicMigrationVersion: 1,
         },
       },
@@ -2217,7 +2215,7 @@ test("Round 7 hardening: signPlcOperation validates all preconditions before rev
           iat: nowSecCap - 10,
           exp: nowSecCap + 295,
           endpoint: ghB.url,
-          supportedSpacePolicies: ["group.opensocial.policy"],
+          supportedSpacePolicies: ["org.atgrp.policy"],
           atomicMigrationVersion: 1,
         },
       },
@@ -2358,7 +2356,7 @@ test("Round 7 hardening: signPlcOperation validates all preconditions before rev
       },
       services: {
         atproto_pds: { type: "AtprotoPersonalDataServer", endpoint: ghB.url },
-        opensocial_group: { type: "OpenSocialGroupHost", endpoint: ghB.url },
+        atgrp_host: { type: "AtmosphereGroupHostV1", endpoint: ghB.url },
       },
     };
 
@@ -2809,8 +2807,8 @@ test("Round 9 hardening: strict target cleanup on explicit source abort, withGro
     const stageRevRaceToks = (await stageRevRace.json()) as { accessJwt: string };
 
     for (const spUri of [
-      `at:space/${groupDid}/group.opensocial.meta/self`,
-      `at:space/${groupDid}/group.opensocial.members/self`,
+      `at:space/${groupDid}/org.atgrp.meta/self`,
+      `at:space/${groupDid}/org.atgrp.members/self`,
     ]) {
       const metaStar = new Uint8Array(
         await (
@@ -3153,8 +3151,8 @@ test("Round 11 hardening: submitPlcOperation crash after PLC commit + deadline e
     assert.equal(upBlobSrc.status, 200);
     const { blob: avatarBlob } = (await upBlobSrc.json()) as { blob: { ref: { $link: string } } };
 
-    const metaSpace = `at:space/${groupDid}/group.opensocial.meta/self`;
-    const membersSpace = `at:space/${groupDid}/group.opensocial.members/self`;
+    const metaSpace = `at:space/${groupDid}/org.atgrp.meta/self`;
+    const membersSpace = `at:space/${groupDid}/org.atgrp.members/self`;
     const putProfRes = await dpopSrc.fetchWithDpop(`${ghSource.url}/xrpc/com.atproto.space.putRecord`, {
       method: "POST",
       accessToken: tokSrc,
@@ -3162,14 +3160,12 @@ test("Round 11 hardening: submitPlcOperation crash after PLC commit + deadline e
       body: JSON.stringify({
         space: metaSpace,
         repo: groupDid,
-        collection: "group.opensocial.profile",
+        collection: "org.atgrp.about",
         rkey: "self",
         record: {
-          $type: "group.opensocial.profile",
+          $type: "org.atgrp.about",
           displayName: "R11 Crash Recovery Group",
-          joinPolicy: "open",
           avatar: avatarBlob,
-          createdAt: new Date().toISOString(),
         },
       }),
     });
@@ -3566,8 +3562,8 @@ test("Round 12 hardening (1a): delayed in-flight PLC commit (live head === pendi
       );
 
       for (const spUri of [
-        `at:space/${groupDid}/group.opensocial.meta/self`,
-        `at:space/${groupDid}/group.opensocial.members/self`,
+        `at:space/${groupDid}/org.atgrp.meta/self`,
+        `at:space/${groupDid}/org.atgrp.members/self`,
       ]) {
         const metaBytes = new Uint8Array(
           await (
@@ -3707,7 +3703,7 @@ test("Round 12 hardening (1a): delayed in-flight PLC commit (live head === pendi
     const prematureSrcJwt = await ghSource.repoStore.signGroupServiceJwt({
       groupDid: grpA.groupDid,
       aud: grpA.targetServiceDid,
-      lxm: "group.opensocial.abortMigration",
+      lxm: "new.flock.group.abortMigration",
     });
     const prematureSvcAbortRes = await fetch(`${ghTarget.url}/group-admin/abort-migration`, {
       method: "POST",
@@ -3894,8 +3890,8 @@ test("Round 12 hardening (1b): markerless direct PLC cutover + PLC 503 outage + 
       200,
     );
     for (const spUri of [
-      `at:space/${groupDid}/group.opensocial.meta/self`,
-      `at:space/${groupDid}/group.opensocial.members/self`,
+      `at:space/${groupDid}/org.atgrp.meta/self`,
+      `at:space/${groupDid}/org.atgrp.members/self`,
     ]) {
       const metaBytes = new Uint8Array(
         await (
@@ -4362,6 +4358,73 @@ test("Round 13 Fix #2: sweepExpiredMigrationSessions paginates past >50 and >500
   } finally {
     await ghTarget.close();
     await ghSource.close();
+    await pds.close();
+    await plc.close();
+  }
+});
+
+test("R15 migration capability rejects legacy #opensocial_group peers and validates both about/self and config/self at activation", async () => {
+  const { createServer: createHttp } = await import("node:http");
+  const plc = await startMockPlcServer();
+  const pds = await startMockPersonalPds(plc);
+  const gh = await startTestGroupHost({ plc, handleDomain: "r15cap.groups.localhost" });
+
+  let legacyPort = 0;
+  const legacyServer = createHttp((req, res) => {
+    const legacyOrigin = `http://127.0.0.1:${legacyPort}`;
+    const legacyDid = `did:web:localhost%3A${legacyPort}`;
+    if (req.url === "/xrpc/com.atproto.server.describeServer") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ did: legacyDid, availableUserDomains: ["legacy.groups.localhost"] }));
+      return;
+    }
+    if (req.url === "/.well-known/did.json") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify({
+          id: legacyDid,
+          service: [
+            { id: "#atproto_pds", type: "AtprotoPersonalDataServer", serviceEndpoint: legacyOrigin },
+            { id: "#opensocial_group", type: "OpenSocialGroupHost", serviceEndpoint: legacyOrigin },
+          ],
+        }),
+      );
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  await new Promise<void>((resolve) => legacyServer.listen(0, "127.0.0.1", () => resolve()));
+  legacyPort = (legacyServer.address() as import("node:net").AddressInfo).port;
+  const legacyUrl = `http://127.0.0.1:${legacyPort}`;
+
+  try {
+    const alice = await pds.registerUser("alice-r15cap.test");
+    const flow = await createSteppedUpGroupFlow({
+      groupHost: gh,
+      pds,
+      user: alice,
+      scope: groupAdminScopes().join(" "),
+      prompt: "create",
+      createParams: { displayName: "R15 Cap Group", handle: "cap.r15cap.groups.localhost" },
+    });
+    const groupDid = flow.tokenResponse!.sub;
+
+    // Legacy peer advertising ONLY `#opensocial_group` / `OpenSocialGroupHost` MUST be rejected with `400 UnsupportedGroupHostTarget`!
+    const prepLegacyRes = await flow.dpop.fetchWithDpop(`${gh.url}/group-admin/prepare-migration`, {
+      method: "POST",
+      accessToken: flow.tokenResponse!.access_token,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        group: groupDid,
+        operationId: "op-r15-reject-legacy",
+        targetEndpoint: legacyUrl,
+      }),
+    });
+    assert.equal(prepLegacyRes.status, 400);
+    assert.equal(((await prepLegacyRes.json()) as { error: string }).error, "UnsupportedGroupHostTarget");
+  } finally {
+    await new Promise<void>((resolve) => legacyServer.close(() => resolve()));
+    await gh.close();
     await pds.close();
     await plc.close();
   }

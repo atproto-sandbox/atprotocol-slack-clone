@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { chromium, type Browser, type Page } from "@playwright/test";
 import { channelUri, parseWorkspaceUri } from "@flock/protocol/keys";
-import { COLLECTION } from "@flock/protocol/nsids";
+import { ATGRP_MOD_EVENT_TYPE, ATGRP_MOD_REASON, COLLECTION } from "@flock/protocol/nsids";
 import { availablePort, startAppServer, startDeskServer, startOperatorServer, type AppServer } from "../support/app-server";
 import { consent, openChannel } from "../support/browser-app";
 import { watchPreflights } from "../support/browser-network";
@@ -118,7 +118,7 @@ test("Flock Desk end-to-end parity (D3/D5): direct-grant & expiring invites, cro
               (parsedLoc.pathname === "/oauth/par" ||
                 (parsedLoc.pathname === "/xrpc/com.atproto.space.getSpace" &&
                   (parsedLoc.searchParams.get("space") ?? "").startsWith("at:space/") &&
-                  (parsedLoc.searchParams.get("space") ?? "").endsWith("/group.opensocial.invites/self")))
+                  (parsedLoc.searchParams.get("space") ?? "").endsWith("/org.atgrp.inbox/self")))
             ) {
               return;
             }
@@ -163,7 +163,7 @@ test("Flock Desk end-to-end parity (D3/D5): direct-grant & expiring invites, cro
     assert.ok(parsedWs, `expected workspace URI, got ${workspaceUri}`);
 
     // Connect Alice's Group Governance session so she can publish rules, send expiring cross-PDS invites, and moderate
-    const governanceSection = alicePage.getByRole("region", { name: "OpenSocial group governance" });
+    const governanceSection = alicePage.getByRole("region", { name: "Atmosphere group governance" });
     await governanceSection.getByRole("button", { name: "Sign in as group admin →" }).click();
     await consent(alicePage, alice);
     await governanceSection.getByRole("button", { name: "Disconnect group session", exact: true }).waitFor({ state: "visible" });
@@ -279,7 +279,7 @@ test("Flock Desk end-to-end parity (D3/D5): direct-grant & expiring invites, cro
     assert.ok(hideUri);
     await hideItemInDesk.getByTestId("desk-report-message-button").click();
     await bobDeskPage.getByTestId("desk-report-panel").waitFor({ state: "visible" });
-    await bobDeskPage.getByTestId("desk-report-reason-type").selectOption("violation");
+    await bobDeskPage.getByTestId("desk-report-reason-type").selectOption(ATGRP_MOD_REASON.violation);
     await bobDeskPage.getByTestId("desk-report-rule-select").waitFor({ state: "visible" });
     await bobDeskPage.getByTestId("desk-report-reason-input").fill("Reported from Flock Desk");
     await bobDeskPage.getByTestId("desk-report-submit-button").click();
@@ -290,7 +290,7 @@ test("Flock Desk end-to-end parity (D3/D5): direct-grant & expiring invites, cro
     const takedownUri = await takedownItemInDesk.getAttribute("data-message-uri");
     assert.ok(takedownUri);
     await takedownItemInDesk.getByTestId("desk-report-message-button").click();
-    await bobDeskPage.getByTestId("desk-report-reason-type").selectOption("spam");
+    await bobDeskPage.getByTestId("desk-report-reason-type").selectOption(ATGRP_MOD_REASON.spam);
     await bobDeskPage.getByTestId("desk-report-submit-button").click();
     await bobDeskPage.getByTestId("desk-report-confirmation").waitFor({ state: "visible" });
 
@@ -375,6 +375,27 @@ test("Flock Desk end-to-end parity (D3/D5): direct-grant & expiring invites, cro
     const caraRepoBody = (await caraRepoRes.json()) as { records?: Array<{ value?: { text?: string } }> };
     const leaked = (caraRepoBody.records ?? []).some((rec) => rec.value?.text === REMOVED_WRITER_NOTE);
     assert.equal(leaked, false, "Rejected post after removal must NOT exist in Cara's personal PDS repo");
+
+    // 6b. Former-member Appeals & Moderation Self-History directly in Desk (zero Operator calls!):
+    //     Cara refreshes (now 0 joined workspaces), inspects her moderation self-history (sees `#ejectEvent`),
+    //     submits an appeal directly to the Group Host, and sees `#appealEvent` in her self-history!
+    await caraDeskPage.getByTestId("desk-refresh-button").click();
+    await caraDeskPage.getByText("No joined workspaces yet.", { exact: true }).waitFor({ state: "visible", timeout: 30_000 });
+    const caraSelfModPanel = caraDeskPage.getByTestId("desk-self-mod-panel");
+    await caraSelfModPanel.waitFor({ state: "visible" });
+    await caraDeskPage.getByTestId("desk-appeal-group-input").fill(parsedWs.authorityDid);
+    await caraDeskPage.getByTestId("desk-self-history-load").click();
+    await caraDeskPage.getByTestId("desk-self-history-list").getByText(ATGRP_MOD_EVENT_TYPE.eject).waitFor({ state: "visible", timeout: 30_000 });
+
+    await caraDeskPage.getByTestId("desk-appeal-reason-input").fill("Requesting review of my ejection directly from Desk");
+    await caraDeskPage.getByTestId("desk-appeal-submit").click();
+    await caraDeskPage.getByTestId("desk-self-mod-notice").waitFor({ state: "visible", timeout: 30_000 });
+    await caraDeskPage.getByTestId("desk-self-history-list").getByText(ATGRP_MOD_EVENT_TYPE.appeal).waitFor({ state: "visible", timeout: 30_000 });
+    assert.equal(
+      await caraDeskPage.getByTestId("desk-self-history-list").getByText(/Requesting review of my ejection directly from Desk/).count(),
+      0,
+      "querySelfHistory must redact appeal note/reason per Atmosphere Groups self-history allowlist",
+    );
 
     // 7. Same-context two-tab origin IndexedDB isolation + sign-out erasure of `flock-desk-lifecycle:<bobDid>`!
     const bobWebTab = await bobCtx.newPage();

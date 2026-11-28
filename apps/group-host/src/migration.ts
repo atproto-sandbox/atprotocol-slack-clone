@@ -30,15 +30,16 @@ import {
   type MigrationSpaceManifestEntry,
 } from "@flock/protocol/migration-manifest";
 import {
+  ATGRP_COLLECTION,
+  ATGRP_POLICY,
+  ATGRP_SPACE_TYPE,
   ATPROTO_SPACE_COLLECTION,
   FLOCK_EXTENSION_FIELD,
-  OPENSOCIAL_COLLECTION,
-  OPENSOCIAL_POLICY,
-  OPENSOCIAL_SPACE_TYPE,
+  FLOCK_GROUP_METHOD,
   REPO_COLLECTION,
 } from "@flock/protocol/nsids";
 import {
-  canonicalOpenSocialPolicyKey,
+  canonicalAtgrpPolicyKey,
   validatePublicRecord,
   validateSpacePolicy,
   validateSpaceRecord,
@@ -48,7 +49,7 @@ import {
   effectiveHumanAdmins,
   expandGroupScopes,
   groupAdminScopes,
-  type GroupOpenSocialPolicy,
+  type GroupAtgrpPolicy,
 } from "@flock/protocol/scopes";
 import { bytesToHex } from "@noble/hashes/utils";
 import * as jose from "jose";
@@ -225,7 +226,7 @@ export class GroupMigrationService {
       const jwt = await this.repoStore.signGroupServiceJwt({
         groupDid: lease.group_did,
         aud: lease.target_service_did,
-        lxm: "group.opensocial.abortMigration",
+        lxm: FLOCK_GROUP_METHOD.abortMigration,
         nowMs,
       });
       await this.noticeFetcher(`${lease.target_endpoint}/group-admin/abort-migration`, {
@@ -260,7 +261,7 @@ export class GroupMigrationService {
     const jwt = await this.repoStore.signGroupServiceJwt({
       groupDid: lease.group_did,
       aud: lease.target_service_did,
-      lxm: "group.opensocial.abortMigration",
+      lxm: FLOCK_GROUP_METHOD.abortMigration,
       nowMs,
     });
     let res: Response;
@@ -379,8 +380,8 @@ export class GroupMigrationService {
           serviceEndpoint: pdsEndpoint,
         },
         {
-          id: "#opensocial_group",
-          type: "OpenSocialGroupHost",
+          id: "#atgrp_host",
+          type: "AtmosphereGroupHostV1",
           serviceEndpoint: pdsEndpoint,
         },
       ],
@@ -417,13 +418,13 @@ export class GroupMigrationService {
       iat: nowSec,
       exp: nowSec + 300,
       endpoint: this.config.publicUrl,
-      supportedSpacePolicies: [OPENSOCIAL_POLICY],
+      supportedSpacePolicies: [ATGRP_POLICY],
       atomicMigrationVersion: 1,
     });
 
     return {
       did: this.config.serviceDid,
-      supportedSpacePolicies: [OPENSOCIAL_POLICY],
+      supportedSpacePolicies: [ATGRP_POLICY],
       blobUploadLimit: this.config.blobUploadLimit,
       migrationBlobUploadLimit: this.config.migrationBlobUploadLimit,
       maxRepoImportSize: this.config.maxRepoImportSize,
@@ -672,7 +673,7 @@ export class GroupMigrationService {
         typeof info.did !== "string" ||
         !isDid(info.did) ||
         !Array.isArray(info.supportedSpacePolicies) ||
-        !info.supportedSpacePolicies.includes(OPENSOCIAL_POLICY) ||
+        !info.supportedSpacePolicies.includes(ATGRP_POLICY) ||
         typeof info.capabilityProofJwt !== "string" ||
         info.capabilityProofJwt.length === 0 ||
         info.capabilityProofJwt.length > 8_192
@@ -786,7 +787,7 @@ export class GroupMigrationService {
         claims.exp - claims.iat > 300 ||
         normalizedClaimEndpoint !== targetOrigin ||
         !Array.isArray(claims.supportedSpacePolicies) ||
-        !claims.supportedSpacePolicies.includes(OPENSOCIAL_POLICY)
+        !claims.supportedSpacePolicies.includes(ATGRP_POLICY)
       ) {
         throw new GroupHostHttpError(
           400,
@@ -826,7 +827,7 @@ export class GroupMigrationService {
       };
     }
 
-    // Attempt 2: `describeServer` + verified DID document `#opensocial_group` service
+    // Attempt 2: `describeServer` + verified DID document `#atgrp_host` (`AtmosphereGroupHostV1`) service
     try {
       const descRes = await this.infoFetcher(`${targetOrigin}/xrpc/com.atproto.server.describeServer`, {
         method: "GET",
@@ -842,7 +843,7 @@ export class GroupMigrationService {
           if (
             doc &&
             this.plc.extractPdsEndpoint(doc) === targetOrigin &&
-            this.plc.hasOpenSocialGroupService(doc, targetOrigin)
+            this.plc.hasAtgrpGroupService(doc, targetOrigin)
           ) {
             return {
               mode: "standard",
@@ -862,7 +863,7 @@ export class GroupMigrationService {
     throw new GroupHostHttpError(
       400,
       "UnsupportedGroupHostTarget",
-      `Target host ${targetOrigin} does not advertise verifiable OpenSocial group.opensocial.policy capability.`,
+      `Target host ${targetOrigin} does not advertise verifiable Atmosphere Groups org.atgrp.policy capability.`,
     );
   }
 
@@ -1679,7 +1680,7 @@ export class GroupMigrationService {
         (parsed.header.alg !== "ES256" && parsed.header.alg !== "ES256K") ||
         parsed.payload.iss !== params.groupDid ||
         parsed.payload.aud !== this.config.serviceDid ||
-        parsed.payload.lxm !== "group.opensocial.abortMigration" ||
+        parsed.payload.lxm !== FLOCK_GROUP_METHOD.abortMigration ||
         typeof iat !== "number" ||
         !Number.isFinite(iat) ||
         iat > nowSec + 5 ||
@@ -2128,6 +2129,7 @@ export class GroupMigrationService {
         this.db.prepare("DELETE FROM migration_session WHERE group_did = ?").run(params.groupDid);
         this.db.prepare("DELETE FROM revoked_migration_jti WHERE group_did = ?").run(params.groupDid);
         this.db.prepare("DELETE FROM oauth_par WHERE group_did = ?").run(params.groupDid);
+        this.db.prepare("DELETE FROM oauth_consent_snapshot WHERE group_did = ?").run(params.groupDid);
         this.db.prepare("DELETE FROM upstream_oauth_state WHERE group_did = ?").run(params.groupDid);
         this.db.prepare("DELETE FROM oauth_code WHERE group_did = ?").run(params.groupDid);
         this.db.prepare("DELETE FROM oauth_refresh_token WHERE group_did = ?").run(params.groupDid);
@@ -4005,11 +4007,12 @@ export class GroupMigrationService {
       if (!keyCheck.valid) {
         throw new GroupHostHttpError(400, keyCheck.code ?? "InvalidSpaceKey", keyCheck.reason);
       }
-      const stagedMetaPolicy = JSON.parse(sp.policy_json) as GroupOpenSocialPolicy;
+      const stagedMetaPolicy = JSON.parse(sp.policy_json) as GroupAtgrpPolicy;
       const polCheck = validateSpacePolicy(stagedMetaPolicy, {
         groupDid: params.groupDid,
         spaceType: sp.space_type,
         skey: sp.skey,
+        importMode: true,
       });
       if (!polCheck.valid) {
         throw new GroupHostHttpError(400, polCheck.code ?? "InvalidSpacePolicy", polCheck.reason);
@@ -4058,6 +4061,7 @@ export class GroupMigrationService {
         spaceUri: sp.space_uri,
         repoDid: params.groupDid,
         rkey: SELF_SKEY,
+        importMode: true,
       });
       if (!recCheck.valid) {
         throw new GroupHostHttpError(400, recCheck.code ?? "InvalidSpacePolicy", recCheck.reason);
@@ -4066,13 +4070,14 @@ export class GroupMigrationService {
         groupDid: params.groupDid,
         spaceType: sp.space_type,
         skey: sp.skey,
+        importMode: true,
       });
       if (!pubPolCheck.valid) {
         throw new GroupHostHttpError(400, pubPolCheck.code ?? "InvalidSpacePolicy", pubPolCheck.reason);
       }
       if (
-        canonicalOpenSocialPolicyKey(stagedMetaPolicy) !==
-        canonicalOpenSocialPolicyKey(publishedRec.policy as GroupOpenSocialPolicy)
+        canonicalAtgrpPolicyKey(stagedMetaPolicy) !==
+        canonicalAtgrpPolicyKey(publishedRec.policy as GroupAtgrpPolicy)
       ) {
         throw new GroupHostHttpError(
           400,
@@ -4096,26 +4101,42 @@ export class GroupMigrationService {
       }
     }
 
-    // Verify `profile/self` in `meta/self`
-    const profileRow = this.db
+    // Verify BOTH `org.atgrp.about/self` AND `org.atgrp.config/self` in `meta/self` via registry
+    const aboutRow = this.db
       .prepare("SELECT value FROM space_record WHERE space_uri = ? AND repo_did = ? AND collection = ? AND rkey = 'self'")
-      .get(metaSpace, params.groupDid, OPENSOCIAL_COLLECTION.profile) as { value: string } | undefined;
-    if (!profileRow) {
-      throw new GroupHostHttpError(400, "MissingGroupProfile", "group.opensocial.profile/self is required in meta/self.");
+      .get(metaSpace, params.groupDid, ATGRP_COLLECTION.about) as { value: string } | undefined;
+    if (!aboutRow) {
+      throw new GroupHostHttpError(400, "MissingGroupAbout", "org.atgrp.about/self is required in meta/self.");
     }
-    const profileVal = JSON.parse(profileRow.value) as { url?: string };
-    if (profileVal.url !== undefined) {
-      try {
-        const u = new URL(profileVal.url);
-        if (u.protocol !== "http:" && u.protocol !== "https:") {
-          throw new Error("bad scheme");
-        }
-      } catch {
-        throw new GroupHostHttpError(400, "InvalidRequest", "profile.url must use http: or https:.");
-      }
+    const aboutCheck = validateSpaceRecord(ATGRP_COLLECTION.about, JSON.parse(aboutRow.value), {
+      authorityDid: params.groupDid,
+      spaceUri: metaSpace,
+      repoDid: params.groupDid,
+      rkey: SELF_SKEY,
+      importMode: true,
+    });
+    if (!aboutCheck.valid) {
+      throw new GroupHostHttpError(400, aboutCheck.code ?? "InvalidRequest", aboutCheck.reason);
     }
 
-    // Optional `group.opensocial.declaration/self` in `public_record` (must validate if present, never required when absent!)
+    const configRow = this.db
+      .prepare("SELECT value FROM space_record WHERE space_uri = ? AND repo_did = ? AND collection = ? AND rkey = 'self'")
+      .get(metaSpace, params.groupDid, ATGRP_COLLECTION.config) as { value: string } | undefined;
+    if (!configRow) {
+      throw new GroupHostHttpError(400, "MissingGroupConfig", "org.atgrp.config/self is required in meta/self.");
+    }
+    const configCheck = validateSpaceRecord(ATGRP_COLLECTION.config, JSON.parse(configRow.value), {
+      authorityDid: params.groupDid,
+      spaceUri: metaSpace,
+      repoDid: params.groupDid,
+      rkey: SELF_SKEY,
+      importMode: true,
+    });
+    if (!configCheck.valid) {
+      throw new GroupHostHttpError(400, configCheck.code ?? "InvalidRequest", configCheck.reason);
+    }
+
+    // Optional `org.atgrp.declaration/self` in `public_record` (must validate if present, never required when absent!)
     const declRows = this.db
       .prepare("SELECT rkey, value FROM public_record WHERE group_did = ? AND collection = ?")
       .all(params.groupDid, REPO_COLLECTION.groupDeclaration) as Array<{ rkey: string; value: string }>;
@@ -4136,20 +4157,20 @@ export class GroupMigrationService {
       throw new GroupHostHttpError(400, "MissingBlobs", `Missing blob ${missing.blobs[0]!.cid} referenced by ${missing.blobs[0]!.recordUri}.`);
     }
 
-    // Verify exact `group.opensocial.space` index parity in `members/self`!
+    // Verify exact `org.atgrp.space` index parity in `members/self`!
     const indexedRows = this.db
       .prepare("SELECT rkey, value FROM space_record WHERE space_uri = ? AND repo_did = ? AND collection = ?")
-      .all(membersSpace, params.groupDid, OPENSOCIAL_COLLECTION.space) as Array<{ rkey: string; value: string }>;
+      .all(membersSpace, params.groupDid, ATGRP_COLLECTION.space) as Array<{ rkey: string; value: string }>;
     const indexedSpaceUris = new Set<string>();
     for (const r of indexedRows) {
       const spVal = JSON.parse(r.value) as { space?: string };
       if (!spVal.space || indexedSpaceUris.has(spVal.space)) {
-        throw new GroupHostHttpError(400, "InvalidSpaceIndex", "Duplicate or malformed group.opensocial.space index entry.");
+        throw new GroupHostHttpError(400, "InvalidSpaceIndex", "Duplicate or malformed org.atgrp.space index entry.");
       }
       indexedSpaceUris.add(spVal.space);
     }
     for (const sp of spaceRows) {
-      const isCore = sp.space_type === OPENSOCIAL_SPACE_TYPE.meta || sp.space_type === OPENSOCIAL_SPACE_TYPE.members;
+      const isCore = sp.space_type === ATGRP_SPACE_TYPE.meta || sp.space_type === ATGRP_SPACE_TYPE.members;
       if (isCore) continue;
       const pol = JSON.parse(sp.policy_json) as { unlisted?: boolean };
       const shouldBeIndexed = pol.unlisted !== true;
@@ -4157,13 +4178,13 @@ export class GroupMigrationService {
         throw new GroupHostHttpError(
           400,
           "SpaceIndexParityMismatch",
-          `group.opensocial.space index parity mismatch for ${sp.space_uri}.`,
+          `org.atgrp.space index parity mismatch for ${sp.space_uri}.`,
         );
       }
       indexedSpaceUris.delete(sp.space_uri);
     }
     if (indexedSpaceUris.size > 0) {
-      throw new GroupHostHttpError(400, "SpaceIndexParityMismatch", "Dangling group.opensocial.space index entry.");
+      throw new GroupHostHttpError(400, "SpaceIndexParityMismatch", "Dangling org.atgrp.space index entry.");
     }
 
     // Verify RBAC / role / membership / Flock-modality invariants!
@@ -4180,7 +4201,7 @@ export class GroupMigrationService {
       allAppInstalls: new Map(),
       activeAppInstalls: new Map(),
     };
-    assertPostGovernanceInvariants(emptyPreState, effState, params.groupDid);
+    assertPostGovernanceInvariants(emptyPreState, effState, params.groupDid, { importMode: true });
 
     if (effState.hasFlockWorkspace) {
       if (effState.roles.size < 1) {
@@ -4401,7 +4422,7 @@ export class GroupMigrationService {
         const freshInc = randomUUID();
         const roles = JSON.parse(recRow.roles_json) as string[];
         const memVal: Record<string, unknown> = {
-          $type: OPENSOCIAL_COLLECTION.membership,
+          $type: ATGRP_COLLECTION.membership,
           roles,
           createdAt: nowIso,
           [FLOCK_EXTENSION_FIELD.incarnation]: freshInc,
@@ -4410,7 +4431,7 @@ export class GroupMigrationService {
           [FLOCK_EXTENSION_FIELD.afterWriterRev]: writerMeta?.last_evicted_repo_rev ?? null,
         };
         const ser = await serializeRecord(
-          OPENSOCIAL_COLLECTION.membership as NsidString,
+          ATGRP_COLLECTION.membership as NsidString,
           recRow.recovery_did as RecordKeyString,
           jsonToLex(memVal) as LexMap,
         );
@@ -4450,7 +4471,7 @@ export class GroupMigrationService {
             ops: [
               {
                 action: "create",
-                collection: OPENSOCIAL_COLLECTION.membership,
+                collection: ATGRP_COLLECTION.membership,
                 rkey: restoredRecoveryMem.rkey,
                 value: restoredRecoveryMem.value,
                 cborBytes: restoredRecoveryMem.cborBytes,
@@ -4611,7 +4632,7 @@ export class GroupMigrationService {
     });
 
     const isTargetMigrationLxm =
-      lxm === "com.atproto.server.createAccount" || lxm === "group.opensocial.abortMigration";
+      lxm === "com.atproto.server.createAccount" || lxm === FLOCK_GROUP_METHOD.abortMigration;
     let unleasedTargetVerified = false;
 
     for (let attempt = 0; attempt < 2; attempt += 1) {

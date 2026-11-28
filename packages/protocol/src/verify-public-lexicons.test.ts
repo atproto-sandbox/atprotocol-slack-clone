@@ -16,24 +16,28 @@ import {
 
 const REPO_ROOT = fileURLToPath(new URL("../../..", import.meta.url));
 const FLOCK_AUTH_DID = "did:plc:flocklexauthority2345672";
-const OPENSOCIAL_AUTH_DID = "did:plc:opensoclexauth2345672345";
+const ATGRP_AUTH_DID = "did:plc:atgrplexauth234567234567";
 
-test("loadVendoredPublicLexicons discovers both _lexicon.flock.new and _lexicon.opensocial.group authorities", () => {
+test("loadVendoredPublicLexicons discovers _lexicon.flock.new, _lexicon.group.flock.new, _lexicon.atgrp.org, and _lexicon.mod.atgrp.org authorities", () => {
   const entries = loadVendoredPublicLexicons(REPO_ROOT);
-  const opensocial = entries.filter((e) => e.id.startsWith("group.opensocial."));
+  const atgrp = entries.filter((e) => e.id.startsWith("org.atgrp."));
   const flock = entries.filter((e) => e.id.startsWith("new.flock."));
-  assert.equal(opensocial.length, 27);
-  assert.ok(flock.length >= 30);
-  assert.equal(nsidAuthorityDomain("group.opensocial.meta"), "opensocial.group");
-  assert.equal(lexiconDnsHostname("group.opensocial.meta"), "_lexicon.opensocial.group");
+  assert.equal(atgrp.length, 32);
+  assert.ok(flock.length >= 31);
+  assert.equal(nsidAuthorityDomain("org.atgrp.meta"), "atgrp.org");
+  assert.equal(lexiconDnsHostname("org.atgrp.meta"), "_lexicon.atgrp.org");
+  assert.equal(nsidAuthorityDomain("org.atgrp.mod.querySubjects"), "mod.atgrp.org");
+  assert.equal(lexiconDnsHostname("org.atgrp.mod.querySubjects"), "_lexicon.mod.atgrp.org");
+  assert.equal(nsidAuthorityDomain("new.flock.group.abortMigration"), "group.flock.new");
+  assert.equal(lexiconDnsHostname("new.flock.group.abortMigration"), "_lexicon.group.flock.new");
   assert.equal(nsidAuthorityDomain("new.flock.workspace"), "flock.new");
   assert.equal(lexiconDnsHostname("new.flock.workspace"), "_lexicon.flock.new");
   assert.equal(lexiconDnsHostname("new.flock.channel.message"), "_lexicon.channel.flock.new");
 
   // Multi-chunk TXT join and single-record DID validation
-  assert.equal(parseLexiconDnsTxt([[`did=${OPENSOCIAL_AUTH_DID.slice(0, 12)}`, OPENSOCIAL_AUTH_DID.slice(12)]]), OPENSOCIAL_AUTH_DID);
+  assert.equal(parseLexiconDnsTxt([[`did=${ATGRP_AUTH_DID.slice(0, 12)}`, ATGRP_AUTH_DID.slice(12)]]), ATGRP_AUTH_DID);
   assert.equal(parseLexiconDnsTxt([]), null);
-  assert.equal(parseLexiconDnsTxt([[`did=${FLOCK_AUTH_DID}`], [`did=${OPENSOCIAL_AUTH_DID}`]]), null);
+  assert.equal(parseLexiconDnsTxt([[`did=${FLOCK_AUTH_DID}`], [`did=${ATGRP_AUTH_DID}`]]), null);
   assert.equal(parseLexiconDnsTxt([["did=not-a-valid-did"]]), null);
 });
 
@@ -41,7 +45,7 @@ test("verifyPublicLexicons succeeds when all DNS TXT authorities and XRPC schema
   const entries = loadVendoredPublicLexicons(REPO_ROOT);
   const schemaByDidAndNsid = new Map<string, Record<string, unknown>>();
   for (const entry of entries) {
-    const did = entry.id.startsWith("group.opensocial.") ? OPENSOCIAL_AUTH_DID : FLOCK_AUTH_DID;
+    const did = entry.id.startsWith("org.atgrp.") ? ATGRP_AUTH_DID : FLOCK_AUTH_DID;
     schemaByDidAndNsid.set(`${did}:${entry.id}`, {
       $type: "com.atproto.lexicon.schema",
       ...entry.schema,
@@ -52,7 +56,7 @@ test("verifyPublicLexicons succeeds when all DNS TXT authorities and XRPC schema
     repoRoot: REPO_ROOT,
     plcUrl: "https://plc.example",
     resolveTxt: async (hostname) => {
-      if (hostname === "_lexicon.opensocial.group") return [[`did=${OPENSOCIAL_AUTH_DID}`]];
+      if (hostname === "_lexicon.atgrp.org" || hostname === "_lexicon.mod.atgrp.org") return [[`did=${ATGRP_AUTH_DID}`]];
       if (hostname.endsWith(".flock.new")) return [[`did=${FLOCK_AUTH_DID}`]];
       throw Object.assign(new Error(`queryTxt ENOTFOUND ${hostname}`), { code: "ENOTFOUND" });
     },
@@ -62,7 +66,7 @@ test("verifyPublicLexicons succeeds when all DNS TXT authorities and XRPC schema
       if (url.origin === "https://plc.example") {
         const did = decodeURIComponent(url.pathname.slice(1));
         const pdsEndpoint =
-          did === OPENSOCIAL_AUTH_DID ? "https://pds.opensocial.example" : "https://pds.flock.example";
+          did === ATGRP_AUTH_DID ? "https://pds.atgrp.example" : "https://pds.flock.example";
         return new Response(
           JSON.stringify({
             id: did,
@@ -93,14 +97,16 @@ test("verifyPublicLexicons succeeds when all DNS TXT authorities and XRPC schema
   });
 
   assert.equal(result.verifiedCount, entries.length);
-  assert.equal(result.authorities["_lexicon.opensocial.group"], OPENSOCIAL_AUTH_DID);
+  assert.equal(result.authorities["_lexicon.atgrp.org"], ATGRP_AUTH_DID);
+  assert.equal(result.authorities["_lexicon.mod.atgrp.org"], ATGRP_AUTH_DID);
   assert.equal(result.authorities["_lexicon.flock.new"], FLOCK_AUTH_DID);
+  assert.equal(result.authorities["_lexicon.group.flock.new"], FLOCK_AUTH_DID);
 });
 
 test("verifyPublicLexicons fails closed on missing DNS TXT, missing schema record, or drifted schema definition", async () => {
   const entries = loadVendoredPublicLexicons(REPO_ROOT);
 
-  // 1. Missing _lexicon.opensocial.group DNS TXT
+  // 1. Missing _lexicon.atgrp.org DNS TXT
   await assert.rejects(
     () =>
       verifyPublicLexicons({
@@ -130,17 +136,17 @@ test("verifyPublicLexicons fails closed on missing DNS TXT, missing schema recor
           );
         },
       }),
-    /_lexicon\.opensocial\.group/,
+    /_lexicon\.atgrp\.org/,
   );
 
-  // 2. Drifted remote schema definition for group.opensocial.meta
+  // 2. Drifted remote schema definition for org.atgrp.meta
   await assert.rejects(
     () =>
       verifyPublicLexicons({
         repoRoot: REPO_ROOT,
         plcUrl: "https://plc.example",
         resolveTxt: async (hostname) =>
-          hostname === "_lexicon.opensocial.group" ? [[`did=${OPENSOCIAL_AUTH_DID}`]] : [[`did=${FLOCK_AUTH_DID}`]],
+          hostname.endsWith(".atgrp.org") ? [[`did=${ATGRP_AUTH_DID}`]] : [[`did=${FLOCK_AUTH_DID}`]],
         fetchImpl: async (input) => {
           const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
           if (url.origin === "https://plc.example") {
@@ -156,7 +162,7 @@ test("verifyPublicLexicons fails closed on missing DNS TXT, missing schema recor
           const rkey = url.searchParams.get("rkey") ?? "";
           const local = entries.find((e) => e.id === rkey)!;
           const schema =
-            rkey === "group.opensocial.meta"
+            rkey === "org.atgrp.meta"
               ? { ...local.schema, defs: { main: { type: "space", key: "any" } } }
               : local.schema;
           return new Response(JSON.stringify({ value: schema }), {
@@ -165,13 +171,13 @@ test("verifyPublicLexicons fails closed on missing DNS TXT, missing schema recor
           });
         },
       }),
-    /group\.opensocial\.meta: published schema .* differs from local vendored lexicon/,
+    /org\.atgrp\.meta: published schema .* differs from local vendored lexicon/,
   );
 });
 
 test("verifyPublicLexicons enforces DID-document identity binding and AtprotoPersonalDataServer service type", async () => {
   const resolveTxt = async (hostname: string) =>
-    hostname === "_lexicon.opensocial.group" ? [[`did=${OPENSOCIAL_AUTH_DID}`]] : [[`did=${FLOCK_AUTH_DID}`]];
+    hostname.endsWith(".atgrp.org") ? [[`did=${ATGRP_AUTH_DID}`]] : [[`did=${FLOCK_AUTH_DID}`]];
 
   // 1. DID mismatch (`didDoc.id !== authorityDid`)
   await assert.rejects(
@@ -240,7 +246,7 @@ test("verifyPublicLexicons enforces DID-document identity binding and AtprotoPer
 
 test("verifyPublicLexicons rejects oversized responses (> 256 KiB) and disallowed MIME types", async () => {
   const resolveTxt = async (hostname: string) =>
-    hostname === "_lexicon.opensocial.group" ? [[`did=${OPENSOCIAL_AUTH_DID}`]] : [[`did=${FLOCK_AUTH_DID}`]];
+    hostname.endsWith(".atgrp.org") ? [[`did=${ATGRP_AUTH_DID}`]] : [[`did=${FLOCK_AUTH_DID}`]];
 
   // 1. Oversized streamed body without Content-Length header (> 256 * 1024 bytes)
   await assert.rejects(
@@ -285,7 +291,7 @@ test("verifyPublicLexicons rejects oversized responses (> 256 KiB) and disallowe
 
 test("verifyPublicLexicons rejects private-IP SSRF targets, default loopback, and HTTP redirects via boundedSafeFetch", async () => {
   const resolveTxt = async (hostname: string) =>
-    hostname === "_lexicon.opensocial.group" ? [[`did=${OPENSOCIAL_AUTH_DID}`]] : [[`did=${FLOCK_AUTH_DID}`]];
+    hostname.endsWith(".atgrp.org") ? [[`did=${ATGRP_AUTH_DID}`]] : [[`did=${FLOCK_AUTH_DID}`]];
 
   // 1. Private IP in DID document #atproto_pds serviceEndpoint is blocked
   await assert.rejects(
@@ -365,7 +371,7 @@ test("verifyPublicLexicons default production boundedSafeFetch wiring (no fetchI
       verifyPublicLexicons({
         repoRoot: REPO_ROOT,
         plcUrl: "https://10.0.0.42",
-        resolveTxt: async () => [[`did=${OPENSOCIAL_AUTH_DID}`]],
+        resolveTxt: async () => [[`did=${ATGRP_AUTH_DID}`]],
       }),
     /non-public IP address/i,
   );
@@ -402,7 +408,7 @@ test("verifyPublicLexicons default production boundedSafeFetch wiring (no fetchI
   const { port } = srv.address() as AddressInfo;
   const localPlcOrigin = `http://127.0.0.1:${port}`;
   const resolveTxt = async (hostname: string) =>
-    hostname === "_lexicon.opensocial.group" ? [[`did=${OPENSOCIAL_AUTH_DID}`]] : [[`did=${FLOCK_AUTH_DID}`]];
+    hostname.endsWith(".atgrp.org") ? [[`did=${ATGRP_AUTH_DID}`]] : [[`did=${FLOCK_AUTH_DID}`]];
 
   try {
     mode = "private-ip-pds";

@@ -33,7 +33,7 @@ import {
 // deletes one database and a different account's start deletes databases that are not its own.
 
 const DATABASE_PREFIX = "flock-sync-";
-const VERSION = 4;
+const VERSION = 5;
 const LAST = "￿";
 
 type Factory = Pick<IDBFactory, "open" | "deleteDatabase" | "databases">;
@@ -79,67 +79,88 @@ export class IndexedDbStore implements SyncStore {
         ? upgradeTx?.objectStore("clock")
         : db.createObjectStore("clock", { keyPath: ["accountDid", "scope"] });
       if (clock && !clock.indexNames.contains("scope")) clock.createIndex("scope", "scope");
-      if (!db.objectStoreNames.contains("leavingGroups")) db.createObjectStore("leavingGroups", { keyPath: "groupDid" });
+      const leavingGroups = db.objectStoreNames.contains("leavingGroups")
+        ? upgradeTx?.objectStore("leavingGroups")
+        : db.createObjectStore("leavingGroups", { keyPath: "groupDid" });
       const joiningGroups = db.objectStoreNames.contains("joiningGroups")
         ? upgradeTx?.objectStore("joiningGroups")
         : db.createObjectStore("joiningGroups", { keyPath: "operationId" });
-      if (!db.objectStoreNames.contains("reactivatingGroups")) db.createObjectStore("reactivatingGroups", { keyPath: "operationId" });
+      const reactivatingGroups = db.objectStoreNames.contains("reactivatingGroups")
+        ? upgradeTx?.objectStore("reactivatingGroups")
+        : db.createObjectStore("reactivatingGroups", { keyPath: "operationId" });
 
-      if (event.oldVersion > 0 && event.oldVersion < 4) {
+      if (event.oldVersion > 0 && event.oldVersion < 5) {
+        const normalizeV4 = event.oldVersion < 4;
+        const isLegacyOpenSocial = (value: string | null | undefined): boolean =>
+          typeof value === "string" && (value.includes("/group.opensocial.") || value.includes("/space/group.opensocial."));
+
         if (spaces) {
-          rewriteStoreRows(spaces, (row: SpaceState) => {
+          migrateStoreRows(spaces, (row: SpaceState) => {
+            if (isLegacyOpenSocial(row.space) || isLegacyOpenSocial(row.workspace)) return { action: "delete" };
+            if (!normalizeV4) return null;
             const nextSpace = normalizeLegacySpaceUri(row.space);
             const nextWorkspace = row.workspace === null ? null : normalizeLegacySpaceUri(row.workspace);
             if (nextSpace === row.space && nextWorkspace === row.workspace) return null;
-            return { next: { ...row, space: nextSpace, workspace: nextWorkspace }, keyChanged: nextSpace !== row.space };
+            return { action: "replace", next: { ...row, space: nextSpace, workspace: nextWorkspace }, keyChanged: nextSpace !== row.space };
           });
         }
         if (writers) {
-          rewriteStoreRows(writers, (row: WriterState) => {
+          migrateStoreRows(writers, (row: WriterState) => {
+            if (isLegacyOpenSocial(row.space)) return { action: "delete" };
+            if (!normalizeV4) return null;
             const nextSpace = normalizeLegacySpaceUri(row.space);
             if (nextSpace === row.space) return null;
-            return { next: { ...row, space: nextSpace }, keyChanged: true };
+            return { action: "replace", next: { ...row, space: nextSpace }, keyChanged: true };
           });
         }
         if (records) {
-          rewriteStoreRows(records, (row: StoredRecord) => {
+          migrateStoreRows(records, (row: StoredRecord) => {
+            if (
+              isLegacyOpenSocial(row.space) ||
+              row.collection.startsWith("group.opensocial.") ||
+              isLegacyOpenSocial(row.uri)
+            ) {
+              return { action: "delete" };
+            }
+            if (!normalizeV4) return null;
             const nextSpace = normalizeLegacySpaceUri(row.space);
             const nextUri = normalizeLegacySpaceUri(row.uri);
             if (nextSpace === row.space && nextUri === row.uri) return null;
-            return { next: { ...row, space: nextSpace, uri: nextUri }, keyChanged: nextSpace !== row.space };
+            return { action: "replace", next: { ...row, space: nextSpace, uri: nextUri }, keyChanged: nextSpace !== row.space };
           });
         }
         if (meta) {
-          rewriteStoreRows(meta, (row: { key: string; value: unknown }) => {
-            if (!row.key.startsWith("purges ")) return null;
+          migrateStoreRows(meta, (row: { key: string; value: unknown }) => {
+            if (isLegacyOpenSocial(row.key)) return { action: "delete" };
+            if (!normalizeV4 || !row.key.startsWith("purges ")) return null;
             const rawSpace = row.key.slice("purges ".length);
             const nextSpace = normalizeLegacySpaceUri(rawSpace);
             if (nextSpace === rawSpace) return null;
-            return { next: { ...row, key: `purges ${nextSpace}` }, keyChanged: true };
+            return { action: "replace", next: { ...row, key: `purges ${nextSpace}` }, keyChanged: true };
           });
         }
         if (activity) {
-          rewriteStoreRows(activity, (row: ActivityState) => {
+          migrateStoreRows(activity, (row: ActivityState) => {
+            if (isLegacyOpenSocial(row.space)) return { action: "delete" };
+            if (!normalizeV4) return null;
             const nextSpace = normalizeLegacySpaceUri(row.space);
             if (nextSpace === row.space) return null;
-            return { next: { ...row, space: nextSpace }, keyChanged: true };
+            return { action: "replace", next: { ...row, space: nextSpace }, keyChanged: true };
           });
         }
         if (clock) {
-          rewriteStoreRows(clock, (row: ClockState) => {
+          migrateStoreRows(clock, (row: ClockState) => {
+            if (isLegacyOpenSocial(row.scope)) return { action: "delete" };
+            if (!normalizeV4) return null;
             const nextScope = normalizeLegacySpaceUri(row.scope);
             if (nextScope === row.scope) return null;
-            return { next: { ...row, scope: nextScope }, keyChanged: true };
+            return { action: "replace", next: { ...row, scope: nextScope }, keyChanged: true };
           });
         }
-        if (joiningGroups) {
-          rewriteStoreRows(joiningGroups, (row: JoiningGroupEntry) => {
-            if (typeof row.inviteUri !== "string") return null;
-            const nextInvite = normalizeLegacySpaceUri(row.inviteUri);
-            if (nextInvite === row.inviteUri) return null;
-            return { next: { ...row, inviteUri: nextInvite }, keyChanged: false };
-          });
-        }
+        // Clear all pre-R15 DID-only lifecycle journal rows so legacy OpenSocial entries cannot resume against R15 endpoints.
+        leavingGroups?.clear();
+        joiningGroups?.clear();
+        reactivatingGroups?.clear();
       }
     };
     const db = await settle(opening);
@@ -662,9 +683,9 @@ async function epochOf(meta: IDBObjectStore, space: string): Promise<string> {
   return `${clears?.value ?? 0}:${purges?.value ?? 0}`;
 }
 
-function rewriteStoreRows<T>(
+function migrateStoreRows<T>(
   store: IDBObjectStore,
-  transform: (row: T) => { next: T; keyChanged: boolean } | null,
+  transform: (row: T) => { action: "delete" } | { action: "replace"; next: T; keyChanged: boolean } | null,
 ): void {
   const req = store.openCursor();
   req.onsuccess = () => {
@@ -672,7 +693,9 @@ function rewriteStoreRows<T>(
     if (!cursor) return;
     const change = transform(cursor.value as T);
     if (change) {
-      if (change.keyChanged) {
+      if (change.action === "delete") {
+        cursor.delete();
+      } else if (change.keyChanged) {
         cursor.delete();
         store.put(change.next);
       } else {

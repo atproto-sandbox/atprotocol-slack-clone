@@ -6,6 +6,7 @@ import type { GroupClient } from "@flock/client/group-client";
 import { OperatorRemoteError, type AuthorityFlowRequest, type OperatorClient } from "@flock/client/operator-client";
 import type { CreatedGroupWorkspace, DiscoveredWorkspace, WorkspaceClient } from "@flock/client/workspace-client";
 import type { WorkspaceSummary } from "@flock/protocol/workspace-summary";
+import { ATGRP_MOD_EVENT_TYPE, ATGRP_MOD_REASON } from "@flock/protocol/nsids";
 import {
   parsePersistedGroupMigrationState,
   serializePersistedGroupMigrationState,
@@ -24,6 +25,7 @@ import {
   mergeInviteDeliveryPage,
   mergeJoinRequestPage,
   MIGRATION_MODE_OPTIONS,
+  safeWebsiteUrl,
   saveGroupProfileChanges,
 } from "./group-governance-panel";
 import { fetchModerationSnapshot, mergeModHistoryPage, mergeModSubjectsPage } from "./moderation-panel";
@@ -61,7 +63,7 @@ function makeWorkspace(overrides: Partial<WorkspaceSummary> = {}): WorkspaceSumm
       { did: BOB, active: true, roles: ["member"] },
     ],
     pendingMembers: [{ did: CAROL, roles: ["member"] }],
-    roles: [{ rkey: "admin", displayName: "Admin", default: false, assignable: ["admin", "member"], scopes: [] }],
+    roles: [{ rkey: "admin", displayName: "Admin", default: false, canAssign: ["admin", "member"], permissions: [] }],
     channels: [],
     installs: [],
     degradedReasons: [],
@@ -69,20 +71,30 @@ function makeWorkspace(overrides: Partial<WorkspaceSummary> = {}): WorkspaceSumm
   };
 }
 
-test("REPORT_REASON_TYPES uses OpenSocial 'nsfw' value instead of 'sexual'", () => {
-  assert.equal(REPORT_REASON_TYPES.some((r) => r.value === "nsfw"), true);
+test("REPORT_REASON_TYPES uses canonical Atmosphere Groups reason tokens (org.atgrp.mod.defs#reason*)", () => {
+  assert.equal(REPORT_REASON_TYPES.some((r) => r.value === ATGRP_MOD_REASON.nsfw), true);
   assert.equal(
-    REPORT_REASON_TYPES.find((r) => r.value === "nsfw")?.label,
+    REPORT_REASON_TYPES.find((r) => r.value === ATGRP_MOD_REASON.nsfw)?.label,
     "Unwanted sexual / NSFW content",
   );
   assert.equal(REPORT_REASON_TYPES.some((r) => (r.value as string) === "sexual"), false);
+  assert.equal(REPORT_REASON_TYPES.some((r) => (r.value as string) === "nsfw"), false);
+});
+
+test("safeWebsiteUrl enforces http/https allowlist and rejects javascript:/data: XSS schemes", () => {
+  assert.equal(safeWebsiteUrl("https://example.org/group"), "https://example.org/group");
+  assert.equal(safeWebsiteUrl("http://127.0.0.1:8080/team"), "http://127.0.0.1:8080/team");
+  assert.equal(safeWebsiteUrl("javascript:alert(1)"), null);
+  assert.equal(safeWebsiteUrl("data:text/html,<script>alert(1)</script>"), null);
+  assert.equal(safeWebsiteUrl("vbscript:msgbox(1)"), null);
+  assert.equal(safeWebsiteUrl("not-a-url"), null);
 });
 
 test("channelWatchedSpaces watches both the channel space and members/self for live account labels", () => {
   const channelSpace = `at:space/${GROUP_DID}/new.flock.channel/general`;
   assert.deepEqual(channelWatchedSpaces(channelSpace, GROUP_DID), [
     channelSpace,
-    `at:space/${GROUP_DID}/group.opensocial.members/self`,
+    `at:space/${GROUP_DID}/org.atgrp.members/self`,
   ]);
   assert.deepEqual(channelWatchedSpaces(null, GROUP_DID), []);
   assert.deepEqual(channelWatchedSpaces(channelSpace, undefined), []);
@@ -249,17 +261,21 @@ test("runBrowserOperatorReauthorization starts Operator reauth once, records pen
   assert.equal(navigated.length, 1);
 });
 
-test("fetchGovernanceSnapshot isolates independent governance requests via Promise.allSettled, gates deliveries to admins, and preserves loaded queues on partial failure", async () => {
+test("fetchGovernanceSnapshot isolates independent governance requests via Promise.allSettled, gates admin-only queues, and preserves loaded queues on partial failure", async () => {
   let deliveriesCalls = 0;
+  let joinReqCalls = 0;
 
-  // 1. Moderator (`isAdmin: false`): does NOT call listInviteDeliveries(), preserves joinRequestsCursor, and detects publicMeta drift!
+  // 1. Non-admin moderator (`isAdmin: false`): does NOT call admin-only listInviteDeliveries() or listJoinRequests(), detects publicMeta drift!
   const modSnap = await fetchGovernanceSnapshot(
     {
       listRoles: async () => [],
-      listJoinRequests: async () => ({
-        requests: [{ member: BOB, createdAt: "2026-11-10T00:00:00.000Z" }],
-        cursor: "jr-cur-1",
-      }),
+      listJoinRequests: async () => {
+        joinReqCalls += 1;
+        return {
+          requests: [{ member: BOB, createdAt: "2026-11-10T00:00:00.000Z" }],
+          cursor: "jr-cur-1",
+        };
+      },
       listInviteDeliveries: async () => {
         deliveriesCalls += 1;
         return { deliveries: [] };
@@ -273,8 +289,8 @@ test("fetchGovernanceSnapshot isolates independent governance requests via Promi
     { isAdmin: false },
   );
   assert.equal(deliveriesCalls, 0, "non-admin moderator must not call admin-only listInviteDeliveries");
-  assert.equal(modSnap.joinRequests.length, 1);
-  assert.equal(modSnap.joinRequestsCursor, "jr-cur-1");
+  assert.equal(joinReqCalls, 0, "non-admin moderator must not call admin-only listJoinRequests");
+  assert.equal(modSnap.joinRequests.length, 0);
   assert.equal(modSnap.joinRequestsError, "");
   assert.equal(modSnap.rolesError, "");
   assert.equal(modSnap.publicMetaError, "");
@@ -313,7 +329,7 @@ test("fetchGovernanceSnapshot isolates independent governance requests via Promi
   const pendingReq = { member: BOB, createdAt: "2026-11-10T00:00:00.000Z", message: "Let me in" };
   const pendingDelivery = {
     inviteUri: "at://u1/inv/1",
-    spaceUri: "at:space/u1/group.opensocial.invites/self",
+    spaceUri: "at:space/u1/org.atgrp.inbox/self",
     inviteeDid: CAROL,
     rkey: "3lbl111111111",
     repoRev: "rev1",
@@ -328,11 +344,11 @@ test("fetchGovernanceSnapshot isolates independent governance requests via Promi
       listRoles: async () => [
         {
           rkey: "moderator",
-          uri: `at:space/${GROUP_DID}/group.opensocial.members/self/${GROUP_DID}/group.opensocial.role/moderator`,
+          uri: `at:space/${GROUP_DID}/org.atgrp.members/self/${GROUP_DID}/org.atgrp.role/moderator`,
           displayName: "Moderator",
           default: false,
-          scopes: [],
-          assignable: [],
+          permissions: [],
+          canAssign: [],
         },
       ],
       listJoinRequests: async () => ({ requests: [pendingReq], cursor: "jr-next" }),
@@ -400,7 +416,7 @@ test("governance & moderation cursor pagination helpers deduplicate and append p
     [
       {
         inviteUri: "at://u1/inv/1",
-        spaceUri: "at:space/u1/group.opensocial.invites/self",
+        spaceUri: "at:space/u1/org.atgrp.inbox/self",
         inviteeDid: BOB,
         rkey: "1",
         repoRev: "rev1",
@@ -413,7 +429,7 @@ test("governance & moderation cursor pagination helpers deduplicate and append p
     [
       {
         inviteUri: "at://u1/inv/1",
-        spaceUri: "at:space/u1/group.opensocial.invites/self",
+        spaceUri: "at:space/u1/org.atgrp.inbox/self",
         inviteeDid: BOB,
         rkey: "1",
         repoRev: "rev1",
@@ -424,7 +440,7 @@ test("governance & moderation cursor pagination helpers deduplicate and append p
       },
       {
         inviteUri: "at://u2/inv/2",
-        spaceUri: "at:space/u2/group.opensocial.invites/self",
+        spaceUri: "at:space/u2/org.atgrp.inbox/self",
         inviteeDid: CAROL,
         rkey: "2",
         repoRev: "rev2",
@@ -452,13 +468,13 @@ test("governance & moderation cursor pagination helpers deduplicate and append p
   assert.equal(mergedSubjects[1]?.subject, CAROL);
 
   const mergedHistory = mergeModHistoryPage(
-    [{ id: "1", createdAt: "t1", event: { $type: "report" } }],
+    [{ eventId: "1", subject: BOB, createdAt: "t1", event: { $type: ATGRP_MOD_EVENT_TYPE.report } }],
     [
-      { id: "1", createdAt: "t1", event: { $type: "report" } },
-      { id: "2", createdAt: "t2", event: { $type: "resolve", status: "resolved" } },
+      { eventId: "1", subject: BOB, createdAt: "t1", event: { $type: ATGRP_MOD_EVENT_TYPE.report } },
+      { eventId: "2", subject: BOB, createdAt: "t2", event: { $type: ATGRP_MOD_EVENT_TYPE.status, status: "resolved" } },
     ],
   );
-  assert.deepEqual(mergedHistory.map((e) => e.id), ["1", "2"]);
+  assert.deepEqual(mergedHistory.map((e) => e.eventId), ["1", "2"]);
 
   assert.equal(formatReceivedInvitesWarning(undefined), "");
   assert.equal(
@@ -469,10 +485,10 @@ test("governance & moderation cursor pagination helpers deduplicate and append p
   );
 });
 
-test("fetchModerationSnapshot isolates listRules and listModSubjects via Promise.allSettled in both failure directions", async () => {
+test("fetchModerationSnapshot isolates listRules and queryModSubjects via Promise.allSettled in both failure directions", async () => {
   const sampleRule = {
     rkey: "3lblrule00001",
-    uri: `at:space/${GROUP_DID}/group.opensocial.meta/self/${GROUP_DID}/group.opensocial.rule/3lblrule00001`,
+    uri: `at:space/${GROUP_DID}/org.atgrp.members/self/${GROUP_DID}/org.atgrp.rule/3lblrule00001`,
     title: "Be respectful",
     text: "No harassment or spam.",
     order: 1,
@@ -484,32 +500,34 @@ test("fetchModerationSnapshot isolates listRules and listModSubjects via Promise
     createdAt: "2026-11-10T00:00:00.000Z",
     updatedAt: "2026-11-10T00:05:00.000Z",
     reportCount: 3,
+    tags: ["escalated"],
   };
 
-  // 1. `listRules()` rejects while `listModSubjects()` fulfills -> moderation queue & cursor are preserved, `subjectsError === ""`!
+  // 1. `listRules()` rejects while `queryModSubjects()` fulfills -> moderation queue & cursor are preserved, `subjectsError === ""`!
   const rulesFailedSnap = await fetchModerationSnapshot(
     {
       listRules: async () => {
-        throw new Error("Meta rules space read timed out");
+        throw new Error("Members rules space read timed out");
       },
-      listModSubjects: async (opts) => {
-        assert.equal(opts?.status, "escalated");
+      queryModSubjects: async (opts) => {
+        assert.equal(opts?.status, "open");
+        assert.deepEqual(opts?.tags, ["escalated"]);
         return { subjects: [sampleSubject], cursor: "mod-cur-2" };
       },
     },
-    { canModerate: true, status: "escalated" },
+    { canModerate: true, status: "open", tags: ["escalated"] },
   );
   assert.equal(rulesFailedSnap.rules, undefined);
-  assert.equal(rulesFailedSnap.rulesError, "Meta rules space read timed out");
+  assert.equal(rulesFailedSnap.rulesError, "Members rules space read timed out");
   assert.deepEqual(rulesFailedSnap.subjects, [sampleSubject]);
   assert.equal(rulesFailedSnap.subjectsCursor, "mod-cur-2");
   assert.equal(rulesFailedSnap.subjectsError, "");
 
-  // 2. `listModSubjects()` rejects while `listRules()` fulfills -> rules are preserved, `rulesError === ""`!
+  // 2. `queryModSubjects()` rejects while `listRules()` fulfills -> rules are preserved, `rulesError === ""`!
   const subjectsFailedSnap = await fetchModerationSnapshot(
     {
       listRules: async () => [sampleRule],
-      listModSubjects: async () => {
+      queryModSubjects: async () => {
         throw new Error("Moderation subject queue unavailable");
       },
     },
@@ -521,19 +539,19 @@ test("fetchModerationSnapshot isolates listRules and listModSubjects via Promise
   assert.equal(subjectsFailedSnap.subjectsCursor, undefined);
   assert.equal(subjectsFailedSnap.subjectsError, "Moderation subject queue unavailable");
 
-  // 3. `canModerate: false` skips `listModSubjects()` while loading rules cleanly.
-  let listModSubjectsCalled = false;
+  // 3. `canModerate: false` skips `queryModSubjects()` while loading rules cleanly.
+  let queryModSubjectsCalled = false;
   const memberSnap = await fetchModerationSnapshot(
     {
       listRules: async () => [sampleRule],
-      listModSubjects: async () => {
-        listModSubjectsCalled = true;
+      queryModSubjects: async () => {
+        queryModSubjectsCalled = true;
         return { subjects: [] };
       },
     },
     { canModerate: false, status: "open" },
   );
-  assert.equal(listModSubjectsCalled, false);
+  assert.equal(queryModSubjectsCalled, false);
   assert.deepEqual(memberSnap.rules, [sampleRule]);
   assert.equal(memberSnap.rulesError, "");
   assert.deepEqual(memberSnap.subjects, []);

@@ -48,7 +48,7 @@ import {
   channelUri,
   groupMembersUri,
   groupMetaUri,
-  personalInvitesUri,
+  personalInboxUri,
   requestDigest,
   SELF_SKEY,
   spaceRecordUri,
@@ -57,12 +57,14 @@ import {
   workspaceUri,
 } from "@flock/protocol/keys";
 import {
+  ATGRP_COLLECTION,
+  ATGRP_METHOD,
+  ATGRP_MOD_REASON,
+  ATGRP_POLICY,
+  ATGRP_SPACE_TYPE,
   ATPROTO_SPACE_COLLECTION,
   COLLECTION,
-  OPENSOCIAL_COLLECTION,
-  OPENSOCIAL_METHOD,
-  OPENSOCIAL_POLICY,
-  OPENSOCIAL_SPACE_TYPE,
+  FLOCK_GROUP_METHOD,
   REPO_COLLECTION,
   SPACE_TYPE,
 } from "@flock/protocol/nsids";
@@ -276,11 +278,13 @@ async function walkGroupHostAuthorizeUrl(params: {
   assert.equal(getConfirmRes.status, 200);
   const html = await getConfirmRes.text();
   const csrfMatch = /name="csrf_token"\s+value="([^"]+)"/.exec(html);
-  const confirmRes = await fetch(`${params.groupHost.url}/oauth/confirm-action`, {
+  const snapshotMatch = /name="consent_snapshot"\s+value="([^"]+)"/.exec(html);
+  const confirmRes = await fetch(cbLoc, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded", cookie: consentCookie },
     body: new URLSearchParams({
       csrf_token: csrfMatch?.[1] ?? "",
+      ...(snapshotMatch?.[1] ? { consent_snapshot: snapshotMatch[1] } : {}),
       decision: params.confirmDecision ?? "approve",
     }).toString(),
     redirect: "manual",
@@ -425,10 +429,10 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
         ] as const) {
           const provider = actor.pds.ctx.oauthProvider!;
           const resolvedSpaces = await provider.lexiconManager.getSpacesFromScope(fullScope);
-          assert.ok(resolvedSpaces.has(OPENSOCIAL_SPACE_TYPE.meta));
-          assert.ok(resolvedSpaces.has(OPENSOCIAL_SPACE_TYPE.members));
+          assert.ok(resolvedSpaces.has(ATGRP_SPACE_TYPE.meta));
+          assert.ok(resolvedSpaces.has(ATGRP_SPACE_TYPE.members));
           if (fullScope === memberScopeStr) {
-            assert.ok(resolvedSpaces.has(OPENSOCIAL_SPACE_TYPE.invites));
+            assert.ok(resolvedSpaces.has(ATGRP_SPACE_TYPE.inbox));
           }
 
           const redirectUri = "http://127.0.0.1:43901/callback";
@@ -458,9 +462,9 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
           assert.ok(new URL(cbUrl).searchParams.get("code"), "Published OpenSocial + Flock scopes succeed at real PDS");
         }
 
-        // Negative check: unpublished space NSID (`space:group.opensocial.unpublished?...`) MUST fail `OAuthProvider.authorize()`!
+        // Negative check: unpublished space NSID (`space:org.atgrp.unpublished?...`) MUST fail `OAuthProvider.authorize()`!
         {
-          const badScope = "atproto space:group.opensocial.unpublished?authority=*&skey=self&action=read";
+          const badScope = "atproto space:org.atgrp.unpublished?authority=*&skey=self&action=read";
           const badRedirect = "http://127.0.0.1:43902/callback";
           const badClientId = `http://localhost?${new URLSearchParams({ scope: badScope, redirect_uri: badRedirect }).toString()}`;
           const challenge = createHash("sha256").update(randomBytes(32)).digest("base64url");
@@ -491,7 +495,7 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
             (err: unknown) =>
               err instanceof Error &&
               (/Unable to retrieve space declarations|Lexicon|scope|invalid/i.test(err.message) ||
-                /group\.opensocial\.unpublished/i.test(String((err as { cause?: unknown }).cause))),
+                /org\.atgrp\.unpublished/i.test(String((err as { cause?: unknown }).cause))),
             "Unpublished space NSID must fail OAuthProvider.authorize() getSpacesFromScope()",
           );
         }
@@ -545,25 +549,25 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
         const publicGroupDid = pubGroupSession.did;
         assert.ok(publicGroupDid.startsWith("did:plc:"));
 
-        // Verify `publicMeta: true` defaults: `declaration/self`, `labeler/self`, and `publicRead: true` on `meta/self`!
+        // Verify `publicMeta: true` defaults: empty `declaration/self`, `labeler/self` in `members/self`, and `publicRead: true` on `meta/self`!
         const pubGroupXrpc = new AtprotoClient((path, init) => pubGroupSession.fetchHandler(path, init));
-        const declRes = await pubGroupXrpc.query<{ value: { meta: string } }>("com.atproto.repo.getRecord", {
+        const declRes = await pubGroupXrpc.query<{ value: { $type: string } }>("com.atproto.repo.getRecord", {
           repo: publicGroupDid,
           collection: REPO_COLLECTION.groupDeclaration,
           rkey: SELF_SKEY,
         });
-        assert.equal(declRes.value.meta, groupMetaUri(publicGroupDid));
+        assert.equal(declRes.value.$type, REPO_COLLECTION.groupDeclaration);
         const metaSpaceInfo = await pubGroupXrpc.query<{ policy: { publicRead: boolean } }>("com.atproto.space.getSpace", {
           space: groupMetaUri(publicGroupDid),
         });
         assert.equal(metaSpaceInfo.policy.publicRead, true);
         const labelerRes = await pubGroupXrpc.query<{ value: { $type: string } }>("com.atproto.space.getRecord", {
-          space: groupMetaUri(publicGroupDid),
+          space: groupMembersUri(publicGroupDid),
           repo: publicGroupDid,
-          collection: OPENSOCIAL_COLLECTION.labeler,
+          collection: ATGRP_COLLECTION.labeler,
           rkey: SELF_SKEY,
         });
-        assert.equal(labelerRes.value.$type, OPENSOCIAL_COLLECTION.labeler);
+        assert.equal(labelerRes.value.$type, ATGRP_COLLECTION.labeler);
 
         // Downstream `/oauth/confirm-action` Deny (`error=access_denied` + `iss`) & Approve on existing group, plus `fragment` `iss`!
         const denyConfirmRes = await completeRealGroupOAuthFlow({
@@ -1220,7 +1224,7 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
           const modFlow = await completeRealGroupOAuthFlow({
             groupHost: pds.groupHost,
             actor: bob,
-            scope: groupModeratorScopes(ws.groupDid).join(" "),
+            scope: groupModeratorScopes().join(" "),
             loginHint: ws.groupDid,
           });
           const bobModClient = makeGroupClient(
@@ -1231,7 +1235,7 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
           );
 
           // Moderator CAN read moderation subjects and publish labels
-          const modSubs = await bobModClient.listModSubjects();
+          const modSubs = await bobModClient.queryModSubjects();
           assert.deepEqual(modSubs.subjects, []);
           await bobModClient.publishLabel({ uri: dan.did, val: "!hide" });
 
@@ -1239,12 +1243,12 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
           const assignAdminErr = await captureXrpcError(() => bobModClient.putMembership(dan.did, ["member", "admin"]));
           assert.equal(assignAdminErr.status, 403);
 
-          // Moderator CANNOT create a role granting `admin` scopes or `assignable: ["admin"]` (`403`)
+          // Moderator CANNOT create a role granting `admin` permissions or `canAssign: ["admin"]` (`403`)
           const escalateRoleErr = await captureXrpcError(() =>
             bobModClient.putRole("rogue-admin", {
               displayName: "Rogue Admin",
-              scopes: groupAdminScopes(ws.groupDid).filter((s) => s !== "atproto"),
-              assignable: ["admin"],
+              permissions: groupAdminScopes(ws.groupDid).filter((s) => s !== "atproto"),
+              canAssign: ["admin"],
             }),
           );
           assert.equal(escalateRoleErr.status, 403);
@@ -1254,7 +1258,7 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
             bobModClient.xrpc.procedure("com.atproto.space.updateSpace", {
               space: ws.workspace,
               policy: {
-                $type: OPENSOCIAL_POLICY,
+                $type: ATGRP_POLICY,
                 publicRead: true,
                 unlisted: false,
                 grants: [{ role: "moderator", read: true, write: true }],
@@ -1263,8 +1267,8 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
           );
           assert.equal(escalatePolicyErr.status, 403);
 
-          // Delegated sub-manager holding `manage=update` + `role` CRUD + `assignable: ["helper"]` (and NO `read`/`write` on private channel `secret-room`)
-          // CANNOT: (i) grant `read`/`write` on `secret-room` to `helper` or themselves, (ii) edit/delete unassignable `moderator`, or (iii) convert probe scopes to wildcards!
+          // Delegated sub-manager holding `manage=update` + `role` CRUD + `canAssign: ["helper"]` (and NO `read`/`write` on private channel `secret-room`)
+          // CANNOT: (i) grant `read`/`write` on `secret-room` to `helper` or themselves, (ii) edit/delete unassignable `moderator`, or (iii) convert probe permissions to wildcards!
           await ws.groupClient.putRole("helper", { displayName: "Helper" });
           await ws.groupClient.putRole("secret-member", { displayName: "Secret Member" });
           const secretSpace = channelUri(ws.groupDid, "secret-room");
@@ -1272,7 +1276,7 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
             spaceType: SPACE_TYPE.channel,
             skey: "secret-room",
             policy: {
-              $type: OPENSOCIAL_POLICY,
+              $type: ATGRP_POLICY,
               publicRead: false,
               unlisted: true,
               grants: [{ role: "secret-member", read: true, write: true }],
@@ -1280,14 +1284,14 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
           });
           const subMgrScopes = [
             "space:new.flock.channel?manage=update",
-            "space:group.opensocial.members?skey=self&collection=group.opensocial.role&action=read&action=create&action=update&action=delete",
+            `space:${ATGRP_SPACE_TYPE.members}?skey=self&collection=${ATGRP_COLLECTION.role}&action=read&action=create&action=update&action=delete`,
             "blob?accept=image%2Fpng&accept=application%2Foctet-stream",
             "repo:com.atproto.probe.wildcard?action=create&action=update&action=delete",
           ];
           await ws.groupClient.putRole("sub-manager", {
             displayName: "Sub Manager",
-            scopes: subMgrScopes,
-            assignable: ["helper"],
+            permissions: subMgrScopes,
+            canAssign: ["helper"],
           });
           await ws.groupClient.putMembership(carol.did, ["member", "sub-manager"]);
           await acceptGroupMembership(pds, carol, ws.groupDid);
@@ -1310,7 +1314,7 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
             carolSubMgr.xrpc.procedure("com.atproto.space.updateSpace", {
               space: secretSpace,
               policy: {
-                $type: OPENSOCIAL_POLICY,
+                $type: ATGRP_POLICY,
                 publicRead: false,
                 unlisted: true,
                 grants: [
@@ -1327,7 +1331,7 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
             carolSubMgr.xrpc.procedure("com.atproto.space.updateSpace", {
               space: secretSpace,
               policy: {
-                $type: OPENSOCIAL_POLICY,
+                $type: ATGRP_POLICY,
                 publicRead: false,
                 unlisted: true,
                 grants: [
@@ -1340,7 +1344,7 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
           assert.equal(helperReadPrivErr.status, 403);
           assert.equal(helperReadPrivErr.code, "PrivilegeEscalation");
 
-          // (ii) Sub-manager CANNOT overwrite or delete unassignable `secret-member` / new role outside `assignable`, nor self-bootstrap `assignable: ["x"]`!
+          // (ii) Sub-manager CANNOT overwrite or delete unassignable `secret-member` / new role outside `canAssign`, nor self-bootstrap `canAssign: ["x"]`!
           const editUnassignableRoleErr = await captureXrpcError(() =>
             carolSubMgr.putRole("secret-member", { displayName: "Hijacked" }),
           );
@@ -1358,7 +1362,7 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
           const wildcardBlobEscErr = await captureXrpcError(() =>
             carolSubMgr.putRole("helper", {
               displayName: "Helper",
-              scopes: ["blob:*/*"],
+              permissions: ["blob:*/*"],
             }),
           );
           assert.equal(wildcardBlobEscErr.status, 403);
@@ -1367,7 +1371,7 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
           const wildcardRepoEscErr = await captureXrpcError(() =>
             carolSubMgr.putRole("helper", {
               displayName: "Helper",
-              scopes: ["repo:*?action=create"],
+              permissions: ["repo:*?action=create"],
             }),
           );
           assert.equal(wildcardRepoEscErr.status, 403);
@@ -1447,10 +1451,10 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
           // Provision a limited sub-admin (`bob` with `recruiter` role: can edit membership for `member`, cannot create private channels)
           await carolGroupClient.putRole("recruiter", {
             displayName: "Recruiter",
-            scopes: [
-              `space:${OPENSOCIAL_SPACE_TYPE.members}?skey=self&collection=${OPENSOCIAL_COLLECTION.membership}&action=read&action=create&action=update`,
+            permissions: [
+              `space:${ATGRP_SPACE_TYPE.members}?skey=self&collection=${ATGRP_COLLECTION.membership}&action=read&action=create&action=update`,
             ],
-            assignable: ["member"],
+            canAssign: ["member"],
           });
           await carolGroupClient.putMembership(bob.did, ["member", "recruiter"]);
 
@@ -1502,7 +1506,7 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
               fetchHandler: async (path: string, init?: RequestInit) => {
                 if (interceptActive && init?.body && typeof init.body === "string") {
                   const parsedBody = JSON.parse(init.body) as { collection?: string; rkey?: string };
-                  if (stopStep === 1 && path.includes("com.atproto.space.putRecord") && parsedBody.collection === OPENSOCIAL_COLLECTION.membership) {
+                  if (stopStep === 1 && path.includes("com.atproto.space.putRecord") && parsedBody.collection === ATGRP_COLLECTION.membership) {
                     return Response.json({ error: "InternalServerError", message: "injected step-1 stop" }, { status: 500 });
                   }
                   if (stopStep === 2 && path.includes("com.atproto.space.putRecord") && parsedBody.collection === COLLECTION.directory) {
@@ -1603,14 +1607,14 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
         await ws.groupClient.putMembership(humanMember.did, ["member"]);
         await acceptGroupMembership(pds, humanMember, ws.groupDid);
 
-        // 2a. `group.opensocial.space` auto-indexing on `createSpace` / `updateSpace(unlisted)` / `deleteSpace` + `IndexHostMaintained`
+        // 2a. `org.atgrp.space` auto-indexing on `createSpace` / `updateSpace(unlisted)` / `deleteSpace` + `IndexHostMaintained`
         const tempSpaceSkey = "indexed-modality";
         const tempSpaceUri = channelUri(ws.groupDid, tempSpaceSkey);
         await ws.groupClient.xrpc.procedure("com.atproto.space.createSpace", {
           spaceType: SPACE_TYPE.channel,
           skey: tempSpaceSkey,
           policy: {
-            $type: OPENSOCIAL_POLICY,
+            $type: ATGRP_POLICY,
             publicRead: false,
             unlisted: false,
             grants: [
@@ -1626,7 +1630,7 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
             {
               space: groupMembersUri(ws.groupDid),
               repo: ws.groupDid,
-              collection: OPENSOCIAL_COLLECTION.space,
+              collection: ATGRP_COLLECTION.space,
             },
           );
           return res.records;
@@ -1637,15 +1641,15 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
         assert.equal(idx1.some((r) => r.value.space === groupMetaUri(ws.groupDid)), false, "meta/self excluded");
         assert.equal(idx1.some((r) => r.value.space === groupMembersUri(ws.groupDid)), false, "members/self excluded");
 
-        // Direct CRUD write to `group.opensocial.space` rejected with `400 IndexHostMaintained`
+        // Direct CRUD write to `org.atgrp.space` rejected with `400 IndexHostMaintained`
         const hostMaintErr = await captureXrpcError(() =>
           ws.groupClient.xrpc.procedure("com.atproto.space.putRecord", {
             space: groupMembersUri(ws.groupDid),
             repo: ws.groupDid,
-            collection: OPENSOCIAL_COLLECTION.space,
+            collection: ATGRP_COLLECTION.space,
             rkey: tidNow(),
             record: {
-              $type: OPENSOCIAL_COLLECTION.space,
+              $type: ATGRP_COLLECTION.space,
               space: tempSpaceUri,
               createdAt: new Date().toISOString(),
             },
@@ -1658,7 +1662,7 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
         await ws.groupClient.xrpc.procedure("com.atproto.space.updateSpace", {
           space: tempSpaceUri,
           policy: {
-            $type: OPENSOCIAL_POLICY,
+            $type: ATGRP_POLICY,
             publicRead: false,
             unlisted: true,
             grants: [{ role: "admin", read: true, write: true }],
@@ -1669,7 +1673,7 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
         await ws.groupClient.xrpc.procedure("com.atproto.space.updateSpace", {
           space: tempSpaceUri,
           policy: {
-            $type: OPENSOCIAL_POLICY,
+            $type: ATGRP_POLICY,
             publicRead: false,
             unlisted: false,
             grants: [{ role: "admin", read: true, write: true }],
@@ -1690,7 +1694,7 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
               spaceType: SPACE_TYPE.channel,
               skey: "dup-grant-chan",
               policy: {
-                $type: OPENSOCIAL_POLICY,
+                $type: ATGRP_POLICY,
                 publicRead: false,
                 unlisted: false,
                 grants: [
@@ -1708,7 +1712,7 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
               spaceType: SPACE_TYPE.channel,
               skey: "unknown-role-chan",
               policy: {
-                $type: OPENSOCIAL_POLICY,
+                $type: ATGRP_POLICY,
                 publicRead: false,
                 unlisted: false,
                 grants: [{ role: "ghost-role", read: true }],
@@ -1721,9 +1725,9 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
             ws.groupClient.xrpc.procedure("com.atproto.space.putRecord", {
               space: groupMembersUri(ws.groupDid),
               repo: ws.groupDid,
-              collection: OPENSOCIAL_COLLECTION.membership,
+              collection: ATGRP_COLLECTION.membership,
               rkey: humanMember.did,
-              record: { $type: OPENSOCIAL_COLLECTION.membership, roles: ["ghost-role"], createdAt: new Date().toISOString() },
+              record: { $type: ATGRP_COLLECTION.membership, roles: ["ghost-role"], createdAt: new Date().toISOString() },
             }),
           );
           assert.equal(unknownMemRoleErr.code, "UnknownRole");
@@ -1733,10 +1737,10 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
             ws.groupClient.xrpc.procedure("com.atproto.space.putRecord", {
               space: groupMembersUri(ws.groupDid),
               repo: ws.groupDid,
-              collection: OPENSOCIAL_COLLECTION.membership,
+              collection: ATGRP_COLLECTION.membership,
               rkey: humanMember.did,
               validate: false,
-              record: { $type: OPENSOCIAL_COLLECTION.membership, roles: [], createdAt: new Date().toISOString() },
+              record: { $type: ATGRP_COLLECTION.membership, roles: [], createdAt: new Date().toISOString() },
             }),
           );
           assert.ok(emptyRolesErr.code === "EmptyMemberRoles" || emptyRolesErr.status === 400);
@@ -1750,17 +1754,17 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
           await ws.groupClient.putRole("member", {
             displayName: existingMemberRole.displayName,
             default: false,
-            scopes: existingMemberRole.scopes,
-            assignable: existingMemberRole.assignable,
+            permissions: existingMemberRole.permissions,
+            canAssign: existingMemberRole.canAssign,
           });
           const outsiderNoDef = await nextActor("nodef", 1);
           const noDefRes = await personalGroupCall<{ error?: string }>({
             hostUrl: pds.groupHostUrl,
             actor: outsiderNoDef,
             groupDid: ws.groupDid,
-            path: OPENSOCIAL_METHOD.requestJoin,
+            path: ATGRP_METHOD.requestJoin,
             httpMethod: "POST",
-            lxm: OPENSOCIAL_METHOD.requestJoin,
+            lxm: ATGRP_METHOD.requestJoin,
             body: { group: ws.groupDid },
           });
           assert.equal(noDefRes.status, 400);
@@ -1770,8 +1774,8 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
           await ws.groupClient.putRole("member", {
             displayName: existingMemberRole.displayName,
             default: true,
-            scopes: existingMemberRole.scopes,
-            assignable: existingMemberRole.assignable,
+            permissions: existingMemberRole.permissions,
+            canAssign: existingMemberRole.canAssign,
           });
 
           // `CannotTargetGroupSelf`:
@@ -1780,21 +1784,21 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
             ws.groupClient.xrpc.procedure("com.atproto.space.putRecord", {
               space: groupMembersUri(ws.groupDid),
               repo: ws.groupDid,
-              collection: OPENSOCIAL_COLLECTION.membership,
+              collection: ATGRP_COLLECTION.membership,
               rkey: ws.groupDid,
-              record: { $type: OPENSOCIAL_COLLECTION.membership, roles: ["member"], createdAt: new Date().toISOString() },
+              record: { $type: ATGRP_COLLECTION.membership, roles: ["member"], createdAt: new Date().toISOString() },
             }),
           );
           assert.equal(selfMemErr.code, "CannotTargetGroupSelf");
 
-          // (ii) `acceptance/self` authored by `groupDid`
+          // (ii) `confirmation/self` authored by `groupDid`
           const selfAccErr = await captureXrpcError(() =>
             ws.groupClient.xrpc.procedure("com.atproto.space.putRecord", {
               space: groupMembersUri(ws.groupDid),
               repo: ws.groupDid,
-              collection: OPENSOCIAL_COLLECTION.acceptance,
+              collection: ATGRP_COLLECTION.confirmation,
               rkey: SELF_SKEY,
-              record: { $type: OPENSOCIAL_COLLECTION.acceptance, createdAt: new Date().toISOString() },
+              record: { $type: ATGRP_COLLECTION.confirmation, createdAt: new Date().toISOString() },
             }),
           );
           assert.equal(selfAccErr.code, "CannotTargetGroupSelf");
@@ -1819,12 +1823,12 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
           );
           assert.equal(selfAppErr.code, "CannotTargetGroupSelf");
 
-          // (iv) `requestJoin`, `cancelJoinRequest`, `leaveGroup`, `createReport` signed by `<groupDid>` itself!
+          // (iv) `requestJoin`, `cancelJoinRequest`, `leave`, `submitReport` signed by `<groupDid>` itself!
           for (const [methodNsid, payload] of [
-            [OPENSOCIAL_METHOD.requestJoin, { group: ws.groupDid }],
-            [OPENSOCIAL_METHOD.cancelJoinRequest, { group: ws.groupDid }],
-            [OPENSOCIAL_METHOD.leaveGroup, { group: ws.groupDid }],
-            [OPENSOCIAL_METHOD.createReport, { group: ws.groupDid, subject: humanMember.did, reasonType: "spam" }],
+            [ATGRP_METHOD.requestJoin, { group: ws.groupDid }],
+            [ATGRP_METHOD.cancelJoinRequest, { group: ws.groupDid }],
+            [ATGRP_METHOD.leaveGroup, { group: ws.groupDid }],
+            [ATGRP_METHOD.modSubmitReport, { group: ws.groupDid, subject: humanMember.did, reasonType: ATGRP_MOD_REASON.spam }],
           ] as const) {
             const selfJwt = await pds.groupHost.repoStore.signGroupServiceJwt({
               groupDid: ws.groupDid,
@@ -2037,7 +2041,7 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
           assert.equal(delWsTombErr.code, "CannotDeleteWorkspaceWithAppTombstones");
 
           // 3. `AppMembershipActive`: cannot write `membership/<botActor.did>` while `app.install.active === false`!
-          await ws.groupClient.putRole("app-temp-role", { displayName: "App Temp", scopes: [] });
+          await ws.groupClient.putRole("app-temp-role", { displayName: "App Temp", permissions: [] });
           const inactiveAppMemErr = await captureXrpcError(() =>
             ws.groupClient.putMembership(botActor.did, ["app-temp-role"]),
           );
@@ -2048,9 +2052,9 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
             hostUrl: pds.groupHostUrl,
             actor: botActor,
             groupDid: ws.groupDid,
-            path: OPENSOCIAL_METHOD.requestJoin,
+            path: ATGRP_METHOD.requestJoin,
             httpMethod: "POST",
-            lxm: OPENSOCIAL_METHOD.requestJoin,
+            lxm: ATGRP_METHOD.requestJoin,
             body: { group: ws.groupDid },
           });
           assert.equal(botJoinAttempt.status, 400);
@@ -2075,9 +2079,9 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
             hostUrl: extraHostForBotMigration.url,
             actor: botActor,
             groupDid: ws.groupDid,
-            path: OPENSOCIAL_METHOD.requestJoin,
+            path: ATGRP_METHOD.requestJoin,
             httpMethod: "POST",
-            lxm: OPENSOCIAL_METHOD.requestJoin,
+            lxm: ATGRP_METHOD.requestJoin,
             body: { group: ws.groupDid },
           });
           assert.equal(botJoinOnTarget.status, 400);
@@ -2105,9 +2109,9 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
         for (const freshActor of [freshHost0, freshHost1]) {
           const personalXrpc = sessionClient(bearerSession(freshActor) as never);
           const preCheckErr = await captureXrpcError(() =>
-            personalXrpc.query("com.atproto.space.getSpace", { space: personalInvitesUri(freshActor.did) }),
+            personalXrpc.query("com.atproto.space.getSpace", { space: personalInboxUri(freshActor.did) }),
           );
-          assert.equal(preCheckErr.code, "SpaceNotFound", "Personal PDS fixture must NOT pre-create group.opensocial.invites/self");
+          assert.equal(preCheckErr.code, "SpaceNotFound", "Personal PDS fixture must NOT pre-create org.atgrp.inbox/self");
         }
 
         // Concurrent `SpaceAlreadyExists` race across two independent `WorkspaceClient` instances + restart idempotency!
@@ -2118,14 +2122,14 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
             engA.workspaces.ensureInvitesSpace(),
             engB.workspaces.ensureInvitesSpace(),
           ]);
-          assert.equal(uriA, personalInvitesUri(freshHost0.did));
-          assert.equal(uriB, personalInvitesUri(freshHost0.did));
+          assert.equal(uriA, personalInboxUri(freshHost0.did));
+          assert.equal(uriB, personalInboxUri(freshHost0.did));
 
           // Restart idempotency (`resetInvitesVerificationCache()` + fresh engine)
           engA.workspaces.resetInvitesVerificationCache();
-          assert.equal(await engA.workspaces.ensureInvitesSpace(), personalInvitesUri(freshHost0.did));
+          assert.equal(await engA.workspaces.ensureInvitesSpace(), personalInboxUri(freshHost0.did));
           const engC = createEngine(clientTransport(pds, freshHost0), { operator: operatorService });
-          assert.equal(await engC.workspaces.ensureInvitesSpace(), personalInvitesUri(freshHost0.did));
+          assert.equal(await engC.workspaces.ensureInvitesSpace(), personalInboxUri(freshHost0.did));
         }
 
         // All 4 `IncompatibleInvitesSpacePolicyError` cases on fresh personal PDS accounts:
@@ -2144,13 +2148,13 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
                     publicWrite: true,
                   };
           await badXrpc.procedure("com.atproto.space.createSpace", {
-            spaceType: OPENSOCIAL_SPACE_TYPE.invites,
+            spaceType: ATGRP_SPACE_TYPE.inbox,
             skey: SELF_SKEY,
             policy,
           });
           if (badCase === "nonEmptyMembers") {
             await badXrpc.procedure("com.atproto.memberspace.putMembers", {
-              space: personalInvitesUri(badActor.did),
+              space: personalInboxUri(badActor.did),
               members: [{ did: freshHost0.did, read: true, write: false }],
             });
           }
@@ -2266,9 +2270,9 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
             hostUrl: pds.groupHostUrl,
             actor: carol,
             groupDid: groupA.groupDid,
-            path: OPENSOCIAL_METHOD.requestJoin,
+            path: ATGRP_METHOD.requestJoin,
             httpMethod: "POST",
-            lxm: OPENSOCIAL_METHOD.requestJoin,
+            lxm: ATGRP_METHOD.requestJoin,
             body: { group: groupA.groupDid, invite: invB.uri },
           });
           assert.equal(wrongAuthErr.status, 400);
@@ -2279,9 +2283,9 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
             hostUrl: pds.groupHostUrl,
             actor: dan,
             groupDid: groupA.groupDid,
-            path: OPENSOCIAL_METHOD.requestJoin,
+            path: ATGRP_METHOD.requestJoin,
             httpMethod: "POST",
-            lxm: OPENSOCIAL_METHOD.requestJoin,
+            lxm: ATGRP_METHOD.requestJoin,
             body: { group: groupA.groupDid, invite: invA.uri },
           });
           assert.equal(wrongRecipErr.status, 400);
@@ -2344,9 +2348,9 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
             hostUrl: pds.groupHostUrl,
             actor: dan,
             groupDid: groupA.groupDid,
-            path: OPENSOCIAL_METHOD.requestJoin,
+            path: ATGRP_METHOD.requestJoin,
             httpMethod: "POST",
-            lxm: OPENSOCIAL_METHOD.requestJoin,
+            lxm: ATGRP_METHOD.requestJoin,
             body: { group: groupA.groupDid, invite: raceInv.uri },
           });
           releaseLock();
@@ -2380,11 +2384,10 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
           await customPolicyGroup.groupClient.xrpc.procedure("com.atproto.space.putRecord", {
             space: groupMetaUri(customPolicyGroup.groupDid),
             repo: customPolicyGroup.groupDid,
-            collection: OPENSOCIAL_COLLECTION.profile,
+            collection: ATGRP_COLLECTION.config,
             rkey: SELF_SKEY,
             record: {
-              $type: OPENSOCIAL_COLLECTION.profile,
-              displayName: "Custom Policy Group",
+              $type: ATGRP_COLLECTION.config,
               joinPolicy: "future-custom-mode",
             },
           });
@@ -2392,9 +2395,9 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
             hostUrl: pds.groupHostUrl,
             actor: applicant1,
             groupDid: customPolicyGroup.groupDid,
-            path: OPENSOCIAL_METHOD.requestJoin,
+            path: ATGRP_METHOD.requestJoin,
             httpMethod: "POST",
-            lxm: OPENSOCIAL_METHOD.requestJoin,
+            lxm: ATGRP_METHOD.requestJoin,
             body: { group: customPolicyGroup.groupDid },
           });
           assert.equal(unknownPolRes.status, 400);
@@ -2411,9 +2414,9 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
             hostUrl: pds.groupHostUrl,
             actor: applicant1,
             groupDid: approvalGroup.groupDid,
-            path: OPENSOCIAL_METHOD.requestJoin,
+            path: ATGRP_METHOD.requestJoin,
             httpMethod: "POST",
-            lxm: OPENSOCIAL_METHOD.requestJoin,
+            lxm: ATGRP_METHOD.requestJoin,
             body: { group: approvalGroup.groupDid, message: "Please let me join" },
           });
           assert.equal(headerlessPending.status, 200);
@@ -2425,9 +2428,9 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
             hostUrl: pds.groupHostUrl,
             actor: applicant1,
             groupDid: approvalGroup.groupDid,
-            path: OPENSOCIAL_METHOD.requestJoin,
+            path: ATGRP_METHOD.requestJoin,
             httpMethod: "POST",
-            lxm: OPENSOCIAL_METHOD.requestJoin,
+            lxm: ATGRP_METHOD.requestJoin,
             headers: { "idempotency-key": aliasOpId },
             body: { group: approvalGroup.groupDid, message: "Please let me join" },
           });
@@ -2440,7 +2443,7 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
             groupDid: approvalGroup.groupDid,
             path: "/group-member/join-status",
             httpMethod: "GET",
-            lxm: OPENSOCIAL_METHOD.requestJoin,
+            lxm: ATGRP_METHOD.requestJoin,
             query: { group: approvalGroup.groupDid, operationId: aliasOpId },
           });
           assert.equal(aliasStatus.json.state, "pending");
@@ -2450,9 +2453,9 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
             hostUrl: pds.groupHostUrl,
             actor: applicant1,
             groupDid: approvalGroup.groupDid,
-            path: OPENSOCIAL_METHOD.requestJoin,
+            path: ATGRP_METHOD.requestJoin,
             httpMethod: "POST",
-            lxm: OPENSOCIAL_METHOD.requestJoin,
+            lxm: ATGRP_METHOD.requestJoin,
             headers: { "idempotency-key": aliasOpId },
             body: { group: approvalGroup.groupDid, message: "MUTATED MESSAGE" },
           });
@@ -2465,9 +2468,9 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
             hostUrl: pds.groupHostUrl,
             actor: applicant1,
             groupDid: approvalGroup.groupDid,
-            path: OPENSOCIAL_METHOD.requestJoin,
+            path: ATGRP_METHOD.requestJoin,
             httpMethod: "POST",
-            lxm: OPENSOCIAL_METHOD.requestJoin,
+            lxm: ATGRP_METHOD.requestJoin,
             headers: { "idempotency-key": aliasOpId },
             body: { group: approvalGroup.groupDid, message: "Please let me join" },
           });
@@ -2481,9 +2484,9 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
             hostUrl: pds.groupHostUrl,
             actor: applicant1,
             groupDid: openGroup.groupDid,
-            path: OPENSOCIAL_METHOD.requestJoin,
+            path: ATGRP_METHOD.requestJoin,
             httpMethod: "POST",
-            lxm: OPENSOCIAL_METHOD.requestJoin,
+            lxm: ATGRP_METHOD.requestJoin,
             headers: { "idempotency-key": openOpId },
             body: { group: openGroup.groupDid },
           });
@@ -2493,9 +2496,9 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
             hostUrl: pds.groupHostUrl,
             actor: applicant1,
             groupDid: openGroup.groupDid,
-            path: OPENSOCIAL_METHOD.requestJoin,
+            path: ATGRP_METHOD.requestJoin,
             httpMethod: "POST",
-            lxm: OPENSOCIAL_METHOD.requestJoin,
+            lxm: ATGRP_METHOD.requestJoin,
             headers: { "idempotency-key": openOpId },
             body: { group: openGroup.groupDid },
           });
@@ -2506,18 +2509,18 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
             hostUrl: pds.groupHostUrl,
             actor: applicant2,
             groupDid: approvalGroup.groupDid,
-            path: OPENSOCIAL_METHOD.requestJoin,
+            path: ATGRP_METHOD.requestJoin,
             httpMethod: "POST",
-            lxm: OPENSOCIAL_METHOD.requestJoin,
+            lxm: ATGRP_METHOD.requestJoin,
             body: { group: approvalGroup.groupDid },
           });
           await personalGroupCall({
             hostUrl: pds.groupHostUrl,
             actor: applicant2,
             groupDid: approvalGroup.groupDid,
-            path: OPENSOCIAL_METHOD.cancelJoinRequest,
+            path: ATGRP_METHOD.cancelJoinRequest,
             httpMethod: "POST",
-            lxm: OPENSOCIAL_METHOD.cancelJoinRequest,
+            lxm: ATGRP_METHOD.cancelJoinRequest,
             body: { group: approvalGroup.groupDid },
           });
           const lateApproveErr = await captureXrpcError(() => approvalGroup.groupClient.approveJoinRequest(applicant2.did));
@@ -2543,7 +2546,7 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
             const quotaEngine = createEngine(
               actorTransport(pds, quotaActor, {
                 fetchVia: async (req) => {
-                  if (req.url.includes(`/xrpc/${OPENSOCIAL_METHOD.requestJoin}`)) requestJoinHits += 1;
+                  if (req.url.includes(`/xrpc/${ATGRP_METHOD.requestJoin}`)) requestJoinHits += 1;
                   return fetch(req);
                 },
               }),
@@ -2581,7 +2584,7 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
               createEngine(
                 actorTransport(pds, applicant3, {
                   fetchVia: async (req) => {
-                    if (req.url.includes(`/xrpc/${OPENSOCIAL_METHOD.requestJoin}`)) app3RequestJoinCalls += 1;
+                    if (req.url.includes(`/xrpc/${ATGRP_METHOD.requestJoin}`)) app3RequestJoinCalls += 1;
                     return fetch(req);
                   },
                 }),
@@ -2811,7 +2814,7 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
       "4. 3-phase STAR-preserved leavingGroups, human LastAdmin, barrier races + 105-JTI revocation, 4-phase reactivatingGroups, and deleteAccount + 39-table zero-row verification",
       async () => {
         const assertZeroGroupPurgedTables = (db: RunningGroupHost["db"], groupDid: string) => {
-          assert.equal(SCHEMA_TABLE_CLASSIFICATION.GROUP_PURGED_TABLES.length, 39, "Expected exact 39 GROUP_PURGED_TABLES");
+          assert.equal(SCHEMA_TABLE_CLASSIFICATION.GROUP_PURGED_TABLES.length, 42, "Expected exact 42 GROUP_PURGED_TABLES");
           const ownSpaceLike = `at:space/${groupDid}/%`;
           const repoAndSpaceTables = new Set(["space_record", "space_oplog", "space_repo"]);
           const groupAndSpaceTables = new Set(["notify_registration", "space_record_blob", "space_writer"]);
@@ -2840,7 +2843,7 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
             const res = await xrpc.query<{ value: Record<string, unknown> }>("com.atproto.space.getRecord", {
               space: groupMembersUri(groupDid),
               repo: actor.did,
-              collection: OPENSOCIAL_COLLECTION.acceptance,
+              collection: ATGRP_COLLECTION.confirmation,
               rkey: SELF_SKEY,
             });
             return res.value;
@@ -2977,9 +2980,9 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
               hostUrl: ghLeaveTarget.url,
               actor: carol,
               groupDid: ws.groupDid,
-              path: OPENSOCIAL_METHOD.requestJoin,
+              path: ATGRP_METHOD.requestJoin,
               httpMethod: "POST",
-              lxm: OPENSOCIAL_METHOD.requestJoin,
+              lxm: ATGRP_METHOD.requestJoin,
               body: { group: ws.groupDid },
             });
             const carolStatusNew = await carolRejoinEng.workspaces.getJoinStatus(ws.groupDid);
@@ -3049,8 +3052,8 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
           assert.equal(botRoles.length, 1);
           await ws.groupClient.putRole(botRoles[0]!.rkey, {
             displayName: "Admin-Scoped Bot Role",
-            scopes: groupAdminScopes(ws.groupDid).filter((s) => s !== "atproto"),
-            assignable: ["admin", "member"],
+            permissions: groupAdminScopes(ws.groupDid).filter((s) => s !== "atproto"),
+            canAssign: ["admin", "member"],
           });
 
           // Attempting to demote sole human admin `alice` while bot holds admin-scoped role MUST still fail with `LastAdmin`!
@@ -3110,7 +3113,7 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
               spaceType: SPACE_TYPE.channel,
               skey: "race-chan",
               policy: {
-                $type: OPENSOCIAL_POLICY,
+                $type: ATGRP_POLICY,
                 publicRead: false,
                 unlisted: false,
                 grants: [
@@ -3141,9 +3144,9 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
             await bobPersonalXrpc.procedure("com.atproto.space.putRecord", {
               space: groupMembersUri(gDid),
               repo: bob.did,
-              collection: OPENSOCIAL_COLLECTION.acceptance,
+              collection: ATGRP_COLLECTION.confirmation,
               rkey: SELF_SKEY,
-              record: { $type: OPENSOCIAL_COLLECTION.acceptance, createdAt: new Date().toISOString() },
+              record: { $type: ATGRP_COLLECTION.confirmation, createdAt: new Date().toISOString() },
             });
             await bobPersonalXrpc.procedure("com.atproto.space.putRecord", {
               space: chanSpace,
@@ -3291,7 +3294,7 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
                 spaceType: SPACE_TYPE.workspace,
                 skey: SELF_SKEY,
                 policy: {
-                  $type: OPENSOCIAL_POLICY,
+                  $type: ATGRP_POLICY,
                   publicRead: false,
                   unlisted: false,
                   grants: [
@@ -3314,9 +3317,9 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
                   hostUrl: ghBatch.url,
                   actor: owner,
                   groupDid: gDid,
-                  path: OPENSOCIAL_METHOD.leaveGroup,
+                  path: ATGRP_METHOD.leaveGroup,
                   httpMethod: "POST",
-                  lxm: OPENSOCIAL_METHOD.leaveGroup,
+                  lxm: ATGRP_METHOD.leaveGroup,
                   body: { group: gDid },
                 });
                 assert.equal(soleLeaveRes.status, 200);
@@ -3540,14 +3543,14 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
             // prunes the stale invite cleanly to `[]`!
             const plcAfterDel = await fetch(`${pds.network.plc.url}/${encodeURIComponent(activeDelGroupDid)}`);
             assert.equal(plcAfterDel.status, 404);
-            const invCred = await mintSpaceCredentialWith(actorTransport(pds, invitee), personalInvitesUri(invitee.did));
+            const invCred = await mintSpaceCredentialWith(actorTransport(pds, invitee), personalInboxUri(invitee.did));
             const { headers: spaceSigHeaders } = await createSpaceSigHeaders({
               authorization: `Atproto-Space-Credential ${invCred.token}`,
               audience: activeDelGroupDid as `did:${string}:${string}`,
               keypair: invCred.key,
             });
             const delayedGetRepo = await fetch(
-              `${ghDel.url}/xrpc/com.atproto.space.getRepo?space=${encodeURIComponent(personalInvitesUri(invitee.did))}&repo=${encodeURIComponent(activeDelGroupDid)}`,
+              `${ghDel.url}/xrpc/com.atproto.space.getRepo?space=${encodeURIComponent(personalInboxUri(invitee.did))}&repo=${encodeURIComponent(activeDelGroupDid)}`,
               { headers: spaceSigHeaders },
             );
             assert.equal(delayedGetRepo.status, 400);
@@ -3778,21 +3781,20 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
         });
         const privChanUri = channelUri(ws.groupDid, "vip-room");
 
-        // 1. `profile.url` HTTP/HTTPS validation (`https://` accepted; `javascript:`, `data:`, `ftp:` rejected with `400`)
-        await ws.groupClient.updateProfile({ url: "https://opensocial.example/team" });
-        assert.equal((await ws.groupClient.getProfile())?.url, "https://opensocial.example/team");
+        // 1. `about.website` HTTP/HTTPS validation (`https://` accepted; `javascript:`, `data:`, `ftp:` rejected with `400`)
+        await ws.groupClient.updateProfile({ website: "https://atgrp.example/team" });
+        assert.equal((await ws.groupClient.getProfile())?.website, "https://atgrp.example/team");
         for (const badUrl of ["javascript:alert(1)", "data:text/html,<h1>x</h1>", "ftp://files.example/x"]) {
           const badUrlErr = await captureXrpcError(() =>
             ws.groupClient.xrpc.procedure("com.atproto.space.putRecord", {
               space: groupMetaUri(ws.groupDid),
               repo: ws.groupDid,
-              collection: OPENSOCIAL_COLLECTION.profile,
+              collection: ATGRP_COLLECTION.about,
               rkey: SELF_SKEY,
               record: {
-                $type: OPENSOCIAL_COLLECTION.profile,
+                $type: ATGRP_COLLECTION.about,
                 displayName: "Moderation & Methods Team",
-                joinPolicy: "approval",
-                url: badUrl,
+                website: badUrl,
               },
             }),
           );
@@ -3888,26 +3890,26 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
         await drainGroupHost(pds.groupHost);
 
         // Active `space_writer` message & reaction reports succeed!
-        await silentEngine.workspaces.createReport({
+        await silentEngine.workspaces.submitReport({
           groupDid: ws.groupDid,
           subject: postedMsg.uri,
-          reasonType: "spam",
+          reasonType: ATGRP_MOD_REASON.spam,
           reason: "Spam message",
         });
-        await silentEngine.workspaces.createReport({
+        await silentEngine.workspaces.submitReport({
           groupDid: ws.groupDid,
           subject: postedReactUri,
-          reasonType: "other",
+          reasonType: ATGRP_MOD_REASON.other,
           reason: "Noisy reaction",
         });
 
         // Non-writer member (`silentMember` has never written to `ws.channel`) -> `400 InvalidSubject`!
         const fakeNonWriterMsgUri = spaceRecordUri(ws.channel, silentMember.did, COLLECTION.message, tidNow());
         const nonWriterRepErr = await captureXrpcError(() =>
-          writerEngine.workspaces.createReport({
+          writerEngine.workspaces.submitReport({
             groupDid: ws.groupDid,
             subject: fakeNonWriterMsgUri,
-            reasonType: "spam",
+            reasonType: ATGRP_MOD_REASON.spam,
           }),
         );
         assert.equal(nonWriterRepErr.status, 400);
@@ -3915,62 +3917,62 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
 
         // Private-space existence non-leak: `silentMember` lacks read on `vip-room` -> gets exact same `400 InvalidSubject` as nonexistent space!
         const privLeakErr = await captureXrpcError(() =>
-          silentEngine.workspaces.createReport({
+          silentEngine.workspaces.submitReport({
             groupDid: ws.groupDid,
             subject: privSent.uri,
-            reasonType: "spam",
+            reasonType: ATGRP_MOD_REASON.spam,
           }),
         );
         const nonExistentSpaceErr = await captureXrpcError(() =>
-          silentEngine.workspaces.createReport({
+          silentEngine.workspaces.submitReport({
             groupDid: ws.groupDid,
             subject: spaceRecordUri(channelUri(ws.groupDid, "does-not-exist"), writerMember.did, COLLECTION.message, tidNow()),
-            reasonType: "spam",
+            reasonType: ATGRP_MOD_REASON.spam,
           }),
         );
         assert.equal(privLeakErr.status, 400);
         assert.equal(privLeakErr.code, "InvalidSubject");
         assert.equal(privLeakErr.code, nonExistentSpaceErr.code, "Private space report refusal must not leak space existence");
 
-        // `<groupDid>`-authored record (`rule`) + optional `cid` + implicit `subject === groupDid`!
+        // `<groupDid>`-authored record (`rule` in `members/self`) + optional `cid` + implicit `subject === groupDid`!
         const createdRule = await ws.groupClient.putRule({ title: "Be Kind", text: "Respect everyone.", order: 1 });
         const ruleRec = await ws.groupClient.xrpc.query<{ cid: string }>("com.atproto.space.getRecord", {
-          space: groupMetaUri(ws.groupDid),
+          space: groupMembersUri(ws.groupDid),
           repo: ws.groupDid,
-          collection: OPENSOCIAL_COLLECTION.rule,
+          collection: ATGRP_COLLECTION.rule,
           rkey: createdRule.rkey,
         });
         assert.ok(ruleRec.cid);
 
         // Mismatching `cid` on `<groupDid>`-authored record -> `400 InvalidSubject`
         const badCidErr = await captureXrpcError(() =>
-          silentEngine.workspaces.createReport({
+          silentEngine.workspaces.submitReport({
             groupDid: ws.groupDid,
             subject: createdRule.uri,
             cid: "bafyreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku",
-            reasonType: "other",
+            reasonType: ATGRP_MOD_REASON.other,
           }),
         );
         assert.equal(badCidErr.status, 400);
         assert.equal(badCidErr.code, "InvalidSubject");
 
         // Matching `cid` report + implicit `subject === ws.groupDid` account report succeed!
-        await silentEngine.workspaces.createReport({
+        await silentEngine.workspaces.submitReport({
           groupDid: ws.groupDid,
           subject: createdRule.uri,
           cid: ruleRec.cid,
-          reasonType: "other",
+          reasonType: ATGRP_MOD_REASON.other,
           rule: createdRule.uri,
           reason: "Typo in rule",
         });
-        await silentEngine.workspaces.createReport({
+        await silentEngine.workspaces.submitReport({
           groupDid: ws.groupDid,
           subject: ws.groupDid,
-          reasonType: "other",
+          reasonType: ATGRP_MOD_REASON.other,
           reason: "Group-level feedback",
         });
 
-        // 4. Deterministic pagination & tie-breaking across `listJoinRequests`, `listModSubjects`, and `getModSubjectHistory` + `resolveModSubject`!
+        // 4. Deterministic pagination & tie-breaking across `listJoinRequests`, `queryModSubjects`, and `queryModSubjectHistory` + `updateModSubject`!
         {
           const jrA = await nextActor("jrpaga", 1);
           const jrB = await nextActor("jrpagb", 1);
@@ -3980,9 +3982,9 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
               hostUrl: pds.groupHostUrl,
               actor: u,
               groupDid: ws.groupDid,
-              path: OPENSOCIAL_METHOD.requestJoin,
+              path: ATGRP_METHOD.requestJoin,
               httpMethod: "POST",
-              lxm: OPENSOCIAL_METHOD.requestJoin,
+              lxm: ATGRP_METHOD.requestJoin,
               body: { group: ws.groupDid, message: `Hi from ${u.handle}` },
             });
           }
@@ -4008,37 +4010,42 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
             hostUrl: pds.groupHostUrl,
             actor: jrB,
             groupDid: ws.groupDid,
-            path: OPENSOCIAL_METHOD.cancelJoinRequest,
+            path: ATGRP_METHOD.cancelJoinRequest,
             httpMethod: "POST",
-            lxm: OPENSOCIAL_METHOD.cancelJoinRequest,
+            lxm: ATGRP_METHOD.cancelJoinRequest,
             body: { group: ws.groupDid },
           });
           await ws.groupClient.denyJoinRequest(jrC.did);
           assert.equal((await ws.groupClient.listJoinRequests()).requests.length, 0);
           void outsider;
 
-          // Paginate `listModSubjects` (with identical `updated_at` tie-break) + `getModSubjectHistory` + `resolveModSubject`!
+          // Paginate `queryModSubjects` (with identical `updated_at` tie-break) + `queryModSubjectHistory` + `updateModSubject`!
           pds.groupHost.db
             .prepare("UPDATE mod_subject SET updated_at = ? WHERE group_did = ?")
             .run("2026-11-20T01:00:00.000Z", ws.groupDid);
-          const ms1 = await ws.groupClient.listModSubjects({ status: "open", limit: 2 });
+          const ms1 = await ws.groupClient.queryModSubjects({ status: "open", limit: 2 });
           assert.equal(ms1.subjects.length, 2);
           assert.ok(ms1.cursor);
-          const ms2 = await ws.groupClient.listModSubjects({ status: "open", limit: 2, cursor: ms1.cursor });
+          const ms2 = await ws.groupClient.queryModSubjects({ status: "open", limit: 2, cursor: ms1.cursor });
           assert.equal(ms2.subjects.length, 2);
 
-          // Add multiple reports/labels on `postedMsg.uri` and paginate `getModSubjectHistory`!
-          await aliceEngine.workspaces.createReport({
+          // Add multiple reports/labels on `postedMsg.uri` and paginate `queryModSubjectHistory`!
+          await aliceEngine.workspaces.submitReport({
             groupDid: ws.groupDid,
             subject: postedMsg.uri,
-            reasonType: "rude",
+            reasonType: ATGRP_MOD_REASON.rude,
             reason: "Second report",
           });
-          await ws.groupClient.resolveModSubject({ subject: postedMsg.uri, status: "escalated" });
-          const hist1 = await ws.groupClient.getModSubjectHistory({ subject: postedMsg.uri, limit: 2 });
+          const taggedMsg = await ws.groupClient.updateModSubject({
+            subject: postedMsg.uri,
+            status: "open",
+            addTags: ["escalated"],
+          });
+          assert.ok(taggedMsg.tags?.includes("escalated"));
+          const hist1 = await ws.groupClient.queryModSubjectHistory({ subject: postedMsg.uri, limit: 2 });
           assert.equal(hist1.events.length, 2);
           assert.ok(hist1.cursor);
-          const hist2 = await ws.groupClient.getModSubjectHistory({
+          const hist2 = await ws.groupClient.queryModSubjectHistory({
             subject: postedMsg.uri,
             limit: 2,
             cursor: hist1.cursor,
@@ -4046,10 +4053,10 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
           assert.ok(hist2.events.length >= 1);
 
           // Version-specific `cid` history lookup on `createdRule.uri`
-          const cidHist = await ws.groupClient.getModSubjectHistory({ subject: createdRule.uri, cid: ruleRec.cid });
+          const cidHist = await ws.groupClient.queryModSubjectHistory({ subject: createdRule.uri, cid: ruleRec.cid });
           assert.equal(cidHist.events.length, 1);
 
-          const resolvedRule = await ws.groupClient.resolveModSubject({
+          const resolvedRule = await ws.groupClient.updateModSubject({
             subject: createdRule.uri,
             cid: ruleRec.cid,
             status: "resolved",
@@ -4249,7 +4256,7 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
               spaceType: SPACE_TYPE.channel,
               skey: varSpaceSkey,
               policy: {
-                $type: OPENSOCIAL_POLICY,
+                $type: ATGRP_POLICY,
                 publicRead: false,
                 unlisted: false,
                 grants: [
@@ -4283,7 +4290,7 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
             await ws.groupClient.xrpc.procedure("com.atproto.space.updateSpace", {
               space: varSpaceUri,
               policy: {
-                $type: OPENSOCIAL_POLICY,
+                $type: ATGRP_POLICY,
                 publicRead: false,
                 unlisted: false,
                 grants: [
@@ -4372,12 +4379,11 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
           await bkClient.xrpc.procedure("com.atproto.space.putRecord", {
             space: groupMetaUri(bkDid),
             repo: bkDid,
-            collection: OPENSOCIAL_COLLECTION.profile,
+            collection: ATGRP_COLLECTION.about,
             rkey: SELF_SKEY,
             record: {
-              $type: OPENSOCIAL_COLLECTION.profile,
+              $type: ATGRP_COLLECTION.about,
               displayName: "Backup Drill Team",
-              joinPolicy: "open",
               avatar: bkBlobRef,
             },
           });
@@ -4624,7 +4630,7 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
               groupDid: zeroHumanDid,
               spaceUri: groupMembersUri(zeroHumanDid),
               repoDid: zeroHumanDid,
-              ops: [{ action: "delete", collection: OPENSOCIAL_COLLECTION.membership, rkey: alice.did }],
+              ops: [{ action: "delete", collection: ATGRP_COLLECTION.membership, rkey: alice.did }],
               isOwnAuthoritySpace: true,
               suppressNotices: true,
               nowMs: Date.now(),
@@ -5071,12 +5077,11 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
           await srcClient.xrpc.procedure("com.atproto.space.putRecord", {
             space: groupMetaUri(gDid),
             repo: gDid,
-            collection: OPENSOCIAL_COLLECTION.profile,
+            collection: ATGRP_COLLECTION.about,
             rkey: SELF_SKEY,
             record: {
-              $type: OPENSOCIAL_COLLECTION.profile,
+              $type: ATGRP_COLLECTION.about,
               displayName: "Coordinated Full Migration Group",
-              joinPolicy: "approval",
               avatar: blob2Ref,
               banner: blob3MiBRef,
             },
@@ -5087,7 +5092,7 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
             spaceType: SPACE_TYPE.workspace,
             skey: SELF_SKEY,
             policy: {
-              $type: OPENSOCIAL_POLICY,
+              $type: ATGRP_POLICY,
               publicRead: false,
               unlisted: false,
               grants: [
@@ -5112,7 +5117,7 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
             },
           });
 
-          // Provision `bob` & `carol` `invites/self`; send live invite to `bob`, and send + DELETE invite to `carol`!
+          // Provision `bob` & `carol` `inbox/self`; send live invite to `bob`, and send + DELETE invite to `carol`!
           const bobEng = createEngine(clientTransport(pds, bob), { operator: operatorService });
           const carolEng = createEngine(clientTransport(pds, carol), { operator: operatorService });
           await bobEng.workspaces.ensureInvitesSpace();
@@ -5129,22 +5134,22 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
             hostUrl: ghSource.url,
             actor: pendingOutsider,
             groupDid: gDid,
-            path: OPENSOCIAL_METHOD.requestJoin,
+            path: ATGRP_METHOD.requestJoin,
             httpMethod: "POST",
-            lxm: OPENSOCIAL_METHOD.requestJoin,
+            lxm: ATGRP_METHOD.requestJoin,
             body: { group: gDid, message: "Source-only pending request" },
           });
           await personalGroupCall({
             hostUrl: ghSource.url,
             actor: alice,
             groupDid: gDid,
-            path: OPENSOCIAL_METHOD.createReport,
+            path: ATGRP_METHOD.modSubmitReport,
             httpMethod: "POST",
-            lxm: OPENSOCIAL_METHOD.createReport,
-            body: { group: gDid, subject: gDid, reasonType: "other", reason: "Source-only mod event" },
+            lxm: ATGRP_METHOD.modSubmitReport,
+            body: { group: gDid, subject: gDid, reasonType: ATGRP_MOD_REASON.other, reason: "Source-only mod event" },
           });
           assert.equal((await srcClient.listJoinRequests()).requests.length, 1);
-          assert.equal((await srcClient.listModSubjects()).subjects.length, 1);
+          assert.equal((await srcClient.queryModSubjects()).subjects.length, 1);
 
           // 2. Limit preflight failure (`ghTinyLimit` -> `TargetMigrationLimitExceeded`) MUST leave `ghSource` unfrozen!
           const limitErr = await captureXrpcError(() =>
@@ -5227,9 +5232,9 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
             hostUrl: ghSource.url,
             actor: alice,
             groupDid: gDid,
-            path: OPENSOCIAL_METHOD.leaveGroup,
+            path: ATGRP_METHOD.leaveGroup,
             httpMethod: "POST",
-            lxm: OPENSOCIAL_METHOD.leaveGroup,
+            lxm: ATGRP_METHOD.leaveGroup,
             body: { group: gDid },
           });
           assert.equal(frozenLeaveRes.status, 409);
@@ -5308,7 +5313,7 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
           const targetAbortJwt = await ghSource.repoStore.signGroupServiceJwt({
             groupDid: gDid,
             aud: ghTarget.config.serviceDid,
-            lxm: "group.opensocial.abortMigration",
+            lxm: FLOCK_GROUP_METHOD.abortMigration,
           });
           const targetAbortAbsent = await fetch(`${ghTarget.url}/group-admin/abort-migration`, {
             method: "POST",
@@ -5371,8 +5376,8 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
           const srcSpacesList = (await srcClient.xrpc.query<{ spaces: Array<{ space: string }> }>(
             "com.atproto.space.listSpaces",
           )).spaces;
-          assert.ok(srcSpacesList.some((s) => s.space === personalInvitesUri(bob.did)), "listSpaces includes live external invite space");
-          assert.ok(srcSpacesList.some((s) => s.space === personalInvitesUri(carol.did)), "listSpaces includes previously deleted external invite space");
+          assert.ok(srcSpacesList.some((s) => s.space === personalInboxUri(bob.did)), "listSpaces includes live external invite space");
+          assert.ok(srcSpacesList.some((s) => s.space === personalInboxUri(carol.did)), "listSpaces includes previously deleted external invite space");
 
           // Verify `MigrationManifestMismatch` (`409`) on partial space import (before all spaces are imported)!
           const partialCredsRes = await fetch(`${ghTarget.url}/xrpc/com.atproto.identity.getRecommendedDidCredentials`, {
@@ -5455,11 +5460,11 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
             ...recAbortCreds,
           });
 
-          // While in `'plc_signed'`, Source private reads (`listSpaces`, `listJoinRequests`, `listModSubjects`, `getSpace`) return `409 MigrationCutoverPending`!
+          // While in `'plc_signed'`, Source private reads (`listSpaces`, `listJoinRequests`, `queryModSubjects`, `getSpace`) return `409 MigrationCutoverPending`!
           for (const checkFn of [
             () => srcClient.xrpc.query("com.atproto.space.listSpaces"),
             () => srcClient.listJoinRequests(),
-            () => srcClient.listModSubjects(),
+            () => srcClient.queryModSubjects(),
             () => srcClient.xrpc.query("com.atproto.space.getSpace", { space: groupMetaUri(gDid) }),
           ]) {
             const cutPendErr = await captureXrpcError(checkFn);
@@ -5472,7 +5477,7 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
           const abortJwt3 = await ghSource.repoStore.signGroupServiceJwt({
             groupDid: gDid,
             aud: ghTarget.config.serviceDid,
-            lxm: "group.opensocial.abortMigration",
+            lxm: FLOCK_GROUP_METHOD.abortMigration,
           });
           const targetPurgeRes = await fetch(`${ghTarget.url}/group-admin/abort-migration`, {
             method: "POST",
@@ -5783,7 +5788,7 @@ test("OpenSocial atmospheric groups real-network acceptance suite (Gate 5a)", { 
             dstAdminFlow.tokenResponse!.access_token,
           );
           assert.equal((await dstClient.listJoinRequests()).requests.length, 0, "Pending join_request queue must NOT migrate");
-          assert.equal((await dstClient.listModSubjects()).subjects.length, 0, "Private mod_subject/mod_event history must NOT migrate");
+          assert.equal((await dstClient.queryModSubjects()).subjects.length, 0, "Private mod_subject/mod_event history must NOT migrate");
 
           const botRowOnDst = ghTarget.db
             .prepare("SELECT subject_did FROM known_app_subject WHERE group_did = ? AND subject_did = ?")

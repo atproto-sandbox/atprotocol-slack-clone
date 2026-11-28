@@ -3,11 +3,11 @@ import test from "node:test";
 import { extSpaceUriFor } from "./extensions";
 import { appRoleKey, groupMembersUri, groupMetaUri, subjectKey, workspaceUri } from "./keys";
 import {
+  ATGRP_COLLECTION,
+  ATGRP_POLICY,
   ATPROTO_SPACE_COLLECTION,
   COLLECTION,
   FLOCK_EXTENSION_FIELD,
-  OPENSOCIAL_COLLECTION,
-  OPENSOCIAL_POLICY,
 } from "./nsids";
 import { groupAdminScopes, groupModeratorScopes } from "./scopes";
 import {
@@ -42,33 +42,33 @@ const defaultRoles = () =>
     {
       rkey: "admin",
       value: {
-        $type: OPENSOCIAL_COLLECTION.role,
+        $type: ATGRP_COLLECTION.role,
         displayName: "Admin",
-        scopes: groupAdminScopes(GROUP_DID).filter((s) => s !== "atproto"),
-        assignable: ["*"],
+        permissions: groupAdminScopes(GROUP_DID).filter((s) => s !== "atproto"),
+        canAssign: ["*"],
       },
     },
     {
       rkey: "moderator",
       value: {
-        $type: OPENSOCIAL_COLLECTION.role,
+        $type: ATGRP_COLLECTION.role,
         displayName: "Moderator",
-        scopes: groupModeratorScopes().filter((s) => s !== "atproto"),
-        assignable: ["member"],
+        permissions: groupModeratorScopes().filter((s) => s !== "atproto"),
+        canAssign: ["member"],
       },
     },
     {
       rkey: "member",
       value: {
-        $type: OPENSOCIAL_COLLECTION.role,
-        displayName: "Member",
+        $type: ATGRP_COLLECTION.role,
+        // Omit optional displayName to verify it defaults to role ID ("member")
         default: true,
       },
     },
     {
       rkey: appRoleKey(BOT),
       value: {
-        $type: OPENSOCIAL_COLLECTION.role,
+        $type: ATGRP_COLLECTION.role,
         displayName: `App: ${BOT}`,
       },
     },
@@ -103,37 +103,45 @@ test("workspace envelope checks reject degraded state for operator mutations", (
   assert.equal(WORKSPACE_ENVELOPE.maxPrivateChannelsPerMember, 90);
 });
 
-test("bidirectional membership + acceptance pairing, non-gating admin/moderator authorization, <groupDid> & app exclusion", () => {
+test("bidirectional membership + confirmation pairing, non-gating admin/moderator authorization, <groupDid> & app exclusion, and website scheme filtering", () => {
   const summary = summarizeWorkspace(WORKSPACE, ALICE, {
-    profiles: scanned([
+    abouts: scanned([
       {
         rkey: "self",
         value: {
-          $type: OPENSOCIAL_COLLECTION.profile,
+          $type: ATGRP_COLLECTION.about,
           displayName: "Acme",
+          website: "https://acme.example/",
+        },
+      },
+    ]),
+    configs: scanned([
+      {
+        rkey: "self",
+        value: {
+          $type: ATGRP_COLLECTION.config,
           joinPolicy: "approval",
-          url: "https://acme.example/",
         },
       },
     ]),
     roles: defaultRoles(),
     memberships: scanned([
-      // Alice: admin WITHOUT acceptance/self yet -> still holds isAdmin=true and admins=[ALICE], appears in pendingMembers!
+      // Alice: admin WITHOUT confirmation/self yet -> still holds isAdmin=true and admins=[ALICE], appears in pendingMembers!
       {
         rkey: ALICE,
         value: {
-          $type: OPENSOCIAL_COLLECTION.membership,
+          $type: ATGRP_COLLECTION.membership,
           roles: ["admin", "member"],
           createdAt: NOW,
           [FLOCK_EXTENSION_FIELD.incarnation]: "inc-alice-1",
           [FLOCK_EXTENSION_FIELD.generation]: 1,
         },
       },
-      // Bob: moderator WITH matching acceptance/self -> appears in members AND moderators!
+      // Bob: moderator WITH matching confirmation/self -> appears in members AND moderators!
       {
         rkey: BOB,
         value: {
-          $type: OPENSOCIAL_COLLECTION.membership,
+          $type: ATGRP_COLLECTION.membership,
           roles: ["moderator", "member"],
           createdAt: NOW,
           [FLOCK_EXTENSION_FIELD.incarnation]: "inc-bob-1",
@@ -144,26 +152,26 @@ test("bidirectional membership + acceptance pairing, non-gating admin/moderator 
       {
         rkey: BOT,
         value: {
-          $type: OPENSOCIAL_COLLECTION.membership,
+          $type: ATGRP_COLLECTION.membership,
           roles: [appRoleKey(BOT)],
           createdAt: NOW,
         },
       },
     ]),
-    acceptances: [
+    confirmations: [
       {
         repoDid: BOB,
         value: {
-          $type: OPENSOCIAL_COLLECTION.acceptance,
+          $type: ATGRP_COLLECTION.confirmation,
           createdAt: NOW,
           [FLOCK_EXTENSION_FIELD.incarnation]: "inc-bob-1",
         },
       },
-      // Carol: acceptance-only (ejected / no membership) -> excluded completely!
+      // Carol: confirmation-only (ejected / no membership) -> excluded completely!
       {
         repoDid: CAROL,
         value: {
-          $type: OPENSOCIAL_COLLECTION.acceptance,
+          $type: ATGRP_COLLECTION.confirmation,
           createdAt: NOW,
           [FLOCK_EXTENSION_FIELD.incarnation]: "inc-carol-old",
         },
@@ -185,8 +193,10 @@ test("bidirectional membership + acceptance pairing, non-gating admin/moderator 
 
   assert.ok(summary);
   assert.equal(summary.name, "Acme");
+  assert.equal(summary.website, "https://acme.example/");
   assert.equal(summary.joinPolicy, "approval");
-  // Authorization is NEVER gated on acceptance/self!
+  assert.equal(summary.roles.find((r) => r.rkey === "member")?.displayName, "member");
+  // Authorization is NEVER gated on confirmation/self!
   assert.equal(summary.isAdmin, true);
   assert.deepEqual(summary.admins, [ALICE]);
   assert.deepEqual(summary.moderators, [ALICE, BOB]);
@@ -195,23 +205,33 @@ test("bidirectional membership + acceptance pairing, non-gating admin/moderator 
   assert.deepEqual(summary.pendingMembers, [{ did: ALICE, roles: ["admin", "member"] }]);
   assert.deepEqual(summary.installs, [{ did: BOT, channels: [{ skey: "acme-general", write: true }] }]);
   assert.deepEqual(summary.degradedReasons, []);
+
+  // javascript: website stripped to undefined in summary
+  const unsafeSite = summarizeWorkspace(WORKSPACE, ALICE, {
+    abouts: scanned([{ rkey: "self", value: { $type: ATGRP_COLLECTION.about, displayName: "XSS", website: "javascript:alert(1)" } }]),
+    configs: scanned([{ rkey: "self", value: { $type: ATGRP_COLLECTION.config, joinPolicy: "open" } }]),
+    roles: defaultRoles(),
+    memberships: scanned([]),
+    directory: scanned([]),
+    installs: scanned([]),
+  });
+  assert.equal(unsafeSite?.website, undefined);
 });
 
-test("rejects 2099 future-dated pre-ejection unversioned acceptance, wrong extension types, and leading k..z invalid TIDs", () => {
-  // Bob was ejected at writerRev 2222222222225 and re-admitted at admittedSpaceRev 2222222222228 (generation: 2).
-  // Bob left a future-dated 2099 unversioned acceptance/self on his personal PDS at repoRev 2222222222225!
+test("rejects 2099 future-dated pre-ejection unversioned confirmation, wrong extension types, and leading k..z invalid TIDs", () => {
   const makeSummary = (
     bobWriter: { repoRev: string; spaceRev: string } | undefined,
     daveMembershipExtra: Record<string, unknown>,
   ) =>
     summarizeWorkspace(WORKSPACE, ALICE, {
-      profiles: scanned([{ rkey: "self", value: { $type: OPENSOCIAL_COLLECTION.profile, displayName: "Acme", joinPolicy: "invite" } }]),
+      abouts: scanned([{ rkey: "self", value: { $type: ATGRP_COLLECTION.about, displayName: "Acme" } }]),
+      configs: scanned([{ rkey: "self", value: { $type: ATGRP_COLLECTION.config, joinPolicy: "invite" } }]),
       roles: defaultRoles(),
       memberships: scanned([
         {
           rkey: BOB,
           value: {
-            $type: OPENSOCIAL_COLLECTION.membership,
+            $type: ATGRP_COLLECTION.membership,
             roles: ["member"],
             createdAt: NOW,
             [FLOCK_EXTENSION_FIELD.incarnation]: "inc-bob-2",
@@ -223,7 +243,7 @@ test("rejects 2099 future-dated pre-ejection unversioned acceptance, wrong exten
         {
           rkey: CAROL,
           value: {
-            $type: OPENSOCIAL_COLLECTION.membership,
+            $type: ATGRP_COLLECTION.membership,
             roles: ["member"],
             createdAt: NOW,
             [FLOCK_EXTENSION_FIELD.incarnation]: "inc-carol-2",
@@ -235,27 +255,25 @@ test("rejects 2099 future-dated pre-ejection unversioned acceptance, wrong exten
         {
           rkey: DAVE,
           value: {
-            $type: OPENSOCIAL_COLLECTION.membership,
+            $type: ATGRP_COLLECTION.membership,
             roles: ["member"],
             createdAt: NOW,
             ...daveMembershipExtra,
           },
         },
       ]),
-      acceptances: [
+      confirmations: [
         {
           repoDid: BOB,
-          // Self-reported 2099 timestamp without incarnation stamp!
-          value: { $type: OPENSOCIAL_COLLECTION.acceptance, createdAt: "2099-01-01T00:00:00.000Z" },
+          value: { $type: ATGRP_COLLECTION.confirmation, createdAt: "2099-01-01T00:00:00.000Z" },
         },
         {
           repoDid: CAROL,
-          // Self-reported 2099 timestamp when afterWriterRev === null on gen >= 2 -> must NOT restore!
-          value: { $type: OPENSOCIAL_COLLECTION.acceptance, createdAt: "2099-01-01T00:00:00.000Z" },
+          value: { $type: ATGRP_COLLECTION.confirmation, createdAt: "2099-01-01T00:00:00.000Z" },
         },
         {
           repoDid: DAVE,
-          value: { $type: OPENSOCIAL_COLLECTION.acceptance, createdAt: NOW },
+          value: { $type: ATGRP_COLLECTION.confirmation, createdAt: NOW },
         },
       ],
       memberWriters: new Map([
@@ -267,7 +285,6 @@ test("rejects 2099 future-dated pre-ejection unversioned acceptance, wrong exten
       installs: scanned([]),
     });
 
-  // 1. Pre-ejection writerRev (<= afterWriterRev) + leading-'k' invalid TID on Dave -> BOTH excluded from members!
   const stale = makeSummary(
     { repoRev: "2222222222225", spaceRev: "222222222222b" },
     { [FLOCK_EXTENSION_FIELD.admittedSpaceRev]: "k222222222222" },
@@ -275,8 +292,6 @@ test("rejects 2099 future-dated pre-ejection unversioned acceptance, wrong exten
   assert.deepEqual(stale?.members, []);
   assert.deepEqual(stale?.pendingMembers.map((m) => m.did), [BOB, CAROL], "Dave's invalid leading-'k' TID record is rejected fail-closed");
 
-  // 2. Wrong extension type on Dave (`generation: "2"`) -> rejected fail-closed;
-  //    Genuinely new post-readmission commit by Bob (`repoRev > afterWriterRev && spaceRev > admittedSpaceRev`) -> Bob enters members, Carol (afterWriterRev === null without incarnation) stays pending!
   const advanced = makeSummary(
     { repoRev: "222222222222b", spaceRev: "222222222222b" },
     { [FLOCK_EXTENSION_FIELD.generation]: "2" },
@@ -301,7 +316,8 @@ test("summarizeWorkspace parses ext.install records and flags truncated or over-
     },
   };
   const summary = summarizeWorkspace(WORKSPACE, ALICE, {
-    profiles: scanned([{ rkey: "self", value: { $type: OPENSOCIAL_COLLECTION.profile, displayName: "Acme", joinPolicy: "open" } }]),
+    abouts: scanned([{ rkey: "self", value: { $type: ATGRP_COLLECTION.about, displayName: "Acme" } }]),
+    configs: scanned([{ rkey: "self", value: { $type: ATGRP_COLLECTION.config, joinPolicy: "open" } }]),
     roles: defaultRoles(),
     memberships: scanned([]),
     directory: scanned([directoryEntry("acme-general", "public")]),
@@ -319,13 +335,14 @@ test("summarizeWorkspace parses ext.install records and flags truncated or over-
 
 test("summarizeWorkspace derives publicMeta from meta/self policy and withholds !takedown-labeled members from roster while preserving governance roles", () => {
   const summary = summarizeWorkspace(WORKSPACE, ALICE, {
-    profiles: scanned([{ rkey: "self", value: { $type: OPENSOCIAL_COLLECTION.profile, displayName: "ModTeam", joinPolicy: "invite" } }]),
+    abouts: scanned([{ rkey: "self", value: { $type: ATGRP_COLLECTION.about, displayName: "ModTeam" } }]),
+    configs: scanned([{ rkey: "self", value: { $type: ATGRP_COLLECTION.config, joinPolicy: "invite" } }]),
     roles: defaultRoles(),
     memberships: scanned([
       {
         rkey: ALICE,
         value: {
-          $type: OPENSOCIAL_COLLECTION.membership,
+          $type: ATGRP_COLLECTION.membership,
           roles: ["admin", "member"],
           createdAt: NOW,
           [FLOCK_EXTENSION_FIELD.incarnation]: "inc-a",
@@ -335,7 +352,7 @@ test("summarizeWorkspace derives publicMeta from meta/self policy and withholds 
       {
         rkey: BOB,
         value: {
-          $type: OPENSOCIAL_COLLECTION.membership,
+          $type: ATGRP_COLLECTION.membership,
           roles: ["member"],
           createdAt: NOW,
           [FLOCK_EXTENSION_FIELD.incarnation]: "inc-b",
@@ -345,7 +362,7 @@ test("summarizeWorkspace derives publicMeta from meta/self policy and withholds 
       {
         rkey: CAROL,
         value: {
-          $type: OPENSOCIAL_COLLECTION.membership,
+          $type: ATGRP_COLLECTION.membership,
           roles: ["member"],
           createdAt: NOW,
           [FLOCK_EXTENSION_FIELD.incarnation]: "inc-c",
@@ -353,9 +370,9 @@ test("summarizeWorkspace derives publicMeta from meta/self policy and withholds 
         },
       },
     ]),
-    acceptances: [
-      { repoDid: ALICE, value: { $type: OPENSOCIAL_COLLECTION.acceptance, createdAt: NOW, [FLOCK_EXTENSION_FIELD.incarnation]: "inc-a" } },
-      { repoDid: BOB, value: { $type: OPENSOCIAL_COLLECTION.acceptance, createdAt: NOW, [FLOCK_EXTENSION_FIELD.incarnation]: "inc-b" } },
+    confirmations: [
+      { repoDid: ALICE, value: { $type: ATGRP_COLLECTION.confirmation, createdAt: NOW, [FLOCK_EXTENSION_FIELD.incarnation]: "inc-a" } },
+      { repoDid: BOB, value: { $type: ATGRP_COLLECTION.confirmation, createdAt: NOW, [FLOCK_EXTENSION_FIELD.incarnation]: "inc-b" } },
     ],
     directory: scanned([]),
     installs: scanned([]),
@@ -377,55 +394,47 @@ test("summarizeWorkspace derives publicMeta from meta/self policy and withholds 
   assert.deepEqual(summary.admins, [ALICE]);
 });
 
-test("summarizeWorkspace matches legacy-cid:<cid> bilateral acceptances on imported unversioned memberships while rejecting mismatched CIDs or missing CIDs", () => {
+test("summarizeWorkspace matches legacy-cid:<cid> bilateral confirmations on imported unversioned memberships while rejecting mismatched CIDs or missing CIDs", () => {
   const aliceCid = "bafyreiimportedalicecid00001";
   const bobCid = "bafyreiimportedbobcid000002";
   const daveCid = "bafyreiversioneddavecid0003";
 
   const summary = summarizeWorkspace(WORKSPACE, ALICE, {
-    profiles: scanned([
-      {
-        rkey: "self",
-        value: { $type: OPENSOCIAL_COLLECTION.profile, displayName: "ImportedGroup", joinPolicy: "invite" },
-      },
-    ]),
+    abouts: scanned([{ rkey: "self", value: { $type: ATGRP_COLLECTION.about, displayName: "ImportedGroup" } }]),
+    configs: scanned([{ rkey: "self", value: { $type: ATGRP_COLLECTION.config, joinPolicy: "invite" } }]),
     roles: defaultRoles(),
     memberships: scanned([
-      // Alice: imported unversioned membership + matching `legacy-cid:<aliceCid>` acceptance -> confirmed in `members`!
       {
         rkey: ALICE,
         cid: aliceCid,
         value: {
-          $type: OPENSOCIAL_COLLECTION.membership,
+          $type: ATGRP_COLLECTION.membership,
           roles: ["admin", "member"],
           createdAt: NOW,
         },
       },
-      // Bob: imported unversioned membership + stale `legacy-cid:<other>` acceptance -> stays in `pendingMembers`!
       {
         rkey: BOB,
         cid: bobCid,
         value: {
-          $type: OPENSOCIAL_COLLECTION.membership,
+          $type: ATGRP_COLLECTION.membership,
           roles: ["member"],
           createdAt: NOW,
         },
       },
-      // Carol: unversioned membership WITHOUT `cid` + `legacy-cid:...` acceptance -> stays in `pendingMembers`!
       {
         rkey: CAROL,
         value: {
-          $type: OPENSOCIAL_COLLECTION.membership,
+          $type: ATGRP_COLLECTION.membership,
           roles: ["member"],
           createdAt: NOW,
         },
       },
-      // Dave: explicit `new.flock.incarnation` on membership + `legacy-cid:<daveCid>` acceptance -> never falls back to `legacy-cid:`, stays in `pendingMembers`!
       {
         rkey: DAVE,
         cid: daveCid,
         value: {
-          $type: OPENSOCIAL_COLLECTION.membership,
+          $type: ATGRP_COLLECTION.membership,
           roles: ["member"],
           createdAt: NOW,
           [FLOCK_EXTENSION_FIELD.incarnation]: "inc-dave-explicit",
@@ -433,11 +442,11 @@ test("summarizeWorkspace matches legacy-cid:<cid> bilateral acceptances on impor
         },
       },
     ]),
-    acceptances: [
+    confirmations: [
       {
         repoDid: ALICE,
         value: {
-          $type: OPENSOCIAL_COLLECTION.acceptance,
+          $type: ATGRP_COLLECTION.confirmation,
           createdAt: NOW,
           [FLOCK_EXTENSION_FIELD.incarnation]: `legacy-cid:${aliceCid}`,
         },
@@ -445,7 +454,7 @@ test("summarizeWorkspace matches legacy-cid:<cid> bilateral acceptances on impor
       {
         repoDid: BOB,
         value: {
-          $type: OPENSOCIAL_COLLECTION.acceptance,
+          $type: ATGRP_COLLECTION.confirmation,
           createdAt: NOW,
           [FLOCK_EXTENSION_FIELD.incarnation]: "legacy-cid:bafyreistaleoldcid999999",
         },
@@ -453,7 +462,7 @@ test("summarizeWorkspace matches legacy-cid:<cid> bilateral acceptances on impor
       {
         repoDid: CAROL,
         value: {
-          $type: OPENSOCIAL_COLLECTION.acceptance,
+          $type: ATGRP_COLLECTION.confirmation,
           createdAt: NOW,
           [FLOCK_EXTENSION_FIELD.incarnation]: "legacy-cid:bafyreicarolcid",
         },
@@ -461,7 +470,7 @@ test("summarizeWorkspace matches legacy-cid:<cid> bilateral acceptances on impor
       {
         repoDid: DAVE,
         value: {
-          $type: OPENSOCIAL_COLLECTION.acceptance,
+          $type: ATGRP_COLLECTION.confirmation,
           createdAt: NOW,
           [FLOCK_EXTENSION_FIELD.incarnation]: `legacy-cid:${daveCid}`,
         },
@@ -479,7 +488,7 @@ test("summarizeWorkspace matches legacy-cid:<cid> bilateral acceptances on impor
   );
 });
 
-test("extractGroupSpacePolicyRecord requires explicit outer com.atproto.space.policy $type and inner group.opensocial.policy $type", () => {
+test("extractGroupSpacePolicyRecord requires explicit outer com.atproto.space.policy $type and inner org.atgrp.policy $type", () => {
   const metaSpace = groupMetaUri(GROUP_DID);
   const valid = extractGroupSpacePolicyRecord(
     GROUP_DID,
@@ -490,7 +499,7 @@ test("extractGroupSpacePolicyRecord requires explicit outer com.atproto.space.po
         value: {
           $type: ATPROTO_SPACE_COLLECTION.spacePolicy,
           policy: {
-            $type: OPENSOCIAL_POLICY,
+            $type: ATGRP_POLICY,
             publicRead: true,
             unlisted: false,
             grants: [{ role: "admin", read: true }],
@@ -502,7 +511,6 @@ test("extractGroupSpacePolicyRecord requires explicit outer com.atproto.space.po
   assert.equal(valid.valid, true);
   assert.equal(valid.policy?.publicRead, true);
 
-  // Wrapper missing outer `$type` MUST be rejected fail-closed!
   const missingOuterType = extractGroupSpacePolicyRecord(
     GROUP_DID,
     metaSpace,
@@ -511,7 +519,7 @@ test("extractGroupSpacePolicyRecord requires explicit outer com.atproto.space.po
         rkey: "self",
         value: {
           policy: {
-            $type: OPENSOCIAL_POLICY,
+            $type: ATGRP_POLICY,
             publicRead: true,
             unlisted: false,
             grants: [{ role: "admin", read: true }],

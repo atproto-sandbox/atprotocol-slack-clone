@@ -4,14 +4,14 @@ import Database from "better-sqlite3";
 import type { OAuthSession } from "@atproto/oauth-client-node";
 import { inviteLinkFor } from "@flock/web/app/ui/client-api";
 import { pinnedCheckoutPath } from "../../protocol-tests/support/app-fixture";
-import { ATPROTO_SPACE_COLLECTION, COLLECTION, OPENSOCIAL_COLLECTION } from "@flock/protocol/nsids";
+import { ATGRP_COLLECTION, ATGRP_POLICY, ATGRP_SPACE_TYPE, ATPROTO_SPACE_COLLECTION, COLLECTION } from "@flock/protocol/nsids";
 import { groupMembersUri, groupMetaUri, isDid, parseWorkspaceUri, SELF_SKEY } from "@flock/protocol/keys";
 import { validateSpacePolicy, validateSpaceRecord } from "@flock/protocol/registry";
 import {
   effectiveHumanAdmins,
   type EffectiveGovernanceState,
+  type GroupAtgrpPolicy,
   type GroupMembershipRecord,
-  type GroupOpenSocialPolicy,
   type GroupRoleRecord,
 } from "@flock/protocol/scopes";
 import { listingCalls, openChannel, workspaceChannels } from "./channels-ui";
@@ -96,7 +96,7 @@ export async function signInDeskAt(viewer: AppViewer): Promise<string[]> {
   assert.ok(scopes.length > 0, "Expected non-empty OAuth scopes on Desk authorization prompt");
   assert.ok(scopes.includes("atproto"), `Desk OAuth scopes must include 'atproto': ${shown}`);
   assert.ok(scopes.some((s) => s.includes("new.flock.channel.message")), `Desk OAuth scopes must include channel message scope: ${shown}`);
-  assert.ok(scopes.some((s) => s.includes("group.opensocial.")), `Desk OAuth scopes must include OpenSocial group scopes: ${shown}`);
+  assert.ok(scopes.some((s) => s.includes("org.atgrp.")), `Desk OAuth scopes must include Atmosphere Groups scopes: ${shown}`);
   assert.equal(scopes.some((s) => s.includes("new.flock.operator.")), false, `Desk OAuth scopes must not include Operator scopes: ${shown}`);
   assert.equal(scopes.some((s) => s.includes("new.flock.channel.reaction")), false, `Desk v1 OAuth scopes must not include deferred reaction scope: ${shown}`);
   assert.equal(scopes.some((s) => s.includes("new.flock.dm.")), false, `Desk v1 OAuth scopes must not include deferred DM scope: ${shown}`);
@@ -252,16 +252,16 @@ export function workspaceRead(viewer: Actor, workspaceUri: string, since = 0): W
     return pages.flatMap(({ body }) => body.records);
   };
 
-  const profiles = read(metaSpace, OPENSOCIAL_COLLECTION.profile);
-  const roles = read(membersSpace, OPENSOCIAL_COLLECTION.role);
-  const memberships = read(membersSpace, OPENSOCIAL_COLLECTION.membership);
+  const abouts = read(metaSpace, ATGRP_COLLECTION.about);
+  const roles = read(membersSpace, ATGRP_COLLECTION.role);
+  const memberships = read(membersSpace, ATGRP_COLLECTION.membership);
   const directory = read(workspaceUri, COLLECTION.directory);
   const installs = read(workspaceUri, COLLECTION.appInstall);
   const metaPolicy = read(metaSpace, ATPROTO_SPACE_COLLECTION.spacePolicy);
   const membersPolicy = read(membersSpace, ATPROTO_SPACE_COLLECTION.spacePolicy);
   const wsPolicy = read(workspaceUri, ATPROTO_SPACE_COLLECTION.spacePolicy);
 
-  if (!profiles || !roles || !memberships || !directory || !installs || !metaPolicy || !membersPolicy || !wsPolicy) {
+  if (!abouts || !roles || !memberships || !directory || !installs || !metaPolicy || !membersPolicy || !wsPolicy) {
     return undefined;
   }
 
@@ -277,13 +277,13 @@ export function workspaceRead(viewer: Actor, workspaceUri: string, since = 0): W
     );
 
   const rolesMap = new Map<string, GroupRoleRecord>();
-  for (const { rkey, value } of validRecords(membersSpace, OPENSOCIAL_COLLECTION.role, roles)) {
+  for (const { rkey, value } of validRecords(membersSpace, ATGRP_COLLECTION.role, roles)) {
     rolesMap.set(rkey, {
       displayName: String(value.displayName),
       ...(typeof value.description === "string" ? { description: value.description } : {}),
       default: value.default === true,
-      scopes: Array.isArray(value.scopes) ? (value.scopes as string[]) : [],
-      assignable: Array.isArray(value.assignable) ? (value.assignable as string[]) : [],
+      permissions: Array.isArray(value.permissions) ? (value.permissions as string[]) : [],
+      canAssign: Array.isArray(value.canAssign) ? (value.canAssign as string[]) : [],
     });
   }
 
@@ -294,7 +294,7 @@ export function workspaceRead(viewer: Actor, workspaceUri: string, since = 0): W
   }
 
   const membershipsMap = new Map<string, GroupMembershipRecord>();
-  for (const { rkey, value } of validRecords(membersSpace, OPENSOCIAL_COLLECTION.membership, memberships)) {
+  for (const { rkey, value } of validRecords(membersSpace, ATGRP_COLLECTION.membership, memberships)) {
     if (!isDid(rkey) || rkey === groupDid) continue;
     membershipsMap.set(rkey, {
       ...(value as GroupMembershipRecord),
@@ -303,16 +303,16 @@ export function workspaceRead(viewer: Actor, workspaceUri: string, since = 0): W
     });
   }
 
-  const spacePolicies = new Map<string, GroupOpenSocialPolicy>();
+  const spacePolicies = new Map<string, GroupAtgrpPolicy>();
   for (const [spUri, spType, skey, polRecords] of [
-    [metaSpace, "group.opensocial.meta", SELF_SKEY, metaPolicy],
-    [membersSpace, "group.opensocial.members", SELF_SKEY, membersPolicy],
+    [metaSpace, ATGRP_SPACE_TYPE.meta, SELF_SKEY, metaPolicy],
+    [membersSpace, ATGRP_SPACE_TYPE.members, SELF_SKEY, membersPolicy],
     [workspaceUri, "new.flock.workspace", SELF_SKEY, wsPolicy],
   ] as const) {
     const selfPol = polRecords.find((r) => r.rkey === SELF_SKEY)?.value?.policy;
     if (selfPol && typeof selfPol === "object" && !Array.isArray(selfPol)) {
-      const candidate = selfPol as GroupOpenSocialPolicy;
-      if (validateSpacePolicy({ $type: "group.opensocial.policy", ...candidate }, { groupDid, spaceType: spType, skey }).valid) {
+      const candidate = selfPol as GroupAtgrpPolicy;
+      if (validateSpacePolicy({ $type: ATGRP_POLICY, ...candidate }, { groupDid, spaceType: spType, skey }).valid) {
         spacePolicies.set(spUri, candidate);
       }
     }

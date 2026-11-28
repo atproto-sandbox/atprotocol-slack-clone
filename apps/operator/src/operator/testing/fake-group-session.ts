@@ -5,11 +5,11 @@ import { XrpcError } from "@flock/protocol/atproto/xrpc";
 import { groupMembersUri, parseSpaceUri } from "@flock/protocol/keys";
 import {
   ATPROTO_SPACE_COLLECTION,
-  OPENSOCIAL_COLLECTION,
-  OPENSOCIAL_METHOD,
-  OPENSOCIAL_POLICY,
+  ATGRP_COLLECTION,
+  ATGRP_METHOD,
+  ATGRP_POLICY,
 } from "@flock/protocol/nsids";
-import { groupAdminScopes, type GroupOpenSocialPolicy } from "@flock/protocol/scopes";
+import { groupAdminScopes, type GroupAtgrpPolicy } from "@flock/protocol/scopes";
 import { FakeNetwork } from "@flock/testing/fake-network";
 import { setIdentityTestOverrides } from "../../atproto/identity";
 
@@ -68,7 +68,7 @@ const MUTATING_METHODS = new Set([
   "com.atproto.space.applyWrites",
   "com.atproto.space.clearRecords",
   "com.atproto.space.removeWriter",
-  OPENSOCIAL_METHOD.denyJoinRequest,
+  ATGRP_METHOD.denyJoinRequest,
 ]);
 
 function parseTarget(url: URL, init?: RequestInit): FakeGroupTarget {
@@ -137,7 +137,7 @@ function formatWriteEntry(groupDid: string, target: FakeGroupTarget): string {
       return `applyWrites ${target.space}`;
     case "com.atproto.space.removeWriter":
       return `removeWriter ${target.space} ${target.repo}`;
-    case OPENSOCIAL_METHOD.denyJoinRequest:
+    case ATGRP_METHOD.denyJoinRequest:
       return `denyJoinRequest ${target.member}`;
     default:
       return `${target.method} ${target.space ?? ""}`.trim();
@@ -218,13 +218,13 @@ export async function fakeGroupHost(
   const session = { did: groupDid, fetchHandler } as unknown as OAuthSession;
   const selfClient = network.clientFor(groupDid);
 
-  const getSpacePolicy = async (spaceUri: string): Promise<GroupOpenSocialPolicy | null> => {
+  const getSpacePolicy = async (spaceUri: string): Promise<GroupAtgrpPolicy | null> => {
     try {
       const out = await selfClient.query<{ policy?: Record<string, unknown> }>("com.atproto.space.getSpace", {
         space: spaceUri,
       });
-      if (out.policy?.$type === OPENSOCIAL_POLICY) {
-        return out.policy as unknown as GroupOpenSocialPolicy;
+      if (out.policy?.$type === ATGRP_POLICY) {
+        return out.policy as unknown as GroupAtgrpPolicy;
       }
       return null;
     } catch (err) {
@@ -317,7 +317,7 @@ export async function fakeGroupHost(
       "com.atproto.server.getServiceAuth",
       {
         aud: `${groupDid}#atproto_pds`,
-        lxm: OPENSOCIAL_METHOD.requestJoin,
+        lxm: ATGRP_METHOD.requestJoin,
       },
     );
     const headers: Record<string, string> = {
@@ -326,7 +326,7 @@ export async function fakeGroupHost(
     };
     if (input.idempotencyKey) headers["idempotency-key"] = input.idempotencyKey;
     const res = await network.fetchEndpoint(
-      new Request(`https://fake-pds.test/group-host/xrpc/${OPENSOCIAL_METHOD.requestJoin}`, {
+      new Request(`https://fake-pds.test/group-host/xrpc/${ATGRP_METHOD.requestJoin}`, {
         method: "POST",
         headers,
         body: JSON.stringify({
@@ -348,7 +348,7 @@ export async function fakeGroupHost(
     if (!policy) return "-";
     const membership = await getRecord<{ roles: string[] }>(
       groupMembersUri(groupDid),
-      OPENSOCIAL_COLLECTION.membership,
+      ATGRP_COLLECTION.membership,
       subjectDid,
     );
     if (!membership || !Array.isArray(membership.roles) || membership.roles.length === 0) {

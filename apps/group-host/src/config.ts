@@ -94,7 +94,7 @@ export function deriveGroupHostServiceDid(publicUrl: URL): string {
 }
 
 /**
- * The `#atproto_pds` / `#opensocial_group` service endpoint advertised in DID documents (`did:plc` groups and
+ * The `#atproto_pds` / `#atgrp_host` service endpoint advertised in DID documents (`did:plc` groups and
  * `did:web` host metadata). Outside loopback development this is `config.publicUrl` verbatim (`https://...`).
  * On loopback development, RFC 8252 OAuth redirect URIs and host-only OAuth cookies use `http://127.0.0.1:<port>`,
  * whereas `@atproto/pds` routes outbound `notifyRepoUpdate` / `notifyCredentialsRevoked` calls through

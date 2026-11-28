@@ -17,7 +17,7 @@ import {
 } from "@flock/protocol/entity-merge";
 import { groupMembersUri, requireSpaceAuthority, SELF_SKEY, spaceRecordUri, tasksSpaceUri, tidNow } from "@flock/protocol/keys";
 import { mapLimited } from "@flock/protocol/map-limited";
-import { COLLECTION, OPENSOCIAL_COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
+import { ATGRP_COLLECTION, COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
 import { WORKSPACE_ENVELOPE } from "@flock/protocol/workspace-summary";
 import { readIndependentTasksSpace } from "@flock/reader/independent-tasks";
 import { startGroupHostServer, type RunningGroupHost } from "@flock/group-host/server";
@@ -432,7 +432,7 @@ test("D11.13 frozen 50-writer / 1,000-task / 5,020-record Tasks performance enve
     const membersSpace = groupMembersUri(createdGroup.groupDid);
     await mapLimited(writers, PER_ORIGIN_CONNECTIONS, async (writer) => {
       if (writer.did !== authority.did) {
-        await putAuthorityRecord(ownerSession, membersSpace, OPENSOCIAL_COLLECTION.membership, writer.did, {
+        await putAuthorityRecord(ownerSession, membersSpace, ATGRP_COLLECTION.membership, writer.did, {
           roles: ["member"],
           createdAt: nowIso,
         });
@@ -877,7 +877,7 @@ test("D11.13 frozen 50-writer / 1,000-task / 5,020-record Tasks performance enve
     });
     const gate5MembersSpace = groupMembersUri(gate5Group.groupDid);
     for (const member of [reader, oversizedWriter]) {
-      await putAuthorityRecord(gate5OwnerSession, gate5MembersSpace, OPENSOCIAL_COLLECTION.membership, member.did, {
+      await putAuthorityRecord(gate5OwnerSession, gate5MembersSpace, ATGRP_COLLECTION.membership, member.did, {
         roles: ["member"],
         createdAt: nowIso,
       });

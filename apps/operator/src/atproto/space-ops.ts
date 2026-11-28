@@ -14,17 +14,17 @@ import {
   XrpcError,
 } from "@flock/protocol/atproto/xrpc";
 import { canonicalJson, parseSpaceUri, requireSpaceAuthority, spaceRecordUri, spaceUri } from "@flock/protocol/keys";
-import { OPENSOCIAL_POLICY } from "@flock/protocol/nsids";
+import { ATGRP_POLICY } from "@flock/protocol/nsids";
 import { validateSpacePolicy, validateSpaceRecord } from "@flock/protocol/registry";
-import type { GroupOpenSocialPolicy } from "@flock/protocol/scopes";
+import type { GroupAtgrpPolicy } from "@flock/protocol/scopes";
 import { WORKSPACE_ENVELOPE, WorkspaceEnvelopeError } from "@flock/protocol/workspace-summary";
 import { serviceClient, sessionClient } from "./client";
 import { resolvePds } from "./identity";
 import { mintSpaceCredential } from "./space-credential";
 
-function normalizeOpenSocialPolicy(policy: GroupOpenSocialPolicy): Record<string, unknown> & { $type: string } {
+function normalizeOpenSocialPolicy(policy: GroupAtgrpPolicy): Record<string, unknown> & { $type: string } {
   return {
-    $type: OPENSOCIAL_POLICY,
+    $type: ATGRP_POLICY,
     publicRead: policy.publicRead === true,
     unlisted: policy.unlisted === true,
     grants: [...policy.grants]
@@ -33,7 +33,7 @@ function normalizeOpenSocialPolicy(policy: GroupOpenSocialPolicy): Record<string
         role: grant.role,
         ...(grant.read !== undefined ? { read: grant.read } : {}),
         ...(grant.write !== undefined ? { write: grant.write } : {}),
-        ...(grant.scopes && grant.scopes.length > 0 ? { scopes: [...grant.scopes] } : {}),
+        ...(grant.permissions && grant.permissions.length > 0 ? { permissions: [...grant.permissions] } : {}),
       })),
   };
 }
@@ -42,12 +42,12 @@ export async function ensureOpenSocialSpace(
   session: OAuthSession,
   type: string,
   skey: string,
-  policy: GroupOpenSocialPolicy,
+  policy: GroupAtgrpPolicy,
 ): Promise<string> {
   const uri = spaceUri(session.did, type, skey);
   const desired = normalizeOpenSocialPolicy(policy);
   const check = validateSpacePolicy(desired, { groupDid: session.did, spaceType: type, skey });
-  if (!check.valid) throw new Error(`Invalid group.opensocial.policy for ${uri}: ${check.reason}`);
+  if (!check.valid) throw new Error(`Invalid org.atgrp.policy for ${uri}: ${check.reason}`);
   const client = sessionClient(session);
   try {
     const result = await client.procedure<CreateSpace.InputSchema, CreateSpace.OutputSchema>(
@@ -59,10 +59,10 @@ export async function ensureOpenSocialSpace(
     if (!isSpaceAlreadyExists(error)) throw error;
     const current = await client.query<GetSpace.OutputSchema>("com.atproto.space.getSpace", { space: uri });
     const rawPolicy = current.policy as Record<string, unknown> | undefined;
-    if (!rawPolicy || rawPolicy.$type !== OPENSOCIAL_POLICY) {
+    if (!rawPolicy || rawPolicy.$type !== ATGRP_POLICY) {
       throw new Error(`Space already exists with an incompatible policy: ${uri}`);
     }
-    const normalizedCurrent = normalizeOpenSocialPolicy(rawPolicy as unknown as GroupOpenSocialPolicy);
+    const normalizedCurrent = normalizeOpenSocialPolicy(rawPolicy as unknown as GroupAtgrpPolicy);
     if (canonicalJson(normalizedCurrent) !== canonicalJson(desired)) {
       await updateOpenSocialSpacePolicy(session, uri, policy);
     }
@@ -73,7 +73,7 @@ export async function ensureOpenSocialSpace(
 export async function updateOpenSocialSpacePolicy(
   session: OAuthSession,
   space: string,
-  policy: GroupOpenSocialPolicy,
+  policy: GroupAtgrpPolicy,
 ): Promise<void> {
   const parsed = parseSpaceUri(space);
   if (!parsed || parsed.authorityDid !== session.did) {
@@ -85,7 +85,7 @@ export async function updateOpenSocialSpacePolicy(
     spaceType: parsed.type,
     skey: parsed.skey,
   });
-  if (!check.valid) throw new Error(`Invalid group.opensocial.policy for ${space}: ${check.reason}`);
+  if (!check.valid) throw new Error(`Invalid org.atgrp.policy for ${space}: ${check.reason}`);
   await sessionClient(session).procedure<UpdateSpace.InputSchema, Record<string, never>>(
     "com.atproto.space.updateSpace",
     { space, policy: desired as unknown as UpdateSpace.InputSchema["policy"] },
@@ -93,7 +93,7 @@ export async function updateOpenSocialSpacePolicy(
 }
 
 export type OpenSocialSpacePolicyInspection =
-  | { status: "valid"; policy: GroupOpenSocialPolicy }
+  | { status: "valid"; policy: GroupAtgrpPolicy }
   | { status: "missing" }
   | { status: "invalid" };
 
@@ -109,7 +109,7 @@ export async function inspectOpenSocialSpacePolicy(
       { space },
     );
     const rawPolicy = current.policy as Record<string, unknown> | undefined;
-    if (!rawPolicy || rawPolicy.$type !== OPENSOCIAL_POLICY) return { status: "invalid" };
+    if (!rawPolicy || rawPolicy.$type !== ATGRP_POLICY) return { status: "invalid" };
     const check = validateSpacePolicy(rawPolicy, {
       groupDid: parsed.authorityDid,
       spaceType: parsed.type,
@@ -119,10 +119,10 @@ export async function inspectOpenSocialSpacePolicy(
     return {
       status: "valid",
       policy: {
-        $type: OPENSOCIAL_POLICY,
+        $type: ATGRP_POLICY,
         publicRead: rawPolicy.publicRead === true,
         unlisted: rawPolicy.unlisted === true,
-        grants: (rawPolicy.grants as GroupOpenSocialPolicy["grants"]) ?? [],
+        grants: (rawPolicy.grants as GroupAtgrpPolicy["grants"]) ?? [],
       },
     };
   } catch (error) {
@@ -134,7 +134,7 @@ export async function inspectOpenSocialSpacePolicy(
 export async function getOpenSocialSpacePolicy(
   session: OAuthSession,
   space: string,
-): Promise<GroupOpenSocialPolicy | null> {
+): Promise<GroupAtgrpPolicy | null> {
   const res = await inspectOpenSocialSpacePolicy(session, space);
   return res.status === "valid" ? res.policy : null;
 }

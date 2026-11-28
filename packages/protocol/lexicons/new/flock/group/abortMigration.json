@@ -1,0 +1,40 @@
+{
+  "lexicon": 1,
+  "id": "new.flock.group.abortMigration",
+  "defs": {
+    "main": {
+      "type": "procedure",
+      "description": "Aborts a staged or prepared Atmosphere Group host migration on the target or source host. Requires group service auth or admin OAuth.",
+      "input": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "groupDid": {
+              "type": "string",
+              "format": "did"
+            },
+            "operationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        }
+      },
+      "output": {
+        "encoding": "application/json",
+        "schema": {
+          "type": "object",
+          "required": ["status"],
+          "properties": {
+            "status": {
+              "type": "string",
+              "knownValues": ["purged", "aborted", "noop"]
+            }
+          }
+        }
+      }
+    }
+  }
+}

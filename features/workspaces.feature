@@ -1,7 +1,7 @@
 @phase2
 Feature: Workspace membership and discovery
-  Teams share a workspace governed centrally by an OpenSocial group's group.opensocial.members/self role and membership
-  records and per-space group.opensocial.policy role grants on the Group Host.
+  Teams share a workspace governed centrally by an Atmosphere Group's org.atgrp.members/self role and membership
+  records and per-space org.atgrp.policy role grants on the Group Host.
 
   Rule: Creating the first workspace needs one permission approval, requested in the same step
 

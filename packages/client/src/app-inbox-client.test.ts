@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { appInboxSkey, appInboxUri, appRoleKey, SELF_SKEY, spaceRecordUri, subjectKey } from "@flock/protocol/keys";
-import { ATPROTO_SPACE_COLLECTION, COLLECTION, OPENSOCIAL_COLLECTION, OPENSOCIAL_POLICY, SPACE_TYPE } from "@flock/protocol/nsids";
+import { ATPROTO_SPACE_COLLECTION, COLLECTION, ATGRP_COLLECTION, ATGRP_POLICY, SPACE_TYPE } from "@flock/protocol/nsids";
 import { FakeNetwork } from "@flock/testing/fake-network";
 import { createEngine } from "./engine";
 import { AUTHORITY, countCalls, createWorkspace, key, transportFor } from "./testing/engine-fixture";
@@ -18,9 +18,9 @@ test("a member sends and retracts commands and actions without minting a credent
   await owner.procedure("com.atproto.space.putRecord", {
     space: fixture.members,
     repo: AUTHORITY,
-    collection: OPENSOCIAL_COLLECTION.role,
+    collection: ATGRP_COLLECTION.role,
     rkey: botRole,
-    record: { $type: OPENSOCIAL_COLLECTION.role, displayName: "App Bot" },
+    record: { $type: ATGRP_COLLECTION.role, displayName: "App Bot" },
   });
   await owner.procedure("com.atproto.space.putRecord", {
     space: fixture.workspace,
@@ -40,9 +40,9 @@ test("a member sends and retracts commands and actions without minting a credent
   await owner.procedure("com.atproto.space.putRecord", {
     space: fixture.members,
     repo: AUTHORITY,
-    collection: OPENSOCIAL_COLLECTION.membership,
+    collection: ATGRP_COLLECTION.membership,
     rkey: APP,
-    record: { $type: OPENSOCIAL_COLLECTION.membership, roles: [botRole], createdAt: "2026-11-10T12:00:00.000Z" },
+    record: { $type: ATGRP_COLLECTION.membership, roles: [botRole], createdAt: "2026-11-10T12:00:00.000Z" },
   });
 
   const inboxSkey = appInboxSkey(SELF_SKEY, APP);
@@ -51,7 +51,7 @@ test("a member sends and retracts commands and actions without minting a credent
     spaceType: SPACE_TYPE.appInbox,
     skey: inboxSkey,
     policy: {
-      $type: OPENSOCIAL_POLICY,
+      $type: ATGRP_POLICY,
       publicRead: false,
       unlisted: true,
       grants: [
@@ -130,7 +130,7 @@ test("a member sends and retracts commands and actions without minting a credent
   await owner.procedure("com.atproto.space.updateSpace", {
     space: fixture.members,
     policy: {
-      $type: OPENSOCIAL_POLICY,
+      $type: ATGRP_POLICY,
       publicRead: false,
       unlisted: false,
       grants: [

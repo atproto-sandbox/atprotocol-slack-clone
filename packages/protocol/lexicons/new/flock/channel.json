@@ -7,7 +7,7 @@
       "key": "any",
       "title": "Channel",
       "collections": ["new.flock.channel.message", "new.flock.channel.reaction", "com.atproto.label.record"],
-      "description": "A public or private team conversation governed by group.opensocial.policy."
+      "description": "A public or private team conversation governed by org.atgrp.policy."
     }
   }
 }

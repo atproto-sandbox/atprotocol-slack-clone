@@ -9,8 +9,8 @@ import { LOOPBACK_PATH_HEADER, resolveLoopbackRedirect } from "../lib/loopback-r
 import { DeskThemeProvider } from "./ui/desk-theme";
 
 export const metadata: Metadata = {
-  title: "Flock Desk — Independent OpenSocial & Spaces Client",
-  description: "Standalone browser client talking directly to personal PDSes and OpenSocial Group Hosts.",
+  title: "Flock Desk — Independent Atmosphere Groups & Spaces Client",
+  description: "Standalone browser client talking directly to personal PDSes and Atmosphere Group Hosts.",
 };
 
 export default async function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

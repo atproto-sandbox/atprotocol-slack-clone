@@ -76,7 +76,7 @@ export function WorkspaceOnboarding({
       <div id="workspace-setup" className="starter-card setup-panel">
         <h2>Create a workspace</h2>
         <p>
-          Creates an atmospheric <code>opensocial.group</code> DID on the Group Host with flat role-based access
+          Creates an Atmosphere Group (<code>org.atgrp</code>) DID on the Group Host with flat role-based access
           control. You authenticate with your own AT Protocol account and become the group&rsquo;s first admin.
         </p>
         <form className="inline-form" onSubmit={(e) => void createWorkspace(e)}>

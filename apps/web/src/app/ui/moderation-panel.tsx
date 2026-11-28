@@ -7,6 +7,7 @@ import type {
   ModSubjectHistoryEvent,
   ModSubjectItem,
 } from "@flock/client/group-client";
+import { ATGRP_MOD_EVENT_TYPE } from "@flock/protocol/nsids";
 import type { WorkspaceSummary } from "@flock/protocol/workspace-summary";
 import type { GroupBrowserOAuthClient } from "../../browser/group-session";
 import { messageOf } from "./client-api";
@@ -26,8 +27,8 @@ export function mergeModHistoryPage(
   incoming: readonly ModSubjectHistoryEvent[],
 ): ModSubjectHistoryEvent[] {
   const byId = new Map<string, ModSubjectHistoryEvent>();
-  for (const ev of existing) byId.set(ev.id, ev);
-  for (const ev of incoming) byId.set(ev.id, ev);
+  for (const ev of existing) byId.set(ev.eventId, ev);
+  for (const ev of incoming) byId.set(ev.eventId, ev);
   return [...byId.values()];
 }
 
@@ -39,14 +40,20 @@ export type ModerationSnapshot = {
   subjectsError: string;
 };
 
+export type ModerationQueueFilter = "all" | "open" | "resolved";
+
 export async function fetchModerationSnapshot(
-  groupClient: Pick<GroupClient, "listRules" | "listModSubjects">,
-  options: { canModerate: boolean; status: "open" | "escalated" | "resolved" },
+  groupClient: Pick<GroupClient, "listRules" | "queryModSubjects">,
+  options: { canModerate: boolean; status: ModerationQueueFilter; tags?: readonly string[] },
 ): Promise<ModerationSnapshot> {
   const [rulesSettled, subjectsSettled] = await Promise.allSettled([
     (async () => groupClient.listRules())(),
     options.canModerate
-      ? (async () => groupClient.listModSubjects({ status: options.status }))()
+      ? (async () =>
+          groupClient.queryModSubjects({
+            ...(options.status === "all" ? {} : { status: options.status }),
+            ...(options.tags && options.tags.length > 0 ? { tags: options.tags } : {}),
+          }))()
       : Promise.resolve({ subjects: [] as ModSubjectItem[], cursor: undefined as string | undefined }),
   ]);
 
@@ -69,6 +76,40 @@ export async function fetchModerationSnapshot(
   };
 }
 
+export function formatModHistoryEventSummary(ev: ModSubjectHistoryEvent): string {
+  const type = String(ev.event.$type ?? "event");
+  if (type === ATGRP_MOD_EVENT_TYPE.label) {
+    const val = typeof ev.event.val === "string" ? ev.event.val : "label";
+    return ev.event.neg === true ? `negate ${val}` : val;
+  }
+  if (type === ATGRP_MOD_EVENT_TYPE.status) {
+    const status = typeof ev.event.status === "string" ? ev.event.status : "";
+    const note = typeof ev.event.note === "string" && ev.event.note.length > 0 ? `: ${ev.event.note}` : "";
+    return `${status}${note}`;
+  }
+  if (type === ATGRP_MOD_EVENT_TYPE.report) {
+    const rt = typeof ev.event.reasonType === "string" ? ev.event.reasonType : "report";
+    const reason = typeof ev.event.reason === "string" && ev.event.reason.length > 0 ? `: ${ev.event.reason}` : "";
+    return `${rt}${reason}`;
+  }
+  if (type === ATGRP_MOD_EVENT_TYPE.appeal) {
+    const reason = typeof ev.event.reason === "string" && ev.event.reason.length > 0 ? ev.event.reason : "appeal";
+    return reason;
+  }
+  if (type === ATGRP_MOD_EVENT_TYPE.tag) {
+    const added = Array.isArray(ev.event.added) ? (ev.event.added as string[]) : [];
+    const removed = Array.isArray(ev.event.removed) ? (ev.event.removed as string[]) : [];
+    const parts: string[] = [];
+    if (added.length > 0) parts.push(`+${added.join(", +")}`);
+    if (removed.length > 0) parts.push(`-${removed.join(", -")}`);
+    return parts.join(" ");
+  }
+  if (type === ATGRP_MOD_EVENT_TYPE.eject) {
+    return "member ejected";
+  }
+  return "";
+}
+
 type ModerationPanelProps = {
   activeWorkspace: WorkspaceSummary;
   groupClient: GroupClient | null;
@@ -81,11 +122,13 @@ type ModerationPanelProps = {
 };
 
 /**
- * OpenSocial group rules & moderation queue (`proposal.md:140-152`):
- * - Group rules CRUD (`group.opensocial.rule/*` in `meta/self`)
- * - Moderation queue (`listModSubjects` across `open` / `escalated` / `resolved`)
- * - Subject audit trail (`getModSubjectHistory`) + `resolveModSubject`
- * - In-space label publishing & negation (`!hide`, `!takedown`) via `com.atproto.label.record`
+ * Atmosphere Groups moderation & rules panel (`org.atgrp.mod.*`, `org.atgrp.rule/*` in `members/self`):
+ * - Group rules CRUD (`org.atgrp.rule/*` in `members/self`)
+ * - Moderation queue (`org.atgrp.mod.querySubjects` across `all` / `open` / `resolved` + tag filter)
+ * - Subject audit trail (`org.atgrp.mod.querySubjectHistory`) showing all 6 event types
+ * - Subject status, notes & tags (`org.atgrp.mod.updateSubject`)
+ * - In-space label publishing (`!hide`, `!takedown`) and history-based label deletion (`deleteLabelRecord`
+ *   using `#labelEvent.uri`, requiring no `action=read` on `space:*`)
  */
 export function ModerationPanel({
   activeWorkspace,
@@ -102,11 +145,15 @@ export function ModerationPanel({
   const [rulesError, setRulesError] = useState("");
   const [ruleTitle, setRuleTitle] = useState("");
   const [ruleText, setRuleText] = useState("");
-  const [queueFilter, setQueueFilter] = useState<"open" | "escalated" | "resolved">("open");
+  const [queueFilter, setQueueFilter] = useState<ModerationQueueFilter>("open");
+  const [tagFilterInput, setTagFilterInput] = useState("");
+  const [activeTagsFilter, setActiveTagsFilter] = useState<string[]>([]);
   const [subjects, setSubjects] = useState<ModSubjectItem[]>([]);
   const [subjectsCursor, setSubjectsCursor] = useState<string | undefined>(undefined);
   const [subjectsError, setSubjectsError] = useState("");
   const [selectedSubject, setSelectedSubject] = useState<{ subject: string; cid?: string } | null>(null);
+  const [noteInput, setNoteInput] = useState("");
+  const [addTagInput, setAddTagInput] = useState("");
   const [historyState, setHistoryState] = useState<{
     key: string;
     events: ModSubjectHistoryEvent[];
@@ -151,6 +198,7 @@ export function ModerationPanel({
       const snap = await fetchModerationSnapshot(groupClient, {
         canModerate,
         status: queueFilter,
+        tags: activeTagsFilter,
       });
       applyModerationSnapshot(snap);
     } catch (caught) {
@@ -158,7 +206,7 @@ export function ModerationPanel({
       setSubjectsError(msg);
       setError(msg);
     }
-  }, [groupClient, canModerate, queueFilter, applyModerationSnapshot, setError]);
+  }, [groupClient, canModerate, queueFilter, activeTagsFilter, applyModerationSnapshot, setError]);
 
   useEffect(() => {
     if (!groupClient) return;
@@ -166,6 +214,7 @@ export function ModerationPanel({
     void fetchModerationSnapshot(groupClient, {
       canModerate,
       status: queueFilter,
+      tags: activeTagsFilter,
     }).then(
       (snap) => {
         if (!cancelled) applyModerationSnapshot(snap);
@@ -181,14 +230,27 @@ export function ModerationPanel({
     return () => {
       cancelled = true;
     };
-  }, [groupClient, canModerate, queueFilter, applyModerationSnapshot, setError]);
+  }, [groupClient, canModerate, queueFilter, activeTagsFilter, applyModerationSnapshot, setError]);
+
+  const refreshSelectedHistory = useCallback(
+    async (subject: string, cid?: string) => {
+      if (!groupClient) return;
+      const refreshed = await groupClient.queryModSubjectHistory({ subject, ...(cid ? { cid } : {}) });
+      setHistoryState({
+        key: `${subject}#${cid ?? ""}`,
+        events: refreshed.events,
+        ...(refreshed.cursor ? { cursor: refreshed.cursor } : {}),
+      });
+    },
+    [groupClient],
+  );
 
   useEffect(() => {
     if (!groupClient || !selectedSubject || !selectedSubjectKey || !canModerate) return;
     let cancelled = false;
     const targetKey = selectedSubjectKey;
     void groupClient
-      .getModSubjectHistory({ subject: selectedSubject.subject, ...(selectedSubject.cid ? { cid: selectedSubject.cid } : {}) })
+      .queryModSubjectHistory({ subject: selectedSubject.subject, ...(selectedSubject.cid ? { cid: selectedSubject.cid } : {}) })
       .then(
         (res) => {
           if (!cancelled) {
@@ -286,12 +348,7 @@ export function ModerationPanel({
       }
       await loadModerationState();
       if (selectedSubject && selectedSubject.subject === subject) {
-        const refreshed = await groupClient.getModSubjectHistory({ subject, ...(cid ? { cid } : {}) });
-        setHistoryState({
-          key: `${subject}#${cid ?? ""}`,
-          events: refreshed.events,
-          ...(refreshed.cursor ? { cursor: refreshed.cursor } : {}),
-        });
+        await refreshSelectedHistory(subject, cid);
       }
       await onAfterModerationChange();
     } catch (caught) {
@@ -301,25 +358,40 @@ export function ModerationPanel({
     }
   }
 
-  async function updateSubjectStatus(subject: string, cid: string | undefined, nextStatus: "resolved" | "escalated") {
+  async function handleDeleteLabelByUri(labelUri: string, subject: string, cid?: string) {
     if (!groupClient) return;
     setBusy(true);
     setError("");
     try {
-      await groupClient.resolveModSubject({
-        subject,
-        ...(cid ? { cid } : {}),
-        status: nextStatus,
-      });
-      setStatus(`Marked moderation subject ${nextStatus}.`);
+      await groupClient.deleteLabelRecord(labelUri);
+      setStatus(`Deleted label record ${labelUri}.`);
       await loadModerationState();
-      if (selectedSubject && selectedSubject.subject === subject) {
-        const refreshed = await groupClient.getModSubjectHistory({ subject, ...(cid ? { cid } : {}) });
-        setHistoryState({
-          key: `${subject}#${cid ?? ""}`,
-          events: refreshed.events,
-          ...(refreshed.cursor ? { cursor: refreshed.cursor } : {}),
-        });
+      await refreshSelectedHistory(subject, cid);
+      await onAfterModerationChange();
+    } catch (caught) {
+      setError(messageOf(caught));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleUpdateSubject(input: {
+    subject: string;
+    cid?: string;
+    status?: "open" | "resolved";
+    note?: string;
+    addTags?: string[];
+    removeTags?: string[];
+  }) {
+    if (!groupClient) return;
+    setBusy(true);
+    setError("");
+    try {
+      await groupClient.updateModSubject(input);
+      setStatus("Updated moderation subject.");
+      await loadModerationState();
+      if (selectedSubject && selectedSubject.subject === input.subject) {
+        await refreshSelectedHistory(input.subject, input.cid);
       }
     } catch (caught) {
       setError(messageOf(caught));
@@ -333,8 +405,9 @@ export function ModerationPanel({
     setBusy(true);
     setError("");
     try {
-      const page = await groupClient.listModSubjects({
-        status: queueFilter,
+      const page = await groupClient.queryModSubjects({
+        ...(queueFilter === "all" ? {} : { status: queueFilter }),
+        ...(activeTagsFilter.length > 0 ? { tags: activeTagsFilter } : {}),
         cursor: subjectsCursor,
       });
       setSubjects((prev) => mergeModSubjectsPage(prev, page.subjects));
@@ -355,7 +428,7 @@ export function ModerationPanel({
     setBusy(true);
     setError("");
     try {
-      const page = await groupClient.getModSubjectHistory({
+      const page = await groupClient.queryModSubjectHistory({
         subject: selectedSubject.subject,
         ...(selectedSubject.cid ? { cid: selectedSubject.cid } : {}),
         cursor: activeHistoryCursor,
@@ -397,7 +470,7 @@ export function ModerationPanel({
         <div className="starter-card permission-box">
           <p>
             Sign in with your per-user Group OAuth session ({activeWorkspace.isAdmin ? "admin" : "moderator"}) to review
-            reports, manage rules, and publish moderation labels directly on the Group Host.
+            reports, appeals, tags, rules, and moderation labels directly on the Group Host.
           </p>
           <button type="button" className="primary-button" disabled={busy} onClick={() => void signInForModeration()}>
             Sign in to moderate →
@@ -471,7 +544,7 @@ export function ModerationPanel({
             <div className="section-heading">
               <h3>Moderation queue</h3>
               <div>
-                {(["open", "escalated", "resolved"] as const).map((tab) => (
+                {(["open", "resolved", "all"] as const).map((tab) => (
                   <button
                     key={tab}
                     type="button"
@@ -488,6 +561,43 @@ export function ModerationPanel({
                 ))}
               </div>
             </div>
+
+            <form
+              className="inline-form"
+              onSubmit={(e) => {
+                e.preventDefault();
+                const parsed = tagFilterInput
+                  .split(/[\s,]+/)
+                  .map((t) => t.trim().toLowerCase())
+                  .filter(Boolean);
+                setActiveTagsFilter(parsed);
+                setSubjectsCursor(undefined);
+              }}
+            >
+              <input
+                aria-label="Filter by tags"
+                placeholder="Filter tags (e.g. escalated, needs-review)"
+                value={tagFilterInput}
+                onChange={(e) => setTagFilterInput(e.target.value)}
+                disabled={busy}
+              />
+              <button type="submit" className="text-button" disabled={busy}>
+                Filter tags
+              </button>
+              {activeTagsFilter.length > 0 && (
+                <button
+                  type="button"
+                  className="text-button"
+                  disabled={busy}
+                  onClick={() => {
+                    setTagFilterInput("");
+                    setActiveTagsFilter([]);
+                  }}
+                >
+                  Clear tags
+                </button>
+              )}
+            </form>
 
             {subjectsError ? (
               <p className="form-error" role="alert">
@@ -507,7 +617,9 @@ export function ModerationPanel({
                         <strong className="mono-note">{item.subject}</strong>
                         {item.cid && <small className="mono-note"> (cid: {item.cid})</small>}
                         <p>
-                          {item.reportCount} report(s) · status: <b>{item.status}</b> · updated {item.updatedAt}
+                          {item.reportCount ?? 0} report(s) · status: <b>{item.status}</b>
+                          {item.tags && item.tags.length > 0 ? ` · tags: ${item.tags.join(", ")}` : ""} · updated{" "}
+                          {item.updatedAt}
                         </p>
                       </div>
                       <div>
@@ -553,26 +665,54 @@ export function ModerationPanel({
                         >
                           Remove !takedown
                         </button>
-                        {item.status !== "escalated" && (
-                          <button
-                            type="button"
-                            className="text-button"
-                            disabled={busy}
-                            onClick={() => void updateSubjectStatus(item.subject, item.cid, "escalated")}
-                          >
-                            Escalate
-                          </button>
-                        )}
-                        {item.status !== "resolved" && (
+                        {item.status !== "resolved" ? (
                           <button
                             type="button"
                             className="primary-button"
                             disabled={busy}
-                            onClick={() => void updateSubjectStatus(item.subject, item.cid, "resolved")}
+                            onClick={() =>
+                              void handleUpdateSubject({
+                                subject: item.subject,
+                                ...(item.cid ? { cid: item.cid } : {}),
+                                status: "resolved",
+                              })
+                            }
                           >
                             Resolve
                           </button>
+                        ) : (
+                          <button
+                            type="button"
+                            className="text-button"
+                            disabled={busy}
+                            onClick={() =>
+                              void handleUpdateSubject({
+                                subject: item.subject,
+                                ...(item.cid ? { cid: item.cid } : {}),
+                                status: "open",
+                              })
+                            }
+                          >
+                            Reopen
+                          </button>
                         )}
+                        {item.tags?.map((tag) => (
+                          <button
+                            key={tag}
+                            type="button"
+                            className="text-button"
+                            disabled={busy}
+                            onClick={() =>
+                              void handleUpdateSubject({
+                                subject: item.subject,
+                                ...(item.cid ? { cid: item.cid } : {}),
+                                removeTags: [tag],
+                              })
+                            }
+                          >
+                            × {tag}
+                          </button>
+                        ))}
                       </div>
                     </div>
                   );
@@ -594,6 +734,46 @@ export function ModerationPanel({
             {selectedSubject && (
               <div className="starter-card" aria-label="Moderation subject history">
                 <h4>Audit history for {selectedSubject.subject}</h4>
+                <form
+                  className="inline-form"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const tagsToAdd = addTagInput
+                      .split(/[\s,]+/)
+                      .map((t) => t.trim().toLowerCase())
+                      .filter(Boolean);
+                    const note = noteInput.trim();
+                    if (tagsToAdd.length === 0 && !note) return;
+                    void handleUpdateSubject({
+                      subject: selectedSubject.subject,
+                      ...(selectedSubject.cid ? { cid: selectedSubject.cid } : {}),
+                      ...(note ? { note } : {}),
+                      ...(tagsToAdd.length > 0 ? { addTags: tagsToAdd } : {}),
+                    }).then(() => {
+                      setNoteInput("");
+                      setAddTagInput("");
+                    });
+                  }}
+                >
+                  <input
+                    aria-label="Add subject tags"
+                    placeholder="Add tags (a-z, -)"
+                    value={addTagInput}
+                    onChange={(e) => setAddTagInput(e.target.value)}
+                    disabled={busy}
+                  />
+                  <input
+                    aria-label="Moderation note"
+                    placeholder="Internal note (optional)"
+                    value={noteInput}
+                    onChange={(e) => setNoteInput(e.target.value)}
+                    disabled={busy}
+                  />
+                  <button type="submit" className="text-button" disabled={busy}>
+                    Save tags/note
+                  </button>
+                </form>
+
                 {activeHistoryError ? (
                   <p className="form-error" role="alert">
                     Failed to load moderation history: {activeHistoryError}
@@ -602,20 +782,36 @@ export function ModerationPanel({
                   <p>No moderation events recorded.</p>
                 ) : (
                   <ul>
-                    {history.map((ev) => (
-                      <li key={ev.id}>
-                        <code>#{ev.id}</code> · {ev.createdAt}
-                        {ev.createdBy ? ` · by ${ev.createdBy}` : ""} ·{" "}
-                        <code>{String(ev.event.$type ?? "event")}</code>{" "}
-                        {typeof ev.event.val === "string"
-                          ? `(${ev.event.neg ? "negate " : ""}${ev.event.val})`
-                          : typeof ev.event.status === "string"
-                            ? `(${ev.event.status})`
-                            : typeof ev.event.reasonType === "string"
-                              ? `(${ev.event.reasonType}${ev.event.reason ? `: ${String(ev.event.reason)}` : ""})`
-                              : ""}
-                      </li>
-                    ))}
+                    {history.map((ev) => {
+                      const summary = formatModHistoryEventSummary(ev);
+                      const labelRecordUri =
+                        ev.event.$type === ATGRP_MOD_EVENT_TYPE.label && typeof ev.event.uri === "string"
+                          ? ev.event.uri
+                          : undefined;
+                      return (
+                        <li key={ev.eventId}>
+                          <code>#{ev.eventId}</code> · {ev.createdAt}
+                          {ev.createdBy ? ` · by ${ev.createdBy}` : ""} ·{" "}
+                          <code>{String(ev.event.$type ?? "event")}</code>
+                          {summary ? ` (${summary})` : ""}
+                          {labelRecordUri && ev.event.neg !== true ? (
+                            <>
+                              {" "}
+                              <button
+                                type="button"
+                                className="text-button"
+                                disabled={busy}
+                                onClick={() =>
+                                  void handleDeleteLabelByUri(labelRecordUri, selectedSubject.subject, selectedSubject.cid)
+                                }
+                              >
+                                Delete label record
+                              </button>
+                            </>
+                          ) : null}
+                        </li>
+                      );
+                    })}
                   </ul>
                 )}
                 {activeHistoryCursor && (

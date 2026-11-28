@@ -1,9 +1,9 @@
 import type { OAuthSession } from "@atproto/oauth-client-node";
 import type { ExtensionId } from "@flock/protocol/extensions";
 import { appRoleKey, groupMembersUri, groupMetaUri, subjectKey } from "@flock/protocol/keys";
-import { COLLECTION, OPENSOCIAL_POLICY } from "@flock/protocol/nsids";
+import { COLLECTION, ATGRP_POLICY } from "@flock/protocol/nsids";
 import { validateSpaceRecord } from "@flock/protocol/registry";
-import type { GroupOpenSocialPolicy } from "@flock/protocol/scopes";
+import type { GroupAtgrpPolicy } from "@flock/protocol/scopes";
 import { WORKSPACE_ENVELOPE, WorkspaceEnvelopeError } from "@flock/protocol/workspace-summary";
 import { getOpenSocialSpacePolicy, putAuthorityRecord, updateOpenSocialSpacePolicy } from "../atproto/space-ops";
 import type { OperatorActor } from "./actor";
@@ -108,7 +108,7 @@ export function activeAppRoleKeys(installs: ReadonlyMap<string, AppInstall>): st
 }
 
 /**
- * Ensures `group.opensocial.meta/self` and `group.opensocial.members/self` policies carry `{ role: appRoleKey(app), read: true }`
+ * Ensures `org.atgrp.meta/self` and `org.atgrp.members/self` policies carry `{ role: appRoleKey(app), read: true }`
  * for every active app and omit uninstalled app roles while preserving all human/custom role grants intact.
  */
 export async function syncCoreSpaceAppRoleGrants(
@@ -126,7 +126,7 @@ export async function syncCoreSpaceAppRoleGrants(
       ...[...desiredAppRoles].sort().map((role) => ({ role, read: true })),
     ];
     const currentAppRoles = current.grants
-      .filter((g) => g.role.startsWith("app-") && g.read === true && !g.write && (!g.scopes || g.scopes.length === 0))
+      .filter((g) => g.role.startsWith("app-") && g.read === true && !g.write && (!g.permissions || g.permissions.length === 0))
       .map((g) => g.role)
       .sort();
     const desiredSorted = [...desiredAppRoles].sort();
@@ -135,8 +135,8 @@ export async function syncCoreSpaceAppRoleGrants(
       currentAppRoles.length === desiredSorted.length &&
       currentAppRoles.every((r, idx) => r === desiredSorted[idx]);
     if (!unchanged) {
-      const updated: GroupOpenSocialPolicy = {
-        $type: OPENSOCIAL_POLICY,
+      const updated: GroupAtgrpPolicy = {
+        $type: ATGRP_POLICY,
         publicRead: current.publicRead === true,
         unlisted: current.unlisted === true,
         grants: nextGrants,

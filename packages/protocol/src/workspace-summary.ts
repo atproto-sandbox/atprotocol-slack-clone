@@ -10,10 +10,11 @@ import {
   SELF_SKEY,
 } from "./keys";
 import { isTakendown, type ActiveSpaceLabel } from "./moderation";
-import { ATPROTO_SPACE_COLLECTION, COLLECTION, OPENSOCIAL_COLLECTION, OPENSOCIAL_POLICY } from "./nsids";
+import { ATGRP_COLLECTION, ATGRP_POLICY, ATPROTO_SPACE_COLLECTION, COLLECTION } from "./nsids";
 import {
-  decodeFlockAcceptanceExtensions,
+  decodeFlockConfirmationExtensions,
   decodeFlockMembershipExtensions,
+  isHttpOrHttpsUrl,
   validateSpacePolicy,
   validateSpaceRecord,
 } from "./registry";
@@ -21,8 +22,8 @@ import {
   effectiveHumanAdmins,
   isEffectiveModeratorMember,
   type EffectiveGovernanceState,
+  type GroupAtgrpPolicy,
   type GroupMembershipRecord,
-  type GroupOpenSocialPolicy,
   type GroupRoleRecord,
 } from "./scopes";
 
@@ -67,8 +68,8 @@ export type WorkspaceRoleSummary = {
   displayName: string;
   description?: string;
   default: boolean;
-  scopes: string[];
-  assignable: string[];
+  permissions: string[];
+  canAssign: string[];
 };
 
 export type WorkspaceSummary = {
@@ -80,14 +81,14 @@ export type WorkspaceSummary = {
   description?: string;
   joinPolicy: string;
   publicMeta: boolean;
-  url?: string;
+  website?: string;
   isAdmin: boolean;
   isModerator: boolean;
   admins: string[];
   moderators: string[];
-  /** Confirmed bidirectional human members (`membership/<did>` paired with valid post-admission `<did>`-authored `acceptance/self`, withholding `!takedown`-labeled accounts). */
+  /** Confirmed bidirectional human members (`membership/<did>` paired with valid post-admission `<did>`-authored `confirmation/self`, withholding `!takedown`-labeled accounts). */
   members: Array<{ did: string; active: boolean; roles: string[] }>;
-  /** Admitted human members whose personal-PDS `acceptance/self` is absent or stale (still hold full `membership` access, withholding `!takedown`-labeled accounts). */
+  /** Admitted human members whose personal-PDS `confirmation/self` is absent or stale (still hold full `membership` access, withholding `!takedown`-labeled accounts). */
   pendingMembers: Array<{ did: string; roles: string[] }>;
   /** Admitted human member DIDs currently carrying an active `!takedown` account label in `members/self`. */
   takendownMembers?: string[];
@@ -106,8 +107,8 @@ export type ScannedRecords = {
   truncated: boolean;
 };
 
-/** Member-authored `group.opensocial.acceptance/self` records synced across `members/self` writers. */
-export type MemberAcceptanceEntry = {
+/** Member-authored `org.atgrp.confirmation/self` records synced across `members/self` writers. */
+export type MemberConfirmationEntry = {
   repoDid: string;
   rkey?: string;
   value: Record<string, unknown>;
@@ -119,15 +120,16 @@ export type MemberWriterRev = {
 };
 
 export type WorkspaceRecords = {
-  profiles: ScannedRecords;
+  abouts: ScannedRecords;
+  configs?: ScannedRecords;
   roles: ScannedRecords;
   memberships: ScannedRecords;
   directory: ScannedRecords;
   installs: ScannedRecords;
   extInstalls?: ScannedRecords;
-  acceptances?: ReadonlyArray<MemberAcceptanceEntry>;
+  confirmations?: ReadonlyArray<MemberConfirmationEntry>;
   memberWriters?: ReadonlyMap<string, MemberWriterRev>;
-  spacePolicies?: ReadonlyMap<string, GroupOpenSocialPolicy>;
+  spacePolicies?: ReadonlyMap<string, GroupAtgrpPolicy>;
   accountLabels?: ReadonlyArray<ActiveSpaceLabel>;
 };
 
@@ -159,7 +161,7 @@ export function extractGroupSpacePolicyRecord(
   groupDid: string,
   spaceUri: string,
   scanned: ScannedRecords,
-): { policy: GroupOpenSocialPolicy | null; valid: boolean } {
+): { policy: GroupAtgrpPolicy | null; valid: boolean } {
   if (scanned.truncated || scanned.records.length !== 1) {
     return { policy: null, valid: false };
   }
@@ -187,48 +189,48 @@ export function extractGroupSpacePolicyRecord(
     !rawPolicy ||
     typeof rawPolicy !== "object" ||
     Array.isArray(rawPolicy) ||
-    (rawPolicy as Record<string, unknown>).$type !== OPENSOCIAL_POLICY
+    (rawPolicy as Record<string, unknown>).$type !== ATGRP_POLICY
   ) {
     return { policy: null, valid: false };
   }
-  return { policy: rawPolicy as GroupOpenSocialPolicy, valid: true };
+  return { policy: rawPolicy as GroupAtgrpPolicy, valid: true };
 }
 
-function isBidirectionalRosterAccepted(
+function isBidirectionalRosterConfirmed(
   memberDid: string,
   membershipRecord: Record<string, unknown>,
   membershipCid: string | undefined,
-  acceptanceRecord: Record<string, unknown> | undefined,
+  confirmationRecord: Record<string, unknown> | undefined,
   writer: MemberWriterRev | undefined,
 ): boolean {
   void memberDid;
-  if (!acceptanceRecord) return false;
+  if (!confirmationRecord) return false;
   const memExt = decodeFlockMembershipExtensions(membershipRecord);
   if (!memExt.valid) return false;
-  const accExt = decodeFlockAcceptanceExtensions(acceptanceRecord);
-  if (!accExt.valid) return false;
+  const confExt = decodeFlockConfirmationExtensions(confirmationRecord);
+  if (!confExt.valid) return false;
 
   const explicitMembershipInc = memExt.incarnation;
   const effectiveMembershipInc =
     explicitMembershipInc ??
     (typeof membershipCid === "string" && membershipCid.length > 0 ? `legacy-cid:${membershipCid}` : undefined);
-  const accInc = accExt.incarnation;
+  const confInc = confExt.incarnation;
   const gen = memExt.generation ?? 1;
   const admittedSpaceRev = memExt.admittedSpaceRev;
   const afterWriterRev = memExt.afterWriterRev;
 
   // (a) Both carry incarnation stamps: exact match required against explicit membership incarnation.
-  if (accInc !== undefined && explicitMembershipInc !== undefined) {
-    return accInc === explicitMembershipInc;
+  if (confInc !== undefined && explicitMembershipInc !== undefined) {
+    return confInc === explicitMembershipInc;
   }
-  // (a2) Imported/standard unversioned membership JSON paired with stamped acceptance:
+  // (a2) Imported/standard unversioned membership JSON paired with stamped confirmation:
   //      match strictly against deterministic `legacy-cid:<membershipCid>` fallback (rejecting stale/mismatched stamps).
-  if (accInc !== undefined && explicitMembershipInc === undefined) {
-    return effectiveMembershipInc !== undefined && accInc === effectiveMembershipInc;
+  if (confInc !== undefined && explicitMembershipInc === undefined) {
+    return effectiveMembershipInc !== undefined && confInc === effectiveMembershipInc;
   }
 
-  // Unversioned acceptance (`accInc === undefined`):
-  // (b) Re-admitted after prior ejection (`gen >= 2`): never trust self-reported `acceptance.createdAt`!
+  // Unversioned confirmation (`confInc === undefined`):
+  // (b) Re-admitted after prior ejection (`gen >= 2`): never trust self-reported `confirmation.createdAt`!
   // Requires durable post-ejection writer-advance evidence; if `afterWriterRev == null`, requires incarnation match (false here).
   if (gen >= 2) {
     if (afterWriterRev == null) return false;
@@ -239,7 +241,7 @@ function isBidirectionalRosterAccepted(
     );
   }
 
-  // (c) First-generation admission (`gen === 1`) with unversioned third-party acceptance:
+  // (c) First-generation admission (`gen === 1`) with unversioned third-party confirmation:
   if (!writer || !isTid(writer.repoRev) || !isTid(writer.spaceRev)) return false;
   return admittedSpaceRev === undefined || writer.spaceRev > admittedSpaceRev;
 }
@@ -267,36 +269,41 @@ export function summarizeWorkspace(uri: string, viewerDid: string, records: Work
         }).valid,
     );
 
-  const validProfile = validInSpace(metaSpaceUri, OPENSOCIAL_COLLECTION.profile, records.profiles)[0]?.value;
-  if (!validProfile || typeof validProfile.displayName !== "string") return null;
+  const validAbout = validInSpace(metaSpaceUri, ATGRP_COLLECTION.about, records.abouts)[0]?.value;
+  if (!validAbout || typeof validAbout.displayName !== "string") return null;
 
-  const name = validProfile.displayName;
-  const description = typeof validProfile.description === "string" ? validProfile.description : undefined;
-  const joinPolicy = typeof validProfile.joinPolicy === "string" ? validProfile.joinPolicy : "invite";
-  const url = typeof validProfile.url === "string" ? validProfile.url : undefined;
+  const configRecords = records.configs ?? { records: [], truncated: false };
+  const validConfig = validInSpace(metaSpaceUri, ATGRP_COLLECTION.config, configRecords)[0]?.value;
+
+  const name = validAbout.displayName;
+  const description = typeof validAbout.description === "string" ? validAbout.description : undefined;
+  const joinPolicy = typeof validConfig?.joinPolicy === "string" ? validConfig.joinPolicy : "invite";
+  const website = isHttpOrHttpsUrl(validAbout.website) ? validAbout.website : undefined;
 
   // Roles in `members/self`
-  const validRoleEntries = validInSpace(membersSpaceUri, OPENSOCIAL_COLLECTION.role, records.roles);
+  const validRoleEntries = validInSpace(membersSpaceUri, ATGRP_COLLECTION.role, records.roles);
   const rolesMap = new Map<string, GroupRoleRecord>();
   const rolesSummary: WorkspaceRoleSummary[] = [];
   for (const { rkey, value } of validRoleEntries) {
-    const scopes = Array.isArray(value.scopes) ? (value.scopes as string[]) : [];
-    const assignable = Array.isArray(value.assignable) ? (value.assignable as string[]) : [];
+    const permissions = Array.isArray(value.permissions) ? (value.permissions as string[]) : [];
+    const canAssign = Array.isArray(value.canAssign) ? (value.canAssign as string[]) : [];
+    const displayName =
+      typeof value.displayName === "string" && value.displayName.length > 0 ? value.displayName : rkey;
     const roleObj: GroupRoleRecord = {
-      displayName: String(value.displayName),
+      displayName,
       ...(typeof value.description === "string" ? { description: value.description } : {}),
       default: value.default === true,
-      scopes,
-      assignable,
+      permissions,
+      canAssign,
     };
     rolesMap.set(rkey, roleObj);
     rolesSummary.push({
       rkey,
-      displayName: roleObj.displayName,
+      displayName,
       ...(roleObj.description !== undefined ? { description: roleObj.description } : {}),
       default: Boolean(roleObj.default),
-      scopes: [...scopes],
-      assignable: [...assignable],
+      permissions: [...permissions],
+      canAssign: [...canAssign],
     });
   }
   rolesSummary.sort((a, b) => a.rkey.localeCompare(b.rkey));
@@ -336,7 +343,7 @@ export function summarizeWorkspace(uri: string, viewerDid: string, records: Work
   }
 
   // Validate spacePolicies if supplied; ensure default `members/self` read+write grant fallback only if policies were not supplied
-  const validatedSpacePolicies = new Map<string, GroupOpenSocialPolicy>();
+  const validatedSpacePolicies = new Map<string, GroupAtgrpPolicy>();
   let maxPolicyGrants = 0;
   let invalidPolicyCount = 0;
   let missingCorePolicy = false;
@@ -348,7 +355,7 @@ export function summarizeWorkspace(uri: string, viewerDid: string, records: Work
         continue;
       }
       const check = validateSpacePolicy(
-        { $type: OPENSOCIAL_POLICY, ...policy },
+        { $type: ATGRP_POLICY, ...policy },
         { groupDid, spaceType: parsed.type, skey: parsed.skey },
       );
       if (!check.valid) {
@@ -380,7 +387,7 @@ export function summarizeWorkspace(uri: string, viewerDid: string, records: Work
   // Memberships in `members/self` (strictly excluding `groupDid` and `knownAppSubjects` from human sets)
   const validMembershipEntries = validInSpace(
     membersSpaceUri,
-    OPENSOCIAL_COLLECTION.membership,
+    ATGRP_COLLECTION.membership,
     records.memberships,
   );
   const membershipsMap = new Map<string, GroupMembershipRecord>();
@@ -405,21 +412,21 @@ export function summarizeWorkspace(uri: string, viewerDid: string, records: Work
     });
   }
 
-  // Valid member-authored `acceptance/self` records
-  const validAcceptances = new Map<string, Record<string, unknown>>();
-  for (const entry of records.acceptances ?? []) {
+  // Valid member-authored `confirmation/self` records
+  const validConfirmations = new Map<string, Record<string, unknown>>();
+  for (const entry of records.confirmations ?? []) {
     const rkey = entry.rkey ?? SELF_SKEY;
     if (!isDid(entry.repoDid) || entry.repoDid === groupDid || knownAppSubjects.has(entry.repoDid)) {
       continue;
     }
-    const check = validateSpaceRecord(OPENSOCIAL_COLLECTION.acceptance, entry.value, {
+    const check = validateSpaceRecord(ATGRP_COLLECTION.confirmation, entry.value, {
       authorityDid: groupDid,
       spaceUri: membersSpaceUri,
       repoDid: entry.repoDid,
       rkey,
     });
     if (check.valid) {
-      validAcceptances.set(entry.repoDid, entry.value);
+      validConfirmations.set(entry.repoDid, entry.value);
     }
   }
 
@@ -430,7 +437,7 @@ export function summarizeWorkspace(uri: string, viewerDid: string, records: Work
     knownAppSubjects,
   };
 
-  // Authorization derives strictly from `membership` + `effectiveMemberPermissions`, NEVER gated on `acceptance/self`!
+  // Authorization derives strictly from `membership` + `effectiveMemberPermissions`, NEVER gated on `confirmation/self`!
   const admins = effectiveHumanAdmins(governanceState, groupDid);
   const moderators: string[] = [];
   const confirmedMembers: Array<{ did: string; active: boolean; roles: string[] }> = [];
@@ -441,11 +448,11 @@ export function summarizeWorkspace(uri: string, viewerDid: string, records: Work
     if (isEffectiveModeratorMember(memberDid, governanceState, groupDid)) {
       moderators.push(memberDid);
     }
-    const acceptance = validAcceptances.get(memberDid);
+    const confirmation = validConfirmations.get(memberDid);
     const membershipCid = membershipCidsMap.get(memberDid);
     const writer = records.memberWriters?.get(memberDid);
     const roles = [...membership.roles];
-    if (isBidirectionalRosterAccepted(memberDid, membership, membershipCid, acceptance, writer)) {
+    if (isBidirectionalRosterConfirmed(memberDid, membership, membershipCid, confirmation, writer)) {
       confirmedMembers.push({ did: memberDid, active: true, roles });
     } else {
       pendingMembers.push({ did: memberDid, roles });
@@ -496,7 +503,8 @@ export function summarizeWorkspace(uri: string, viewerDid: string, records: Work
 
   const scan = WORKSPACE_ENVELOPE.authorityRecordScan;
   const degradedReasons = [
-    records.profiles.truncated && "Group profile records exceed the expected single-record limit.",
+    records.abouts.truncated && "Group about records exceed the expected single-record limit.",
+    configRecords.truncated && "Group config records exceed the expected single-record limit.",
     records.roles.truncated && `Role records exceed the ${scan}-record scan limit; role governance may be incomplete.`,
     records.memberships.truncated && `Membership records exceed the ${scan}-record scan limit; the member list may be incomplete.`,
     records.directory.truncated && `The channel directory exceeds the ${scan}-record scan limit; the channel list may be incomplete.`,
@@ -528,7 +536,7 @@ export function summarizeWorkspace(uri: string, viewerDid: string, records: Work
     ...(description !== undefined ? { description } : {}),
     joinPolicy,
     publicMeta,
-    ...(url !== undefined ? { url } : {}),
+    ...(website !== undefined ? { website } : {}),
     isAdmin: admins.includes(viewerDid),
     isModerator: moderators.includes(viewerDid),
     admins,

@@ -26,7 +26,7 @@ test("the engine's channel page matches the independent reader on two real PDS h
       { getOpenSocialSpacePolicy, putAuthorityRecord, updateOpenSocialSpacePolicy },
       { putMembershipRoles },
       keys,
-      { COLLECTION, OPENSOCIAL_COLLECTION },
+      { ATGRP_COLLECTION, COLLECTION },
       { AtprotoClient },
     ] = await Promise.all([
       import("@flock/client/engine"),
@@ -125,7 +125,7 @@ test("the engine's channel page matches the independent reader on two real PDS h
 
     // Reduce Carol to a read-only OpenSocial role: losing `write` on `channel` evicts her from `listWriters`.
     const membersSpace = keys.groupMembersUri(group.groupDid);
-    await putAuthorityRecord(grant, membersSpace, OPENSOCIAL_COLLECTION.role, "reader", {
+    await putAuthorityRecord(grant, membersSpace, ATGRP_COLLECTION.role, "reader", {
       displayName: "Read-only member",
     });
     for (const sp of [keys.groupMetaUri(group.groupDid), membersSpace, workspace, channel]) {

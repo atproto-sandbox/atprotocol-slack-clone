@@ -21,7 +21,12 @@ import {
 } from "@flock/client/group-client";
 import { XrpcError } from "@flock/protocol/atproto/xrpc";
 import { isDid } from "@flock/protocol/keys";
-import { groupAdminScopes, groupModeratorScopes } from "@flock/protocol/scopes";
+import {
+  groupAdminScopes,
+  groupBasicEditorScopes,
+  groupMembersManagerScopes,
+  groupModeratorScopes,
+} from "@flock/protocol/scopes";
 import { buildGroupBrowserClientMetadata } from "./client-metadata";
 import { wellKnownHandleResolver, type BrowserSessionConfig } from "./session";
 
@@ -34,7 +39,7 @@ export type GroupClaimPurpose = "delete_account" | "plc_operation";
 export type GroupCallbackAppState = {
   viewerDid: string;
   returnTo?: string;
-  purpose?: "admin" | "moderator" | "recovery" | "step_up" | "create";
+  purpose?: "admin" | "members" | "moderator" | "basic" | "recovery" | "step_up" | "create";
   groupDid?: string;
   claimPurpose?: GroupClaimPurpose;
   erasureGeneration?: string;
@@ -290,14 +295,20 @@ class GroupOAuthDatabase {
     }
     if (this.dbPromise) return this.dbPromise;
     this.dbPromise = new Promise<IDBDatabase>((resolve, reject) => {
-      const request = this.idbFactory.open(groupOAuthDbName(this.viewerDid), 1);
-      request.onupgradeneeded = () => {
+      const request = this.idbFactory.open(groupOAuthDbName(this.viewerDid), 2);
+      request.onupgradeneeded = (event) => {
         const db = request.result;
+        const tx = request.transaction;
         for (const name of STORES) {
           if (!db.objectStoreNames.contains(name)) {
             const store = db.createObjectStore(name);
             store.createIndex("expiresAt", "expiresAt", { unique: false });
           }
+        }
+        if (event.oldVersion > 0 && event.oldVersion < 2 && tx) {
+          // Clear legacy R13/R14 group.opensocial.* OAuth sessions & unversioned migration state on R15 cutover.
+          if (db.objectStoreNames.contains("session")) tx.objectStore("session").clear();
+          if (db.objectStoreNames.contains("state")) tx.objectStore("state").clear();
         }
       };
       request.onsuccess = () => {
@@ -650,7 +661,7 @@ export class GroupBrowserOAuthClient {
 
   async authorizeGroup(input: {
     groupOrHost: string;
-    roleScope?: "admin" | "moderator" | string;
+    roleScope?: "admin" | "members" | "moderator" | "basic" | string;
     prompt?: "login" | "consent" | "create";
     appState?: Omit<GroupCallbackAppState, "viewerDid">;
     signal?: AbortSignal;
@@ -663,9 +674,13 @@ export class GroupBrowserOAuthClient {
     const scope =
       input.roleScope === undefined || input.roleScope === "admin"
         ? groupAdminScopes().join(" ")
-        : input.roleScope === "moderator"
-          ? groupModeratorScopes().join(" ")
-          : input.roleScope;
+        : input.roleScope === "members"
+          ? groupMembersManagerScopes().join(" ")
+          : input.roleScope === "moderator"
+            ? groupModeratorScopes().join(" ")
+            : input.roleScope === "basic"
+              ? groupBasicEditorScopes().join(" ")
+              : input.roleScope;
     const statePayload: GroupCallbackAppState = {
       viewerDid: this.viewerDid,
       ...input.appState,
@@ -969,6 +984,7 @@ function parseProposedPlcParams(raw: unknown): ProposedPlcOperationParams | null
 
 export function parsePersistedGroupMigrationState(raw: unknown): InFlightGroupMigration | null {
   if (!isPlainObjectRecord(raw)) return null;
+  if (raw.protocolVersion !== "org.atgrp.v1") return null;
   let revision: number | undefined;
   if (raw.revision !== undefined) {
     if (typeof raw.revision !== "number" || !Number.isSafeInteger(raw.revision) || raw.revision < 1) {
@@ -1085,6 +1101,7 @@ export function parsePersistedGroupMigrationState(raw: unknown): InFlightGroupMi
   }
 
   return {
+    protocolVersion: "org.atgrp.v1",
     ...(revision !== undefined ? { revision } : {}),
     operationId: raw.operationId,
     targetOrigin: raw.targetOrigin,
@@ -1107,7 +1124,10 @@ export function parsePersistedGroupMigrationState(raw: unknown): InFlightGroupMi
 }
 
 export function serializePersistedGroupMigrationState(state: PersistedGroupMigrationState): PersistedGroupMigrationState {
-  const validated = parsePersistedGroupMigrationState(state);
+  const validated = parsePersistedGroupMigrationState({
+    protocolVersion: "org.atgrp.v1",
+    ...state,
+  });
   if (!validated) {
     throw new Error("Cannot persist malformed group migration state.");
   }
@@ -1127,7 +1147,9 @@ export function parseGroupCallbackAppState(raw: string | null): GroupCallbackApp
         : undefined;
     const purpose =
       obj.purpose === "admin" ||
+      obj.purpose === "members" ||
       obj.purpose === "moderator" ||
+      obj.purpose === "basic" ||
       obj.purpose === "recovery" ||
       obj.purpose === "step_up" ||
       obj.purpose === "create"

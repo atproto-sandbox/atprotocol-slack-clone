@@ -7,16 +7,17 @@ import {
   channelRoleKey,
   channelUri,
   groupMembersUri,
+  groupMetaUri,
   inboxUri,
   parseSpaceUri,
   SELF_SKEY,
   workspaceUri,
 } from "@flock/protocol/keys";
 import {
+  ATGRP_COLLECTION,
+  ATGRP_POLICY,
   COLLECTION,
   FLOCK_EXTENSION_FIELD,
-  OPENSOCIAL_COLLECTION,
-  OPENSOCIAL_POLICY,
   SPACE_TYPE,
 } from "@flock/protocol/nsids";
 import type { FakeNetwork } from "@flock/testing/fake-network";
@@ -92,7 +93,7 @@ export async function createChannel(
       .query("com.atproto.space.getRecord", {
         space: membersSpace,
         repo: authority,
-        collection: OPENSOCIAL_COLLECTION.membership,
+        collection: ATGRP_COLLECTION.membership,
         rkey: member,
       })
       .then(() => true, () => false);
@@ -100,10 +101,10 @@ export async function createChannel(
       await owner.procedure("com.atproto.space.putRecord", {
         space: membersSpace,
         repo: authority,
-        collection: OPENSOCIAL_COLLECTION.membership,
+        collection: ATGRP_COLLECTION.membership,
         rkey: member,
         record: {
-          $type: OPENSOCIAL_COLLECTION.membership,
+          $type: ATGRP_COLLECTION.membership,
           roles: ["member"],
           createdAt,
         },
@@ -114,10 +115,10 @@ export async function createChannel(
   await owner.procedure("com.atproto.space.putRecord", {
     space: membersSpace,
     repo: authority,
-    collection: OPENSOCIAL_COLLECTION.role,
+    collection: ATGRP_COLLECTION.role,
     rkey: roleKey,
     record: {
-      $type: OPENSOCIAL_COLLECTION.role,
+      $type: ATGRP_COLLECTION.role,
       displayName: `#${skey} member`,
     },
   });
@@ -126,7 +127,7 @@ export async function createChannel(
     spaceType: SPACE_TYPE.channel,
     skey,
     policy: {
-      $type: OPENSOCIAL_POLICY,
+      $type: ATGRP_POLICY,
       publicRead: false,
       unlisted: false,
       grants: [{ role: roleKey, read: true, write: true }],
@@ -140,7 +141,7 @@ export async function createChannel(
       .query<{ value: { roles?: string[] } }>("com.atproto.space.getRecord", {
         space: membersSpace,
         repo: authority,
-        collection: OPENSOCIAL_COLLECTION.membership,
+        collection: ATGRP_COLLECTION.membership,
         rkey: member,
       })
       .then((res) => res.value.roles ?? ["member"], () => ["member"]);
@@ -148,10 +149,10 @@ export async function createChannel(
     await owner.procedure("com.atproto.space.putRecord", {
       space: membersSpace,
       repo: authority,
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: member,
       record: {
-        $type: OPENSOCIAL_COLLECTION.membership,
+        $type: ATGRP_COLLECTION.membership,
         roles: nextRoles,
         createdAt,
       },
@@ -273,13 +274,13 @@ export async function createWorkspace(
   const workspace = workspaceUri(groupDid);
   const inbox = inboxUri(groupDid, SELF_SKEY);
   const membersSpace = groupMembersUri(groupDid);
-  const metaSpace = `at:space/${groupDid}/group.opensocial.meta/self`;
+  const metaSpace = groupMetaUri(groupDid);
 
   await owner.procedure("com.atproto.space.createSpace", {
     spaceType: SPACE_TYPE.workspace,
     skey: SELF_SKEY,
     policy: {
-      $type: OPENSOCIAL_POLICY,
+      $type: ATGRP_POLICY,
       publicRead: false,
       unlisted: false,
       grants: [
@@ -294,7 +295,7 @@ export async function createWorkspace(
     spaceType: SPACE_TYPE.inbox,
     skey: SELF_SKEY,
     policy: {
-      $type: OPENSOCIAL_POLICY,
+      $type: ATGRP_POLICY,
       publicRead: false,
       unlisted: false,
       grants: [
@@ -321,10 +322,10 @@ export async function createWorkspace(
       await owner.procedure("com.atproto.space.putRecord", {
         space: membersSpace,
         repo: groupDid,
-        collection: OPENSOCIAL_COLLECTION.role,
+        collection: ATGRP_COLLECTION.role,
         rkey: privRole,
         record: {
-          $type: OPENSOCIAL_COLLECTION.role,
+          $type: ATGRP_COLLECTION.role,
           displayName: `#${channelSkey} member`,
         },
       });
@@ -338,20 +339,20 @@ export async function createWorkspace(
     const policy =
       channel.visibility === "archived"
         ? {
-            $type: OPENSOCIAL_POLICY,
+            $type: ATGRP_POLICY,
             publicRead: false,
             unlisted: true,
             grants: [],
           }
         : channel.visibility === "private"
           ? {
-              $type: OPENSOCIAL_POLICY,
+              $type: ATGRP_POLICY,
               publicRead: false,
               unlisted: true,
               grants: [{ role: privRole, read: true, write: true }],
             }
           : {
-              $type: OPENSOCIAL_POLICY,
+              $type: ATGRP_POLICY,
               publicRead: false,
               unlisted: false,
               grants: [
@@ -384,10 +385,10 @@ export async function createWorkspace(
     await owner.procedure("com.atproto.space.putRecord", {
       space: membersSpace,
       repo: groupDid,
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: did,
       record: {
-        $type: OPENSOCIAL_COLLECTION.membership,
+        $type: ATGRP_COLLECTION.membership,
         roles: [...roles],
         createdAt,
       },
@@ -397,11 +398,11 @@ export async function createWorkspace(
       const memRec = await owner.query<{ value: Record<string, unknown> }>("com.atproto.space.getRecord", {
         space: membersSpace,
         repo: groupDid,
-        collection: OPENSOCIAL_COLLECTION.membership,
+        collection: ATGRP_COLLECTION.membership,
         rkey: did,
       });
       const inc = memRec.value[FLOCK_EXTENSION_FIELD.incarnation];
-      await network.writeAs(did, membersSpace, OPENSOCIAL_COLLECTION.acceptance, SELF_SKEY, {
+      await network.writeAs(did, membersSpace, ATGRP_COLLECTION.confirmation, SELF_SKEY, {
         createdAt,
         ...(typeof inc === "string" ? { [FLOCK_EXTENSION_FIELD.incarnation]: inc } : {}),
       });

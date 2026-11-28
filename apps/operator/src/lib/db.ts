@@ -17,6 +17,7 @@ export type OperationState =
 
 export const OPERATION_TAKEOVER_MIGRATION = 4;
 export const SPACE_URI_MIGRATION = 5;
+export const ATGRP_MIGRATION = 6;
 
 export interface SlackDb {
   oauth_request_lock: { name: string; token: string; expires_at: number };
@@ -310,6 +311,30 @@ export function getDb(): Kysely<SlackDb> {
       rawDatabase
         .prepare("INSERT INTO schema_migration (version, applied_at) VALUES (?, ?)")
         .run(SPACE_URI_MIGRATION, Math.floor(Date.now() / 1000));
+    }
+    const atgrpMigration = rawDatabase.prepare("SELECT 1 FROM schema_migration WHERE version = ?").get(ATGRP_MIGRATION);
+    if (!atgrpMigration) {
+      const unfinished = rawDatabase
+        .prepare("SELECT COUNT(*) AS cnt FROM operation WHERE state IN ('queued', 'running', 'pending', 'paused')")
+        .get() as { cnt: number };
+      if (unfinished.cnt > 0) {
+        throw new Error(
+          `Cannot migrate Operator SQLite database to Atmosphere Groups (org.atgrp.*) while ${unfinished.cnt} unfinished operation(s) exist in 'operation'.`,
+        );
+      }
+      const legacyInvitesLike = "%/group.opensocial.invites/%";
+      rawDatabase.prepare("DELETE FROM notification_registration WHERE space_uri LIKE ?").run(legacyInvitesLike);
+      rawDatabase.prepare("DELETE FROM notification_registration_failure WHERE space_uri LIKE ?").run(legacyInvitesLike);
+      rawDatabase
+        .prepare("DELETE FROM space_notification WHERE space_type = 'group.opensocial.invites' OR space_uri LIKE ?")
+        .run(legacyInvitesLike);
+      rawDatabase
+        .prepare("DELETE FROM space_notification_space_floor WHERE space_type = 'group.opensocial.invites' OR space_uri LIKE ?")
+        .run(legacyInvitesLike);
+      rawDatabase.prepare("DELETE FROM space_notification_type_floor WHERE space_type = 'group.opensocial.invites'").run();
+      rawDatabase
+        .prepare("INSERT INTO schema_migration (version, applied_at) VALUES (?, ?)")
+        .run(ATGRP_MIGRATION, Math.floor(Date.now() / 1000));
     }
     rawDatabase.exec(`CREATE INDEX IF NOT EXISTS operation_workspace_recovery
       ON operation(workspace, workspace_uri, state, created_at);

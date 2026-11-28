@@ -823,7 +823,12 @@ Then("the app server holds no member session and no member token", async functio
   const grants = dmpAuthorityGrants(session.second.databasePath, session.key);
   assert.deepEqual(grants.map((grant) => grant.did), [session.groupDid], "the only grant is the dedicated group DID's; neither alice nor bob has a personal grant on the server");
   for (const grant of grants) {
-    assert.ok(grant.scope.includes("include:group.opensocial.authManageGroup"), `it is the OpenSocial group-authority grant: ${grant.scope.join(" ")}`);
+    assert.ok(
+      grant.scope.includes("include:org.atgrp.authManageAdmin") ||
+        (grant.scope.some((s) => s.startsWith("space:org.atgrp.inbox?")) &&
+          grant.scope.some((s) => s.includes("lxm=org.atgrp.listJoinRequests"))),
+      `it is the Atmosphere Groups authority grant: ${grant.scope.join(" ")}`,
+    );
     assert.deepEqual(grant.scope.filter((scope) => scope.includes(DM_SPACE_TYPE)), [], `it names no DM space: ${grant.scope.join(" ")}`);
   }
   assert.ok(session.dmScopeShown.some((scope) => scope.includes(`space:${DM_SPACE_TYPE}.conversation`)), "the DM permission does exist: it was asked of, and approved at the PDS by, the browser's session");

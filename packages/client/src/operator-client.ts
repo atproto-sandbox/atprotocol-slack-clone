@@ -132,7 +132,7 @@ export function operatorResponseFailure(status: number, ok: boolean, body: { err
  * The operator's methods, called with a service token the member's own host issues for that one method and the operator's
  * audience. No cookie and no server session: what a browser, a bot or a test holds is enough.
  */
-/** What an authority flow is for, and for which OpenSocial group DID (`reauthorize` requires `authority`). */
+/** What an authority flow is for, and for which Atmosphere group DID (`reauthorize` requires `authority`). */
 export type AuthorityFlowRequest =
   | {
       purpose: "createWorkspace";
@@ -200,7 +200,7 @@ export class OperatorClient {
     }
   }
 
-  /** Requests a stateless per-caller PDS webhook notification target for personal `group.opensocial.invites/self` after proving credential possession. */
+  /** Requests a stateless per-caller PDS webhook notification target for personal `org.atgrp.inbox/self` after proving credential possession. */
   async getSpaceNotifyTarget(input: DmNotifyTargetInput, signal?: AbortSignal): Promise<DmNotifyTarget> {
     const timeoutMs = this.options.notifyTimeoutMs ?? DEFAULT_DM_NOTIFY_TIMEOUT_MS;
     const { signal: composedSignal, cleanup } = createTimeoutSignal(timeoutMs, signal);
@@ -211,7 +211,7 @@ export class OperatorClient {
     }
   }
 
-  /** Creates the Flock workspace inside the OpenSocial group authorized for `(name, operationId)` (or explicit `authority` DID). */
+  /** Creates the Flock workspace inside the Atmosphere group authorized for `(name, operationId)` (or explicit `authority` DID). */
   createWorkspace(input: {
     name: string;
     operationId: string;

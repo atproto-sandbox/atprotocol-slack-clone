@@ -1,7 +1,17 @@
+import { randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import Database from "better-sqlite3";
 import { normalizeLegacySpaceUri } from "@flock/protocol/keys";
+
+export const ATGRP_SCHEMA_VERSION = "1";
+
+export class IncompatibleGroupHostSchemaError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "IncompatibleGroupHostSchemaError";
+  }
+}
 
 export const SCHEMA_TABLE_CLASSIFICATION = {
   GROUP_PURGED_TABLES: [
@@ -22,7 +32,9 @@ export const SCHEMA_TABLE_CLASSIFICATION = {
     "join_request",
     "join_operation_state",
     "mod_event",
+    "mod_subject_tag",
     "mod_subject",
+    "mod_ejection_eligibility",
     "known_app_subject",
     "issued_credential",
     "revoked_credential",
@@ -34,6 +46,7 @@ export const SCHEMA_TABLE_CLASSIFICATION = {
     "migration_session",
     "revoked_migration_jti",
     "oauth_par",
+    "oauth_consent_snapshot",
     "upstream_oauth_state",
     "oauth_code",
     "oauth_refresh_token",
@@ -47,11 +60,17 @@ export const SCHEMA_TABLE_CLASSIFICATION = {
   ] as const,
   RETAINED_TOMBSTONE_TABLES: ["group_deletion_journal"] as const,
   GLOBAL_TTL_TABLES: ["dpop_jti", "client_assertion_jti"] as const,
+  GLOBAL_TABLES: ["host_meta"] as const,
 } as const;
 
 export type GroupHostDb = Database.Database;
 
 const SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS host_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS group_account (
   did TEXT PRIMARY KEY,
   handle TEXT NOT NULL UNIQUE,
@@ -97,6 +116,7 @@ CREATE TABLE IF NOT EXISTS group_creation_journal (
   redirect_url TEXT,
   par_state TEXT,
   par_response_mode TEXT,
+  reviewed_scope TEXT,
   code_expires_at INTEGER,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
@@ -295,24 +315,48 @@ CREATE TABLE IF NOT EXISTS mod_subject (
   group_did TEXT NOT NULL,
   subject TEXT NOT NULL,
   cid_key TEXT NOT NULL,
-  status TEXT NOT NULL CHECK (status IN ('open', 'resolved', 'escalated')),
+  status TEXT NOT NULL CHECK (status IN ('open', 'resolved')),
   report_count INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   PRIMARY KEY (group_did, subject, cid_key)
 );
-CREATE INDEX IF NOT EXISTS idx_mod_subject_queue ON mod_subject (group_did, status, updated_at DESC, subject ASC, cid_key ASC);
+CREATE INDEX IF NOT EXISTS idx_mod_subject_created ON mod_subject (group_did, created_at, subject, cid_key);
+CREATE INDEX IF NOT EXISTS idx_mod_subject_status_created ON mod_subject (group_did, status, created_at, subject, cid_key);
+CREATE INDEX IF NOT EXISTS idx_mod_subject_updated ON mod_subject (group_did, updated_at DESC, subject ASC, cid_key ASC);
+CREATE INDEX IF NOT EXISTS idx_mod_subject_status_updated ON mod_subject (group_did, status, updated_at DESC, subject ASC, cid_key ASC);
+
+CREATE TABLE IF NOT EXISTS mod_subject_tag (
+  group_did TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  cid_key TEXT NOT NULL,
+  tag TEXT NOT NULL,
+  PRIMARY KEY (group_did, subject, cid_key, tag)
+);
+CREATE INDEX IF NOT EXISTS idx_mod_subject_tag_lookup ON mod_subject_tag (group_did, tag, subject, cid_key);
+
+CREATE TABLE IF NOT EXISTS mod_ejection_eligibility (
+  group_did TEXT NOT NULL,
+  member_did TEXT NOT NULL,
+  ejected_at TEXT NOT NULL,
+  PRIMARY KEY (group_did, member_did)
+);
 
 CREATE TABLE IF NOT EXISTS mod_event (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   group_did TEXT NOT NULL,
   subject TEXT NOT NULL,
   cid_key TEXT NOT NULL,
+  subject_owner_did TEXT NOT NULL,
+  is_self_visible INTEGER NOT NULL CHECK (is_self_visible IN (0, 1)),
   created_at TEXT NOT NULL,
   created_by TEXT,
   event_json TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_mod_event_subject ON mod_event (group_did, subject, cid_key, seq ASC);
+CREATE INDEX IF NOT EXISTS idx_mod_event_subject_seq ON mod_event (group_did, subject, seq DESC);
+CREATE INDEX IF NOT EXISTS idx_mod_event_subject_cid_seq ON mod_event (group_did, subject, cid_key, seq DESC);
+CREATE INDEX IF NOT EXISTS idx_mod_event_self_seq ON mod_event (group_did, subject_owner_did, is_self_visible, seq DESC);
+CREATE INDEX IF NOT EXISTS idx_mod_event_self_subject_seq ON mod_event (group_did, subject_owner_did, is_self_visible, subject, seq DESC);
 
 CREATE TABLE IF NOT EXISTS known_app_subject (
   group_did TEXT NOT NULL,
@@ -467,6 +511,19 @@ CREATE TABLE IF NOT EXISTS oauth_par (
 CREATE INDEX IF NOT EXISTS idx_oauth_par_exp ON oauth_par (expires_at);
 CREATE INDEX IF NOT EXISTS idx_oauth_par_group ON oauth_par (group_did);
 
+CREATE TABLE IF NOT EXISTS oauth_consent_snapshot (
+  snapshot_id TEXT PRIMARY KEY,
+  par_request_uri TEXT NOT NULL,
+  group_did TEXT NOT NULL,
+  authorizing_user_did TEXT NOT NULL,
+  reviewed_scope TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  consumed_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_oauth_consent_exp ON oauth_consent_snapshot (expires_at);
+CREATE INDEX IF NOT EXISTS idx_oauth_consent_group ON oauth_consent_snapshot (group_did);
+
 CREATE TABLE IF NOT EXISTS upstream_oauth_state (
   state TEXT PRIMARY KEY,
   group_did TEXT,
@@ -587,8 +644,55 @@ CREATE TABLE IF NOT EXISTS client_assertion_jti (
 CREATE INDEX IF NOT EXISTS idx_client_assertion_exp ON client_assertion_jti (expires_at);
 `;
 
+/**
+ * Read-only pre-open probe for existing SQLite files BEFORE any read-write open, `chmodSync`, or `PRAGMA WAL`.
+ * Rejects any unmarked / pre-R15 database (including empty R14 schemas or tombstone-only databases) without
+ * modifying a single byte or creating `-wal`/`-shm` sidecars.
+ */
+function probeExistingGroupHostDbReadOnly(databasePath: string): void {
+  if (!existsSync(databasePath)) {
+    return;
+  }
+  let probe: Database.Database | null = null;
+  try {
+    probe = new Database(databasePath, { readonly: true, fileMustExist: true });
+  } catch (err) {
+    const code = (err as { code?: string })?.code;
+    if (!existsSync(databasePath) && (code === "SQLITE_CANTOPEN" || code === "ENOENT")) {
+      return;
+    }
+    throw err;
+  }
+  try {
+    const tables = (
+      probe
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT GLOB 'sqlite_*'")
+        .all() as Array<{ name: string }>
+    ).map((r) => r.name);
+    if (tables.length === 0) {
+      return;
+    }
+    if (!tables.includes("host_meta")) {
+      throw new IncompatibleGroupHostSchemaError(
+        `Refusing to open legacy/unmarked Group Host database at '${databasePath}': R15 (org.atgrp.*) requires a fresh database.`,
+      );
+    }
+    const metaRow = probe
+      .prepare("SELECT value FROM host_meta WHERE key = 'atgrp_schema_version'")
+      .get() as { value: string } | undefined;
+    if (metaRow?.value !== ATGRP_SCHEMA_VERSION) {
+      throw new IncompatibleGroupHostSchemaError(
+        `Unsupported Group Host schema version '${metaRow?.value ?? "missing"}' in '${databasePath}' (expected '${ATGRP_SCHEMA_VERSION}').`,
+      );
+    }
+  } finally {
+    probe.close();
+  }
+}
+
 export function openGroupHostDb(databasePath: string): GroupHostDb {
   if (databasePath !== ":memory:") {
+    probeExistingGroupHostDbReadOnly(databasePath);
     const parent = dirname(databasePath);
     if (!existsSync(parent)) {
       mkdirSync(parent, { recursive: true, mode: 0o700 });
@@ -606,36 +710,17 @@ export function openGroupHostDb(databasePath: string): GroupHostDb {
   db.pragma("synchronous = NORMAL");
   db.pragma("foreign_keys = ON");
   db.pragma("busy_timeout = 5000");
-  db.exec(SCHEMA_SQL);
-  const migCols = new Set(
-    (db.prepare("PRAGMA table_info(migration_session)").all() as Array<{ name: string }>).map((c) => c.name),
-  );
-  if (!migCols.has("plc_submitting_at")) {
-    db.exec("ALTER TABLE migration_session ADD COLUMN plc_submitting_at INTEGER");
-  }
-  if (!migCols.has("pending_plc_op_cid")) {
-    db.exec("ALTER TABLE migration_session ADD COLUMN pending_plc_op_cid TEXT");
-  }
-  if (!migCols.has("pending_plc_op_json")) {
-    db.exec("ALTER TABLE migration_session ADD COLUMN pending_plc_op_json TEXT");
-  }
-  if (!migCols.has("prev_refresh_jti")) {
-    db.exec("ALTER TABLE migration_session ADD COLUMN prev_refresh_jti TEXT");
-  }
-  if (!migCols.has("refresh_idempotency_key")) {
-    db.exec("ALTER TABLE migration_session ADD COLUMN refresh_idempotency_key TEXT");
-  }
-  if (!migCols.has("refresh_grace_expires_at")) {
-    db.exec("ALTER TABLE migration_session ADD COLUMN refresh_grace_expires_at INTEGER");
-  }
-  for (const tbl of ["oauth_par", "oauth_code", "oauth_session"] as const) {
-    const cols = new Set(
-      (db.prepare(`PRAGMA table_info(${tbl})`).all() as Array<{ name: string }>).map((c) => c.name),
+
+  const initTx = db.transaction(() => {
+    db.exec(SCHEMA_SQL);
+    db.prepare("INSERT OR IGNORE INTO host_meta (key, value) VALUES ('atgrp_schema_version', ?)").run(
+      ATGRP_SCHEMA_VERSION,
     );
-    if (!cols.has("login_step_up_at")) {
-      db.exec(`ALTER TABLE ${tbl} ADD COLUMN login_step_up_at INTEGER`);
-    }
-  }
+    db.prepare("INSERT OR IGNORE INTO host_meta (key, value) VALUES ('mod_event_id_secret', ?)").run(
+      randomBytes(32).toString("hex"),
+    );
+  });
+  initTx.immediate();
   migrateLegacySpaceUrisSync(db);
   return db;
 }
@@ -655,6 +740,7 @@ const LEGACY_SPACE_URI_COLUMNS: ReadonlyArray<readonly [table: string, column: s
   ["invite_delivery", "invite_uri"],
   ["invite_delivery", "space_uri"],
   ["mod_subject", "subject"],
+  ["mod_subject_tag", "subject"],
   ["mod_event", "subject"],
   ["issued_credential", "space_uri"],
   ["revoked_credential", "space_uri"],
@@ -739,7 +825,7 @@ export function migrateLegacySpaceUrisSync(db: GroupHostDb): void {
 }
 
 /**
- * Deletes every row belonging to `groupDid` across all 39 tables in `SCHEMA_TABLE_CLASSIFICATION.GROUP_PURGED_TABLES`.
+ * Deletes every row belonging to `groupDid` across all 42 tables in `SCHEMA_TABLE_CLASSIFICATION.GROUP_PURGED_TABLES`.
  * Caller MUST invoke inside an active transaction or under `withGroupRepoLock(groupDid, ...)`.
  */
 export function purgeGroupDataSync(db: GroupHostDb, groupDid: string): void {
@@ -761,7 +847,9 @@ export function purgeGroupDataSync(db: GroupHostDb, groupDid: string): void {
   db.prepare("DELETE FROM join_request WHERE group_did = ?").run(groupDid);
   db.prepare("DELETE FROM join_operation_state WHERE group_did = ?").run(groupDid);
   db.prepare("DELETE FROM mod_event WHERE group_did = ?").run(groupDid);
+  db.prepare("DELETE FROM mod_subject_tag WHERE group_did = ?").run(groupDid);
   db.prepare("DELETE FROM mod_subject WHERE group_did = ?").run(groupDid);
+  db.prepare("DELETE FROM mod_ejection_eligibility WHERE group_did = ?").run(groupDid);
   db.prepare("DELETE FROM known_app_subject WHERE group_did = ?").run(groupDid);
   db.prepare("DELETE FROM issued_credential WHERE group_did = ?").run(groupDid);
   db.prepare("DELETE FROM revoked_credential WHERE group_did = ?").run(groupDid);
@@ -773,6 +861,7 @@ export function purgeGroupDataSync(db: GroupHostDb, groupDid: string): void {
   db.prepare("DELETE FROM migration_session WHERE group_did = ?").run(groupDid);
   db.prepare("DELETE FROM revoked_migration_jti WHERE group_did = ?").run(groupDid);
   db.prepare("DELETE FROM oauth_par WHERE group_did = ?").run(groupDid);
+  db.prepare("DELETE FROM oauth_consent_snapshot WHERE group_did = ?").run(groupDid);
   db.prepare("DELETE FROM upstream_oauth_state WHERE group_did = ?").run(groupDid);
   db.prepare("DELETE FROM oauth_code WHERE group_did = ?").run(groupDid);
   db.prepare("DELETE FROM oauth_refresh_token WHERE group_did = ?").run(groupDid);
@@ -874,6 +963,9 @@ export function pruneExpiredHostState(db: GroupHostDb, nowMs = Date.now()): void
     ).run(nowMs);
     db.prepare(
       "DELETE FROM oauth_par WHERE rowid IN (SELECT rowid FROM oauth_par WHERE expires_at <= ? LIMIT 500)",
+    ).run(nowMs);
+    db.prepare(
+      "DELETE FROM oauth_consent_snapshot WHERE rowid IN (SELECT rowid FROM oauth_consent_snapshot WHERE expires_at <= ? LIMIT 500)",
     ).run(nowMs);
     db.prepare(
       "DELETE FROM upstream_oauth_state WHERE rowid IN (SELECT rowid FROM upstream_oauth_state WHERE expires_at <= ? LIMIT 500)",

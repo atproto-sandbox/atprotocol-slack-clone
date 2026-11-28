@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { SpaceCredentialError } from "@flock/protocol/atproto/space-credential-core";
 import { channelUri, groupMembersUri, SELF_SKEY, workspaceUri } from "@flock/protocol/keys";
-import { COLLECTION, OPENSOCIAL_COLLECTION, OPENSOCIAL_POLICY, SPACE_TYPE } from "@flock/protocol/nsids";
+import { ATGRP_COLLECTION, ATGRP_POLICY, COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
 import { FakeNetwork } from "@flock/testing/fake-network";
 import { deleteChannelMessage, editChannelMessage, postChannelMessage } from "./channel";
 import type { DeskShellDeps } from "./membership";
@@ -38,7 +38,7 @@ async function setupGroupWithChannel() {
   const ch = channelUri(GROUP, "general");
   const membersUri = groupMembersUri(GROUP);
   const policy = {
-    $type: OPENSOCIAL_POLICY,
+    $type: ATGRP_POLICY,
     publicRead: false,
     unlisted: false,
     grants: [
@@ -52,9 +52,9 @@ async function setupGroupWithChannel() {
     await owner.procedure("com.atproto.space.putRecord", {
       space: membersUri,
       repo: GROUP,
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: did,
-      record: { $type: OPENSOCIAL_COLLECTION.membership, roles: [...roles], createdAt: "2026-11-20T00:00:00.000Z" },
+      record: { $type: ATGRP_COLLECTION.membership, roles: [...roles], createdAt: "2026-11-20T00:00:00.000Z" },
     });
   }
   return { net, ws, ch, membersUri };
@@ -115,7 +115,7 @@ test("channel writes mint fresh credentials, use createRecord, verify top-level 
   await net.clientFor(GROUP).procedure("com.atproto.space.deleteRecord", {
     space: membersUri,
     repo: GROUP,
-    collection: OPENSOCIAL_COLLECTION.membership,
+    collection: ATGRP_COLLECTION.membership,
     rkey: BOB,
   });
   await assert.rejects(

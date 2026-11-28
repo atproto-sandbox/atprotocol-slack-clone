@@ -1,6 +1,6 @@
 import { createHash, createHmac, hkdfSync, timingSafeEqual } from "node:crypto";
 import { getConfig, isLoopback } from "@flock/deployment/config";
-import { isDid, parseDmSpaceUri, parsePersonalInvitesUri, parseSpaceUri } from "@flock/protocol/keys";
+import { isDid, parseDmSpaceUri, parsePersonalInboxUri, parseSpaceUri } from "@flock/protocol/keys";
 import { getOperatorConfig } from "../config";
 import { getRawDb } from "../lib/db";
 import { WebhookAuthError } from "./errors";
@@ -94,7 +94,7 @@ export function deriveDmNotifyToken(
 /**
  * Derives an epoch-bounded, stateless, deterministic per-caller personal-invites webhook token:
  * `inv1.<epochHex>.<base64url(callerDid)>.<base64url(hmacSha256(invKey, "inv1\0" + epochHex + "\0" + space + "\0" + callerDid))>`.
- * Valid exclusively for `at://<callerDid>/space/group.opensocial.invites/self` across `[epoch, epoch - 1]`.
+ * Valid exclusively for `at://<callerDid>/space/org.atgrp.inbox/self` across `[epoch, epoch - 1]`.
  */
 export function deriveSpaceNotifyToken(
   space: string,
@@ -102,9 +102,9 @@ export function deriveSpaceNotifyToken(
   encryptionKey: Buffer = getOperatorConfig().encryptionKey,
   nowMs: number = Date.now(),
 ): string {
-  const parsed = parsePersonalInvitesUri(space);
+  const parsed = parsePersonalInboxUri(space);
   if (!parsed || parsed.userDid !== callerDid) {
-    throw new Error("Personal space notification tokens can only be derived for the caller's own group.opensocial.invites/self space.");
+    throw new Error("Personal space notification tokens can only be derived for the caller's own org.atgrp.inbox/self space.");
   }
   return deriveStatelessNotifyToken({
     version: INVITE_TOKEN_VERSION,
@@ -173,7 +173,7 @@ function constantTimeStringEqual(left: string, right: string): boolean {
 /**
  * Authenticates `(space, token)` on `confirmRegistration` and `notifySpaceUpdate`:
  * - For DM spaces (`dm.inbox` / `dm.conversation`), verifies the epoch-bounded per-caller `dm1` HMAC in constant time.
- * - For personal invites spaces (`group.opensocial.invites/self`), verifies the epoch-bounded per-caller `inv1` HMAC
+ * - For personal invites spaces (`org.atgrp.inbox/self`), verifies the epoch-bounded per-caller `inv1` HMAC
  *   and asserts `parsed.userDid === callerDid`.
  * - For operator-managed group/workspace spaces, matches `notification_registration.token` for `operatorServiceRef` in constant time.
  */
@@ -203,7 +203,7 @@ export function authenticateSpaceWebhook(
     return { kind: "dm", callerDid };
   }
 
-  const personalInvites = parsePersonalInvitesUri(space);
+  const personalInvites = parsePersonalInboxUri(space);
   if (personalInvites) {
     const callerDid = verifyStatelessNotifyToken({
       token,

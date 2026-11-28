@@ -6,7 +6,7 @@ import {
   inboxUri,
   requestRecordKey,
 } from "@flock/protocol/keys";
-import { COLLECTION, OPENSOCIAL_COLLECTION } from "@flock/protocol/nsids";
+import { COLLECTION, ATGRP_COLLECTION } from "@flock/protocol/nsids";
 import { WORKSPACE_ENVELOPE } from "@flock/protocol/workspace-summary";
 import { putAuthorityRecord } from "../../atproto/space-ops";
 import type { OperatorActor } from "../actor";
@@ -25,7 +25,7 @@ import type { OperationKind, OperatorRequest } from "./kind";
 /**
  * Preserved strictly for `SPACE_TYPE.inbox` private-channel join requests with its exact released shape
  * (`required: ["request", "requestId", "decision"]`) and exact 9 step names (Rev 29 §3.2 item 6.5), mapping
- * private-channel access onto `channel-<skey>` role assignment on `group.opensocial.membership/<requester>`
+ * private-channel access onto `channel-<skey>` role assignment on `org.atgrp.membership/<requester>`
  * and making legacy channel-roster steps idempotent no-ops so pre-R13 pending journal rows replay cleanly!
  */
 export const decideJoinRequestKind: OperationKind = {
@@ -144,7 +144,7 @@ async function decideJoinRequest(
         await putAuthorityRecord(
           actor.session,
           groupMembersUri(groupDid),
-          OPENSOCIAL_COLLECTION.role,
+          ATGRP_COLLECTION.role,
           privRole,
           { displayName: `#${channelName} member` },
         );

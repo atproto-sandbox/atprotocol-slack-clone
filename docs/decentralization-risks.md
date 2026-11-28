@@ -1,6 +1,6 @@
 # Decentralization Risks in Multi-Client ATProto Spaces Workspaces
 
-**Scope:** Open-protocol multi-client collaboration on `group.opensocial.*` and `new.flock.*` (as proved by `@flock/web` + Flock Desk [`apps/desk`](../apps/desk) + `@flock/shell` [`packages/shell`](../packages/shell)).  
+**Scope:** Open-protocol multi-client collaboration on `org.atgrp.*` and `new.flock.*` (as proved by `@flock/web` + Flock Desk [`apps/desk`](../apps/desk) + `@flock/shell` [`packages/shell`](../packages/shell)).  
 **Companion Mitigation Proposal:** [`.ai/plans/decentralization-risk-mitigations.md`](../.ai/plans/decentralization-risk-mitigations.md)
 
 ---
@@ -68,7 +68,7 @@ How can a user be sure they are seeing *every* message they should be? This spli
 |---|---|
 | **Failure Mode** | Opening the protocol to arbitrary third-party clients means: (1) an over-privileged or compromised client with broad OAuth scopes can read/write/delete across unintended modalities (DMs, tasks, invites, operator RPCs); (2) a browser client that blindly fetches untrusted DID documents, handles, or PDS URLs can be turned into a local-network SSRF/probing vector; (3) a malicious member can write forged membership, role, or join-decision records into their own personal PDS repo hoping a buggy third-party client accepts them. |
 | **Already Mitigated Today** | Least-privilege `deskMemberScopes()` ([`scopes.ts`](../packages/protocol/src/scopes.ts)); canonical IPv4/IPv6/CIDR/NAT64/6to4/Teredo/metadata/`.local`/`.internal` SSRF guard in both DID resolution and OAuth fetch ([`did-resolver.ts`](../packages/shell/src/did-resolver.ts), [`session.ts`](../packages/shell/src/session.ts)); strict `repoDid === groupDid` validation (`validateSpaceRecord`) proved by `Ignore spoofed authority records` BDD scenario; strict CSP nonces (`desk-csp.spec.ts`); fail-closed `ensureInvitesSpace()` 4-invariant policy check. |
-| **Open Risk** | Third-party developers writing clients outside this monorepo have no standalone published conformance test harness to verify their client enforces SSRF, authority-author checks, fresh pre-write credentials, and `invites/self` policy invariants before shipping. Also, browser DNS rebinding remains an inherent browser platform limit (documented in `.ai/plans/flock-desk-client.md`). |
+| **Open Risk** | Third-party developers writing clients outside this monorepo have no standalone published conformance test harness to verify their client enforces SSRF, authority-author checks, fresh pre-write credentials, and `inbox/self` policy invariants before shipping. Also, browser DNS rebinding remains an inherent browser platform limit (documented in `.ai/plans/flock-desk-client.md`). |
 
 ---
 
@@ -96,8 +96,8 @@ How can a user be sure they are seeing *every* message they should be? This spli
 
 | Dimension | Details |
 |---|---|
-| **Failure Mode** | Flock currently pins an alpha ATProto Spaces checkout (`f839c47e` + `strict-credential-expiry.patch`) and OpenSocial Groups proposal (`8df0cc82`). Upstream breaking changes in `@atproto/space`, PDS endpoints, or `group.opensocial.*` before stabilization could break deployed independent clients; conversely, public PDSes must adopt Permissioned Spaces before general users can connect without custom PDSes. |
-| **Already Mitigated Today** | Cryptographic pin verification (`verify-pinned-checkout.mjs`), tracked upstream protocol requests (`.ai/upstream/U1`–`U12`), and strict separation of `group.opensocial.*` vs `new.flock.*` lexicons. |
+| **Failure Mode** | Flock currently pins an alpha ATProto Spaces checkout (`f839c47e` + `strict-credential-expiry.patch`) and Atmosphere Groups beta (`0885261c`). Upstream breaking changes in `@atproto/space`, PDS endpoints, or `org.atgrp.*` before stabilization could break deployed independent clients; conversely, public PDSes must adopt Permissioned Spaces before general users can connect without custom PDSes. |
+| **Already Mitigated Today** | Cryptographic pin verification (`verify-pinned-checkout.mjs`), tracked upstream protocol requests (`.ai/upstream/U1`–`U12`), and strict separation of `org.atgrp.*` vs `new.flock.*` lexicons. |
 | **Open Risk** | Production launch requires public DNS `_lexicon.*` publication, upstream landing of `strict-credential-expiry.patch` (and U1–U12 items), and a formal Lexicon versioning/deprecation policy before third-party clients ship to end users. |
 
 ---

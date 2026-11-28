@@ -1,15 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { P256Keypair } from "@atproto/crypto";
 import { isCid, parseCid, toBase64, type LexMap } from "@atproto/lex-data";
-import {
-  AccountPermission,
-  BlobPermission,
-  IdentityPermission,
-  RepoPermission,
-  RpcPermission,
-  ScopePermissions,
-  SpacePermission,
-} from "@atproto/oauth-scopes";
+import { ScopePermissions } from "@atproto/oauth-scopes";
 import type { DidString } from "@atproto/syntax";
 import {
   appRoleKey,
@@ -20,19 +12,19 @@ import {
   isRecordKey,
   isTid,
   parseAnySpaceRecordUri,
-  parsePersonalInvitesUri,
+  parsePersonalInboxUri,
   parseSpaceUri,
-  personalInvitesUri,
+  personalInboxUri,
   SELF_SKEY,
   workspaceUri,
 } from "@flock/protocol/keys";
 import {
+  ATGRP_COLLECTION,
+  ATGRP_POLICY,
+  ATGRP_SPACE_TYPE,
   ATPROTO_SPACE_COLLECTION,
   COLLECTION,
   FLOCK_EXTENSION_FIELD,
-  OPENSOCIAL_COLLECTION,
-  OPENSOCIAL_POLICY,
-  OPENSOCIAL_SPACE_TYPE,
 } from "@flock/protocol/nsids";
 import {
   decodeFlockMembershipExtensions,
@@ -46,9 +38,9 @@ import {
   groupAdminScopes,
   groupModeratorScopes,
   isEffectiveAdminMember,
-  SPACE_DECLARED_COLLECTIONS,
+  isPermissionSubset,
+  type GroupAtgrpPolicy,
   type GroupMembershipRecord,
-  type GroupOpenSocialPolicy,
   type GroupRoleRecord,
 } from "@flock/protocol/scopes";
 
@@ -96,16 +88,20 @@ export type FakeInviteDeliveryRow = {
 export type FakeModSubjectRow = {
   subject: string;
   cidKey: string;
-  status: "open" | "resolved" | "escalated";
+  status: "open" | "resolved";
   reportCount: number;
+  tags: Set<string>;
   createdAt: string;
   updatedAt: string;
 };
 
 export type FakeModEventRow = {
   seq: number;
+  eventId: string;
   subject: string;
   cidKey: string;
+  subjectOwnerDid: string;
+  isSelfVisible: boolean;
   createdAt: string;
   createdBy: string | null;
   event: Record<string, unknown>;
@@ -176,6 +172,7 @@ export type FakeGroupState = {
   joinOperations: Map<string, FakeJoinOperationRow>;
   inviteDeliveries: Map<string, FakeInviteDeliveryRow>;
   modSubjects: Map<string, FakeModSubjectRow>;
+  modEjectionEligibility: Map<string, string>;
   modEvents: FakeModEventRow[];
   nextModSeq: number;
   actionTokens: Map<"delete_account" | "plc_operation", FakeActionTokenRow>;
@@ -185,7 +182,7 @@ export type FakeGroupState = {
 export type GovernanceSnapshot = {
   roles: Map<string, GroupRoleRecord>;
   memberships: Map<string, GroupMembershipRecord>;
-  spacePolicies: Map<string, GroupOpenSocialPolicy>;
+  spacePolicies: Map<string, GroupAtgrpPolicy>;
   knownAppSubjects: Set<string>;
   allAppInstalls: Map<string, { subject: string; active: boolean; channels: Array<{ skey: string; write: boolean }> }>;
   activeAppInstalls: Map<string, { subject: string; active: boolean; channels: Array<{ skey: string; write: boolean }> }>;
@@ -195,48 +192,48 @@ export type GovernanceSnapshot = {
 export function defaultBootstrapRoles(groupDid: string): Record<string, GroupRoleRecord & { $type: string }> {
   return {
     admin: {
-      $type: OPENSOCIAL_COLLECTION.role,
+      $type: ATGRP_COLLECTION.role,
       displayName: "Admin",
       description: "Full administrative control over the group.",
-      assignable: ["*"],
-      scopes: groupAdminScopes(groupDid),
+      canAssign: ["*"],
+      permissions: groupAdminScopes(groupDid).filter((s) => s !== "atproto"),
     },
     moderator: {
-      $type: OPENSOCIAL_COLLECTION.role,
+      $type: ATGRP_COLLECTION.role,
       displayName: "Moderator",
-      description: "Moderation queue, labels, join requests, and invitations.",
-      assignable: ["member"],
-      scopes: groupModeratorScopes(),
+      description: "Moderation queue, labels, and member ejection.",
+      canAssign: ["member"],
+      permissions: groupModeratorScopes().filter((s) => s !== "atproto"),
     },
     member: {
-      $type: OPENSOCIAL_COLLECTION.role,
+      $type: ATGRP_COLLECTION.role,
       displayName: "Member",
       description: "Standard group member.",
       default: true,
-      scopes: [],
+      permissions: [],
     },
   };
 }
 
-export function normalizeOpenSocialPolicy(
+export function normalizeAtgrpPolicy(
   rawPolicy: unknown,
-  context: { groupDid: string; spaceType: string; skey: string },
+  context: { groupDid: string; spaceType: string; skey: string; importMode?: boolean },
   ErrorCtor: new (status: number, code: string, message?: string) => Error,
-): GroupOpenSocialPolicy {
+): GroupAtgrpPolicy {
   const check = validateSpacePolicy(rawPolicy, context);
   if (!check.valid) {
     throw new ErrorCtor(400, check.code ?? "InvalidSpacePolicy", check.reason);
   }
-  const pol = rawPolicy as GroupOpenSocialPolicy;
+  const pol = rawPolicy as GroupAtgrpPolicy;
   return {
-    $type: OPENSOCIAL_POLICY,
+    $type: ATGRP_POLICY,
     publicRead: pol.publicRead === true,
     unlisted: pol.unlisted === true,
     grants: pol.grants.map((g) => ({
       role: g.role,
       ...(g.read !== undefined ? { read: Boolean(g.read) } : {}),
       ...(g.write !== undefined ? { write: Boolean(g.write) } : {}),
-      ...(g.scopes && g.scopes.length > 0 ? { scopes: [...g.scopes] } : {}),
+      ...(g.permissions && g.permissions.length > 0 ? { permissions: [...g.permissions] } : {}),
     })),
   };
 }
@@ -266,6 +263,7 @@ export function checkPostGovernanceInvariants(
   options: {
     allowSoleMemberDeactivation?: boolean;
     deletedRoles?: ReadonlySet<string>;
+    importMode?: boolean;
   } = {},
   ErrorCtor: new (status: number, code: string, message?: string) => Error,
 ): void {
@@ -281,8 +279,8 @@ export function checkPostGovernanceInvariants(
     const parsed = parseSpaceUri(spUri);
     if (parsed) {
       const polCheck = validateSpacePolicy(
-        { $type: OPENSOCIAL_POLICY, ...pol },
-        { groupDid, spaceType: parsed.type, skey: parsed.skey },
+        { $type: ATGRP_POLICY, ...pol },
+        { groupDid, spaceType: parsed.type, skey: parsed.skey, importMode: options.importMode },
       );
       if (!polCheck.valid) {
         throw new ErrorCtor(400, polCheck.code ?? "InvalidRequest", polCheck.reason);
@@ -304,12 +302,12 @@ export function checkPostGovernanceInvariants(
     }
   }
   for (const [rkey, role] of postState.roles) {
-    for (const target of role.assignable ?? []) {
+    for (const target of role.canAssign ?? []) {
       if (target !== "*" && target !== rkey && !postState.roles.has(target)) {
         throw new ErrorCtor(
           400,
           deletedRoles.has(target) ? "RoleInUse" : "UnknownRole",
-          `role/${rkey} assignable references unknown role '${target}'`,
+          `role/${rkey} canAssign references unknown role '${target}'`,
         );
       }
     }
@@ -367,182 +365,7 @@ export function checkPostGovernanceInvariants(
   }
 }
 
-/**
- * Exact structural wildcard containment check (zero sampled probes):
- * verifies every permission in `candidatePerms` is structurally covered by `actorPerms`.
- */
-export function isPermissionSubsetLocal(
-  candidatePerms: ScopePermissions,
-  actorPerms: ScopePermissions,
-  groupDid: string,
-): boolean {
-  const actorIdentity: IdentityPermission[] = [];
-  const actorBlob: BlobPermission[] = [];
-  const actorRepo: RepoPermission[] = [];
-  const actorRpc: RpcPermission[] = [];
-  const actorSpace: SpacePermission[] = [];
-
-  for (const actorToken of actorPerms.scopes) {
-    if (actorToken === "atproto") continue;
-    if (actorToken.startsWith("identity:") || actorToken.startsWith("identity?")) {
-      const parsed = IdentityPermission.fromString(actorToken);
-      if (parsed) actorIdentity.push(parsed);
-    } else if (actorToken.startsWith("blob:") || actorToken.startsWith("blob?")) {
-      const parsed = BlobPermission.fromString(actorToken);
-      if (parsed) actorBlob.push(parsed);
-    } else if (actorToken.startsWith("repo:") || actorToken.startsWith("repo?")) {
-      const parsed = RepoPermission.fromString(actorToken);
-      if (parsed) actorRepo.push(parsed);
-    } else if (actorToken.startsWith("rpc:") || actorToken.startsWith("rpc?")) {
-      const parsed = RpcPermission.fromString(actorToken);
-      if (parsed) actorRpc.push(parsed);
-    } else if (actorToken.startsWith("space:") || actorToken.startsWith("space?")) {
-      let parsed = SpacePermission.fromString(actorToken);
-      if (parsed) {
-        if (parsed.spaceType !== "*" && !parsed.hasCollections) {
-          const declared = SPACE_DECLARED_COLLECTIONS[parsed.spaceType] ?? (["*"] as const);
-          parsed = parsed.withDefaultCollections(declared);
-        }
-        if (parsed.isSelfAuthority) {
-          parsed = parsed.withResolvedAuthority(groupDid as DidString);
-        }
-        actorSpace.push(parsed);
-      }
-    }
-  }
-
-  for (const token of candidatePerms.scopes) {
-    if (token === "atproto") continue;
-
-    if (token.startsWith("account:") || token.startsWith("account?")) {
-      const p = AccountPermission.fromString(token);
-      if (!p) return false;
-      for (const action of p.action) {
-        if (!actorPerms.allowsAccount({ attr: p.attr, action })) return false;
-      }
-      continue;
-    }
-
-    if (token.startsWith("identity:") || token.startsWith("identity?")) {
-      const p = IdentityPermission.fromString(token);
-      if (!p) return false;
-      const ok = actorIdentity.some((a) => (p.attr === "*" ? a.attr === "*" : a.attr === "*" || a.attr === p.attr));
-      if (!ok) return false;
-      continue;
-    }
-
-    if (token.startsWith("blob:") || token.startsWith("blob?")) {
-      const p = BlobPermission.fromString(token);
-      if (!p) return false;
-      for (const accept of p.accept) {
-        if (accept === "*/*") {
-          if (!actorBlob.some((a) => a.accept.includes("*/*"))) return false;
-        } else if (accept.endsWith("/*")) {
-          if (!actorBlob.some((a) => a.accept.includes("*/*") || a.accept.includes(accept))) return false;
-        } else {
-          const baseWild = `${accept.split("/", 1)[0]}/*` as typeof accept;
-          if (
-            !actorBlob.some(
-              (a) => a.accept.includes("*/*") || a.accept.includes(baseWild) || a.accept.includes(accept),
-            )
-          ) {
-            return false;
-          }
-        }
-      }
-      continue;
-    }
-
-    if (token.startsWith("repo:") || token.startsWith("repo?")) {
-      const p = RepoPermission.fromString(token);
-      if (!p) return false;
-      for (const col of p.collection) {
-        for (const action of p.action) {
-          if (col === "*") {
-            if (!actorRepo.some((a) => a.action.includes(action) && a.collection.includes("*"))) {
-              return false;
-            }
-          } else if (
-            !actorRepo.some((a) => a.action.includes(action) && (a.collection.includes("*") || a.collection.includes(col)))
-          ) {
-            return false;
-          }
-        }
-      }
-      continue;
-    }
-
-    if (token.startsWith("rpc:") || token.startsWith("rpc?")) {
-      const p = RpcPermission.fromString(token);
-      if (!p) return false;
-      for (const lxm of p.lxm) {
-        const ok = actorRpc.some(
-          (a) =>
-            (p.aud === "*" ? a.aud === "*" : a.aud === "*" || a.aud === p.aud) &&
-            (lxm === "*" ? a.lxm.includes("*") : a.lxm.includes("*") || a.lxm.includes(lxm)),
-        );
-        if (!ok) return false;
-      }
-      continue;
-    }
-
-    if (token.startsWith("space:") || token.startsWith("space?")) {
-      let p = SpacePermission.fromString(token);
-      if (!p) return false;
-      if (p.spaceType !== "*" && !p.hasCollections) {
-        const declared = SPACE_DECLARED_COLLECTIONS[p.spaceType] ?? (["*"] as const);
-        p = p.withDefaultCollections(declared);
-      }
-      const pType = p.spaceType;
-      const pAuth = p.authority === "self" ? (groupDid as DidString) : p.authority;
-      const pSkey = p.skey;
-
-      const targetCovered = (a: SpacePermission): boolean => {
-        const aAuth = a.authority === "self" ? (groupDid as DidString) : a.authority;
-        return (
-          (pType === "*" ? a.spaceType === "*" : a.spaceType === "*" || a.spaceType === pType) &&
-          (pAuth === "*" ? aAuth === "*" : aAuth === "*" || aAuth === pAuth) &&
-          (pSkey === "*" ? a.skey === "*" : a.skey === "*" || a.skey === pSkey)
-        );
-      };
-
-      if (p.manage) {
-        for (const manage of p.manage) {
-          if (!actorSpace.some((a) => targetCovered(a) && Boolean(a.manage?.includes(manage)))) {
-            return false;
-          }
-        }
-      }
-      for (const action of p.action) {
-        if (action === "read") {
-          if (!actorSpace.some((a) => targetCovered(a) && a.action.includes("read"))) return false;
-        } else if (action === "read_self") {
-          if (
-            !actorSpace.some(
-              (a) => targetCovered(a) && (a.action.includes("read") || a.action.includes("read_self")),
-            )
-          ) {
-            return false;
-          }
-        } else if (p.collection) {
-          for (const col of p.collection) {
-            const ok = actorSpace.some(
-              (a) =>
-                targetCovered(a) &&
-                a.action.includes(action) &&
-                Boolean(a.collection && (col === "*" ? a.collection.includes("*") : a.collection.includes("*") || a.collection.includes(col))),
-            );
-            if (!ok) return false;
-          }
-        }
-      }
-      continue;
-    }
-
-    return false;
-  }
-  return true;
-}
+export const isPermissionSubsetLocal = isPermissionSubset;
 
 function canonicalizePolicyGrantScopes(
   rawScopes: readonly string[] | undefined,
@@ -567,8 +390,8 @@ export function checkRoleAndAssignmentEscalation(params: {
     spaceUri?: string;
     spaceType: string;
     skey: string;
-    policy: GroupOpenSocialPolicy;
-    prevPolicy?: GroupOpenSocialPolicy;
+    policy: GroupAtgrpPolicy;
+    prevPolicy?: GroupAtgrpPolicy;
     isEffectiveAdmin?: boolean;
   };
   membershipDiffs: Array<{ prevRoles?: readonly string[]; nextRoles: readonly string[] }>;
@@ -581,7 +404,7 @@ export function checkRoleAndAssignmentEscalation(params: {
   const actorRoles = preState.memberships.get(actorDid)?.roles ?? [];
   const assignable = new Set<string>();
   for (const r of actorRoles) {
-    for (const target of preState.roles.get(r)?.assignable ?? []) {
+    for (const target of preState.roles.get(r)?.canAssign ?? []) {
       assignable.add(target);
     }
   }
@@ -598,26 +421,26 @@ export function checkRoleAndAssignmentEscalation(params: {
       throw new ErrorCtor(403, "PrivilegeEscalation", `Caller cannot create or modify unassignable role '${rw.rkey}'.`);
     }
     const prevRole = preState.roles.get(rw.rkey);
-    const prevAssignable = new Set(prevRole?.assignable ?? []);
-    for (const a of rw.role.assignable ?? []) {
-      if (prevAssignable.has(a)) continue;
+    const prevCanAssign = new Set(prevRole?.canAssign ?? []);
+    for (const a of rw.role.canAssign ?? []) {
+      if (prevCanAssign.has(a)) continue;
       if (a === "*" && !hasWildcard) {
-        throw new ErrorCtor(403, "PrivilegeEscalation", "Only wildcard-assignable admins can grant assignable=['*'].");
+        throw new ErrorCtor(403, "PrivilegeEscalation", "Only wildcard-assignable admins can grant canAssign=['*'].");
       }
       if (a !== "*" && !hasWildcard && !assignable.has(a)) {
-        throw new ErrorCtor(403, "PrivilegeEscalation", `Caller cannot grant assignable over '${a}'.`);
+        throw new ErrorCtor(403, "PrivilegeEscalation", `Caller cannot grant canAssign over '${a}'.`);
       }
     }
-    if (rw.role.scopes && rw.role.scopes.length > 0) {
-      const prevExpanded = prevRole?.scopes?.length
-        ? new Set(expandGroupScopes(prevRole.scopes, groupDid as DidString).scopes)
+    if (rw.role.permissions && rw.role.permissions.length > 0) {
+      const prevExpanded = prevRole?.permissions?.length
+        ? new Set(expandGroupScopes(prevRole.permissions, groupDid as DidString).scopes)
         : new Set<string>();
-      const nextExpanded = expandGroupScopes(rw.role.scopes, groupDid as DidString);
+      const nextExpanded = expandGroupScopes(rw.role.permissions, groupDid as DidString);
       const addedScopes = [...nextExpanded.scopes].filter((s) => !prevExpanded.has(s));
       if (addedScopes.length > 0) {
         const targetPerms = new ScopePermissions(addedScopes);
-        if (!isPermissionSubsetLocal(targetPerms, actorPerms, groupDid)) {
-          throw new ErrorCtor(403, "PrivilegeEscalation", `Role '${rw.rkey}' grants scopes exceeding caller's own permissions.`);
+        if (!isPermissionSubset(targetPerms, actorPerms, groupDid)) {
+          throw new ErrorCtor(403, "PrivilegeEscalation", `Role '${rw.rkey}' grants permissions exceeding caller's own permissions.`);
         }
       }
     }
@@ -635,7 +458,7 @@ export function checkRoleAndAssignmentEscalation(params: {
       prevByRole.set(g.role, {
         read: Boolean(g.read),
         write: Boolean(g.write),
-        canonicalScopes: canonicalizePolicyGrantScopes(g.scopes, scopeTarget),
+        canonicalScopes: canonicalizePolicyGrantScopes(g.permissions, scopeTarget),
       });
     }
     const nextByRole = new Map<string, { read: boolean; write: boolean; canonicalScopes: string[] }>();
@@ -643,7 +466,7 @@ export function checkRoleAndAssignmentEscalation(params: {
       nextByRole.set(g.role, {
         read: Boolean(g.read),
         write: Boolean(g.write),
-        canonicalScopes: canonicalizePolicyGrantScopes(g.scopes, scopeTarget),
+        canonicalScopes: canonicalizePolicyGrantScopes(g.permissions, scopeTarget),
       });
     }
 
@@ -674,7 +497,7 @@ export function checkRoleAndAssignmentEscalation(params: {
           : nextG.canonicalScopes;
         if (addedScopes.length > 0) {
           const candidatePerms = new ScopePermissions(addedScopes);
-          if (!isPermissionSubsetLocal(candidatePerms, actorPerms, groupDid)) {
+          if (!isPermissionSubset(candidatePerms, actorPerms, groupDid)) {
             throw new ErrorCtor(403, "PrivilegeEscalation", `Policy grant for '${role}' exceeds caller's permissions.`);
           }
         }
@@ -770,6 +593,9 @@ export function lexDataToPlainJsonLocal(value: unknown): unknown {
 
 export {
   appRoleKey,
+  ATGRP_COLLECTION,
+  ATGRP_POLICY,
+  ATGRP_SPACE_TYPE,
   ATPROTO_SPACE_COLLECTION,
   canonicalJson,
   COLLECTION,
@@ -781,13 +607,10 @@ export {
   isEffectiveAdminMember,
   isRecordKey,
   isTid,
-  OPENSOCIAL_COLLECTION,
-  OPENSOCIAL_POLICY,
-  OPENSOCIAL_SPACE_TYPE,
   parseAnySpaceRecordUri,
-  parsePersonalInvitesUri,
+  parsePersonalInboxUri,
   parseSpaceUri,
-  personalInvitesUri,
+  personalInboxUri,
   randomUUID,
   SELF_SKEY,
   workspaceUri,

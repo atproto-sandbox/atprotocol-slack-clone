@@ -16,7 +16,7 @@ import {
   spaceRecordUri,
   tidNow,
 } from "@flock/protocol/keys";
-import { COLLECTION, OPENSOCIAL_COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
+import { ATGRP_COLLECTION, COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
 import { createFixtureTempRoot } from "./fixture-temp";
 import { acceptedTimestamps, loadSlurFilter } from "./support/accepted-tid";
 import {
@@ -203,9 +203,9 @@ test(
         const channels = [bootstrap.channel];
         const privateSkey = `scale-${String(CHANNELS - 2).padStart(3, "0")}`;
         const privateRole = channelRoleKey(privateSkey);
-        await putAuthorityRecord(ownerSession, membersSpace, OPENSOCIAL_COLLECTION.role, privateRole, {
+        await putAuthorityRecord(ownerSession, membersSpace, ATGRP_COLLECTION.role, privateRole, {
           displayName: `Private channel #${privateSkey}`,
-          scopes: [],
+          permissions: [],
         });
 
         for (let index = 1; index < CHANNELS - 1; index += 1) {
@@ -266,7 +266,7 @@ test(
           const roles = ["member"];
           if (idx === 0) roles.push("admin");
           if (idx < MEMBERS - 2) roles.push(privateRole);
-          await putAuthorityRecord(ownerSession, membersSpace, OPENSOCIAL_COLLECTION.membership, member.did, {
+          await putAuthorityRecord(ownerSession, membersSpace, ATGRP_COLLECTION.membership, member.did, {
             roles,
             createdAt: nowIso,
           });
@@ -284,7 +284,7 @@ test(
           },
         };
         const singleMembershipStarted = performance.now();
-        await putAuthorityRecord(countedOwnerSession as never, membersSpace, OPENSOCIAL_COLLECTION.membership, inviteTarget.did, {
+        await putAuthorityRecord(countedOwnerSession as never, membersSpace, ATGRP_COLLECTION.membership, inviteTarget.did, {
           roles: ["member", privateRole],
           createdAt: new Date().toISOString(),
         });
@@ -587,7 +587,7 @@ test(
         // ── Gate 5d.4: Writer eviction across 100 spaces <= 500 ms ──
         const evictedMember = members[10]!;
         const evictionStartedAt = performance.now();
-        await deleteAuthorityRecord(ownerSession, membersSpace, OPENSOCIAL_COLLECTION.membership, evictedMember.did);
+        await deleteAuthorityRecord(ownerSession, membersSpace, ATGRP_COLLECTION.membership, evictedMember.did);
         const writerEvictionAcross100SpacesMs = elapsed(evictionStartedAt);
         assert.ok(
           writerEvictionAcross100SpacesMs <= 500,

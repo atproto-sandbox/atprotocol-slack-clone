@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { MemoryStore } from "./memory-store";
 import { groupMembersUri } from "@flock/protocol/keys";
-import { COLLECTION, OPENSOCIAL_COLLECTION, OPENSOCIAL_POLICY } from "@flock/protocol/nsids";
+import { COLLECTION, ATGRP_COLLECTION, ATGRP_POLICY } from "@flock/protocol/nsids";
 import { AUTHORITY, createChannel, key, readChannel, syncFor, writeMessage } from "./testing/engine-fixture";
 import { FakeNetwork } from "@flock/testing/fake-network";
 
@@ -146,16 +146,16 @@ test("a fresh client and a long-lived one agree after a member is removed and an
   await owner.procedure("com.atproto.space.deleteRecord", {
     space: membersSpace,
     repo: AUTHORITY,
-    collection: OPENSOCIAL_COLLECTION.membership,
+    collection: ATGRP_COLLECTION.membership,
     rkey: ALICE,
   });
   await owner.procedure("com.atproto.space.putRecord", {
     space: membersSpace,
     repo: AUTHORITY,
-    collection: OPENSOCIAL_COLLECTION.role,
+    collection: ATGRP_COLLECTION.role,
     rkey: "readonly",
     record: {
-      $type: OPENSOCIAL_COLLECTION.role,
+      $type: ATGRP_COLLECTION.role,
       displayName: "Read-only",
       scopes: [],
       createdAt: "2026-11-10T12:00:00.000Z",
@@ -164,10 +164,10 @@ test("a fresh client and a long-lived one agree after a member is removed and an
   await owner.procedure("com.atproto.space.putRecord", {
     space: membersSpace,
     repo: AUTHORITY,
-    collection: OPENSOCIAL_COLLECTION.membership,
+    collection: ATGRP_COLLECTION.membership,
     rkey: BOB,
     record: {
-      $type: OPENSOCIAL_COLLECTION.membership,
+      $type: ATGRP_COLLECTION.membership,
       roles: ["readonly"],
       createdAt: "2026-11-10T12:00:00.000Z",
     },
@@ -175,7 +175,7 @@ test("a fresh client and a long-lived one agree after a member is removed and an
   await owner.procedure("com.atproto.space.updateSpace", {
     space,
     policy: {
-      $type: OPENSOCIAL_POLICY,
+      $type: ATGRP_POLICY,
       publicRead: false,
       unlisted: false,
       grants: [
