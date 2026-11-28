@@ -19,7 +19,7 @@ import {
   subjectKey,
   tidNow,
 } from "@flock/protocol/keys";
-import { COLLECTION, OPENSOCIAL_COLLECTION, OPENSOCIAL_POLICY, SPACE_TYPE } from "@flock/protocol/nsids";
+import { COLLECTION, ATGRP_COLLECTION, ATGRP_POLICY, SPACE_TYPE } from "@flock/protocol/nsids";
 import { parseWorkspaceRef, type OperatorActor } from "../actor";
 import { grantCreationAuthorization } from "../creation-authorization";
 import { executeOperatorOperation } from "../operations";
@@ -144,12 +144,12 @@ test("an installed app gets a 56-char appRoleKey, reads meta/members/workspace/a
   await completes(run({ kind: "installApp", subject: BOT, channels: [{ skey: general, write: true }] }));
 
   const roleKey = appRoleKey(BOT);
-  assert.equal(roleKey.length, 56);
-  assert.match(roleKey, /^app-[a-z2-7]{52}$/);
+  assert.equal(roleKey.length, 68);
+  assert.match(roleKey, /^app-[a-p]{64}$/);
 
   // Step 1 writes `new.flock.app.install` (`known_app_subject`) + `role/<roleKey>` BEFORE `membership/<BOT>`!
   assert.equal(host.writes[before], `putRecord ${owner.workspace.uri} ${COLLECTION.appInstall}/${subjectKey(BOT)}`);
-  assert.equal(host.writes[before + 1], `putRecord ${groupMembersUri(host.groupDid)} ${OPENSOCIAL_COLLECTION.role}/${roleKey}`);
+  assert.equal(host.writes[before + 1], `putRecord ${groupMembersUri(host.groupDid)} ${ATGRP_COLLECTION.role}/${roleKey}`);
 
   const appInbox = appInboxUri(host.groupDid, owner.workspace.skey, BOT);
   assert.equal(await host.effectiveAccess(appInbox, BOT), "r");
@@ -175,7 +175,7 @@ test("an installed app gets a 56-char appRoleKey, reads meta/members/workspace/a
 
   const mem = await host.getRecord<{ roles: string[] }>(
     groupMembersUri(host.groupDid),
-    OPENSOCIAL_COLLECTION.membership,
+    ATGRP_COLLECTION.membership,
     BOT,
   );
   assert.deepEqual(mem?.roles, [roleKey]);
@@ -207,11 +207,11 @@ test("installApp refuses the group DID, a human member, a channel that is not op
   // `uninstallApp` removes all policy grants -> deletes `membership` -> deletes `role` -> marks `app.install` `active: false` LAST!
   await completes(run({ kind: "uninstallApp", subject: extraBots[0]! }));
   assert.equal(
-    await host.getRecord(groupMembersUri(host.groupDid), OPENSOCIAL_COLLECTION.membership, extraBots[0]!),
+    await host.getRecord(groupMembersUri(host.groupDid), ATGRP_COLLECTION.membership, extraBots[0]!),
     undefined,
   );
   assert.equal(
-    await host.getRecord(groupMembersUri(host.groupDid), OPENSOCIAL_COLLECTION.role, appRoleKey(extraBots[0]!)),
+    await host.getRecord(groupMembersUri(host.groupDid), ATGRP_COLLECTION.role, appRoleKey(extraBots[0]!)),
     undefined,
   );
   assert.equal((await installRecord(host, owner, extraBots[0]!))?.active, false);
@@ -408,7 +408,7 @@ test("appInboxState distinguishes present, missing and uncovered spaces and reth
     spaceType: SPACE_TYPE.appInbox,
     skey: inbox.split("/").at(-1)!,
     policy: {
-      $type: OPENSOCIAL_POLICY,
+      $type: ATGRP_POLICY,
       publicRead: false,
       unlisted: true,
       grants: [],
@@ -473,7 +473,7 @@ test("hasUncoveredAppInbox detects uncovered app inbox spaces and reconcileWorks
     installedAt: nowIso,
     updatedAt: nowIso,
   });
-  await host.putRecord(groupMembersUri(host.groupDid), OPENSOCIAL_COLLECTION.role, appRoleKey(replayBot), {
+  await host.putRecord(groupMembersUri(host.groupDid), ATGRP_COLLECTION.role, appRoleKey(replayBot), {
     displayName: `App: ${replayBot}`,
   });
   const installId = tidNow();
@@ -518,4 +518,25 @@ test("an effective admin excluded from an existing private channel cannot grant 
   assert.notEqual(deniedUpdate.state, "completed", "Excluded admin must not grant app read access on private channel");
   assert.match(deniedUpdate.error ?? "", /PrivilegeEscalation|lacks read access/);
   assert.equal((await placements(host, owner, BOT))[channel("secret")], "-");
+});
+
+test("R15 61-char and 128-char private channel skeys create valid nibble-encoded channelRoleKey roles and reconcile cleanly", async () => {
+  const { host, owner, run } = await workspace("Long Channel Keys");
+  for (const len of [61, 128] as const) {
+    const longSkey = `ch-${"k".repeat(len - 3)}`;
+    assert.equal(longSkey.length, len);
+    await completes(
+      run({
+        kind: "createChannel",
+        skey: longSkey,
+        name: `long-${len}`,
+        visibility: "private",
+        members: [CREATOR, PERSON],
+      }),
+    );
+    await completes(run({ kind: "reconcileWorkspace" }));
+    assert.equal(await host.effectiveAccess(channelUri(host.groupDid, longSkey), PERSON), "rw");
+    assert.equal(await host.effectiveAccess(channelUri(host.groupDid, longSkey), CREATOR), "rw");
+  }
+  void owner;
 });

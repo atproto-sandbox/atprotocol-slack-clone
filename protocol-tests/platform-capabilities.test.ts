@@ -205,7 +205,7 @@ async function memberGrantOperations(
   workspace: Workspace,
   holders: [GrantHolder, GrantHolder, GrantHolder],
 ): Promise<Record<string, Outcome>> {
-  const [{ createEngine }, { isAccessLost }, { sessionClient }, keys, { OPENSOCIAL_COLLECTION }, { validateSpaceRecord }] =
+  const [{ createEngine }, { isAccessLost }, { sessionClient }, keys, { ATGRP_COLLECTION }, { validateSpaceRecord }] =
     await Promise.all([
       import("@flock/client/engine"),
       import("@flock/protocol/atproto/space-credential-core"),
@@ -231,20 +231,20 @@ async function memberGrantOperations(
   const general = { workspace: workspace.uri, skey: workspace.generalSkey };
 
   const results: Record<string, Outcome> = {};
-  results["accepting the invitation writes the OpenSocial acceptance record"] = await outcome(async () => {
+  results["accepting the invitation writes the Atmosphere Groups confirmation record"] = await outcome(async () => {
     const accepted = await memberEngine.workspaces.accept(workspace.uri);
     assert.equal(
       accepted.marker,
-      `${keys.groupMembersUri(authorityDid)}/${member.did}/${OPENSOCIAL_COLLECTION.acceptance}/self`,
+      `${keys.groupMembersUri(authorityDid)}/${member.did}/${ATGRP_COLLECTION.confirmation}/self`,
     );
   });
   results["discovery lists the accepted workspace"] = await outcome(async () => {
     const found = await memberEngine.workspaces.discover();
     assert.ok(found.workspaces.some((entry) => entry.uri === workspace.uri), "the accepted workspace is listed");
   });
-  results["provisioning personal invites space and obtaining getSpaceNotifyTarget"] = await outcome(async () => {
+  results["provisioning personal inbox space and obtaining getSpaceNotifyTarget"] = await outcome(async () => {
     const space = await memberEngine.workspaces.watchInvites(memberEngine.operator!);
-    assert.equal(space, keys.personalInvitesUri(member.did));
+    assert.equal(space, keys.personalInboxUri(member.did));
   });
   results["writing a channel message"] = await outcome(() => memberEngine.channels.send(general, "k3 hello"));
   results["reading the channel page"] = await outcome(async () => {

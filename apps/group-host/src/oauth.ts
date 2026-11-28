@@ -25,11 +25,11 @@ import {
   SELF_SKEY,
 } from "@flock/protocol/keys";
 import {
+  ATGRP_COLLECTION,
+  ATGRP_POLICY,
+  ATGRP_SPACE_TYPE,
   ATPROTO_SPACE_COLLECTION,
   FLOCK_EXTENSION_FIELD,
-  OPENSOCIAL_COLLECTION,
-  OPENSOCIAL_POLICY,
-  OPENSOCIAL_SPACE_TYPE,
   REPO_COLLECTION,
 } from "@flock/protocol/nsids";
 import {
@@ -37,7 +37,10 @@ import {
   expandGroupScopes,
   groupAdminScopes,
   groupModeratorScopes,
-  type GroupOpenSocialPolicy,
+  InvalidScopeError,
+  resolveAuthorizedGroupScope,
+  UnauthorizedScopeError,
+  type GroupAtgrpPolicy,
   type GroupRoleRecord,
 } from "@flock/protocol/scopes";
 import * as jose from "jose";
@@ -413,6 +416,7 @@ type CreationFormParams = {
   publicMeta: boolean;
   creationKey: string;
   creatorApproved: boolean;
+  reviewedScope?: string;
 };
 
 type ConsentCookiePayload = {
@@ -1235,7 +1239,7 @@ export class GroupHostOAuthService {
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>${isCreate ? "Create OpenSocial Group" : "Authorize Group Access"}</title>
+  <title>${isCreate ? "Create Atmosphere Group" : "Authorize Group Access"}</title>
   <style>
     body { font-family: system-ui, sans-serif; max-width: 520px; margin: 40px auto; padding: 0 20px; color: #111; }
     label { display: block; margin-top: 12px; font-weight: 600; font-size: 14px; }
@@ -1248,7 +1252,7 @@ export class GroupHostOAuthService {
   </style>
 </head>
 <body>
-  <h1>${isCreate ? "Create OpenSocial Group" : "Sign in to Group"}</h1>
+  <h1>${isCreate ? "Create Atmosphere Group" : "Sign in to Group"}</h1>
   <p>Client: <code>${escapeHtml(par.client_id)}</code></p>
   <div class="scopes">Requested scopes: ${escapeHtml(par.scope)}</div>
   <form method="POST" action="/oauth/authorize" data-testid="group-oauth-authorize-form">
@@ -1277,7 +1281,7 @@ export class GroupHostOAuthService {
     </label>
     <label>
       <input type="checkbox" name="public_meta" value="true"${defaultPublicMeta ? " checked" : ""} data-testid="group-oauth-public-meta-checkbox" />
-      Publish public group metadata (<code>group.opensocial.declaration</code> &amp; <code>publicRead: true</code> on <code>meta/self</code>)
+      Publish public group metadata (<code>org.atgrp.declaration</code> &amp; <code>publicRead: true</code> on <code>meta/self</code>)
     </label>
     `
         : !par.group_did
@@ -1368,6 +1372,7 @@ export class GroupHostOAuthService {
           publicMeta,
           creationKey,
           creatorApproved: true,
+          reviewedScope: par.scope,
         },
         nowMs,
       });
@@ -1681,7 +1686,7 @@ export class GroupHostOAuthService {
       throw new OAuthProtocolError(400, "invalid_request", "Missing target group DID.");
     }
 
-    // Check whether confidential `private_key_jwt` client already has an active session covering `par.scope` (and `prompt !== "consent"`)
+    // Check whether confidential `private_key_jwt` client already has an active session covering the narrowed live scope (and `prompt !== "consent"`)
     const clientMeta = await this.resolveDownstreamClientMetadata(par.client_id);
     const isPublicClient = (clientMeta.token_endpoint_auth_method ?? "none") === "none";
     if (!isPublicClient && par.prompt !== "consent") {
@@ -1692,26 +1697,54 @@ export class GroupHostOAuthService {
         )
         .all(groupDid, authorizingUserDid, par.client_id, nowMs) as Array<{ approved_scope: string }>;
 
-      const reqPerms = expandGroupScopes(par.scope.split(/\s+/).filter(Boolean), groupDid);
-      const alreadyCovered = priorSessions.some((s) => {
+      if (priorSessions.length > 0) {
+        const acct = this.db
+          .prepare("SELECT activated FROM group_account WHERE did = ?")
+          .get(groupDid) as { activated: number } | undefined;
+        const liveState = loadLiveGovernanceState(this.db, groupDid);
+        const recRow = this.db
+          .prepare("SELECT * FROM group_recovery_admin WHERE group_did = ?")
+          .get(groupDid) as RecoveryAdminRow | undefined;
+        const effState = effectiveStateForSession(
+          liveState,
+          { sessionKind: acct?.activated === 0 ? "recovery" : "group", authorizingUserDid },
+          recRow,
+        );
+        const livePerms = effectiveMemberPermissions(effState, groupDid, authorizingUserDid);
+        let narrowedLivePerms: ScopePermissions | null = null;
         try {
-          const priorPerms = expandGroupScopes(s.approved_scope.split(/\s+/).filter(Boolean), groupDid);
-          return isPermissionSubset(reqPerms, priorPerms, groupDid);
+          narrowedLivePerms = resolveAuthorizedGroupScope(
+            par.scope.split(/\s+/).filter(Boolean),
+            livePerms,
+            groupDid,
+          ).permissions;
         } catch {
-          return false;
+          narrowedLivePerms = null;
         }
-      });
 
-      if (alreadyCovered) {
-        const redirectUrl = this.issueDownstreamAuthCodeSync({
-          groupDid,
-          authorizingUserDid,
-          authenticatedAt: nowMs,
-          loginStepUpAt,
-          par,
-          nowMs,
-        });
-        return { location: redirectUrl, setCookies: [clearFlowCookie] };
+        const matchedPrior = narrowedLivePerms
+          ? priorSessions.find((s) => {
+              try {
+                const priorPerms = expandGroupScopes(s.approved_scope.split(/\s+/).filter(Boolean), groupDid);
+                return isPermissionSubset(narrowedLivePerms!, priorPerms, groupDid);
+              } catch {
+                return false;
+              }
+            })
+          : undefined;
+
+        if (matchedPrior) {
+          const redirectUrl = this.issueDownstreamAuthCodeSync({
+            groupDid,
+            authorizingUserDid,
+            authenticatedAt: nowMs,
+            loginStepUpAt,
+            par,
+            priorApprovedScope: matchedPrior.approved_scope,
+            nowMs,
+          });
+          return { location: redirectUrl, setCookies: [clearFlowCookie] };
+        }
       }
     }
 
@@ -1799,13 +1832,13 @@ export class GroupHostOAuthService {
       throw new OAuthProtocolError(400, "invalid_request", "Target group not found.");
     }
 
-    const profileRow = this.db
+    const aboutRow = this.db
       .prepare(
         "SELECT value FROM space_record WHERE space_uri = ? AND repo_did = ? AND collection = ? AND rkey = 'self'",
       )
-      .get(groupMetaUri(par.group_did), par.group_did, OPENSOCIAL_COLLECTION.profile) as { value: string } | undefined;
-    const displayName = profileRow
-      ? ((JSON.parse(profileRow.value) as { displayName?: string }).displayName ?? acct.handle)
+      .get(groupMetaUri(par.group_did), par.group_did, ATGRP_COLLECTION.about) as { value: string } | undefined;
+    const displayName = aboutRow
+      ? ((JSON.parse(aboutRow.value) as { displayName?: string }).displayName ?? acct.handle)
       : acct.handle;
 
     const liveState = loadLiveGovernanceState(this.db, par.group_did);
@@ -1818,6 +1851,38 @@ export class GroupHostOAuthService {
       recRow,
     );
     const userRoles = effState.memberships.get(consent.userDid)?.roles ?? [];
+    const livePerms = effectiveMemberPermissions(effState, par.group_did, consent.userDid);
+
+    let reviewedScope = par.scope;
+    try {
+      reviewedScope = resolveAuthorizedGroupScope(
+        par.scope.split(/\s+/).filter(Boolean),
+        livePerms,
+        par.group_did,
+      ).scope;
+    } catch (err) {
+      if (err instanceof UnauthorizedScopeError) {
+        throw new OAuthProtocolError(403, "access_denied", err.message);
+      }
+      if (err instanceof InvalidScopeError) {
+        throw new OAuthProtocolError(400, "invalid_scope", err.message);
+      }
+      throw err;
+    }
+
+    const snapshotId = randomUUID();
+    const snapshotExpiresAt = Math.min(par.expires_at, nowMs + 5 * MINUTE_MS);
+    this.db
+      .prepare(
+        `INSERT INTO oauth_consent_snapshot (
+           snapshot_id, par_request_uri, group_did, authorizing_user_did, reviewed_scope, created_at, expires_at, consumed_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
+      )
+      .run(snapshotId, par.request_uri, par.group_did, consent.userDid, reviewedScope, nowMs, snapshotExpiresAt);
+    const signedSnapshotRef = this.cryptoBox.signCookiePayload(
+      "consent-snapshot",
+      JSON.stringify({ snapshotId, requestUri: par.request_uri }),
+    );
 
     const html = `<!doctype html>
 <html lang="en">
@@ -1842,9 +1907,10 @@ export class GroupHostOAuthService {
     <p><strong>Active roles:</strong> <code>${escapeHtml(userRoles.join(", ") || "none")}</code></p>
     <p><strong>Client:</strong> <code>${escapeHtml(par.client_id)}</code></p>
   </div>
-  <div class="scopes">${escapeHtml(par.scope)}</div>
+  <div class="scopes">${escapeHtml(reviewedScope)}</div>
   <form method="POST" action="/oauth/confirm-action?consent=${escapeHtml(encodeURIComponent(consentId))}" data-testid="group-oauth-confirm-form">
     <input type="hidden" name="csrf_token" value="${escapeHtml(consent.csrf)}" />
+    <input type="hidden" name="consent_snapshot" value="${escapeHtml(signedSnapshotRef)}" />
     <div class="actions">
       <button type="submit" name="decision" value="approve" class="primary" data-testid="group-oauth-confirm-approve">Approve</button>
       <button type="submit" name="decision" value="deny" class="secondary" data-testid="group-oauth-confirm-deny">Deny</button>
@@ -1935,12 +2001,21 @@ export class GroupHostOAuthService {
       throw new OAuthProtocolError(400, "invalid_request", "Missing group DID on PAR.");
     }
 
+    const verifiedSnapshot = this.cryptoBox.verifyCookiePayload<{ snapshotId: string; requestUri: string }>(
+      "consent-snapshot",
+      params.body.consent_snapshot,
+    );
+    if (!verifiedSnapshot || verifiedSnapshot.requestUri !== par.request_uri) {
+      throw new OAuthProtocolError(400, "invalid_request", "Missing or invalid consent snapshot reference.");
+    }
+
     const location = this.issueDownstreamAuthCodeSync({
       groupDid: par.group_did,
       authorizingUserDid: consent.userDid,
       authenticatedAt: par.authenticated_at ?? nowMs,
       loginStepUpAt: par.prompt === "login" ? par.login_step_up_at : null,
       par,
+      consentSnapshotId: verifiedSnapshot.snapshotId,
       nowMs,
     });
 
@@ -1962,6 +2037,8 @@ export class GroupHostOAuthService {
       code_challenge: string;
       dpop_jkt: string;
     };
+    consentSnapshotId?: string;
+    priorApprovedScope?: string;
     nowMs: number;
   }): string {
     const tx = this.db.transaction(() => {
@@ -2003,15 +2080,59 @@ export class GroupHostOAuthService {
         }
       }
 
-      // Verify requested scopes do not exceed caller's live effectiveMemberPermissions!
+      // Atomically consume server-side consent snapshot if present, then narrow requested scopes
+      // against caller's live roles and reviewed/prior ceiling (Atmosphere Groups §Permission sets).
+      let ceilingPerms: ScopePermissions | undefined;
+      if (params.consentSnapshotId !== undefined) {
+        const snapRow = this.db
+          .prepare(
+            `UPDATE oauth_consent_snapshot
+             SET consumed_at = ?
+             WHERE snapshot_id = ?
+               AND par_request_uri = ?
+               AND group_did = ?
+               AND authorizing_user_did = ?
+               AND consumed_at IS NULL
+               AND expires_at > ?
+             RETURNING reviewed_scope`,
+          )
+          .get(
+            params.nowMs,
+            params.consentSnapshotId,
+            params.par.request_uri,
+            params.groupDid,
+            params.authorizingUserDid,
+            params.nowMs,
+          ) as { reviewed_scope: string } | undefined;
+        if (!snapRow) {
+          throw new OAuthProtocolError(
+            400,
+            "invalid_request",
+            "Consent snapshot is missing, expired, or already consumed.",
+          );
+        }
+        ceilingPerms = expandGroupScopes(snapRow.reviewed_scope.split(/\s+/).filter(Boolean), params.groupDid);
+      } else if (params.priorApprovedScope !== undefined) {
+        ceilingPerms = expandGroupScopes(params.priorApprovedScope.split(/\s+/).filter(Boolean), params.groupDid);
+      }
+
       const livePerms = effectiveMemberPermissions(effState, params.groupDid, params.authorizingUserDid);
-      const requestedPerms = expandGroupScopes(params.par.scope.split(/\s+/).filter(Boolean), params.groupDid);
-      if (!isPermissionSubset(requestedPerms, livePerms, params.groupDid)) {
-        throw new OAuthProtocolError(
-          403,
-          "access_denied",
-          "Requested OAuth scopes exceed caller's live group role permissions.",
-        );
+      let issuedScope: string;
+      try {
+        issuedScope = resolveAuthorizedGroupScope(
+          params.par.scope.split(/\s+/).filter(Boolean),
+          livePerms,
+          params.groupDid,
+          { ceilingPerms },
+        ).scope;
+      } catch (err) {
+        if (err instanceof UnauthorizedScopeError) {
+          throw new OAuthProtocolError(403, "access_denied", err.message);
+        }
+        if (err instanceof InvalidScopeError) {
+          throw new OAuthProtocolError(400, "invalid_scope", err.message);
+        }
+        throw err;
       }
 
       const rawCode = `ghc_${randomBytes(32).toString("base64url")}`;
@@ -2034,7 +2155,7 @@ export class GroupHostOAuthService {
           params.authorizingUserDid,
           params.par.client_id,
           params.par.redirect_uri,
-          params.par.scope,
+          issuedScope,
           params.par.code_challenge,
           params.par.dpop_jkt,
           sessionKind,
@@ -2093,6 +2214,7 @@ export class GroupHostOAuthService {
           rotation_key_enc: string | null;
           genesis_op_json: string;
           status: string;
+          reviewed_scope?: string | null;
           redirect_url?: string | null;
           code_expires_at?: number | null;
         }
@@ -2197,9 +2319,9 @@ export class GroupHostOAuthService {
           .prepare(
             `INSERT INTO group_creation_journal (
                initiator_did, client_id, creation_key, group_did, handle, display_name, join_policy, public_meta,
-               signing_key_enc, kem_key_enc, rotation_key_enc, genesis_op_json,
+               signing_key_enc, kem_key_enc, rotation_key_enc, genesis_op_json, reviewed_scope,
                status, auth_code, redirect_url, code_expires_at, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_plc', NULL, NULL, NULL, ?, ?)
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_plc', NULL, NULL, NULL, ?, ?)
              ON CONFLICT(initiator_did, client_id, creation_key) DO UPDATE SET
                group_did = excluded.group_did,
                handle = excluded.handle,
@@ -2210,6 +2332,7 @@ export class GroupHostOAuthService {
                kem_key_enc = excluded.kem_key_enc,
                rotation_key_enc = excluded.rotation_key_enc,
                genesis_op_json = excluded.genesis_op_json,
+               reviewed_scope = excluded.reviewed_scope,
                status = 'pending_plc',
                updated_at = excluded.updated_at`,
           )
@@ -2226,6 +2349,7 @@ export class GroupHostOAuthService {
             kemEnc,
             rotEnc,
             genesisJson,
+            params.createParams.reviewedScope ?? params.par.scope,
             nowMs,
             nowMs,
           );
@@ -2242,6 +2366,7 @@ export class GroupHostOAuthService {
         kem_key_enc: kemEnc,
         rotation_key_enc: rotEnc,
         genesis_op_json: genesisJson,
+        reviewed_scope: params.createParams.reviewedScope ?? params.par.scope,
         status: "pending_plc",
       };
     } else {
@@ -2307,12 +2432,11 @@ export class GroupHostOAuthService {
       const metaSpace = groupMetaUri(groupDid);
       const membersSpace = groupMembersUri(groupDid);
 
-      // Build initial public MST commit (`declaration/self` when `publicMeta === true`, empty signed MST when `false`!)
+      // Build initial public MST commit (`org.atgrp.declaration/self` when `publicMeta === true`, empty signed MST when `false`!)
       const initBlocks = new BlockMap();
       const tempStorage = new SqlStagingRepoStorage(this.db, groupDid);
       const declarationValue = {
         $type: REPO_COLLECTION.groupDeclaration,
-        meta: metaSpace,
       };
       const initWrites = publicMetaBool
         ? [
@@ -2333,9 +2457,9 @@ export class GroupHostOAuthService {
         declarationCidStr = (await cidForCbor(cborEncode(jsonToLex(declarationValue) as LexValue))).toString();
       }
 
-      // Pre-serialize `meta/self` records (`policy/self`, `profile/self`, `labeler/self`)
-      const metaPolicy: GroupOpenSocialPolicy = {
-        $type: OPENSOCIAL_POLICY,
+      // Pre-serialize `org.atgrp.meta/self` records (`policy/self`, `about/self`, `config/self`)
+      const metaPolicy: GroupAtgrpPolicy = {
+        $type: ATGRP_POLICY,
         publicRead: publicMetaBool,
         unlisted: false,
         grants: [
@@ -2345,14 +2469,13 @@ export class GroupHostOAuthService {
         ],
       };
       const metaPolicyRec = { $type: ATPROTO_SPACE_COLLECTION.spacePolicy, policy: metaPolicy };
-      const profileRec = {
-        $type: OPENSOCIAL_COLLECTION.profile,
+      const aboutRec = {
+        $type: ATGRP_COLLECTION.about,
         displayName: journal!.display_name,
-        joinPolicy: journal!.join_policy,
       };
-      const labelerRec = {
-        $type: OPENSOCIAL_COLLECTION.labeler,
-        policies: { labelValues: ["!takedown", "!hide"] },
+      const configRec = {
+        $type: ATGRP_COLLECTION.config,
+        joinPolicy: journal!.join_policy,
       };
 
       const serMetaPolicy = await serializeRecord(
@@ -2360,20 +2483,20 @@ export class GroupHostOAuthService {
         SELF_SKEY as RecordKeyString,
         jsonToLex(metaPolicyRec) as LexMap,
       );
-      const serProfile = await serializeRecord(
-        OPENSOCIAL_COLLECTION.profile as NsidString,
+      const serAbout = await serializeRecord(
+        ATGRP_COLLECTION.about as NsidString,
         SELF_SKEY as RecordKeyString,
-        jsonToLex(profileRec) as LexMap,
+        jsonToLex(aboutRec) as LexMap,
       );
-      const serLabeler = await serializeRecord(
-        OPENSOCIAL_COLLECTION.labeler as NsidString,
+      const serConfig = await serializeRecord(
+        ATGRP_COLLECTION.config as NsidString,
         SELF_SKEY as RecordKeyString,
-        jsonToLex(labelerRec) as LexMap,
+        jsonToLex(configRec) as LexMap,
       );
 
-      // Pre-serialize `members/self` records (`policy/self`, `role/admin`, `role/moderator`, `role/member`, `membership/<creatorDid>`)
-      const membersPolicy: GroupOpenSocialPolicy = {
-        $type: OPENSOCIAL_POLICY,
+      // Pre-serialize `org.atgrp.members/self` records (`policy/self`, `labeler/self`, `role/admin`, `role/moderator`, `role/member`, `membership/<creatorDid>`)
+      const membersPolicy: GroupAtgrpPolicy = {
+        $type: ATGRP_POLICY,
         publicRead: false,
         unlisted: false,
         grants: [
@@ -2383,20 +2506,24 @@ export class GroupHostOAuthService {
         ],
       };
       const membersPolicyRec = { $type: ATPROTO_SPACE_COLLECTION.spacePolicy, policy: membersPolicy };
+      const labelerRec = {
+        $type: ATGRP_COLLECTION.labeler,
+        policies: { labelValues: ["!hide", "!takedown"] },
+      };
       const adminRoleRec = {
-        $type: OPENSOCIAL_COLLECTION.role,
+        $type: ATGRP_COLLECTION.role,
         displayName: "Admin",
-        scopes: groupAdminScopes(groupDid).filter((s) => s !== "atproto"),
-        assignable: ["*"],
+        permissions: groupAdminScopes(groupDid).filter((s) => s !== "atproto"),
+        canAssign: ["*"],
       };
       const modRoleRec = {
-        $type: OPENSOCIAL_COLLECTION.role,
+        $type: ATGRP_COLLECTION.role,
         displayName: "Moderator",
-        scopes: groupModeratorScopes().filter((s) => s !== "atproto"),
-        assignable: ["member"],
+        permissions: groupModeratorScopes().filter((s) => s !== "atproto"),
+        canAssign: ["member"],
       };
       const memberRoleRec = {
-        $type: OPENSOCIAL_COLLECTION.role,
+        $type: ATGRP_COLLECTION.role,
         displayName: "Member",
         default: true,
       };
@@ -2405,7 +2532,7 @@ export class GroupHostOAuthService {
       const nextMembersSpaceRev = nextMonotonicTid(initialMembersSpaceRev);
       const creatorIncarnation = randomUUID();
       const creatorMembershipRec: Record<string, unknown> = {
-        $type: OPENSOCIAL_COLLECTION.membership,
+        $type: ATGRP_COLLECTION.membership,
         roles: ["admin", "member"],
         createdAt: nowIso,
         [FLOCK_EXTENSION_FIELD.incarnation]: creatorIncarnation,
@@ -2419,28 +2546,33 @@ export class GroupHostOAuthService {
         SELF_SKEY as RecordKeyString,
         jsonToLex(membersPolicyRec) as LexMap,
       );
+      const serLabeler = await serializeRecord(
+        ATGRP_COLLECTION.labeler as NsidString,
+        SELF_SKEY as RecordKeyString,
+        jsonToLex(labelerRec) as LexMap,
+      );
       const serAdminRole = await serializeRecord(
-        OPENSOCIAL_COLLECTION.role as NsidString,
+        ATGRP_COLLECTION.role as NsidString,
         "admin" as RecordKeyString,
         jsonToLex(adminRoleRec) as LexMap,
       );
       const serModRole = await serializeRecord(
-        OPENSOCIAL_COLLECTION.role as NsidString,
+        ATGRP_COLLECTION.role as NsidString,
         "moderator" as RecordKeyString,
         jsonToLex(modRoleRec) as LexMap,
       );
       const serMemberRole = await serializeRecord(
-        OPENSOCIAL_COLLECTION.role as NsidString,
+        ATGRP_COLLECTION.role as NsidString,
         "member" as RecordKeyString,
         jsonToLex(memberRoleRec) as LexMap,
       );
       const serCreatorMem = await serializeRecord(
-        OPENSOCIAL_COLLECTION.membership as NsidString,
+        ATGRP_COLLECTION.membership as NsidString,
         params.initiatorDid as RecordKeyString,
         jsonToLex(creatorMembershipRec) as LexMap,
       );
 
-      // Verify requested PAR scopes against creator's effective permissions before issuing code
+      // Narrow requested PAR scopes against creator's seeded admin permissions and reviewed ceiling
       const creatorState = {
         roles: new Map<string, GroupRoleRecord>([
           ["admin", adminRoleRec],
@@ -2454,9 +2586,24 @@ export class GroupHostOAuthService {
         ]),
       };
       const creatorPerms = effectiveMemberPermissions(creatorState, groupDid, params.initiatorDid);
-      const reqPerms = expandGroupScopes(params.par.scope.split(/\s+/).filter(Boolean), groupDid);
-      if (!isPermissionSubset(reqPerms, creatorPerms, groupDid)) {
-        throw new OAuthProtocolError(403, "access_denied", "Requested PAR scopes exceed creator admin permissions.");
+      const reviewedScopeRaw = journal!.reviewed_scope ?? params.createParams.reviewedScope ?? params.par.scope;
+      const ceilingPerms = expandGroupScopes(reviewedScopeRaw.split(/\s+/).filter(Boolean), groupDid);
+      let issuedScope: string;
+      try {
+        issuedScope = resolveAuthorizedGroupScope(
+          params.par.scope.split(/\s+/).filter(Boolean),
+          creatorPerms,
+          groupDid,
+          { ceilingPerms },
+        ).scope;
+      } catch (err) {
+        if (err instanceof UnauthorizedScopeError) {
+          throw new OAuthProtocolError(403, "access_denied", err.message);
+        }
+        if (err instanceof InvalidScopeError) {
+          throw new OAuthProtocolError(400, "invalid_scope", err.message);
+        }
+        throw err;
       }
 
       const rawCode = `ghc_${randomBytes(32).toString("base64url")}`;
@@ -2527,7 +2674,7 @@ export class GroupHostOAuthService {
                space_uri, group_did, space_type, skey, policy_json, space_rev, index_rkey, deleted_at, created_at, updated_at
              ) VALUES (?, ?, ?, 'self', ?, ?, NULL, NULL, ?, ?)`,
           )
-          .run(metaSpace, groupDid, OPENSOCIAL_SPACE_TYPE.meta, JSON.stringify(metaPolicy), initialMetaSpaceRev, nowMs, nowMs);
+          .run(metaSpace, groupDid, ATGRP_SPACE_TYPE.meta, JSON.stringify(metaPolicy), initialMetaSpaceRev, nowMs, nowMs);
 
         this.repoStore.applySpaceRepoMutationsSync({
           groupDid,
@@ -2544,19 +2691,19 @@ export class GroupHostOAuthService {
             },
             {
               action: "create",
-              collection: OPENSOCIAL_COLLECTION.profile,
+              collection: ATGRP_COLLECTION.about,
               rkey: SELF_SKEY,
-              value: profileRec,
-              cborBytes: serProfile.bytes,
-              cidStr: serProfile.cid.toString(),
+              value: aboutRec,
+              cborBytes: serAbout.bytes,
+              cidStr: serAbout.cid.toString(),
             },
             {
               action: "create",
-              collection: OPENSOCIAL_COLLECTION.labeler,
+              collection: ATGRP_COLLECTION.config,
               rkey: SELF_SKEY,
-              value: labelerRec,
-              cborBytes: serLabeler.bytes,
-              cidStr: serLabeler.cid.toString(),
+              value: configRec,
+              cborBytes: serConfig.bytes,
+              cidStr: serConfig.cid.toString(),
             },
           ],
           isOwnAuthoritySpace: true,
@@ -2573,7 +2720,7 @@ export class GroupHostOAuthService {
           .run(
             membersSpace,
             groupDid,
-            OPENSOCIAL_SPACE_TYPE.members,
+            ATGRP_SPACE_TYPE.members,
             JSON.stringify(membersPolicy),
             initialMembersSpaceRev,
             nowMs,
@@ -2595,7 +2742,15 @@ export class GroupHostOAuthService {
             },
             {
               action: "create",
-              collection: OPENSOCIAL_COLLECTION.role,
+              collection: ATGRP_COLLECTION.labeler,
+              rkey: SELF_SKEY,
+              value: labelerRec,
+              cborBytes: serLabeler.bytes,
+              cidStr: serLabeler.cid.toString(),
+            },
+            {
+              action: "create",
+              collection: ATGRP_COLLECTION.role,
               rkey: "admin",
               value: adminRoleRec,
               cborBytes: serAdminRole.bytes,
@@ -2603,7 +2758,7 @@ export class GroupHostOAuthService {
             },
             {
               action: "create",
-              collection: OPENSOCIAL_COLLECTION.role,
+              collection: ATGRP_COLLECTION.role,
               rkey: "moderator",
               value: modRoleRec,
               cborBytes: serModRole.bytes,
@@ -2611,7 +2766,7 @@ export class GroupHostOAuthService {
             },
             {
               action: "create",
-              collection: OPENSOCIAL_COLLECTION.role,
+              collection: ATGRP_COLLECTION.role,
               rkey: "member",
               value: memberRoleRec,
               cborBytes: serMemberRole.bytes,
@@ -2619,7 +2774,7 @@ export class GroupHostOAuthService {
             },
             {
               action: "create",
-              collection: OPENSOCIAL_COLLECTION.membership,
+              collection: ATGRP_COLLECTION.membership,
               rkey: params.initiatorDid,
               value: creatorMembershipRec,
               cborBytes: serCreatorMem.bytes,
@@ -2649,7 +2804,7 @@ export class GroupHostOAuthService {
             params.initiatorDid,
             params.par.client_id,
             params.par.redirect_uri,
-            params.par.scope,
+            issuedScope,
             params.par.code_challenge,
             params.par.dpop_jkt,
             nowMs,

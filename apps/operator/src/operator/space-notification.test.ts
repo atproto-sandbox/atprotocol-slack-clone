@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after, beforeEach } from "node:test";
 import { closeDb, getRawDb } from "../lib/db";
-import { dmConversationUri, dmInboxUri, personalInvitesUri } from "@flock/protocol/keys";
+import { dmConversationUri, dmInboxUri, personalInboxUri } from "@flock/protocol/keys";
 import { WebhookAuthError } from "./errors";
 import {
   authenticateSpaceNotification,
@@ -138,9 +138,9 @@ test("operatorNotifyEndpoint maps loopback IP literals to localhost for PDS safe
   assert.equal(operatorNotifyEndpoint(new URL("https://operator.spaces.example.com")), "https://operator.spaces.example.com");
 });
 
-test("deriveSpaceNotifyToken issues stateless inv1 tokens exclusively for the caller's own group.opensocial.invites/self space across [epoch, epoch - 1]", () => {
-  const aliceInvites = personalInvitesUri(ALICE);
-  const bobInvites = personalInvitesUri(BOB);
+test("deriveSpaceNotifyToken issues stateless inv1 tokens exclusively for the caller's own org.atgrp.inbox/self space across [epoch, epoch - 1]", () => {
+  const aliceInvites = personalInboxUri(ALICE);
+  const bobInvites = personalInboxUri(BOB);
   const baseMs = 200 * DM_TOKEN_EPOCH_MS + 1_000;
   const key = Buffer.from(KEY_HEX, "hex");
 

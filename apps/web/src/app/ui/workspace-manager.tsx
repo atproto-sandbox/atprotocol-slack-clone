@@ -28,7 +28,7 @@ import type { GroupClient, GroupRule } from "@flock/client/group-client";
 import { isDid } from "@flock/protocol/keys";
 import { SPACE_TYPE } from "@flock/protocol/nsids";
 import type { AuthorityFlowRequest, OperatorClient } from "@flock/client/operator-client";
-import type { ReceivedGroupInvite, WorkspaceClient, WorkspaceDiscovery } from "@flock/client/workspace-client";
+import type { ModSelfHistoryEvent, ReceivedGroupInvite, WorkspaceClient, WorkspaceDiscovery } from "@flock/client/workspace-client";
 import type { WorkspaceSummary } from "@flock/protocol/workspace-summary";
 
 // The DM stage renders only client-side; see the note in sidebar.tsx.
@@ -232,6 +232,15 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
   const [inviteUri, setInviteUri] = useState("");
   const [joinMessage, setJoinMessage] = useState("");
   const [reactivateDid, setReactivateDid] = useState("");
+  const [selfModGroupDid, setSelfModGroupDid] = useState("");
+  const [selfModSubject, setSelfModSubject] = useState("");
+  const [selfModAppealReason, setSelfModAppealReason] = useState("");
+  const [selfModEvents, setSelfModEvents] = useState<ModSelfHistoryEvent[]>([]);
+  const [selfModCursor, setSelfModCursor] = useState<string | undefined>(undefined);
+  const [selfModLoadedFor, setSelfModLoadedFor] = useState<string | null>(null);
+  const [selfModBusy, setSelfModBusy] = useState(false);
+  const [selfModNotice, setSelfModNotice] = useState("");
+  const [selfModError, setSelfModError] = useState("");
   const [invitedTo, setInvitedTo] = useState<string | null>(null);
   const [groupClientState, setGroupClientState] = useState<{ groupDid: string; client: GroupClient | null } | null>(null);
   const [groupClientSeq, setGroupClientSeq] = useState(0);
@@ -761,7 +770,7 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
           return;
         }
       } catch (acceptErr) {
-        // Fall through to OpenSocial requestJoin (open / approval group) if not yet in members/self
+        // Fall through to Atmosphere Groups requestJoin (open / approval group) if not yet in members/self
         if (!isAccessFailure(acceptErr)) {
           setError(acceptFailure(acceptErr)?.error ?? messageOf(acceptErr));
           setBusy(false);
@@ -1230,10 +1239,72 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
     reason?: string;
   }) {
     if (!engine || !activeWorkspace) return;
-    await engine.workspaces.createReport({
+    await engine.workspaces.submitReport({
       groupDid: activeWorkspace.groupDid,
       ...input,
     });
+  }
+
+  async function handleSubmitSelfAppeal(event: FormEvent) {
+    event.preventDefault();
+    if (!engine) return;
+    const targetGroupDid = (selfModGroupDid.trim() || activeGroupDid || "").trim();
+    if (!isDid(targetGroupDid)) {
+      setSelfModError("Enter a valid Group DID (did:plc:… or did:web:…).");
+      return;
+    }
+    const targetSubject = selfModSubject.trim() || did;
+    const trimmedReason = selfModAppealReason.trim();
+    setSelfModBusy(true);
+    setSelfModError("");
+    setSelfModNotice("");
+    try {
+      const receipt = await engine.workspaces.submitAppeal({
+        groupDid: targetGroupDid,
+        subject: targetSubject,
+        ...(trimmedReason ? { reason: trimmedReason } : {}),
+      });
+      setSelfModAppealReason("");
+      setSelfModNotice(`Appeal submitted (event ${receipt.eventId}).`);
+      const history = await engine.workspaces.querySelfModHistory({ groupDid: targetGroupDid });
+      setSelfModEvents(history.events);
+      setSelfModCursor(history.cursor);
+      setSelfModLoadedFor(targetGroupDid);
+    } catch (caught) {
+      setSelfModError(messageOf(caught));
+    } finally {
+      setSelfModBusy(false);
+    }
+  }
+
+  async function handleLoadSelfModHistory(append = false) {
+    if (!engine) return;
+    const targetGroupDid = (selfModGroupDid.trim() || activeGroupDid || "").trim();
+    if (!isDid(targetGroupDid)) {
+      setSelfModError("Enter a valid Group DID (did:plc:… or did:web:…).");
+      return;
+    }
+    setSelfModBusy(true);
+    setSelfModError("");
+    try {
+      const page = await engine.workspaces.querySelfModHistory({
+        groupDid: targetGroupDid,
+        ...(append && selfModCursor ? { cursor: selfModCursor } : {}),
+      });
+      setSelfModEvents((prev) => {
+        if (!append) return page.events;
+        const byId = new Map<string, ModSelfHistoryEvent>();
+        for (const item of prev) byId.set(item.eventId, item);
+        for (const item of page.events) byId.set(item.eventId, item);
+        return [...byId.values()];
+      });
+      setSelfModCursor(page.cursor);
+      setSelfModLoadedFor(targetGroupDid);
+    } catch (caught) {
+      setSelfModError(messageOf(caught));
+    } finally {
+      setSelfModBusy(false);
+    }
   }
 
   function handleRulesChanged(loadedRules: GroupRule[]) {
@@ -1604,6 +1675,87 @@ function WorkspaceShell({ did, dmConfig }: { did: string; dmConfig: BrowserSessi
                   setStatus={setStatus}
                   setError={setError}
                 />
+              )}
+              {engine && (
+                <section className="starter-card" aria-label="Appeals and moderation history" data-testid="web-self-mod-panel">
+                  <span className="eyebrow">MODERATION APPEALS &amp; SELF-HISTORY</span>
+                  <h3>Appeal or inspect your moderation history</h3>
+                  <p>
+                    Enter any Group DID to submit an appeal or view moderation events affecting your account (works even if you are no longer a member).
+                  </p>
+                  {selfModError && <p className="form-error" role="alert">{selfModError}</p>}
+                  {selfModNotice && <p className="status-note" role="status">{selfModNotice}</p>}
+                  <form onSubmit={(event) => void handleSubmitSelfAppeal(event)}>
+                    <div className="roster-list">
+                      <input
+                        aria-label="Group DID for appeal or history"
+                        placeholder={activeGroupDid ?? "did:plc:…"}
+                        value={selfModGroupDid}
+                        onChange={(event) => setSelfModGroupDid(event.target.value)}
+                        data-testid="web-appeal-group-input"
+                      />
+                      <input
+                        aria-label="Subject DID or record URI (optional, defaults to your DID)"
+                        placeholder={`Subject (default: ${did})`}
+                        value={selfModSubject}
+                        onChange={(event) => setSelfModSubject(event.target.value)}
+                        data-testid="web-appeal-subject-input"
+                      />
+                      <input
+                        aria-label="Appeal reason"
+                        placeholder="Explain your appeal (optional)"
+                        value={selfModAppealReason}
+                        onChange={(event) => setSelfModAppealReason(event.target.value)}
+                        data-testid="web-appeal-reason-input"
+                      />
+                      <div>
+                        <button type="submit" className="primary-button" disabled={selfModBusy} data-testid="web-appeal-submit">
+                          {selfModBusy ? "Working…" : "Submit appeal"}
+                        </button>{" "}
+                        <button
+                          type="button"
+                          className="text-button"
+                          disabled={selfModBusy}
+                          onClick={() => void handleLoadSelfModHistory(false)}
+                          data-testid="web-self-history-load"
+                        >
+                          Load my moderation history
+                        </button>
+                      </div>
+                    </div>
+                  </form>
+                  {selfModLoadedFor && (
+                    <div data-testid="web-self-history-list">
+                      <p className="mono-note">History for {selfModLoadedFor} ({selfModEvents.length} event(s))</p>
+                      {selfModEvents.length === 0 ? (
+                        <p>No moderation events recorded for your account in this group.</p>
+                      ) : (
+                        <ul className="roster-list">
+                          {selfModEvents.map((ev) => (
+                            <li key={ev.eventId} className="roster-row">
+                              <span>
+                                <code>{String(ev.event.$type ?? "event")}</code> · <code>{ev.subject}</code>
+                                {typeof ev.event.reason === "string" && ev.event.reason ? ` — ${ev.event.reason}` : ""}
+                                {typeof ev.event.val === "string" && ev.event.val ? ` [${ev.event.neg === true ? "neg " : ""}${ev.event.val}]` : ""}
+                              </span>
+                              <small>{ev.createdAt}</small>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      {selfModCursor && (
+                        <button
+                          type="button"
+                          className="text-button"
+                          disabled={selfModBusy}
+                          onClick={() => void handleLoadSelfModHistory(true)}
+                        >
+                          Load more history
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </section>
               )}
             </>
           )}

@@ -4,7 +4,7 @@ import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 import { serializedRecordBytes } from "@flock/protocol/atproto/space-credential-core";
 import { advanceHlc, buildEditClosure, MAX_ANCESTOR_REFS, opRef } from "@flock/protocol/entity-merge";
 import { groupMembersUri, SELF_SKEY, spaceRecordUri, tasksSpaceUri, tidNow, workspaceUri } from "@flock/protocol/keys";
-import { ATPROTO_SPACE_COLLECTION, COLLECTION, OPENSOCIAL_COLLECTION, OPENSOCIAL_POLICY, SPACE_TYPE } from "@flock/protocol/nsids";
+import { ATPROTO_SPACE_COLLECTION, COLLECTION, ATGRP_COLLECTION, ATGRP_POLICY, SPACE_TYPE } from "@flock/protocol/nsids";
 import { WORKSPACE_ENVELOPE } from "@flock/protocol/workspace-summary";
 import { readIndependentTasksSpace, type IndependentTasksReadResult } from "@flock/reader/independent-tasks";
 import { FakeNetwork } from "@flock/testing/fake-network";
@@ -73,7 +73,7 @@ async function createTasksFixture(
     spaceType: SPACE_TYPE.workspace,
     skey: SELF_SKEY,
     policy: {
-      $type: OPENSOCIAL_POLICY,
+      $type: ATGRP_POLICY,
       publicRead: false,
       unlisted: false,
       grants: [
@@ -91,7 +91,7 @@ async function createTasksFixture(
       spaceType: SPACE_TYPE.tasks,
       skey: tasksSpace.split("/").at(-1)!,
       policy: {
-        $type: OPENSOCIAL_POLICY,
+        $type: ATGRP_POLICY,
         publicRead: false,
         unlisted: false,
         grants: [
@@ -109,10 +109,10 @@ async function createTasksFixture(
     await owner.procedure("com.atproto.space.putRecord", {
       space: membersSpace,
       repo: groupDid,
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: did,
       record: {
-        $type: OPENSOCIAL_COLLECTION.membership,
+        $type: ATGRP_COLLECTION.membership,
         roles: idx === 0 ? ["admin", "member"] : ["member"],
         createdAt: TIMESTAMP,
       },
@@ -120,11 +120,11 @@ async function createTasksFixture(
     const mem = await owner.query<{ value: Record<string, unknown> }>("com.atproto.space.getRecord", {
       space: membersSpace,
       repo: groupDid,
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: did,
     });
     const inc = mem.value["new.flock.incarnation"];
-    await network.writeAs(did, membersSpace, OPENSOCIAL_COLLECTION.acceptance, SELF_SKEY, {
+    await network.writeAs(did, membersSpace, ATGRP_COLLECTION.confirmation, SELF_SKEY, {
       createdAt: TIMESTAMP,
       ...(typeof inc === "string" ? { "new.flock.incarnation": inc } : {}),
     });
@@ -309,7 +309,7 @@ test("engine.tasks matches readIndependentTasksSpace across cold STAR, listRepoO
     await network.clientFor(groupDid).procedure("com.atproto.space.deleteRecord", {
       space: membersSpace,
       repo: groupDid,
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: BOB,
     });
     await compare("after D14 intermediate writer removal");
@@ -377,7 +377,7 @@ test("engine.tasks matches readIndependentTasksSpace across 255/256/257 saturati
   await network.clientFor(groupDid).procedure("com.atproto.space.deleteRecord", {
     space: membersSpace,
     repo: groupDid,
-    collection: OPENSOCIAL_COLLECTION.membership,
+    collection: ATGRP_COLLECTION.membership,
     rkey: BOB,
   });
   assertTasksParity(
@@ -411,9 +411,9 @@ test("engine.tasks matches readIndependentTasksSpace when Tasks is disabled or w
     await network.clientFor(overflow.groupDid).procedure("com.atproto.space.putRecord", {
       space: overflow.membersSpace,
       repo: overflow.groupDid,
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: extraDid,
-      record: { $type: OPENSOCIAL_COLLECTION.membership, roles: ["member"], createdAt: TIMESTAMP },
+      record: { $type: ATGRP_COLLECTION.membership, roles: ["member"], createdAt: TIMESTAMP },
     });
   }
   network.advanceClock(alice.sync.options.truthIntervalMs);
@@ -607,7 +607,7 @@ test("engine.tasks and readIndependentTasksSpace match on RepoStarLimitError and
     await network.clientFor(groupDid).procedure("com.atproto.space.updateSpace", {
       space: tasksSpace,
       policy: {
-        $type: OPENSOCIAL_POLICY,
+        $type: ATGRP_POLICY,
         publicRead: false,
         unlisted: true,
         grants: [],

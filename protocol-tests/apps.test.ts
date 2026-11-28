@@ -25,7 +25,7 @@ test("apps at the pinned PDS: installed after reauthorizing, reading only what i
       { resolvePds },
       { liveSpaceAccess, readGroupGovernanceState },
       keys,
-      { OPENSOCIAL_COLLECTION, OPENSOCIAL_PERMISSION_SET, SPACE_TYPE },
+      { ATGRP_COLLECTION, ATGRP_PERMISSION_SET, SPACE_TYPE },
       { getRawDb },
     ] = await Promise.all([
       import("@flock/operator/operator/authority-grant"),
@@ -44,7 +44,7 @@ test("apps at the pinned PDS: installed after reauthorizing, reading only what i
     // Narrower Group-DID grant omitting `collection=new.flock.app.install` on `new.flock.workspace` and `space:new.flock.app.inbox`
     const withoutAppInstallScope = [
       "atproto",
-      `include:${OPENSOCIAL_PERMISSION_SET.authManageGroup}`,
+      `include:${ATGRP_PERMISSION_SET.authManageAdmin}`,
       "repo:*",
       "blob:*/*",
       "identity:*",
@@ -157,9 +157,9 @@ test("apps at the pinned PDS: installed after reauthorizing, reading only what i
       await sessionClient(appGrant.session).procedure("com.atproto.space.putRecord", {
         space: keys.groupMembersUri(group.groupDid),
         repo: app.did,
-        collection: OPENSOCIAL_COLLECTION.acceptance,
+        collection: ATGRP_COLLECTION.confirmation,
         rkey: "self",
-        record: { $type: OPENSOCIAL_COLLECTION.acceptance, createdAt: new Date().toISOString() },
+        record: { $type: ATGRP_COLLECTION.confirmation, createdAt: new Date().toISOString() },
       });
       await new Promise((resolve) => setTimeout(resolve, 2_000));
 
@@ -228,7 +228,7 @@ test("an app installs at exactly 200 people, and a reconcile then finds every Op
       { sessionClient },
       { humanMemberDids, liveSpaceAccess, readGroupGovernanceState },
       keys,
-      { OPENSOCIAL_COLLECTION },
+      { ATGRP_COLLECTION },
       { mapLimited },
     ] = await Promise.all([
       import("@flock/operator/operator/authority-grant"),
@@ -263,10 +263,10 @@ test("an app installs at exactly 200 people, and a reconcile then finds every Op
       repo: group.groupDid,
       writes: people.map((person) => ({
         $type: "com.atproto.space.applyWrites#create",
-        collection: OPENSOCIAL_COLLECTION.membership,
+        collection: ATGRP_COLLECTION.membership,
         rkey: person.did,
         value: {
-          $type: OPENSOCIAL_COLLECTION.membership,
+          $type: ATGRP_COLLECTION.membership,
           roles: ["member"],
           createdAt: nowIso,
         },

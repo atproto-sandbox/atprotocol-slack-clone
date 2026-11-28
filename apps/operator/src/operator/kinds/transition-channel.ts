@@ -1,5 +1,5 @@
 import { channelRoleKey, channelUri, groupMembersUri } from "@flock/protocol/keys";
-import { COLLECTION, OPENSOCIAL_COLLECTION } from "@flock/protocol/nsids";
+import { COLLECTION, ATGRP_COLLECTION } from "@flock/protocol/nsids";
 import { WORKSPACE_ENVELOPE } from "@flock/protocol/workspace-summary";
 import {
   deleteAuthorityRecord,
@@ -115,7 +115,7 @@ async function transitionChannel(
       visibility: "transitioning",
     });
     if (operation.visibility === "private") {
-      await putAuthorityRecord(actor.session, membersSpace, OPENSOCIAL_COLLECTION.role, privRole, {
+      await putAuthorityRecord(actor.session, membersSpace, ATGRP_COLLECTION.role, privRole, {
         displayName: `#${directory.name} member`,
       });
     } else {
@@ -193,7 +193,7 @@ async function transitionChannel(
   await context.step("channel-visibility-verified", async () => {
     // Ensure policy is converged (including if `channel-set-transitioning` ran on an earlier release before policy write).
     if (operation.visibility === "private") {
-      await putAuthorityRecord(actor.session, membersSpace, OPENSOCIAL_COLLECTION.role, privRole, {
+      await putAuthorityRecord(actor.session, membersSpace, ATGRP_COLLECTION.role, privRole, {
         displayName: `#${directory.name} member`,
       });
       await updateOpenSocialSpacePolicy(
@@ -203,7 +203,7 @@ async function transitionChannel(
       );
     } else {
       await updateOpenSocialSpacePolicy(actor.session, space, defaultPublicChannelPolicy(appGrants));
-      await deleteAuthorityRecord(actor.session, membersSpace, OPENSOCIAL_COLLECTION.role, privRole);
+      await deleteAuthorityRecord(actor.session, membersSpace, ATGRP_COLLECTION.role, privRole);
     }
     dropMemberList(space);
 

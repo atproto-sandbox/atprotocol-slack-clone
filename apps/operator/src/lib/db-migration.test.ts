@@ -180,3 +180,81 @@ test("SPACE_URI_MIGRATION rewrites legacy at://<did>/space/... Operator columns 
   assert.equal(reg.expires_at, 0, "rewritten registration must reset expires_at for immediate renewal");
   assert.equal(reg.renew_at, 0, "rewritten registration must reset renew_at for immediate renewal");
 });
+
+test("ATGRP_MIGRATION = 6 fails closed on unfinished operation rows and retires legacy group.opensocial.invites rows while preserving DM/channel rows", async () => {
+  const { ATGRP_MIGRATION } = await import("./db");
+  closeDb();
+
+  // 1. Fail closed when ANY unfinished operation row exists ('queued', 'running', 'pending', 'paused')
+  for (const state of ["queued", "running", "pending", "paused"] as const) {
+    const dbFile = new BetterSqlite3(PATH);
+    dbFile.prepare("DELETE FROM schema_migration WHERE version = ?").run(ATGRP_MIGRATION);
+    dbFile.prepare("DELETE FROM operation").run();
+    dbFile
+      .prepare(
+        `INSERT INTO operation (workspace, workspace_uri, actor, operation_id, request_hash, request_json, state, steps_json, created_at, updated_at)
+         VALUES ('did:plc:mig6', 'at:space/did:plc:mig6/new.flock.workspace/self', 'did:plc:alice', '2222222222226', 'h', '{}', ?, '[]', 1, 1)`,
+      )
+      .run(state);
+    dbFile.close();
+
+    assert.throws(
+      () => getRawDb(),
+      /Cannot migrate Operator SQLite database to Atmosphere Groups/,
+      `ATGRP_MIGRATION must fail closed on unfinished '${state}' operation`,
+    );
+    closeDb();
+  }
+
+  // 2. When only terminal operations exist, v6 succeeds and retires legacy group.opensocial.invites rows while preserving channel & completed audit history
+  const dbFile = new BetterSqlite3(PATH);
+  dbFile.prepare("DELETE FROM schema_migration WHERE version = ?").run(ATGRP_MIGRATION);
+  dbFile.prepare("UPDATE operation SET state = 'completed'").run();
+  const legacyInv = "at:space/did:plc:alice/group.opensocial.invites/self";
+  const keepChan = "at:space/did:plc:mig6/new.flock.channel/general";
+  dbFile
+    .prepare(
+      `INSERT OR REPLACE INTO notification_registration (service_ref, space_uri, expires_at, workspace_uri, token, renew_at, last_space_rev, generation)
+       VALUES (?, ?, 9999999999999, NULL, 'tok-inv', 9999999999999, NULL, 1)`,
+    )
+    .run(SERVICE_REF, legacyInv);
+  dbFile
+    .prepare(
+      `INSERT OR REPLACE INTO notification_registration (service_ref, space_uri, expires_at, workspace_uri, token, renew_at, last_space_rev, generation)
+       VALUES (?, ?, 9999999999999, 'at:space/did:plc:mig6/new.flock.workspace/self', 'tok-chan', 9999999999999, NULL, 1)`,
+    )
+    .run(SERVICE_REF, keepChan);
+  dbFile
+    .prepare("INSERT INTO space_notification (space_uri, space_type, type_seq, repo_did, rev, notified_at) VALUES (?, 'group.opensocial.invites', 1, 'did:plc:grp', '2222222222222', 10)")
+    .run(legacyInv);
+  dbFile
+    .prepare("INSERT OR REPLACE INTO space_notification_space_floor (space_uri, space_type, floor) VALUES (?, 'group.opensocial.invites', 1)")
+    .run(legacyInv);
+  dbFile
+    .prepare("INSERT OR REPLACE INTO space_notification_type_floor (space_type, floor) VALUES ('group.opensocial.invites', 1)")
+    .run();
+  dbFile.close();
+
+  const migrated = getRawDb();
+  assert.equal(
+    migrated.prepare("SELECT 1 FROM notification_registration WHERE space_uri = ?").get(legacyInv),
+    undefined,
+    "legacy group.opensocial.invites registration must be retired",
+  );
+  assert.ok(
+    migrated.prepare("SELECT 1 FROM notification_registration WHERE space_uri = ?").get(keepChan),
+    "channel registration must be preserved",
+  );
+  assert.equal(
+    migrated.prepare("SELECT 1 FROM space_notification WHERE space_type = 'group.opensocial.invites'").get(),
+    undefined,
+  );
+  assert.equal(
+    migrated.prepare("SELECT 1 FROM space_notification_space_floor WHERE space_type = 'group.opensocial.invites'").get(),
+    undefined,
+  );
+  assert.equal(
+    migrated.prepare("SELECT 1 FROM space_notification_type_floor WHERE space_type = 'group.opensocial.invites'").get(),
+    undefined,
+  );
+});

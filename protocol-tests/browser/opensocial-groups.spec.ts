@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { chromium, type Browser, type Page } from "@playwright/test";
 import { parseWorkspaceUri } from "@flock/protocol/keys";
+import { ATGRP_MOD_REASON } from "@flock/protocol/nsids";
 import { availablePort, startAppServer, startOperatorServer, type AppServer } from "../support/app-server";
 import { consent, openChannel } from "../support/browser-app";
 import { countByOrigin, watchPreflights } from "../support/browser-network";
@@ -79,7 +80,7 @@ test("OpenSocial groups in real browsers: dual-OAuth isolation, cross-PDS invite
     assert.notEqual(groupDid, alice.did, "workspace lives under a dedicated OpenSocial Group DID");
 
     // Complete per-user Group-DID OAuth (`GroupBrowserOAuthClient`) in `GroupGovernancePanel`.
-    const governanceSection = alicePage.getByRole("region", { name: "OpenSocial group governance" });
+    const governanceSection = alicePage.getByRole("region", { name: "Atmosphere group governance" });
     await governanceSection.getByRole("button", { name: "Sign in as group admin →" }).click();
     await consent(alicePage, alice);
     await governanceSection.getByRole("button", { name: "Disconnect group session", exact: true }).waitFor({ state: "visible" });
@@ -231,12 +232,12 @@ test("OpenSocial groups in real browsers: dual-OAuth isolation, cross-PDS invite
     assert.ok(hideMessageUri, "message card carries data-message-uri");
 
     await caraHideCard.getByRole("button", { name: "Report", exact: true }).click();
-    await caraHideCard.getByLabel("Report reason").selectOption("rude");
+    await caraHideCard.getByLabel("Report reason").selectOption(ATGRP_MOD_REASON.rude);
     await caraHideCard.getByLabel("Report details").fill("Untagged spoiler in general");
     await caraHideCard.getByRole("button", { name: "Submit report", exact: true }).click();
     await caraPage.getByText("Report submitted to group moderators.", { exact: true }).waitFor({ state: "visible" });
 
-    // Alice opens #general and reports TAKEDOWN_MESSAGE with `reasonType = "violation"` against the published group rule.
+    // Alice opens #general and reports TAKEDOWN_MESSAGE with `reasonType = reasonViolation` against the published group rule.
     await openChannel(alicePage, "general");
     await alicePage.getByRole("button", { name: "Sync ↻" }).click();
     const aliceTakedownCard = alicePage.locator(".message-card").filter({ hasText: TAKEDOWN_MESSAGE });
@@ -245,7 +246,7 @@ test("OpenSocial groups in real browsers: dual-OAuth isolation, cross-PDS invite
     assert.ok(takedownMessageUri, "takedown message card carries data-message-uri");
 
     await aliceTakedownCard.getByRole("button", { name: "Report", exact: true }).click();
-    await aliceTakedownCard.getByLabel("Report reason").selectOption("violation");
+    await aliceTakedownCard.getByLabel("Report reason").selectOption(ATGRP_MOD_REASON.violation);
     await aliceTakedownCard.getByLabel("Violated rule").waitFor({ state: "visible" });
     await aliceTakedownCard.getByLabel("Report details").fill("Severe rule-violating spam");
     await aliceTakedownCard.getByRole("button", { name: "Submit report", exact: true }).click();
@@ -263,14 +264,14 @@ test("OpenSocial groups in real browsers: dual-OAuth isolation, cross-PDS invite
     const auditHistory = moderationSection.getByLabel("Moderation subject history");
     await auditHistory.getByText(/!hide/).waitFor({ state: "visible" });
     await hideModRow.getByRole("button", { name: "Resolve", exact: true }).click();
-    await alicePage.getByText("Marked moderation subject resolved.", { exact: true }).waitFor({ state: "visible" });
+    await alicePage.getByText("Updated moderation subject.", { exact: true }).waitFor({ state: "visible" });
 
     const takedownModRow = moderationSection.locator(".roster-row").filter({ hasText: takedownMessageUri });
     await takedownModRow.waitFor({ state: "visible" });
     await takedownModRow.getByRole("button", { name: "Apply !takedown", exact: true }).click();
     await alicePage.getByText(`Published !takedown label on ${takedownMessageUri}.`, { exact: true }).waitFor({ state: "visible" });
     await takedownModRow.getByRole("button", { name: "Resolve", exact: true }).click();
-    await alicePage.getByText("Marked moderation subject resolved.", { exact: true }).waitFor({ state: "visible" });
+    await alicePage.getByText("Updated moderation subject.", { exact: true }).waitFor({ state: "visible" });
 
     await pds.groupHost.flushBackgroundWork();
 

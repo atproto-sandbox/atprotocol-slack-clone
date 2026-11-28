@@ -4,7 +4,7 @@
   "defs": {
     "main": {
       "type": "procedure",
-      "description": "Issue a stateless per-caller PDS webhook notification target for the caller's personal group.opensocial.invites/self space after verifying a valid space credential and RFC 9421 key possession proof.",
+      "description": "Issue a stateless per-caller PDS webhook notification target for the caller's personal org.atgrp.inbox/self space after verifying a valid space credential and RFC 9421 key possession proof.",
       "input": {
         "encoding": "application/json",
         "schema": {

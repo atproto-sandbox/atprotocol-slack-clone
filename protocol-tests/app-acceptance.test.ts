@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { isAccessLost, SPACE_CREDENTIAL_LIFETIME_MS } from "@flock/protocol/atproto/space-credential-core";
 import { channelRoleKey, groupMembersUri } from "@flock/protocol/keys";
-import { COLLECTION, OPENSOCIAL_COLLECTION, OPENSOCIAL_POLICY, SPACE_TYPE } from "@flock/protocol/nsids";
+import { ATGRP_COLLECTION, ATGRP_POLICY, ATGRP_SPACE_TYPE, COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
 import {
   acceptGroupMembership,
   actorTransport,
@@ -42,7 +42,7 @@ test("app acceptance across two real PDS hosts, OpenSocial Group Host, and journ
       hooks: { onResolveAuthority: () => pds.network.lexiconAuthority!.did },
     });
     await resolver.get("new.flock.workspace");
-    await resolver.get("group.opensocial.members");
+    await resolver.get(ATGRP_SPACE_TYPE.members);
 
     const fixtureLexiconManager = (pds.hosts[1].ctx.oauthProvider as unknown as {
       lexiconManager: { getSpacesFromScope(scope: string): Promise<Map<string, { collections: string[] }>> };
@@ -283,17 +283,17 @@ test("app acceptance across two real PDS hosts, OpenSocial Group Host, and journ
       "a transient workspace summary failure must surface instead of returning an incomplete successful list",
     );
 
-    // Non-authority spoof attempt of `group.opensocial.membership` is rejected by delegation scope / validation and never elevates admins.
+    // Non-authority spoof attempt of `org.atgrp.membership` is rejected by delegation scope / validation and never elevates admins.
     const membersSpace = groupMembersUri(pilotGroup.groupDid);
     const spoofedMembership = {
-      $type: OPENSOCIAL_COLLECTION.membership,
+      $type: ATGRP_COLLECTION.membership,
       roles: ["member", "admin"],
       createdAt: new Date().toISOString(),
     };
-    await writeRecord(sessionClient(memberSession as never), membersSpace, member.did, OPENSOCIAL_COLLECTION.membership, member.did, spoofedMembership)
+    await writeRecord(sessionClient(memberSession as never), membersSpace, member.did, ATGRP_COLLECTION.membership, member.did, spoofedMembership)
       .catch(() => null);
     assert.equal(
-      validateSpaceRecord(OPENSOCIAL_COLLECTION.membership, spoofedMembership, {
+      validateSpaceRecord(ATGRP_COLLECTION.membership, spoofedMembership, {
         authorityDid: pilotGroup.groupDid,
         spaceUri: membersSpace,
         repoDid: member.did,
@@ -427,7 +427,7 @@ test("app acceptance across two real PDS hosts, OpenSocial Group Host, and journ
     ]);
     const operatorOrigin = await inProcessOperator();
     const doomedSpace = await ensureOpenSocialSpace(pilotSession, SPACE_TYPE.channel, "doomed-by-notice", {
-      $type: OPENSOCIAL_POLICY,
+      $type: ATGRP_POLICY,
       publicRead: false,
       unlisted: true,
       grants: [],
@@ -632,7 +632,7 @@ test("app acceptance across two real PDS hosts, OpenSocial Group Host, and journ
           sawMembershipDelete &&
           injectedAttempts < 4 &&
           path.includes("com.atproto.space.listRecords") &&
-          path.includes("collection=group.opensocial.membership")
+          path.includes(`collection=${ATGRP_COLLECTION.membership}`)
         ) {
           injectedAttempts += 1;
           return new Response(JSON.stringify({ message: "injected crash window" }), {
@@ -898,7 +898,7 @@ async function runPhase5FailureMatrix(input: {
   ) => {
     const space = channelUri(groupDid, skey);
     const privRole = channelRoleKey(skey);
-    await writeAuthority(membersSpace, OPENSOCIAL_COLLECTION.role, privRole, {
+    await writeAuthority(membersSpace, ATGRP_COLLECTION.role, privRole, {
       displayName: `#${skey} member`,
     });
     const policy =
@@ -1037,7 +1037,7 @@ async function runPhase5FailureMatrix(input: {
       session: {
         did: owner.session.did,
         fetchHandler: async (path: string, init: RequestInit) => {
-          if (recordMutation(membersSpace, OPENSOCIAL_COLLECTION.membership, input.outsiderDid)(path, init)) {
+          if (recordMutation(membersSpace, ATGRP_COLLECTION.membership, input.outsiderDid)(path, init)) {
             postCommitWrites += 1;
             const committed = await owner.session.fetchHandler(path, init);
             await committed.arrayBuffer();
@@ -1062,7 +1062,7 @@ async function runPhase5FailureMatrix(input: {
     owner,
     { kind: "inviteMember", subject: input.outsiderDid },
     "member-workspace",
-    recordMutation(membersSpace, OPENSOCIAL_COLLECTION.membership, input.outsiderDid),
+    recordMutation(membersSpace, ATGRP_COLLECTION.membership, input.outsiderDid),
     () => resetMember(input.outsiderDid),
     async () => {
       assert.deepEqual(await access(workspace, input.outsiderDid), { read: true, write: false });
@@ -1078,7 +1078,7 @@ async function runPhase5FailureMatrix(input: {
     owner,
     { kind: "removeMember", subject: input.adminDid },
     "remove-workspace-membership",
-    recordDelete(membersSpace, OPENSOCIAL_COLLECTION.membership, input.adminDid),
+    recordDelete(membersSpace, ATGRP_COLLECTION.membership, input.adminDid),
     () => seedMember(input.adminDid, true),
     async () => {
       assert.deepEqual(await access(workspace, input.adminDid), { read: false, write: false });
@@ -1095,7 +1095,7 @@ async function runPhase5FailureMatrix(input: {
       "promote admin role",
       true,
       "write-admin-active",
-      recordMutation(membersSpace, OPENSOCIAL_COLLECTION.membership, input.adminDid, (v) =>
+      recordMutation(membersSpace, ATGRP_COLLECTION.membership, input.adminDid, (v) =>
         Array.isArray(v.roles) && v.roles.includes("admin"),
       ),
     ],
@@ -1103,7 +1103,7 @@ async function runPhase5FailureMatrix(input: {
       "demote admin role",
       false,
       "write-admin-inactive",
-      recordMutation(membersSpace, OPENSOCIAL_COLLECTION.membership, input.adminDid, (v) =>
+      recordMutation(membersSpace, ATGRP_COLLECTION.membership, input.adminDid, (v) =>
         Array.isArray(v.roles) && !v.roles.includes("admin"),
       ),
     ],
@@ -1156,7 +1156,7 @@ async function runPhase5FailureMatrix(input: {
       "private",
       `channel-member-${input.outsiderDid}`,
       (skey: string) =>
-        recordMutation(membersSpace, OPENSOCIAL_COLLECTION.membership, input.outsiderDid, (v) =>
+        recordMutation(membersSpace, ATGRP_COLLECTION.membership, input.outsiderDid, (v) =>
           Array.isArray(v.roles) && v.roles.includes(channelRoleKey(skey)),
         ),
       true,
@@ -1224,7 +1224,7 @@ async function runPhase5FailureMatrix(input: {
       "private",
       [transitionMemberDid],
       `channel-remove-${input.adminDid}`,
-      recordMutation(membersSpace, OPENSOCIAL_COLLECTION.membership, input.adminDid, (v) =>
+      recordMutation(membersSpace, ATGRP_COLLECTION.membership, input.adminDid, (v) =>
         Array.isArray(v.roles) && !v.roles.includes(channelRoleKey(transitionSkey)),
       ),
       true,
@@ -1236,7 +1236,7 @@ async function runPhase5FailureMatrix(input: {
       "private",
       [transitionMemberDid],
       `channel-private-add-${transitionMemberDid}`,
-      recordMutation(membersSpace, OPENSOCIAL_COLLECTION.membership, transitionMemberDid, (v) =>
+      recordMutation(membersSpace, ATGRP_COLLECTION.membership, transitionMemberDid, (v) =>
         Array.isArray(v.roles) && v.roles.includes(channelRoleKey(transitionSkey)),
       ),
       true,
@@ -1306,7 +1306,7 @@ async function runPhase5FailureMatrix(input: {
       "fault-archive-remove",
       `channel-archive-remove-${input.memberDid}`,
       (skey: string) =>
-        recordMutation(membersSpace, OPENSOCIAL_COLLECTION.membership, input.memberDid, (v) =>
+        recordMutation(membersSpace, ATGRP_COLLECTION.membership, input.memberDid, (v) =>
           Array.isArray(v.roles) && !v.roles.includes(channelRoleKey(skey)),
         ),
       true,
@@ -1342,7 +1342,7 @@ async function runPhase5FailureMatrix(input: {
         assert.equal((await record(workspace, COLLECTION.directory, skey))?.visibility, "archived");
         assert.deepEqual(await access(space, input.memberDid), { read: false, write: false });
         assert.deepEqual(await access(space, input.adminDid), { read: false, write: false });
-        assert.equal(await record(membersSpace, OPENSOCIAL_COLLECTION.role, channelRoleKey(skey)), undefined);
+        assert.equal(await record(membersSpace, ATGRP_COLLECTION.role, channelRoleKey(skey)), undefined);
         assert.ok(archiveCredential);
         const archivedMessage = await archiveCredential
           .client(memberPds)
@@ -1379,7 +1379,7 @@ async function runPhase5FailureMatrix(input: {
     const requestId = tidNow();
     const matcher =
       matchKind === "membership"
-        ? recordMutation(membersSpace, OPENSOCIAL_COLLECTION.membership, input.memberDid, (v) =>
+        ? recordMutation(membersSpace, ATGRP_COLLECTION.membership, input.memberDid, (v) =>
             Array.isArray(v.roles) && v.roles.includes(channelRoleKey(joinSkey)),
           )
         : recordMutation(
@@ -1420,7 +1420,7 @@ async function runPhase5FailureMatrix(input: {
     memberActor,
     { kind: "leaveWorkspace" },
     "remove-workspace-membership",
-    recordDelete(membersSpace, OPENSOCIAL_COLLECTION.membership, input.memberDid),
+    recordDelete(membersSpace, ATGRP_COLLECTION.membership, input.memberDid),
     () => seedMember(input.memberDid, false),
     async () => {
       assert.deepEqual(await access(workspace, input.memberDid), { read: false, write: false });
@@ -1439,7 +1439,7 @@ async function runPhase5FailureMatrix(input: {
     memberActor,
     { kind: "leaveChannel", skey: privateLeaveSkey },
     "leave-channel-membership",
-    recordMutation(membersSpace, OPENSOCIAL_COLLECTION.membership, input.memberDid, (v) =>
+    recordMutation(membersSpace, ATGRP_COLLECTION.membership, input.memberDid, (v) =>
       Array.isArray(v.roles) && !v.roles.includes(channelRoleKey(privateLeaveSkey)),
     ),
     async () => {
@@ -1457,7 +1457,7 @@ async function runPhase5FailureMatrix(input: {
   const archivedRepairSkey = "fault-reconcile-archived";
   const archivedRepairSpace = channelUri(groupDid, archivedRepairSkey);
   const adminOnlyDriftPolicy = {
-    $type: "group.opensocial.policy",
+    $type: ATGRP_POLICY,
     publicRead: false,
     unlisted: true,
     grants: [{ role: "admin", read: true, write: true }],
@@ -1534,7 +1534,7 @@ async function runPhase5FailureMatrix(input: {
   const archivedPolicy = await getOpenSocialSpacePolicy(input.groupSession as never, archivedRepairSpace);
   assert.deepEqual(archivedPolicy?.grants ?? [], []);
   assert.deepEqual(await access(archivedRepairSpace, input.memberDid), { read: false, write: false });
-  assert.equal(await record(membersSpace, OPENSOCIAL_COLLECTION.role, channelRoleKey(archivedRepairSkey)), undefined);
+  assert.equal(await record(membersSpace, ATGRP_COLLECTION.role, channelRoleKey(archivedRepairSkey)), undefined);
 
   assert.equal(input.memberSession.did, input.memberDid);
 }

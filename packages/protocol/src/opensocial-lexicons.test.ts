@@ -7,7 +7,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import { Lexicons, parseLexiconDoc, type LexiconDoc } from "@atproto/lexicon";
 import { IncludeScope } from "@atproto/oauth-scopes";
-import { schemaDict, schemas } from "./lexicons/api/lexicons";
+import { lexicons as protocolLexicons, schemaDict, schemas } from "./lexicons/api/lexicons";
+import { ATGRP_METHOD, ATGRP_MOD_REASON, ATGRP_PERMISSION_SET, FLOCK_GROUP_METHOD } from "./nsids";
 import { VENDORED_PERMISSION_SETS, expandGroupScopes } from "./scopes";
 
 const LEXICONS_ROOT = fileURLToPath(new URL("../lexicons", import.meta.url));
@@ -28,10 +29,10 @@ function walkJsonFiles(dir: string): string[] {
 }
 
 /**
- * Complete 99-file SHA-256 manifest: all 27 `group.opensocial.*` lexicons (`8df0cc82`) +
- * all 72 `com.atproto.*` lexicons (`6747610566`).
+ * Complete 104-file SHA-256 manifest: all 32 `org.atgrp.*` lexicons (`0885261c`) +
+ * all 72 `com.atproto.*` lexicons (`f839c47e`).
  */
-const UPSTREAM_99_MANIFEST: Readonly<Record<string, string>> = {
+const UPSTREAM_104_MANIFEST: Readonly<Record<string, string>> = {
   "com/atproto/identity/getRecommendedDidCredentials.json": "f222de8a6a87aa75760b658fc0d061ad8b533cf49eb4e52631043f3d9a9300d3",
   "com/atproto/identity/requestPlcOperationSignature.json": "90f4faaa6cf88a35b3ad5d1bad50be4a72cf9350ca6cec117c98175ef2faa39a",
   "com/atproto/identity/resolveHandle.json": "d1cdbbc2a1a89d905228e0dc65546a140bd96262c60c4756e51027597ec5ebea",
@@ -104,37 +105,43 @@ const UPSTREAM_99_MANIFEST: Readonly<Record<string, string>> = {
   "com/atproto/sync/getRepo.json": "c16b1b22bef031f0456d90cd4b4f648bc12ea1b3b9918eeb53177362875ee5fa",
   "com/atproto/sync/getRepoStatus.json": "389167313a4e806c422ff2bbbd3e9a6190ad4480b57afd97354610b4c6020927",
   "com/atproto/sync/listBlobs.json": "26671c6ff5946f09ec633019d20dc3fe8c86af7675f3f9666397f25f8d69d7f1",
-  "group/opensocial/acceptance.json": "d0a66c1c73b972f5b8dd16a14f8dc8a2b6c6301f6e05b5c18df4f9fb24dba4c6",
-  "group/opensocial/authManageGroup.json": "c38b0c0fbbafd74585002c21fc8e8e1861d77de7564456f90e2cbe512d64f48b",
-  "group/opensocial/authManageProfile.json": "5b05ba56fd5037c3a5bbb362d9b5d628e50afea373cb1f13a5917059a257dcf8",
-  "group/opensocial/authModerate.json": "9dde4909c6259d3c4b466c47da3f39219eab43545558fd8b89076e5206a2f406",
-  "group/opensocial/authParticipate.json": "17e44fcc7a9a8a0550118e2a8c942f21366bb840de95de070cb48df72c784a37",
-  "group/opensocial/cancelJoinRequest.json": "4e69f74aed3ce81c6974ebf95e4be66b05e306e5506c8dd7ff47f24b49b2da38",
-  "group/opensocial/createReport.json": "1f574f5cafc97525bca1957d3d1335b0e9e05e864e9065140d61470d631c07ff",
-  "group/opensocial/declaration.json": "b51f8a0f5c8974ba5c51c3767d9fba49bcf28bb1525d1430191c618ef16fe23d",
-  "group/opensocial/defs.json": "46232e72bdf08a1e2357c5ea34e548d098aaaeeb6062130e4133ad8914dff2ed",
-  "group/opensocial/denyJoinRequest.json": "c2493e174bf77e75d04740517a4721dfea6197683182d4419b523403000cbdbf",
-  "group/opensocial/getModSubjectHistory.json": "8cb37e3134e4364f5b5eb0f5f4056b359ad86eba66e004bda3aa39e2d5c4c2a4",
-  "group/opensocial/invite.json": "602467af04826cac5442f1c23eb63fc67a18a76d2fe5683eee4b87bcd7eaf6ac",
-  "group/opensocial/invites.json": "cff0ed1f0a9d6a0059ac29f9f4701eb02cc2e642e1f7138d6d1a21813c18a5ee",
-  "group/opensocial/labeler.json": "fcbc1f53d861d8cef4f1ff02b23885a6cb73446bfa33b728c069aca18e82c031",
-  "group/opensocial/leaveGroup.json": "06199d872e2b02d94ae6f4dca9c370198aa8b848011368d79032684cd9f01c2b",
-  "group/opensocial/listJoinRequests.json": "ac7e75e8fee2d95c3036947cb7fa43f80d2a2d69f628a88c06b8c7e6e2b6769b",
-  "group/opensocial/listModSubjects.json": "e3a3c24a166f085d706acde57bf9ffbdbe924d6c6cfb5ec088d2cf0eee9a5580",
-  "group/opensocial/members.json": "de1cec21993f15bcc2e965110a981f207298015831b30eef75c38b1aa97392f2",
-  "group/opensocial/membership.json": "a493baa3c0994e7b379da0db35b52fb43ffffc5b33144b02dd6f79d3cf9bd3f2",
-  "group/opensocial/meta.json": "faf25ee619a423ffc65e15f715580947c0df6cf0e30d0af8ae616d1a6ba3d127",
-  "group/opensocial/policy.json": "af2f0733394a52b0ee4b611ec383553c1a0cae187a79cb31d22ced19ff8f4b3d",
-  "group/opensocial/profile.json": "60f9ed90a2dd7826c400ca91919897106fd8dd16ac7ef3becd876b5cc4aa47e5",
-  "group/opensocial/requestJoin.json": "683fc3e514f98dda71c0cba0961f52fbe6c3968cbde6b0aa07c0ce94163b2f81",
-  "group/opensocial/resolveModSubject.json": "103c9d4a0c79f935af301ea10aaddcb6184f8b0ca876e3bf6d43d66e735f21c6",
-  "group/opensocial/role.json": "ade62d51b78c568cef7b82f470b9891e5a28596c28645226726634be02d54cce",
-  "group/opensocial/rule.json": "13349f5c27e3ec2176bc50ed8c1b5f01f77c07be5c9826d507d98aaf871507d0",
-  "group/opensocial/space.json": "e5a34c4cf59cedf33873a886c73d4cd6ec8acd7e5149930c1927d462ee4854bc",
+  "org/atgrp/about.json": "872af58e90ace9e61e2bafc9bb720c0c1de672eb0742ac7b9d435e2d3a4d0e91",
+  "org/atgrp/authManageAdmin.json": "f6dec406c5fc6ccbf3ce6c258ed02db415c7911dd89c0cb6a451a5a8e2f1d0d5",
+  "org/atgrp/authManageBasic.json": "61dcbd54f4eed2905480c01e5074b5a2ba44ad2a561ff57aa854b28c6f48da56",
+  "org/atgrp/authManageMembers.json": "c4bf03b6c7bf5c608609d70e3cbf9fcd85e86169cb63a78ab8db0f88a7829075",
+  "org/atgrp/authModerate.json": "4875a92ef71bced715383449b17a03888aa87a84e6aec94da5a20e52da3c929f",
+  "org/atgrp/authParticipate.json": "86d8e5511293727eff7ad55ae638b760f82a070262b14806639aa7aeac25d221",
+  "org/atgrp/cancelJoinRequest.json": "beec85a12b0cb15ed2336faea91843d8e45bfdb6d5fa23d1cc8cf366d89f86b2",
+  "org/atgrp/config.json": "59abb29c05d772233868230388cb894e7f83a16694fd71ef0aeb2f0ebffd4cf1",
+  "org/atgrp/confirmation.json": "1a2cafd7e3059a0bfcb40efea7145b417f1588f02df8df73adeee5bfa5c5b227",
+  "org/atgrp/declaration.json": "ab509ed1a47764c62e73470a65e5c3811117407aec1dd0cf2447e1df6d821ba5",
+  "org/atgrp/defs.json": "48e3e780ef26d55e9ce76c2bd9bd5d77a66ac35c34db30bc1b9852e43a572185",
+  "org/atgrp/denyJoinRequest.json": "b6a78c45329c83202c1d82540a53adc739c6efce4a5f8d812e5ba1fe4fbcdee4",
+  "org/atgrp/inbox.json": "b5187e9a87fe56edd434d42e51e2f1df327985b91cda656b59a8bb5e43058682",
+  "org/atgrp/invite.json": "79d54f23d5a55f9a91f5ca4030583141704af2da3a6f108aaf85d543312ce101",
+  "org/atgrp/labeler.json": "c8513bc81206cdd90543689154d3082efe0abf241fad8780410a3ee015716bd4",
+  "org/atgrp/leaveGroup.json": "f96a375932c114938f407ef6e598251ca35657185c3df0ced0bba005691b9931",
+  "org/atgrp/listJoinRequests.json": "f86fc482ded24ffbc6b70240f3f5afa9278055c0171bd64d5b62c221dea2988c",
+  "org/atgrp/members.json": "0d3deaf737214327c6c0dcd41a96e568ad075d83b9ac086225420409560c9a1d",
+  "org/atgrp/membership.json": "82c17f2ecf442df1c7477e8d909954304256e1e044bda271c295dfa7cfd1a7a3",
+  "org/atgrp/meta.json": "f5fb83bec8ba80ef371fe7856854af6d38ebd6ba418a98ac9183bbdabc5ceae9",
+  "org/atgrp/mod/defs.json": "af82cef0ed77857d62015d22f4953758afaff52634ec85a0ac53865cc757b941",
+  "org/atgrp/mod/querySelfHistory.json": "988a24f7da740aa1b553ae5afd1e46525d9256d158ac52629e6a9e1d9cf9689d",
+  "org/atgrp/mod/querySubjectHistory.json": "7fd91670921f092c91f45d8e6551c6f98ba9e68d13226899910870873d65c0a8",
+  "org/atgrp/mod/querySubjects.json": "7ed7bdf8c08b13163472d45db7153bbb951fc8d4387569d3fa378ca84d139b3c",
+  "org/atgrp/mod/submitAppeal.json": "89a1076b6cbd4e795ed03ee48a83451e080011fd81681e71f49e423c2a1d4669",
+  "org/atgrp/mod/submitReport.json": "866e4f47ad59ca5a5121510f2b24f4b3caa800a9dc59296ee186ad4e12c6568a",
+  "org/atgrp/mod/updateSubject.json": "4334573983b729dc9561f63d794b70d349a112bb9df0117d139fc17cefe963c6",
+  "org/atgrp/policy.json": "89c78250a26d6b04030ef0c736e51ef3e6b7a2d6407157cdae0a40e7587c2652",
+  "org/atgrp/requestJoin.json": "dec76f1bd30fe6e99d152181fd41b379a13d3722a204ed45f0a6c7b7d48753fe",
+  "org/atgrp/role.json": "6590aef2670aaa09931472aedfe0e861e6185c5898d26f073a2cce56019d7b98",
+  "org/atgrp/rule.json": "f88b7678312478aceda03030b4dccf665100c815914d026ae09d1e139b00e84c",
+  "org/atgrp/space.json": "257978ea33fd7135b671594d2e3ca8afc73fe0fd7091150a0971d77e444bded8",
 };
 
 /**
- * Explicit XRPC route-schema manifest covering every XRPC NSID in §3.1's Group Host route matrix + Operator methods.
+ * Explicit XRPC route-schema manifest covering every XRPC NSID in the Group Host route matrix,
+ * all 11 Atmosphere Groups methods, `new.flock.group.abortMigration`, and Operator methods.
  */
 const ROUTE_SCHEMA_MANIFEST: readonly string[] = [
   "com.atproto.server.describeServer",
@@ -194,15 +201,8 @@ const ROUTE_SCHEMA_MANIFEST: readonly string[] = [
   "com.atproto.space.notifyCredentialsRevoked",
   "com.atproto.space.confirmRegistration",
   "com.atproto.space.notifySpaceUpdate",
-  "group.opensocial.requestJoin",
-  "group.opensocial.cancelJoinRequest",
-  "group.opensocial.leaveGroup",
-  "group.opensocial.createReport",
-  "group.opensocial.listJoinRequests",
-  "group.opensocial.denyJoinRequest",
-  "group.opensocial.listModSubjects",
-  "group.opensocial.getModSubjectHistory",
-  "group.opensocial.resolveModSubject",
+  ...Object.values(ATGRP_METHOD),
+  FLOCK_GROUP_METHOD.abortMigration,
   "new.flock.operator.execute",
   "new.flock.operator.getOperation",
   "new.flock.operator.getChanges",
@@ -215,49 +215,54 @@ const ROUTE_SCHEMA_MANIFEST: readonly string[] = [
 
 const UPSTREAM_EXAMPLE_RECORDS: ReadonlyArray<{ collection: string; value: Record<string, unknown> }> = [
   {
-    collection: "group.opensocial.declaration",
+    collection: "org.atgrp.declaration",
     value: {
-      $type: "group.opensocial.declaration",
-      meta: "at:space/did:plc:abcdefghijklmnopqrstuvwx/group.opensocial.meta/self",
+      $type: "org.atgrp.declaration",
     },
   },
   {
-    collection: "group.opensocial.profile",
+    collection: "org.atgrp.about",
     value: {
-      $type: "group.opensocial.profile",
+      $type: "org.atgrp.about",
       displayName: "Neighborhood Garden",
       description: "A group for local gardeners.",
-      joinPolicy: "approval",
-      url: "https://garden.example.com/",
+      website: "https://garden.example.com/",
     },
   },
   {
-    collection: "group.opensocial.rule",
+    collection: "org.atgrp.config",
     value: {
-      $type: "group.opensocial.rule",
+      $type: "org.atgrp.config",
+      joinPolicy: "approval",
+    },
+  },
+  {
+    collection: "org.atgrp.rule",
+    value: {
+      $type: "org.atgrp.rule",
       title: "Be considerate",
       text: "Treat other members with respect.",
       order: 0,
     },
   },
   {
-    collection: "group.opensocial.role",
+    collection: "org.atgrp.role",
     value: {
-      $type: "group.opensocial.role",
+      $type: "org.atgrp.role",
       displayName: "Admin",
-      scopes: [
-        "include:group.opensocial.authManageGroup",
-        "space:*?collection=com.atproto.label.record",
+      permissions: [
+        "include:org.atgrp.authManageAdmin",
+        "space:*?collection=com.atproto.label.record&action=create&action=update&action=delete",
         "space:*?manage=update",
         "space:*?manage=create&manage=delete",
       ],
-      assignable: ["*"],
+      canAssign: ["*"],
     },
   },
   {
-    collection: "group.opensocial.labeler",
+    collection: "org.atgrp.labeler",
     value: {
-      $type: "group.opensocial.labeler",
+      $type: "org.atgrp.labeler",
       policies: {
         labelValues: ["!hide", "spoiler"],
         labelValueDefinitions: [
@@ -269,30 +274,30 @@ const UPSTREAM_EXAMPLE_RECORDS: ReadonlyArray<{ collection: string; value: Recor
           },
         ],
       },
-      reasonTypes: ["rude", "other"],
+      reasonTypes: [ATGRP_MOD_REASON.rude, ATGRP_MOD_REASON.other],
       subjectTypes: ["account", "record"],
     },
   },
   {
-    collection: "group.opensocial.space",
+    collection: "org.atgrp.space",
     value: {
-      $type: "group.opensocial.space",
-      space: "at:space/did:plc:abcdefghijklmnopqrstuvwx/group.opensocial.meta/self",
+      $type: "org.atgrp.space",
+      space: "at:space/did:plc:abcdefghijklmnopqrstuvwx/org.atgrp.meta/self",
       createdAt: "2026-09-29T12:00:00.000Z",
     },
   },
   {
-    collection: "group.opensocial.membership",
+    collection: "org.atgrp.membership",
     value: {
-      $type: "group.opensocial.membership",
+      $type: "org.atgrp.membership",
       roles: ["member"],
       createdAt: "2026-09-29T12:00:00.000Z",
     },
   },
   {
-    collection: "group.opensocial.acceptance",
+    collection: "org.atgrp.confirmation",
     value: {
-      $type: "group.opensocial.acceptance",
+      $type: "org.atgrp.confirmation",
       createdAt: "2026-09-29T12:00:00.000Z",
     },
   },
@@ -301,7 +306,7 @@ const UPSTREAM_EXAMPLE_RECORDS: ReadonlyArray<{ collection: string; value: Recor
     value: {
       $type: "com.atproto.space.policy",
       policy: {
-        $type: "group.opensocial.policy",
+        $type: "org.atgrp.policy",
         grants: [
           { role: "member", read: true, write: true },
           { role: "moderator", read: true, write: true },
@@ -319,9 +324,9 @@ const UPSTREAM_EXAMPLE_RECORDS: ReadonlyArray<{ collection: string; value: Recor
     },
   },
   {
-    collection: "group.opensocial.invite",
+    collection: "org.atgrp.invite",
     value: {
-      $type: "group.opensocial.invite",
+      $type: "org.atgrp.invite",
       createdAt: "2026-09-29T12:00:00.000Z",
       expiresAt: "2026-10-29T12:00:00.000Z",
       message: "Join our gardening group.",
@@ -329,27 +334,28 @@ const UPSTREAM_EXAMPLE_RECORDS: ReadonlyArray<{ collection: string; value: Recor
   },
 ];
 
-test("all 99 upstream-vendored lexicons (27 group.opensocial.* + 72 com.atproto.*) match pinned SHA-256 digests", () => {
+test("all 104 upstream-vendored lexicons (32 org.atgrp.* + 72 com.atproto.*) match pinned SHA-256 digests", () => {
   const actualFiles = [
-    ...walkJsonFiles(join(LEXICONS_ROOT, "group/opensocial")),
+    ...walkJsonFiles(join(LEXICONS_ROOT, "org/atgrp")),
     ...walkJsonFiles(join(LEXICONS_ROOT, "com/atproto")),
   ]
     .map((full) => relative(LEXICONS_ROOT, full).split(sep).join(posix.sep))
     .sort();
 
-  const expectedFiles = Object.keys(UPSTREAM_99_MANIFEST).sort();
-  assert.equal(expectedFiles.length, 99);
-  assert.equal(expectedFiles.filter((f) => f.startsWith("group/opensocial/")).length, 27);
+  const expectedFiles = Object.keys(UPSTREAM_104_MANIFEST).sort();
+  assert.equal(expectedFiles.length, 104);
+  assert.equal(expectedFiles.filter((f) => f.startsWith("org/atgrp/")).length, 32);
   assert.equal(expectedFiles.filter((f) => f.startsWith("com/atproto/")).length, 72);
   assert.deepEqual(actualFiles, expectedFiles);
 
   for (const rel of expectedFiles) {
     const actualDigest = sha256Hex(readFileSync(join(LEXICONS_ROOT, rel)));
-    assert.equal(actualDigest, UPSTREAM_99_MANIFEST[rel], `SHA-256 mismatch on vendored lexicon ${rel}`);
+    assert.equal(actualDigest, UPSTREAM_104_MANIFEST[rel], `SHA-256 mismatch on vendored lexicon ${rel}`);
   }
 
-  // Retired Flock memberspace governance lexicons must remain absent
+  // Retired OpenSocial & Flock memberspace governance lexicons must remain absent
   for (const retired of [
+    "group/opensocial",
     "new/flock/workspace/profile.json",
     "new/flock/workspace/roster.json",
     "new/flock/admin.json",
@@ -369,23 +375,25 @@ test("all 72 com.atproto.* lexicons match ATPROTO_PIN_CHECKOUT byte-for-byte whe
     return;
   }
   const pinLexRoot = join(resolve(checkout), "lexicons");
-  for (const rel of Object.keys(UPSTREAM_99_MANIFEST).filter((f) => f.startsWith("com/atproto/"))) {
+  for (const rel of Object.keys(UPSTREAM_104_MANIFEST).filter((f) => f.startsWith("com/atproto/"))) {
     const vendoredBytes = readFileSync(join(LEXICONS_ROOT, rel));
     const upstreamBytes = readFileSync(join(pinLexRoot, rel));
     assert.equal(sha256Hex(vendoredBytes), sha256Hex(upstreamBytes), `Drift against ATPROTO_PIN_CHECKOUT in ${rel}`);
   }
 });
 
-test("route-schema manifest: every XRPC route NSID has one registered LexiconDoc in schemaDict and one generated type module", () => {
+test("route-schema manifest: every XRPC route NSID (including all 11 org.atgrp.* methods and new.flock.group.abortMigration) exists in schemaDict, protocolLexicons, and generated types", () => {
   const docsById = new Map<string, { id: string }>();
   for (const doc of schemas as ReadonlyArray<{ id: string }>) {
     assert.equal(docsById.has(doc.id), false, `Duplicate schemaDict entry for ${doc.id}`);
     docsById.set(doc.id, doc);
   }
   assert.equal(Object.keys(schemaDict).length, schemas.length);
+  assert.equal(Object.values(ATGRP_METHOD).length, 11);
 
   for (const nsid of ROUTE_SCHEMA_MANIFEST) {
     assert.ok(docsById.has(nsid), `Missing ${nsid} from generated schemaDict`);
+    assert.ok(protocolLexicons.get(nsid), `Missing ${nsid} from runtime protocolLexicons`);
     const typeRel = `${nsid.replaceAll(".", "/")}.ts`;
     assert.equal(
       existsSync(join(GENERATED_TYPES_ROOT, typeRel)),
@@ -400,32 +408,34 @@ test("structural @atproto/lexicon, @atproto/oauth-scopes #atproto_pds audience, 
     parseLexiconDoc(JSON.parse(readFileSync(full, "utf8"))),
   );
   const lex = new Lexicons(allDocs);
-  assert.ok(allDocs.length >= 115);
+  assert.ok(allDocs.length >= 120);
 
   for (const example of UPSTREAM_EXAMPLE_RECORDS) {
     const res = lex.validate(example.collection, example.value);
     assert.equal(res.success, true, `${example.collection} example failed validation: ${res.success ? "" : res.error.message}`);
   }
 
-  // Verify all 4 OpenSocial permission sets expand cleanly with canonical `${groupDid}#atproto_pds` RPC audience
+  // Verify all 5 Atmosphere Groups permission sets expand cleanly with canonical `${groupDid}#atproto_pds` RPC audience
   const groupDid = "did:plc:abcdefghijklmnopqrstuvwx";
   const groupPdsAud = `${groupDid}#atproto_pds` as const;
-  for (const nsid of [
-    "group.opensocial.authParticipate",
-    "group.opensocial.authManageProfile",
-    "group.opensocial.authModerate",
-    "group.opensocial.authManageGroup",
-  ] as const) {
+  for (const nsid of Object.values(ATGRP_PERMISSION_SET)) {
     const inc = IncludeScope.fromString(`include:${nsid}`);
     assert.ok(inc, `IncludeScope parsed ${nsid}`);
     const expanded = inc.toScopes(VENDORED_PERMISSION_SETS[nsid]!);
     assert.ok(expanded.length > 0, `${nsid} expanded to non-empty scopes`);
     const perms = expandGroupScopes([`include:${nsid}`], groupDid);
-    if (nsid === "group.opensocial.authParticipate") {
-      assert.equal(perms.allowsRpc({ aud: groupPdsAud, lxm: "group.opensocial.requestJoin" }), true);
+    if (nsid === ATGRP_PERMISSION_SET.authParticipate) {
+      assert.equal(perms.allowsRpc({ aud: groupPdsAud, lxm: ATGRP_METHOD.requestJoin }), true);
+      assert.equal(perms.allowsRpc({ aud: groupPdsAud, lxm: ATGRP_METHOD.modSubmitAppeal }), true);
+      assert.equal(perms.allowsRpc({ aud: groupPdsAud, lxm: ATGRP_METHOD.modQuerySelfHistory }), true);
     }
-    if (nsid === "group.opensocial.authModerate" || nsid === "group.opensocial.authManageGroup") {
-      assert.equal(perms.allowsRpc({ aud: groupPdsAud, lxm: "group.opensocial.listModSubjects" }), true);
+    if (nsid === ATGRP_PERMISSION_SET.authManageMembers || nsid === ATGRP_PERMISSION_SET.authManageAdmin) {
+      assert.equal(perms.allowsRpc({ aud: groupPdsAud, lxm: ATGRP_METHOD.listJoinRequests }), true);
+      assert.equal(perms.allowsRpc({ aud: groupPdsAud, lxm: ATGRP_METHOD.denyJoinRequest }), true);
+    }
+    if (nsid === ATGRP_PERMISSION_SET.authModerate || nsid === ATGRP_PERMISSION_SET.authManageAdmin) {
+      assert.equal(perms.allowsRpc({ aud: groupPdsAud, lxm: ATGRP_METHOD.modQuerySubjects }), true);
+      assert.equal(perms.allowsRpc({ aud: groupPdsAud, lxm: ATGRP_METHOD.modUpdateSubject }), true);
     }
   }
 });

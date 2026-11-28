@@ -86,7 +86,7 @@ test("a page on the web origin signs in, reaches personal PDS hosts, Group Host,
 async function steps(pds: PdsNetwork, input: {
   groupDid: string; writer: NetworkActor; memberSide: BrowserMember; outsiderSide: BrowserMember; channel: string; rkey: string; operatorOrigin: string; unreachableOrigin: string;
 }): Promise<Record<string, Outcome>> {
-  const [{ mintSpaceCredentialWith, isAccessLost }, { generateSpaceKey }, { kemKeyFromDidDocument }, { sessionClient }, { groupMetaUri, tidNow }, { COLLECTION, OPENSOCIAL_COLLECTION, OPENSOCIAL_METHOD }] = await Promise.all([
+  const [{ mintSpaceCredentialWith, isAccessLost }, { generateSpaceKey }, { kemKeyFromDidDocument }, { sessionClient }, { groupMetaUri, tidNow }, { ATGRP_COLLECTION, ATGRP_METHOD, COLLECTION }] = await Promise.all([
     import("@flock/protocol/atproto/space-credential-core"),
     import("@flock/protocol/atproto/space-key"),
     import("@flock/protocol/atproto/kem-key"),
@@ -115,10 +115,10 @@ async function steps(pds: PdsNetwork, input: {
   results["reads group profile directly from Group Host with RFC 9421 MAC verification"] = await outcome(async () => {
     const metaSpace = groupMetaUri(input.groupDid);
     const metaCred = await mintSpaceCredentialWith(deps(memberSide), metaSpace);
-    const profile = await metaCred.client(pds.groupHostUrl).query<{ value: { displayName?: string } }>("com.atproto.space.getRecord", {
-      space: metaSpace, repo: input.groupDid, collection: OPENSOCIAL_COLLECTION.profile, rkey: "self",
+    const about = await metaCred.client(pds.groupHostUrl).query<{ value: { displayName?: string } }>("com.atproto.space.getRecord", {
+      space: metaSpace, repo: input.groupDid, collection: ATGRP_COLLECTION.about, rkey: "self",
     });
-    assert.equal(profile.value.displayName, "K9 Group");
+    assert.equal(about.value.displayName, "K9 Group");
   });
   results["lists writers at the Group Host authority"] = await outcome(async () => {
     const credential = await mintSpaceCredentialWith(deps(memberSide), input.channel);
@@ -128,12 +128,12 @@ async function steps(pds: PdsNetwork, input: {
     space: input.channel, repo: memberSide.actor.did, collection: COLLECTION.message, rkey: tidNow(),
     record: { $type: COLLECTION.message, text: "k9 from the browser", createdAt: new Date().toISOString() },
   }));
-  results["calls Group Host OpenSocial XRPC directly with a service token"] = await outcome(async () => {
+  results["calls Group Host Atmosphere Groups XRPC directly with a service token"] = await outcome(async () => {
     const { token } = await sessionClient(outsiderSide.session).query<{ token: string }>("com.atproto.server.getServiceAuth", {
       aud: `${input.groupDid}#atproto_pds`,
-      lxm: OPENSOCIAL_METHOD.requestJoin,
+      lxm: ATGRP_METHOD.requestJoin,
     });
-    const response = await outsiderSide.browserFetch(new Request(new URL(`/xrpc/${OPENSOCIAL_METHOD.requestJoin}`, pds.groupHostUrl), {
+    const response = await outsiderSide.browserFetch(new Request(new URL(`/xrpc/${ATGRP_METHOD.requestJoin}`, pds.groupHostUrl), {
       method: "POST",
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json" },
       body: JSON.stringify({ group: input.groupDid, message: "k9 cross-origin join request" }),
@@ -213,7 +213,7 @@ async function provision(pds: PdsNetwork): Promise<{ groupDid: string; writer: N
     { defaultPublicChannelPolicy },
     { AtprotoClient },
     { groupMembersUri, tidNow },
-    { COLLECTION, OPENSOCIAL_COLLECTION, SPACE_TYPE },
+    { ATGRP_COLLECTION, COLLECTION, SPACE_TYPE },
   ] = await Promise.all([
     import("@flock/operator/operator/authority-grant"),
     import("@flock/operator/atproto/space-ops"),
@@ -232,7 +232,7 @@ async function provision(pds: PdsNetwork): Promise<{ groupDid: string; writer: N
   });
   const groupSession = await restoreAuthorityGrant(createdGroup.groupDid);
   const channel = await ensureOpenSocialSpace(groupSession, SPACE_TYPE.channel, "general", defaultPublicChannelPolicy());
-  await putAuthorityRecord(groupSession, groupMembersUri(createdGroup.groupDid), OPENSOCIAL_COLLECTION.membership, member.did, {
+  await putAuthorityRecord(groupSession, groupMembersUri(createdGroup.groupDid), ATGRP_COLLECTION.membership, member.did, {
     roles: ["member"],
     createdAt: new Date().toISOString(),
   });

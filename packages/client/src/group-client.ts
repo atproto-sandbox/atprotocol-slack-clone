@@ -5,31 +5,43 @@ import {
   groupMembersUri,
   groupMetaUri,
   isDid,
-  isRecordKey,
   isTid,
+  isValidRoleId,
   parseAnySpaceRecordUri,
   parseSpaceUri,
-  personalInvitesUri,
+  personalInboxUri,
   SELF_SKEY,
   spaceRecordUri,
   tidNow,
 } from "@flock/protocol/keys";
 import {
+  ATGRP_COLLECTION,
+  ATGRP_METHOD,
+  ATGRP_MOD_EVENT_TYPE,
   ATPROTO_SPACE_COLLECTION,
   FLOCK_EXTENSION_FIELD,
-  OPENSOCIAL_COLLECTION,
-  OPENSOCIAL_METHOD,
+  FLOCK_GROUP_METHOD,
   REPO_COLLECTION,
 } from "@flock/protocol/nsids";
 import { validateSpaceRecord } from "@flock/protocol/registry";
 
 const MAX_ADMIN_JSON_BYTES = 4 * 1024 * 1024;
 
+export type GroupAbout = {
+  displayName: string;
+  description?: string;
+  website?: string;
+};
+
+export type GroupConfig = {
+  joinPolicy: string;
+};
+
 export type GroupProfile = {
   displayName: string;
   description?: string;
   joinPolicy: string;
-  url?: string;
+  website?: string;
 };
 
 export type PublicMetaStatus = {
@@ -62,8 +74,8 @@ export type GroupRoleEntry = {
   displayName: string;
   description?: string;
   default: boolean;
-  scopes: string[];
-  assignable: string[];
+  permissions: string[];
+  canAssign: string[];
 };
 
 export type GroupMembershipEntry = {
@@ -97,15 +109,18 @@ export type GroupInviteDelivery = {
 export type ModSubjectItem = {
   subject: string;
   cid?: string;
-  status: "open" | "resolved" | "escalated" | string;
+  status: "open" | "resolved" | string;
   createdAt: string;
   updatedAt: string;
-  reportCount: number;
+  reportCount?: number;
+  tags?: string[];
 };
 
 export type ModSubjectHistoryEvent = {
-  id: string;
+  eventId: string;
   createdAt: string;
+  subject: string;
+  cid?: string;
   createdBy?: string;
   event: Record<string, unknown>;
 };
@@ -142,6 +157,7 @@ export type ProposedPlcOperationParams = {
 
 export type PersistedGroupMigrationState = {
   readonly revision?: number;
+  protocolVersion?: "org.atgrp.v1";
   operationId: string;
   targetOrigin: string;
   handle: string;
@@ -679,15 +695,15 @@ export class GroupClient {
   }
 
   // ---------------------------------------------------------------------------
-  // Profile, Rules & Labeler (`group.opensocial.meta/self`)
+  // About & Config (`org.atgrp.meta/self`)
   // ---------------------------------------------------------------------------
 
-  async getProfile(): Promise<GroupProfile | null> {
+  async getAbout(): Promise<GroupAbout | null> {
     try {
       const res = await this.xrpc.query<{ value: Record<string, unknown> }>("com.atproto.space.getRecord", {
         space: this.metaSpaceUri,
         repo: this.groupDid,
-        collection: OPENSOCIAL_COLLECTION.profile,
+        collection: ATGRP_COLLECTION.about,
         rkey: SELF_SKEY,
       });
       const val = res.value;
@@ -695,8 +711,7 @@ export class GroupClient {
       return {
         displayName: val.displayName,
         ...(typeof val.description === "string" ? { description: val.description } : {}),
-        joinPolicy: typeof val.joinPolicy === "string" ? val.joinPolicy : "invite",
-        ...(typeof val.url === "string" ? { url: val.url } : {}),
+        ...(typeof val.website === "string" ? { website: val.website } : {}),
       };
     } catch (error) {
       if (isMissingXrpcResource(error)) return null;
@@ -704,17 +719,16 @@ export class GroupClient {
     }
   }
 
-  async updateProfile(patch: {
+  async updateAbout(patch: {
     displayName?: string;
     description?: string | null;
-    joinPolicy?: "open" | "approval" | "invite";
-    url?: string | null;
-  }): Promise<GroupProfile> {
+    website?: string | null;
+  }): Promise<GroupAbout> {
     const existing = await this.xrpc
       .query<{ value: Record<string, unknown> }>("com.atproto.space.getRecord", {
         space: this.metaSpaceUri,
         repo: this.groupDid,
-        collection: OPENSOCIAL_COLLECTION.profile,
+        collection: ATGRP_COLLECTION.about,
         rkey: SELF_SKEY,
       })
       .then((res) => res.value, (err: unknown) => {
@@ -724,16 +738,15 @@ export class GroupClient {
 
     const next: Record<string, unknown> = {
       ...existing,
-      $type: OPENSOCIAL_COLLECTION.profile,
+      $type: ATGRP_COLLECTION.about,
     };
     if (patch.displayName !== undefined) next.displayName = patch.displayName;
     if (patch.description === null) delete next.description;
     else if (patch.description !== undefined) next.description = patch.description;
-    if (patch.joinPolicy !== undefined) next.joinPolicy = patch.joinPolicy;
-    if (patch.url === null) delete next.url;
-    else if (patch.url !== undefined) next.url = patch.url;
+    if (patch.website === null) delete next.website;
+    else if (patch.website !== undefined) next.website = patch.website;
 
-    const check = validateSpaceRecord(OPENSOCIAL_COLLECTION.profile, next, {
+    const check = validateSpaceRecord(ATGRP_COLLECTION.about, next, {
       authorityDid: this.groupDid,
       spaceUri: this.metaSpaceUri,
       repoDid: this.groupDid,
@@ -744,7 +757,7 @@ export class GroupClient {
     await this.xrpc.procedure("com.atproto.space.putRecord", {
       space: this.metaSpaceUri,
       repo: this.groupDid,
-      collection: OPENSOCIAL_COLLECTION.profile,
+      collection: ATGRP_COLLECTION.about,
       rkey: SELF_SKEY,
       record: next,
     });
@@ -752,8 +765,97 @@ export class GroupClient {
     return {
       displayName: String(next.displayName),
       ...(typeof next.description === "string" ? { description: next.description } : {}),
-      joinPolicy: typeof next.joinPolicy === "string" ? next.joinPolicy : "invite",
-      ...(typeof next.url === "string" ? { url: next.url } : {}),
+      ...(typeof next.website === "string" ? { website: next.website } : {}),
+    };
+  }
+
+  async getConfig(): Promise<GroupConfig | null> {
+    try {
+      const res = await this.xrpc.query<{ value: Record<string, unknown> }>("com.atproto.space.getRecord", {
+        space: this.metaSpaceUri,
+        repo: this.groupDid,
+        collection: ATGRP_COLLECTION.config,
+        rkey: SELF_SKEY,
+      });
+      const val = res.value;
+      if (!val || typeof val.joinPolicy !== "string") return null;
+      return { joinPolicy: val.joinPolicy };
+    } catch (error) {
+      if (isMissingXrpcResource(error)) return null;
+      throw error;
+    }
+  }
+
+  async updateConfig(patch: { joinPolicy: "open" | "approval" | "invite" | string }): Promise<GroupConfig> {
+    const existing = await this.xrpc
+      .query<{ value: Record<string, unknown> }>("com.atproto.space.getRecord", {
+        space: this.metaSpaceUri,
+        repo: this.groupDid,
+        collection: ATGRP_COLLECTION.config,
+        rkey: SELF_SKEY,
+      })
+      .then((res) => res.value, (err: unknown) => {
+        if (isMissingXrpcResource(err)) return {} as Record<string, unknown>;
+        throw err;
+      });
+
+    const next: Record<string, unknown> = {
+      ...existing,
+      $type: ATGRP_COLLECTION.config,
+      joinPolicy: patch.joinPolicy,
+    };
+
+    const check = validateSpaceRecord(ATGRP_COLLECTION.config, next, {
+      authorityDid: this.groupDid,
+      spaceUri: this.metaSpaceUri,
+      repoDid: this.groupDid,
+      rkey: SELF_SKEY,
+    });
+    if (!check.valid) throw new Error(check.reason);
+
+    await this.xrpc.procedure("com.atproto.space.putRecord", {
+      space: this.metaSpaceUri,
+      repo: this.groupDid,
+      collection: ATGRP_COLLECTION.config,
+      rkey: SELF_SKEY,
+      record: next,
+    });
+
+    return { joinPolicy: String(next.joinPolicy) };
+  }
+
+  async getProfile(): Promise<GroupProfile | null> {
+    const [about, config] = await Promise.all([this.getAbout(), this.getConfig()]);
+    if (!about) return null;
+    return {
+      ...about,
+      joinPolicy: config?.joinPolicy ?? "invite",
+    };
+  }
+
+  async updateProfile(patch: {
+    displayName?: string;
+    description?: string | null;
+    joinPolicy?: "open" | "approval" | "invite";
+    website?: string | null;
+  }): Promise<GroupProfile> {
+    const wantsAbout =
+      patch.displayName !== undefined || patch.description !== undefined || patch.website !== undefined;
+    const about = wantsAbout
+      ? await this.updateAbout({
+          ...(patch.displayName !== undefined ? { displayName: patch.displayName } : {}),
+          ...(patch.description !== undefined ? { description: patch.description } : {}),
+          ...(patch.website !== undefined ? { website: patch.website } : {}),
+        })
+      : await this.getAbout();
+    const config =
+      patch.joinPolicy !== undefined
+        ? await this.updateConfig({ joinPolicy: patch.joinPolicy })
+        : await this.getConfig();
+    if (!about) throw new Error("Group about record is missing.");
+    return {
+      ...about,
+      joinPolicy: config?.joinPolicy ?? "invite",
     };
   }
 
@@ -854,8 +956,6 @@ export class GroupClient {
       ...(swapCommit ? { swapCommit } : {}),
       record: {
         $type: REPO_COLLECTION.groupDeclaration,
-        meta: this.metaSpaceUri,
-        createdAt: new Date(this.now()).toISOString(),
       },
     });
   }
@@ -1069,25 +1169,29 @@ export class GroupClient {
     });
   }
 
+  // ---------------------------------------------------------------------------
+  // Rules & Labeler (`org.atgrp.members/self`)
+  // ---------------------------------------------------------------------------
+
   async listRules(maxRecords = 200): Promise<GroupRule[]> {
     const scanned = await listBoundedRecords(this.xrpc, {
-      space: this.metaSpaceUri,
+      space: this.membersSpaceUri,
       repo: this.groupDid,
-      collection: OPENSOCIAL_COLLECTION.rule,
+      collection: ATGRP_COLLECTION.rule,
       maxRecords,
     });
     return scanned.records
       .filter((rec) =>
-        validateSpaceRecord(OPENSOCIAL_COLLECTION.rule, rec.value, {
+        validateSpaceRecord(ATGRP_COLLECTION.rule, rec.value, {
           authorityDid: this.groupDid,
-          spaceUri: this.metaSpaceUri,
+          spaceUri: this.membersSpaceUri,
           repoDid: this.groupDid,
           rkey: rec.rkey,
         }).valid,
       )
       .map((rec) => ({
         rkey: rec.rkey,
-        uri: spaceRecordUri(this.metaSpaceUri, this.groupDid, OPENSOCIAL_COLLECTION.rule, rec.rkey),
+        uri: spaceRecordUri(this.membersSpaceUri, this.groupDid, ATGRP_COLLECTION.rule, rec.rkey),
         title: String(rec.value.title),
         text: String(rec.value.text),
         ...(typeof rec.value.order === "number" ? { order: rec.value.order } : {}),
@@ -1099,22 +1203,22 @@ export class GroupClient {
     const rkey = input.rkey ?? tidNow(this.now());
     if (!isTid(rkey)) throw new Error("Rule rkey must be a valid TID.");
     const record: Record<string, unknown> = {
-      $type: OPENSOCIAL_COLLECTION.rule,
+      $type: ATGRP_COLLECTION.rule,
       title: input.title,
       text: input.text,
       ...(input.order !== undefined ? { order: input.order } : {}),
     };
-    const check = validateSpaceRecord(OPENSOCIAL_COLLECTION.rule, record, {
+    const check = validateSpaceRecord(ATGRP_COLLECTION.rule, record, {
       authorityDid: this.groupDid,
-      spaceUri: this.metaSpaceUri,
+      spaceUri: this.membersSpaceUri,
       repoDid: this.groupDid,
       rkey,
     });
     if (!check.valid) throw new Error(check.reason);
     const out = await this.xrpc.procedure<unknown, { uri: string }>("com.atproto.space.putRecord", {
-      space: this.metaSpaceUri,
+      space: this.membersSpaceUri,
       repo: this.groupDid,
-      collection: OPENSOCIAL_COLLECTION.rule,
+      collection: ATGRP_COLLECTION.rule,
       rkey,
       record,
     });
@@ -1124,9 +1228,9 @@ export class GroupClient {
   async deleteRule(rkey: string): Promise<void> {
     if (!isTid(rkey)) throw new Error("Rule rkey must be a valid TID.");
     await this.xrpc.procedure("com.atproto.space.deleteRecord", {
-      space: this.metaSpaceUri,
+      space: this.membersSpaceUri,
       repo: this.groupDid,
-      collection: OPENSOCIAL_COLLECTION.rule,
+      collection: ATGRP_COLLECTION.rule,
       rkey,
     });
   }
@@ -1134,9 +1238,9 @@ export class GroupClient {
   async getLabeler(): Promise<Record<string, unknown> | null> {
     try {
       const res = await this.xrpc.query<{ value: Record<string, unknown> }>("com.atproto.space.getRecord", {
-        space: this.metaSpaceUri,
+        space: this.membersSpaceUri,
         repo: this.groupDid,
-        collection: OPENSOCIAL_COLLECTION.labeler,
+        collection: ATGRP_COLLECTION.labeler,
         rkey: SELF_SKEY,
       });
       return res.value;
@@ -1148,39 +1252,39 @@ export class GroupClient {
 
   async putLabeler(policies: Record<string, unknown>): Promise<{ uri: string }> {
     const record: Record<string, unknown> = {
-      $type: OPENSOCIAL_COLLECTION.labeler,
+      $type: ATGRP_COLLECTION.labeler,
       policies,
     };
-    const check = validateSpaceRecord(OPENSOCIAL_COLLECTION.labeler, record, {
+    const check = validateSpaceRecord(ATGRP_COLLECTION.labeler, record, {
       authorityDid: this.groupDid,
-      spaceUri: this.metaSpaceUri,
+      spaceUri: this.membersSpaceUri,
       repoDid: this.groupDid,
       rkey: SELF_SKEY,
     });
     if (!check.valid) throw new Error(check.reason);
     return this.xrpc.procedure<unknown, { uri: string }>("com.atproto.space.putRecord", {
-      space: this.metaSpaceUri,
+      space: this.membersSpaceUri,
       repo: this.groupDid,
-      collection: OPENSOCIAL_COLLECTION.labeler,
+      collection: ATGRP_COLLECTION.labeler,
       rkey: SELF_SKEY,
       record,
     });
   }
 
   // ---------------------------------------------------------------------------
-  // Roles & Memberships (`group.opensocial.members/self`)
+  // Roles & Memberships (`org.atgrp.members/self`)
   // ---------------------------------------------------------------------------
 
   async listRoles(maxRecords = 500): Promise<GroupRoleEntry[]> {
     const scanned = await listBoundedRecords(this.xrpc, {
       space: this.membersSpaceUri,
       repo: this.groupDid,
-      collection: OPENSOCIAL_COLLECTION.role,
+      collection: ATGRP_COLLECTION.role,
       maxRecords,
     });
     return scanned.records
       .filter((rec) =>
-        validateSpaceRecord(OPENSOCIAL_COLLECTION.role, rec.value, {
+        validateSpaceRecord(ATGRP_COLLECTION.role, rec.value, {
           authorityDid: this.groupDid,
           spaceUri: this.membersSpaceUri,
           repoDid: this.groupDid,
@@ -1189,12 +1293,12 @@ export class GroupClient {
       )
       .map((rec) => ({
         rkey: rec.rkey,
-        uri: spaceRecordUri(this.membersSpaceUri, this.groupDid, OPENSOCIAL_COLLECTION.role, rec.rkey),
-        displayName: String(rec.value.displayName),
+        uri: spaceRecordUri(this.membersSpaceUri, this.groupDid, ATGRP_COLLECTION.role, rec.rkey),
+        displayName: typeof rec.value.displayName === "string" && rec.value.displayName.length > 0 ? rec.value.displayName : rec.rkey,
         ...(typeof rec.value.description === "string" ? { description: rec.value.description } : {}),
         default: rec.value.default === true,
-        scopes: Array.isArray(rec.value.scopes) ? (rec.value.scopes as string[]) : [],
-        assignable: Array.isArray(rec.value.assignable) ? (rec.value.assignable as string[]) : [],
+        permissions: Array.isArray(rec.value.permissions) ? (rec.value.permissions as string[]) : [],
+        canAssign: Array.isArray(rec.value.canAssign) ? (rec.value.canAssign as string[]) : [],
       }))
       .sort((a, b) => a.rkey.localeCompare(b.rkey));
   }
@@ -1202,23 +1306,23 @@ export class GroupClient {
   async putRole(
     rkey: string,
     role: {
-      displayName: string;
+      displayName?: string;
       description?: string;
       default?: boolean;
-      scopes?: readonly string[];
-      assignable?: readonly string[];
+      permissions?: readonly string[];
+      canAssign?: readonly string[];
     },
   ): Promise<{ uri: string }> {
-    if (!isRecordKey(rkey)) throw new Error("Invalid role rkey.");
+    if (!isValidRoleId(rkey)) throw new Error("Invalid role rkey: must match /^[a-z-]{3,512}$/.");
     const record: Record<string, unknown> = {
-      $type: OPENSOCIAL_COLLECTION.role,
-      displayName: role.displayName,
+      $type: ATGRP_COLLECTION.role,
+      ...(role.displayName !== undefined ? { displayName: role.displayName } : {}),
       ...(role.description !== undefined ? { description: role.description } : {}),
       ...(role.default !== undefined ? { default: role.default } : {}),
-      ...(role.scopes !== undefined ? { scopes: [...role.scopes] } : {}),
-      ...(role.assignable !== undefined ? { assignable: [...role.assignable] } : {}),
+      ...(role.permissions !== undefined ? { permissions: [...role.permissions] } : {}),
+      ...(role.canAssign !== undefined ? { canAssign: [...role.canAssign] } : {}),
     };
-    const check = validateSpaceRecord(OPENSOCIAL_COLLECTION.role, record, {
+    const check = validateSpaceRecord(ATGRP_COLLECTION.role, record, {
       authorityDid: this.groupDid,
       spaceUri: this.membersSpaceUri,
       repoDid: this.groupDid,
@@ -1228,18 +1332,18 @@ export class GroupClient {
     return this.xrpc.procedure<unknown, { uri: string }>("com.atproto.space.putRecord", {
       space: this.membersSpaceUri,
       repo: this.groupDid,
-      collection: OPENSOCIAL_COLLECTION.role,
+      collection: ATGRP_COLLECTION.role,
       rkey,
       record,
     });
   }
 
   async deleteRole(rkey: string): Promise<void> {
-    if (!isRecordKey(rkey)) throw new Error("Invalid role rkey.");
+    if (!isValidRoleId(rkey)) throw new Error("Invalid role rkey.");
     await this.xrpc.procedure("com.atproto.space.deleteRecord", {
       space: this.membersSpaceUri,
       repo: this.groupDid,
-      collection: OPENSOCIAL_COLLECTION.role,
+      collection: ATGRP_COLLECTION.role,
       rkey,
     });
   }
@@ -1248,12 +1352,12 @@ export class GroupClient {
     const scanned = await listBoundedRecords(this.xrpc, {
       space: this.membersSpaceUri,
       repo: this.groupDid,
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       maxRecords,
     });
     return scanned.records
       .filter((rec) =>
-        validateSpaceRecord(OPENSOCIAL_COLLECTION.membership, rec.value, {
+        validateSpaceRecord(ATGRP_COLLECTION.membership, rec.value, {
           authorityDid: this.groupDid,
           spaceUri: this.membersSpaceUri,
           repoDid: this.groupDid,
@@ -1262,7 +1366,7 @@ export class GroupClient {
       )
       .map((rec) => ({
         memberDid: rec.rkey,
-        uri: spaceRecordUri(this.membersSpaceUri, this.groupDid, OPENSOCIAL_COLLECTION.membership, rec.rkey),
+        uri: spaceRecordUri(this.membersSpaceUri, this.groupDid, ATGRP_COLLECTION.membership, rec.rkey),
         roles: [...(rec.value.roles as string[])],
         createdAt: String(rec.value.createdAt),
         ...(typeof rec.value[FLOCK_EXTENSION_FIELD.incarnation] === "string"
@@ -1280,7 +1384,7 @@ export class GroupClient {
         {
           space: this.membersSpaceUri,
           repo: this.groupDid,
-          collection: OPENSOCIAL_COLLECTION.membership,
+          collection: ATGRP_COLLECTION.membership,
           rkey: memberDid,
         },
       );
@@ -1309,7 +1413,7 @@ export class GroupClient {
     if (roles.length === 0) throw new Error("Membership requires at least one role.");
     const existing = await this.getMembership(memberDid);
     const record: Record<string, unknown> = {
-      $type: OPENSOCIAL_COLLECTION.membership,
+      $type: ATGRP_COLLECTION.membership,
       roles: [...new Set(roles)],
       createdAt: existing?.createdAt ?? new Date(this.now()).toISOString(),
     };
@@ -1318,7 +1422,7 @@ export class GroupClient {
       {
         space: this.membersSpaceUri,
         repo: this.groupDid,
-        collection: OPENSOCIAL_COLLECTION.membership,
+        collection: ATGRP_COLLECTION.membership,
         rkey: memberDid,
         record,
       },
@@ -1332,13 +1436,13 @@ export class GroupClient {
     await this.xrpc.procedure("com.atproto.space.deleteRecord", {
       space: this.membersSpaceUri,
       repo: this.groupDid,
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: memberDid,
     });
   }
 
   // ---------------------------------------------------------------------------
-  // Cross-PDS Invitations & Delivery
+  // Cross-PDS Invitations & Delivery (`org.atgrp.inbox/self`)
   // ---------------------------------------------------------------------------
 
   async createInvite(
@@ -1348,24 +1452,24 @@ export class GroupClient {
     if (!isDid(inviteeDid)) throw new Error("Invalid invitee DID.");
     const rkey = options.rkey ?? tidNow(this.now());
     if (!isTid(rkey)) throw new Error("Invite rkey must be a valid TID.");
-    const invitesSpace = personalInvitesUri(inviteeDid);
+    const inboxSpace = personalInboxUri(inviteeDid);
     const record: Record<string, unknown> = {
-      $type: OPENSOCIAL_COLLECTION.invite,
+      $type: ATGRP_COLLECTION.invite,
       createdAt: new Date(this.now()).toISOString(),
       ...(options.expiresAt !== undefined ? { expiresAt: options.expiresAt } : {}),
       ...(options.message !== undefined ? { message: options.message } : {}),
     };
-    const check = validateSpaceRecord(OPENSOCIAL_COLLECTION.invite, record, {
+    const check = validateSpaceRecord(ATGRP_COLLECTION.invite, record, {
       authorityDid: inviteeDid,
-      spaceUri: invitesSpace,
+      spaceUri: inboxSpace,
       repoDid: this.groupDid,
       rkey,
     });
     if (!check.valid) throw new Error(check.reason);
     const out = await this.xrpc.procedure<unknown, { uri: string }>("com.atproto.space.putRecord", {
-      space: invitesSpace,
+      space: inboxSpace,
       repo: this.groupDid,
-      collection: OPENSOCIAL_COLLECTION.invite,
+      collection: ATGRP_COLLECTION.invite,
       rkey,
       record,
     });
@@ -1376,9 +1480,9 @@ export class GroupClient {
     if (!isDid(inviteeDid)) throw new Error("Invalid invitee DID.");
     if (!isTid(rkey)) throw new Error("Invite rkey must be a valid TID.");
     await this.xrpc.procedure("com.atproto.space.deleteRecord", {
-      space: personalInvitesUri(inviteeDid),
+      space: personalInboxUri(inviteeDid),
       repo: this.groupDid,
-      collection: OPENSOCIAL_COLLECTION.invite,
+      collection: ATGRP_COLLECTION.invite,
       rkey,
     });
   }
@@ -1403,14 +1507,14 @@ export class GroupClient {
   }
 
   // ---------------------------------------------------------------------------
-  // Join Requests (`group.opensocial.listJoinRequests`, approve, deny)
+  // Join Requests (`org.atgrp.listJoinRequests`, approve, deny)
   // ---------------------------------------------------------------------------
 
   async listJoinRequests(options: { limit?: number; cursor?: string } = {}): Promise<{
     requests: GroupJoinRequestItem[];
     cursor?: string;
   }> {
-    return this.xrpc.query(OPENSOCIAL_METHOD.listJoinRequests, {
+    return this.xrpc.query(ATGRP_METHOD.listJoinRequests, {
       ...(options.limit !== undefined ? { limit: options.limit } : {}),
       ...(options.cursor !== undefined ? { cursor: options.cursor } : {}),
     });
@@ -1430,48 +1534,60 @@ export class GroupClient {
 
   async denyJoinRequest(memberDid: string): Promise<void> {
     if (!isDid(memberDid)) throw new Error("Invalid member DID.");
-    await this.xrpc.procedure(OPENSOCIAL_METHOD.denyJoinRequest, { member: memberDid });
+    await this.xrpc.procedure(ATGRP_METHOD.denyJoinRequest, { member: memberDid });
   }
 
   // ---------------------------------------------------------------------------
-  // Moderation & Labels (`listModSubjects`, `getModSubjectHistory`, `resolveModSubject`, `com.atproto.label.record`)
+  // Moderation & Labels (`org.atgrp.mod.*`, `com.atproto.label.record`)
   // ---------------------------------------------------------------------------
 
-  async listModSubjects(options: {
-    status?: "open" | "resolved" | "escalated";
+  async queryModSubjects(options: {
+    status?: "open" | "resolved";
+    tags?: readonly string[];
+    sort?: "oldest" | "newest" | "updated";
     limit?: number;
     cursor?: string;
   } = {}): Promise<{ subjects: ModSubjectItem[]; cursor?: string }> {
-    return this.xrpc.query(OPENSOCIAL_METHOD.listModSubjects, {
+    return this.xrpc.query(ATGRP_METHOD.modQuerySubjects, {
       ...(options.status !== undefined ? { status: options.status } : {}),
+      ...(options.tags !== undefined && options.tags.length > 0 ? { tags: options.tags } : {}),
+      ...(options.sort !== undefined ? { sort: options.sort } : {}),
       ...(options.limit !== undefined ? { limit: options.limit } : {}),
       ...(options.cursor !== undefined ? { cursor: options.cursor } : {}),
     });
   }
 
-  async getModSubjectHistory(options: {
+  async queryModSubjectHistory(options: {
     subject: string;
     cid?: string;
+    sort?: "newest" | "oldest";
     limit?: number;
     cursor?: string;
   }): Promise<{ events: ModSubjectHistoryEvent[]; cursor?: string }> {
-    return this.xrpc.query(OPENSOCIAL_METHOD.getModSubjectHistory, {
+    return this.xrpc.query(ATGRP_METHOD.modQuerySubjectHistory, {
       subject: options.subject,
       ...(options.cid !== undefined ? { cid: options.cid } : {}),
+      ...(options.sort !== undefined ? { sort: options.sort } : {}),
       ...(options.limit !== undefined ? { limit: options.limit } : {}),
       ...(options.cursor !== undefined ? { cursor: options.cursor } : {}),
     });
   }
 
-  async resolveModSubject(input: {
+  async updateModSubject(input: {
     subject: string;
     cid?: string;
-    status: "resolved" | "escalated";
+    status?: "open" | "resolved";
+    note?: string;
+    addTags?: readonly string[];
+    removeTags?: readonly string[];
   }): Promise<ModSubjectItem> {
-    return this.xrpc.procedure(OPENSOCIAL_METHOD.resolveModSubject, {
+    return this.xrpc.procedure(ATGRP_METHOD.modUpdateSubject, {
       subject: input.subject,
       ...(input.cid !== undefined ? { cid: input.cid } : {}),
-      status: input.status,
+      ...(input.status !== undefined ? { status: input.status } : {}),
+      ...(input.note !== undefined ? { note: input.note } : {}),
+      ...(input.addTags !== undefined && input.addTags.length > 0 ? { addTags: [...input.addTags] } : {}),
+      ...(input.removeTags !== undefined && input.removeTags.length > 0 ? { removeTags: [...input.removeTags] } : {}),
     });
   }
 
@@ -1527,6 +1643,65 @@ export class GroupClient {
     val: string;
   }): Promise<{ uri: string; rkey: string }> {
     return this.publishLabel({ ...input, neg: true });
+  }
+
+  /**
+   * Deletes an existing `com.atproto.label.record` by its AT space record URI (e.g. `#labelEvent.uri` returned
+   * by `queryModSubjectHistory`), enabling moderators to negate/remove labels without holding `action=read` on `space:*`.
+   */
+  async deleteLabelRecord(labelRecordUri: string): Promise<void> {
+    const parsed = parseAnySpaceRecordUri(labelRecordUri);
+    if (
+      !parsed ||
+      parsed.authorityDid !== this.groupDid ||
+      parsed.repoDid !== this.groupDid ||
+      parsed.collection !== ATPROTO_SPACE_COLLECTION.label
+    ) {
+      throw new Error("Label URI must be a com.atproto.label.record owned by this group.");
+    }
+    await this.xrpc.procedure("com.atproto.space.deleteRecord", {
+      space: parsed.spaceUri,
+      repo: this.groupDid,
+      collection: ATPROTO_SPACE_COLLECTION.label,
+      rkey: parsed.rkey,
+    });
+  }
+
+  /**
+   * Lists `#labelEvent` URIs recorded in `queryModSubjectHistory` for `subject` (without requiring `action=read` on `space:*`).
+   */
+  async listLabelEventsFromHistory(options: {
+    subject: string;
+    cid?: string;
+    maxPages?: number;
+  }): Promise<Array<{ eventId: string; createdAt: string; val: string; neg: boolean; uri?: string }>> {
+    const maxPages = options.maxPages ?? 10;
+    const out: Array<{ eventId: string; createdAt: string; val: string; neg: boolean; uri?: string }> = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < maxPages; page += 1) {
+      const res = await this.queryModSubjectHistory({
+        subject: options.subject,
+        ...(options.cid !== undefined ? { cid: options.cid } : {}),
+        sort: "newest",
+        limit: 100,
+        ...(cursor ? { cursor } : {}),
+      });
+      for (const item of res.events) {
+        if (item.event.$type !== ATGRP_MOD_EVENT_TYPE.label) continue;
+        const val = typeof item.event.val === "string" ? item.event.val : undefined;
+        if (!val) continue;
+        out.push({
+          eventId: item.eventId,
+          createdAt: item.createdAt,
+          val,
+          neg: item.event.neg === true,
+          ...(typeof item.event.uri === "string" ? { uri: item.event.uri } : {}),
+        });
+      }
+      if (!res.cursor) break;
+      cursor = res.cursor;
+    }
+    return out;
   }
 
   // ---------------------------------------------------------------------------
@@ -1836,7 +2011,7 @@ export class GroupClient {
               "com.atproto.server.getServiceAuth",
               {
                 aud: currentState.targetServiceDid,
-                lxm: "group.opensocial.abortMigration",
+                lxm: FLOCK_GROUP_METHOD.abortMigration,
               },
             );
             token = out.token;
@@ -2119,6 +2294,7 @@ export class GroupClient {
         };
       } else {
         const initial: PersistedGroupMigrationState = {
+          protocolVersion: "org.atgrp.v1",
           operationId,
           targetOrigin,
           handle: normalizedHandle,

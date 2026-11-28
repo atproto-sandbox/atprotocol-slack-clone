@@ -20,6 +20,8 @@ test("journal migration indexes legacy operation rows by workspace URI; an older
   process.env.OPERATOR_SERVICE_REF = "did:web:localhost%3A3000#atproto_flock_operator";
   process.env.APP_URL = "http://127.0.0.1:3000";
   const legacy = new BetterSqlite3(databasePath);
+  legacy.exec(`CREATE TABLE schema_migration (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);
+    INSERT INTO schema_migration VALUES (6, 1700000002);`);
   legacy.exec(`CREATE TABLE operation (
     workspace TEXT NOT NULL, actor TEXT NOT NULL, operation_id TEXT NOT NULL,
     request_hash TEXT NOT NULL, request_json TEXT NOT NULL,

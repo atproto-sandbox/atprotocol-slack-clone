@@ -1,22 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { AtprotoClient } from "@flock/protocol/atproto/xrpc";
-import { personalInvitesUri, SELF_SKEY } from "@flock/protocol/keys";
-import { OPENSOCIAL_SPACE_TYPE } from "@flock/protocol/nsids";
+import { personalInboxUri, SELF_SKEY } from "@flock/protocol/keys";
+import { ATGRP_SPACE_TYPE } from "@flock/protocol/nsids";
 import { FakeNetwork } from "@flock/testing/fake-network";
 import { ensureInvitesSpace, IncompatibleInvitesSpacePolicyError } from "./invites";
 
 const ALICE = "did:plc:aliceinvitesaaaaaaaaaaaa";
 const BOB = "did:plc:bobinvitesaaaaaaaaaaaaaa";
 
-test("ensureInvitesSpace idempotently creates personal invites/self and enforces all 4 R13 invariants", async () => {
+test("ensureInvitesSpace idempotently creates personal inbox/self and enforces all 4 invariants", async () => {
   const net = new FakeNetwork();
   net.createAccount(ALICE, "pds1");
   net.createAccount(BOB, "pds2");
 
   const deps = { did: ALICE, memberClient: net.clientFor(ALICE) };
   const space = await ensureInvitesSpace(deps);
-  assert.equal(space, personalInvitesUri(ALICE));
+  assert.equal(space, personalInboxUri(ALICE));
 
   // Idempotent second call succeeds cleanly
   assert.equal(await ensureInvitesSpace(deps), space);
@@ -98,6 +98,6 @@ test("ensureInvitesSpace idempotently creates personal invites/self and enforces
     policy: { $type: "com.atproto.memberspace.policy", publicRead: false, publicWrite: true },
   });
   assert.equal(await ensureInvitesSpace(deps), space);
-  void OPENSOCIAL_SPACE_TYPE;
+  void ATGRP_SPACE_TYPE;
   void SELF_SKEY;
 });

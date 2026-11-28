@@ -195,15 +195,15 @@ test("the kinds that create or archive spaces name them, so the operator registe
   const owner = "did:plc:owner";
   const actor = { did: owner, workspace: { uri: `at:space/${owner}/new.flock.workspace/self`, authorityDid: owner, skey: "self" } } as OperatorActor;
   assert.deepEqual(operationKind("bootstrapWorkspace")!.createsSpaces!(actor, { kind: "bootstrapWorkspace", name: "Acme" }), [
-    `at:space/${owner}/group.opensocial.meta/self`,
-    `at:space/${owner}/group.opensocial.members/self`,
+    `at:space/${owner}/org.atgrp.meta/self`,
+    `at:space/${owner}/org.atgrp.members/self`,
     `at:space/${owner}/new.flock.workspace/self`,
     `at:space/${owner}/new.flock.inbox/self`,
     `at:space/${owner}/new.flock.channel/general`,
   ]);
   assert.deepEqual(operationKind("createWorkspace")!.createsSpaces!(actor, { kind: "createWorkspace", name: "Acme", creator: "did:plc:creator" }), [
-    `at:space/${owner}/group.opensocial.meta/self`,
-    `at:space/${owner}/group.opensocial.members/self`,
+    `at:space/${owner}/org.atgrp.meta/self`,
+    `at:space/${owner}/org.atgrp.members/self`,
     `at:space/${owner}/new.flock.workspace/self`,
     `at:space/${owner}/new.flock.inbox/self`,
     `at:space/${owner}/new.flock.channel/general`,

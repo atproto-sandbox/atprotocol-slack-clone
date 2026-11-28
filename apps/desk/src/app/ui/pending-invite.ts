@@ -3,6 +3,11 @@ import { PENDING_INVITE_STORAGE_KEY } from "@flock/shell";
 
 export { PENDING_INVITE_STORAGE_KEY };
 
+export function isLegacyOpenSocialInviteUri(raw: string | null | undefined): boolean {
+  if (!raw) return false;
+  return raw.includes("group.opensocial.");
+}
+
 /**
  * Validates and normalizes an invite input (either a canonical workspace space URI
  * or a bare group DID for the manual Join bar) into `{ groupDid, workspaceUri }`, or `null`.
@@ -12,7 +17,7 @@ export function parseInviteTarget(raw: string | null | undefined, options: { all
   workspaceUri: string;
 } | null {
   const trimmed = raw?.trim();
-  if (!trimmed) return null;
+  if (!trimmed || isLegacyOpenSocialInviteUri(trimmed)) return null;
   const parsedWs = parseWorkspaceUri(normalizeLegacySpaceUri(trimmed));
   if (parsedWs) {
     return { groupDid: parsedWs.authorityDid, workspaceUri: workspaceUri(parsedWs.authorityDid) };

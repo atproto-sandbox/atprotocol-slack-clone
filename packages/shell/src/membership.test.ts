@@ -4,10 +4,10 @@ import { IDBFactory } from "fake-indexeddb";
 import { XrpcError } from "@flock/protocol/atproto/xrpc";
 import { groupMembersUri, SELF_SKEY } from "@flock/protocol/keys";
 import {
+  ATGRP_COLLECTION,
+  ATGRP_METHOD,
+  ATGRP_POLICY,
   FLOCK_EXTENSION_FIELD,
-  OPENSOCIAL_COLLECTION,
-  OPENSOCIAL_METHOD,
-  OPENSOCIAL_POLICY,
   SPACE_TYPE,
 } from "@flock/protocol/nsids";
 import { FakeNetwork } from "@flock/testing/fake-network";
@@ -53,7 +53,7 @@ async function setupGroup(net: FakeNetwork, groupDid = GROUP) {
     spaceType: SPACE_TYPE.workspace,
     skey: SELF_SKEY,
     policy: {
-      $type: OPENSOCIAL_POLICY,
+      $type: ATGRP_POLICY,
       publicRead: false,
       unlisted: false,
       grants: [
@@ -136,10 +136,10 @@ test("acceptDirectMembership repairs missing and stale-incarnation acceptance/se
   await owner.procedure("com.atproto.space.putRecord", {
     space: membersUri,
     repo: GROUP,
-    collection: OPENSOCIAL_COLLECTION.membership,
+    collection: ATGRP_COLLECTION.membership,
     rkey: BOB,
     record: {
-      $type: OPENSOCIAL_COLLECTION.membership,
+      $type: ATGRP_COLLECTION.membership,
       roles: ["member"],
       [FLOCK_EXTENSION_FIELD.incarnation]: "inc-2",
       createdAt: "2026-11-20T00:00:00.000Z",
@@ -148,10 +148,10 @@ test("acceptDirectMembership repairs missing and stale-incarnation acceptance/se
   await net.clientFor(BOB).procedure("com.atproto.space.putRecord", {
     space: membersUri,
     repo: BOB,
-    collection: OPENSOCIAL_COLLECTION.acceptance,
+    collection: ATGRP_COLLECTION.confirmation,
     rkey: SELF_SKEY,
     record: {
-      $type: OPENSOCIAL_COLLECTION.acceptance,
+      $type: ATGRP_COLLECTION.confirmation,
       [FLOCK_EXTENSION_FIELD.incarnation]: "inc-1",
       createdAt: "2026-11-19T00:00:00.000Z",
     },
@@ -160,7 +160,7 @@ test("acceptDirectMembership repairs missing and stale-incarnation acceptance/se
   const liveMembership = await owner.query<{ value: Record<string, unknown> }>("com.atproto.space.getRecord", {
     space: membersUri,
     repo: GROUP,
-    collection: OPENSOCIAL_COLLECTION.membership,
+    collection: ATGRP_COLLECTION.membership,
     rkey: BOB,
   });
   const liveIncarnation = String(liveMembership.value[FLOCK_EXTENSION_FIELD.incarnation]);
@@ -175,7 +175,7 @@ test("acceptDirectMembership repairs missing and stale-incarnation acceptance/se
   const updatedAcc = await net.clientFor(BOB).query<{ value: Record<string, unknown> }>("com.atproto.space.getRecord", {
     space: membersUri,
     repo: BOB,
-    collection: OPENSOCIAL_COLLECTION.acceptance,
+    collection: ATGRP_COLLECTION.confirmation,
     rkey: SELF_SKEY,
   });
   assert.equal(updatedAcc.value[FLOCK_EXTENSION_FIELD.incarnation], liveIncarnation);
@@ -195,7 +195,7 @@ test("joinGroup crash-resumes across all 5 phases, replays Idempotency-Key, hand
     resolvePds: async (did) => (did === GROUP ? endpoint : net.resolvePds(did)),
     onEndpoint: async (request) => {
       const url = new URL(request.url);
-      if (url.pathname === `/xrpc/${OPENSOCIAL_METHOD.requestJoin}`) {
+      if (url.pathname === `/xrpc/${ATGRP_METHOD.requestJoin}`) {
         const key = request.headers.get("idempotency-key") ?? "";
         seenKeys.push(key);
         if (joinBehavior === "transient") return jsonRes({ error: "Internal", message: "boom" }, 503);
@@ -207,10 +207,10 @@ test("joinGroup crash-resumes across all 5 phases, replays Idempotency-Key, hand
         await owner.procedure("com.atproto.space.putRecord", {
           space: membersUri,
           repo: GROUP,
-          collection: OPENSOCIAL_COLLECTION.membership,
+          collection: ATGRP_COLLECTION.membership,
           rkey: BOB,
           record: {
-            $type: OPENSOCIAL_COLLECTION.membership,
+            $type: ATGRP_COLLECTION.membership,
             roles: ["member"],
             [FLOCK_EXTENSION_FIELD.incarnation]: "inc-join-1",
             createdAt: "2026-11-20T00:00:00.000Z",
@@ -279,7 +279,7 @@ test("joinGroup crash-resumes across all 5 phases, replays Idempotency-Key, hand
   await owner.procedure("com.atproto.space.deleteRecord", {
     space: membersUri,
     repo: GROUP,
-    collection: OPENSOCIAL_COLLECTION.membership,
+    collection: ATGRP_COLLECTION.membership,
     rkey: BOB,
   });
 
@@ -329,7 +329,7 @@ test("cancelPendingJoin handles JoinRequestNotFound admission-race upgrade and p
     resolvePds: async () => "https://gh1.example",
     onEndpoint: async (req) => {
       const url = new URL(req.url);
-      if (url.pathname === `/xrpc/${OPENSOCIAL_METHOD.cancelJoinRequest}`) {
+      if (url.pathname === `/xrpc/${ATGRP_METHOD.cancelJoinRequest}`) {
         return jsonRes({ error: "JoinRequestNotFound", message: "gone" }, 400);
       }
       if (url.pathname === "/group-member/join-status") {
@@ -391,11 +391,11 @@ test("reconcileLifecycle enforces strict leave-before-join order, leave-completi
     resolvePds: async () => "https://gh1.example",
     onEndpoint: async (req) => {
       const url = new URL(req.url);
-      if (url.pathname === `/xrpc/${OPENSOCIAL_METHOD.requestJoin}`) {
+      if (url.pathname === `/xrpc/${ATGRP_METHOD.requestJoin}`) {
         requestJoinCalls += 1;
         return jsonRes({ status: "admitted" }, 200);
       }
-      if (url.pathname === `/xrpc/${OPENSOCIAL_METHOD.leaveGroup}`) {
+      if (url.pathname === `/xrpc/${ATGRP_METHOD.leaveGroup}`) {
         const body = (await req.json()) as { group: string };
         if (body.group === GROUP && leaveFailsTransiently) {
           return jsonRes({ error: "TemporaryError", message: "503" }, 503);
@@ -448,10 +448,10 @@ test("leaveGroup handles preflight + 3-phase errors: tombstone, LastAdmin, Membe
     await net.clientFor(BOB).procedure("com.atproto.space.putRecord", {
       space: membersUri,
       repo: BOB,
-      collection: OPENSOCIAL_COLLECTION.acceptance,
+      collection: ATGRP_COLLECTION.confirmation,
       rkey: SELF_SKEY,
       record: {
-        $type: OPENSOCIAL_COLLECTION.acceptance,
+        $type: ATGRP_COLLECTION.confirmation,
         [FLOCK_EXTENSION_FIELD.incarnation]: incarnation,
         createdAt: "2026-11-20T00:00:00.000Z",
       },
@@ -463,7 +463,7 @@ test("leaveGroup handles preflight + 3-phase errors: tombstone, LastAdmin, Membe
         await net.clientFor(BOB).query<{ value: Record<string, unknown> }>("com.atproto.space.getRecord", {
           space: membersUri,
           repo: BOB,
-          collection: OPENSOCIAL_COLLECTION.acceptance,
+          collection: ATGRP_COLLECTION.confirmation,
           rkey: SELF_SKEY,
         })
       ).value;
@@ -489,7 +489,7 @@ test("leaveGroup handles preflight + 3-phase errors: tombstone, LastAdmin, Membe
     },
     onEndpoint: async (req) => {
       const url = new URL(req.url);
-      if (url.pathname === `/xrpc/${OPENSOCIAL_METHOD.leaveGroup}`) return leaveRes.clone();
+      if (url.pathname === `/xrpc/${ATGRP_METHOD.leaveGroup}`) return leaveRes.clone();
       if (url.pathname === "/group-member/join-status") return joinStatusRes.clone();
       return null;
     },
@@ -543,7 +543,7 @@ test("leaveGroup handles preflight + 3-phase errors: tombstone, LastAdmin, Membe
     },
     onEndpoint: async (req) => {
       const url = new URL(req.url);
-      if (url.pathname === `/xrpc/${OPENSOCIAL_METHOD.leaveGroup}`) {
+      if (url.pathname === `/xrpc/${ATGRP_METHOD.leaveGroup}`) {
         return url.origin === "https://gh1.example"
           ? jsonRes({ error: "RepoTakendown", message: "moved" }, 400)
           : jsonRes({}, 200);
@@ -650,4 +650,90 @@ test("withGroupLifecycleLock serializes concurrent operations per (viewerDid, gr
   const rec = await reconcileLifecycle(makeMockDeps(net, BOB), mem);
   assert.equal(rec.joinErrors.length, 1);
   assert.ok(rec.joinErrors[0]!.error instanceof LifecycleActorMismatchError);
+});
+
+test("spec-only host fallback when /group-member/join-status returns 404/501 checks org.atgrp.members/self without resubmitting requestJoin, and IDB v3 clears pre-R15 lifecycle rows", async () => {
+  const net = new FakeNetwork();
+  const { owner, membersUri } = await setupGroup(net);
+  const store = new MemoryLifecycleStore(BOB);
+
+  let requestJoinCalls = 0;
+  let joinStatusHttp = 404;
+
+  const deps = makeMockDeps(net, BOB, {
+    onEndpoint: async (req) => {
+      const url = new URL(req.url);
+      if (url.pathname === `/xrpc/${ATGRP_METHOD.requestJoin}`) {
+        requestJoinCalls += 1;
+        return jsonRes({ status: "pending" }, 200);
+      }
+      if (url.pathname === "/group-member/join-status") {
+        return jsonRes({ error: "NotFound", message: "spec-only host" }, joinStatusHttp);
+      }
+      return null;
+    },
+  });
+
+  // 1. Initial join enters pending_approval
+  const p = await joinGroup(deps, store, { groupDid: GROUP, message: "please admit" });
+  assert.equal(p.status, "pending");
+  assert.equal(requestJoinCalls, 1);
+
+  // 2. While not yet admitted, 404/501 on /group-member/join-status probes members/self and stays pending without resubmitting requestJoin!
+  for (const status of [404, 501]) {
+    joinStatusHttp = status;
+    const recPending = await reconcileLifecycle(deps, store);
+    assert.equal(recPending.joinErrors.length, 0);
+    assert.equal(requestJoinCalls, 1, `must not resubmit requestJoin on HTTP ${status} join-status`);
+    assert.equal((await store.listJoiningGroups())[0]?.phase, "pending_approval");
+  }
+
+  // 3. Once admin admits Bob on the spec-only host, reconcileLifecycle advances via members/self check and writes confirmation/self!
+  await owner.procedure("com.atproto.space.putRecord", {
+    space: membersUri,
+    repo: GROUP,
+    collection: ATGRP_COLLECTION.membership,
+    rkey: BOB,
+    record: { $type: ATGRP_COLLECTION.membership, roles: ["member"], createdAt: "2026-11-20T00:00:00.000Z" },
+  });
+  const recAdmitted = await reconcileLifecycle(deps, store);
+  assert.equal(recAdmitted.joinErrors.length, 0);
+  assert.equal(requestJoinCalls, 1);
+  assert.deepEqual(await store.listJoiningGroups(), []);
+  const conf = await net.clientFor(BOB).query<{ value: Record<string, unknown> }>("com.atproto.space.getRecord", {
+    space: membersUri,
+    repo: BOB,
+    collection: ATGRP_COLLECTION.confirmation,
+    rkey: SELF_SKEY,
+  });
+  assert.equal(conf.value.$type, ATGRP_COLLECTION.confirmation);
+
+  // 4. Desk IDB v2 -> v3 upgrade clears pre-R15 joiningGroups & leavingGroups rows!
+  const idb = new IDBFactory();
+  const dbName = deskLifecycleDatabaseName(BOB);
+  const v2Db = await new Promise<IDBDatabase>((resolve, reject) => {
+    const req = idb.open(dbName, 2);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      db.createObjectStore("joiningGroups", { keyPath: "operationId" });
+      db.createObjectStore("leavingGroups", { keyPath: "groupDid" });
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  await new Promise<void>((resolve, reject) => {
+    const tx = v2Db.transaction(["joiningGroups", "leavingGroups"], "readwrite");
+    tx.objectStore("joiningGroups").put({ viewerDid: BOB, operationId: "old-op", mode: "open", intentHash: "h", groupDid: GROUP, phase: "pending_approval", createdAt: 1 });
+    tx.objectStore("leavingGroups").put({ viewerDid: BOB, groupDid: GROUP, phase: "leaving_group", createdAt: 1 });
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+  v2Db.close();
+  const v3Store = await IndexedDbLifecycleStore.open(BOB, idb);
+  try {
+    assert.deepEqual(await v3Store.listJoiningGroups(), []);
+    assert.deepEqual(await v3Store.listLeavingGroups(), []);
+  } finally {
+    v3Store.close();
+  }
 });

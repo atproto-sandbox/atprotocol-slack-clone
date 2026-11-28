@@ -1,5 +1,5 @@
 import { groupMembersUri, groupMetaUri, parseExtSpaceUri, parseSpaceUri, workspaceUri } from "@flock/protocol/keys";
-import { OPENSOCIAL_SPACE_TYPE, SPACE_TYPE } from "@flock/protocol/nsids";
+import { ATGRP_SPACE_TYPE, SPACE_TYPE } from "@flock/protocol/nsids";
 import type { SyncStore } from "./store";
 
 // When held copies stop being served: the lifecycle rules that lived in the server's cache, applied to the client's store.
@@ -13,7 +13,7 @@ export class Lifecycle {
     const rootWorkspace =
       parsed?.type === SPACE_TYPE.workspace
         ? space
-        : parsed?.type === OPENSOCIAL_SPACE_TYPE.members || parsed?.type === OPENSOCIAL_SPACE_TYPE.meta
+        : parsed?.type === ATGRP_SPACE_TYPE.members || parsed?.type === ATGRP_SPACE_TYPE.meta
           ? workspaceUri(parsed.authorityDid)
           : null;
     if (rootWorkspace && parsed) {
@@ -33,7 +33,7 @@ export class Lifecycle {
     await this.store.purgeSpace(space);
   }
 
-  /** After a full discovery: workspaces the account no longer lists go, with their OpenSocial core spaces, channels, and inboxes. */
+  /** After a full discovery: workspaces the account no longer lists go, with their Atmosphere Group core spaces, channels, and inboxes. */
   async keepWorkspaces(listed: readonly string[]): Promise<void> {
     const keep = new Set(listed);
     const keepGroupCores = new Set<string>();
@@ -47,7 +47,7 @@ export class Lifecycle {
     for (const state of await this.store.listSpaces()) {
       const parsed = parseSpaceUri(state.space);
       const isWorkspace = parsed?.type === SPACE_TYPE.workspace;
-      const isGroupCore = parsed?.type === OPENSOCIAL_SPACE_TYPE.meta || parsed?.type === OPENSOCIAL_SPACE_TYPE.members;
+      const isGroupCore = parsed?.type === ATGRP_SPACE_TYPE.meta || parsed?.type === ATGRP_SPACE_TYPE.members;
       if (
         (isWorkspace && !keep.has(state.space)) ||
         (isGroupCore && !keepGroupCores.has(state.space)) ||

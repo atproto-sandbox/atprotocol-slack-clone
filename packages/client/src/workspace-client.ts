@@ -21,7 +21,7 @@ import {
   normalizeLegacySpaceUri,
   parseGroupMembersUri,
   parseWorkspaceUri,
-  personalInvitesUri,
+  personalInboxUri,
   SELF_SKEY,
   spaceRecordUri,
   tidNow,
@@ -31,23 +31,23 @@ export { normalizeLegacySpaceUri };
 import { mapLimited } from "@flock/protocol/map-limited";
 import { isTakendown, projectActiveLabels } from "@flock/protocol/moderation";
 import {
+  ATGRP_COLLECTION,
+  ATGRP_METHOD,
+  ATGRP_SPACE_TYPE,
   ATPROTO_SPACE_COLLECTION,
   COLLECTION,
   FLOCK_EXTENSION_FIELD,
-  OPENSOCIAL_COLLECTION,
-  OPENSOCIAL_METHOD,
-  OPENSOCIAL_SPACE_TYPE,
   REPO_COLLECTION,
 } from "@flock/protocol/nsids";
 import { MAX_RECORD_BYTES, validateAppDeclaration, validateSpaceRecord } from "@flock/protocol/registry";
-import type { GroupOpenSocialPolicy } from "@flock/protocol/scopes";
+import type { GroupAtgrpPolicy } from "@flock/protocol/scopes";
 import {
   extractGroupSpacePolicyRecord,
   summarizeWorkspace,
   WORKSPACE_ENVELOPE,
   workspaceDegradedMessage,
   WorkspaceEnvelopeError,
-  type MemberAcceptanceEntry,
+  type MemberConfirmationEntry,
   type MemberWriterRev,
   type WorkspaceSummary,
 } from "@flock/protocol/workspace-summary";
@@ -142,6 +142,14 @@ export type JoinStatusResponse = {
   state: "admitted" | "pending" | "denied" | "cancelled" | "unknown" | "left_deactivated";
   currentIncarnation?: string;
   membership?: { uri: string; cid: string };
+};
+
+export type ModSelfHistoryEvent = {
+  eventId: string;
+  createdAt: string;
+  subject: string;
+  cid?: string;
+  event: Record<string, unknown>;
 };
 
 export type CreatedGroupWorkspace = {
@@ -296,17 +304,17 @@ export class WorkspaceClient {
   }
 
   // ---------------------------------------------------------------------------
-  // Personal `group.opensocial.invites/self` Provisioning, Notify & Tombstone-Aware Reader
+  // Personal `org.atgrp.inbox/self` Provisioning, Notify & Tombstone-Aware Reader
   // ---------------------------------------------------------------------------
 
   /**
-   * Idempotently provisions and verifies `at://<viewerDid>/space/group.opensocial.invites/self` on the
-   * viewer's personal PDS (`proposal.md:155`: `{ publicRead: false, publicWrite: true }`, `allowedApps === undefined`,
+   * Idempotently provisions and verifies `at://<viewerDid>/space/org.atgrp.inbox/self` on the
+   * viewer's personal PDS (`{ publicRead: false, publicWrite: true }`, `allowedApps === undefined`,
    * and zero members). Cached per-instance once verified so warm polls pay 0 extra XRPCs.
    */
   async ensureInvitesSpace(): Promise<string> {
     const viewerDid = this.deps.transport.did;
-    const invitesSpace = personalInvitesUri(viewerDid);
+    const invitesSpace = personalInboxUri(viewerDid);
     if (this.invitesSpaceVerified) {
       return invitesSpace;
     }
@@ -330,7 +338,7 @@ export class WorkspaceClient {
           if (!isSpaceNotFound) throw error;
           try {
             await this.deps.transport.memberClient.procedure("com.atproto.space.createSpace", {
-              spaceType: OPENSOCIAL_SPACE_TYPE.invites,
+              spaceType: ATGRP_SPACE_TYPE.inbox,
               skey: SELF_SKEY,
               policy: memberspacePolicy({ publicWrite: true }),
             });
@@ -359,7 +367,7 @@ export class WorkspaceClient {
           (memberPage.members?.length ?? 0) !== 0
         ) {
           throw new IncompatibleInvitesSpacePolicyError(
-            "Personal group.opensocial.invites/self space has an incompatible policy or non-empty member list.",
+            "Personal org.atgrp.inbox/self space has an incompatible policy or non-empty member list.",
           );
         }
 
@@ -510,7 +518,7 @@ export class WorkspaceClient {
             return [];
           }
           // Transient PLC error: serve valid non-expired cached invites if present
-          const cached = await this.store.records(space, OPENSOCIAL_COLLECTION.invite, groupDid);
+          const cached = await this.store.records(space, ATGRP_COLLECTION.invite, groupDid);
           return this.projectInviteRecords(space, viewerDid, groupDid, cached, nowMs);
         }
 
@@ -519,7 +527,7 @@ export class WorkspaceClient {
           return listBoundedRecords(groupSpaceClient, {
             space,
             repo: groupDid,
-            collection: OPENSOCIAL_COLLECTION.invite,
+            collection: ATGRP_COLLECTION.invite,
             maxRecords: 100,
           });
         };
@@ -571,7 +579,7 @@ export class WorkspaceClient {
           } else {
             const failure = classifyRepoFailure(error, { space, repo: groupDid, authorityDid: viewerDid });
             if (!failure) throw error;
-            const cached = await this.store.records(space, OPENSOCIAL_COLLECTION.invite, groupDid);
+            const cached = await this.store.records(space, ATGRP_COLLECTION.invite, groupDid);
             return this.projectInviteRecords(space, viewerDid, groupDid, cached, nowMs);
           }
         }
@@ -579,9 +587,9 @@ export class WorkspaceClient {
         const scannedStoredRecords: StoredRecord[] = scanned.records.map((rec) => ({
           space,
           repo: groupDid,
-          collection: OPENSOCIAL_COLLECTION.invite,
+          collection: ATGRP_COLLECTION.invite,
           rkey: rec.rkey,
-          uri: spaceRecordUri(space, groupDid, OPENSOCIAL_COLLECTION.invite, rec.rkey),
+          uri: spaceRecordUri(space, groupDid, ATGRP_COLLECTION.invite, rec.rkey),
           cid: "",
           value: rec.value,
         }));
@@ -589,7 +597,7 @@ export class WorkspaceClient {
         let effectiveRecords = scannedStoredRecords;
         if (scanned.truncated) {
           anyWriterTruncated = true;
-          const existingCached = await this.store.records(space, OPENSOCIAL_COLLECTION.invite, groupDid);
+          const existingCached = await this.store.records(space, ATGRP_COLLECTION.invite, groupDid);
           const byRkey = new Map<string, StoredRecord>();
           for (const oldRec of existingCached) byRkey.set(oldRec.rkey, oldRec);
           for (const freshRec of scannedStoredRecords) byRkey.set(freshRec.rkey, freshRec);
@@ -608,10 +616,10 @@ export class WorkspaceClient {
             checkedAt: nowMs,
             stale: false,
             coverage: {
-              [OPENSOCIAL_COLLECTION.invite]: { strategy: "all", lowest: null, complete: !scanned.truncated, cursor: null },
+              [ATGRP_COLLECTION.invite]: { strategy: "all", lowest: null, complete: !scanned.truncated, cursor: null },
             },
           },
-          replace: { [OPENSOCIAL_COLLECTION.invite]: effectiveRecords },
+          replace: { [ATGRP_COLLECTION.invite]: effectiveRecords },
         });
 
         const projected = this.projectInviteRecords(space, viewerDid, groupDid, effectiveRecords, nowMs);
@@ -629,7 +637,7 @@ export class WorkspaceClient {
 
       if (writerScan.truncated || anyWriterTruncated) {
         throw new WorkspaceEnvelopeError(
-          "Personal invites space exceeded bounded scan limits; invitation list is incomplete.",
+          "Personal inbox space exceeded bounded scan limits; invitation list is incomplete.",
         );
       }
 
@@ -649,7 +657,7 @@ export class WorkspaceClient {
     const out: ReceivedGroupInvite[] = [];
     for (const rec of records) {
       if (!isTid(rec.rkey)) continue;
-      const check = validateSpaceRecord(OPENSOCIAL_COLLECTION.invite, rec.value, {
+      const check = validateSpaceRecord(ATGRP_COLLECTION.invite, rec.value, {
         authorityDid: viewerDid,
         spaceUri: space,
         repoDid: groupDid,
@@ -664,7 +672,7 @@ export class WorkspaceClient {
       }
       const message = typeof rec.value.message === "string" ? rec.value.message : undefined;
       out.push({
-        uri: spaceRecordUri(space, groupDid, OPENSOCIAL_COLLECTION.invite, rec.rkey),
+        uri: spaceRecordUri(space, groupDid, ATGRP_COLLECTION.invite, rec.rkey),
         rkey: rec.rkey,
         groupDid,
         createdAt: String(rec.value.createdAt),
@@ -678,6 +686,7 @@ export class WorkspaceClient {
   async tryReadPublicGroupProfile(groupDid: string): Promise<{
     displayName: string;
     description?: string;
+    website?: string;
     joinPolicy: string;
   } | null> {
     if (!isDid(groupDid)) return null;
@@ -685,17 +694,28 @@ export class WorkspaceClient {
     try {
       const cred = await this.deps.credentials.get(metaUri);
       const client = cred.client(await this.deps.transport.resolvePds(groupDid));
-      const res = await client.query<{ value: Record<string, unknown> }>("com.atproto.space.getRecord", {
-        space: metaUri,
-        repo: groupDid,
-        collection: OPENSOCIAL_COLLECTION.profile,
-        rkey: SELF_SKEY,
-      });
-      if (!res.value || typeof res.value.displayName !== "string") return null;
+      const [aboutRes, configRes] = await Promise.all([
+        client.query<{ value: Record<string, unknown> }>("com.atproto.space.getRecord", {
+          space: metaUri,
+          repo: groupDid,
+          collection: ATGRP_COLLECTION.about,
+          rkey: SELF_SKEY,
+        }),
+        client
+          .query<{ value: Record<string, unknown> }>("com.atproto.space.getRecord", {
+            space: metaUri,
+            repo: groupDid,
+            collection: ATGRP_COLLECTION.config,
+            rkey: SELF_SKEY,
+          })
+          .catch(() => null),
+      ]);
+      if (!aboutRes.value || typeof aboutRes.value.displayName !== "string") return null;
       return {
-        displayName: res.value.displayName,
-        ...(typeof res.value.description === "string" ? { description: res.value.description } : {}),
-        joinPolicy: typeof res.value.joinPolicy === "string" ? res.value.joinPolicy : "invite",
+        displayName: aboutRes.value.displayName,
+        ...(typeof aboutRes.value.description === "string" ? { description: aboutRes.value.description } : {}),
+        ...(typeof aboutRes.value.website === "string" ? { website: aboutRes.value.website } : {}),
+        joinPolicy: typeof configRes?.value?.joinPolicy === "string" ? configRes.value.joinPolicy : "invite",
       };
     } catch {
       return null;
@@ -756,7 +776,7 @@ export class WorkspaceClient {
    */
   async discoverCore(): Promise<WorkspaceDiscovery> {
     const memberSpaces = await listAllSpaceUris(this.deps.transport.memberClient, {
-      spaceType: OPENSOCIAL_SPACE_TYPE.members,
+      spaceType: ATGRP_SPACE_TYPE.members,
       maxSpaces: MAX_DISCOVERABLE_WORKSPACES,
     });
 
@@ -842,7 +862,8 @@ export class WorkspaceClient {
 
     const bound = WORKSPACE_ENVELOPE.authorityRecordScan;
     const [
-      profiles,
+      abouts,
+      configs,
       metaPolicyScan,
       roles,
       memberships,
@@ -854,10 +875,11 @@ export class WorkspaceClient {
       extInstalls,
       wsPolicyScan,
     ] = await Promise.all([
-      listBoundedRecords(metaClient, { space: metaUri, repo: groupDid, collection: OPENSOCIAL_COLLECTION.profile, maxRecords: 1 }),
+      listBoundedRecords(metaClient, { space: metaUri, repo: groupDid, collection: ATGRP_COLLECTION.about, maxRecords: 1 }),
+      listBoundedRecords(metaClient, { space: metaUri, repo: groupDid, collection: ATGRP_COLLECTION.config, maxRecords: 1 }),
       listBoundedRecords(metaClient, { space: metaUri, repo: groupDid, collection: ATPROTO_SPACE_COLLECTION.spacePolicy, maxRecords: 1 }),
-      listBoundedRecords(membersClient, { space: membersUri, repo: groupDid, collection: OPENSOCIAL_COLLECTION.role, maxRecords: bound }),
-      listBoundedRecords(membersClient, { space: membersUri, repo: groupDid, collection: OPENSOCIAL_COLLECTION.membership, maxRecords: bound }),
+      listBoundedRecords(membersClient, { space: membersUri, repo: groupDid, collection: ATGRP_COLLECTION.role, maxRecords: bound }),
+      listBoundedRecords(membersClient, { space: membersUri, repo: groupDid, collection: ATGRP_COLLECTION.membership, maxRecords: bound }),
       listBoundedRecords(membersClient, { space: membersUri, repo: groupDid, collection: ATPROTO_SPACE_COLLECTION.spacePolicy, maxRecords: 1 }),
       listBoundedRecords(membersClient, { space: membersUri, repo: groupDid, collection: ATPROTO_SPACE_COLLECTION.label, maxRecords: bound }),
       listBoundedWriters(membersClient, { space: membersUri, maxRepos: MAX_INBOX_WRITERS }),
@@ -867,7 +889,7 @@ export class WorkspaceClient {
       listBoundedRecords(wsClient, { space: uri, repo: groupDid, collection: ATPROTO_SPACE_COLLECTION.spacePolicy, maxRecords: 1 }),
     ]);
 
-    const spacePolicies = new Map<string, GroupOpenSocialPolicy>();
+    const spacePolicies = new Map<string, GroupAtgrpPolicy>();
     let invalidPolicyScan = false;
     for (const [spUri, polScan] of [
       [metaUri, metaPolicyScan],
@@ -897,7 +919,7 @@ export class WorkspaceClient {
       .filter((did) => isDid(did) && did !== groupDid && !knownAppDids.has(did));
 
     const membersCredential = await this.deps.credentials.get(membersUri);
-    const acceptances: MemberAcceptanceEntry[] = [];
+    const confirmations: MemberConfirmationEntry[] = [];
     await mapLimited(admittedHumanDids, 8, async (memberDid) => {
       if (!memberWriters.has(memberDid) && memberDid !== this.deps.transport.did) return;
       try {
@@ -907,12 +929,12 @@ export class WorkspaceClient {
           {
             space: membersUri,
             repo: memberDid,
-            collection: OPENSOCIAL_COLLECTION.acceptance,
+            collection: ATGRP_COLLECTION.confirmation,
             rkey: SELF_SKEY,
           },
         );
         if (res.value && typeof res.value === "object" && !Array.isArray(res.value)) {
-          acceptances.push({ repoDid: memberDid, rkey: SELF_SKEY, value: res.value });
+          confirmations.push({ repoDid: memberDid, rkey: SELF_SKEY, value: res.value });
         }
       } catch (error) {
         if (isMissingXrpcResource(error) || isDidTombstonedError(error)) return;
@@ -927,13 +949,14 @@ export class WorkspaceClient {
     );
 
     const summary = summarizeWorkspace(uri, this.deps.transport.did, {
-      profiles,
+      abouts,
+      configs,
       roles,
       memberships,
       directory,
       installs,
       extInstalls,
-      acceptances,
+      confirmations,
       memberWriters,
       spacePolicies,
       accountLabels: activeAccountLabels,
@@ -947,8 +970,8 @@ export class WorkspaceClient {
     const takendownMembers = summary.takendownMembers ?? [];
 
     const invalidRosterRecords =
-      countInvalidAuthorityRecords(OPENSOCIAL_COLLECTION.role, roles.records, groupDid, membersUri) +
-      countInvalidAuthorityRecords(OPENSOCIAL_COLLECTION.membership, memberships.records, groupDid, membersUri);
+      countInvalidAuthorityRecords(ATGRP_COLLECTION.role, roles.records, groupDid, membersUri) +
+      countInvalidAuthorityRecords(ATGRP_COLLECTION.membership, memberships.records, groupDid, membersUri);
     const invalidExtInstallRecords = countInvalidAuthorityRecords(
       COLLECTION.extInstall,
       extInstalls.records,
@@ -1033,7 +1056,7 @@ export class WorkspaceClient {
         const mem = await groupClient.query<{ cid?: string; value: Record<string, unknown> }>("com.atproto.space.getRecord", {
           space: membersUri,
           repo: groupDid,
-          collection: OPENSOCIAL_COLLECTION.membership,
+          collection: ATGRP_COLLECTION.membership,
           rkey: viewerDid,
         });
         if (typeof mem.value[FLOCK_EXTENSION_FIELD.incarnation] === "string") {
@@ -1459,7 +1482,7 @@ export class WorkspaceClient {
           joinRes = await this.callPersonalGroupProcedure<{ status: string; membership?: { uri: string; cid: string } }>(
             groupDid,
             authorityEndpoint,
-            OPENSOCIAL_METHOD.requestJoin,
+            ATGRP_METHOD.requestJoin,
             {
               group: groupDid,
               ...(entry.inviteUri !== undefined ? { invite: entry.inviteUri } : {}),
@@ -1634,7 +1657,7 @@ export class WorkspaceClient {
 
       let confirmedTerminalAbsent = false;
       try {
-        await this.callPersonalGroupProcedure(groupDid, endpoint, OPENSOCIAL_METHOD.cancelJoinRequest, {
+        await this.callPersonalGroupProcedure(groupDid, endpoint, ATGRP_METHOD.cancelJoinRequest, {
           group: groupDid,
         });
         confirmedTerminalAbsent = true;
@@ -1919,7 +1942,7 @@ export class WorkspaceClient {
           this.callPersonalGroupProcedure<Record<string, unknown>>(
             groupDid,
             endpoint,
-            OPENSOCIAL_METHOD.leaveGroup,
+            ATGRP_METHOD.leaveGroup,
             { group: groupDid },
             entry!.expectedIncarnation !== undefined
               ? { "if-match-membership-incarnation": entry!.expectedIncarnation }
@@ -2037,7 +2060,7 @@ export class WorkspaceClient {
           await this.deps.transport.memberClient.procedure("com.atproto.space.deleteRecord", {
             space: groupMembersUri(groupDid),
             repo: this.deps.transport.did,
-            collection: OPENSOCIAL_COLLECTION.acceptance,
+            collection: ATGRP_COLLECTION.confirmation,
             rkey: SELF_SKEY,
           });
         } catch (error) {
@@ -2312,27 +2335,74 @@ export class WorkspaceClient {
   }
 
   // ---------------------------------------------------------------------------
-  // Personal Moderation Reports, Group Join Request Decisions & Private-Channel Inbox
+  // Personal Moderation Reports, Appeals, Self-History, Group Join Decisions & Inbox
   // ---------------------------------------------------------------------------
 
-  async createReport(input: {
+  async submitReport(input: {
     groupDid: string;
     subject: string;
     cid?: string;
     reasonType: string;
     rule?: string;
     reason?: string;
-  }): Promise<Record<string, unknown>> {
+  }): Promise<{ eventId: string; createdAt: string }> {
     if (!isDid(input.groupDid)) throw new Error("Invalid group DID.");
     const endpoint = await this.deps.transport.resolvePds(input.groupDid);
-    return this.callPersonalGroupProcedure(input.groupDid, endpoint, OPENSOCIAL_METHOD.createReport, {
-      group: input.groupDid,
-      subject: input.subject,
-      ...(input.cid !== undefined ? { cid: input.cid } : {}),
-      reasonType: input.reasonType,
-      ...(input.rule !== undefined ? { rule: input.rule } : {}),
-      ...(input.reason !== undefined ? { reason: input.reason } : {}),
-    });
+    return this.callPersonalGroupProcedure<{ eventId: string; createdAt: string }>(
+      input.groupDid,
+      endpoint,
+      ATGRP_METHOD.modSubmitReport,
+      {
+        group: input.groupDid,
+        subject: input.subject,
+        ...(input.cid !== undefined ? { cid: input.cid } : {}),
+        reasonType: input.reasonType,
+        ...(input.rule !== undefined ? { rule: input.rule } : {}),
+        ...(input.reason !== undefined ? { reason: input.reason } : {}),
+      },
+    );
+  }
+
+  async submitAppeal(input: {
+    groupDid: string;
+    subject: string;
+    reason?: string;
+  }): Promise<{ eventId: string; createdAt: string }> {
+    if (!isDid(input.groupDid)) throw new Error("Invalid group DID.");
+    const endpoint = await this.deps.transport.resolvePds(input.groupDid);
+    return this.callPersonalGroupProcedure<{ eventId: string; createdAt: string }>(
+      input.groupDid,
+      endpoint,
+      ATGRP_METHOD.modSubmitAppeal,
+      {
+        group: input.groupDid,
+        subject: input.subject,
+        ...(input.reason !== undefined ? { reason: input.reason } : {}),
+      },
+    );
+  }
+
+  async querySelfModHistory(input: {
+    groupDid: string;
+    subject?: string;
+    sort?: "newest" | "oldest";
+    limit?: number;
+    cursor?: string;
+  }): Promise<{ events: ModSelfHistoryEvent[]; cursor?: string }> {
+    if (!isDid(input.groupDid)) throw new Error("Invalid group DID.");
+    const endpoint = await this.deps.transport.resolvePds(input.groupDid);
+    return this.callPersonalGroupQuery<{ events: ModSelfHistoryEvent[]; cursor?: string }>(
+      input.groupDid,
+      endpoint,
+      ATGRP_METHOD.modQuerySelfHistory,
+      {
+        group: input.groupDid,
+        ...(input.subject !== undefined ? { subject: input.subject } : {}),
+        ...(input.sort !== undefined ? { sort: input.sort } : {}),
+        ...(input.limit !== undefined ? { limit: String(input.limit) } : {}),
+        ...(input.cursor !== undefined ? { cursor: input.cursor } : {}),
+      },
+    );
   }
 
   async decideGroupJoinRequest(
@@ -2455,7 +2525,7 @@ export class WorkspaceClient {
         {
           space: groupMembersUri(groupDid),
           repo: this.deps.transport.did,
-          collection: OPENSOCIAL_COLLECTION.acceptance,
+          collection: ATGRP_COLLECTION.confirmation,
           rkey: SELF_SKEY,
         },
       );
@@ -2472,11 +2542,11 @@ export class WorkspaceClient {
     const membersUri = groupMembersUri(groupDid);
     const viewerDid = this.deps.transport.did;
     const record: Record<string, unknown> = {
-      $type: OPENSOCIAL_COLLECTION.acceptance,
+      $type: ATGRP_COLLECTION.confirmation,
       createdAt: new Date(transportNow(this.deps.transport)).toISOString(),
       ...(incarnation !== undefined ? { [FLOCK_EXTENSION_FIELD.incarnation]: incarnation } : {}),
     };
-    const validation = validateSpaceRecord(OPENSOCIAL_COLLECTION.acceptance, record, {
+    const validation = validateSpaceRecord(ATGRP_COLLECTION.confirmation, record, {
       authorityDid: groupDid,
       spaceUri: membersUri,
       repoDid: viewerDid,
@@ -2489,7 +2559,7 @@ export class WorkspaceClient {
       {
         space: membersUri,
         repo: viewerDid,
-        collection: OPENSOCIAL_COLLECTION.acceptance,
+        collection: ATGRP_COLLECTION.confirmation,
         rkey: SELF_SKEY,
         record,
       },
@@ -2505,7 +2575,7 @@ export class WorkspaceClient {
     const res = await cred.client(pds).query<{ cid?: string; value: Record<string, unknown> }>("com.atproto.space.getRecord", {
       space: membersUri,
       repo: groupDid,
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: viewerDid,
     });
     if (typeof res.value[FLOCK_EXTENSION_FIELD.incarnation] === "string") {
@@ -2519,6 +2589,47 @@ export class WorkspaceClient {
       return `legacy-cid:${res.cid}`;
     }
     return undefined;
+  }
+
+  private async callPersonalGroupQuery<T>(
+    groupDid: string,
+    endpoint: string,
+    methodNsid: string,
+    params: Readonly<Record<string, string>>,
+  ): Promise<T> {
+    const { token } = await this.deps.transport.memberClient.query<{ token: string }>(
+      "com.atproto.server.getServiceAuth",
+      {
+        aud: `${groupDid}#atproto_pds`,
+        lxm: methodNsid,
+      },
+    );
+    const url = new URL(`/xrpc/${methodNsid}`, endpoint);
+    for (const [key, value] of Object.entries(params)) {
+      url.searchParams.set(key, value);
+    }
+    const response = await this.deps.transport.fetchEndpoint(
+      new Request(url, {
+        method: "GET",
+        redirect: "error",
+        headers: {
+          accept: "application/json",
+          authorization: `Bearer ${token}`,
+        },
+      }),
+    );
+    const body = await readUpstreamJson<T & { error?: string; message?: string }>(
+      response,
+      MAX_GROUP_MEMBER_JSON_BYTES,
+    );
+    if (!response.ok) {
+      throw new XrpcError(
+        response.status,
+        body?.message ?? `Group query ${methodNsid} failed (${response.status}).`,
+        body?.error ?? "XrpcError",
+      );
+    }
+    return (body ?? ({} as T)) as T;
   }
 
   private async callPersonalGroupProcedure<T>(
@@ -2572,7 +2683,7 @@ export class WorkspaceClient {
       "com.atproto.server.getServiceAuth",
       {
         aud: `${groupDid}#atproto_pds`,
-        lxm: OPENSOCIAL_METHOD.requestJoin,
+        lxm: ATGRP_METHOD.requestJoin,
       },
     );
     const url = new URL("/group-member/join-status", endpoint);

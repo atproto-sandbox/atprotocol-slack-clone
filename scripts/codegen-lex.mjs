@@ -18,7 +18,9 @@ const SKIPPED_MAIN_TYPES = new Set(["record", "space", "permission-set"]);
 
 const patterns = [
   "packages/protocol/lexicons/new/flock/operator/*.json",
-  "packages/protocol/lexicons/group/opensocial/*.json",
+  "packages/protocol/lexicons/new/flock/group/*.json",
+  "packages/protocol/lexicons/org/atgrp/*.json",
+  "packages/protocol/lexicons/org/atgrp/mod/*.json",
   "packages/protocol/lexicons/com/atproto/space/*.json",
   "packages/protocol/lexicons/com/atproto/memberspace/*.json",
   "packages/protocol/lexicons/com/atproto/managedspace/*.json",

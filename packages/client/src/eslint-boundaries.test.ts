@@ -228,27 +228,27 @@ test("R13 OpenSocial hard-cut: com.atproto.memberspace.{putMembers,removeMembers
 
   for (const filePath of strictlyForbiddenTargets) {
     for (const method of ["putMembers", "removeMembers", "listMembers"]) {
-      await assertForbidden(filePath, `export const m = "com.atproto.memberspace.${method}";\n`, "R13 OpenSocial hard-cut");
-      await assertForbidden(filePath, `export const m = \`com.atproto.memberspace.${method}\`;\n`, "R13 OpenSocial hard-cut");
+      await assertForbidden(filePath, `export const m = "com.atproto.memberspace.${method}";\n`, "Atmosphere Groups hard-cut");
+      await assertForbidden(filePath, `export const m = \`com.atproto.memberspace.${method}\`;\n`, "Atmosphere Groups hard-cut");
       await assertForbidden(
         filePath,
         `import type * as T from "@flock/protocol/lexicons/api/types/com/atproto/memberspace/${method}";\nexport type X = T.InputSchema;\n`,
-        "R13 OpenSocial hard-cut",
+        "Atmosphere Groups hard-cut",
       );
     }
     await assertForbidden(
       filePath,
       "export const m = `com.atproto.memberspace.\\u0070utMembers`;\n",
-      "R13 OpenSocial hard-cut",
+      "Atmosphere Groups hard-cut",
     );
     await assertForbidden(
       filePath,
       `import { listMemberPages } from "@flock/protocol/atproto/record-pages";\nvoid listMemberPages;\n`,
-      "R13 OpenSocial hard-cut",
+      "Atmosphere Groups hard-cut",
     );
   }
 
-  // `workspace-client.ts` & `workspace-client.test.ts` allow ONLY `listMembers` (for personal `invites/self` verification), NEVER `putMembers`/`removeMembers`.
+  // `workspace-client.ts` & `workspace-client.test.ts` allow ONLY `listMembers` (for personal `inbox/self` verification), NEVER `putMembers`/`removeMembers`.
   for (const filePath of [
     "packages/client/src/workspace-client.ts",
     "packages/client/src/workspace-client.test.ts",
@@ -258,8 +258,8 @@ test("R13 OpenSocial hard-cut: com.atproto.memberspace.{putMembers,removeMembers
       filePath,
       `import { listMemberPages } from "@flock/protocol/atproto/record-pages";\nvoid listMemberPages;\n`,
     );
-    await assertForbidden(filePath, `export const m = "com.atproto.memberspace.putMembers";\n`, "R13 OpenSocial hard-cut");
-    await assertForbidden(filePath, `export const m = "com.atproto.memberspace.removeMembers";\n`, "R13 OpenSocial hard-cut");
+    await assertForbidden(filePath, `export const m = "com.atproto.memberspace.putMembers";\n`, "Atmosphere Groups hard-cut");
+    await assertForbidden(filePath, `export const m = "com.atproto.memberspace.removeMembers";\n`, "Atmosphere Groups hard-cut");
   }
 
   // Sanctioned DM / protocol / fixture modules remain permitted.
@@ -374,7 +374,7 @@ test("Flock Desk & Shell independence boundaries enforce forbidden static/dynami
 
   // `no-legacy-memberspace`: only `packages/shell/src/invites.ts` (+ test) allows `listMembers`; all other Shell/Desk files forbid all three
   await assertAllowed("packages/shell/src/invites.ts", `export const m = "com.atproto.memberspace.listMembers";\n`);
-  await assertForbidden("packages/shell/src/invites.ts", `export const m = "com.atproto.memberspace.putMembers";\n`, "R13 OpenSocial hard-cut");
-  await assertForbidden("packages/shell/src/membership.ts", `export const m = "com.atproto.memberspace.listMembers";\n`, "R13 OpenSocial hard-cut");
-  await assertForbidden("apps/desk/src/app/ui/desk-client.tsx", `export const m = "com.atproto.memberspace.listMembers";\n`, "R13 OpenSocial hard-cut");
+  await assertForbidden("packages/shell/src/invites.ts", `export const m = "com.atproto.memberspace.putMembers";\n`, "Atmosphere Groups hard-cut");
+  await assertForbidden("packages/shell/src/membership.ts", `export const m = "com.atproto.memberspace.listMembers";\n`, "Atmosphere Groups hard-cut");
+  await assertForbidden("apps/desk/src/app/ui/desk-client.tsx", `export const m = "com.atproto.memberspace.listMembers";\n`, "Atmosphere Groups hard-cut");
 });

@@ -12,13 +12,13 @@ import {
   workspaceUri,
 } from "@flock/protocol/keys";
 import { mapLimited } from "@flock/protocol/map-limited";
-import { COLLECTION, OPENSOCIAL_COLLECTION } from "@flock/protocol/nsids";
+import { COLLECTION, ATGRP_COLLECTION } from "@flock/protocol/nsids";
 import { validateSpaceRecord } from "@flock/protocol/registry";
 import {
   effectiveHumanAdmins,
   type EffectiveGovernanceState,
   type GroupMembershipRecord,
-  type GroupOpenSocialPolicy,
+  type GroupAtgrpPolicy,
   type GroupRoleRecord,
 } from "@flock/protocol/scopes";
 import { WORKSPACE_ENVELOPE, WorkspaceEnvelopeError } from "@flock/protocol/workspace-summary";
@@ -39,7 +39,7 @@ const MAX_AUTHORITY_RECORD_SCAN = WORKSPACE_ENVELOPE.authorityRecordScan;
 export type LiveGroupGovernanceState = EffectiveGovernanceState & {
   roles: Map<string, GroupRoleRecord>;
   memberships: Map<string, GroupMembershipRecord>;
-  spacePolicies: Map<string, GroupOpenSocialPolicy>;
+  spacePolicies: Map<string, GroupAtgrpPolicy>;
   knownAppSubjects: Set<string>;
   invalidSpacePolicyUris: string[];
 };
@@ -52,8 +52,8 @@ export async function readGroupGovernanceState(
   const wsSpace = workspaceUri(groupDid);
 
   const [roleRows, membershipRows, installRows, ownSpaceUris] = await Promise.all([
-    listOwnerRecords(session, membersSpace, OPENSOCIAL_COLLECTION.role),
-    listOwnerRecords(session, membersSpace, OPENSOCIAL_COLLECTION.membership),
+    listOwnerRecords(session, membersSpace, ATGRP_COLLECTION.role),
+    listOwnerRecords(session, membersSpace, ATGRP_COLLECTION.membership),
     listOwnerRecords(session, wsSpace, COLLECTION.appInstall).catch((err: unknown) => {
       if (isSpaceNotFound(err)) return [];
       throw err;
@@ -64,7 +64,7 @@ export async function readGroupGovernanceState(
   const roles = new Map<string, GroupRoleRecord>();
   for (const { rkey, value } of roleRows) {
     if (
-      !validateSpaceRecord(OPENSOCIAL_COLLECTION.role, value, {
+      !validateSpaceRecord(ATGRP_COLLECTION.role, value, {
         authorityDid: groupDid,
         spaceUri: membersSpace,
         repoDid: groupDid,
@@ -74,11 +74,11 @@ export async function readGroupGovernanceState(
       continue;
     }
     roles.set(rkey, {
-      displayName: String(value.displayName),
+      ...(typeof value.displayName === "string" ? { displayName: value.displayName } : {}),
       ...(typeof value.description === "string" ? { description: value.description } : {}),
       default: value.default === true,
-      scopes: Array.isArray(value.scopes) ? (value.scopes as string[]) : [],
-      assignable: Array.isArray(value.assignable) ? (value.assignable as string[]) : [],
+      permissions: Array.isArray(value.permissions) ? (value.permissions as string[]) : [],
+      canAssign: Array.isArray(value.canAssign) ? (value.canAssign as string[]) : [],
     });
   }
 
@@ -86,7 +86,7 @@ export async function readGroupGovernanceState(
   for (const { rkey, value } of membershipRows) {
     if (!isDid(rkey) || rkey === groupDid) continue;
     if (
-      !validateSpaceRecord(OPENSOCIAL_COLLECTION.membership, value, {
+      !validateSpaceRecord(ATGRP_COLLECTION.membership, value, {
         authorityDid: groupDid,
         spaceUri: membersSpace,
         repoDid: groupDid,
@@ -128,7 +128,7 @@ export async function readGroupGovernanceState(
     space,
     inspection: await inspectOpenSocialSpacePolicy(session, space),
   }));
-  const spacePolicies = new Map<string, GroupOpenSocialPolicy>();
+  const spacePolicies = new Map<string, GroupAtgrpPolicy>();
   const invalidSpacePolicyUris: string[] = [];
   for (const { space, inspection } of policies) {
     if (inspection.status === "valid") {
@@ -170,7 +170,7 @@ export function assignableRolesForMember(
   if (!membership) return out;
   for (const roleKey of membership.roles) {
     const role = state.roles.get(roleKey);
-    for (const a of role?.assignable ?? []) {
+    for (const a of role?.canAssign ?? []) {
       out.add(a);
     }
   }
@@ -211,7 +211,7 @@ export async function putMembershipRoles(
   const existing =
     options?.existingRecord !== undefined
       ? options.existingRecord
-      : await getOwnerRecord(session, membersSpace, OPENSOCIAL_COLLECTION.membership, memberDid);
+      : await getOwnerRecord(session, membersSpace, ATGRP_COLLECTION.membership, memberDid);
   const createdAt =
     options?.createdAt ??
     (typeof existing?.createdAt === "string" ? existing.createdAt : new Date().toISOString());
@@ -226,7 +226,7 @@ export async function putMembershipRoles(
   await putAuthorityRecord(
     session,
     membersSpace,
-    OPENSOCIAL_COLLECTION.membership,
+    ATGRP_COLLECTION.membership,
     memberDid,
     {
       ...preservedExtensions,
@@ -244,7 +244,7 @@ export async function deleteMembershipRecord(
   memberDid: string,
 ): Promise<void> {
   const membersSpace = groupMembersUri(groupDid);
-  await deleteAuthorityRecord(session, membersSpace, OPENSOCIAL_COLLECTION.membership, memberDid);
+  await deleteAuthorityRecord(session, membersSpace, ATGRP_COLLECTION.membership, memberDid);
   dropMemberList(membersSpace);
 }
 

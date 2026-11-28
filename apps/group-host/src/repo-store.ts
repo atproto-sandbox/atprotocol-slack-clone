@@ -39,7 +39,7 @@ import {
   isDid,
   isRecordKey,
   isTid,
-  parsePersonalInvitesUri,
+  parsePersonalInboxUri,
   parseSpaceUri,
   SELF_SKEY,
   spaceUri,
@@ -48,12 +48,13 @@ import {
 } from "@flock/protocol/keys";
 import { compareUtf16 } from "@flock/protocol/migration-manifest";
 import {
+  ATGRP_COLLECTION,
+  ATGRP_NAMESPACE,
+  ATGRP_POLICY,
+  ATGRP_SPACE_TYPE,
   ATPROTO_SPACE_COLLECTION,
   COLLECTION,
   FLOCK_EXTENSION_FIELD,
-  OPENSOCIAL_COLLECTION,
-  OPENSOCIAL_POLICY,
-  OPENSOCIAL_SPACE_TYPE,
   REPO_COLLECTION,
 } from "@flock/protocol/nsids";
 import {
@@ -64,7 +65,7 @@ import {
   validateSpaceRecord,
   validateSpaceTypeKey,
 } from "@flock/protocol/registry";
-import type { GroupOpenSocialPolicy, GroupRoleRecord } from "@flock/protocol/scopes";
+import type { GroupAtgrpPolicy, GroupRoleRecord } from "@flock/protocol/scopes";
 import * as jose from "jose";
 import { CID } from "multiformats/cid";
 import { sha256 } from "multiformats/hashes/sha2";
@@ -75,7 +76,11 @@ import {
   type GroupHostCryptoBox,
 } from "./crypto-box";
 import { purgeGroupDataSync, type GroupHostDb } from "./db";
-import { recordModEjectEventSync, recordModLabelEventSync } from "./moderation";
+import {
+  clearModEjectionEligibilitySync,
+  recordModEjectEventSync,
+  recordModLabelEventSync,
+} from "./moderation";
 import {
   assertFreshLoginStepUp,
   revalidateLiveOAuthSessionSync,
@@ -312,7 +317,7 @@ export class GroupRepoStore {
       throw new GroupHostHttpError(
         400,
         "InvalidRequest",
-        "Cannot publish group.opensocial.declaration while group.opensocial.meta/self is missing.",
+        "Cannot publish org.atgrp.declaration while org.atgrp.meta/self is missing.",
       );
     }
     const pol = JSON.parse(metaRow.policy_json) as { publicRead?: boolean };
@@ -320,7 +325,7 @@ export class GroupRepoStore {
       throw new GroupHostHttpError(
         400,
         "InvalidRequest",
-        "Cannot publish group.opensocial.declaration while group.opensocial.meta/self has publicRead=false.",
+        "Cannot publish org.atgrp.declaration while org.atgrp.meta/self has publicRead=false.",
       );
     }
   }
@@ -1665,7 +1670,7 @@ export class GroupRepoStore {
     policy: Record<string, unknown>;
     suppressNotices?: boolean;
     nowMs?: number;
-  }): Promise<{ space: string; uri: string; policy: GroupOpenSocialPolicy }> {
+  }): Promise<{ space: string; uri: string; policy: GroupAtgrpPolicy }> {
     const nowMs = params.nowMs ?? Date.now();
     const keyCheck = validateSpaceTypeKey(params.spaceType, params.skey, { isGroupHostOwnSpace: true });
     if (!keyCheck.valid) {
@@ -1679,24 +1684,24 @@ export class GroupRepoStore {
     if (!polCheck.valid) {
       throw new GroupHostHttpError(400, polCheck.code ?? "InvalidSpacePolicy", polCheck.reason);
     }
-    const normalizedPolicy: GroupOpenSocialPolicy = {
-      $type: OPENSOCIAL_POLICY,
+    const normalizedPolicy: GroupAtgrpPolicy = {
+      $type: ATGRP_POLICY,
       publicRead: params.policy.publicRead === true,
       unlisted: params.policy.unlisted === true,
-      grants: (params.policy.grants as GroupOpenSocialPolicy["grants"]).map((g) => ({
+      grants: (params.policy.grants as GroupAtgrpPolicy["grants"]).map((g) => ({
         role: g.role,
         ...(g.read !== undefined ? { read: Boolean(g.read) } : {}),
         ...(g.write !== undefined ? { write: Boolean(g.write) } : {}),
-        ...(g.scopes && g.scopes.length > 0 ? { scopes: [...g.scopes] } : {}),
+        ...(g.permissions && g.permissions.length > 0 ? { permissions: [...g.permissions] } : {}),
       })),
     };
 
     const targetSpaceUri = spaceUri(params.groupDid, params.spaceType, params.skey);
     const isCoreSpace =
-      params.spaceType === OPENSOCIAL_SPACE_TYPE.meta ||
-      params.spaceType === OPENSOCIAL_SPACE_TYPE.members;
+      params.spaceType === ATGRP_SPACE_TYPE.meta ||
+      params.spaceType === ATGRP_SPACE_TYPE.members;
 
-    // Pre-serialize `com.atproto.space.policy/self` CBOR + optional `group.opensocial.space/<tid>` CBOR outside transaction!
+    // Pre-serialize `com.atproto.space.policy/self` CBOR + optional `org.atgrp.space/<tid>` CBOR outside transaction!
     const policyRecordValue = {
       $type: ATPROTO_SPACE_COLLECTION.spacePolicy,
       policy: normalizedPolicy,
@@ -1710,13 +1715,13 @@ export class GroupRepoStore {
     const candidateIndexRkey = tidNow(nowMs);
     const nowIso = new Date(nowMs).toISOString();
     const indexRecordValue = {
-      $type: OPENSOCIAL_COLLECTION.space,
+      $type: ATGRP_COLLECTION.space,
       space: targetSpaceUri,
       createdAt: nowIso,
     };
     const serializedIndex = !isCoreSpace
       ? await serializeRecord(
-          OPENSOCIAL_COLLECTION.space as NsidString,
+          ATGRP_COLLECTION.space as NsidString,
           candidateIndexRkey as RecordKeyString,
           jsonToLex(indexRecordValue) as LexMap,
         )
@@ -1761,16 +1766,12 @@ export class GroupRepoStore {
           const prevDecl = existingDecl ? (JSON.parse(existingDecl.value) as Record<string, unknown>) : null;
           if (
             prevDecl &&
-            prevDecl.$type === REPO_COLLECTION.groupDeclaration &&
-            prevDecl.meta === targetSpaceUri
+            prevDecl.$type === REPO_COLLECTION.groupDeclaration
           ) {
             stagedMetaDeclOp = { kind: "noop", expectedExistingCid: existingDecl!.cid };
           } else {
             const declValue: Record<string, unknown> = {
-              ...(prevDecl ?? {}),
               $type: REPO_COLLECTION.groupDeclaration,
-              meta: targetSpaceUri,
-              createdAt: typeof prevDecl?.createdAt === "string" ? prevDecl.createdAt : nowIso,
             };
             const storage = new SqlStagingRepoStorage(this.db, params.groupDid);
             const signingKey = await this.getGroupSigningKey(params.groupDid);
@@ -1940,13 +1941,13 @@ export class GroupRepoStore {
           nowMs,
         });
 
-        // Atomically couple `meta/self` `policy.publicRead` <-> `group.opensocial.declaration/self` in the public MST repo!
+        // Atomically couple `meta/self` `policy.publicRead` <-> `org.atgrp.declaration/self` in the public MST repo!
         if (stagedMetaDeclOp !== null) {
           const liveDecl = this.db
             .prepare("SELECT cid FROM public_record WHERE group_did = ? AND collection = ? AND rkey = ?")
             .get(params.groupDid, REPO_COLLECTION.groupDeclaration, SELF_SKEY) as { cid: string } | undefined;
           if ((liveDecl?.cid ?? null) !== stagedMetaDeclOp.expectedExistingCid) {
-            throw new GroupHostHttpError(400, "InvalidSwap", "Concurrent modification of group.opensocial.declaration/self.");
+            throw new GroupHostHttpError(400, "InvalidSwap", "Concurrent modification of org.atgrp.declaration/self.");
           }
           if (stagedMetaDeclOp.kind === "upsert") {
             stagedMetaDeclOp.storage.flushStagedSync(nowMs, stagedMetaDeclOp.commitData.removedCids.toList());
@@ -1981,7 +1982,7 @@ export class GroupRepoStore {
           }
         }
 
-        // Maintain host-managed `group.opensocial.space/<tid>` index in `members/self`
+        // Maintain host-managed `org.atgrp.space/<tid>` index in `members/self`
         if (!isCoreSpace) {
           const membersSpace = groupMembersUri(params.groupDid);
           const membersExists = this.db
@@ -1996,7 +1997,7 @@ export class GroupRepoStore {
                 ops: [
                   {
                     action: "create",
-                    collection: OPENSOCIAL_COLLECTION.space,
+                    collection: ATGRP_COLLECTION.space,
                     rkey: nextIndexRkey,
                     value: indexRecordValue,
                     cborBytes: serializedIndex.bytes,
@@ -2015,7 +2016,7 @@ export class GroupRepoStore {
                 ops: [
                   {
                     action: "delete",
-                    collection: OPENSOCIAL_COLLECTION.space,
+                    collection: ATGRP_COLLECTION.space,
                     rkey: existingSpace.index_rkey,
                   },
                 ],
@@ -2048,10 +2049,10 @@ export class GroupRepoStore {
       throw new GroupHostHttpError(400, "InvalidRequest", "Space does not belong to this group.");
     }
     if (
-      parsed.type === OPENSOCIAL_SPACE_TYPE.meta ||
-      parsed.type === OPENSOCIAL_SPACE_TYPE.members
+      parsed.type === ATGRP_SPACE_TYPE.meta ||
+      parsed.type === ATGRP_SPACE_TYPE.members
     ) {
-      throw new GroupHostHttpError(400, "CannotDeleteCoreSpace", `Core OpenSocial space ${parsed.type} cannot be deleted.`);
+      throw new GroupHostHttpError(400, "CannotDeleteCoreSpace", `Core Atmosphere Group space ${parsed.type} cannot be deleted.`);
     }
 
     return this.locks.withGroupRepoLock(params.groupDid, () => {
@@ -2104,7 +2105,7 @@ export class GroupRepoStore {
             ops: [
               {
                 action: "delete",
-                collection: OPENSOCIAL_COLLECTION.space,
+                collection: ATGRP_COLLECTION.space,
                 rkey: existing.index_rkey,
               },
             ],
@@ -2181,8 +2182,8 @@ export class GroupRepoStore {
     if (!spaceKeyCheck.valid) {
       throw new GroupHostHttpError(400, spaceKeyCheck.code ?? "InvalidSpaceKey", spaceKeyCheck.reason);
     }
-    if (!isOwnAuthoritySpace && parsedSpace.type !== OPENSOCIAL_SPACE_TYPE.invites) {
-      throw new GroupHostHttpError(400, "InvalidRequest", "Group Host only writes to own group spaces or external group.opensocial.invites/self spaces.");
+    if (!isOwnAuthoritySpace && parsedSpace.type !== ATGRP_SPACE_TYPE.inbox) {
+      throw new GroupHostHttpError(400, "InvalidRequest", "Group Host only writes to own group spaces or external org.atgrp.inbox/self spaces.");
     }
 
     // Lock sorted([groupDid, parsedSpace.authorityDid]) if target space authority is also hosted locally!
@@ -2273,14 +2274,14 @@ export class GroupRepoStore {
         if (w.collection === ATPROTO_SPACE_COLLECTION.spacePolicy) {
           throw new GroupHostHttpError(400, "InvalidRequest", "com.atproto.space.policy is host-published via createSpace/updateSpace.");
         }
-        if (w.collection === OPENSOCIAL_COLLECTION.space) {
-          throw new GroupHostHttpError(400, "IndexHostMaintained", "group.opensocial.space is host-maintained and rejects direct writes.");
+        if (w.collection === ATGRP_COLLECTION.space) {
+          throw new GroupHostHttpError(400, "IndexHostMaintained", "org.atgrp.space is host-maintained and rejects direct writes.");
         }
-        if (!isOwnAuthoritySpace && w.collection !== OPENSOCIAL_COLLECTION.invite) {
+        if (!isOwnAuthoritySpace && w.collection !== ATGRP_COLLECTION.invite) {
           throw new GroupHostHttpError(
             400,
             "InvalidRequest",
-            "External group.opensocial.invites/self spaces only accept group.opensocial.invite records.",
+            "External org.atgrp.inbox/self spaces only accept org.atgrp.invite records.",
           );
         }
 
@@ -2301,11 +2302,11 @@ export class GroupRepoStore {
             throw new GroupHostHttpError(400, "InvalidSwap", "swapRecord mismatch on space deleteRecord.");
           }
           const prevVal = existingRow ? (JSON.parse(existingRow.value) as Record<string, unknown>) : undefined;
-          if (params.spaceUri === membersSpace && w.collection === OPENSOCIAL_COLLECTION.role) {
+          if (params.spaceUri === membersSpace && w.collection === ATGRP_COLLECTION.role) {
             assertRoleWriteAntiEscalation(params.actorDid, preState, params.groupDid, rkey, undefined);
             postRoles.delete(rkey);
             deletedRoles.add(rkey);
-          } else if (params.spaceUri === membersSpace && w.collection === OPENSOCIAL_COLLECTION.membership) {
+          } else if (params.spaceUri === membersSpace && w.collection === ATGRP_COLLECTION.membership) {
             if (prevVal) {
               assertCanAssignRoleDiff(
                 params.actorDid,
@@ -2360,8 +2361,8 @@ export class GroupRepoStore {
         let recordValue: Record<string, unknown> = { $type: w.collection, ...w.value };
         let recordIncarnation: string | null | undefined = undefined;
 
-        // Stamp or preserve Flock incarnation + generation metadata on `group.opensocial.membership`!
-        if (params.spaceUri === membersSpace && w.collection === OPENSOCIAL_COLLECTION.membership) {
+        // Stamp or preserve Flock incarnation + generation metadata on `org.atgrp.membership`!
+        if (params.spaceUri === membersSpace && w.collection === ATGRP_COLLECTION.membership) {
           const callerExtCheck = decodeFlockMembershipExtensions(recordValue);
           if (!callerExtCheck.valid) {
             throw new GroupHostHttpError(400, callerExtCheck.code, callerExtCheck.reason);
@@ -2411,11 +2412,15 @@ export class GroupRepoStore {
           }
         }
 
-        // Enforce runtime Lexicons + semantic validation (unconditionally for MANDATORY_VALIDATED_SPACE_COLLECTIONS and external invites/self!)
+        // Enforce runtime Lexicons + semantic validation unconditionally for MANDATORY_VALIDATED_SPACE_COLLECTIONS,
+        // the ENTIRE reserved `org.atgrp.*` namespace, and external `org.atgrp.inbox/self`!
+        const isReservedAtgrp = w.collection.startsWith(`${ATGRP_NAMESPACE}.`);
         const mustValidate =
-          !isOwnAuthoritySpace || w.validate !== false || MANDATORY_VALIDATED_SPACE_COLLECTIONS.has(w.collection);
+          !isOwnAuthoritySpace ||
+          w.validate !== false ||
+          MANDATORY_VALIDATED_SPACE_COLLECTIONS.has(w.collection) ||
+          isReservedAtgrp;
         if (mustValidate) {
-          // Allow unknown third-party modality collections only in own-authority group spaces when not in MANDATORY_VALIDATED_SPACE_COLLECTIONS
           const check = validateSpaceRecord(w.collection, recordValue, {
             authorityDid: parsedSpace.authorityDid,
             spaceUri: params.spaceUri,
@@ -2426,7 +2431,8 @@ export class GroupRepoStore {
             if (
               isOwnAuthoritySpace &&
               check.reason === "unknown collection" &&
-              !MANDATORY_VALIDATED_SPACE_COLLECTIONS.has(w.collection)
+              !MANDATORY_VALIDATED_SPACE_COLLECTIONS.has(w.collection) &&
+              !isReservedAtgrp
             ) {
               // Third-party modality collection permitted on Group Host
             } else {
@@ -2436,11 +2442,11 @@ export class GroupRepoStore {
         }
 
         // RBAC anti-escalation & post-state tracking
-        if (params.spaceUri === membersSpace && w.collection === OPENSOCIAL_COLLECTION.role) {
+        if (params.spaceUri === membersSpace && w.collection === ATGRP_COLLECTION.role) {
           const nextRole = recordValue as unknown as LiveGroupGovernanceState["roles"] extends Map<string, infer R> ? R : never;
           assertRoleWriteAntiEscalation(params.actorDid, preState, params.groupDid, rkey, nextRole);
           postRoles.set(rkey, nextRole);
-        } else if (params.spaceUri === membersSpace && w.collection === OPENSOCIAL_COLLECTION.membership) {
+        } else if (params.spaceUri === membersSpace && w.collection === ATGRP_COLLECTION.membership) {
           const prevRoles = existingRow
             ? ((JSON.parse(existingRow.value) as { roles?: string[] }).roles ?? [])
             : undefined;
@@ -2559,7 +2565,7 @@ export class GroupRepoStore {
               action: requiredAction,
               collection: op.collection as NsidString,
             });
-            if (params.spaceUri === membersSpace && op.collection === OPENSOCIAL_COLLECTION.role) {
+            if (params.spaceUri === membersSpace && op.collection === ATGRP_COLLECTION.role) {
               assertRoleWriteAntiEscalation(
                 params.actorDid,
                 revalidated.liveState,
@@ -2567,7 +2573,7 @@ export class GroupRepoStore {
                 op.rkey,
                 op.action === "delete" ? undefined : (op.value as unknown as GroupRoleRecord),
               );
-            } else if (params.spaceUri === membersSpace && op.collection === OPENSOCIAL_COLLECTION.membership) {
+            } else if (params.spaceUri === membersSpace && op.collection === ATGRP_COLLECTION.membership) {
               assertCanAssignRoleDiff(
                 params.actorDid,
                 revalidated.liveState,
@@ -2585,7 +2591,7 @@ export class GroupRepoStore {
 
         if (params.ifJoinRequestPresent) {
           for (const op of preparedOps) {
-            if (params.spaceUri === membersSpace && op.collection === OPENSOCIAL_COLLECTION.membership && op.action !== "delete") {
+            if (params.spaceUri === membersSpace && op.collection === ATGRP_COLLECTION.membership && op.action !== "delete") {
               const jr = this.db
                 .prepare("SELECT 1 AS ok FROM join_request WHERE group_did = ? AND requester_did = ? AND expires_at > ?")
                 .get(params.groupDid, op.rkey, nowMs);
@@ -2621,9 +2627,10 @@ export class GroupRepoStore {
               .run(params.groupDid, String(op.value.subject), nowMs);
           }
 
-          // 2. Membership create/update -> delete join_request & upgrade pending join_operation_state rows!
-          if (params.spaceUri === membersSpace && op.collection === OPENSOCIAL_COLLECTION.membership) {
+          // 2. Membership create/update -> clear ejection eligibility, delete join_request & upgrade pending join_operation_state rows!
+          if (params.spaceUri === membersSpace && op.collection === ATGRP_COLLECTION.membership) {
             if (op.action !== "delete" && res.cid) {
+              clearModEjectionEligibilitySync(this.db, params.groupDid, op.rkey);
               this.db
                 .prepare("DELETE FROM join_request WHERE group_did = ? AND requester_did = ?")
                 .run(params.groupDid, op.rkey);
@@ -2672,8 +2679,8 @@ export class GroupRepoStore {
             }
           }
 
-          // 4. External `group.opensocial.invites/self` tracking + `notifyRepoUpdate` outbox!
-          if (!isOwnAuthoritySpace && parsedSpace.type === OPENSOCIAL_SPACE_TYPE.invites && op.collection === OPENSOCIAL_COLLECTION.invite) {
+          // 4. External `org.atgrp.inbox/self` tracking + `notifyRepoUpdate` outbox!
+          if (!isOwnAuthoritySpace && parsedSpace.type === ATGRP_SPACE_TYPE.inbox && op.collection === ATGRP_COLLECTION.invite) {
             const inviteeDid = parsedSpace.authorityDid;
             this.db
               .prepare("INSERT OR IGNORE INTO group_invite_target (group_did, space_uri, invitee_did) VALUES (?, ?, ?)")
@@ -2750,7 +2757,7 @@ export class GroupRepoStore {
     if (!parsedSpace) throw new GroupHostHttpError(400, "InvalidRequest", "Invalid space URI.");
     const isOwnAuthority = parsedSpace.authorityDid === params.groupDid;
     const keep = new Set<string>(
-      isOwnAuthority ? [ATPROTO_SPACE_COLLECTION.spacePolicy, OPENSOCIAL_COLLECTION.space] : [],
+      isOwnAuthority ? [ATPROTO_SPACE_COLLECTION.spacePolicy, ATGRP_COLLECTION.space] : [],
     );
     const filterCols = params.collections && params.collections.length > 0 ? new Set(params.collections) : null;
 
@@ -2865,19 +2872,20 @@ export class GroupRepoStore {
       groupDid: params.groupDid,
       spaceType: parsedSpace.type,
       skey: parsedSpace.skey,
+      importMode: true,
     });
     if (!polCheck.valid) {
       throw new GroupHostHttpError(400, polCheck.code ?? "InvalidSpaceMeta", polCheck.reason);
     }
-    const normalizedPolicy: GroupOpenSocialPolicy = {
-      $type: OPENSOCIAL_POLICY,
+    const normalizedPolicy: GroupAtgrpPolicy = {
+      $type: ATGRP_POLICY,
       publicRead: plainPolicy.publicRead === true,
       unlisted: plainPolicy.unlisted === true,
-      grants: (plainPolicy.grants as GroupOpenSocialPolicy["grants"]).map((g) => ({
+      grants: (plainPolicy.grants as GroupAtgrpPolicy["grants"]).map((g) => ({
         role: g.role,
         ...(g.read !== undefined ? { read: Boolean(g.read) } : {}),
         ...(g.write !== undefined ? { write: Boolean(g.write) } : {}),
-        ...(g.scopes && g.scopes.length > 0 ? { scopes: [...g.scopes] } : {}),
+        ...(g.permissions && g.permissions.length > 0 ? { permissions: [...g.permissions] } : {}),
       })),
     };
 
@@ -3026,8 +3034,8 @@ export class GroupRepoStore {
       if (!keyCheck.valid) {
         throw new GroupHostHttpError(400, keyCheck.code ?? "InvalidSpaceKey", keyCheck.reason);
       }
-      if (!isOwnAuthority && parsedSpace.type !== OPENSOCIAL_SPACE_TYPE.invites) {
-        throw new GroupHostHttpError(400, "InvalidRepoFile", "External space repo must be group.opensocial.invites/self.");
+      if (!isOwnAuthority && parsedSpace.type !== ATGRP_SPACE_TYPE.inbox) {
+        throw new GroupHostHttpError(400, "InvalidRepoFile", "External space repo must be org.atgrp.inbox/self.");
       }
 
       for await (const entry of repoReader.records) {
@@ -3036,18 +3044,19 @@ export class GroupRepoStore {
         const plainJson = lexToJson(entry.record) as Record<string, unknown>;
 
         if (!isOwnAuthority) {
-          if (entry.collection !== OPENSOCIAL_COLLECTION.invite) {
+          if (entry.collection !== ATGRP_COLLECTION.invite) {
             throw new GroupHostHttpError(
               400,
               "InvalidRepoFile",
-              "External group.opensocial.invites/self STAR archives may only contain group.opensocial.invite records.",
+              "External org.atgrp.inbox/self STAR archives may only contain org.atgrp.invite records.",
             );
           }
-          const check = validateSpaceRecord(OPENSOCIAL_COLLECTION.invite, plainJson, {
+          const check = validateSpaceRecord(ATGRP_COLLECTION.invite, plainJson, {
             authorityDid: parsedSpace.authorityDid,
             spaceUri: commit.space,
             repoDid: params.groupDid,
             rkey: entry.rkey,
+            importMode: true,
           });
           if (!check.valid) {
             throw new GroupHostHttpError(400, "InvalidRepoFile", check.reason);
@@ -3065,6 +3074,7 @@ export class GroupRepoStore {
             spaceUri: commit.space,
             repoDid: params.groupDid,
             rkey: entry.rkey,
+            importMode: true,
           });
           if (!check.valid) {
             throw new GroupHostHttpError(400, check.code ?? "InvalidRepoFile", check.reason);
@@ -3073,19 +3083,26 @@ export class GroupRepoStore {
             groupDid: params.groupDid,
             spaceType: parsedSpace.type,
             skey: parsedSpace.skey,
+            importMode: true,
           });
           if (!polCheck.valid) {
             throw new GroupHostHttpError(400, polCheck.code ?? "InvalidSpacePolicy", polCheck.reason);
           }
         } else {
+          const isReservedAtgrp = entry.collection.startsWith(`${ATGRP_NAMESPACE}.`);
           const check = validateSpaceRecord(entry.collection, plainJson, {
             authorityDid: parsedSpace.authorityDid,
             spaceUri: commit.space,
             repoDid: params.groupDid,
             rkey: entry.rkey,
+            importMode: true,
           });
           if (!check.valid) {
-            if (check.reason === "unknown collection" && !MANDATORY_VALIDATED_SPACE_COLLECTIONS.has(entry.collection)) {
+            if (
+              check.reason === "unknown collection" &&
+              !MANDATORY_VALIDATED_SPACE_COLLECTIONS.has(entry.collection) &&
+              !isReservedAtgrp
+            ) {
               // Third-party modality collection permitted in own-authority spaces
             } else {
               throw new GroupHostHttpError(400, check.code ?? "InvalidRepoFile", check.reason);
@@ -3094,7 +3111,7 @@ export class GroupRepoStore {
         }
 
         let incarnation: string | null = null;
-        if (entry.collection === OPENSOCIAL_COLLECTION.membership) {
+        if (entry.collection === ATGRP_COLLECTION.membership) {
           const ext = decodeFlockMembershipExtensions(plainJson);
           if (!ext.valid) {
             throw new GroupHostHttpError(400, ext.code, ext.reason);
@@ -3152,7 +3169,7 @@ export class GroupRepoStore {
           }
         } else {
           // Reconstruct `group_invite_target` even when `verifiedRecords.length === 0`!
-          const inviteTarget = parsePersonalInvitesUri(commit.space);
+          const inviteTarget = parsePersonalInboxUri(commit.space);
           if (inviteTarget) {
             this.db
               .prepare("INSERT OR IGNORE INTO group_invite_target (group_did, space_uri, invitee_did) VALUES (?, ?, ?)")
@@ -3232,7 +3249,7 @@ export class GroupRepoStore {
               .prepare("INSERT OR IGNORE INTO known_app_subject (group_did, subject_did, created_at) VALUES (?, ?, ?)")
               .run(params.groupDid, String(rec.plainJson.subject), commitNowMs);
           }
-          if (commit.space === groupMembersUri(params.groupDid) && rec.collection === OPENSOCIAL_COLLECTION.space) {
+          if (commit.space === groupMembersUri(params.groupDid) && rec.collection === ATGRP_COLLECTION.space) {
             const indexedSpaceUri = String(rec.plainJson.space);
             this.db
               .prepare("UPDATE group_space SET index_rkey = ? WHERE space_uri = ? AND group_did = ?")

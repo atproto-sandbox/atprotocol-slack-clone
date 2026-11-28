@@ -34,7 +34,7 @@ import {
   channelUri,
   groupMembersUri,
   groupMetaUri,
-  personalInvitesUri,
+  personalInboxUri,
   SELF_SKEY,
   subjectKey,
   tidNow,
@@ -44,10 +44,10 @@ import {
   ATPROTO_SPACE_COLLECTION,
   COLLECTION,
   FLOCK_EXTENSION_FIELD,
-  OPENSOCIAL_COLLECTION,
-  OPENSOCIAL_METHOD,
-  OPENSOCIAL_POLICY,
-  OPENSOCIAL_SPACE_TYPE,
+  ATGRP_COLLECTION,
+  ATGRP_METHOD,
+  ATGRP_POLICY,
+  ATGRP_SPACE_TYPE,
   REPO_COLLECTION,
   SPACE_TYPE,
 } from "@flock/protocol/nsids";
@@ -166,7 +166,7 @@ async function createFakeDriver(opts: {
       spaceType: SPACE_TYPE.workspace,
       skey: SELF_SKEY,
       policy: {
-        $type: OPENSOCIAL_POLICY,
+        $type: ATGRP_POLICY,
         publicRead: false,
         unlisted: false,
         grants: [
@@ -348,7 +348,7 @@ async function createFakeDriver(opts: {
     },
     async provisionPersonalInvitesSpace(userDid: string) {
       await net.clientFor(userDid).procedure("com.atproto.space.createSpace", {
-        spaceType: OPENSOCIAL_SPACE_TYPE.invites,
+        spaceType: ATGRP_SPACE_TYPE.inbox,
         skey: SELF_SKEY,
         policy: {
           $type: MEMBERSPACE_POLICY,
@@ -625,7 +625,7 @@ async function createRealDriver(opts: {
       spaceType: SPACE_TYPE.workspace,
       skey: SELF_SKEY,
       policy: {
-        $type: OPENSOCIAL_POLICY,
+        $type: ATGRP_POLICY,
         publicRead: false,
         unlisted: false,
         grants: [
@@ -907,15 +907,15 @@ test("FakeNetwork vs real GroupHostServer parity: space indexing, RBAC anti-esca
   try {
     for (const d of [fake, real]) {
       // 1. Core spaces & public declaration exist; membership getRecord emits Atproto-Membership-Incarnation header
-      const decl = await d.adminClient.query<{ value: { meta: string } }>("com.atproto.repo.getRecord", {
+      const decl = await d.adminClient.query<{ value: { $type: string } }>("com.atproto.repo.getRecord", {
         repo: d.groupDid,
         collection: REPO_COLLECTION.groupDeclaration,
         rkey: SELF_SKEY,
       });
-      assert.equal(decl.value.meta, groupMetaUri(d.groupDid));
+      assert.equal(decl.value.$type, REPO_COLLECTION.groupDeclaration);
 
       const memHttp = await d.groupHttpCall({
-        path: `/xrpc/com.atproto.space.getRecord?space=${encodeURIComponent(groupMembersUri(d.groupDid))}&repo=${encodeURIComponent(d.groupDid)}&collection=${encodeURIComponent(OPENSOCIAL_COLLECTION.membership)}&rkey=${encodeURIComponent(d.aliceDid)}`,
+        path: `/xrpc/com.atproto.space.getRecord?space=${encodeURIComponent(groupMembersUri(d.groupDid))}&repo=${encodeURIComponent(d.groupDid)}&collection=${encodeURIComponent(ATGRP_COLLECTION.membership)}&rkey=${encodeURIComponent(d.aliceDid)}`,
         method: "GET",
       });
       assert.equal(memHttp.status, 200);
@@ -930,7 +930,7 @@ test("FakeNetwork vs real GroupHostServer parity: space indexing, RBAC anti-esca
         spaceType: SPACE_TYPE.channel,
         skey: "general",
         policy: {
-          $type: OPENSOCIAL_POLICY,
+          $type: ATGRP_POLICY,
           publicRead: false,
           unlisted: false,
           grants: [
@@ -944,7 +944,7 @@ test("FakeNetwork vs real GroupHostServer parity: space indexing, RBAC anti-esca
         {
           space: groupMembersUri(d.groupDid),
           repo: d.groupDid,
-          collection: OPENSOCIAL_COLLECTION.space,
+          collection: ATGRP_COLLECTION.space,
         },
       );
       assert.ok(idxBefore.records.some((r) => r.value.space === chanUri), `[${d.kind}] listed channel must appear in space index`);
@@ -954,7 +954,7 @@ test("FakeNetwork vs real GroupHostServer parity: space indexing, RBAC anti-esca
       await d.adminClient.procedure("com.atproto.space.updateSpace", {
         space: chanUri,
         policy: {
-          $type: OPENSOCIAL_POLICY,
+          $type: ATGRP_POLICY,
           publicRead: false,
           unlisted: true,
           grants: [{ role: "admin", read: true, write: true }],
@@ -965,18 +965,18 @@ test("FakeNetwork vs real GroupHostServer parity: space indexing, RBAC anti-esca
         {
           space: groupMembersUri(d.groupDid),
           repo: d.groupDid,
-          collection: OPENSOCIAL_COLLECTION.space,
+          collection: ATGRP_COLLECTION.space,
         },
       );
       assert.ok(!idxAfter.records.some((r) => r.value.space === chanUri), `[${d.kind}] unlisted channel must be removed from index`);
     }
 
-    // 3. Direct write to group.opensocial.space -> 400 IndexHostMaintained on both
+    // 3. Direct write to org.atgrp.space -> 400 IndexHostMaintained on both
     const fakeIdxErr = await captureErrorCode(() =>
       fake.adminClient.procedure("com.atproto.space.createRecord", {
         space: groupMembersUri(fake.groupDid),
         repo: fake.groupDid,
-        collection: OPENSOCIAL_COLLECTION.space,
+        collection: ATGRP_COLLECTION.space,
         record: { space: channelUri(fake.groupDid, "general"), createdAt: new Date().toISOString() },
       }),
     );
@@ -984,7 +984,7 @@ test("FakeNetwork vs real GroupHostServer parity: space indexing, RBAC anti-esca
       real.adminClient.procedure("com.atproto.space.createRecord", {
         space: groupMembersUri(real.groupDid),
         repo: real.groupDid,
-        collection: OPENSOCIAL_COLLECTION.space,
+        collection: ATGRP_COLLECTION.space,
         record: { space: channelUri(real.groupDid, "general"), createdAt: new Date().toISOString() },
       }),
     );
@@ -1006,7 +1006,7 @@ test("FakeNetwork vs real GroupHostServer parity: space indexing, RBAC anti-esca
       fake.adminClient.procedure("com.atproto.space.putRecord", {
         space: groupMembersUri(fake.groupDid),
         repo: fake.groupDid,
-        collection: OPENSOCIAL_COLLECTION.membership,
+        collection: ATGRP_COLLECTION.membership,
         rkey: fake.aliceDid,
         record: { roles: ["member"], createdAt: new Date().toISOString() },
       }),
@@ -1015,7 +1015,7 @@ test("FakeNetwork vs real GroupHostServer parity: space indexing, RBAC anti-esca
       real.adminClient.procedure("com.atproto.space.putRecord", {
         space: groupMembersUri(real.groupDid),
         repo: real.groupDid,
-        collection: OPENSOCIAL_COLLECTION.membership,
+        collection: ATGRP_COLLECTION.membership,
         rkey: real.aliceDid,
         record: { roles: ["member"], createdAt: new Date().toISOString() },
       }),
@@ -1028,7 +1028,7 @@ test("FakeNetwork vs real GroupHostServer parity: space indexing, RBAC anti-esca
       await d.adminClient.procedure("com.atproto.space.putRecord", {
         space: groupMembersUri(d.groupDid),
         repo: d.groupDid,
-        collection: OPENSOCIAL_COLLECTION.membership,
+        collection: ATGRP_COLLECTION.membership,
         rkey: d.bobDid,
         record: { roles: ["moderator", "member"], createdAt: new Date().toISOString() },
       });
@@ -1036,22 +1036,22 @@ test("FakeNetwork vs real GroupHostServer parity: space indexing, RBAC anti-esca
     const fakeMod = await fake.moderatorClientFor(fake.bobDid);
     const realMod = await real.moderatorClientFor(real.bobDid);
 
+    // Moderator holds `authModerate` (delete membership) + `canAssign: ["member"]`:
+    // trying to eject an `admin` (Alice) fails with `403 RoleNotAssignable`!
     const fakeEscalate = await captureErrorCode(() =>
-      fakeMod.procedure("com.atproto.space.putRecord", {
+      fakeMod.procedure("com.atproto.space.deleteRecord", {
         space: groupMembersUri(fake.groupDid),
         repo: fake.groupDid,
-        collection: OPENSOCIAL_COLLECTION.membership,
-        rkey: fake.carolDid,
-        record: { roles: ["admin"], createdAt: new Date().toISOString() },
+        collection: ATGRP_COLLECTION.membership,
+        rkey: fake.aliceDid,
       }),
     );
     const realEscalate = await captureErrorCode(() =>
-      realMod.procedure("com.atproto.space.putRecord", {
+      realMod.procedure("com.atproto.space.deleteRecord", {
         space: groupMembersUri(real.groupDid),
         repo: real.groupDid,
-        collection: OPENSOCIAL_COLLECTION.membership,
-        rkey: real.carolDid,
-        record: { roles: ["admin"], createdAt: new Date().toISOString() },
+        collection: ATGRP_COLLECTION.membership,
+        rkey: real.aliceDid,
       }),
     );
     assert.deepEqual(fakeEscalate, { status: 403, code: "RoleNotAssignable" });
@@ -1078,23 +1078,23 @@ test("FakeNetwork vs real GroupHostServer parity: space indexing, RBAC anti-esca
       await d.adminClient.procedure("com.atproto.space.putRecord", {
         space: groupMembersUri(d.groupDid),
         repo: d.groupDid,
-        collection: OPENSOCIAL_COLLECTION.role,
+        collection: ATGRP_COLLECTION.role,
         rkey: botRole,
         record: { displayName: `App: ${d.botDid}` },
       });
       await d.adminClient.procedure("com.atproto.space.putRecord", {
         space: groupMembersUri(d.groupDid),
         repo: d.groupDid,
-        collection: OPENSOCIAL_COLLECTION.membership,
+        collection: ATGRP_COLLECTION.membership,
         rkey: d.botDid,
         record: { roles: [botRole], createdAt: new Date().toISOString() },
       });
 
       const botJoin = await d.personalServiceCall<{ error?: string }>({
         callerDid: d.botDid,
-        method: OPENSOCIAL_METHOD.requestJoin,
+        method: ATGRP_METHOD.requestJoin,
         httpMethod: "POST",
-        lxm: OPENSOCIAL_METHOD.requestJoin,
+        lxm: ATGRP_METHOD.requestJoin,
         body: { group: d.groupDid },
       });
       assert.equal(botJoin.status, 400);
@@ -1122,9 +1122,9 @@ test("FakeNetwork vs real GroupHostServer parity: 6-case requestJoin, invitation
       // 1. Approval join request + Idempotency-Key replay + mismatch (`409`)
       const req1 = await d.personalServiceCall<{ status: string; request: { member: string; message?: string } }>({
         callerDid: d.bobDid,
-        method: OPENSOCIAL_METHOD.requestJoin,
+        method: ATGRP_METHOD.requestJoin,
         httpMethod: "POST",
-        lxm: OPENSOCIAL_METHOD.requestJoin,
+        lxm: ATGRP_METHOD.requestJoin,
         body: { group: d.groupDid, message: "Please let me in" },
         headers: { "idempotency-key": "op-bob-1" },
       });
@@ -1134,9 +1134,9 @@ test("FakeNetwork vs real GroupHostServer parity: 6-case requestJoin, invitation
 
       const mismatch = await d.personalServiceCall<{ error?: string }>({
         callerDid: d.bobDid,
-        method: OPENSOCIAL_METHOD.requestJoin,
+        method: ATGRP_METHOD.requestJoin,
         httpMethod: "POST",
-        lxm: OPENSOCIAL_METHOD.requestJoin,
+        lxm: ATGRP_METHOD.requestJoin,
         body: { group: d.groupDid, message: "Different message" },
         headers: { "idempotency-key": "op-bob-1" },
       });
@@ -1147,7 +1147,7 @@ test("FakeNetwork vs real GroupHostServer parity: 6-case requestJoin, invitation
         callerDid: d.bobDid,
         method: "group-member/join-status",
         httpMethod: "GET",
-        lxm: OPENSOCIAL_METHOD.requestJoin,
+        lxm: ATGRP_METHOD.requestJoin,
         query: { group: d.groupDid, operationId: "op-bob-1" },
       });
       assert.equal(statusPending.status, 200);
@@ -1164,7 +1164,7 @@ test("FakeNetwork vs real GroupHostServer parity: 6-case requestJoin, invitation
         body: JSON.stringify({
           space: groupMembersUri(d.groupDid),
           repo: d.groupDid,
-          collection: OPENSOCIAL_COLLECTION.membership,
+          collection: ATGRP_COLLECTION.membership,
           rkey: d.carolDid,
           record: { roles: ["member"], createdAt: new Date().toISOString() },
         }),
@@ -1185,7 +1185,7 @@ test("FakeNetwork vs real GroupHostServer parity: 6-case requestJoin, invitation
         body: JSON.stringify({
           space: groupMembersUri(d.groupDid),
           repo: d.groupDid,
-          collection: OPENSOCIAL_COLLECTION.membership,
+          collection: ATGRP_COLLECTION.membership,
           rkey: d.bobDid,
           record: { roles: ["member"], createdAt: new Date().toISOString() },
         }),
@@ -1196,7 +1196,7 @@ test("FakeNetwork vs real GroupHostServer parity: 6-case requestJoin, invitation
         callerDid: d.bobDid,
         method: "group-member/join-status",
         httpMethod: "GET",
-        lxm: OPENSOCIAL_METHOD.requestJoin,
+        lxm: ATGRP_METHOD.requestJoin,
         query: { group: d.groupDid, operationId: "op-bob-1" },
       });
       assert.equal(statusAdmitted.status, 200);
@@ -1204,13 +1204,13 @@ test("FakeNetwork vs real GroupHostServer parity: 6-case requestJoin, invitation
       assert.ok(typeof statusAdmitted.json.currentIncarnation === "string");
 
       // 3. Cross-PDS invitation write + invite-deliveries + requestJoin invite redemption
-      const inviteSpace = personalInvitesUri(d.carolDid);
+      const inviteSpace = personalInboxUri(d.carolDid);
       const createdInvite = await d.adminClient.procedure<Record<string, unknown>, { uri: string }>(
         "com.atproto.space.createRecord",
         {
           space: inviteSpace,
           repo: d.groupDid,
-          collection: OPENSOCIAL_COLLECTION.invite,
+          collection: ATGRP_COLLECTION.invite,
           record: {
             group: d.groupDid,
             createdBy: d.aliceDid,
@@ -1227,28 +1227,29 @@ test("FakeNetwork vs real GroupHostServer parity: 6-case requestJoin, invitation
 
       const carolRedeem = await d.personalServiceCall<{ status: string }>({
         callerDid: d.carolDid,
-        method: OPENSOCIAL_METHOD.requestJoin,
+        method: ATGRP_METHOD.requestJoin,
         httpMethod: "POST",
-        lxm: OPENSOCIAL_METHOD.requestJoin,
+        lxm: ATGRP_METHOD.requestJoin,
         body: { group: d.groupDid, invite: createdInvite.uri },
       });
       assert.equal(carolRedeem.status, 200);
       assert.equal(carolRedeem.json.status, "admitted");
 
-      // 4. Moderation: createReport, label.record -> labelEvent, eject -> ejectEvent, resolveModSubject
-      const rep = await d.personalServiceCall<{ id: string }>({
+      // 4. Moderation: submitReport, label.record -> labelEvent, eject -> ejectEvent, updateSubject
+      const rep = await d.personalServiceCall<{ eventId: string }>({
         callerDid: d.bobDid,
-        method: OPENSOCIAL_METHOD.createReport,
+        method: ATGRP_METHOD.modSubmitReport,
         httpMethod: "POST",
-        lxm: OPENSOCIAL_METHOD.createReport,
+        lxm: ATGRP_METHOD.modSubmitReport,
         body: {
           group: d.groupDid,
           subject: d.carolDid,
-          reasonType: "spam",
+          reasonType: "org.atgrp.mod.defs#reasonSpam",
           reason: "Spamming invites",
         },
       });
       assert.equal(rep.status, 200);
+      assert.ok(rep.json.eventId.startsWith("ev-"));
 
       await d.adminClient.procedure("com.atproto.space.createRecord", {
         space: groupMembersUri(d.groupDid),
@@ -1265,25 +1266,25 @@ test("FakeNetwork vs real GroupHostServer parity: 6-case requestJoin, invitation
       await d.adminClient.procedure("com.atproto.space.deleteRecord", {
         space: groupMembersUri(d.groupDid),
         repo: d.groupDid,
-        collection: OPENSOCIAL_COLLECTION.membership,
+        collection: ATGRP_COLLECTION.membership,
         rkey: d.carolDid,
       });
 
       const hist = await d.adminClient.query<{ events: Array<{ event: { $type: string } }> }>(
-        OPENSOCIAL_METHOD.getModSubjectHistory,
-        { subject: d.carolDid },
+        ATGRP_METHOD.modQuerySubjectHistory,
+        { subject: d.carolDid, sort: "oldest" },
       );
       assert.deepEqual(
         hist.events.map((e) => e.event.$type),
         [
-          "group.opensocial.defs#reportEvent",
-          "group.opensocial.defs#labelEvent",
-          "group.opensocial.defs#ejectEvent",
+          "org.atgrp.mod.defs#reportEvent",
+          "org.atgrp.mod.defs#labelEvent",
+          "org.atgrp.mod.defs#ejectEvent",
         ],
       );
 
       const resolved = await d.adminClient.procedure<Record<string, unknown>, { status: string }>(
-        OPENSOCIAL_METHOD.resolveModSubject,
+        ATGRP_METHOD.modUpdateSubject,
         { subject: d.carolDid, status: "resolved", note: "Handled" },
       );
       assert.equal(resolved.status, "resolved");
@@ -1302,11 +1303,10 @@ test("FakeNetwork vs real GroupHostServer parity: 6-case requestJoin, invitation
       await d.adminClient.procedure("com.atproto.space.putRecord", {
         space: groupMetaUri(d.groupDid),
         repo: d.groupDid,
-        collection: OPENSOCIAL_COLLECTION.profile,
+        collection: ATGRP_COLLECTION.about,
         rkey: SELF_SKEY,
         record: {
           displayName: "Parity Group",
-          joinPolicy: "approval",
           avatar: uploadedBlob,
         },
       });
@@ -1329,14 +1329,14 @@ test("FakeNetwork vs real GroupHostServer parity: 6-case requestJoin, invitation
       for await (const rec of parsedRepo.records) {
         exportedCols.push(rec.collection);
       }
-      assert.ok(exportedCols.includes(OPENSOCIAL_COLLECTION.profile));
+      assert.ok(exportedCols.includes(ATGRP_COLLECTION.about));
 
       // 6. LeaveGroup CAS mismatch (`409`) -> Bob leaves -> Alice sole-member leaves -> reversible deactivation + reactivation!
       const badLeave = await d.personalServiceCall<{ error?: string }>({
         callerDid: d.bobDid,
-        method: OPENSOCIAL_METHOD.leaveGroup,
+        method: ATGRP_METHOD.leaveGroup,
         httpMethod: "POST",
-        lxm: OPENSOCIAL_METHOD.leaveGroup,
+        lxm: ATGRP_METHOD.leaveGroup,
         body: { group: d.groupDid },
         headers: { "if-match-membership-incarnation": "wrong-incarnation" },
       });
@@ -1345,9 +1345,9 @@ test("FakeNetwork vs real GroupHostServer parity: 6-case requestJoin, invitation
 
       const bobLeave = await d.personalServiceCall({
         callerDid: d.bobDid,
-        method: OPENSOCIAL_METHOD.leaveGroup,
+        method: ATGRP_METHOD.leaveGroup,
         httpMethod: "POST",
-        lxm: OPENSOCIAL_METHOD.leaveGroup,
+        lxm: ATGRP_METHOD.leaveGroup,
         body: { group: d.groupDid },
         headers: { "if-match-membership-incarnation": statusAdmitted.json.currentIncarnation },
       });
@@ -1355,9 +1355,9 @@ test("FakeNetwork vs real GroupHostServer parity: 6-case requestJoin, invitation
 
       const aliceLeave = await d.personalServiceCall({
         callerDid: d.aliceDid,
-        method: OPENSOCIAL_METHOD.leaveGroup,
+        method: ATGRP_METHOD.leaveGroup,
         httpMethod: "POST",
-        lxm: OPENSOCIAL_METHOD.leaveGroup,
+        lxm: ATGRP_METHOD.leaveGroup,
         body: { group: d.groupDid },
       });
       assert.equal(aliceLeave.status, 200);
@@ -1366,7 +1366,7 @@ test("FakeNetwork vs real GroupHostServer parity: 6-case requestJoin, invitation
         callerDid: d.aliceDid,
         method: "group-member/join-status",
         httpMethod: "GET",
-        lxm: OPENSOCIAL_METHOD.requestJoin,
+        lxm: ATGRP_METHOD.requestJoin,
         query: { group: d.groupDid },
       });
       assert.equal(aliceDeactStatus.status, 200);
@@ -1379,7 +1379,7 @@ test("FakeNetwork vs real GroupHostServer parity: 6-case requestJoin, invitation
         callerDid: d.aliceDid,
         method: "group-member/join-status",
         httpMethod: "GET",
-        lxm: OPENSOCIAL_METHOD.requestJoin,
+        lxm: ATGRP_METHOD.requestJoin,
         query: { group: d.groupDid },
       });
       assert.equal(aliceRejoined.status, 200);
@@ -1402,21 +1402,21 @@ test("FakeNetwork vs real GroupHostServer parity: policy read/write/assignable a
       await d.adminClient.procedure("com.atproto.space.putRecord", {
         space: groupMembersUri(d.groupDid),
         repo: d.groupDid,
-        collection: OPENSOCIAL_COLLECTION.role,
+        collection: ATGRP_COLLECTION.role,
         rkey: "secret-team",
-        record: { displayName: "Secret Team", scopes: [] },
+        record: { displayName: "Secret Team", permissions: [] },
       });
       await d.adminClient.procedure("com.atproto.space.putRecord", {
         space: groupMembersUri(d.groupDid),
         repo: d.groupDid,
-        collection: OPENSOCIAL_COLLECTION.role,
+        collection: ATGRP_COLLECTION.role,
         rkey: "channel-mgr",
         record: {
           displayName: "Channel Manager",
-          assignable: ["member"],
-          scopes: [
+          canAssign: ["member"],
+          permissions: [
             "space:new.flock.channel?manage=create&manage=update",
-            "space:group.opensocial.members?authority=self&skey=self&collection=group.opensocial.role&action=create&action=update&action=delete",
+            "space:org.atgrp.members?authority=self&skey=self&collection=org.atgrp.role&action=create&action=update&action=delete",
             "blob:image/png",
             "repo:app.bsky.feed.post?action=create&action=update&action=delete",
             `rpc:app.bsky.actor.getProfile?aud=${encodeURIComponent(`${d.groupDid}#atproto_pds`)}`,
@@ -1428,7 +1428,7 @@ test("FakeNetwork vs real GroupHostServer parity: policy read/write/assignable a
       await d.adminClient.procedure("com.atproto.space.putRecord", {
         space: groupMembersUri(d.groupDid),
         repo: d.groupDid,
-        collection: OPENSOCIAL_COLLECTION.membership,
+        collection: ATGRP_COLLECTION.membership,
         rkey: d.bobDid,
         record: { roles: ["channel-mgr", "member"], createdAt: new Date().toISOString() },
       });
@@ -1436,7 +1436,7 @@ test("FakeNetwork vs real GroupHostServer parity: policy read/write/assignable a
       const bobClient = await d.clientForMemberWithScopes(d.bobDid, [
         "atproto",
         "space:new.flock.channel?manage=create&manage=update",
-        "space:group.opensocial.members?authority=self&skey=self&collection=group.opensocial.role&action=create&action=update&action=delete",
+        "space:org.atgrp.members?authority=self&skey=self&collection=org.atgrp.role&action=create&action=update&action=delete",
       ]);
 
       // 1. Role create / update / delete anti-escalation on unassignable roles + no self-assignable exemption!
@@ -1444,9 +1444,9 @@ test("FakeNetwork vs real GroupHostServer parity: policy read/write/assignable a
         bobClient.procedure("com.atproto.space.putRecord", {
           space: groupMembersUri(d.groupDid),
           repo: d.groupDid,
-          collection: OPENSOCIAL_COLLECTION.role,
+          collection: ATGRP_COLLECTION.role,
           rkey: "rogue-role",
-          record: { displayName: "Rogue", scopes: [] },
+          record: { displayName: "Rogue", permissions: [] },
         }),
       );
       assert.deepEqual(createUnassignable, { status: 403, code: "PrivilegeEscalation" }, `[${d.kind}] create unassignable role`);
@@ -1455,9 +1455,9 @@ test("FakeNetwork vs real GroupHostServer parity: policy read/write/assignable a
         bobClient.procedure("com.atproto.space.putRecord", {
           space: groupMembersUri(d.groupDid),
           repo: d.groupDid,
-          collection: OPENSOCIAL_COLLECTION.role,
+          collection: ATGRP_COLLECTION.role,
           rkey: "secret-team",
-          record: { displayName: "Tampered Secret Team", scopes: [] },
+          record: { displayName: "Tampered Secret Team", permissions: [] },
         }),
       );
       assert.deepEqual(updateUnassignable, { status: 403, code: "PrivilegeEscalation" }, `[${d.kind}] update unassignable role`);
@@ -1466,7 +1466,7 @@ test("FakeNetwork vs real GroupHostServer parity: policy read/write/assignable a
         bobClient.procedure("com.atproto.space.deleteRecord", {
           space: groupMembersUri(d.groupDid),
           repo: d.groupDid,
-          collection: OPENSOCIAL_COLLECTION.role,
+          collection: ATGRP_COLLECTION.role,
           rkey: "secret-team",
         }),
       );
@@ -1479,7 +1479,7 @@ test("FakeNetwork vs real GroupHostServer parity: policy read/write/assignable a
           writes: [
             {
               $type: "com.atproto.space.applyWrites#delete",
-              collection: OPENSOCIAL_COLLECTION.role,
+              collection: ATGRP_COLLECTION.role,
               rkey: "secret-team",
             },
           ],
@@ -1491,13 +1491,13 @@ test("FakeNetwork vs real GroupHostServer parity: policy read/write/assignable a
         bobClient.procedure("com.atproto.space.putRecord", {
           space: groupMembersUri(d.groupDid),
           repo: d.groupDid,
-          collection: OPENSOCIAL_COLLECTION.role,
+          collection: ATGRP_COLLECTION.role,
           rkey: "member",
           record: {
             displayName: "Member",
             default: true,
-            assignable: ["secret-team"],
-            scopes: [],
+            canAssign: ["secret-team"],
+            permissions: [],
           },
         }),
       );
@@ -1508,12 +1508,12 @@ test("FakeNetwork vs real GroupHostServer parity: policy read/write/assignable a
         bobClient.procedure("com.atproto.space.putRecord", {
           space: groupMembersUri(d.groupDid),
           repo: d.groupDid,
-          collection: OPENSOCIAL_COLLECTION.role,
+          collection: ATGRP_COLLECTION.role,
           rkey: "self-boot",
           record: {
             displayName: "Self Boot",
-            assignable: ["self-boot"],
-            scopes: [],
+            canAssign: ["self-boot"],
+            permissions: [],
           },
         }),
       );
@@ -1536,12 +1536,12 @@ test("FakeNetwork vs real GroupHostServer parity: policy read/write/assignable a
           bobClient.procedure("com.atproto.space.putRecord", {
             space: groupMembersUri(d.groupDid),
             repo: d.groupDid,
-            collection: OPENSOCIAL_COLLECTION.role,
+            collection: ATGRP_COLLECTION.role,
             rkey: "member",
             record: {
               displayName: "Member",
               default: true,
-              scopes: [candidateScope],
+              permissions: [candidateScope],
             },
           }),
         );
@@ -1556,21 +1556,21 @@ test("FakeNetwork vs real GroupHostServer parity: policy read/write/assignable a
       await bobClient.procedure("com.atproto.space.putRecord", {
         space: groupMembersUri(d.groupDid),
         repo: d.groupDid,
-        collection: OPENSOCIAL_COLLECTION.role,
+        collection: ATGRP_COLLECTION.role,
         rkey: "member",
         record: {
           displayName: "Member",
           default: true,
-          scopes: ["blob:image/png", "repo:app.bsky.feed.post?action=create"],
+          permissions: ["blob:image/png", "repo:app.bsky.feed.post?action=create"],
         },
       });
       // Restore `member` to empty scopes
       await bobClient.procedure("com.atproto.space.putRecord", {
         space: groupMembersUri(d.groupDid),
         repo: d.groupDid,
-        collection: OPENSOCIAL_COLLECTION.role,
+        collection: ATGRP_COLLECTION.role,
         rkey: "member",
-        record: { displayName: "Member", default: true, scopes: [] },
+        record: { displayName: "Member", default: true, permissions: [] },
       });
 
       // 3. Policy `read` / `write` / `publicRead` / `unlisted` / `assignable` anti-escalation
@@ -1579,7 +1579,7 @@ test("FakeNetwork vs real GroupHostServer parity: policy read/write/assignable a
         spaceType: SPACE_TYPE.channel,
         skey: "secret-room",
         policy: {
-          $type: OPENSOCIAL_POLICY,
+          $type: ATGRP_POLICY,
           publicRead: false,
           unlisted: true,
           grants: [
@@ -1594,7 +1594,7 @@ test("FakeNetwork vs real GroupHostServer parity: policy read/write/assignable a
         bobClient.procedure("com.atproto.space.updateSpace", {
           space: secretChanUri,
           policy: {
-            $type: OPENSOCIAL_POLICY,
+            $type: ATGRP_POLICY,
             publicRead: false,
             unlisted: true,
             grants: [
@@ -1610,7 +1610,7 @@ test("FakeNetwork vs real GroupHostServer parity: policy read/write/assignable a
         bobClient.procedure("com.atproto.space.updateSpace", {
           space: secretChanUri,
           policy: {
-            $type: OPENSOCIAL_POLICY,
+            $type: ATGRP_POLICY,
             publicRead: false,
             unlisted: true,
             grants: [{ role: "secret-team", read: true }],
@@ -1625,7 +1625,7 @@ test("FakeNetwork vs real GroupHostServer parity: policy read/write/assignable a
         bobClient.procedure("com.atproto.space.updateSpace", {
           space: secretChanUri,
           policy: {
-            $type: OPENSOCIAL_POLICY,
+            $type: ATGRP_POLICY,
             publicRead: false,
             unlisted: true,
             grants: [
@@ -1642,7 +1642,7 @@ test("FakeNetwork vs real GroupHostServer parity: policy read/write/assignable a
         bobClient.procedure("com.atproto.space.updateSpace", {
           space: secretChanUri,
           policy: {
-            $type: OPENSOCIAL_POLICY,
+            $type: ATGRP_POLICY,
             publicRead: true,
             unlisted: true,
             grants: [
@@ -1658,7 +1658,7 @@ test("FakeNetwork vs real GroupHostServer parity: policy read/write/assignable a
         bobClient.procedure("com.atproto.space.updateSpace", {
           space: secretChanUri,
           policy: {
-            $type: OPENSOCIAL_POLICY,
+            $type: ATGRP_POLICY,
             publicRead: false,
             unlisted: false,
             grants: [
@@ -1675,7 +1675,7 @@ test("FakeNetwork vs real GroupHostServer parity: policy read/write/assignable a
       await d.adminClient.procedure("com.atproto.space.updateSpace", {
         space: secretChanUri,
         policy: {
-          $type: OPENSOCIAL_POLICY,
+          $type: ATGRP_POLICY,
           publicRead: false,
           unlisted: true,
           grants: [
@@ -1689,7 +1689,7 @@ test("FakeNetwork vs real GroupHostServer parity: policy read/write/assignable a
       await bobClient.procedure("com.atproto.space.updateSpace", {
         space: secretChanUri,
         policy: {
-          $type: OPENSOCIAL_POLICY,
+          $type: ATGRP_POLICY,
           publicRead: false,
           unlisted: true,
           grants: [
@@ -1705,7 +1705,7 @@ test("FakeNetwork vs real GroupHostServer parity: policy read/write/assignable a
         bobClient.procedure("com.atproto.space.updateSpace", {
           space: secretChanUri,
           policy: {
-            $type: OPENSOCIAL_POLICY,
+            $type: ATGRP_POLICY,
             publicRead: false,
             unlisted: true,
             grants: [
@@ -1724,7 +1724,7 @@ test("FakeNetwork vs real GroupHostServer parity: policy read/write/assignable a
         bobClient.procedure("com.atproto.space.updateSpace", {
           space: secretChanUri,
           policy: {
-            $type: OPENSOCIAL_POLICY,
+            $type: ATGRP_POLICY,
             publicRead: false,
             unlisted: true,
             grants: [
@@ -1734,7 +1734,7 @@ test("FakeNetwork vs real GroupHostServer parity: policy read/write/assignable a
               {
                 role: "member",
                 read: true,
-                scopes: [`space:${SPACE_TYPE.channel}?authority=self&skey=secret-room&collection=*&action=create`],
+                permissions: [`space:${SPACE_TYPE.channel}?authority=self&skey=secret-room&collection=*&action=create`],
               },
             ],
           },
@@ -1752,7 +1752,7 @@ test("FakeNetwork vs real GroupHostServer parity: policy read/write/assignable a
           spaceType: SPACE_TYPE.channel,
           skey: "submgr-self-read",
           policy: {
-            $type: OPENSOCIAL_POLICY,
+            $type: ATGRP_POLICY,
             publicRead: false,
             unlisted: false,
             grants: [{ role: "member", read: true }],
@@ -1770,7 +1770,7 @@ test("FakeNetwork vs real GroupHostServer parity: policy read/write/assignable a
           spaceType: SPACE_TYPE.channel,
           skey: "submgr-self-write",
           policy: {
-            $type: OPENSOCIAL_POLICY,
+            $type: ATGRP_POLICY,
             publicRead: false,
             unlisted: false,
             grants: [{ role: "member", write: true }],
@@ -1788,7 +1788,7 @@ test("FakeNetwork vs real GroupHostServer parity: policy read/write/assignable a
           spaceType: SPACE_TYPE.channel,
           skey: "submgr-pub-read",
           policy: {
-            $type: OPENSOCIAL_POLICY,
+            $type: ATGRP_POLICY,
             publicRead: true,
             unlisted: false,
             grants: [],
@@ -1806,7 +1806,7 @@ test("FakeNetwork vs real GroupHostServer parity: policy read/write/assignable a
         spaceType: SPACE_TYPE.channel,
         skey: "submgr-empty-grants",
         policy: {
-          $type: OPENSOCIAL_POLICY,
+          $type: ATGRP_POLICY,
           publicRead: false,
           unlisted: false,
           grants: [],
@@ -1879,11 +1879,10 @@ test("FakeNetwork vs real GroupHostServer parity: account/identity/sync/migratio
       await d.adminClient.procedure("com.atproto.space.putRecord", {
         space: groupMetaUri(d.groupDid),
         repo: d.groupDid,
-        collection: OPENSOCIAL_COLLECTION.profile,
+        collection: ATGRP_COLLECTION.about,
         rkey: SELF_SKEY,
         record: {
           displayName: "Parity Group",
-          joinPolicy: "approval",
           avatar: uploadedBlob,
         },
       });
@@ -2031,7 +2030,7 @@ test("FakeNetwork vs real GroupHostServer parity: account/identity/sync/migratio
         atomicMigrationVersion: number;
         capabilityProofJwt: string;
       };
-      assert.ok(migInfo.supportedSpacePolicies.includes(OPENSOCIAL_POLICY));
+      assert.ok(migInfo.supportedSpacePolicies.includes(ATGRP_POLICY));
       assert.equal(migInfo.atomicMigrationVersion, 1);
       assert.equal(migInfo.capabilityProofJwt.split(".").length, 3);
 
@@ -2075,7 +2074,7 @@ test("FakeNetwork vs real GroupHostServer parity: account/identity/sync/migratio
           spaceType: SPACE_TYPE.channel,
           skey: "frozen-test",
           policy: {
-            $type: OPENSOCIAL_POLICY,
+            $type: ATGRP_POLICY,
             publicRead: false,
             unlisted: false,
             grants: [{ role: "admin", read: true, write: true }],
@@ -2101,7 +2100,7 @@ test("FakeNetwork vs real GroupHostServer parity: account/identity/sync/migratio
         spaceType: SPACE_TYPE.channel,
         skey: "unfrozen-test",
         policy: {
-          $type: OPENSOCIAL_POLICY,
+          $type: ATGRP_POLICY,
           publicRead: false,
           unlisted: false,
           grants: [{ role: "admin", read: true, write: true }],
@@ -2543,7 +2542,7 @@ test("FakeNetwork & GroupHostServer parity: authenticated notifyCredentialsRevok
       // 8. Space/repo relationship enforcement (`403 Forbidden`):
       //    (a) Unrelated external space where `d.groupDid` has no repository -> `403 Forbidden`
       const carolKp = await d.getPersonalSigningKeyForTest(d.carolDid);
-      const carolInviteSpace = personalInvitesUri(d.carolDid);
+      const carolInviteSpace = personalInboxUri(d.carolDid);
       const carolUnrelatedJwt = await signCustomJwt(carolKp, {
         iss: d.carolDid,
         aud: d.groupDid,
@@ -2675,13 +2674,13 @@ test("FakeNetwork & GroupHostServer parity: authenticated notifyCredentialsRevok
 
       //     (b) Request-count cap (`30` requests / 60s window) for an authorized external space (`bob`'s invites space):
       await d.provisionPersonalInvitesSpace(d.bobDid);
-      const bobInviteSpace = personalInvitesUri(d.bobDid);
+      const bobInviteSpace = personalInboxUri(d.bobDid);
       await d.adminClient.procedure("com.atproto.space.putRecord", {
         space: bobInviteSpace,
         repo: d.groupDid,
-        collection: OPENSOCIAL_COLLECTION.invite,
+        collection: ATGRP_COLLECTION.invite,
         rkey: "3jzfcijpj2z2e",
-        record: { $type: OPENSOCIAL_COLLECTION.invite, createdAt: new Date().toISOString() },
+        record: { $type: ATGRP_COLLECTION.invite, createdAt: new Date().toISOString() },
       });
       const bobKp = await d.getPersonalSigningKeyForTest(d.bobDid);
       for (let reqIdx = 0; reqIdx < 30; reqIdx += 1) {
@@ -2749,7 +2748,7 @@ test("FakeNetwork & GroupHostServer parity: authenticated notifyCredentialsRevok
     await adminClient.procedure("com.atproto.space.putRecord", {
       space: membersSpace,
       repo: groupDid,
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: bobDid,
       record: { roles: ["member"], createdAt: new Date().toISOString() },
     });
@@ -2788,7 +2787,7 @@ test("FakeNetwork & GroupHostServer parity: authenticated notifyCredentialsRevok
     await adminClient.procedure("com.atproto.space.deleteRecord", {
       space: membersSpace,
       repo: groupDid,
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: bobDid,
     });
     assert.deepEqual(
@@ -2843,7 +2842,7 @@ test("FakeNetwork & GroupHostServer parity: authenticated notifyCredentialsRevok
     await adminClient.procedure("com.atproto.space.putRecord", {
       space: membersSpace,
       repo: groupDid,
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: bobDid,
       record: { roles: ["member"], createdAt: new Date().toISOString() },
     });
@@ -2854,7 +2853,7 @@ test("FakeNetwork & GroupHostServer parity: authenticated notifyCredentialsRevok
       await adminClient.procedure("com.atproto.space.deleteRecord", {
         space: membersSpace,
         repo: groupDid,
-        collection: OPENSOCIAL_COLLECTION.membership,
+        collection: ATGRP_COLLECTION.membership,
         rkey: bobDid,
       });
       return new Response(JSON.stringify({ challenge }), { status: 200, headers: { "content-type": "application/json" } });
@@ -2879,7 +2878,7 @@ test("FakeNetwork & GroupHostServer parity: authenticated notifyCredentialsRevok
     await adminClient.procedure("com.atproto.space.putRecord", {
       space: membersSpace,
       repo: groupDid,
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: bobDid,
       record: { roles: ["member"], createdAt: new Date().toISOString() },
     });
@@ -3157,9 +3156,9 @@ test("FakeNetwork & GroupHostServer parity: POST /group-admin/controller-session
       //    Sole human (`aliceDid`) leaves the non-Flock group -> stays `activated === 1` with 0 human members!
       const leaveRes = await d.personalServiceCall<{ status: string }>({
         callerDid: d.aliceDid,
-        method: OPENSOCIAL_METHOD.leaveGroup,
+        method: ATGRP_METHOD.leaveGroup,
         httpMethod: "POST",
-        lxm: OPENSOCIAL_METHOD.leaveGroup,
+        lxm: ATGRP_METHOD.leaveGroup,
         body: { group: d.groupDid },
       });
       assert.equal(leaveRes.status, 200, `[${d.kind}] sole-member leave on sovereign non-Flock group`);
@@ -3225,13 +3224,12 @@ test("FakeNetwork & GroupHostServer parity: POST /group-admin/controller-session
           body: JSON.stringify({
             space: groupMetaUri(d.groupDid),
             repo: d.groupDid,
-            collection: OPENSOCIAL_COLLECTION.profile,
+            collection: ATGRP_COLLECTION.about,
             rkey: SELF_SKEY,
             record: {
-              $type: OPENSOCIAL_COLLECTION.profile,
+              $type: ATGRP_COLLECTION.about,
               displayName: "Zero-Human Sovereign Group",
               description: `Governed via ${d.kind} controller-session`,
-              joinPolicy: "invite",
             },
           }),
         },
@@ -3302,9 +3300,9 @@ test("FakeNetwork & GroupHostServer parity: POST /group-admin/controller-session
           body: JSON.stringify({
             space: groupMetaUri(d.groupDid),
             repo: d.groupDid,
-            collection: OPENSOCIAL_COLLECTION.profile,
+            collection: ATGRP_COLLECTION.about,
             rkey: SELF_SKEY,
-            record: { $type: OPENSOCIAL_COLLECTION.profile, displayName: "Blocked", joinPolicy: "invite" },
+            record: { $type: ATGRP_COLLECTION.about, displayName: "Blocked" },
           }),
         },
       );
@@ -3370,7 +3368,7 @@ test("FakeNetwork & GroupHostServer parity: POST /group-admin/controller-session
         const badAbortJwt = await signRawCompactJwt(groupSignKp, tc.header, {
           iss: d.groupDid,
           aud: peerServiceDid,
-          lxm: "group.opensocial.abortMigration",
+          lxm: "new.flock.group.abortMigration",
           iat: tc.iat,
           exp: tc.exp,
           jti: randomUUID(),
@@ -3389,7 +3387,7 @@ test("FakeNetwork & GroupHostServer parity: POST /group-admin/controller-session
         {
           iss: d.groupDid,
           aud: peerServiceDid,
-          lxm: "group.opensocial.abortMigration",
+          lxm: "new.flock.group.abortMigration",
           iat: nowSec,
           exp: nowSec + 60,
           jti: randomUUID(),
@@ -3508,12 +3506,12 @@ test("FakeNetwork & GroupHostServer Round 4 parity: atomic meta publicRead <-> d
       const membersSpace = groupMembersUri(d.groupDid);
 
       // =======================================================================
-      // 1. Codex Round 4 Finding #1: Atomic coupling `meta/self` `publicRead` <-> `group.opensocial.declaration/self`
+      // 1. Codex Round 4 Finding #1: Atomic coupling `meta/self` `publicRead` <-> `org.atgrp.declaration/self`
       // =======================================================================
       await d.adminClient.procedure("com.atproto.space.updateSpace", {
         space: metaSpace,
         policy: {
-          $type: OPENSOCIAL_POLICY,
+          $type: ATGRP_POLICY,
           publicRead: false,
           unlisted: false,
           grants: [
@@ -3538,14 +3536,14 @@ test("FakeNetwork & GroupHostServer Round 4 parity: atomic meta publicRead <-> d
             repo: d.groupDid,
             collection: REPO_COLLECTION.groupDeclaration,
             rkey: SELF_SKEY,
-            record: { $type: REPO_COLLECTION.groupDeclaration, meta: metaSpace, createdAt: new Date().toISOString() },
+            record: { $type: REPO_COLLECTION.groupDeclaration },
           }),
         () =>
           d.adminClient.procedure("com.atproto.repo.createRecord", {
             repo: d.groupDid,
             collection: REPO_COLLECTION.groupDeclaration,
             rkey: SELF_SKEY,
-            record: { $type: REPO_COLLECTION.groupDeclaration, meta: metaSpace, createdAt: new Date().toISOString() },
+            record: { $type: REPO_COLLECTION.groupDeclaration },
           }),
         () =>
           d.adminClient.procedure("com.atproto.repo.applyWrites", {
@@ -3555,7 +3553,7 @@ test("FakeNetwork & GroupHostServer Round 4 parity: atomic meta publicRead <-> d
                 $type: "com.atproto.repo.applyWrites#create",
                 collection: REPO_COLLECTION.groupDeclaration,
                 rkey: SELF_SKEY,
-                value: { $type: REPO_COLLECTION.groupDeclaration, meta: metaSpace, createdAt: new Date().toISOString() },
+                value: { $type: REPO_COLLECTION.groupDeclaration },
               },
             ],
           }),
@@ -3571,7 +3569,7 @@ test("FakeNetwork & GroupHostServer Round 4 parity: atomic meta publicRead <-> d
       await d.adminClient.procedure("com.atproto.space.updateSpace", {
         space: metaSpace,
         policy: {
-          $type: OPENSOCIAL_POLICY,
+          $type: ATGRP_POLICY,
           publicRead: true,
           unlisted: false,
           grants: [
@@ -3580,7 +3578,7 @@ test("FakeNetwork & GroupHostServer Round 4 parity: atomic meta publicRead <-> d
           ],
         },
       });
-      const restoredDecl = await d.adminClient.query<{ value: { meta: string; createdAt: string } }>(
+      const restoredDecl = await d.adminClient.query<{ cid: string; value: { $type: string } }>(
         "com.atproto.repo.getRecord",
         {
           repo: d.groupDid,
@@ -3588,13 +3586,13 @@ test("FakeNetwork & GroupHostServer Round 4 parity: atomic meta publicRead <-> d
           rkey: SELF_SKEY,
         },
       );
-      assert.equal(restoredDecl.value.meta, metaSpace);
+      assert.equal(restoredDecl.value.$type, REPO_COLLECTION.groupDeclaration);
 
       await new Promise((r) => setTimeout(r, 10));
       await d.adminClient.procedure("com.atproto.space.updateSpace", {
         space: metaSpace,
         policy: {
-          $type: OPENSOCIAL_POLICY,
+          $type: ATGRP_POLICY,
           publicRead: true,
           unlisted: false,
           grants: [
@@ -3604,19 +3602,19 @@ test("FakeNetwork & GroupHostServer Round 4 parity: atomic meta publicRead <-> d
           ],
         },
       });
-      const preservedDecl = await d.adminClient.query<{ value: { createdAt: string } }>("com.atproto.repo.getRecord", {
+      const preservedDecl = await d.adminClient.query<{ cid: string; value: { $type: string } }>("com.atproto.repo.getRecord", {
         repo: d.groupDid,
         collection: REPO_COLLECTION.groupDeclaration,
         rkey: SELF_SKEY,
       });
-      assert.equal(preservedDecl.value.createdAt, restoredDecl.value.createdAt, `[${d.kind}] createdAt must be preserved`);
+      assert.equal(preservedDecl.cid, restoredDecl.cid, `[${d.kind}] declaration CID must remain stable`);
 
       // Concurrent race: `updateSpace(publicRead: false)` racing `repo.putRecord(declaration/self)` must NEVER leave `publicRead: false` + live `declaration/self`!
       await Promise.allSettled([
         d.adminClient.procedure("com.atproto.space.updateSpace", {
           space: metaSpace,
           policy: {
-            $type: OPENSOCIAL_POLICY,
+            $type: ATGRP_POLICY,
             publicRead: false,
             unlisted: false,
             grants: [
@@ -3629,7 +3627,7 @@ test("FakeNetwork & GroupHostServer Round 4 parity: atomic meta publicRead <-> d
           repo: d.groupDid,
           collection: REPO_COLLECTION.groupDeclaration,
           rkey: SELF_SKEY,
-          record: { $type: REPO_COLLECTION.groupDeclaration, meta: metaSpace, createdAt: new Date().toISOString() },
+          record: { $type: REPO_COLLECTION.groupDeclaration },
         }),
       ]);
       const raceDeclErr = await captureErrorCode(() =>
@@ -3645,7 +3643,7 @@ test("FakeNetwork & GroupHostServer Round 4 parity: atomic meta publicRead <-> d
       await d.adminClient.procedure("com.atproto.space.updateSpace", {
         space: metaSpace,
         policy: {
-          $type: OPENSOCIAL_POLICY,
+          $type: ATGRP_POLICY,
           publicRead: true,
           unlisted: false,
           grants: [
@@ -3868,7 +3866,7 @@ test("FakeNetwork & GroupHostServer Round 4 parity: atomic meta publicRead <-> d
           method: "POST",
           headers: {
             "content-type": "application/json",
-            authorization: `Bearer ${await makeTargetJwt("group.opensocial.abortMigration")}`,
+            authorization: `Bearer ${await makeTargetJwt("new.flock.group.abortMigration")}`,
           },
           body: JSON.stringify({
             group: d.groupDid,
@@ -3897,7 +3895,7 @@ test("FakeNetwork & GroupHostServer Round 4 parity: atomic meta publicRead <-> d
 
         // While we have an active target staging session, also verify Codex Round 4 Finding #7 (`space.importRepo` rejects non-invite collection in external `invites/self` -> `400 InvalidRepoFile`)!
         if (op2Header === "parity-std-op-2") {
-          const bobInvSpace = personalInvitesUri(d.bobDid);
+          const bobInvSpace = personalInboxUri(d.bobDid);
           const rogueSer = await serializeRecord(
             "app.bsky.feed.post" as NsidString,
             "3jzfcijpj2z2a" as RecordKeyString,
@@ -3940,14 +3938,14 @@ test("FakeNetwork & GroupHostServer Round 4 parity: atomic meta publicRead <-> d
       // 3. Codex Round 4 Finding #7: Reject unknown collections & invalid invites in external `invites/self` even with `validate: false` & wildcard scopes!
       // =======================================================================
       await d.provisionPersonalInvitesSpace(d.bobDid);
-      const bobInvSpace = personalInvitesUri(d.bobDid);
+      const bobInvSpace = personalInboxUri(d.bobDid);
 
       // Invalid invite record with `validate: false` -> `400 InvalidRequest`
       const badInvErr = await captureErrorCode(() =>
         d.adminClient.procedure("com.atproto.space.putRecord", {
           space: bobInvSpace,
           repo: d.groupDid,
-          collection: OPENSOCIAL_COLLECTION.invite,
+          collection: ATGRP_COLLECTION.invite,
           rkey: "3jzfcijpj2z2a",
           validate: false,
           record: { unexpected: "missing createdAt" },
@@ -4009,7 +4007,7 @@ test("FakeNetwork & GroupHostServer Round 4 parity: atomic meta publicRead <-> d
       const { access_token: ctrlTok } = (await ctrlSessRes.json()) as { access_token: string };
 
       const wildcardInviteScope =
-        "space:group.opensocial.invites?authority=*&skey=self&collection=*&action=create&action=update&action=delete";
+        "space:org.atgrp.inbox?authority=*&skey=self&collection=*&action=create&action=update&action=delete";
       const updAdminRoleRes = await sendParityDpop(
         d,
         ctrlDpop,
@@ -4023,12 +4021,12 @@ test("FakeNetwork & GroupHostServer Round 4 parity: atomic meta publicRead <-> d
           body: JSON.stringify({
             space: membersSpace,
             repo: d.groupDid,
-            collection: OPENSOCIAL_COLLECTION.role,
+            collection: ATGRP_COLLECTION.role,
             rkey: "admin",
             record: {
               displayName: "Admin",
-              assignable: ["*"],
-              scopes: [...groupAdminScopes(d.groupDid).filter((s) => s !== "atproto"), wildcardInviteScope],
+              canAssign: ["*"],
+              permissions: [...groupAdminScopes(d.groupDid).filter((s) => s !== "atproto"), wildcardInviteScope],
             },
           }),
         },
@@ -4060,7 +4058,7 @@ test("FakeNetwork & GroupHostServer Round 4 parity: atomic meta publicRead <-> d
         spaceType: SPACE_TYPE.channel,
         skey: "localhost-app-gated",
         policy: {
-          $type: OPENSOCIAL_POLICY,
+          $type: ATGRP_POLICY,
           publicRead: false,
           unlisted: false,
           allowedApps: [localhostClientId],
@@ -4276,7 +4274,7 @@ test("FakeNetwork & GroupHostServer Round 5 parity: operation-ID tombstones bloc
         method: "POST",
         headers: {
           "content-type": "application/json",
-          authorization: `Bearer ${await makeTargetJwt("group.opensocial.abortMigration")}`,
+          authorization: `Bearer ${await makeTargetJwt("new.flock.group.abortMigration")}`,
         },
         body: JSON.stringify({
           group: d.groupDid,
@@ -4322,7 +4320,7 @@ test("FakeNetwork & GroupHostServer Round 5 parity: operation-ID tombstones bloc
         method: "POST",
         headers: {
           "content-type": "application/json",
-          authorization: `Bearer ${await makeTargetJwt("group.opensocial.abortMigration")}`,
+          authorization: `Bearer ${await makeTargetJwt("new.flock.group.abortMigration")}`,
         },
         body: JSON.stringify({
           group: d.groupDid,
@@ -4519,7 +4517,7 @@ test("FakeNetwork & GroupHostServer Round 5 parity: operation-ID tombstones bloc
         method: "POST",
         headers: {
           "content-type": "application/json",
-          authorization: `Bearer ${await makeTargetJwt("group.opensocial.abortMigration")}`,
+          authorization: `Bearer ${await makeTargetJwt("new.flock.group.abortMigration")}`,
         },
         body: JSON.stringify({ group: d.groupDid, operationId: "parity-r5-verify-none" }),
       });
@@ -4610,7 +4608,7 @@ test("FakeNetwork & GroupHostServer Round 6 parity: per-issuer clientAttestation
         spaceType: SPACE_TYPE.channel,
         skey: "r6-att-parity",
         policy: {
-          $type: OPENSOCIAL_POLICY,
+          $type: ATGRP_POLICY,
           publicRead: false,
           unlisted: false,
           allowedApps: [clientIdA, clientIdB],
@@ -4623,12 +4621,12 @@ test("FakeNetwork & GroupHostServer Round 6 parity: per-issuer clientAttestation
 
       // Grant `bobDid` `member` access in `members/self` so cross-issuer delegationToken JTI isolation can be tested too!
       await d.adminClient.procedure("com.atproto.space.putRecord", {
-        space: `at:space/${d.groupDid}/group.opensocial.members/self`,
+        space: `at:space/${d.groupDid}/org.atgrp.members/self`,
         repo: d.groupDid,
-        collection: "group.opensocial.membership",
+        collection: "org.atgrp.membership",
         rkey: d.bobDid,
         record: {
-          $type: "group.opensocial.membership",
+          $type: "org.atgrp.membership",
           roles: ["member"],
           createdAt: new Date().toISOString(),
         },
@@ -4850,20 +4848,20 @@ test("FakeNetwork & GroupHostServer Round 7 parity: signPlcOperation pre-side-ef
       await d.adminClient.procedure("com.atproto.space.putRecord", {
         space: membersSpace,
         repo: d.groupDid,
-        collection: OPENSOCIAL_COLLECTION.role,
-        rkey: "r7-id-viewer",
+        collection: ATGRP_COLLECTION.role,
+        rkey: "id-viewer-role",
         record: {
           displayName: "Identity Viewer",
-          scopes: ["identity:*"],
+          permissions: ["identity:*"],
         },
       });
       await d.adminClient.procedure("com.atproto.space.putRecord", {
         space: membersSpace,
         repo: d.groupDid,
-        collection: OPENSOCIAL_COLLECTION.membership,
+        collection: ATGRP_COLLECTION.membership,
         rkey: d.bobDid,
         record: {
-          roles: ["member", "r7-id-viewer"],
+          roles: ["member", "id-viewer-role"],
           createdAt: new Date().toISOString(),
         },
       });
@@ -4888,7 +4886,7 @@ test("FakeNetwork & GroupHostServer Round 7 parity: signPlcOperation pre-side-ef
             iat: nowSecCap,
             exp: nowSecCap + 300,
             endpoint: d.peerMigrationEndpoint,
-            supportedSpacePolicies: [OPENSOCIAL_POLICY],
+            supportedSpacePolicies: [ATGRP_POLICY],
             atomicMigrationVersion: 1,
           },
         },
@@ -4901,7 +4899,7 @@ test("FakeNetwork & GroupHostServer Round 7 parity: signPlcOperation pre-side-ef
             iat: nowSecCap,
             exp: nowSecCap + 300,
             endpoint: d.peerMigrationEndpoint,
-            supportedSpacePolicies: [OPENSOCIAL_POLICY],
+            supportedSpacePolicies: [ATGRP_POLICY],
             atomicMigrationVersion: 1,
           },
         },
@@ -4914,7 +4912,7 @@ test("FakeNetwork & GroupHostServer Round 7 parity: signPlcOperation pre-side-ef
             iat: nowSecCap,
             exp: nowSecCap + 300,
             endpoint: d.peerMigrationEndpoint,
-            supportedSpacePolicies: [OPENSOCIAL_POLICY],
+            supportedSpacePolicies: [ATGRP_POLICY],
             atomicMigrationVersion: 1,
           },
         },
@@ -4926,7 +4924,7 @@ test("FakeNetwork & GroupHostServer Round 7 parity: signPlcOperation pre-side-ef
             iss: peerServiceDid,
             exp: nowSecCap + 300,
             endpoint: d.peerMigrationEndpoint,
-            supportedSpacePolicies: [OPENSOCIAL_POLICY],
+            supportedSpacePolicies: [ATGRP_POLICY],
             atomicMigrationVersion: 1,
           },
         },
@@ -4939,7 +4937,7 @@ test("FakeNetwork & GroupHostServer Round 7 parity: signPlcOperation pre-side-ef
             iat: nowSecCap + 30,
             exp: nowSecCap + 300,
             endpoint: d.peerMigrationEndpoint,
-            supportedSpacePolicies: [OPENSOCIAL_POLICY],
+            supportedSpacePolicies: [ATGRP_POLICY],
             atomicMigrationVersion: 1,
           },
         },
@@ -4952,7 +4950,7 @@ test("FakeNetwork & GroupHostServer Round 7 parity: signPlcOperation pre-side-ef
             iat: nowSecCap - 10,
             exp: nowSecCap + 295,
             endpoint: d.peerMigrationEndpoint,
-            supportedSpacePolicies: [OPENSOCIAL_POLICY],
+            supportedSpacePolicies: [ATGRP_POLICY],
             atomicMigrationVersion: 1,
           },
         },
@@ -5032,7 +5030,7 @@ test("FakeNetwork & GroupHostServer Round 7 parity: signPlcOperation pre-side-ef
         spaceType: SPACE_TYPE.channel,
         skey: "r7-public-fanout",
         policy: {
-          $type: OPENSOCIAL_POLICY,
+          $type: ATGRP_POLICY,
           publicRead: true,
           unlisted: false,
           grants: [
@@ -5180,7 +5178,7 @@ test("FakeNetwork & GroupHostServer Round 7 parity: signPlcOperation pre-side-ef
         },
         services: {
           atproto_pds: { type: "AtprotoPersonalDataServer", endpoint: d.peerMigrationEndpoint },
-          opensocial_group: { type: "OpenSocialGroupHost", endpoint: d.peerMigrationEndpoint },
+          atgrp_host: { type: "AtmosphereGroupHostV1", endpoint: d.peerMigrationEndpoint },
         },
       };
 
@@ -5515,7 +5513,7 @@ test("FakeNetwork & GroupHostServer Round 8 parity: delayed Standard-mode source
           iat: nowSecCap,
           exp: nowSecCap + 300,
           endpoint: d.peerMigrationEndpoint,
-          supportedSpacePolicies: [OPENSOCIAL_POLICY],
+          supportedSpacePolicies: [ATGRP_POLICY],
           atomicMigrationVersion: 1,
         });
         d.setSourceOutboundInterceptor(async (urlStr, _init, forward) => {
@@ -6127,13 +6125,13 @@ test("FakeNetwork & GroupHostServer Round 9 parity: live-PLC verifyPersonalServi
       const badStagedJoinJwt = await signJwtWithKey(stagedPeerGroupKey, {
         iss: d.groupDid,
         aud: `${peerSiblingDid}#atproto_pds`,
-        lxm: OPENSOCIAL_METHOD.requestJoin,
+        lxm: ATGRP_METHOD.requestJoin,
         iat: nowSec1,
         exp: nowSec1 + 60,
         jti: `r9-bad-staged-${randomUUID()}`,
       });
       const badStagedJoinRes = await d.rawFetch(
-        `${d.peerMigrationEndpoint}/xrpc/${OPENSOCIAL_METHOD.requestJoin}`,
+        `${d.peerMigrationEndpoint}/xrpc/${ATGRP_METHOD.requestJoin}`,
         {
           method: "POST",
           headers: {
@@ -6150,13 +6148,13 @@ test("FakeNetwork & GroupHostServer Round 9 parity: live-PLC verifyPersonalServi
       const goodPreCutoverJwt = await signJwtWithKey(srcGroupKey, {
         iss: d.groupDid,
         aud: `${peerSiblingDid}#atproto_pds`,
-        lxm: OPENSOCIAL_METHOD.requestJoin,
+        lxm: ATGRP_METHOD.requestJoin,
         iat: nowSec1,
         exp: nowSec1 + 60,
         jti: `r9-good-pre-${randomUUID()}`,
       });
       const goodPreCutoverRes = await d.rawFetch(
-        `${d.peerMigrationEndpoint}/xrpc/${OPENSOCIAL_METHOD.requestJoin}`,
+        `${d.peerMigrationEndpoint}/xrpc/${ATGRP_METHOD.requestJoin}`,
         {
           method: "POST",
           headers: {
@@ -6304,12 +6302,12 @@ test("FakeNetwork & GroupHostServer Round 9 parity: live-PLC verifyPersonalServi
       const badRetiredJoinJwt = await signJwtWithKey(srcGroupKey, {
         iss: d.groupDid,
         aud: `${sourceSiblingDid}#atproto_pds`,
-        lxm: OPENSOCIAL_METHOD.requestJoin,
+        lxm: ATGRP_METHOD.requestJoin,
         iat: nowSec2,
         exp: nowSec2 + 60,
         jti: `r9-bad-retired-${randomUUID()}`,
       });
-      const badRetiredJoinRes = await d.rawFetch(`${d.baseUrl}/xrpc/${OPENSOCIAL_METHOD.requestJoin}`, {
+      const badRetiredJoinRes = await d.rawFetch(`${d.baseUrl}/xrpc/${ATGRP_METHOD.requestJoin}`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -6324,12 +6322,12 @@ test("FakeNetwork & GroupHostServer Round 9 parity: live-PLC verifyPersonalServi
       const goodPostCutoverJwt = await signJwtWithKey(stagedPeerGroupKey, {
         iss: d.groupDid,
         aud: `${sourceSiblingDid}#atproto_pds`,
-        lxm: OPENSOCIAL_METHOD.requestJoin,
+        lxm: ATGRP_METHOD.requestJoin,
         iat: nowSec2,
         exp: nowSec2 + 60,
         jti: `r9-good-post-${randomUUID()}`,
       });
-      const goodPostCutoverRes = await d.rawFetch(`${d.baseUrl}/xrpc/${OPENSOCIAL_METHOD.requestJoin}`, {
+      const goodPostCutoverRes = await d.rawFetch(`${d.baseUrl}/xrpc/${ATGRP_METHOD.requestJoin}`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -6366,9 +6364,9 @@ test("Round 10 hardening parity: notifyRepoUpdate security/validation/retry cont
       await d.provisionPersonalInvitesSpace(d.bobDid);
       await d.personalServiceCall({
         callerDid: d.bobDid,
-        method: OPENSOCIAL_METHOD.requestJoin,
+        method: ATGRP_METHOD.requestJoin,
         httpMethod: "POST",
-        lxm: OPENSOCIAL_METHOD.requestJoin,
+        lxm: ATGRP_METHOD.requestJoin,
         body: { group: d.groupDid },
       });
 
@@ -6377,7 +6375,7 @@ test("Round 10 hardening parity: notifyRepoUpdate security/validation/retry cont
         spaceType: SPACE_TYPE.channel,
         skey: "r10-notify-chan",
         policy: {
-          $type: OPENSOCIAL_POLICY,
+          $type: ATGRP_POLICY,
           publicRead: false,
           unlisted: false,
           grants: [
@@ -6482,7 +6480,7 @@ test("Round 10 hardening parity: notifyRepoUpdate security/validation/retry cont
           {
             iss: d.bobDid,
             aud: `${d.groupDid}#atproto_pds`,
-            lxm: OPENSOCIAL_METHOD.requestJoin,
+            lxm: ATGRP_METHOD.requestJoin,
             iat: nowSec,
             exp: nowSec + 60,
           },
@@ -6894,10 +6892,10 @@ test("Round 10 hardening parity: notifyRepoUpdate security/validation/retry cont
         [
           "invalid-grant-scope",
           {
-            $type: OPENSOCIAL_POLICY,
+            $type: ATGRP_POLICY,
             publicRead: false,
             unlisted: false,
-            grants: [{ role: "admin", read: true, write: true, scopes: ["identity:*"] }],
+            grants: [{ role: "admin", read: true, write: true, permissions: ["identity:*"] }],
           },
           "InvalidSpacePolicyScope",
         ],
@@ -7060,7 +7058,7 @@ test("Round 10 hardening parity: notifyRepoUpdate security/validation/retry cont
       //    stages cleanly and `activateAccount` succeeds (`200 OK`)!
       const rawGrants = (exportedMembersMetaPolicy.grants as Array<Record<string, unknown>>).slice().reverse();
       const semanticallyEqualPolicy: Record<string, unknown> = {
-        $type: OPENSOCIAL_POLICY,
+        $type: ATGRP_POLICY,
         ...(exportedMembersMetaPolicy.publicRead === true ? { publicRead: true } : {}),
         ...(exportedMembersMetaPolicy.unlisted === true ? { unlisted: true } : {}),
         grants: rawGrants,
@@ -7111,9 +7109,9 @@ test("Round 12 hardening parity: effective admins excluded from an existing priv
       await d.provisionPersonalInvitesSpace(d.bobDid);
       await d.personalServiceCall({
         callerDid: d.bobDid,
-        method: OPENSOCIAL_METHOD.requestJoin,
+        method: ATGRP_METHOD.requestJoin,
         httpMethod: "POST",
-        lxm: OPENSOCIAL_METHOD.requestJoin,
+        lxm: ATGRP_METHOD.requestJoin,
         body: { group: d.groupDid },
       });
 
@@ -7122,20 +7120,20 @@ test("Round 12 hardening parity: effective admins excluded from an existing priv
       await d.adminClient.procedure("com.atproto.space.putRecord", {
         space: membersSpace,
         repo: d.groupDid,
-        collection: OPENSOCIAL_COLLECTION.role,
+        collection: ATGRP_COLLECTION.role,
         rkey: "channel-secret",
         record: {
-          $type: OPENSOCIAL_COLLECTION.role,
+          $type: ATGRP_COLLECTION.role,
           displayName: "#secret member",
         },
       });
       await d.adminClient.procedure("com.atproto.space.putRecord", {
         space: membersSpace,
         repo: d.groupDid,
-        collection: OPENSOCIAL_COLLECTION.membership,
+        collection: ATGRP_COLLECTION.membership,
         rkey: d.bobDid,
         record: {
-          $type: OPENSOCIAL_COLLECTION.membership,
+          $type: ATGRP_COLLECTION.membership,
           roles: ["member", "channel-secret"],
           createdAt: "2026-11-22T00:00:00.000Z",
         },
@@ -7147,7 +7145,7 @@ test("Round 12 hardening parity: effective admins excluded from an existing priv
         spaceType: SPACE_TYPE.channel,
         skey: "secret",
         policy: {
-          $type: OPENSOCIAL_POLICY,
+          $type: ATGRP_POLICY,
           publicRead: false,
           unlisted: true,
           grants: [{ role: "channel-secret", read: true, write: true }],
@@ -7160,7 +7158,7 @@ test("Round 12 hardening parity: effective admins excluded from an existing priv
         {
           label: "grant read to assignable role",
           policy: {
-            $type: OPENSOCIAL_POLICY,
+            $type: ATGRP_POLICY,
             publicRead: false,
             unlisted: true,
             grants: [
@@ -7172,7 +7170,7 @@ test("Round 12 hardening parity: effective admins excluded from an existing priv
         {
           label: "grant write to assignable role",
           policy: {
-            $type: OPENSOCIAL_POLICY,
+            $type: ATGRP_POLICY,
             publicRead: false,
             unlisted: true,
             grants: [
@@ -7184,7 +7182,7 @@ test("Round 12 hardening parity: effective admins excluded from an existing priv
         {
           label: "enable publicRead",
           policy: {
-            $type: OPENSOCIAL_POLICY,
+            $type: ATGRP_POLICY,
             publicRead: true,
             unlisted: true,
             grants: [{ role: "channel-secret", read: true, write: true }],
@@ -7193,7 +7191,7 @@ test("Round 12 hardening parity: effective admins excluded from an existing priv
         {
           label: "list unlisted space (unlisted: false)",
           policy: {
-            $type: OPENSOCIAL_POLICY,
+            $type: ATGRP_POLICY,
             publicRead: false,
             unlisted: false,
             grants: [{ role: "channel-secret", read: true, write: true }],
@@ -7214,14 +7212,14 @@ test("Round 12 hardening parity: effective admins excluded from an existing priv
         );
       }
 
-      // Once `aliceDid` holds `channel-secret` (which is in `aliceDid`'s `assignable: ["*"]` union), `aliceDid` holds `rw` on `secretUri` and CAN grant access!
+      // Once `aliceDid` holds `channel-secret` (which is in `aliceDid`'s `canAssign: ["*"]` union), `aliceDid` holds `rw` on `secretUri` and CAN grant access!
       await d.adminClient.procedure("com.atproto.space.putRecord", {
         space: membersSpace,
         repo: d.groupDid,
-        collection: OPENSOCIAL_COLLECTION.membership,
+        collection: ATGRP_COLLECTION.membership,
         rkey: d.aliceDid,
         record: {
-          $type: OPENSOCIAL_COLLECTION.membership,
+          $type: ATGRP_COLLECTION.membership,
           roles: ["admin", "member", "channel-secret"],
           createdAt: "2026-11-22T00:00:00.000Z",
         },
@@ -7229,7 +7227,7 @@ test("Round 12 hardening parity: effective admins excluded from an existing priv
       await d.adminClient.procedure("com.atproto.space.updateSpace", {
         space: secretUri,
         policy: {
-          $type: OPENSOCIAL_POLICY,
+          $type: ATGRP_POLICY,
           publicRead: false,
           unlisted: false,
           grants: [
@@ -7246,7 +7244,7 @@ test("Round 12 hardening parity: effective admins excluded from an existing priv
   }
 });
 
-test("FakeNetwork & GroupHostServer parity: browser-scoped groupAdminScopes() grants target-bound group.opensocial.abortMigration service JWTs for post-purge recovery", async () => {
+test("FakeNetwork & GroupHostServer parity: browser-scoped groupAdminScopes() grants target-bound new.flock.group.abortMigration service JWTs for post-purge recovery", async () => {
   const fake = await createFakeDriver({ joinPolicy: "open", publicMeta: true });
   const real = await createRealDriver({ joinPolicy: "open", publicMeta: true });
 
@@ -7258,10 +7256,10 @@ test("FakeNetwork & GroupHostServer parity: browser-scoped groupAdminScopes() gr
       await d.adminClient.procedure("com.atproto.space.putRecord", {
         space: groupMembersUri(d.groupDid),
         repo: d.groupDid,
-        collection: OPENSOCIAL_COLLECTION.membership,
+        collection: ATGRP_COLLECTION.membership,
         rkey: d.bobDid,
         record: {
-          $type: OPENSOCIAL_COLLECTION.membership,
+          $type: ATGRP_COLLECTION.membership,
           roles: ["moderator", "member"],
           createdAt: "2026-11-22T00:00:00.000Z",
         },
@@ -7274,23 +7272,23 @@ test("FakeNetwork & GroupHostServer parity: browser-scoped groupAdminScopes() gr
       assert.equal(peerDescRes.status, 200);
       const { did: peerServiceDid } = (await peerDescRes.json()) as { did: string };
 
-      // 1. Moderator session cannot mint `group.opensocial.abortMigration` (`403`).
+      // 1. Moderator session cannot mint `new.flock.group.abortMigration` (`403`).
       await assert.rejects(
         () =>
           modClient.query("com.atproto.server.getServiceAuth", {
             aud: peerServiceDid,
-            lxm: "group.opensocial.abortMigration",
+            lxm: "new.flock.group.abortMigration",
           }),
         (err: unknown) => err instanceof XrpcError && err.status === 403,
         `[${d.kind}] moderator session must not mint abortMigration service JWT`,
       );
 
-      // 2. Unleased `getServiceAuth(lxm = group.opensocial.abortMigration)` rejects non-GroupHost `aud` (`400 UnsupportedGroupHostTarget`).
+      // 2. Unleased `getServiceAuth(lxm = new.flock.group.abortMigration)` rejects non-GroupHost `aud` (`400 UnsupportedGroupHostTarget`).
       await assert.rejects(
         () =>
           browserAdmin.query("com.atproto.server.getServiceAuth", {
             aud: d.bobDid,
-            lxm: "group.opensocial.abortMigration",
+            lxm: "new.flock.group.abortMigration",
           }),
         (err: unknown) => err instanceof XrpcError && err.status === 400 && err.code === "UnsupportedGroupHostTarget",
         `[${d.kind}] unleased abortMigration service JWT must reject non-target audience`,
@@ -7321,7 +7319,7 @@ test("FakeNetwork & GroupHostServer parity: browser-scoped groupAdminScopes() gr
         () =>
           browserAdmin.query("com.atproto.server.getServiceAuth", {
             aud: d.bobDid,
-            lxm: "group.opensocial.abortMigration",
+            lxm: "new.flock.group.abortMigration",
           }),
         (err: unknown) => err instanceof XrpcError && err.status === 409 && err.code === "MigrationInProgress",
         `[${d.kind}] leased abortMigration service JWT must restrict aud to lease.target_service_did`,
@@ -7366,10 +7364,10 @@ test("FakeNetwork & GroupHostServer parity: browser-scoped groupAdminScopes() gr
       });
       assert.equal(refreshAfterPurge.status, 401, `[${d.kind}] refreshSession after purge must 401`);
 
-      // Mint REAL `group.opensocial.abortMigration` service JWT via `browserAdmin` (`groupAdminScopes()`)
+      // Mint REAL `new.flock.group.abortMigration` service JWT via `browserAdmin` (`groupAdminScopes()`)
       const { token: abortSvcJwt } = await browserAdmin.query<{ token: string }>("com.atproto.server.getServiceAuth", {
         aud: prep.targetServiceDid,
-        lxm: "group.opensocial.abortMigration",
+        lxm: "new.flock.group.abortMigration",
       });
       const fallbackTargetAbort = await d.rawFetch(`${d.peerMigrationEndpoint}/group-admin/abort-migration`, {
         method: "POST",
@@ -7396,10 +7394,10 @@ test("FakeNetwork & GroupHostServer parity: browser-scoped groupAdminScopes() gr
       await d.adminClient.procedure("com.atproto.space.putRecord", {
         space: groupMembersUri(d.groupDid),
         repo: d.groupDid,
-        collection: OPENSOCIAL_COLLECTION.membership,
+        collection: ATGRP_COLLECTION.membership,
         rkey: d.bobDid,
         record: {
-          $type: OPENSOCIAL_COLLECTION.membership,
+          $type: ATGRP_COLLECTION.membership,
           roles: ["admin", "member"],
           createdAt: "2026-11-22T00:00:00.000Z",
         },
@@ -7434,10 +7432,10 @@ test("FakeNetwork & GroupHostServer parity: browser-scoped groupAdminScopes() gr
       await d.adminClient.procedure("com.atproto.space.putRecord", {
         space: groupMembersUri(d.groupDid),
         repo: d.groupDid,
-        collection: OPENSOCIAL_COLLECTION.membership,
+        collection: ATGRP_COLLECTION.membership,
         rkey: d.bobDid,
         record: {
-          $type: OPENSOCIAL_COLLECTION.membership,
+          $type: ATGRP_COLLECTION.membership,
           roles: ["member"],
           createdAt: "2026-11-22T00:00:00.000Z",
         },
@@ -7498,7 +7496,7 @@ test("FakeNetwork & GroupHostServer parity: browser-scoped groupAdminScopes() gr
       const mintAbortJwt = async () => {
         const { token } = await browserAdmin.query<{ token: string }>("com.atproto.server.getServiceAuth", {
           aud: peerServiceDid,
-          lxm: "group.opensocial.abortMigration",
+          lxm: "new.flock.group.abortMigration",
         });
         return token;
       };
@@ -7815,7 +7813,7 @@ test("FakeNetwork & GroupHostServer parity: browser-scoped groupAdminScopes() gr
           JSON.stringify({
             iss: d.groupDid,
             aud: peerServiceDid,
-            lxm: "group.opensocial.abortMigration",
+            lxm: "new.flock.group.abortMigration",
             iat: nowSecR24,
             exp: nowSecR24 + 60,
             jti,
@@ -8056,7 +8054,7 @@ test("FakeNetwork & GroupHostServer parity: browser-scoped groupAdminScopes() gr
         },
         services: {
           atproto_pds: { type: "AtprotoPersonalDataServer", endpoint: d.peerMigrationEndpoint },
-          opensocial_group: { type: "OpenSocialGroupHost", endpoint: d.peerMigrationEndpoint },
+          atgrp_host: { type: "AtmosphereGroupHostV1", endpoint: d.peerMigrationEndpoint },
         },
       };
       assert.equal(
@@ -8677,6 +8675,136 @@ test("Round 31 parity: coordinated peer-service-JWT verification enforces ES256-
       assert.equal(validAttBody.operationId, opId);
       assert.ok(typeof validAttBody.manifestDigest === "string" && validAttBody.manifestDigest.length > 0);
       assert.ok(typeof validAttBody.targetLocalRotationKey === "string" && validAttBody.targetLocalRotationKey.startsWith("did:key:"));
+    }
+  } finally {
+    await fake.cleanup();
+    await real.cleanup();
+  }
+});
+
+test("FakeNetwork & GroupHostServer R15 parity: org.atgrp.mod.* appeals, self-history redaction, tags, optional status, Cache-Control, and eject/readmit/leave lifecycle", async () => {
+  const fake = await createFakeDriver({ joinPolicy: "open", publicMeta: true, withFlockWorkspace: true });
+  const real = await createRealDriver({ joinPolicy: "open", publicMeta: true, withFlockWorkspace: true });
+
+  try {
+    for (const d of [fake, real]) {
+      const membersSpace = groupMembersUri(d.groupDid);
+
+      // Admit Bob via open requestJoin
+      const joinRes = await d.personalServiceCall<{ status: string }>({
+        callerDid: d.bobDid,
+        method: ATGRP_METHOD.requestJoin,
+        httpMethod: "POST",
+        lxm: ATGRP_METHOD.requestJoin,
+        body: { group: d.groupDid },
+      });
+      assert.equal(joinRes.status, 200, `[${d.kind}] Bob join failed`);
+
+      // Uniform 400 NotAppealable before any label or ejection
+      const preAppeal = await d.personalServiceCall<{ error?: string }>({
+        callerDid: d.bobDid,
+        method: ATGRP_METHOD.modSubmitAppeal,
+        httpMethod: "POST",
+        lxm: ATGRP_METHOD.modSubmitAppeal,
+        body: { group: d.groupDid, subject: d.bobDid, reason: "Nothing happened yet" },
+      });
+      assert.equal(preAppeal.status, 400, `[${d.kind}] Unlabeled member appeal must fail 400`);
+      assert.equal(preAppeal.json.error, "NotAppealable", `[${d.kind}] Expected NotAppealable`);
+
+      // Moderator ejects Bob -> Bob can appeal ejection -> opens bob.did with reportCount omitted
+      await d.adminClient.procedure("com.atproto.space.deleteRecord", {
+        space: membersSpace,
+        repo: d.groupDid,
+        collection: ATGRP_COLLECTION.membership,
+        rkey: d.bobDid,
+      });
+
+      const ejectAppeal = await d.personalServiceCall<{ eventId: string; createdAt: string }>({
+        callerDid: d.bobDid,
+        method: ATGRP_METHOD.modSubmitAppeal,
+        httpMethod: "POST",
+        lxm: ATGRP_METHOD.modSubmitAppeal,
+        body: { group: d.groupDid, subject: d.bobDid, reason: "Please reconsider" },
+      });
+      assert.equal(ejectAppeal.status, 200, `[${d.kind}] Former member ejection appeal must succeed`);
+      assert.ok(ejectAppeal.json.eventId.startsWith("ev-"), `[${d.kind}] Opaque eventId required`);
+
+      // Moderator adds tags + resolves with private note
+      const upd = await d.adminClient.procedure<Record<string, unknown>, { status: string; tags?: string[]; reportCount?: number }>(
+        ATGRP_METHOD.modUpdateSubject,
+        {
+          subject: d.bobDid,
+          status: "resolved",
+          note: "INTERNAL MOD NOTE",
+          addTags: ["escalated", "appeal-reviewed"],
+        },
+      );
+      assert.equal(upd.status, "resolved");
+      assert.deepEqual(upd.tags, ["appeal-reviewed", "escalated"]);
+      assert.equal("reportCount" in upd, false, `[${d.kind}] reportCount must be omitted when 0`);
+
+      // `querySubjects` with repeated `tags` returns deduped match + `Cache-Control: no-store`
+      const qsHttp = await d.groupHttpCall({
+        path: `/xrpc/${ATGRP_METHOD.modQuerySubjects}?tags=escalated&tags=appeal-reviewed&sort=updated`,
+        method: "GET",
+      });
+      assert.equal(qsHttp.status, 200);
+      assert.equal(qsHttp.headers.get("cache-control"), "no-store", `[${d.kind}] querySubjects must set Cache-Control: no-store`);
+      const qsBody = JSON.parse(Buffer.from(qsHttp.bytes).toString("utf8")) as { subjects: Array<{ subject: string }> };
+      assert.equal(qsBody.subjects.length, 1, `[${d.kind}] ANY-tag filter must deduplicate`);
+      assert.equal(qsBody.subjects[0]?.subject, d.bobDid);
+
+      // `querySelfHistory` returns `#ejectEvent`, `#appealEvent`, `#statusEvent` ONLY (no `#tagEvent`), strips `createdBy` & `note`, and sets `Cache-Control: no-store`!
+      const selfHist = await d.personalServiceCall<{
+        events: Array<{ eventId: string; subject: string; createdBy?: string; event: Record<string, unknown> }>;
+      }>({
+        callerDid: d.bobDid,
+        method: ATGRP_METHOD.modQuerySelfHistory,
+        httpMethod: "GET",
+        lxm: ATGRP_METHOD.modQuerySelfHistory,
+        query: { group: d.groupDid, sort: "oldest" },
+      });
+      assert.equal(selfHist.status, 200, `[${d.kind}] querySelfHistory failed`);
+      assert.equal(selfHist.headers.get("cache-control"), "no-store", `[${d.kind}] querySelfHistory must set Cache-Control: no-store`);
+      assert.deepEqual(
+        selfHist.json.events.map((e) => e.event.$type),
+        [
+          "org.atgrp.mod.defs#ejectEvent",
+          "org.atgrp.mod.defs#appealEvent",
+          "org.atgrp.mod.defs#statusEvent",
+        ],
+        `[${d.kind}] querySelfHistory must return exact self-visible event types`,
+      );
+      for (const ev of selfHist.json.events) {
+        assert.equal("createdBy" in ev, false, `[${d.kind}] querySelfHistory must strip createdBy`);
+        assert.equal("note" in ev.event, false, `[${d.kind}] querySelfHistory must strip note`);
+      }
+
+      // Readmit Bob -> voluntary leave -> NOT appealable!
+      await d.adminClient.procedure("com.atproto.space.putRecord", {
+        space: membersSpace,
+        repo: d.groupDid,
+        collection: ATGRP_COLLECTION.membership,
+        rkey: d.bobDid,
+        record: { $type: ATGRP_COLLECTION.membership, roles: ["member"], createdAt: new Date().toISOString() },
+      });
+      const leaveRes = await d.personalServiceCall({
+        callerDid: d.bobDid,
+        method: ATGRP_METHOD.leaveGroup,
+        httpMethod: "POST",
+        lxm: ATGRP_METHOD.leaveGroup,
+        body: { group: d.groupDid },
+      });
+      assert.equal(leaveRes.status, 200);
+      const afterLeaveAppeal = await d.personalServiceCall<{ error?: string }>({
+        callerDid: d.bobDid,
+        method: ATGRP_METHOD.modSubmitAppeal,
+        httpMethod: "POST",
+        lxm: ATGRP_METHOD.modSubmitAppeal,
+        body: { group: d.groupDid, subject: d.bobDid },
+      });
+      assert.equal(afterLeaveAppeal.status, 400);
+      assert.equal(afterLeaveAppeal.json.error, "NotAppealable");
     }
   } finally {
     await fake.cleanup();

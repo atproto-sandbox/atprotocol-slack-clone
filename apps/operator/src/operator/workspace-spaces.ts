@@ -2,8 +2,8 @@ import type { OAuthSession } from "@atproto/oauth-client-node";
 import { isMissingXrpcResource } from "@flock/protocol/atproto/xrpc";
 import { extSpaceSkeyFor, getExtension, type ExtensionId } from "@flock/protocol/extensions";
 import { groupMetaUri, inboxUri, SELF_SKEY } from "@flock/protocol/keys";
-import { COLLECTION, OPENSOCIAL_COLLECTION, OPENSOCIAL_POLICY, REPO_COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
-import type { GroupOpenSocialPolicy } from "@flock/protocol/scopes";
+import { COLLECTION, ATGRP_COLLECTION, ATGRP_POLICY, REPO_COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
+import type { GroupAtgrpPolicy } from "@flock/protocol/scopes";
 import { sessionClient } from "../atproto/client";
 import {
   ensureOpenSocialSpace,
@@ -17,7 +17,7 @@ function countGraphemes(text: string): number {
   return [...graphemeSegmenter.segment(text)].length;
 }
 
-/** Validates a group/workspace display name against `group.opensocial.profile` & `createWorkspace` limits (1..64 graphemes, <= 640 bytes). */
+/** Validates a group/workspace display name against `org.atgrp.about` & `createWorkspace` limits (1..64 graphemes, <= 640 bytes). */
 export function assertWorkspaceName(name: string): void {
   const trimmed = name.trim();
   if (
@@ -39,9 +39,9 @@ export function generalKey(workspaceSkey = SELF_SKEY): string {
   return workspaceSkey === SELF_SKEY ? "general" : `${workspaceSkey}-general`;
 }
 
-export function defaultWorkspaceSpacePolicy(activeAppRoles: readonly string[] = []): GroupOpenSocialPolicy {
+export function defaultWorkspaceSpacePolicy(activeAppRoles: readonly string[] = []): GroupAtgrpPolicy {
   return {
-    $type: OPENSOCIAL_POLICY,
+    $type: ATGRP_POLICY,
     publicRead: false,
     unlisted: false,
     grants: [
@@ -53,9 +53,9 @@ export function defaultWorkspaceSpacePolicy(activeAppRoles: readonly string[] = 
   };
 }
 
-export function defaultInboxSpacePolicy(): GroupOpenSocialPolicy {
+export function defaultInboxSpacePolicy(): GroupAtgrpPolicy {
   return {
-    $type: OPENSOCIAL_POLICY,
+    $type: ATGRP_POLICY,
     publicRead: false,
     unlisted: false,
     grants: [
@@ -68,9 +68,9 @@ export function defaultInboxSpacePolicy(): GroupOpenSocialPolicy {
 
 export function defaultPublicChannelPolicy(
   activeAppGrants: ReadonlyArray<{ role: string; write: boolean }> = [],
-): GroupOpenSocialPolicy {
+): GroupAtgrpPolicy {
   return {
-    $type: OPENSOCIAL_POLICY,
+    $type: ATGRP_POLICY,
     publicRead: false,
     unlisted: false,
     grants: [
@@ -87,9 +87,9 @@ export function defaultPublicChannelPolicy(
 export function defaultPrivateChannelPolicy(
   channelRole: string,
   activeAppGrants: ReadonlyArray<{ role: string; write: boolean }> = [],
-): GroupOpenSocialPolicy {
+): GroupAtgrpPolicy {
   return {
-    $type: OPENSOCIAL_POLICY,
+    $type: ATGRP_POLICY,
     publicRead: false,
     unlisted: true,
     grants: [
@@ -101,18 +101,18 @@ export function defaultPrivateChannelPolicy(
   };
 }
 
-export function archivedChannelPolicy(): GroupOpenSocialPolicy {
+export function archivedChannelPolicy(): GroupAtgrpPolicy {
   return {
-    $type: OPENSOCIAL_POLICY,
+    $type: ATGRP_POLICY,
     publicRead: false,
     unlisted: true,
     grants: [],
   };
 }
 
-export function defaultAppInboxPolicy(appRole: string): GroupOpenSocialPolicy {
+export function defaultAppInboxPolicy(appRole: string): GroupAtgrpPolicy {
   return {
-    $type: OPENSOCIAL_POLICY,
+    $type: ATGRP_POLICY,
     publicRead: false,
     unlisted: false,
     grants: [
@@ -124,18 +124,18 @@ export function defaultAppInboxPolicy(appRole: string): GroupOpenSocialPolicy {
   };
 }
 
-export function disabledAppInboxPolicy(): GroupOpenSocialPolicy {
+export function disabledAppInboxPolicy(): GroupAtgrpPolicy {
   return {
-    $type: OPENSOCIAL_POLICY,
+    $type: ATGRP_POLICY,
     publicRead: false,
     unlisted: true,
     grants: [],
   };
 }
 
-export function defaultExtensionSpacePolicy(): GroupOpenSocialPolicy {
+export function defaultExtensionSpacePolicy(): GroupAtgrpPolicy {
   return {
-    $type: OPENSOCIAL_POLICY,
+    $type: ATGRP_POLICY,
     publicRead: false,
     unlisted: false,
     grants: [
@@ -146,9 +146,9 @@ export function defaultExtensionSpacePolicy(): GroupOpenSocialPolicy {
   };
 }
 
-export function disabledExtensionSpacePolicy(): GroupOpenSocialPolicy {
+export function disabledExtensionSpacePolicy(): GroupAtgrpPolicy {
   return {
-    $type: OPENSOCIAL_POLICY,
+    $type: ATGRP_POLICY,
     publicRead: false,
     unlisted: true,
     grants: [{ role: "admin", read: true, write: true }],
@@ -177,7 +177,7 @@ export async function ensureGroupProfileName(
   const metaSpace = groupMetaUri(session.did);
   const metaPolicy = await getOpenSocialSpacePolicy(session, metaSpace);
   if (!metaPolicy) {
-    throw new Error("OpenSocial group.opensocial.meta/self space is missing on the group host.");
+    throw new Error("OpenSocial org.atgrp.meta/self space is missing on the group host.");
   }
   if (options?.publicMeta !== undefined) {
     const client = sessionClient(session);
@@ -211,8 +211,6 @@ export async function ensureGroupProfileName(
           rkey: SELF_SKEY,
           record: {
             $type: REPO_COLLECTION.groupDeclaration,
-            meta: metaSpace,
-            createdAt: new Date().toISOString(),
           },
         });
       } else if (!options.publicMeta && postHasDeclaration) {
@@ -228,11 +226,31 @@ export async function ensureGroupProfileName(
       }
     }
   }
-  const existingProfile = await (async () => {
+  const existingAbout = await (async () => {
     try {
       const res = await sessionClient(session).query<{ value: Record<string, unknown> }>(
         "com.atproto.space.getRecord",
-        { space: metaSpace, repo: session.did, collection: OPENSOCIAL_COLLECTION.profile, rkey: "self" },
+        { space: metaSpace, repo: session.did, collection: ATGRP_COLLECTION.about, rkey: "self" },
+      );
+      return res.value;
+    } catch {
+      return null;
+    }
+  })();
+  if (existingAbout?.displayName !== name) {
+    const { joinPolicy: _legacyJoin, createdAt: _legacyCreated, ...restAbout } = existingAbout ?? {};
+    void _legacyJoin;
+    void _legacyCreated;
+    await putAuthorityRecord(session, metaSpace, ATGRP_COLLECTION.about, "self", {
+      ...restAbout,
+      displayName: name,
+    });
+  }
+  const existingConfig = await (async () => {
+    try {
+      const res = await sessionClient(session).query<{ value: Record<string, unknown> }>(
+        "com.atproto.space.getRecord",
+        { space: metaSpace, repo: session.did, collection: ATGRP_COLLECTION.config, rkey: "self" },
       );
       return res.value;
     } catch {
@@ -241,15 +259,13 @@ export async function ensureGroupProfileName(
   })();
   const joinPolicy =
     options?.joinPolicy ??
-    (typeof existingProfile?.joinPolicy === "string" ? existingProfile.joinPolicy : "invite");
-  if (existingProfile?.displayName === name && existingProfile?.joinPolicy === joinPolicy) {
-    return;
+    (typeof existingConfig?.joinPolicy === "string" ? existingConfig.joinPolicy : "invite");
+  if (existingConfig?.joinPolicy !== joinPolicy) {
+    await putAuthorityRecord(session, metaSpace, ATGRP_COLLECTION.config, "self", {
+      ...(existingConfig ?? {}),
+      joinPolicy,
+    });
   }
-  await putAuthorityRecord(session, metaSpace, OPENSOCIAL_COLLECTION.profile, "self", {
-    ...(existingProfile ?? {}),
-    displayName: name,
-    joinPolicy,
-  });
 }
 
 export async function writeGeneralDirectory(session: OAuthSession, workspace: string, skey = SELF_SKEY): Promise<void> {

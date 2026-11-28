@@ -1,6 +1,6 @@
 import type * as GetRecord from "@flock/protocol/lexicons/api/types/com/atproto/space/getRecord";
-import { personalInvitesUri } from "@flock/protocol/keys";
-import { OPENSOCIAL_COLLECTION } from "@flock/protocol/nsids";
+import { personalInboxUri } from "@flock/protocol/keys";
+import { ATGRP_COLLECTION } from "@flock/protocol/nsids";
 import { WORKSPACE_ENVELOPE } from "@flock/protocol/workspace-summary";
 import { sessionClient } from "../../atproto/client";
 import { putAuthorityRecord } from "../../atproto/space-ops";
@@ -90,8 +90,8 @@ async function inviteMember(
     await context.step("member-invite-record", async () => {
       await putAuthorityRecord(
         actor.session,
-        personalInvitesUri(subject),
-        OPENSOCIAL_COLLECTION.invite,
+        personalInboxUri(subject),
+        ATGRP_COLLECTION.invite,
         context.operationId,
         {
           createdAt: new Date().toISOString(),
@@ -134,9 +134,9 @@ async function inviteMember(
       const stored = await sessionClient(actor.session).query<GetRecord.OutputSchema>(
         "com.atproto.space.getRecord",
         {
-          space: personalInvitesUri(subject),
+          space: personalInboxUri(subject),
           repo: groupDid,
-          collection: OPENSOCIAL_COLLECTION.invite,
+          collection: ATGRP_COLLECTION.invite,
           rkey: context.operationId,
         },
       );

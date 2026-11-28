@@ -1,5 +1,5 @@
 import { channelRoleKey, channelUri, groupMembersUri, SELF_SKEY } from "@flock/protocol/keys";
-import { COLLECTION, OPENSOCIAL_COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
+import { COLLECTION, ATGRP_COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
 import { WORKSPACE_ENVELOPE } from "@flock/protocol/workspace-summary";
 import {
   ensureOpenSocialSpace,
@@ -107,7 +107,7 @@ async function createChannel(
 
   await context.step("channel-space", async () => {
     if (operation.visibility === "private") {
-      await putAuthorityRecord(actor.session, membersSpace, OPENSOCIAL_COLLECTION.role, privRole, {
+      await putAuthorityRecord(actor.session, membersSpace, ATGRP_COLLECTION.role, privRole, {
         displayName: `#${operation.name.trim()} member`,
       });
       await ensureOpenSocialSpace(actor.session, SPACE_TYPE.channel, skey, defaultPrivateChannelPolicy(privRole));

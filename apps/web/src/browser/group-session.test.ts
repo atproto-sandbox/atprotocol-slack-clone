@@ -91,6 +91,7 @@ test("GroupBrowserOAuthClient durably persists and validates full phase-resumabl
   const store1 = client1.createMigrationStateStore();
 
   const fullPlcSignedState = {
+    protocolVersion: "org.atgrp.v1" as const,
     operationId: "3lblbrowserop01",
     targetOrigin: "https://groups2.example.com",
     handle: "team.groups2.example.com",
@@ -162,9 +163,58 @@ test("GroupBrowserOAuthClient durably persists and validates full phase-resumabl
     }),
   );
 
+  // R15 cutover: pre-R15 migration state missing protocolVersion: "org.atgrp.v1" is rejected.
+  const { protocolVersion: _omitted, ...legacyUnversioned } = fullPlcSignedState;
+  void _omitted;
+  assert.equal(parsePersistedGroupMigrationState(legacyUnversioned), null);
+
   await store2.delete(GROUP_A);
   assert.equal(await store2.get(GROUP_A), undefined);
   await client2.close();
+});
+
+test("GroupOAuthDatabase v1 -> v2 upgrade purges pre-R15 group.opensocial.* session and state records", async () => {
+  const idb = new IDBFactory();
+  const dbName = groupOAuthDbName(ALICE);
+  // Seed a v1 database matching pre-R15 schema with legacy session and state records.
+  await new Promise<void>((resolve, reject) => {
+    const req = idb.open(dbName, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      db.createObjectStore("state", { keyPath: "key" });
+      db.createObjectStore("session", { keyPath: "key" });
+      db.createObjectStore("dpopNonce", { keyPath: "key" });
+      db.createObjectStore("migrationState", { keyPath: "groupDid" });
+    };
+    req.onsuccess = () => {
+      const db = req.result;
+      const tx = db.transaction(["session", "state"], "readwrite");
+      tx.objectStore("session").put({ key: GROUP_A, value: { tokenSet: { scope: "include:group.opensocial.authAdmin" } } });
+      tx.objectStore("state").put({ key: "old-state-1", value: { iss: "http://127.0.0.1:3004" } });
+      tx.oncomplete = () => {
+        db.close();
+        resolve();
+      };
+      tx.onerror = () => reject(tx.error);
+    };
+    req.onerror = () => reject(req.error);
+  });
+
+  const client = new GroupBrowserOAuthClient({
+    viewerDid: ALICE,
+    config: {
+      appUrl: "http://127.0.0.1:3000",
+      plcUrl: "http://127.0.0.1:2582",
+      groupHostUrl: "http://127.0.0.1:3004",
+      loopback: true,
+    },
+    idbFactory: idb,
+  });
+  try {
+    assert.deepEqual(await client.listStoredGroupDids(), [], "v1->v2 upgrade purged legacy group.opensocial.* sessions");
+  } finally {
+    await client.close();
+  }
 });
 
 test("runBrowserOperatorReauthorization does not leave reauthAttempted or pendingReactivateGroup set when startAuthorityFlow throws", async () => {

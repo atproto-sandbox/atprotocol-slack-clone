@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef } from "react";
 import type { Engine } from "@flock/client/engine";
 import type { LiveSpaces, Snapshot, Snapshots } from "@flock/client/views";
 import type { ReceivedGroupInvite, WorkspaceDiscovery } from "@flock/client/workspace-client";
-import { groupMembersUri, groupMetaUri, personalInvitesUri } from "@flock/protocol/keys";
+import { groupMembersUri, groupMetaUri, personalInboxUri } from "@flock/protocol/keys";
 import type { WorkspaceSummary } from "@flock/protocol/workspace-summary";
 import { shownWorkspace } from "./selection";
 import { useLiveKey, useSnapshot } from "./use-live-view";
@@ -21,9 +21,9 @@ type Session = {
 };
 
 /**
- * The account's OpenSocial workspaces and cross-PDS `group.opensocial.invites/self` inbox as live views:
+ * The account's Atmosphere Groups workspaces and cross-PDS `org.atgrp.inbox/self` inbox as live views:
  * follows `meta/self`, `members/self`, and `workspace/self` on the active workspace, and registers an
- * Operator `getSpaceNotifyTarget` webhook on `personalInvitesUri(did)` so incoming cross-PDS invitations
+ * Operator `getSpaceNotifyTarget` webhook on `personalInboxUri(did)` so incoming cross-PDS invitations
  * wake `LiveSpaces` immediately alongside periodic sweeps.
  */
 export function useDiscovery(
@@ -78,7 +78,7 @@ export function useDiscovery(
     [workspace],
   );
   const watchedInvitesSpaces = useMemo(
-    () => (engine && !needsNotifyScopeUpgrade ? [personalInvitesUri(did)] : []),
+    () => (engine && !needsNotifyScopeUpgrade ? [personalInboxUri(did)] : []),
     [engine, did, needsNotifyScopeUpgrade],
   );
 

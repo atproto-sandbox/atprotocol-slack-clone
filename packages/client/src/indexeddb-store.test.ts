@@ -224,7 +224,7 @@ test("deleteAccount wipes persisted activity and clock state alongside spaces wi
   reopenedBob.close();
 });
 
-test("onversionchange closes existing IndexedDbStore cleanly so a v5 upgrade does not wedge", async () => {
+test("onversionchange closes existing IndexedDbStore cleanly so a v6 upgrade does not wedge", async () => {
   const factory = new IDBFactory();
   const did = "did:plc:versionchange";
   let closedCount = 0;
@@ -232,27 +232,27 @@ test("onversionchange closes existing IndexedDbStore cleanly so a v5 upgrade doe
     closedCount++;
   });
 
-  // Upgrade the same database to version 5 from a second connection; store1 must close and unblock cleanly.
+  // Upgrade the same database to version 6 from a second connection; store1 must close and unblock cleanly.
   const upgraded = new Promise<IDBDatabase>((resolve, reject) => {
-    const req = factory.open(`flock-sync-${did}`, 5);
+    const req = factory.open(`flock-sync-${did}`, 6);
     req.onupgradeneeded = () => {
-      // No-op v5 upgrade.
+      // No-op v6 upgrade.
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
 
-  const v5Db = await Promise.race([
+  const v6Db = await Promise.race([
     upgraded,
-    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("v5 upgrade wedged waiting on store1")), 1_000)),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("v6 upgrade wedged waiting on store1")), 1_000)),
   ]);
-  v5Db.close();
+  v6Db.close();
 
   assert.equal(closedCount, 1);
   await assert.rejects(() => store1.listSpaces(), SyncStoreError);
 });
 
-test("v3 IndexedDB database upgrades cleanly to v4 rewriting legacy at://<did>/space/... keys across all stores", async () => {
+test("v3 IndexedDB database upgrades cleanly to v5 rewriting legacy at://<did>/space/... keys and purging group.opensocial.* + pre-R15 journals while preserving DM and Flock spaces", async () => {
   const factory = new IDBFactory();
   const did = "did:plc:migratev4";
   const dbName = `flock-sync-${did}`;
@@ -262,8 +262,10 @@ test("v3 IndexedDB database upgrades cleanly to v4 rewriting legacy at://<did>/s
   const newWs = "at:space/did:plc:host/new.flock.workspace/self";
   const oldRec = `${oldSpace}/did:plc:alice/${COLLECTION.message}/2222222222222`;
   const newRec = `${newSpace}/did:plc:alice/${COLLECTION.message}/2222222222222`;
-  const oldInvite = "at://did:plc:migratev4/space/group.opensocial.invites/self/did:plc:host/group.opensocial.invite/2222222222222";
-  const newInvite = "at:space/did:plc:migratev4/group.opensocial.invites/self/did:plc:host/group.opensocial.invite/2222222222222";
+  const dmSpace = "at:space/did:plc:migratev4/new.flock.dm.inbox/self";
+  const dmRecUri = `${dmSpace}/did:plc:alice/new.flock.dm.request/2222222222223`;
+  const legacyMeta = "at:space/did:plc:host/group.opensocial.meta/self";
+  const legacyInvite = "at://did:plc:migratev4/space/group.opensocial.invites/self/did:plc:host/group.opensocial.invite/2222222222222";
 
   const v3Db = await new Promise<IDBDatabase>((resolve, reject) => {
     const req = factory.open(dbName, 3);
@@ -285,14 +287,27 @@ test("v3 IndexedDB database upgrades cleanly to v4 rewriting legacy at://<did>/s
   });
 
   await new Promise<void>((resolve, reject) => {
-    const tx = v3Db.transaction(["spaces", "writers", "records", "meta", "activity", "clock", "joiningGroups"], "readwrite");
+    const tx = v3Db.transaction(
+      ["spaces", "writers", "records", "meta", "activity", "clock", "joiningGroups", "leavingGroups", "reactivatingGroups"],
+      "readwrite",
+    );
     tx.objectStore("spaces").put({ space: oldSpace, spaceRev: "2222222222222", writers: ["did:plc:alice"], writersListedAt: 10, workspace: oldWs, lastOpenedAt: 20 });
+    tx.objectStore("spaces").put({ space: dmSpace, spaceRev: "2222222222223", writers: ["did:plc:alice"], writersListedAt: 10, workspace: null, lastOpenedAt: 20 });
+    tx.objectStore("spaces").put({ space: legacyMeta, spaceRev: "2222222222224", writers: ["did:plc:host"], writersListedAt: 10, workspace: oldWs, lastOpenedAt: 20 });
     tx.objectStore("writers").put({ space: oldSpace, repo: "did:plc:alice", generation: 1, syncedRev: "2222222222222", checkedAt: 30, stale: false, coverage: {} });
+    tx.objectStore("writers").put({ space: legacyMeta, repo: "did:plc:host", generation: 1, syncedRev: "2222222222224", checkedAt: 30, stale: false, coverage: {} });
     tx.objectStore("records").put({ space: oldSpace, collection: COLLECTION.message, repo: "did:plc:alice", rkey: "2222222222222", uri: oldRec, cid: "bafy1", value: { text: "hi" } });
+    tx.objectStore("records").put({ space: dmSpace, collection: "new.flock.dm.request", repo: "did:plc:alice", rkey: "2222222222223", uri: dmRecUri, cid: "bafydm", value: { convKey: "dm1" } });
+    tx.objectStore("records").put({ space: legacyMeta, collection: "group.opensocial.profile", repo: "did:plc:host", rkey: "self", uri: `${legacyMeta}/did:plc:host/group.opensocial.profile/self`, cid: "bafyold", value: { displayName: "Old" } });
     tx.objectStore("meta").put({ key: `purges ${oldSpace}`, value: 7 });
+    tx.objectStore("meta").put({ key: `purges ${legacyMeta}`, value: 3 });
     tx.objectStore("activity").put({ accountDid: did, space: oldSpace, seenIds: ["e1"], dismissedIds: [], updatedAt: 50 });
-    tx.objectStore("clock").put({ accountDid: did, scope: oldSpace, lastTidMs: 100, lastHlcMs: 100, lastHlcCounter: 0 });
-    tx.objectStore("joiningGroups").put({ operationId: "op1", groupDid: "did:plc:host", mode: "invite", inviteUri: oldInvite, phase: "submitting", createdAt: 60 });
+    tx.objectStore("activity").put({ accountDid: did, space: legacyMeta, seenIds: ["old"], dismissedIds: [], updatedAt: 50 });
+    tx.objectStore("clock").put({ accountDid: did, scope: oldSpace, lastTidMs: 100, lastClockId: 0, ownLastHlc: null });
+    tx.objectStore("clock").put({ accountDid: did, scope: legacyMeta, lastTidMs: 100, lastClockId: 0, ownLastHlc: null });
+    tx.objectStore("joiningGroups").put({ operationId: "op1", groupDid: "did:plc:host", mode: "invite", intentHash: "h", inviteUri: legacyInvite, phase: "submitting", createdAt: 60 });
+    tx.objectStore("leavingGroups").put({ groupDid: "did:plc:host", phase: "leaving_group", createdAt: 60 });
+    tx.objectStore("reactivatingGroups").put({ operationId: "op2", groupDid: "did:plc:host", phase: "activating", createdAt: 60 });
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
@@ -301,14 +316,25 @@ test("v3 IndexedDB database upgrades cleanly to v4 rewriting legacy at://<did>/s
   const store = await IndexedDbStore.open(did, factory);
   try {
     assert.equal(await store.getSpace(oldSpace), undefined);
+    assert.equal(await store.getSpace(legacyMeta), undefined, "legacy group.opensocial.* space purged on v5");
+    assert.equal(await store.getWriter(legacyMeta, "did:plc:host"), undefined);
+    assert.equal(await store.getRecord(legacyMeta, "did:plc:host", "group.opensocial.profile", "self"), undefined);
+    assert.equal(await store.getActivityState(did, legacyMeta), undefined);
+    assert.equal(await store.getClock(did, legacyMeta), undefined);
+    assert.deepEqual(await store.listJoiningGroups(), [], "pre-R15 joiningGroups cleared on v5");
+    assert.deepEqual(await store.listLeavingGroups(), [], "pre-R15 leavingGroups cleared on v5");
+    assert.deepEqual(await store.listReactivatingGroups(), [], "pre-R15 reactivatingGroups cleared on v5");
+
+    // Non-opensocial Flock & DM state preserved intact!
     const sp = await store.getSpace(newSpace);
     assert.equal(sp?.workspace, newWs);
+    assert.equal((await store.getSpace(dmSpace))?.spaceRev, "2222222222223");
+    assert.equal((await store.getRecord(dmSpace, "did:plc:alice", "new.flock.dm.request", "2222222222223"))?.uri, dmRecUri);
     assert.equal((await store.getWriter(newSpace, "did:plc:alice"))?.syncedRev, "2222222222222");
     assert.equal((await store.getRecord(newSpace, "did:plc:alice", COLLECTION.message, "2222222222222"))?.uri, newRec);
     assert.equal(await store.epoch(newSpace), "0:7");
     assert.deepEqual((await store.getActivityState(did, newSpace))?.seenIds, ["e1"]);
     assert.equal((await store.getClock(did, newSpace))?.lastTidMs, 100);
-    assert.equal((await store.getJoiningGroup("op1"))?.inviteUri, newInvite);
   } finally {
     store.close();
   }

@@ -9,14 +9,14 @@ import {
   isSkey,
   isTid,
   parseSpaceUri,
-  personalInvitesUri,
+  personalInboxUri,
   requestRecordKey,
 } from "@flock/protocol/keys";
 import {
   COLLECTION,
-  OPENSOCIAL_COLLECTION,
-  OPENSOCIAL_METHOD,
-  OPENSOCIAL_SPACE_TYPE,
+  ATGRP_COLLECTION,
+  ATGRP_METHOD,
+  ATGRP_SPACE_TYPE,
   OPERATOR_METHOD,
   SPACE_TYPE,
 } from "@flock/protocol/nsids";
@@ -144,7 +144,7 @@ export async function assertActorAuthorizedForOperation(
 
   const perms = effectiveMemberPermissions(state, groupDid, actorDid);
   const assignable = assignableRolesForMember(state, actorDid);
-  const membersTarget = { spaceDid: groupDid, spaceType: OPENSOCIAL_SPACE_TYPE.members, skey: "self" };
+  const membersTarget = { spaceDid: groupDid, spaceType: ATGRP_SPACE_TYPE.members, skey: "self" };
   const workspaceTarget = { spaceDid: groupDid, spaceType: SPACE_TYPE.workspace, skey: workspace.skey };
   const inboxTarget = { spaceDid: groupDid, spaceType: SPACE_TYPE.inbox, skey: workspace.skey };
 
@@ -153,13 +153,13 @@ export async function assertActorAuthorizedForOperation(
       const defaults = defaultRoleKeys(state);
       const rolesToAssign = defaults.length > 0 ? defaults : ["member"];
       const canWriteMembership =
-        permissionsAllowSpace(perms, membersTarget, { action: "create", collection: OPENSOCIAL_COLLECTION.membership }) &&
-        permissionsAllowSpace(perms, membersTarget, { action: "update", collection: OPENSOCIAL_COLLECTION.membership });
+        permissionsAllowSpace(perms, membersTarget, { action: "create", collection: ATGRP_COLLECTION.membership }) &&
+        permissionsAllowSpace(perms, membersTarget, { action: "update", collection: ATGRP_COLLECTION.membership });
       if (!canWriteMembership || !rolesToAssign.every((r) => canAssignRole(assignable, r))) {
         throw new OperatorAuthError("Actor lacks membership write or assignable permission for inviteMember.");
       }
       if (request.expiresAt !== undefined) {
-        const parsedInvites = parseSpaceUri(personalInvitesUri(String(request.subject)))!;
+        const parsedInvites = parseSpaceUri(personalInboxUri(String(request.subject)))!;
         if (
           !permissionsAllowSpace(
             perms,
@@ -168,7 +168,7 @@ export async function assertActorAuthorizedForOperation(
               spaceType: parsedInvites.type,
               skey: parsedInvites.skey,
             },
-            { action: "create", collection: OPENSOCIAL_COLLECTION.invite },
+            { action: "create", collection: ATGRP_COLLECTION.invite },
           )
         ) {
           throw new OperatorAuthError("Actor lacks invite write permission.");
@@ -181,7 +181,7 @@ export async function assertActorAuthorizedForOperation(
       const subject = String(request.subject);
       const targetRoles = state.memberships.get(subject)?.roles ?? ["member"];
       if (
-        !permissionsAllowSpace(perms, membersTarget, { action: "delete", collection: OPENSOCIAL_COLLECTION.membership }) ||
+        !permissionsAllowSpace(perms, membersTarget, { action: "delete", collection: ATGRP_COLLECTION.membership }) ||
         !targetRoles.every((r) => canAssignRole(assignable, r))
       ) {
         throw new OperatorAuthError("Actor lacks membership delete or assignable coverage over target member's roles.");
@@ -191,7 +191,7 @@ export async function assertActorAuthorizedForOperation(
 
     case "setAdmin": {
       if (
-        !permissionsAllowSpace(perms, membersTarget, { action: "update", collection: OPENSOCIAL_COLLECTION.membership }) ||
+        !permissionsAllowSpace(perms, membersTarget, { action: "update", collection: ATGRP_COLLECTION.membership }) ||
         !canAssignRole(assignable, "admin")
       ) {
         throw new OperatorAuthError("Actor lacks membership update or assignable coverage over 'admin' role.");
@@ -211,8 +211,8 @@ export async function assertActorAuthorizedForOperation(
       if (request.visibility === "private") {
         const privRole = channelRoleKey(chSkey);
         const privOk =
-          permissionsAllowSpace(perms, membersTarget, { action: "create", collection: OPENSOCIAL_COLLECTION.role }) &&
-          permissionsAllowSpace(perms, membersTarget, { action: "update", collection: OPENSOCIAL_COLLECTION.membership }) &&
+          permissionsAllowSpace(perms, membersTarget, { action: "create", collection: ATGRP_COLLECTION.role }) &&
+          permissionsAllowSpace(perms, membersTarget, { action: "update", collection: ATGRP_COLLECTION.membership }) &&
           canAssignRole(assignable, privRole);
         if (!privOk) throw new OperatorAuthError("Actor lacks role/assignable permissions for private channel creation.");
       }
@@ -226,8 +226,8 @@ export async function assertActorAuthorizedForOperation(
       const ok =
         permissionsAllowSpace(perms, chTarget, { manage: "update" }) &&
         permissionsAllowSpace(perms, workspaceTarget, { action: "update", collection: COLLECTION.directory }) &&
-        permissionsAllowSpace(perms, membersTarget, { action: "create", collection: OPENSOCIAL_COLLECTION.role }) &&
-        permissionsAllowSpace(perms, membersTarget, { action: "update", collection: OPENSOCIAL_COLLECTION.membership }) &&
+        permissionsAllowSpace(perms, membersTarget, { action: "create", collection: ATGRP_COLLECTION.role }) &&
+        permissionsAllowSpace(perms, membersTarget, { action: "update", collection: ATGRP_COLLECTION.membership }) &&
         canAssignRole(assignable, privRole);
       if (!ok) throw new OperatorAuthError("Actor lacks permissions to transition channel visibility.");
       return state;
@@ -240,8 +240,8 @@ export async function assertActorAuthorizedForOperation(
       const ok =
         permissionsAllowSpace(perms, chTarget, { manage: "update" }) &&
         permissionsAllowSpace(perms, workspaceTarget, { action: "update", collection: COLLECTION.directory }) &&
-        permissionsAllowSpace(perms, membersTarget, { action: "update", collection: OPENSOCIAL_COLLECTION.membership }) &&
-        permissionsAllowSpace(perms, membersTarget, { action: "delete", collection: OPENSOCIAL_COLLECTION.role }) &&
+        permissionsAllowSpace(perms, membersTarget, { action: "update", collection: ATGRP_COLLECTION.membership }) &&
+        permissionsAllowSpace(perms, membersTarget, { action: "delete", collection: ATGRP_COLLECTION.role }) &&
         canAssignRole(assignable, privRole);
       if (!ok) throw new OperatorAuthError("Actor lacks permissions to archive channel.");
       return state;
@@ -254,7 +254,7 @@ export async function assertActorAuthorizedForOperation(
         permissionsAllowSpace(perms, inboxTarget, { action: "update", collection: COLLECTION.joinDecision });
       if (!canDecide) throw new OperatorAuthError("Actor lacks inbox read/joinDecision permissions.");
       if (request.decision === "approve") {
-        if (!permissionsAllowSpace(perms, membersTarget, { action: "update", collection: OPENSOCIAL_COLLECTION.membership })) {
+        if (!permissionsAllowSpace(perms, membersTarget, { action: "update", collection: ATGRP_COLLECTION.membership })) {
           throw new OperatorAuthError("Actor lacks membership update permission for channel approval.");
         }
         const parsedReq = parseJoinRequestUri(String(request.request), groupDid, inboxUri(groupDid, workspace.skey));
@@ -277,8 +277,8 @@ export async function assertActorAuthorizedForOperation(
 
     case "decideGroupJoinRequest": {
       if (request.decision === "deny") {
-        if (!permissionsAllowRpc(perms, groupDid, OPENSOCIAL_METHOD.denyJoinRequest)) {
-          throw new OperatorAuthError("Actor lacks group.opensocial.denyJoinRequest permission.");
+        if (!permissionsAllowRpc(perms, groupDid, ATGRP_METHOD.denyJoinRequest)) {
+          throw new OperatorAuthError("Actor lacks org.atgrp.denyJoinRequest permission.");
         }
         return state;
       }
@@ -287,8 +287,8 @@ export async function assertActorAuthorizedForOperation(
         : defaultRoleKeys(state);
       const rolesToCheck = requestedRoles.length > 0 ? requestedRoles : ["member"];
       const canApprove =
-        permissionsAllowSpace(perms, membersTarget, { action: "create", collection: OPENSOCIAL_COLLECTION.membership }) &&
-        permissionsAllowSpace(perms, membersTarget, { action: "update", collection: OPENSOCIAL_COLLECTION.membership }) &&
+        permissionsAllowSpace(perms, membersTarget, { action: "create", collection: ATGRP_COLLECTION.membership }) &&
+        permissionsAllowSpace(perms, membersTarget, { action: "update", collection: ATGRP_COLLECTION.membership }) &&
         rolesToCheck.every((r) => canAssignRole(assignable, r));
       if (!canApprove) {
         throw new OperatorAuthError("Actor lacks membership write or assignable coverage for decideGroupJoinRequest.");

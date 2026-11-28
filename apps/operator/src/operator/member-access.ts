@@ -4,10 +4,10 @@ import {
   groupMembersUri,
   isDid,
   parseDmSpaceUri,
-  parsePersonalInvitesUri,
+  parsePersonalInboxUri,
   parseSpaceUri,
 } from "@flock/protocol/keys";
-import { OPENSOCIAL_COLLECTION, OPENSOCIAL_SPACE_TYPE, SPACE_TYPE } from "@flock/protocol/nsids";
+import { ATGRP_COLLECTION, ATGRP_SPACE_TYPE, SPACE_TYPE } from "@flock/protocol/nsids";
 import { validateSpaceRecord } from "@flock/protocol/registry";
 import { WORKSPACE_ENVELOPE, WorkspaceEnvelopeError } from "@flock/protocol/workspace-summary";
 import { sessionClient } from "../atproto/client";
@@ -27,8 +27,8 @@ export const MEMBER_LIST_TTL_MS = 60_000;
 export const MEMBER_LIST_SUSPENDED_BACKOFF_MS = AUTHORITY_SUSPENDED_BACKOFF_MS;
 
 const FOLLOWED_BY_GROUP_POLICY: ReadonlySet<string> = new Set([
-  OPENSOCIAL_SPACE_TYPE.meta,
-  OPENSOCIAL_SPACE_TYPE.members,
+  ATGRP_SPACE_TYPE.meta,
+  ATGRP_SPACE_TYPE.members,
   SPACE_TYPE.workspace,
   SPACE_TYPE.inbox,
   SPACE_TYPE.channel,
@@ -79,7 +79,7 @@ async function readOpenSocialSpaceReaders(space: string, groupDid: string): Prom
   const scan = await listBoundedRecords(sessionClient(session), {
     space: membersSpace,
     repo: groupDid,
-    collection: OPENSOCIAL_COLLECTION.membership,
+    collection: ATGRP_COLLECTION.membership,
     maxRecords: WORKSPACE_ENVELOPE.authorityRecordScan,
   });
   if (scan.truncated) {
@@ -91,7 +91,7 @@ async function readOpenSocialSpaceReaders(space: string, groupDid: string): Prom
   for (const row of scan.records) {
     if (!isDid(row.rkey) || row.rkey === groupDid) continue;
     if (
-      !validateSpaceRecord(OPENSOCIAL_COLLECTION.membership, row.value, {
+      !validateSpaceRecord(ATGRP_COLLECTION.membership, row.value, {
         authorityDid: groupDid,
         spaceUri: membersSpace,
         repoDid: groupDid,
@@ -129,13 +129,13 @@ function normalizeSnapshot(raw: SpaceAccessEntry[] | SpaceReadSnapshot): SpaceRe
 /**
  * Whether `did` may follow `space`'s changes:
  * - DM inbox / conversation: per `authorizeDmSubscription`.
- * - Personal `group.opensocial.invites/self`: exclusively for its owner (`parsed.userDid === did`).
+ * - Personal `org.atgrp.inbox/self`: exclusively for its owner (`parsed.userDid === did`).
  * - Registered group/workspace spaces (`meta`, `members`, `workspace`, `inbox`, `channel`, `app.inbox`, `ext.tasks`):
  *   when `policy.publicRead === true`, `did === groupDid`, or `did` holds a role granted `read: true` on `space`.
  */
 export async function mayFollow(space: string, did: string, deps: MemberAccessDeps = defaultDeps): Promise<boolean> {
   if (parseDmSpaceUri(space)) return authorizeDmSubscription(space, did).allowed;
-  const personalInvites = parsePersonalInvitesUri(space);
+  const personalInvites = parsePersonalInboxUri(space);
   if (personalInvites) return personalInvites.userDid === did;
   const parsed = parseSpaceUri(space);
   if (!parsed || !FOLLOWED_BY_GROUP_POLICY.has(parsed.type) || !deps.isRegistered(space)) return false;
@@ -162,7 +162,7 @@ export function dropMemberList(space: string): void {
     lists.delete(space);
     return;
   }
-  if (parsed.type === OPENSOCIAL_SPACE_TYPE.members) {
+  if (parsed.type === ATGRP_SPACE_TYPE.members) {
     const prefix = `at:space/${parsed.authorityDid}/`;
     for (const cached of lists.keys()) {
       if (cached.startsWith(prefix)) lists.delete(cached);

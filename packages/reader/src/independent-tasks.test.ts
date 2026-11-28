@@ -12,7 +12,7 @@ import {
   opRef,
 } from "@flock/protocol/entity-merge";
 import { groupMembersUri, SELF_SKEY, spaceRecordUri, tasksSpaceUri, workspaceUri } from "@flock/protocol/keys";
-import { ATPROTO_SPACE_COLLECTION, COLLECTION, OPENSOCIAL_COLLECTION, OPENSOCIAL_POLICY, SPACE_TYPE } from "@flock/protocol/nsids";
+import { ATPROTO_SPACE_COLLECTION, COLLECTION, ATGRP_COLLECTION, ATGRP_POLICY, SPACE_TYPE } from "@flock/protocol/nsids";
 import { WORKSPACE_ENVELOPE } from "@flock/protocol/workspace-summary";
 import { FakeNetwork } from "@flock/testing/fake-network";
 import {
@@ -89,7 +89,7 @@ async function createTasksWorkspaceFixture(
     spaceType: SPACE_TYPE.workspace,
     skey: SELF_SKEY,
     policy: {
-      $type: OPENSOCIAL_POLICY,
+      $type: ATGRP_POLICY,
       publicRead: false,
       unlisted: false,
       grants: [
@@ -107,7 +107,7 @@ async function createTasksWorkspaceFixture(
       spaceType: SPACE_TYPE.tasks,
       skey: tasksSpace.split("/").at(-1)!,
       policy: {
-        $type: OPENSOCIAL_POLICY,
+        $type: ATGRP_POLICY,
         publicRead: false,
         unlisted: false,
         grants: [
@@ -127,10 +127,10 @@ async function createTasksWorkspaceFixture(
     await owner.procedure("com.atproto.space.putRecord", {
       space: membersSpace,
       repo: groupDid,
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: did,
       record: {
-        $type: OPENSOCIAL_COLLECTION.membership,
+        $type: ATGRP_COLLECTION.membership,
         roles: idx === 0 ? ["admin", "member"] : ["member"],
         createdAt: TIMESTAMP,
       },
@@ -139,11 +139,11 @@ async function createTasksWorkspaceFixture(
       const mem = await owner.query<{ value: Record<string, unknown> }>("com.atproto.space.getRecord", {
         space: membersSpace,
         repo: groupDid,
-        collection: OPENSOCIAL_COLLECTION.membership,
+        collection: ATGRP_COLLECTION.membership,
         rkey: did,
       });
       const inc = mem.value["new.flock.incarnation"];
-      await network.writeAs(did, membersSpace, OPENSOCIAL_COLLECTION.acceptance, SELF_SKEY, {
+      await network.writeAs(did, membersSpace, ATGRP_COLLECTION.confirmation, SELF_SKEY, {
         createdAt: TIMESTAMP,
         ...(typeof inc === "string" ? { "new.flock.incarnation": inc } : {}),
       });
@@ -810,9 +810,9 @@ test("overflowed membership envelope or malformed ext.install sets workspaceSnap
       await network.clientFor(groupDid).procedure("com.atproto.space.putRecord", {
         space: membersSpace,
         repo: groupDid,
-        collection: OPENSOCIAL_COLLECTION.membership,
+        collection: ATGRP_COLLECTION.membership,
         rkey: extraDid,
-        record: { $type: OPENSOCIAL_COLLECTION.membership, roles: ["member"], createdAt: TIMESTAMP },
+        record: { $type: ATGRP_COLLECTION.membership, roles: ["member"], createdAt: TIMESTAMP },
       });
     }
 
@@ -953,7 +953,7 @@ test("removed intermediate writer B (D -> B -> R and >256 sTruncated overflow) y
     await network.clientFor(groupDid).procedure("com.atproto.space.deleteRecord", {
       space: membersSpace,
       repo: groupDid,
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: BOB,
     });
 
@@ -1011,7 +1011,7 @@ test("removed intermediate writer B (D -> B -> R and >256 sTruncated overflow) y
     await network.clientFor(groupDid).procedure("com.atproto.space.deleteRecord", {
       space: membersSpace,
       repo: groupDid,
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: BOB,
     });
 
@@ -1121,9 +1121,9 @@ test("workspace snapshot forged MAC, oversized roster (>200), and deactivated Ta
       await network.clientFor(groupDid).procedure("com.atproto.space.putRecord", {
         space: membersSpace,
         repo: groupDid,
-        collection: OPENSOCIAL_COLLECTION.membership,
+        collection: ATGRP_COLLECTION.membership,
         rkey: extraDid,
-        record: { $type: OPENSOCIAL_COLLECTION.membership, roles: ["member"], createdAt: TIMESTAMP },
+        record: { $type: ATGRP_COLLECTION.membership, roles: ["member"], createdAt: TIMESTAMP },
       });
     }
 
@@ -1288,7 +1288,7 @@ test("listWriters #repoRemoved, cross-page removal override, and >72h / InvalidC
     await network.clientFor(groupDid).procedure("com.atproto.space.deleteRecord", {
       space: membersSpace,
       repo: groupDid,
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: BOB,
     });
 
@@ -1358,7 +1358,7 @@ test("listWriters #repoRemoved, cross-page removal override, and >72h / InvalidC
     await network.clientFor(groupDid).procedure("com.atproto.space.deleteRecord", {
       space: membersSpace,
       repo: groupDid,
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: BOB,
     });
 
@@ -1769,26 +1769,32 @@ test("readIndependentTasksSpace marks workspaceSnapshotComplete: false when memb
     authorityDid: AUTHORITY,
     workspaceSkey: "self",
     expectedTasksSpace: tasksSpace,
-    metaUri: `at:space/${AUTHORITY}/group.opensocial.meta/self`,
+    metaUri: `at:space/${AUTHORITY}/org.atgrp.meta/self`,
     membersUri: membersSpace,
     metaRecords: [
       {
-        collection: OPENSOCIAL_COLLECTION.profile,
+        collection: ATGRP_COLLECTION.about,
         rkey: SELF_SKEY,
         cid: "bafyreiprofile00001",
-        record: { $type: OPENSOCIAL_COLLECTION.profile, displayName: "Acme", joinPolicy: "invite" },
+        record: { $type: ATGRP_COLLECTION.about, displayName: "Acme" },
+      },
+      {
+        collection: ATGRP_COLLECTION.config,
+        rkey: SELF_SKEY,
+        cid: "bafyreiconfig00001",
+        record: { $type: ATGRP_COLLECTION.config, joinPolicy: "invite" },
       },
     ],
     membersAuthorityRecords: [
       {
-        collection: OPENSOCIAL_COLLECTION.role,
+        collection: ATGRP_COLLECTION.role,
         rkey: "member",
         cid: "bafyreirolemember01",
-        record: { $type: OPENSOCIAL_COLLECTION.role, displayName: "Member", default: true },
+        record: { $type: ATGRP_COLLECTION.role, displayName: "Member", default: true },
       },
     ],
     wsAuthorityRecords: [],
-    acceptances: [],
+    confirmations: [],
     memberWriters: new Map(),
     membersWriterScanTruncated: false,
     memberSetAside: [],
@@ -1803,14 +1809,20 @@ test("readIndependentTasksSpace marks workspaceSnapshotComplete: false when memb
     authorityDid: AUTHORITY,
     workspaceSkey: "self",
     expectedTasksSpace: tasksSpace,
-    metaUri: `at:space/${AUTHORITY}/group.opensocial.meta/self`,
+    metaUri: `at:space/${AUTHORITY}/org.atgrp.meta/self`,
     membersUri: membersSpace,
     metaRecords: [
       {
-        collection: OPENSOCIAL_COLLECTION.profile,
+        collection: ATGRP_COLLECTION.about,
         rkey: SELF_SKEY,
         cid: "bafyreiprofile00001",
-        record: { $type: OPENSOCIAL_COLLECTION.profile, displayName: "Acme", joinPolicy: "invite" },
+        record: { $type: ATGRP_COLLECTION.about, displayName: "Acme" },
+      },
+      {
+        collection: ATGRP_COLLECTION.config,
+        rkey: SELF_SKEY,
+        cid: "bafyreiconfig00001",
+        record: { $type: ATGRP_COLLECTION.config, joinPolicy: "invite" },
       },
       {
         collection: ATPROTO_SPACE_COLLECTION.spacePolicy,
@@ -1818,13 +1830,13 @@ test("readIndependentTasksSpace marks workspaceSnapshotComplete: false when memb
         cid: "bafyreipolbad1",
         record: {
           $type: "com.example.wrongWrapper",
-          policy: { $type: OPENSOCIAL_POLICY, publicRead: true, unlisted: false, grants: [] },
+          policy: { $type: ATGRP_POLICY, publicRead: true, unlisted: false, grants: [] },
         },
       },
     ],
     membersAuthorityRecords: [],
     wsAuthorityRecords: [],
-    acceptances: [],
+    confirmations: [],
     memberWriters: new Map(),
     membersWriterScanTruncated: false,
     memberSetAside: [],

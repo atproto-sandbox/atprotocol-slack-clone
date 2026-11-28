@@ -5,7 +5,7 @@ import { createEngine } from "@flock/client/engine";
 import { extSpaceUriFor } from "@flock/protocol/extensions";
 import { advanceHlc } from "@flock/protocol/entity-merge";
 import { tidNow } from "@flock/protocol/keys";
-import { COLLECTION, OPENSOCIAL_SPACE_TYPE, SPACE_TYPE } from "@flock/protocol/nsids";
+import { ATGRP_SPACE_TYPE, COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
 import { availablePort, startAppServer, startOperatorServer, type AppServer } from "../support/app-server";
 import { consent, openChannel, signIn } from "../support/browser-app";
 import { actorTransport, createOpenSocialGroup, startPdsNetwork, storeGroupAuthorityGrant } from "../support/pds-network";
@@ -76,8 +76,8 @@ test("Tasks UI end-to-end: legacy authority CTA, enable extension, cross-repo pr
 
     // Replace Operator's stored group authority grant with a narrow pre-Tasks grant omitting `space:new.flock.ext.tasks`.
     const narrowSpaces = [
-      OPENSOCIAL_SPACE_TYPE.meta,
-      OPENSOCIAL_SPACE_TYPE.members,
+      ATGRP_SPACE_TYPE.meta,
+      ATGRP_SPACE_TYPE.members,
       SPACE_TYPE.workspace,
       SPACE_TYPE.inbox,
       SPACE_TYPE.channel,

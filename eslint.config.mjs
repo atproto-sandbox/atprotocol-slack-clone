@@ -99,7 +99,7 @@ const MEMBERSPACE_FULL_ALLOWLIST = [
 ];
 /**
  * `WorkspaceClient.ensureInvitesSpace()` (and its unit test) may call `com.atproto.memberspace.listMembers`
- * ONLY to verify zero members on personal `group.opensocial.invites/self`; `putMembers` and `removeMembers` remain forbidden.
+ * ONLY to verify zero members on personal `org.atgrp.inbox/self`; `putMembers` and `removeMembers` remain forbidden.
  */
 const MEMBERSPACE_LIST_ONLY_ALLOWLIST = [
   "packages/client/src/workspace-client.ts",
@@ -211,7 +211,7 @@ const flockBoundariesPlugin = {
         const dottedRe = allowListMembers ? MUTATE_ONLY_DOTTED_RE : ALL_THREE_DOTTED_RE;
         const pathRe = allowListMembers ? MUTATE_ONLY_PATH_RE : ALL_THREE_PATH_RE;
         const message =
-          "R13 OpenSocial hard-cut: com.atproto.memberspace.{putMembers,removeMembers,listMembers} is forbidden outside personal-PDS DM and protocol boundaries; use group.opensocial.* governance.";
+          "Atmosphere Groups hard-cut: com.atproto.memberspace.{putMembers,removeMembers,listMembers} is forbidden outside personal-PDS DM and protocol boundaries; use org.atgrp.* governance.";
 
         function checkSourceSpecifier(node, value) {
           if (typeof value === "string" && pathRe.test(value)) {

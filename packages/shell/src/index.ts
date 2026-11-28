@@ -71,13 +71,18 @@ export {
   postChannelMessage,
 } from "./channel";
 export {
+  querySelfHistory,
   readGroupModerationConfig,
   ReportPreconditionError,
   reportSubject,
   STANDARD_REPORT_REASON_TYPES,
+  submitAppeal,
   validateReportPreconditions,
   type GroupLabelerConfig,
   type GroupModerationConfig,
   type GroupModerationRule,
+  type QuerySelfHistoryInput,
   type ReportSubjectInput,
+  type SelfModerationHistoryEvent,
+  type SubmitAppealInput,
 } from "./moderation";

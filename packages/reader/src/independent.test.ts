@@ -9,7 +9,7 @@ import {
   channelRoleKey,
   channelUri,
   groupMembersUri,
-  personalInvitesUri,
+  personalInboxUri,
   SELF_SKEY,
   spaceRecordUri,
   tidNow,
@@ -19,9 +19,9 @@ import {
   ATPROTO_SPACE_COLLECTION,
   COLLECTION,
   FLOCK_EXTENSION_FIELD,
-  OPENSOCIAL_COLLECTION,
-  OPENSOCIAL_POLICY,
-  OPENSOCIAL_SPACE_TYPE,
+  ATGRP_COLLECTION,
+  ATGRP_POLICY,
+  ATGRP_SPACE_TYPE,
   SPACE_TYPE,
 } from "@flock/protocol/nsids";
 import { FakeNetwork } from "@flock/testing/fake-network";
@@ -80,7 +80,7 @@ async function createChannelWorkspace(
     spaceType: SPACE_TYPE.workspace,
     skey: SELF_SKEY,
     policy: {
-      $type: OPENSOCIAL_POLICY,
+      $type: ATGRP_POLICY,
       publicRead: false,
       unlisted: false,
       grants: [
@@ -96,9 +96,9 @@ async function createChannelWorkspace(
     await owner.procedure("com.atproto.space.putRecord", {
       space: membersSpace,
       repo: groupDid,
-      collection: OPENSOCIAL_COLLECTION.role,
+      collection: ATGRP_COLLECTION.role,
       rkey: privRole,
-      record: { $type: OPENSOCIAL_COLLECTION.role, displayName: "#general private" },
+      record: { $type: ATGRP_COLLECTION.role, displayName: "#general private" },
     });
   }
 
@@ -109,13 +109,13 @@ async function createChannelWorkspace(
     policy:
       input.visibility === "private"
         ? {
-            $type: OPENSOCIAL_POLICY,
+            $type: ATGRP_POLICY,
             publicRead: false,
             unlisted: true,
             grants: [{ role: privRole, read: true, write: true }],
           }
         : {
-            $type: OPENSOCIAL_POLICY,
+            $type: ATGRP_POLICY,
             publicRead: false,
             unlisted: false,
             grants: [
@@ -140,18 +140,18 @@ async function createChannelWorkspace(
     await owner.procedure("com.atproto.space.putRecord", {
       space: membersSpace,
       repo: groupDid,
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: did,
-      record: { $type: OPENSOCIAL_COLLECTION.membership, roles, createdAt: TIMESTAMP },
+      record: { $type: ATGRP_COLLECTION.membership, roles, createdAt: TIMESTAMP },
     });
     const mem = await owner.query<{ value: Record<string, unknown> }>("com.atproto.space.getRecord", {
       space: membersSpace,
       repo: groupDid,
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: did,
     });
     const inc = mem.value["new.flock.incarnation"];
-    await network.writeAs(did, membersSpace, OPENSOCIAL_COLLECTION.acceptance, SELF_SKEY, {
+    await network.writeAs(did, membersSpace, ATGRP_COLLECTION.confirmation, SELF_SKEY, {
       createdAt: TIMESTAMP,
       ...(typeof inc === "string" ? { "new.flock.incarnation": inc } : {}),
     });
@@ -168,7 +168,7 @@ test("listIndependentWorkspaces discovers OpenSocial groups via acceptance/self,
   await network.clientFor(ws2.groupDid).procedure("com.atproto.space.deleteRecord", {
     space: ws2.membersSpace,
     repo: ws2.groupDid,
-    collection: OPENSOCIAL_COLLECTION.membership,
+    collection: ATGRP_COLLECTION.membership,
     rkey: ALICE,
   });
 
@@ -229,7 +229,7 @@ test("readIndependentChannelPage applies listWriters #repoRemoved, cross-page la
   await network.clientFor(groupDid).procedure("com.atproto.space.deleteRecord", {
     space: membersSpace,
     repo: groupDid,
-    collection: OPENSOCIAL_COLLECTION.membership,
+    collection: ATGRP_COLLECTION.membership,
     rkey: BOB,
   });
   const afterRemove = await readIndependentChannelPage(depsFor(network, ALICE), workspace, chSkey);
@@ -357,36 +357,36 @@ test("readIndependentInvites returns live cross-PDS invites and prunes tombstone
   const network = new FakeNetwork();
   network.createAccount(ALICE, "pds1");
   await network.clientFor(ALICE).procedure("com.atproto.space.createSpace", {
-    spaceType: OPENSOCIAL_SPACE_TYPE.invites,
+    spaceType: ATGRP_SPACE_TYPE.inbox,
     skey: SELF_SKEY,
     policy: memberspacePolicy({ publicWrite: true }),
   });
   const g1 = await createChannelWorkspace(network, { members: [BOB], skey: "invlive" });
   const g2 = await createChannelWorkspace(network, { members: [BOB], skey: "invdead" });
 
-  const invitesSpace = personalInvitesUri(ALICE);
+  const invitesSpace = personalInboxUri(ALICE);
   const g1StdRkey = tidNow(network.now() + 1);
   await network.clientFor(g1.groupDid).procedure("com.atproto.space.putRecord", {
     space: invitesSpace,
     repo: g1.groupDid,
-    collection: OPENSOCIAL_COLLECTION.invite,
+    collection: ATGRP_COLLECTION.invite,
     rkey: g1StdRkey,
-    record: { $type: OPENSOCIAL_COLLECTION.invite, createdAt: TIMESTAMP, message: "Come join g1" },
+    record: { $type: ATGRP_COLLECTION.invite, createdAt: TIMESTAMP, message: "Come join g1" },
   });
   const g1SpoofRkey = tidNow(network.now() + 2);
   await network.clientFor(g1.groupDid).procedure("com.atproto.space.putRecord", {
     space: invitesSpace,
     repo: g1.groupDid,
-    collection: OPENSOCIAL_COLLECTION.invite,
+    collection: ATGRP_COLLECTION.invite,
     rkey: g1SpoofRkey,
-    record: { $type: OPENSOCIAL_COLLECTION.invite, group: g2.groupDid, createdAt: TIMESTAMP },
+    record: { $type: ATGRP_COLLECTION.invite, group: g2.groupDid, createdAt: TIMESTAMP },
   });
   await network.clientFor(g2.groupDid).procedure("com.atproto.space.putRecord", {
     space: invitesSpace,
     repo: g2.groupDid,
-    collection: OPENSOCIAL_COLLECTION.invite,
+    collection: ATGRP_COLLECTION.invite,
     rkey: tidNow(network.now() + 3),
-    record: { $type: OPENSOCIAL_COLLECTION.invite, createdAt: TIMESTAMP },
+    record: { $type: ATGRP_COLLECTION.invite, createdAt: TIMESTAMP },
   });
 
   const baseDeps = depsFor(network, ALICE);
@@ -416,20 +416,20 @@ test("readIndependentInvites and readIndependentWorkspace force-refresh cached P
   const network = new FakeNetwork();
   network.createAccount(ALICE, "pds1");
   await network.clientFor(ALICE).procedure("com.atproto.space.createSpace", {
-    spaceType: OPENSOCIAL_SPACE_TYPE.invites,
+    spaceType: ATGRP_SPACE_TYPE.inbox,
     skey: SELF_SKEY,
     policy: memberspacePolicy({ publicWrite: true }),
   });
   const migrated = await createChannelWorkspace(network, { members: [ALICE, BOB, CAROL], skey: "migratedgrp" });
 
   // Publish invite on migrated.groupDid into ALICE's personal invites/self
-  const invitesSpace = personalInvitesUri(ALICE);
+  const invitesSpace = personalInboxUri(ALICE);
   await network.clientFor(migrated.groupDid).procedure("com.atproto.space.putRecord", {
     space: invitesSpace,
     repo: migrated.groupDid,
-    collection: OPENSOCIAL_COLLECTION.invite,
+    collection: ATGRP_COLLECTION.invite,
     rkey: tidNow(network.now() + 5),
-    record: { $type: OPENSOCIAL_COLLECTION.invite, createdAt: TIMESTAMP },
+    record: { $type: ATGRP_COLLECTION.invite, createdAt: TIMESTAMP },
   });
 
   // Publish account-level `!takedown` on CAROL in `members/self`
@@ -495,7 +495,7 @@ test("independent reader fails closed on truncated label/invite scans, excludes 
   const network = new FakeNetwork();
   network.createAccount(ALICE, "pds1");
   await network.clientFor(ALICE).procedure("com.atproto.space.createSpace", {
-    spaceType: OPENSOCIAL_SPACE_TYPE.invites,
+    spaceType: ATGRP_SPACE_TYPE.inbox,
     skey: SELF_SKEY,
     policy: memberspacePolicy({ publicWrite: true }),
   });
@@ -552,7 +552,7 @@ test("independent reader fails closed on truncated label/invite scans, excludes 
         rkey: "self",
         value: {
           policy: {
-            $type: OPENSOCIAL_POLICY,
+            $type: ATGRP_POLICY,
             grants: [{ role: "admin", read: true, write: true }],
           },
         },
@@ -581,7 +581,7 @@ test("independent reader fails closed on truncated label/invite scans, excludes 
         value: {
           $type: "com.example.badWrapper",
           policy: {
-            $type: OPENSOCIAL_POLICY,
+            $type: ATGRP_POLICY,
             grants: [{ role: "admin", read: true, write: true }],
           },
         },
@@ -681,13 +681,13 @@ test("independent reader fails closed on truncated label/invite scans, excludes 
   );
 
   // 4. readIndependentInvites fails closed on truncated writer scan and truncated per-writer invite scan!
-  const invitesSpace = personalInvitesUri(ALICE);
+  const invitesSpace = personalInboxUri(ALICE);
   await owner.procedure("com.atproto.space.putRecord", {
     space: invitesSpace,
     repo: privFixture.groupDid,
-    collection: OPENSOCIAL_COLLECTION.invite,
+    collection: ATGRP_COLLECTION.invite,
     rkey: tidNow(network.now() + 20),
-    record: { $type: OPENSOCIAL_COLLECTION.invite, createdAt: TIMESTAMP },
+    record: { $type: ATGRP_COLLECTION.invite, createdAt: TIMESTAMP },
   });
 
   const truncWriterInviteDeps: IndependentDeps = {
@@ -729,7 +729,7 @@ test("independent reader fails closed on truncated label/invite scans, excludes 
       if (
         url.pathname === "/xrpc/com.atproto.space.listRecords" &&
         url.searchParams.get("space") === invitesSpace &&
-        url.searchParams.get("collection") === OPENSOCIAL_COLLECTION.invite
+        url.searchParams.get("collection") === ATGRP_COLLECTION.invite
       ) {
         const offset = Number((url.searchParams.get("cursor") ?? "r-0").replace("r-", "")) || 0;
         const limit = Number(url.searchParams.get("limit") ?? "100");
@@ -738,11 +738,11 @@ test("independent reader fails closed on truncated label/invite scans, excludes 
         const records = Array.from({ length: count }, (_, idx) => {
           const rkey = tidNow(network.now() + 5_000 + offset + idx);
           return {
-            uri: `${invitesSpace}/${privFixture.groupDid}/${OPENSOCIAL_COLLECTION.invite}/${rkey}`,
+            uri: `${invitesSpace}/${privFixture.groupDid}/${ATGRP_COLLECTION.invite}/${rkey}`,
             cid: "bafyreiinv",
-            collection: OPENSOCIAL_COLLECTION.invite,
+            collection: ATGRP_COLLECTION.invite,
             rkey,
-            value: { $type: OPENSOCIAL_COLLECTION.invite, createdAt: TIMESTAMP },
+            value: { $type: ATGRP_COLLECTION.invite, createdAt: TIMESTAMP },
           };
         });
         return Response.json({
@@ -775,7 +775,7 @@ test("independent reader and tasks snapshot recognize legacy-cid:<cid> bilateral
     limit: 100,
   });
   const nonMemberships = existing.records
-    .filter((rec) => rec.collection !== OPENSOCIAL_COLLECTION.membership)
+    .filter((rec) => rec.collection !== ATGRP_COLLECTION.membership)
     .map((rec) => {
       const { $type: _type, ...rest } = rec.value;
       void _type;
@@ -785,17 +785,17 @@ test("independent reader and tasks snapshot recognize legacy-cid:<cid> bilateral
   await network.importRepoAs(fixture.groupDid, fixture.membersSpace, [
     ...nonMemberships,
     {
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: ALICE,
       value: { roles: ["admin", "member"], createdAt: TIMESTAMP },
     },
     {
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: BOB,
       value: { roles: ["member"], createdAt: TIMESTAMP },
     },
     {
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: CAROL,
       value: { roles: ["member"], createdAt: TIMESTAMP },
     },
@@ -807,21 +807,21 @@ test("independent reader and tasks snapshot recognize legacy-cid:<cid> bilateral
   }>("com.atproto.space.getRecord", {
     space: fixture.membersSpace,
     repo: fixture.groupDid,
-    collection: OPENSOCIAL_COLLECTION.membership,
+    collection: ATGRP_COLLECTION.membership,
     rkey: ALICE,
   });
   assert.equal(aliceMem.value[FLOCK_EXTENSION_FIELD.incarnation], undefined);
 
   // Alice writes matching `legacy-cid:<aliceMem.cid>` acceptance; Bob writes mismatched `legacy-cid:`; Carol has none!
-  await network.writeAs(ALICE, fixture.membersSpace, OPENSOCIAL_COLLECTION.acceptance, SELF_SKEY, {
+  await network.writeAs(ALICE, fixture.membersSpace, ATGRP_COLLECTION.confirmation, SELF_SKEY, {
     createdAt: TIMESTAMP,
     [FLOCK_EXTENSION_FIELD.incarnation]: `legacy-cid:${aliceMem.cid}`,
   });
-  await network.writeAs(BOB, fixture.membersSpace, OPENSOCIAL_COLLECTION.acceptance, SELF_SKEY, {
+  await network.writeAs(BOB, fixture.membersSpace, ATGRP_COLLECTION.confirmation, SELF_SKEY, {
     createdAt: TIMESTAMP,
     [FLOCK_EXTENSION_FIELD.incarnation]: "legacy-cid:bafyreistalebobcid",
   });
-  await network.deleteAs(CAROL, fixture.membersSpace, OPENSOCIAL_COLLECTION.acceptance, SELF_SKEY);
+  await network.deleteAs(CAROL, fixture.membersSpace, ATGRP_COLLECTION.confirmation, SELF_SKEY);
 
   const deps = { ...depsFor(network, ALICE), did: ALICE };
   const ws = await readIndependentWorkspace(deps, fixture.workspace);
@@ -842,7 +842,7 @@ test("Round 9 Finding #5: listIndependentWorkspaces rethrows transient personal 
   const network = new FakeNetwork();
   const acceptedWs = await createChannelWorkspace(network, { members: [ALICE], skey: "r9indacc" });
   const unacceptedWs = await createChannelWorkspace(network, { members: [BOB, ALICE], skey: "r9indnoacc" });
-  await network.deleteAs(ALICE, unacceptedWs.membersSpace, OPENSOCIAL_COLLECTION.acceptance, SELF_SKEY);
+  await network.deleteAs(ALICE, unacceptedWs.membersSpace, ATGRP_COLLECTION.confirmation, SELF_SKEY);
 
   const baseDeps: IndependentDeps = { ...depsFor(network, ALICE), did: ALICE };
 
@@ -863,7 +863,7 @@ test("Round 9 Finding #5: listIndependentWorkspaces rethrows transient personal 
           if (
             nsid === "com.atproto.space.getRecord" &&
             params?.space === acceptedWs.membersSpace &&
-            params?.collection === OPENSOCIAL_COLLECTION.acceptance
+            params?.collection === ATGRP_COLLECTION.confirmation
           ) {
             throw injected;
           }

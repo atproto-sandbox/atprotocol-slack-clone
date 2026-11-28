@@ -16,10 +16,10 @@ import {
   dmInboxUri,
   groupMembersUri,
   inboxUri,
-  personalInvitesUri,
+  personalInboxUri,
   workspaceUri,
 } from "@flock/protocol/keys";
-import { COLLECTION, OPENSOCIAL_COLLECTION, OPENSOCIAL_POLICY, SPACE_TYPE } from "@flock/protocol/nsids";
+import { COLLECTION, ATGRP_COLLECTION, ATGRP_POLICY, SPACE_TYPE } from "@flock/protocol/nsids";
 import { closeDb, getRawDb } from "../lib/db";
 import type { WorkspaceRef } from "./actor";
 import { OperatorAuthError, WebhookAuthError } from "./errors";
@@ -63,7 +63,7 @@ let groupCounter = 0;
 /**
  * Provisions an OpenSocial group with CREATOR + ADMIN as effective human admins,
  * MEMBER as a human member in `#design` (private) and `#general` (public),
- * and ZERO `group.opensocial.acceptance/self` records (proving Operator auth never gates on `acceptance/self`).
+ * and ZERO `org.atgrp.confirmation/self` records (proving Operator auth never gates on `acceptance/self`).
  */
 async function workspaceGroup(options: FakeGroupSessionOptions = {}) {
   const groupDid = plcDid(`secgrp${++groupCounter}`);
@@ -81,7 +81,7 @@ async function workspaceGroup(options: FakeGroupSessionOptions = {}) {
     spaceType: SPACE_TYPE.workspace,
     skey: "self",
     policy: {
-      $type: OPENSOCIAL_POLICY,
+      $type: ATGRP_POLICY,
       publicRead: false,
       unlisted: false,
       grants: [
@@ -94,7 +94,7 @@ async function workspaceGroup(options: FakeGroupSessionOptions = {}) {
     spaceType: SPACE_TYPE.inbox,
     skey: "self",
     policy: {
-      $type: OPENSOCIAL_POLICY,
+      $type: ATGRP_POLICY,
       publicRead: false,
       unlisted: false,
       grants: [
@@ -103,14 +103,14 @@ async function workspaceGroup(options: FakeGroupSessionOptions = {}) {
       ],
     },
   });
-  await host.putRecord(membersSpace, OPENSOCIAL_COLLECTION.role, privRole, {
+  await host.putRecord(membersSpace, ATGRP_COLLECTION.role, privRole, {
     displayName: "#design member",
   });
   await host.selfClient.procedure("com.atproto.space.createSpace", {
     spaceType: SPACE_TYPE.channel,
     skey: PRIVATE_SKEY,
     policy: {
-      $type: OPENSOCIAL_POLICY,
+      $type: ATGRP_POLICY,
       publicRead: false,
       unlisted: true,
       grants: [{ role: privRole, read: true, write: true }],
@@ -120,7 +120,7 @@ async function workspaceGroup(options: FakeGroupSessionOptions = {}) {
     spaceType: SPACE_TYPE.channel,
     skey: PUBLIC_SKEY,
     policy: {
-      $type: OPENSOCIAL_POLICY,
+      $type: ATGRP_POLICY,
       publicRead: false,
       unlisted: false,
       grants: [{ role: "member", read: true, write: true }],
@@ -128,11 +128,11 @@ async function workspaceGroup(options: FakeGroupSessionOptions = {}) {
   });
 
   const nowIso = "2026-11-01T12:00:00.000Z";
-  await host.putRecord(membersSpace, OPENSOCIAL_COLLECTION.membership, ADMIN, {
+  await host.putRecord(membersSpace, ATGRP_COLLECTION.membership, ADMIN, {
     roles: ["admin", "member"],
     createdAt: nowIso,
   });
-  await host.putRecord(membersSpace, OPENSOCIAL_COLLECTION.membership, MEMBER, {
+  await host.putRecord(membersSpace, ATGRP_COLLECTION.membership, MEMBER, {
     roles: ["member", privRole],
     createdAt: nowIso,
   });
@@ -170,33 +170,33 @@ test("effectiveMemberPermissions authorizes a delegated role whose membership wr
   const recruiterDid = plcDid("recruitersec");
   const membersSpace = groupMembersUri(host.groupDid);
 
-  // `role/recruiter` has NO `role.scopes`, only `assignable: ["member"]`; capability comes from `members/self` `policy.grants[].scopes`!
-  await host.putRecord(membersSpace, OPENSOCIAL_COLLECTION.role, "recruiter", {
+  // `role/recruiter` has NO `role.permissions`, only `canAssign: ["member"]`; capability comes from `members/self` `policy.grants[].permissions`!
+  await host.putRecord(membersSpace, ATGRP_COLLECTION.role, "recruiter", {
     displayName: "Recruiter",
-    assignable: ["member"],
+    canAssign: ["member"],
   });
   await host.selfClient.procedure("com.atproto.space.updateSpace", {
     space: membersSpace,
     policy: {
-      $type: OPENSOCIAL_POLICY,
+      $type: ATGRP_POLICY,
       publicRead: false,
       unlisted: false,
       grants: [
         { role: "admin", read: true, write: true },
-        { role: "moderator", read: true },
+        { role: "moderator", read: true, write: true },
         { role: "member", read: true, write: true },
         {
           role: "recruiter",
           read: true,
           write: true,
-          scopes: [
-            `space:${SPACE_TYPE.workspace === "new.flock.workspace" ? "group.opensocial.members" : ""}?skey=self&collection=${OPENSOCIAL_COLLECTION.membership}&action=read&action=create&action=update`,
+          permissions: [
+            `space:${SPACE_TYPE.workspace === "new.flock.workspace" ? "org.atgrp.members" : ""}?skey=self&collection=${ATGRP_COLLECTION.membership}&action=read&action=create&action=update`,
           ],
         },
       ],
     },
   });
-  await host.putRecord(membersSpace, OPENSOCIAL_COLLECTION.membership, recruiterDid, {
+  await host.putRecord(membersSpace, ATGRP_COLLECTION.membership, recruiterDid, {
     roles: ["member", "recruiter"],
     createdAt: "2026-11-01T12:00:00.000Z",
   });
@@ -208,7 +208,7 @@ test("effectiveMemberPermissions authorizes a delegated role whose membership wr
   assert.equal(actor.did, recruiterDid);
   assert.equal(actor.canRecoverOperations, true);
 
-  // Recruiter lacks `group.opensocial.invites` `create` permission -> expiring `inviteMember` is refused!
+  // Recruiter lacks `org.atgrp.inbox` `create` permission -> expiring `inviteMember` is refused!
   const futureExp = new Date(Date.now() + 3_600_000).toISOString();
   await assert.rejects(
     authorizeOperationActor(host.session, host.workspace, recruiterDid, {
@@ -219,12 +219,12 @@ test("effectiveMemberPermissions authorizes a delegated role whose membership wr
     refusal(/invite write permission/),
   );
 
-  // Grant `group.opensocial.invites` `create` on `role/recruiter` -> expiring `inviteMember` is now authorized!
-  await host.putRecord(membersSpace, OPENSOCIAL_COLLECTION.role, "recruiter", {
+  // Grant `org.atgrp.inbox` `create` on `role/recruiter` -> expiring `inviteMember` is now authorized!
+  await host.putRecord(membersSpace, ATGRP_COLLECTION.role, "recruiter", {
     displayName: "Recruiter",
-    assignable: ["member"],
-    scopes: [
-      `space:group.opensocial.invites?authority=*&skey=self&collection=${OPENSOCIAL_COLLECTION.invite}&action=create`,
+    canAssign: ["member"],
+    permissions: [
+      `space:org.atgrp.inbox?authority=*&skey=self&collection=${ATGRP_COLLECTION.invite}&action=create`,
     ],
   });
   const inviterActor = await authorizeOperationActor(host.session, host.workspace, recruiterDid, {
@@ -278,7 +278,7 @@ test("a member may not leave a public channel, or a private channel they are not
     authorizeOperationActor(host.session, host.workspace, MEMBER, { kind: "leaveChannel", skey: PUBLIC_SKEY }),
     refusal(/Only an active private channel/),
   );
-  await host.putRecord(groupMembersUri(host.groupDid), OPENSOCIAL_COLLECTION.membership, MEMBER, {
+  await host.putRecord(groupMembersUri(host.groupDid), ATGRP_COLLECTION.membership, MEMBER, {
     roles: ["member"],
     createdAt: "2026-11-01T12:00:00.000Z",
   });
@@ -332,7 +332,7 @@ test("a member whose leave stopped after removing their own membership may send 
   let membershipDeleted = false;
   const host = await workspaceGroup({
     intercept: (method, target) => {
-      if (method === "com.atproto.space.deleteRecord" && target.collection === OPENSOCIAL_COLLECTION.membership) {
+      if (method === "com.atproto.space.deleteRecord" && target.collection === ATGRP_COLLECTION.membership) {
         membershipDeleted = true;
         return undefined;
       }
@@ -375,11 +375,11 @@ test("a member whose leave stopped after removing their own membership may send 
   assert.equal(retrying.canRecoverOperations, false);
   assert.equal(finished.state, "completed");
   assert.equal(
-    await host.getRecord(groupMembersUri(host.groupDid), OPENSOCIAL_COLLECTION.membership, MEMBER),
+    await host.getRecord(groupMembersUri(host.groupDid), ATGRP_COLLECTION.membership, MEMBER),
     undefined,
   );
   assert.equal(
-    host.writes.filter((write) => write === `deleteRecord ${groupMembersUri(host.groupDid)} ${OPENSOCIAL_COLLECTION.membership}/${MEMBER}`).length,
+    host.writes.filter((write) => write === `deleteRecord ${groupMembersUri(host.groupDid)} ${ATGRP_COLLECTION.membership}/${MEMBER}`).length,
     1,
     "the completed step is not repeated",
   );
@@ -402,7 +402,7 @@ test("an admin whose own demotion stopped part-way may send it again, but not an
   let adminDemoted = false;
   const host = await workspaceGroup({
     intercept: (method, target) => {
-      if (method === "com.atproto.space.putRecord" && target.collection === OPENSOCIAL_COLLECTION.membership && target.rkey === ADMIN) {
+      if (method === "com.atproto.space.putRecord" && target.collection === ATGRP_COLLECTION.membership && target.rkey === ADMIN) {
         adminDemoted = true;
         return undefined;
       }
@@ -439,7 +439,7 @@ test("an admin whose own demotion stopped part-way may send it again, but not an
   assert.deepEqual([retrying.canRecoverOperations, finished.state], [false, "completed"]);
   const adminMem = await host.getRecord<{ roles: string[] }>(
     groupMembersUri(host.groupDid),
-    OPENSOCIAL_COLLECTION.membership,
+    ATGRP_COLLECTION.membership,
     ADMIN,
   );
   assert.deepEqual(adminMem?.roles, ["member"]);
@@ -669,20 +669,20 @@ test("verifyDmNotifyCredentialAndProof accepts valid SpaceCredential + PoP, retr
   );
 });
 
-test("verifySpaceNotifyCredentialAndProof enforces personal group.opensocial.invites/self space, 600s max credential lifetime, PoP audience, replay lock, and inv1 epoch tokens", async () => {
+test("verifySpaceNotifyCredentialAndProof enforces personal org.atgrp.inbox/self space, 600s max credential lifetime, PoP audience, replay lock, and inv1 epoch tokens", async () => {
   resetDmProofReplayCacheForTests();
   const aliceKey = await Secp256k1Keypair.create();
   const holderKey = await generateSpaceKey();
   const aliceDid = plcDid("aliceinv");
   const bobDid = plcDid("bobinv");
-  const aliceInvites = personalInvitesUri(aliceDid) as CredOptions["sub"];
+  const aliceInvites = personalInboxUri(aliceDid) as CredOptions["sub"];
   const holderKid = holderKey.did() as CredOptions["keyId"];
   const deps = {
     resolveSigningKey: async () => aliceKey.did(),
     operatorServiceRef: SERVICE_REF,
   };
 
-  // 1. Valid credential (`exp - iat === 600`) + timestamped PoP for caller's own `group.opensocial.invites/self` succeeds
+  // 1. Valid credential (`exp - iat === 600`) + timestamped PoP for caller's own `org.atgrp.inbox/self` succeeds
   const validCred = await createSpaceCredential({
     iss: aliceDid,
     sub: aliceInvites,
@@ -727,7 +727,7 @@ test("verifySpaceNotifyCredentialAndProof enforces personal group.opensocial.inv
     { space: aliceInvites, callerDid: bobDid },
     { space: workspaceUri(aliceDid), callerDid: aliceDid },
     { space: dmInboxUri(aliceDid), callerDid: aliceDid },
-    { space: `at:space/${aliceDid}/group.opensocial.invites/custom`, callerDid: aliceDid },
+    { space: `at:space/${aliceDid}/org.atgrp.inbox/custom`, callerDid: aliceDid },
   ]) {
     await assert.rejects(
       verifySpaceNotifyCredentialAndProof(
@@ -795,7 +795,7 @@ test("verifySpaceNotifyCredentialAndProof enforces personal group.opensocial.inv
     (err: unknown) => err instanceof WebhookAuthError,
   );
   assert.throws(
-    () => authenticateSpaceWebhook(personalInvitesUri(bobDid), invToken, undefined, t0),
+    () => authenticateSpaceWebhook(personalInboxUri(bobDid), invToken, undefined, t0),
     (err: unknown) => err instanceof WebhookAuthError,
   );
 });

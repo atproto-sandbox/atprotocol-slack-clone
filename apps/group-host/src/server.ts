@@ -13,7 +13,7 @@ import {
 import { cryptoVerifySignatureWithKey } from "@atproto/xrpc-server";
 import { isDid, parseSpaceUri } from "@flock/protocol/keys";
 import { lexicons as protocolLexicons } from "@flock/protocol/lexicons/api/lexicons";
-import { OPENSOCIAL_COLLECTION, OPENSOCIAL_METHOD, OPENSOCIAL_SPACE_TYPE } from "@flock/protocol/nsids";
+import { ATGRP_COLLECTION, ATGRP_METHOD, ATGRP_SPACE_TYPE } from "@flock/protocol/nsids";
 import { InvalidScopeError, InvalidSpacePolicyScopeError } from "@flock/protocol/scopes";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
 import {
@@ -34,10 +34,12 @@ import {
 } from "./methods";
 import { GroupMigrationService, type AuthenticatedMigrationSession } from "./migration";
 import {
-  executeCreateReportSync,
-  executeGetModSubjectHistory,
-  executeListModSubjects,
-  executeResolveModSubjectSync,
+  executeQueryModSubjects,
+  executeQuerySelfHistory,
+  executeQuerySubjectHistory,
+  executeSubmitAppealSync,
+  executeSubmitReportSync,
+  executeUpdateModSubjectSync,
 } from "./moderation";
 import {
   GroupHostOAuthService,
@@ -120,16 +122,61 @@ function queryInt(req: Request, key: string): number | undefined {
 
 const DUMMY_VALID_AT_URI = "at://did:plc:abcdefghijklmnopqrstuvwx/app.bsky.feed.post/3jzfcijpj2z2a";
 
-function assertOpenSocialXrpcParams(
+const MOD_SUBMISSION_RATE_WINDOW_MS = 5 * 60_000;
+const MOD_SUBMISSION_RATE_MAX = 60;
+const MOD_SUBMISSION_RATE_MAX_ACTORS = 4_096;
+
+function createModSubmissionRateLimiter(): (actorDid: string, nowMs?: number) => void {
+  const buckets = new Map<string, { windowStartMs: number; count: number }>();
+  return (actorDid: string, nowMs = Date.now()) => {
+    const existing = buckets.get(actorDid);
+    if (!existing || nowMs - existing.windowStartMs >= MOD_SUBMISSION_RATE_WINDOW_MS) {
+      if (buckets.size >= MOD_SUBMISSION_RATE_MAX_ACTORS) {
+        const oldestKey = buckets.keys().next().value;
+        if (oldestKey !== undefined) buckets.delete(oldestKey);
+      }
+      buckets.set(actorDid, { windowStartMs: nowMs, count: 1 });
+      return;
+    }
+    if (existing.count >= MOD_SUBMISSION_RATE_MAX) {
+      throw new GroupHostHttpError(429, "RateLimitExceeded", "Moderation submission rate limit exceeded.");
+    }
+    existing.count += 1;
+  };
+}
+
+function assertAtgrpXrpcParams(
   nsid: string,
   req: Request,
-  options: { intKeys?: readonly string[]; preserveSubjectSemanticError?: boolean } = {},
+  options: {
+    intKeys?: readonly string[];
+    arrayKeys?: readonly string[];
+    preserveSubjectSemanticError?: boolean;
+  } = {},
 ): Record<string, unknown> {
   const intKeys = new Set(options.intKeys ?? []);
+  const arrayKeys = new Set(options.arrayKeys ?? []);
   const rawOut: Record<string, unknown> = {};
   const checkOut: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(req.query)) {
     if (v === undefined) continue;
+    if (arrayKeys.has(k)) {
+      let arr: string[];
+      if (typeof v === "string") {
+        arr = [v];
+      } else if (Array.isArray(v) && v.every((item): item is string => typeof item === "string")) {
+        arr = v;
+      } else {
+        throw new GroupHostHttpError(
+          400,
+          "InvalidRequest",
+          `Query parameter '${k}' must be a string or array of strings.`,
+        );
+      }
+      rawOut[k] = arr;
+      checkOut[k] = arr;
+      continue;
+    }
     if (typeof v !== "string") {
       throw new GroupHostHttpError(400, "InvalidRequest", `Query parameter '${k}' must be a single string.`);
     }
@@ -163,7 +210,7 @@ function assertOpenSocialXrpcParams(
   return rawOut;
 }
 
-function assertOpenSocialXrpcInput(
+function assertAtgrpXrpcInput(
   nsid: string,
   body: unknown,
   options: { preserveInviteSemanticError?: boolean; preserveSubjectSemanticError?: boolean } = {},
@@ -697,7 +744,7 @@ export async function createGroupHostApp(services: Awaited<ReturnType<typeof cre
       }
       session.permissions.assertSpace(
         {
-          spaceType: OPENSOCIAL_SPACE_TYPE.invites as NsidString,
+          spaceType: ATGRP_SPACE_TYPE.inbox as NsidString,
           authority: "*",
           skey: "self" as RecordKeyString,
         },
@@ -722,11 +769,11 @@ export async function createGroupHostApp(services: Awaited<ReturnType<typeof cre
       }
       session.permissions.assertSpace(
         {
-          spaceType: OPENSOCIAL_SPACE_TYPE.invites as NsidString,
+          spaceType: ATGRP_SPACE_TYPE.inbox as NsidString,
           authority: "*",
           skey: "self" as RecordKeyString,
         },
-        { action: "update", collection: OPENSOCIAL_COLLECTION.invite as NsidString },
+        { action: "update", collection: ATGRP_COLLECTION.invite as NsidString },
       );
       const out = await methods.executeRetryInviteDelivery({
         groupDid: targetGroup,
@@ -751,7 +798,7 @@ export async function createGroupHostApp(services: Awaited<ReturnType<typeof cre
         plc,
         authorization: req.headers.authorization,
         groupDid: group,
-        expectedLxm: OPENSOCIAL_METHOD.requestJoin,
+        expectedLxm: ATGRP_METHOD.requestJoin,
       });
       const out = methods.executeGetJoinStatus({
         callerDid: jwt.iss,
@@ -2044,7 +2091,7 @@ export async function createGroupHostApp(services: Awaited<ReturnType<typeof cre
         .get(repoDid) as { status: string } | undefined;
       const isExternalInvitesCleanup =
         parsed.authorityDid !== repoDid &&
-        parsed.type === OPENSOCIAL_SPACE_TYPE.invites &&
+        parsed.type === ATGRP_SPACE_TYPE.inbox &&
         delRow?.status === "remote_cleanup_queued";
 
       if (!isExternalInvitesCleanup) {
@@ -2176,7 +2223,7 @@ export async function createGroupHostApp(services: Awaited<ReturnType<typeof cre
       for (const [hk, hv] of Object.entries(macHeaders)) {
         res.setHeader(hk, hv);
       }
-      if (collection === OPENSOCIAL_COLLECTION.membership && row.incarnation) {
+      if (collection === ATGRP_COLLECTION.membership && row.incarnation) {
         res.setHeader("Atproto-Membership-Incarnation", row.incarnation);
       }
 
@@ -2572,7 +2619,7 @@ export async function createGroupHostApp(services: Awaited<ReturnType<typeof cre
     "/xrpc/com.atproto.space.notifyCredentialsRevoked",
     json1Mb,
     asyncHandler(async (req, res) => {
-      const parsedBody = assertOpenSocialXrpcInput("com.atproto.space.notifyCredentialsRevoked", req.body) as {
+      const parsedBody = assertAtgrpXrpcInput("com.atproto.space.notifyCredentialsRevoked", req.body) as {
         space: string;
         credentials: string[];
       };
@@ -2671,14 +2718,16 @@ export async function createGroupHostApp(services: Awaited<ReturnType<typeof cre
   );
 
   // =========================================================================
-  // `/xrpc/group.opensocial.*`
+  // `/xrpc/org.atgrp.*` & `/xrpc/org.atgrp.mod.*`
   // =========================================================================
 
+  const checkModSubmissionRate = createModSubmissionRateLimiter();
+
   app.post(
-    `/xrpc/${OPENSOCIAL_METHOD.requestJoin}`,
+    `/xrpc/${ATGRP_METHOD.requestJoin}`,
     json1Mb,
     asyncHandler(async (req, res) => {
-      const parsedBody = assertOpenSocialXrpcInput(OPENSOCIAL_METHOD.requestJoin, req.body, {
+      const parsedBody = assertAtgrpXrpcInput(ATGRP_METHOD.requestJoin, req.body, {
         preserveInviteSemanticError: true,
       }) as {
         group: string;
@@ -2695,7 +2744,7 @@ export async function createGroupHostApp(services: Awaited<ReturnType<typeof cre
         plc,
         authorization: req.headers.authorization,
         groupDid: group,
-        expectedLxm: OPENSOCIAL_METHOD.requestJoin,
+        expectedLxm: ATGRP_METHOD.requestJoin,
       });
       const idempotencyKey =
         typeof req.headers["idempotency-key"] === "string" ? req.headers["idempotency-key"] : undefined;
@@ -2711,10 +2760,10 @@ export async function createGroupHostApp(services: Awaited<ReturnType<typeof cre
   );
 
   app.post(
-    `/xrpc/${OPENSOCIAL_METHOD.cancelJoinRequest}`,
+    `/xrpc/${ATGRP_METHOD.cancelJoinRequest}`,
     json1Mb,
     asyncHandler(async (req, res) => {
-      const { group } = assertOpenSocialXrpcInput(OPENSOCIAL_METHOD.cancelJoinRequest, req.body) as {
+      const { group } = assertAtgrpXrpcInput(ATGRP_METHOD.cancelJoinRequest, req.body) as {
         group: string;
       };
       if (!isDid(group)) {
@@ -2726,7 +2775,7 @@ export async function createGroupHostApp(services: Awaited<ReturnType<typeof cre
         plc,
         authorization: req.headers.authorization,
         groupDid: group,
-        expectedLxm: OPENSOCIAL_METHOD.cancelJoinRequest,
+        expectedLxm: ATGRP_METHOD.cancelJoinRequest,
       });
       await methods.executeCancelJoinRequest({
         callerDid: jwt.iss,
@@ -2737,10 +2786,10 @@ export async function createGroupHostApp(services: Awaited<ReturnType<typeof cre
   );
 
   app.post(
-    `/xrpc/${OPENSOCIAL_METHOD.leaveGroup}`,
+    `/xrpc/${ATGRP_METHOD.leaveGroup}`,
     json1Mb,
     asyncHandler(async (req, res) => {
-      const { group } = assertOpenSocialXrpcInput(OPENSOCIAL_METHOD.leaveGroup, req.body) as {
+      const { group } = assertAtgrpXrpcInput(ATGRP_METHOD.leaveGroup, req.body) as {
         group: string;
       };
       if (!isDid(group)) {
@@ -2752,7 +2801,7 @@ export async function createGroupHostApp(services: Awaited<ReturnType<typeof cre
         plc,
         authorization: req.headers.authorization,
         groupDid: group,
-        expectedLxm: OPENSOCIAL_METHOD.leaveGroup,
+        expectedLxm: ATGRP_METHOD.leaveGroup,
       });
       const ifMatchIncarnation =
         typeof req.headers["if-match-membership-incarnation"] === "string"
@@ -2767,12 +2816,51 @@ export async function createGroupHostApp(services: Awaited<ReturnType<typeof cre
     }),
   );
 
+  app.get(
+    `/xrpc/${ATGRP_METHOD.listJoinRequests}`,
+    asyncHandler(async (req, res) => {
+      const session = await authGroupDpop(req, res, ATGRP_METHOD.listJoinRequests);
+      const mig = db.prepare("SELECT status FROM source_migration_lease WHERE group_did = ?").get(session.groupDid) as
+        | { status: string }
+        | undefined;
+      if (mig?.status === "plc_signed") throw new GroupHostHttpError(409, "MigrationCutoverPending");
+      session.permissions.assertRpc({
+        aud: `${session.groupDid}#atproto_pds` as `${DidString}#${string}`,
+        lxm: ATGRP_METHOD.listJoinRequests as NsidString,
+      });
+      const { limit, cursor } = assertAtgrpXrpcParams(ATGRP_METHOD.listJoinRequests, req, {
+        intKeys: ["limit"],
+      }) as { limit?: number; cursor?: string };
+      res.json(methods.executeListJoinRequests({ groupDid: session.groupDid, limit, cursor }));
+    }),
+  );
+
   app.post(
-    `/xrpc/${OPENSOCIAL_METHOD.createReport}`,
+    `/xrpc/${ATGRP_METHOD.denyJoinRequest}`,
     json1Mb,
     asyncHandler(async (req, res) => {
-      const { group, subject, cid, reasonType, reason, rule } = assertOpenSocialXrpcInput(
-        OPENSOCIAL_METHOD.createReport,
+      const session = await authGroupDpop(req, res, ATGRP_METHOD.denyJoinRequest);
+      session.permissions.assertRpc({
+        aud: `${session.groupDid}#atproto_pds` as `${DidString}#${string}`,
+        lxm: ATGRP_METHOD.denyJoinRequest as NsidString,
+      });
+      const { member } = assertAtgrpXrpcInput(ATGRP_METHOD.denyJoinRequest, req.body) as {
+        member: string;
+      };
+      if (!isDid(member)) {
+        throw new GroupHostHttpError(400, "InvalidRequest", "member DID is required.");
+      }
+      await methods.executeDenyJoinRequest({ groupDid: session.groupDid, memberDid: member, session });
+      res.status(200).end();
+    }),
+  );
+
+  app.post(
+    `/xrpc/${ATGRP_METHOD.modSubmitReport}`,
+    json1Mb,
+    asyncHandler(async (req, res) => {
+      const { group, subject, cid, reasonType, reason, rule } = assertAtgrpXrpcInput(
+        ATGRP_METHOD.modSubmitReport,
         req.body,
         { preserveSubjectSemanticError: true },
       ) as {
@@ -2792,10 +2880,11 @@ export async function createGroupHostApp(services: Awaited<ReturnType<typeof cre
         plc,
         authorization: req.headers.authorization,
         groupDid: group,
-        expectedLxm: OPENSOCIAL_METHOD.createReport,
+        expectedLxm: ATGRP_METHOD.modSubmitReport,
       });
+      checkModSubmissionRate(jwt.iss);
       const out = await services.locks.withGroupRepoLock(group, () =>
-        executeCreateReportSync(db, {
+        executeSubmitReportSync(db, {
           callerDid: jwt.iss,
           groupDid: group,
           subject,
@@ -2809,118 +2898,164 @@ export async function createGroupHostApp(services: Awaited<ReturnType<typeof cre
     }),
   );
 
-  app.get(
-    `/xrpc/${OPENSOCIAL_METHOD.listJoinRequests}`,
-    asyncHandler(async (req, res) => {
-      const session = await authGroupDpop(req, res, OPENSOCIAL_METHOD.listJoinRequests);
-      const mig = db.prepare("SELECT status FROM source_migration_lease WHERE group_did = ?").get(session.groupDid) as
-        | { status: string }
-        | undefined;
-      if (mig?.status === "plc_signed") throw new GroupHostHttpError(409, "MigrationCutoverPending");
-      session.permissions.assertRpc({
-        aud: `${session.groupDid}#atproto_pds` as `${DidString}#${string}`,
-        lxm: OPENSOCIAL_METHOD.listJoinRequests as NsidString,
-      });
-      const { limit, cursor } = assertOpenSocialXrpcParams(OPENSOCIAL_METHOD.listJoinRequests, req, {
-        intKeys: ["limit"],
-      }) as { limit?: number; cursor?: string };
-      res.json(methods.executeListJoinRequests({ groupDid: session.groupDid, limit, cursor }));
-    }),
-  );
-
   app.post(
-    `/xrpc/${OPENSOCIAL_METHOD.denyJoinRequest}`,
+    `/xrpc/${ATGRP_METHOD.modSubmitAppeal}`,
     json1Mb,
     asyncHandler(async (req, res) => {
-      const session = await authGroupDpop(req, res, OPENSOCIAL_METHOD.denyJoinRequest);
-      session.permissions.assertRpc({
-        aud: `${session.groupDid}#atproto_pds` as `${DidString}#${string}`,
-        lxm: OPENSOCIAL_METHOD.denyJoinRequest as NsidString,
-      });
-      const { member } = assertOpenSocialXrpcInput(OPENSOCIAL_METHOD.denyJoinRequest, req.body) as {
-        member: string;
+      const { group, subject, note } = assertAtgrpXrpcInput(
+        ATGRP_METHOD.modSubmitAppeal,
+        req.body,
+        { preserveSubjectSemanticError: true },
+      ) as {
+        group: string;
+        subject: string;
+        note?: string;
       };
-      if (!isDid(member)) {
-        throw new GroupHostHttpError(400, "InvalidRequest", "member DID is required.");
+      if (!isDid(group)) {
+        throw new GroupHostHttpError(400, "InvalidRequest", "group DID is required.");
       }
-      await methods.executeDenyJoinRequest({ groupDid: session.groupDid, memberDid: member, session });
-      res.status(200).end();
+      const jwt = await verifyPersonalServiceJwt({
+        db,
+        cryptoBox,
+        plc,
+        authorization: req.headers.authorization,
+        groupDid: group,
+        expectedLxm: ATGRP_METHOD.modSubmitAppeal,
+      });
+      checkModSubmissionRate(jwt.iss);
+      const out = await services.locks.withGroupRepoLock(group, () =>
+        executeSubmitAppealSync(db, {
+          callerDid: jwt.iss,
+          groupDid: group,
+          subject,
+          note,
+        }),
+      );
+      res.json(out);
     }),
   );
 
   app.get(
-    `/xrpc/${OPENSOCIAL_METHOD.listModSubjects}`,
+    `/xrpc/${ATGRP_METHOD.modQuerySubjects}`,
     asyncHandler(async (req, res) => {
-      const session = await authGroupDpop(req, res, OPENSOCIAL_METHOD.listModSubjects);
+      res.setHeader("Cache-Control", "no-store");
+      const session = await authGroupDpop(req, res, ATGRP_METHOD.modQuerySubjects);
       const mig = db.prepare("SELECT status FROM source_migration_lease WHERE group_did = ?").get(session.groupDid) as
         | { status: string }
         | undefined;
       if (mig?.status === "plc_signed") throw new GroupHostHttpError(409, "MigrationCutoverPending");
       session.permissions.assertRpc({
         aud: `${session.groupDid}#atproto_pds` as `${DidString}#${string}`,
-        lxm: OPENSOCIAL_METHOD.listModSubjects as NsidString,
+        lxm: ATGRP_METHOD.modQuerySubjects as NsidString,
       });
-      const { status, limit, cursor } = assertOpenSocialXrpcParams(OPENSOCIAL_METHOD.listModSubjects, req, {
+      const { status, tags, sort, limit, cursor } = assertAtgrpXrpcParams(ATGRP_METHOD.modQuerySubjects, req, {
         intKeys: ["limit"],
+        arrayKeys: ["tags"],
       }) as {
-        status?: "open" | "escalated" | "resolved";
+        status?: "open" | "resolved";
+        tags?: string[];
+        sort?: string;
         limit?: number;
         cursor?: string;
       };
-      if (status !== undefined && status !== "open" && status !== "escalated" && status !== "resolved") {
-        throw new GroupHostHttpError(400, "InvalidRequest", "Invalid status filter.");
-      }
-      res.json(executeListModSubjects(db, { groupDid: session.groupDid, status, limit, cursor }));
+      res.json(executeQueryModSubjects(db, { groupDid: session.groupDid, status, tags, sort, limit, cursor }));
     }),
   );
 
   app.get(
-    `/xrpc/${OPENSOCIAL_METHOD.getModSubjectHistory}`,
+    `/xrpc/${ATGRP_METHOD.modQuerySubjectHistory}`,
     asyncHandler(async (req, res) => {
-      const session = await authGroupDpop(req, res, OPENSOCIAL_METHOD.getModSubjectHistory);
+      res.setHeader("Cache-Control", "no-store");
+      const session = await authGroupDpop(req, res, ATGRP_METHOD.modQuerySubjectHistory);
       const mig = db.prepare("SELECT status FROM source_migration_lease WHERE group_did = ?").get(session.groupDid) as
         | { status: string }
         | undefined;
       if (mig?.status === "plc_signed") throw new GroupHostHttpError(409, "MigrationCutoverPending");
       session.permissions.assertRpc({
         aud: `${session.groupDid}#atproto_pds` as `${DidString}#${string}`,
-        lxm: OPENSOCIAL_METHOD.getModSubjectHistory as NsidString,
+        lxm: ATGRP_METHOD.modQuerySubjectHistory as NsidString,
       });
-      const { subject, cid, limit, cursor } = assertOpenSocialXrpcParams(
-        OPENSOCIAL_METHOD.getModSubjectHistory,
+      const { subject, cid, sort, limit, cursor } = assertAtgrpXrpcParams(
+        ATGRP_METHOD.modQuerySubjectHistory,
         req,
         { intKeys: ["limit"], preserveSubjectSemanticError: true },
       ) as {
         subject: string;
         cid?: string;
+        sort?: string;
         limit?: number;
         cursor?: string;
       };
-      res.json(executeGetModSubjectHistory(db, { groupDid: session.groupDid, subject, cid, limit, cursor }));
+      res.json(executeQuerySubjectHistory(db, { groupDid: session.groupDid, subject, cid, sort, limit, cursor }));
+    }),
+  );
+
+  app.get(
+    `/xrpc/${ATGRP_METHOD.modQuerySelfHistory}`,
+    asyncHandler(async (req, res) => {
+      res.setHeader("Cache-Control", "no-store");
+      const { group, subject, sort, limit, cursor } = assertAtgrpXrpcParams(
+        ATGRP_METHOD.modQuerySelfHistory,
+        req,
+        { intKeys: ["limit"], preserveSubjectSemanticError: true },
+      ) as {
+        group: string;
+        subject?: string;
+        sort?: string;
+        limit?: number;
+        cursor?: string;
+      };
+      if (!isDid(group)) {
+        throw new GroupHostHttpError(400, "InvalidRequest", "group DID is required.");
+      }
+      const mig = db.prepare("SELECT status FROM source_migration_lease WHERE group_did = ?").get(group) as
+        | { status: string }
+        | undefined;
+      if (mig?.status === "plc_signed") throw new GroupHostHttpError(409, "MigrationCutoverPending");
+      const jwt = await verifyPersonalServiceJwt({
+        db,
+        cryptoBox,
+        plc,
+        authorization: req.headers.authorization,
+        groupDid: group,
+        expectedLxm: ATGRP_METHOD.modQuerySelfHistory,
+      });
+      res.json(
+        executeQuerySelfHistory(db, {
+          callerDid: jwt.iss,
+          groupDid: group,
+          subject,
+          sort,
+          limit,
+          cursor,
+        }),
+      );
     }),
   );
 
   app.post(
-    `/xrpc/${OPENSOCIAL_METHOD.resolveModSubject}`,
+    `/xrpc/${ATGRP_METHOD.modUpdateSubject}`,
     json1Mb,
     asyncHandler(async (req, res) => {
-      const session = await authGroupDpop(req, res, OPENSOCIAL_METHOD.resolveModSubject);
+      const session = await authGroupDpop(req, res, ATGRP_METHOD.modUpdateSubject);
       session.permissions.assertRpc({
         aud: `${session.groupDid}#atproto_pds` as `${DidString}#${string}`,
-        lxm: OPENSOCIAL_METHOD.resolveModSubject as NsidString,
+        lxm: ATGRP_METHOD.modUpdateSubject as NsidString,
       });
-      const { subject, cid, status, note } = assertOpenSocialXrpcInput(
-        OPENSOCIAL_METHOD.resolveModSubject,
+      const { subject, cid, status, note, addTags, removeTags } = assertAtgrpXrpcInput(
+        ATGRP_METHOD.modUpdateSubject,
         req.body,
         { preserveSubjectSemanticError: true },
       ) as {
         subject: string;
         cid?: string;
-        status: "resolved" | "escalated";
+        status?: "open" | "resolved";
         note?: string;
+        addTags?: string[];
+        removeTags?: string[];
       };
       const out = await services.locks.withGroupRepoLock(session.groupDid, () =>
-        executeResolveModSubjectSync(db, {
+        executeUpdateModSubjectSync(db, {
           groupDid: session.groupDid,
           actorDid: session.authorizingUserDid,
           session,
@@ -2928,6 +3063,8 @@ export async function createGroupHostApp(services: Awaited<ReturnType<typeof cre
           cid,
           status,
           note,
+          addTags,
+          removeTags,
         }),
       );
       res.json(out);

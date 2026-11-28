@@ -6,7 +6,7 @@ import test, { after, before } from "node:test";
 import { closeDb, getRawDb } from "../../lib/db";
 import { extSpaceUriFor } from "@flock/protocol/extensions";
 import { groupMembersUri, tidNow } from "@flock/protocol/keys";
-import { COLLECTION, OPENSOCIAL_COLLECTION, OPENSOCIAL_POLICY, SPACE_TYPE } from "@flock/protocol/nsids";
+import { COLLECTION, ATGRP_COLLECTION, ATGRP_POLICY, SPACE_TYPE } from "@flock/protocol/nsids";
 import { WorkspaceEnvelopeError } from "@flock/protocol/workspace-summary";
 import { parseWorkspaceRef, type OperatorActor } from "../actor";
 import { grantCreationAuthorization } from "../creation-authorization";
@@ -283,7 +283,7 @@ test("reconcileWorkspace repairs extension policy drift and missing space, and d
   await host.selfClient.procedure("com.atproto.space.updateSpace", {
     space: tasksSpace,
     policy: {
-      $type: OPENSOCIAL_POLICY,
+      $type: ATGRP_POLICY,
       publicRead: false,
       unlisted: true,
       grants: [{ role: "admin", read: true, write: true }],
@@ -349,14 +349,14 @@ test("assertOperatorWorkspaceWithinEnvelope scans ext.install and enforces OpenS
     if (
       injectMalformedMembership &&
       method === "com.atproto.space.listRecords" &&
-      target.collection === OPENSOCIAL_COLLECTION.membership
+      target.collection === ATGRP_COLLECTION.membership
     ) {
       return Response.json({
         records: [
           {
-            collection: OPENSOCIAL_COLLECTION.membership,
+            collection: ATGRP_COLLECTION.membership,
             rkey: "not-a-valid-did",
-            value: { $type: OPENSOCIAL_COLLECTION.membership, roles: "broken" },
+            value: { $type: ATGRP_COLLECTION.membership, roles: "broken" },
           },
         ],
       });
@@ -393,7 +393,7 @@ test("assertOperatorWorkspaceWithinEnvelope scans ext.install and enforces OpenS
   host.network.interceptResponse = undefined;
   await assert.doesNotReject(assertOperatorWorkspaceWithinEnvelope(owner));
 
-  // Round 17 Fix #5 (oclaude #1 + codex #5): Semantically invalid `group.opensocial.policy` (e.g. duplicate role grants),
+  // Round 17 Fix #5 (oclaude #1 + codex #5): Semantically invalid `org.atgrp.policy` (e.g. duplicate role grants),
   // missing published `com.atproto.space.policy/self` record (on core OR modality spaces), or malformed outer policy wrapper
   // MUST trigger fail-closed WorkspaceEnvelopeError!
   let policyFaultMode:
@@ -412,7 +412,7 @@ test("assertOperatorWorkspaceWithinEnvelope scans ext.install and enforces OpenS
       return Response.json({
         space: groupMembersUri(host.groupDid),
         policy: {
-          $type: OPENSOCIAL_POLICY,
+          $type: ATGRP_POLICY,
           publicRead: false,
           unlisted: false,
           grants: [
@@ -445,7 +445,7 @@ test("assertOperatorWorkspaceWithinEnvelope scans ext.install and enforces OpenS
             value: {
               $type: "wrong.wrapper.type",
               policy: {
-                $type: OPENSOCIAL_POLICY,
+                $type: ATGRP_POLICY,
                 publicRead: false,
                 unlisted: false,
                 grants: [{ role: "admin", read: true, write: true }],
@@ -484,11 +484,14 @@ test("assertOperatorWorkspaceWithinEnvelope scans ext.install and enforces OpenS
 
   // Seed >90 private channel roles on PERSON -> `assertOperatorWorkspaceWithinEnvelope` rejects (`maxPrivateChannelsPerMember === 90`)!
   const membersSpace = groupMembersUri(host.groupDid);
-  const manyChannelRoles = Array.from({ length: 91 }, (_, idx) => `channel-priv${idx}`);
+  const manyChannelRoles = Array.from(
+    { length: 91 },
+    (_, idx) => `channel-priv-${String.fromCharCode(97 + Math.floor(idx / 26))}${String.fromCharCode(97 + (idx % 26))}`,
+  );
   for (const r of manyChannelRoles) {
-    await host.putRecord(membersSpace, OPENSOCIAL_COLLECTION.role, r, { displayName: r });
+    await host.putRecord(membersSpace, ATGRP_COLLECTION.role, r, { displayName: r });
   }
-  await host.putRecord(membersSpace, OPENSOCIAL_COLLECTION.membership, PERSON, {
+  await host.putRecord(membersSpace, ATGRP_COLLECTION.membership, PERSON, {
     roles: ["member", ...manyChannelRoles],
     createdAt: "2026-11-16T00:00:00.000Z",
   });

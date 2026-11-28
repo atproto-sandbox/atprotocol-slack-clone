@@ -10,14 +10,15 @@ import {
   isDid,
   isTid,
   parseAnySpaceRecordUri,
-  personalInvitesUri,
+  personalInboxUri,
 } from "@flock/protocol/keys";
 import {
+  ATGRP_COLLECTION,
+  ATGRP_METHOD,
+  ATGRP_SPACE_TYPE,
   FLOCK_EXTENSION_FIELD,
-  OPENSOCIAL_COLLECTION,
-  OPENSOCIAL_METHOD,
-  OPENSOCIAL_SPACE_TYPE,
 } from "@flock/protocol/nsids";
+import { clearModEjectionEligibilitySync } from "./moderation";
 import {
   lexDataToPlainJson as lexToJson,
   plainJsonToLexData as jsonToLex,
@@ -274,17 +275,17 @@ export class GroupOpenSocialMethods {
     nowMs: number;
   }): { inviteSpaceUri: string; rkey: string; inviteRecordUri: string } {
     const parsed = parseAnySpaceRecordUri(params.inviteUri);
-    const expectedInviteSpace = personalInvitesUri(params.callerDid);
+    const expectedInviteSpace = personalInboxUri(params.callerDid);
     if (
       !parsed ||
       parsed.authorityDid !== params.callerDid ||
-      parsed.spaceType !== OPENSOCIAL_SPACE_TYPE.invites ||
+      parsed.spaceType !== ATGRP_SPACE_TYPE.inbox ||
       parsed.skey !== "self" ||
       parsed.spaceUri !== expectedInviteSpace ||
       parsed.repoDid !== params.groupDid ||
-      parsed.collection !== OPENSOCIAL_COLLECTION.invite ||
+      parsed.collection !== ATGRP_COLLECTION.invite ||
       !isTid(parsed.rkey) ||
-      params.inviteUri !== `${expectedInviteSpace}/${params.groupDid}/${OPENSOCIAL_COLLECTION.invite}/${parsed.rkey}`
+      params.inviteUri !== `${expectedInviteSpace}/${params.groupDid}/${ATGRP_COLLECTION.invite}/${parsed.rkey}`
     ) {
       throw new GroupHostHttpError(400, "InvalidInvite", "Invite URI is malformed or does not target caller.");
     }
@@ -293,7 +294,7 @@ export class GroupOpenSocialMethods {
       .prepare(
         "SELECT value FROM space_record WHERE space_uri = ? AND repo_did = ? AND collection = ? AND rkey = ?",
       )
-      .get(expectedInviteSpace, params.groupDid, OPENSOCIAL_COLLECTION.invite, parsed.rkey) as
+      .get(expectedInviteSpace, params.groupDid, ATGRP_COLLECTION.invite, parsed.rkey) as
       | { value: string }
       | undefined;
     if (!row) {
@@ -333,7 +334,7 @@ export class GroupOpenSocialMethods {
       ops: [
         {
           action: "delete",
-          collection: OPENSOCIAL_COLLECTION.invite,
+          collection: ATGRP_COLLECTION.invite,
           rkey: params.rkey,
         },
       ],
@@ -430,7 +431,7 @@ export class GroupOpenSocialMethods {
         const predictedMembersSpaceRev = nextMonotonicTid(curSpace?.space_rev ?? null);
         const freshInc = randomUUID();
         const memVal: Record<string, unknown> = {
-          $type: OPENSOCIAL_COLLECTION.membership,
+          $type: ATGRP_COLLECTION.membership,
           roles: defaultRoles,
           createdAt: nowIso,
           [FLOCK_EXTENSION_FIELD.incarnation]: freshInc,
@@ -439,7 +440,7 @@ export class GroupOpenSocialMethods {
           [FLOCK_EXTENSION_FIELD.afterWriterRev]: writerMeta?.last_evicted_repo_rev ?? null,
         };
         const serialized = await serializeRecord(
-          OPENSOCIAL_COLLECTION.membership as NsidString,
+          ATGRP_COLLECTION.membership as NsidString,
           params.callerDid as RecordKeyString,
           jsonToLex(memVal) as LexMap,
         );
@@ -474,7 +475,7 @@ export class GroupOpenSocialMethods {
           .prepare(
             "SELECT uri, cid FROM space_record WHERE space_uri = ? AND repo_did = ? AND collection = ? AND rkey = ?",
           )
-          .get(membersSpace, params.groupDid, OPENSOCIAL_COLLECTION.membership, params.callerDid) as
+          .get(membersSpace, params.groupDid, ATGRP_COLLECTION.membership, params.callerDid) as
           | { uri: string; cid: string }
           | undefined;
 
@@ -602,7 +603,7 @@ export class GroupOpenSocialMethods {
             ops: [
               {
                 action: "create",
-                collection: OPENSOCIAL_COLLECTION.membership,
+                collection: ATGRP_COLLECTION.membership,
                 rkey: params.callerDid,
                 value: preSerializedMembership.value,
                 cborBytes: preSerializedMembership.cborBytes,
@@ -613,6 +614,7 @@ export class GroupOpenSocialMethods {
             isOwnAuthoritySpace: true,
             nowMs,
           });
+          clearModEjectionEligibilitySync(this.db, params.groupDid, params.callerDid);
           const memRef = appliedMem.results[0]!;
           const finalResp = {
             status: "admitted",
@@ -639,15 +641,15 @@ export class GroupOpenSocialMethods {
           return finalResp;
         }
 
-        // Read `profile/self` in `meta/self` to determine `joinPolicy`
+        // Read `org.atgrp.config/self` in `meta/self` to determine `joinPolicy`
         const metaSpace = groupMetaUri(params.groupDid);
-        const profileRow = this.db
+        const configRow = this.db
           .prepare(
             "SELECT value FROM space_record WHERE space_uri = ? AND repo_did = ? AND collection = ? AND rkey = 'self'",
           )
-          .get(metaSpace, params.groupDid, OPENSOCIAL_COLLECTION.profile) as { value: string } | undefined;
-        const profile = profileRow ? (JSON.parse(profileRow.value) as { joinPolicy?: string }) : {};
-        const joinPolicy = profile.joinPolicy;
+          .get(metaSpace, params.groupDid, ATGRP_COLLECTION.config) as { value: string } | undefined;
+        const config = configRow ? (JSON.parse(configRow.value) as { joinPolicy?: string }) : {};
+        const joinPolicy = config.joinPolicy;
 
         // Case C: `joinPolicy === "open"`
         if (joinPolicy === "open") {
@@ -664,7 +666,7 @@ export class GroupOpenSocialMethods {
             ops: [
               {
                 action: "create",
-                collection: OPENSOCIAL_COLLECTION.membership,
+                collection: ATGRP_COLLECTION.membership,
                 rkey: params.callerDid,
                 value: preSerializedMembership.value,
                 cborBytes: preSerializedMembership.cborBytes,
@@ -675,6 +677,7 @@ export class GroupOpenSocialMethods {
             isOwnAuthoritySpace: true,
             nowMs,
           });
+          clearModEjectionEligibilitySync(this.db, params.groupDid, params.callerDid);
           const memRef = appliedMem.results[0]!;
           const finalResp = {
             status: "admitted",
@@ -808,7 +811,7 @@ export class GroupOpenSocialMethods {
           const { permissions: commitPerms } = revalidateLiveOAuthSessionSync(this.db, params.session, { nowMs });
           commitPerms.assertRpc({
             aud: `${params.groupDid}#atproto_pds` as `${DidString}#${string}`,
-            lxm: OPENSOCIAL_METHOD.denyJoinRequest as NsidString,
+            lxm: ATGRP_METHOD.denyJoinRequest as NsidString,
           });
         }
         this.db.prepare("DELETE FROM join_request WHERE group_did = ? AND expires_at <= ?").run(params.groupDid, nowMs);
@@ -974,7 +977,7 @@ export class GroupOpenSocialMethods {
           .prepare(
             "SELECT value, incarnation FROM space_record WHERE space_uri = ? AND repo_did = ? AND collection = ? AND rkey = ?",
           )
-          .get(membersSpace, params.groupDid, OPENSOCIAL_COLLECTION.membership, params.callerDid) as
+          .get(membersSpace, params.groupDid, ATGRP_COLLECTION.membership, params.callerDid) as
           | { value: string; incarnation: string | null }
           | undefined;
 
@@ -1030,7 +1033,7 @@ export class GroupOpenSocialMethods {
           ops: [
             {
               action: "delete",
-              collection: OPENSOCIAL_COLLECTION.membership,
+              collection: ATGRP_COLLECTION.membership,
               rkey: params.callerDid,
             },
           ],
@@ -1086,6 +1089,7 @@ export class GroupOpenSocialMethods {
           this.db.prepare("DELETE FROM migration_session WHERE group_did = ?").run(params.groupDid);
           this.db.prepare("DELETE FROM revoked_migration_jti WHERE group_did = ?").run(params.groupDid);
           this.db.prepare("DELETE FROM oauth_par WHERE group_did = ?").run(params.groupDid);
+          this.db.prepare("DELETE FROM oauth_consent_snapshot WHERE group_did = ?").run(params.groupDid);
           this.db.prepare("DELETE FROM upstream_oauth_state WHERE group_did = ?").run(params.groupDid);
           this.db.prepare("DELETE FROM oauth_code WHERE group_did = ?").run(params.groupDid);
           this.db.prepare("DELETE FROM oauth_refresh_token WHERE group_did = ?").run(params.groupDid);
@@ -1161,7 +1165,7 @@ export class GroupOpenSocialMethods {
           .prepare(
             "SELECT uri, cid, incarnation FROM space_record WHERE space_uri = ? AND repo_did = ? AND collection = ? AND rkey = ?",
           )
-          .get(membersSpace, params.groupDid, OPENSOCIAL_COLLECTION.membership, params.callerDid) as
+          .get(membersSpace, params.groupDid, ATGRP_COLLECTION.membership, params.callerDid) as
           | { uri: string; cid: string; incarnation: string | null }
           | undefined;
 
@@ -1274,11 +1278,11 @@ export class GroupOpenSocialMethods {
           const { permissions: commitPerms } = revalidateLiveOAuthSessionSync(this.db, params.session, { nowMs });
           commitPerms.assertSpace(
             {
-              spaceType: OPENSOCIAL_SPACE_TYPE.invites as NsidString,
+              spaceType: ATGRP_SPACE_TYPE.inbox as NsidString,
               authority: deliv.invitee_did as DidString,
               skey: "self" as RecordKeyString,
             },
-            { action: "update", collection: OPENSOCIAL_COLLECTION.invite as NsidString },
+            { action: "update", collection: ATGRP_COLLECTION.invite as NsidString },
           );
         }
         const repoRow = this.db
@@ -1444,4 +1448,4 @@ function requireRepoCommit() {
   return { RepoCommit: SpaceRepoCommit };
 }
 
-export { OPENSOCIAL_METHOD };
+export { ATGRP_METHOD };

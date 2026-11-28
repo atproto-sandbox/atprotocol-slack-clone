@@ -9,7 +9,7 @@ import type { GroupBrowserOAuthClient } from "../../browser/group-session";
 import { AppsPanel, type AppDirectory } from "./apps-panel";
 import { inviteLinkFor, makeShortId, splitDids, toSlug, type InboxRequest, type RunOperation } from "./client-api";
 import { ExtensionsPanel, type ExtensionToggleOutcome } from "./extensions-panel";
-import { GroupGovernancePanel } from "./group-governance-panel";
+import { GroupGovernancePanel, safeWebsiteUrl } from "./group-governance-panel";
 import type { WorkspaceDeclarations } from "./interactions";
 import { ModerationPanel } from "./moderation-panel";
 import { ReportSubjectButton, type ReportRuleOption, type SubmitReportFn } from "./report-subject-modal";
@@ -109,6 +109,16 @@ export function WorkspaceHome({
             <b>{activeWorkspace.joinPolicy}</b>
           </p>
           {activeWorkspace.description && <p>{activeWorkspace.description}</p>}
+          {(() => {
+            const safeSite = safeWebsiteUrl(activeWorkspace.website);
+            return safeSite ? (
+              <p>
+                <a href={safeSite} target="_blank" rel="noreferrer noopener" data-testid="workspace-website-link">
+                  {safeSite}
+                </a>
+              </p>
+            ) : null;
+          })()}
           <p className="mono-note">{activeWorkspace.uri}</p>
           <button
             className="text-button"
@@ -137,7 +147,7 @@ export function WorkspaceHome({
           <div className="banner-card banner-card-main">
             <b>Atmospheric group</b>
             <p>Group DID: {activeWorkspace.authorityDid}</p>
-            <p>Governance &amp; RBAC enforced by OpenSocial spaces.</p>
+            <p>Governance &amp; RBAC enforced by Atmosphere Groups spaces.</p>
           </div>
         </div>
       </div>

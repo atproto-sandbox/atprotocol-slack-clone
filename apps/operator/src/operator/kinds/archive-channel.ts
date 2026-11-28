@@ -1,5 +1,5 @@
 import { channelRoleKey, channelUri, groupMembersUri } from "@flock/protocol/keys";
-import { COLLECTION, OPENSOCIAL_COLLECTION } from "@flock/protocol/nsids";
+import { COLLECTION, ATGRP_COLLECTION } from "@flock/protocol/nsids";
 import {
   deleteAuthorityRecord,
   getOpenSocialSpacePolicy,
@@ -81,7 +81,7 @@ async function archiveChannel(actor: OperatorActor, context: OperationContext, s
     await updateOpenSocialSpacePolicy(actor.session, space, archivedChannelPolicy());
     dropMemberList(space);
     // Step 3: delete `role/channel-<skey>` now that zero policies or memberships reference it (`RoleInUse`-safe!).
-    await deleteAuthorityRecord(actor.session, membersSpace, OPENSOCIAL_COLLECTION.role, privRole);
+    await deleteAuthorityRecord(actor.session, membersSpace, ATGRP_COLLECTION.role, privRole);
 
     const policy = await getOpenSocialSpacePolicy(actor.session, space);
     if (!policy || policy.grants.length !== 0 || policy.unlisted !== true) {

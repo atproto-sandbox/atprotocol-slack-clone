@@ -51,14 +51,14 @@ import {
   projectActiveLabels,
   type ActiveSpaceLabel,
 } from "@flock/protocol/moderation";
-import { ATPROTO_SPACE_COLLECTION, COLLECTION, OPENSOCIAL_COLLECTION } from "@flock/protocol/nsids";
+import { ATGRP_COLLECTION, ATPROTO_SPACE_COLLECTION, COLLECTION } from "@flock/protocol/nsids";
 import { validateSpaceRecord } from "@flock/protocol/registry";
-import type { GroupOpenSocialPolicy } from "@flock/protocol/scopes";
+import type { GroupAtgrpPolicy } from "@flock/protocol/scopes";
 import {
   extractGroupSpacePolicyRecord,
   summarizeWorkspace,
   WORKSPACE_ENVELOPE,
-  type MemberAcceptanceEntry,
+  type MemberConfirmationEntry,
   type MemberWriterRev,
   type ScannedRecords,
   type WorkspaceExtensionSummary,
@@ -442,12 +442,12 @@ export async function readIndependentTasksWorkspaceSnapshot(
       .map((e) => String(e.record.subject)),
   );
   const admittedHumans = membersAuthorityRecords
-    .filter((e) => e.collection === OPENSOCIAL_COLLECTION.membership)
+    .filter((e) => e.collection === ATGRP_COLLECTION.membership)
     .map((e) => e.rkey)
     .filter((did) => isDid(did) && did !== authorityDid && !knownApps.has(did));
 
   const memberSetAside: IndependentTasksSetAside[] = [];
-  const acceptances: MemberAcceptanceEntry[] = [];
+  const confirmations: MemberConfirmationEntry[] = [];
   await mapLimited(
     admittedHumans.filter((did) => memberWriters.has(did)),
     WRITER_READ_CONCURRENCY,
@@ -461,9 +461,9 @@ export async function readIndependentTasksWorkspaceSnapshot(
           maxRecords,
           maxRetries: WORKSPACE_ENVELOPE.maxListRecordsRetry,
         });
-        const acc = entries.find((e) => e.collection === OPENSOCIAL_COLLECTION.acceptance && e.rkey === SELF_SKEY);
-        if (acc) {
-          acceptances.push({ repoDid: memberDid, rkey: SELF_SKEY, value: acc.record });
+        const conf = entries.find((e) => e.collection === ATGRP_COLLECTION.confirmation && e.rkey === SELF_SKEY);
+        if (conf) {
+          confirmations.push({ repoDid: memberDid, rkey: SELF_SKEY, value: conf.record });
         }
       } catch (error) {
         if (error instanceof SpaceCredentialError) throw error;
@@ -488,7 +488,7 @@ export async function readIndependentTasksWorkspaceSnapshot(
     metaRecords,
     membersAuthorityRecords,
     wsAuthorityRecords,
-    acceptances,
+    confirmations,
     memberWriters,
     membersWriterScanTruncated: membersWriterScan.truncated,
     memberSetAside,
@@ -567,7 +567,7 @@ export function summarizeVerifiedWorkspaceRecords(input: {
   metaRecords: readonly VerifiedRecordEntry[];
   membersAuthorityRecords: readonly VerifiedRecordEntry[];
   wsAuthorityRecords: readonly VerifiedRecordEntry[];
-  acceptances: readonly MemberAcceptanceEntry[];
+  confirmations: readonly MemberConfirmationEntry[];
   memberWriters: ReadonlyMap<string, MemberWriterRev>;
   membersWriterScanTruncated: boolean;
   memberSetAside: readonly IndependentTasksSetAside[];
@@ -583,7 +583,7 @@ export function summarizeVerifiedWorkspaceRecords(input: {
     metaRecords,
     membersAuthorityRecords,
     wsAuthorityRecords,
-    acceptances,
+    confirmations,
     memberWriters,
     membersWriterScanTruncated,
     memberSetAside,
@@ -594,7 +594,7 @@ export function summarizeVerifiedWorkspaceRecords(input: {
   let workspaceSnapshotComplete = memberSetAside.length === 0 && !membersWriterScanTruncated;
   if (membersWriterScanTruncated) {
     degradedReasons.push(
-      `Members space writer set exceeds the ${MAX_TASKS_WRITERS}-repo scan limit; member acceptance state may be incomplete.`,
+      `Members space writer set exceeds the ${MAX_TASKS_WRITERS}-repo scan limit; member confirmation state may be incomplete.`,
     );
   }
   let invalidRecordCount = 0;
@@ -644,11 +644,14 @@ export function summarizeVerifiedWorkspaceRecords(input: {
         value: entry.record,
       });
     }
-    const cap = collection === OPENSOCIAL_COLLECTION.profile ? 1 : WORKSPACE_ENVELOPE.authorityRecordScan;
+    const cap =
+      collection === ATGRP_COLLECTION.about || collection === ATGRP_COLLECTION.config
+        ? 1
+        : WORKSPACE_ENVELOPE.authorityRecordScan;
     return { records: out, truncated: out.length > cap };
   };
 
-  const spacePolicies = new Map<string, GroupOpenSocialPolicy>();
+  const spacePolicies = new Map<string, GroupAtgrpPolicy>();
   let invalidPolicyScan = false;
   for (const [spUri, entries] of [
     [metaUri, metaRecords],
@@ -672,9 +675,10 @@ export function summarizeVerifiedWorkspaceRecords(input: {
     }
   }
 
-  const profiles = checkInSpace(metaUri, metaRecords, OPENSOCIAL_COLLECTION.profile);
-  const roles = checkInSpace(membersUri, membersAuthorityRecords, OPENSOCIAL_COLLECTION.role);
-  const memberships = checkInSpace(membersUri, membersAuthorityRecords, OPENSOCIAL_COLLECTION.membership);
+  const abouts = checkInSpace(metaUri, metaRecords, ATGRP_COLLECTION.about);
+  const configs = checkInSpace(metaUri, metaRecords, ATGRP_COLLECTION.config);
+  const roles = checkInSpace(membersUri, membersAuthorityRecords, ATGRP_COLLECTION.role);
+  const memberships = checkInSpace(membersUri, membersAuthorityRecords, ATGRP_COLLECTION.membership);
   const accountLabelScan = checkInSpace(membersUri, membersAuthorityRecords, ATPROTO_SPACE_COLLECTION.label);
   const directory = checkInSpace(workspaceUri, wsAuthorityRecords, COLLECTION.directory);
   const installs = checkInSpace(workspaceUri, wsAuthorityRecords, COLLECTION.appInstall);
@@ -703,13 +707,14 @@ export function summarizeVerifiedWorkspaceRecords(input: {
   );
 
   const summary = summarizeWorkspace(workspaceUri, "", {
-    profiles,
+    abouts,
+    configs,
     roles,
     memberships,
     directory,
     installs,
     extInstalls,
-    acceptances,
+    confirmations,
     memberWriters,
     accountLabels,
     spacePolicies,

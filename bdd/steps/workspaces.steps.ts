@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { Given, Then, When } from "@cucumber/cucumber";
 import { groupMembersUri, groupMetaUri, inboxUri, isDid } from "@flock/protocol/keys";
-import { OPENSOCIAL_COLLECTION } from "@flock/protocol/nsids";
+import { ATGRP_COLLECTION, ATGRP_SPACE_TYPE } from "@flock/protocol/nsids";
 import { withIndependentReader } from "../support/independent-app-ui";
 import { credentialCalls, credentialOutcome, workspaceChannels } from "../support/channels-ui";
 import {
@@ -24,7 +24,7 @@ type Member = { did: string; read: boolean; write: boolean };
 
 /** The browser's own listings of the account's group memberships, from its own PDS. */
 const workspaceListings = (actor: Actor) => actor.xrpc.filter((call) => call.path === "/xrpc/com.atproto.space.listSpaces" && call.status === 200
-  && new URLSearchParams(call.query).get("spaceType") === "group.opensocial.members");
+  && new URLSearchParams(call.query).get("spaceType") === ATGRP_SPACE_TYPE.members);
 
 const owner = (world: AppWorld): Actor => {
   const actor = world.actors.get("owner");
@@ -44,9 +44,9 @@ async function membersOf(world: AppWorld, _as: Actor, space: string): Promise<Me
 
 const workspaceSkey = (world: AppWorld): string => world.workspaceUri.split("/").at(-1)!;
 
-/** The `group.opensocial.members` spaces an account's own PDS lists (from own-authored `acceptance/self` records). */
+/** The `org.atgrp.members` spaces an account's own PDS lists (from own-authored `confirmation/self` records). */
 async function memberSpacesOn(world: AppWorld, as: Actor): Promise<string[]> {
-  const listed = await world.pdsGet<{ spaces: Array<{ space: string }> }>(as, "com.atproto.space.listSpaces", { spaceType: "group.opensocial.members", limit: "100" });
+  const listed = await world.pdsGet<{ spaces: Array<{ space: string }> }>(as, "com.atproto.space.listSpaces", { spaceType: ATGRP_SPACE_TYPE.members, limit: "100" });
   assert.equal(listed.status, 200, JSON.stringify(listed.body));
   return listed.body.spaces.map((entry) => entry.space);
 }
@@ -315,7 +315,7 @@ Then("the workspace belongs to a dedicated group DID, and the person is its firs
   assert.ok(isDid(groupDid) && groupDid !== person.did, "the workspace belongs to a dedicated group DID");
   await waitForAdminControls(this, person);
   assert.deepEqual(groupEffectiveAdmins(this, groupDid), [person.did], "the creator is the sole effective human admin");
-  assert.equal(groupSpaceRecord(this, groupMembersUri(groupDid), OPENSOCIAL_COLLECTION.membership, groupDid), undefined, "the group DID has no membership record");
+  assert.equal(groupSpaceRecord(this, groupMembersUri(groupDid), ATGRP_COLLECTION.membership, groupDid), undefined, "the group DID has no membership record");
   assert.equal((await membersOf(this, person, groupMembersUri(groupDid))).some((entry) => entry.did === person.did && entry.read && entry.write), true, "the creator is a member");
 });
 
@@ -362,7 +362,7 @@ When("the workspace is created", async function (this: AppWorld) {
 Then("a group-authored membership record grants the creator the admin role", function (this: AppWorld) {
   const groupDid = groupDidOf(this);
   const person = owner(this);
-  const membership = groupSpaceRecord(this, groupMembersUri(groupDid), OPENSOCIAL_COLLECTION.membership, person.did);
+  const membership = groupSpaceRecord(this, groupMembersUri(groupDid), ATGRP_COLLECTION.membership, person.did);
   assert.ok(membership, "the group host stores a membership record for the creator");
   assert.ok(Array.isArray(membership.roles) && (membership.roles as string[]).includes("admin"), "the creator holds the admin role");
   assert.ok(groupEffectiveAdmins(this, groupDid).includes(person.did));
@@ -370,9 +370,9 @@ Then("a group-authored membership record grants the creator the admin role", fun
 
 Then("the group authority holds the workspace profile while having no membership record of its own", function (this: AppWorld) {
   const groupDid = groupDidOf(this);
-  assert.equal(groupSpaceRecord(this, groupMembersUri(groupDid), OPENSOCIAL_COLLECTION.membership, groupDid), undefined, "the group DID is not on its own member list");
-  const profile = groupSpaceRecord(this, groupMetaUri(groupDid), OPENSOCIAL_COLLECTION.profile, "self");
-  assert.equal(profile?.displayName, this.workspaceName, "the group's meta/self space holds the workspace profile");
+  assert.equal(groupSpaceRecord(this, groupMembersUri(groupDid), ATGRP_COLLECTION.membership, groupDid), undefined, "the group DID is not on its own member list");
+  const about = groupSpaceRecord(this, groupMetaUri(groupDid), ATGRP_COLLECTION.about, "self");
+  assert.equal(about?.displayName, this.workspaceName, "the group's meta/self space holds the workspace about record");
 });
 
 async function promote(world: AppWorld, member: Actor): Promise<void> {
@@ -401,10 +401,10 @@ When("that user calls a group space mutation with only their personal PDS token"
     body: JSON.stringify({
       space: groupMembersUri(groupDid),
       repo: groupDid,
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: outsider.did,
       record: {
-        $type: OPENSOCIAL_COLLECTION.membership,
+        $type: ATGRP_COLLECTION.membership,
         roles: ["member"],
         createdAt: new Date().toISOString(),
       },
@@ -436,7 +436,7 @@ When("that admin leaves, is removed, or is demoted", async function (this: AppWo
   const admin = owner(this);
   const ownRow = admin.page.locator(".roster-row").filter({ hasText: admin.did });
 
-  // 1) Leave workspace via the UI's "Leave this workspace" button (calls Group Host `group.opensocial.leaveGroup` -> `LastAdmin`).
+  // 1) Leave workspace via the UI's "Leave this workspace" button (calls Group Host `org.atgrp.leave` -> `LastAdmin`).
   await admin.page.getByRole("button", { name: "Leave this workspace", exact: true }).click();
   const leaveAlert = admin.page.locator("p.form-error[role=alert]");
   await leaveAlert.waitFor({ state: "visible", timeout: 60_000 });

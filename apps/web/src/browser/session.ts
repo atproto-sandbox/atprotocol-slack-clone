@@ -1,7 +1,7 @@
 import type { AtprotoDid, HandleResolver, OAuthSession } from "@atproto/oauth-client-browser";
 import { buildBrowserClientMetadata } from "./client-metadata";
 import { readUpstreamText } from "@flock/protocol/bounded-json";
-import { OPENSOCIAL_SPACE_TYPE, OPERATOR_METHOD, SPACE_TYPE, type AnySpaceType } from "@flock/protocol/nsids";
+import { ATGRP_SPACE_TYPE, OPERATOR_METHOD, SPACE_TYPE, type AnySpaceType } from "@flock/protocol/nsids";
 import { spaceCollections } from "@flock/protocol/registry";
 import { LEGACY_OPERATOR_METHODS } from "@flock/protocol/scopes";
 
@@ -155,7 +155,7 @@ type ReducedSpaceScope = {
 
 const KNOWN_SPACE_TYPES: ReadonlySet<string> = new Set([
   ...Object.values(SPACE_TYPE),
-  ...Object.values(OPENSOCIAL_SPACE_TYPE),
+  ...Object.values(ATGRP_SPACE_TYPE),
 ]);
 const SPACE_PARAM_KEYS: ReadonlySet<string> = new Set(["authority", "skey", "collection", "action", "manage"]);
 const VALID_SPACE_ACTIONS: ReadonlySet<string> = new Set(["read_self", "read", "create", "update", "delete"]);

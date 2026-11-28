@@ -13,7 +13,7 @@ import {
   groupMembersUri,
   groupMetaUri,
   inboxUri,
-  personalInvitesUri,
+  personalInboxUri,
   reactionRecordKey,
   requestRecordKey,
   spaceRecordUri,
@@ -23,9 +23,9 @@ import {
 } from "./keys";
 import { extSpaceUriFor } from "./extensions";
 import {
+  ATGRP_COLLECTION,
   BLOCK_TYPE,
   COLLECTION,
-  OPENSOCIAL_COLLECTION,
 } from "./nsids";
 import {
   REGISTRY,
@@ -40,7 +40,7 @@ const MEMBER = "did:plc:member";
 const NOW = "2026-11-01T12:00:00.000Z";
 const META = groupMetaUri(AUTHORITY);
 const MEMBERS = groupMembersUri(AUTHORITY);
-const INVITES = personalInvitesUri(MEMBER);
+const INVITES = personalInboxUri(MEMBER);
 const WORKSPACE = workspaceUri(AUTHORITY);
 const INBOX = inboxUri(AUTHORITY);
 const APP = "did:plc:bot";
@@ -65,35 +65,39 @@ const OP_REF_A = "a".repeat(32);
 type Fixture = { record: Record<string, unknown>; context: RecordContext };
 
 const FIXTURES: Record<RegisteredSpaceCollection, Fixture> = {
-  [OPENSOCIAL_COLLECTION.profile]: {
-    record: { displayName: "Acme", description: "Team space", joinPolicy: "invite", url: "https://acme.example/" },
+  [ATGRP_COLLECTION.about]: {
+    record: { displayName: "Acme", description: "Team space", website: "https://acme.example/" },
     context: { authorityDid: AUTHORITY, spaceUri: META, repoDid: AUTHORITY, rkey: "self" },
   },
-  [OPENSOCIAL_COLLECTION.rule]: {
+  [ATGRP_COLLECTION.config]: {
+    record: { joinPolicy: "invite" },
+    context: { authorityDid: AUTHORITY, spaceUri: META, repoDid: AUTHORITY, rkey: "self" },
+  },
+  [ATGRP_COLLECTION.rule]: {
     record: { title: "Be kind", text: "Treat everyone respectfully.", order: 0 },
-    context: { authorityDid: AUTHORITY, spaceUri: META, repoDid: AUTHORITY, rkey: "2222222222222" },
+    context: { authorityDid: AUTHORITY, spaceUri: MEMBERS, repoDid: AUTHORITY, rkey: "2222222222222" },
   },
-  [OPENSOCIAL_COLLECTION.labeler]: {
+  [ATGRP_COLLECTION.labeler]: {
     record: { policies: { labelValues: ["!takedown", "!hide"] } },
-    context: { authorityDid: AUTHORITY, spaceUri: META, repoDid: AUTHORITY, rkey: "self" },
+    context: { authorityDid: AUTHORITY, spaceUri: MEMBERS, repoDid: AUTHORITY, rkey: "self" },
   },
-  [OPENSOCIAL_COLLECTION.space]: {
+  [ATGRP_COLLECTION.space]: {
     record: { space: CHANNEL, createdAt: NOW },
     context: { authorityDid: AUTHORITY, spaceUri: MEMBERS, repoDid: AUTHORITY, rkey: "2222222222222" },
   },
-  [OPENSOCIAL_COLLECTION.role]: {
-    record: { displayName: "Moderator", scopes: ["include:group.opensocial.authModerate"], assignable: ["member"] },
+  [ATGRP_COLLECTION.role]: {
+    record: { displayName: "Moderator", permissions: ["include:org.atgrp.authModerate"], canAssign: ["member"] },
     context: { authorityDid: AUTHORITY, spaceUri: MEMBERS, repoDid: AUTHORITY, rkey: "moderator" },
   },
-  [OPENSOCIAL_COLLECTION.membership]: {
+  [ATGRP_COLLECTION.membership]: {
     record: { roles: ["member"], createdAt: NOW },
     context: { authorityDid: AUTHORITY, spaceUri: MEMBERS, repoDid: AUTHORITY, rkey: MEMBER },
   },
-  [OPENSOCIAL_COLLECTION.acceptance]: {
+  [ATGRP_COLLECTION.confirmation]: {
     record: { createdAt: NOW },
     context: { authorityDid: AUTHORITY, spaceUri: MEMBERS, repoDid: MEMBER, rkey: "self" },
   },
-  [OPENSOCIAL_COLLECTION.invite]: {
+  [ATGRP_COLLECTION.invite]: {
     record: { createdAt: NOW, expiresAt: "2026-12-01T12:00:00.000Z", message: "Join us!" },
     context: { authorityDid: MEMBER, spaceUri: INVITES, repoDid: AUTHORITY, rkey: "2222222222222" },
   },
@@ -279,15 +283,15 @@ test("a record with an unknown extension field is accepted in every collection, 
   }
 });
 
-test("semantic rejection covers OpenSocial and Flock collections", () => {
+test("semantic rejection covers Atmosphere Groups and Flock collections", () => {
   const cases: Array<{ collection: RegisteredSpaceCollection; record?: Record<string, unknown>; context?: Partial<RecordContext>; reason: RegExp }> = [
-    { collection: OPENSOCIAL_COLLECTION.profile, record: { url: "javascript:alert(1)" }, reason: /http or https/ },
-    { collection: OPENSOCIAL_COLLECTION.space, record: { space: META }, reason: /core or personal/ },
-    { collection: OPENSOCIAL_COLLECTION.role, record: { scopes: ["include:unknown.nsid.set"] }, reason: /Unknown permission-set/ },
-    { collection: OPENSOCIAL_COLLECTION.membership, context: { rkey: AUTHORITY }, reason: /implicit membership/ },
-    { collection: OPENSOCIAL_COLLECTION.membership, record: { roles: [] }, reason: /at least one role/ },
-    { collection: OPENSOCIAL_COLLECTION.acceptance, context: { repoDid: AUTHORITY }, reason: /group DID/ },
-    { collection: OPENSOCIAL_COLLECTION.invite, context: { repoDid: MEMBER }, reason: /external group DID/ },
+    { collection: ATGRP_COLLECTION.about, record: { website: "javascript:alert(1)" }, reason: /http or https/ },
+    { collection: ATGRP_COLLECTION.space, record: { space: META }, reason: /core or personal/ },
+    { collection: ATGRP_COLLECTION.role, record: { permissions: ["include:unknown.nsid.set"] }, reason: /Unknown permission-set/ },
+    { collection: ATGRP_COLLECTION.membership, context: { rkey: AUTHORITY }, reason: /implicit membership/ },
+    { collection: ATGRP_COLLECTION.membership, record: { roles: [] }, reason: /at least one role/ },
+    { collection: ATGRP_COLLECTION.confirmation, context: { repoDid: AUTHORITY }, reason: /group DID/ },
+    { collection: ATGRP_COLLECTION.invite, context: { repoDid: MEMBER }, reason: /external group DID/ },
     { collection: COLLECTION.directory, context: { rkey: "acme-random" }, reason: /directory key/ },
     { collection: COLLECTION.appInstall, record: { subject: AUTHORITY }, context: { rkey: subjectKey(AUTHORITY) }, reason: /group DID/ },
     { collection: COLLECTION.appCommand, record: { command: "Echo_1" }, reason: /command name/ },

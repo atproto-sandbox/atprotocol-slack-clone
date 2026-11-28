@@ -13,7 +13,7 @@ import {
   requestDigest,
   workspaceUri,
 } from "@flock/protocol/keys";
-import { OPENSOCIAL_COLLECTION, OPENSOCIAL_POLICY, SPACE_TYPE } from "@flock/protocol/nsids";
+import { ATGRP_COLLECTION, ATGRP_POLICY, SPACE_TYPE } from "@flock/protocol/nsids";
 import {
   CreationNotAuthorizedError,
   grantCreationAuthorization,
@@ -146,17 +146,22 @@ test("with creation approval, createWorkspace provisions OpenSocial modality spa
   assert.equal(await host.effectiveAccess(inbox, CREATOR), "rw");
   assert.equal(await host.effectiveAccess(general, CREATOR), "rw");
 
-  const profile = await host.getRecord<{ displayName: string; joinPolicy: string }>(
+  const profile = await host.getRecord<{ displayName: string }>(
     meta,
-    OPENSOCIAL_COLLECTION.profile,
+    ATGRP_COLLECTION.about,
     "self",
   );
   assert.equal(profile?.displayName, "Team Alpha");
-  assert.equal(profile?.joinPolicy, "approval");
+  const config = await host.getRecord<{ joinPolicy: string }>(
+    meta,
+    ATGRP_COLLECTION.config,
+    "self",
+  );
+  assert.equal(config?.joinPolicy, "approval");
 
   const creatorMem = await host.getRecord<{ roles: string[] }>(
     members,
-    OPENSOCIAL_COLLECTION.membership,
+    ATGRP_COLLECTION.membership,
     CREATOR,
   );
   assert.ok(creatorMem?.roles.includes("admin"));
@@ -164,7 +169,7 @@ test("with creation approval, createWorkspace provisions OpenSocial modality spa
 
   // Group DID itself is NEVER in `membership/*` (`proposal.md:44`)
   assert.equal(
-    await host.getRecord(members, OPENSOCIAL_COLLECTION.membership, host.groupDid),
+    await host.getRecord(members, ATGRP_COLLECTION.membership, host.groupDid),
     undefined,
   );
 });
@@ -290,7 +295,7 @@ test("a creation stopped at any write step resumes for its creator, repeating no
 async function pendingCreation(name: string, operationId: string, steps: readonly string[]) {
   const host = await newGroup({ creatorDid: CREATOR, name: "Initial" });
   const { members, workspace } = spacesOf(host.groupDid);
-  await host.putRecord(members, OPENSOCIAL_COLLECTION.membership, OTHER, {
+  await host.putRecord(members, ATGRP_COLLECTION.membership, OTHER, {
     roles: ["admin", "member"],
     createdAt: "2026-11-01T00:00:00.000Z",
   });
@@ -352,7 +357,7 @@ test("once a creation has made its creator an admin, another admin recovers it, 
       spaceType: st,
       skey: sk,
       policy: {
-        $type: OPENSOCIAL_POLICY,
+        $type: ATGRP_POLICY,
         publicRead: false,
         unlisted: false,
         grants: [{ role: "member", read: true, write: true }],
@@ -388,7 +393,7 @@ test("an approval is for a new workspace: one whose workspace/self space exists 
     "the approval is not used",
   );
   assert.equal(
-    await host.getRecord(groupMembersUri(host.groupDid), OPENSOCIAL_COLLECTION.membership, CREATOR),
+    await host.getRecord(groupMembersUri(host.groupDid), ATGRP_COLLECTION.membership, CREATOR),
     undefined,
   );
 });
@@ -399,7 +404,7 @@ test("a retry of a creation whose first step's answer was lost resumes, though w
     spaceType: SPACE_TYPE.workspace,
     skey: "self",
     policy: {
-      $type: OPENSOCIAL_POLICY,
+      $type: ATGRP_POLICY,
       publicRead: false,
       unlisted: false,
       grants: [
@@ -509,7 +514,7 @@ test("an unfinished creation claims its workspace: nobody else creates it meanwh
   assert.equal(rowOf("2a2a2a2a2a2a3"), undefined);
   assert.equal((await createWorkspace(host.session, { creator: CREATOR, name: "Dup", operationId: "2a2a2a2a2a2a2" })).state, "completed");
   assert.equal(
-    await host.getRecord(groupMembersUri(host.groupDid), OPENSOCIAL_COLLECTION.membership, OTHER),
+    await host.getRecord(groupMembersUri(host.groupDid), ATGRP_COLLECTION.membership, OTHER),
     undefined,
   );
 });
@@ -525,7 +530,7 @@ test("a first write whose answer was lost is retried within the same attempt, wh
         spaceType: SPACE_TYPE.workspace,
         skey: "self",
         policy: {
-          $type: OPENSOCIAL_POLICY,
+          $type: ATGRP_POLICY,
           publicRead: false,
           unlisted: false,
           grants: [
@@ -561,7 +566,7 @@ test("the operator's recovery skips and audits a row it may not run, and recover
     assert.deepEqual(auditOf(skipped), ["operationResumeFailed"]);
   }
   assert.equal(
-    await host.getRecord(groupMembersUri(host.groupDid), OPENSOCIAL_COLLECTION.membership, OTHER),
+    await host.getRecord(groupMembersUri(host.groupDid), ATGRP_COLLECTION.membership, OTHER),
     undefined,
   );
 });
@@ -615,21 +620,26 @@ test("createWorkspace journals joinPolicy and publicMeta: false and preserves bo
 
   const metaPolicy = await host.getSpacePolicy(groupMetaUri(host.groupDid));
   assert.equal(metaPolicy?.publicRead, false, "meta/self policy must be private when publicMeta: false");
-  const profile = await host.getRecord<{ displayName: string; joinPolicy: string }>(
+  const profile = await host.getRecord<{ displayName: string }>(
     groupMetaUri(host.groupDid),
-    OPENSOCIAL_COLLECTION.profile,
+    ATGRP_COLLECTION.about,
     "self",
   );
   assert.equal(profile?.displayName, "Private Team");
-  assert.equal(profile?.joinPolicy, "approval");
+  const config = await host.getRecord<{ joinPolicy: string }>(
+    groupMetaUri(host.groupDid),
+    ATGRP_COLLECTION.config,
+    "self",
+  );
+  assert.equal(config?.joinPolicy, "approval");
 
   await assert.rejects(
     host.selfClient.query("com.atproto.repo.getRecord", {
       repo: host.groupDid,
-      collection: "group.opensocial.declaration",
+      collection: "org.atgrp.declaration",
       rkey: "self",
     }),
-    "public group.opensocial.declaration/self must be absent when publicMeta: false",
+    "public org.atgrp.declaration/self must be absent when publicMeta: false",
   );
 });
 

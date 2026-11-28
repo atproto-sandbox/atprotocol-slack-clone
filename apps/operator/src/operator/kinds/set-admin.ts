@@ -31,7 +31,7 @@ async function setAdmin(actor: OperatorActor, context: OperationContext, subject
       throw new OperationRejectedError("Only an active workspace member can become an admin.");
     }
     if (!state.roles.has("admin")) {
-      throw new OperationRejectedError("Role 'admin' does not exist in group.opensocial.members/self.");
+      throw new OperationRejectedError("Role 'admin' does not exist in org.atgrp.members/self.");
     }
   } else {
     const admins = effectiveHumanAdmins(state, groupDid);

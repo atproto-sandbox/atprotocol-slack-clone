@@ -22,28 +22,50 @@ import {
   joinGroup,
   leaveGroup,
   PASSIVE_JOIN_PHASES,
+  querySelfHistory,
   readGroupModerationConfig,
   reconcileLifecycle,
   restoreDeskSession,
   retryJoinOperation,
   signInDesk,
   signOutDesk,
+  submitAppeal,
   type DeskJoiningGroupEntry,
   type DeskLeavingGroupEntry,
   type DeskSessionConfig,
   type DeskShellDeps,
   type GroupModerationConfig,
+  type SelfModerationHistoryEvent,
 } from "@flock/shell";
 import { DeskChannelView } from "./desk-channel-view";
 import { DeskReportPanel, type ReportTarget } from "./desk-report-panel";
 import {
   clearPendingInvite,
+  isLegacyOpenSocialInviteUri,
   loadPendingInvite,
   parseInviteTarget,
   savePendingInvite,
 } from "./pending-invite";
 
 export type DeskPublicConfig = DeskSessionConfig;
+
+const LEGACY_INVITE_ERROR =
+  "Legacy group.opensocial.* invite URIs are no longer supported after the Atmosphere Groups (org.atgrp.*) upgrade. Ask the group for a fresh invite link or Group DID.";
+
+export function safeDeskWebsiteUrl(raw: string | undefined): string | null {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === "https:" || parsed.protocol === "http:") {
+      return parsed.toString();
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 export function DeskClient({
   config,
@@ -55,7 +77,9 @@ export function DeskClient({
   const [authState, setAuthState] = useState<"checking" | "signed_out" | "signed_in">("checking");
   const [handleInput, setHandleInput] = useState("");
   const [signingIn, setSigningIn] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(() =>
+    isLegacyOpenSocialInviteUri(initialInviteUri) ? LEGACY_INVITE_ERROR : null,
+  );
   const [syncError, setSyncError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -94,6 +118,16 @@ export function DeskClient({
   const [joinTargetInput, setJoinTargetInput] = useState("");
   const [joinMessageInput, setJoinMessageInput] = useState("");
   const [accountReportTarget, setAccountReportTarget] = useState<ReportTarget | null>(null);
+
+  const [selfModGroupDid, setSelfModGroupDid] = useState("");
+  const [selfModSubject, setSelfModSubject] = useState("");
+  const [selfModReason, setSelfModReason] = useState("");
+  const [selfModEvents, setSelfModEvents] = useState<SelfModerationHistoryEvent[]>([]);
+  const [selfModCursor, setSelfModCursor] = useState<string | undefined>(undefined);
+  const [selfModLoadedFor, setSelfModLoadedFor] = useState<string | null>(null);
+  const [selfModBusy, setSelfModBusy] = useState(false);
+  const [selfModNotice, setSelfModNotice] = useState<string | null>(null);
+  const [selfModError, setSelfModError] = useState<string | null>(null);
 
   const [refreshing, setRefreshing] = useState(false);
   const [channelLoading, setChannelLoading] = useState(false);
@@ -451,6 +485,10 @@ export function DeskClient({
 
   async function handleManualJoinSubmit(event: React.FormEvent) {
     event.preventDefault();
+    if (isLegacyOpenSocialInviteUri(joinTargetInput)) {
+      setError(LEGACY_INVITE_ERROR);
+      return;
+    }
     const parsed = parseInviteTarget(joinTargetInput, { allowBareDid: true });
     if (!parsed) {
       setError("Enter a valid workspace URI or group DID.");
@@ -464,6 +502,70 @@ export function DeskClient({
     if (ok) {
       setJoinTargetInput("");
       setJoinMessageInput("");
+    }
+  }
+
+  async function handleDeskSubmitAppeal(event: React.FormEvent) {
+    event.preventDefault();
+    const deps = depsRef.current;
+    if (!deps || !viewerDid) return;
+    const targetGroupDid = (selfModGroupDid.trim() || activeWorkspace?.groupDid || "").trim();
+    if (!targetGroupDid) {
+      setSelfModError("Enter a Group DID (did:plc:… or did:web:…).");
+      return;
+    }
+    const targetSubject = selfModSubject.trim() || viewerDid;
+    const reason = selfModReason.trim();
+    setSelfModBusy(true);
+    setSelfModError(null);
+    setSelfModNotice(null);
+    try {
+      const receipt = await submitAppeal(deps, {
+        groupDid: targetGroupDid,
+        subject: targetSubject,
+        ...(reason ? { reason } : {}),
+      });
+      setSelfModReason("");
+      setSelfModNotice(`Appeal submitted directly to Group Host (event ${receipt.eventId}).`);
+      const history = await querySelfHistory(deps, { groupDid: targetGroupDid });
+      setSelfModEvents(history.events);
+      setSelfModCursor(history.cursor);
+      setSelfModLoadedFor(targetGroupDid);
+    } catch (caught) {
+      setSelfModError(caught instanceof Error ? caught.message : "Could not submit appeal.");
+    } finally {
+      setSelfModBusy(false);
+    }
+  }
+
+  async function handleDeskLoadSelfHistory(append = false) {
+    const deps = depsRef.current;
+    if (!deps) return;
+    const targetGroupDid = (selfModGroupDid.trim() || activeWorkspace?.groupDid || "").trim();
+    if (!targetGroupDid) {
+      setSelfModError("Enter a Group DID (did:plc:… or did:web:…).");
+      return;
+    }
+    setSelfModBusy(true);
+    setSelfModError(null);
+    try {
+      const page = await querySelfHistory(deps, {
+        groupDid: targetGroupDid,
+        ...(append && selfModCursor ? { cursor: selfModCursor } : {}),
+      });
+      setSelfModEvents((prev) => {
+        if (!append) return page.events;
+        const byId = new Map<string, SelfModerationHistoryEvent>();
+        for (const item of prev) byId.set(item.eventId, item);
+        for (const item of page.events) byId.set(item.eventId, item);
+        return [...byId.values()];
+      });
+      setSelfModCursor(page.cursor);
+      setSelfModLoadedFor(targetGroupDid);
+    } catch (caught) {
+      setSelfModError(caught instanceof Error ? caught.message : "Could not load moderation history.");
+    } finally {
+      setSelfModBusy(false);
     }
   }
 
@@ -575,7 +677,7 @@ export function DeskClient({
               <Badge label="Independent Client" variant="neutral" />
             </HStack>
             <Text color="secondary">
-              Standalone OpenSocial &amp; ATProto Spaces client. Talks directly to your personal PDS and each Group Host with zero Operator server.
+              Standalone Atmosphere Groups &amp; ATProto Spaces client. Talks directly to your personal PDS and each Group Host with zero Operator server.
             </Text>
 
             {parsedInvite ? (
@@ -980,6 +1082,26 @@ export function DeskClient({
                 <p data-testid="desk-workspace-summary">
                   {`${activeWorkspace.members.length} active members · ${activeWorkspace.channels.length} channels · join policy: ${activeWorkspace.joinPolicy}`}
                 </p>
+                {activeWorkspace.description ? (
+                  <Text color="secondary" data-testid="desk-workspace-description">
+                    {activeWorkspace.description}
+                  </Text>
+                ) : null}
+                {(() => {
+                  const safeSite = safeDeskWebsiteUrl(activeWorkspace.website);
+                  return safeSite ? (
+                    <p>
+                      <a
+                        href={safeSite}
+                        target="_blank"
+                        rel="noreferrer noopener"
+                        data-testid="desk-workspace-website"
+                      >
+                        {safeSite}
+                      </a>
+                    </p>
+                  ) : null;
+                })()}
                 <p className="desk-mono" data-testid="desk-workspace-uri">
                   {activeWorkspace.uri}
                 </p>
@@ -1054,6 +1176,121 @@ export function DeskClient({
             </VStack>
           </Card>
         )}
+
+        <section aria-label="Appeals and moderation history" data-testid="desk-self-mod-panel">
+          <Card padding={4}>
+            <VStack gap={3}>
+              <Heading level={2}>Appeals &amp; Moderation Self-History</Heading>
+              <Text color="secondary">
+                Submit an appeal or view moderation events affecting your account directly on any Group Host (works for current and former members with zero Operator calls).
+              </Text>
+              {selfModError ? (
+                <Banner
+                  status="error"
+                  title={selfModError}
+                  role="alert"
+                  isDismissable
+                  onDismiss={() => setSelfModError(null)}
+                  data-testid="desk-self-mod-error"
+                />
+              ) : null}
+              {selfModNotice ? (
+                <Banner
+                  status="success"
+                  title={selfModNotice}
+                  isDismissable
+                  onDismiss={() => setSelfModNotice(null)}
+                  data-testid="desk-self-mod-notice"
+                />
+              ) : null}
+              <form onSubmit={(event) => void handleDeskSubmitAppeal(event)}>
+                <VStack gap={2}>
+                  <TextInput
+                    label="Group DID"
+                    placeholder={activeWorkspace?.groupDid ?? "did:plc:..."}
+                    value={selfModGroupDid}
+                    onChange={setSelfModGroupDid}
+                    width="100%"
+                    data-testid="desk-appeal-group-input"
+                  />
+                  <TextInput
+                    label="Subject DID or record URI (optional)"
+                    placeholder={viewerDid ? `Defaults to ${viewerDid}` : "did:plc:... or at:space/..."}
+                    value={selfModSubject}
+                    onChange={setSelfModSubject}
+                    width="100%"
+                    data-testid="desk-appeal-subject-input"
+                  />
+                  <TextInput
+                    label="Appeal reason"
+                    placeholder="Optional explanation for moderators"
+                    value={selfModReason}
+                    onChange={setSelfModReason}
+                    width="100%"
+                    data-testid="desk-appeal-reason-input"
+                  />
+                  <HStack gap={2}>
+                    <Button
+                      type="submit"
+                      variant="primary"
+                      size="sm"
+                      label={selfModBusy ? "Working…" : "Submit appeal"}
+                      isDisabled={selfModBusy}
+                      data-testid="desk-appeal-submit"
+                    />
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      label="Load my moderation history"
+                      isDisabled={selfModBusy}
+                      onClick={() => void handleDeskLoadSelfHistory(false)}
+                      data-testid="desk-self-history-load"
+                    />
+                  </HStack>
+                </VStack>
+              </form>
+              {selfModLoadedFor ? (
+                <div data-testid="desk-self-history-list">
+                  <VStack gap={2}>
+                    <Text color="secondary">
+                      {`History for ${selfModLoadedFor} (${selfModEvents.length} event${selfModEvents.length === 1 ? "" : "s"})`}
+                    </Text>
+                    {selfModEvents.length === 0 ? (
+                      <Text color="secondary">No moderation events recorded for your account.</Text>
+                    ) : (
+                      <ul>
+                        {selfModEvents.map((ev) => (
+                          <li key={ev.eventId} data-testid="desk-self-history-item">
+                            <span className="desk-mono">{String(ev.event.$type ?? "event")}</span>
+                            {" · "}
+                            <span className="desk-mono">{ev.subject}</span>
+                            {typeof ev.event.reason === "string" && ev.event.reason ? ` — ${ev.event.reason}` : ""}
+                            {typeof ev.event.val === "string" && ev.event.val
+                              ? ` [${ev.event.neg === true ? "neg " : ""}${ev.event.val}]`
+                              : ""}
+                            {" · "}
+                            <span>{ev.createdAt}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    {selfModCursor ? (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        label="Load more history"
+                        isDisabled={selfModBusy}
+                        onClick={() => void handleDeskLoadSelfHistory(true)}
+                      />
+                    ) : null}
+                  </VStack>
+                </div>
+              ) : null}
+            </VStack>
+          </Card>
+        </section>
       </main>
     </div>
   );

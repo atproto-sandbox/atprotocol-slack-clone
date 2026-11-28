@@ -6,7 +6,7 @@ import { DmClient } from "./dm/dm-client";
 import { readIndependentChannelPage, type IndependentChannelPage } from "@flock/reader/independent";
 import { readIndependentDmConversation } from "@flock/reader/independent-dm";
 import { reactionRecordKey, SELF_SKEY, spaceRecordUri } from "@flock/protocol/keys";
-import { ATPROTO_SPACE_COLLECTION, COLLECTION, OPENSOCIAL_COLLECTION } from "@flock/protocol/nsids";
+import { ATPROTO_SPACE_COLLECTION, COLLECTION, ATGRP_COLLECTION } from "@flock/protocol/nsids";
 import { AUTHORITY, createWorkspace, key, transportFor, writeMessage } from "./testing/engine-fixture";
 import { FakeNetwork } from "@flock/testing/fake-network";
 
@@ -88,7 +88,7 @@ test("a channel page matches the independent reader through writes, replies, rea
   await network.clientFor(AUTHORITY).procedure("com.atproto.space.deleteRecord", {
     space: fixture.members,
     repo: AUTHORITY,
-    collection: OPENSOCIAL_COLLECTION.membership,
+    collection: ATGRP_COLLECTION.membership,
     rkey: CAROL,
   });
   network.advanceClock(engine.sync.options.truthIntervalMs);
@@ -99,11 +99,11 @@ test("a channel page matches the independent reader through writes, replies, rea
   await network.clientFor(AUTHORITY).procedure("com.atproto.space.putRecord", {
     space: fixture.members,
     repo: AUTHORITY,
-    collection: OPENSOCIAL_COLLECTION.membership,
+    collection: ATGRP_COLLECTION.membership,
     rkey: dave,
-    record: { $type: OPENSOCIAL_COLLECTION.membership, roles: ["member"], createdAt: "2026-11-10T12:00:00.000Z" },
+    record: { $type: ATGRP_COLLECTION.membership, roles: ["member"], createdAt: "2026-11-10T12:00:00.000Z" },
   });
-  await network.writeAs(dave, fixture.members, OPENSOCIAL_COLLECTION.acceptance, SELF_SKEY, { createdAt: "2026-11-10T12:00:00.000Z" });
+  await network.writeAs(dave, fixture.members, ATGRP_COLLECTION.confirmation, SELF_SKEY, { createdAt: "2026-11-10T12:00:00.000Z" });
   await writeMessage(network, dave, space, 50);
   await compare("a new writer");
 });

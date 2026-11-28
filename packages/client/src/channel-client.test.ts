@@ -6,7 +6,7 @@ import { ChannelUnavailableError } from "./errors";
 import { key, transportFor, createWorkspace, AUTHORITY, writeMessage } from "./testing/engine-fixture";
 import { FakeNetwork } from "@flock/testing/fake-network";
 import { channelRoleKey, reactionRecordKey, spaceRecordUri } from "@flock/protocol/keys";
-import { ATPROTO_SPACE_COLLECTION, COLLECTION, OPENSOCIAL_COLLECTION } from "@flock/protocol/nsids";
+import { ATPROTO_SPACE_COLLECTION, COLLECTION, ATGRP_COLLECTION } from "@flock/protocol/nsids";
 
 // The channel rows of the route table ("What the member routes do today"): each rule the routes enforce, now owned by
 // `ChannelClient`, on the fake network.
@@ -132,9 +132,9 @@ test("roster lists a private channel's members from OpenSocial role grants + mem
   await network.clientFor(AUTHORITY).procedure("com.atproto.space.putRecord", {
     space: fixture.members,
     repo: AUTHORITY,
-    collection: OPENSOCIAL_COLLECTION.membership,
+    collection: ATGRP_COLLECTION.membership,
     rkey: BOB,
-    record: { $type: OPENSOCIAL_COLLECTION.membership, roles: ["member"], createdAt: "2026-11-10T12:00:00.000Z" },
+    record: { $type: ATGRP_COLLECTION.membership, roles: ["member"], createdAt: "2026-11-10T12:00:00.000Z" },
   });
   assert.deepEqual(await alice.channels.roster({ workspace: fixture.workspace, skey: "secret" }), [ALICE]);
 });
@@ -158,9 +158,9 @@ test("losing access to a channel drops its copy", async () => {
   await network.clientFor(AUTHORITY).procedure("com.atproto.space.putRecord", {
     space: fixture.members,
     repo: AUTHORITY,
-    collection: OPENSOCIAL_COLLECTION.membership,
+    collection: ATGRP_COLLECTION.membership,
     rkey: ALICE,
-    record: { $type: OPENSOCIAL_COLLECTION.membership, roles: ["member"], createdAt: "2026-11-10T12:00:00.000Z" },
+    record: { $type: ATGRP_COLLECTION.membership, roles: ["member"], createdAt: "2026-11-10T12:00:00.000Z" },
   });
   network.advanceClock(11 * 60 * 1000);
   await assert.rejects(alice.channels.readPage(ref("secret")));
@@ -177,9 +177,9 @@ test("after the account leaves a channel its cached credential and held copy go 
   await network.clientFor(AUTHORITY).procedure("com.atproto.space.putRecord", {
     space: fixture.members,
     repo: AUTHORITY,
-    collection: OPENSOCIAL_COLLECTION.membership,
+    collection: ATGRP_COLLECTION.membership,
     rkey: ALICE,
-    record: { $type: OPENSOCIAL_COLLECTION.membership, roles: ["member"], createdAt: "2026-11-10T12:00:00.000Z" },
+    record: { $type: ATGRP_COLLECTION.membership, roles: ["member"], createdAt: "2026-11-10T12:00:00.000Z" },
   });
   await alice.channels.left(ref("secret"));
   assert.deepEqual(await alice.sync.store.records(space, COLLECTION.message), [], "the held copy was dropped");
@@ -208,7 +208,7 @@ test("a write is refused once the member is removed, even while a cached credent
   await network.clientFor(AUTHORITY).procedure("com.atproto.space.deleteRecord", {
     space: fixture.members,
     repo: AUTHORITY,
-    collection: OPENSOCIAL_COLLECTION.membership,
+    collection: ATGRP_COLLECTION.membership,
     rkey: ALICE,
   });
   await assert.rejects(alice.channels.send(ref(), "after removal"));
@@ -259,9 +259,9 @@ test("roster refuses a private channel whose roster exceeds the supported member
     await network.clientFor(AUTHORITY).procedure("com.atproto.space.putRecord", {
       space: fixture.members,
       repo: AUTHORITY,
-      collection: OPENSOCIAL_COLLECTION.membership,
+      collection: ATGRP_COLLECTION.membership,
       rkey: did,
-      record: { $type: OPENSOCIAL_COLLECTION.membership, roles: ["member", privRole], createdAt: "2026-11-10T12:00:00.000Z" },
+      record: { $type: ATGRP_COLLECTION.membership, roles: ["member", privRole], createdAt: "2026-11-10T12:00:00.000Z" },
     });
   }
   await assert.rejects(alice.channels.roster(ref("secret")), /exceeds 200 members/);
@@ -373,7 +373,7 @@ test("getMessage gates target and parent authors against sync.writers (Carbon R2
   await network.clientFor(AUTHORITY).procedure("com.atproto.space.deleteRecord", {
     space: fixture.members,
     repo: AUTHORITY,
-    collection: OPENSOCIAL_COLLECTION.membership,
+    collection: ATGRP_COLLECTION.membership,
     rkey: BOB,
   });
   await inspectedAlice.sync.markSpaceStale(space);
@@ -446,11 +446,11 @@ test("moderation labels withhold !takedown messages, replies, reactions, and tak
   await owner.procedure("com.atproto.space.putRecord", {
     space: fixture.members,
     repo: AUTHORITY,
-    collection: OPENSOCIAL_COLLECTION.membership,
+    collection: ATGRP_COLLECTION.membership,
     rkey: carol,
-    record: { $type: OPENSOCIAL_COLLECTION.membership, roles: ["member"], createdAt: "2026-11-10T12:00:00.000Z" },
+    record: { $type: ATGRP_COLLECTION.membership, roles: ["member"], createdAt: "2026-11-10T12:00:00.000Z" },
   });
-  await network.writeAs(carol, fixture.members, OPENSOCIAL_COLLECTION.acceptance, "self", {
+  await network.writeAs(carol, fixture.members, ATGRP_COLLECTION.confirmation, "self", {
     group: AUTHORITY,
     createdAt: "2026-11-10T12:00:01.000Z",
   });
@@ -581,7 +581,7 @@ test("private channel roster excludes !takedown members and fails closed on miss
         value: {
           $type: ATPROTO_SPACE_COLLECTION.spacePolicy,
           policy: {
-            $type: "group.opensocial.policy",
+            $type: "org.atgrp.policy",
             grants: [
               { role: "admin", read: true, write: true },
               { role: "admin", read: true, write: false }, // duplicate role grant -> invalid!

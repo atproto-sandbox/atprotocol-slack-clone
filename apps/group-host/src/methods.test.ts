@@ -43,18 +43,18 @@ test("OpenSocial requestJoin 6-case decision table (with & without Idempotency-K
     const token = flow.tokenResponse!.access_token;
     const groupDid = flow.tokenResponse!.sub;
     const aud = `${groupDid}#atproto_pds`;
-    const metaSpace = `at:space/${groupDid}/group.opensocial.meta/self`;
-    const membersSpace = `at:space/${groupDid}/group.opensocial.members/self`;
+    const metaSpace = `at:space/${groupDid}/org.atgrp.meta/self`;
+    const membersSpace = `at:space/${groupDid}/org.atgrp.members/self`;
 
     // 0. Guard checks: `iss === groupDid` (`CannotTargetGroupSelf`), `75s` lifetime cap, and `service_jwt_jti` replay!
     const groupSigKey = await gh.repoStore.getGroupSigningKey(groupDid);
     const selfJwt = await createServiceJwt({
       iss: groupDid,
       aud,
-      lxm: "group.opensocial.requestJoin",
+      lxm: "org.atgrp.requestJoin",
       keypair: groupSigKey,
     });
-    const selfJoinRes = await fetch(`${gh.url}/xrpc/group.opensocial.requestJoin`, {
+    const selfJoinRes = await fetch(`${gh.url}/xrpc/org.atgrp.requestJoin`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${selfJwt}` },
       body: JSON.stringify({ group: groupDid }),
@@ -62,8 +62,8 @@ test("OpenSocial requestJoin 6-case decision table (with & without Idempotency-K
     assert.equal(selfJoinRes.status, 400);
     assert.equal(((await selfJoinRes.json()) as { error: string }).error, "CannotTargetGroupSelf");
 
-    const longExpJwt = await bob.signServiceJwt(aud, "group.opensocial.requestJoin", 120);
-    const longExpRes = await fetch(`${gh.url}/xrpc/group.opensocial.requestJoin`, {
+    const longExpJwt = await bob.signServiceJwt(aud, "org.atgrp.requestJoin", 120);
+    const longExpRes = await fetch(`${gh.url}/xrpc/org.atgrp.requestJoin`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${longExpJwt}` },
       body: JSON.stringify({ group: groupDid }),
@@ -74,11 +74,11 @@ test("OpenSocial requestJoin 6-case decision table (with & without Idempotency-K
     gh.db
       .prepare("INSERT INTO known_app_subject (group_did, subject_did, created_at) VALUES (?, ?, ?)")
       .run(groupDid, bot.did, Date.now());
-    const botJoinRes = await fetch(`${gh.url}/xrpc/group.opensocial.requestJoin`, {
+    const botJoinRes = await fetch(`${gh.url}/xrpc/org.atgrp.requestJoin`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${await bot.signServiceJwt(aud, "group.opensocial.requestJoin")}`,
+        authorization: `Bearer ${await bot.signServiceJwt(aud, "org.atgrp.requestJoin")}`,
       },
       body: JSON.stringify({ group: groupDid }),
     });
@@ -86,11 +86,11 @@ test("OpenSocial requestJoin 6-case decision table (with & without Idempotency-K
     assert.equal(((await botJoinRes.json()) as { error: string }).error, "SubjectIsAppServicePrincipal");
 
     // Case D: `joinPolicy === "invite"` without invite -> `400 JoinClosed` (both headerless & with Idempotency-Key)
-    const closedRes = await fetch(`${gh.url}/xrpc/group.opensocial.requestJoin`, {
+    const closedRes = await fetch(`${gh.url}/xrpc/org.atgrp.requestJoin`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${await bob.signServiceJwt(aud, "group.opensocial.requestJoin")}`,
+        authorization: `Bearer ${await bob.signServiceJwt(aud, "org.atgrp.requestJoin")}`,
         "idempotency-key": "op-closed-1",
       },
       body: JSON.stringify({ group: groupDid }),
@@ -100,7 +100,7 @@ test("OpenSocial requestJoin 6-case decision table (with & without Idempotency-K
 
     // Case B + Invite Delivery Failure -> `retry-invite-delivery` -> Author-Scoped 4-Key Redemption!
     pds.failInviteDeliveryForDid.add(bob.did);
-    const bobInvSpace = `at:space/${bob.did}/group.opensocial.invites/self`;
+    const bobInvSpace = `at:space/${bob.did}/org.atgrp.inbox/self`;
     const invRkey = "3jzfcijpj2z2a";
     const putInvRes = await dpop.fetchWithDpop(`${gh.url}/xrpc/com.atproto.space.putRecord`, {
       method: "POST",
@@ -109,17 +109,17 @@ test("OpenSocial requestJoin 6-case decision table (with & without Idempotency-K
       body: JSON.stringify({
         space: bobInvSpace,
         repo: groupDid,
-        collection: "group.opensocial.invite",
+        collection: "org.atgrp.invite",
         rkey: invRkey,
         record: {
-          $type: "group.opensocial.invite",
+          $type: "org.atgrp.invite",
           createdBy: alice.did,
           createdAt: new Date().toISOString(),
         },
       }),
     });
     assert.equal(putInvRes.status, 200);
-    const bobInviteUri = `${bobInvSpace}/${groupDid}/group.opensocial.invite/${invRkey}`;
+    const bobInviteUri = `${bobInvSpace}/${groupDid}/org.atgrp.invite/${invRkey}`;
 
     // Drain outbox while failing -> status becomes `pending`/`failed`, then clear failure & call `retry-invite-delivery`!
     for (let i = 0; i < 6; i += 1) {
@@ -154,11 +154,11 @@ test("OpenSocial requestJoin 6-case decision table (with & without Idempotency-K
     assert.equal(deliveries2[0]?.status, "delivered");
 
     // Carol cannot redeem Bob's invite (`400 InvalidInvite`)!
-    const carolStealInvite = await fetch(`${gh.url}/xrpc/group.opensocial.requestJoin`, {
+    const carolStealInvite = await fetch(`${gh.url}/xrpc/org.atgrp.requestJoin`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${await carol.signServiceJwt(aud, "group.opensocial.requestJoin")}`,
+        authorization: `Bearer ${await carol.signServiceJwt(aud, "org.atgrp.requestJoin")}`,
       },
       body: JSON.stringify({ group: groupDid, invite: bobInviteUri }),
     });
@@ -166,11 +166,11 @@ test("OpenSocial requestJoin 6-case decision table (with & without Idempotency-K
     assert.equal(((await carolStealInvite.json()) as { error: string }).error, "InvalidInvite");
 
     // Bob redeems his invite WITHOUT `Idempotency-Key` (canonical third-party OpenSocial client!) -> `200 admitted`!
-    const bobRedeemRes = await fetch(`${gh.url}/xrpc/group.opensocial.requestJoin`, {
+    const bobRedeemRes = await fetch(`${gh.url}/xrpc/org.atgrp.requestJoin`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${await bob.signServiceJwt(aud, "group.opensocial.requestJoin")}`,
+        authorization: `Bearer ${await bob.signServiceJwt(aud, "org.atgrp.requestJoin")}`,
       },
       body: JSON.stringify({ group: groupDid, invite: bobInviteUri }),
     });
@@ -179,22 +179,22 @@ test("OpenSocial requestJoin 6-case decision table (with & without Idempotency-K
     assert.equal(bobRedeemBody.status, "admitted");
 
     // Case A1: Bob is already a member -> calling `requestJoin` with `Idempotency-Key` returns `admitted`, and mismatched params on same key -> `409 IdempotencyParameterMismatch`!
-    const bobAgain = await fetch(`${gh.url}/xrpc/group.opensocial.requestJoin`, {
+    const bobAgain = await fetch(`${gh.url}/xrpc/org.atgrp.requestJoin`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${await bob.signServiceJwt(aud, "group.opensocial.requestJoin")}`,
+        authorization: `Bearer ${await bob.signServiceJwt(aud, "org.atgrp.requestJoin")}`,
         "idempotency-key": "op-bob-a1",
       },
       body: JSON.stringify({ group: groupDid }),
     });
     assert.equal(bobAgain.status, 200);
 
-    const bobParamMismatch = await fetch(`${gh.url}/xrpc/group.opensocial.requestJoin`, {
+    const bobParamMismatch = await fetch(`${gh.url}/xrpc/org.atgrp.requestJoin`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${await bob.signServiceJwt(aud, "group.opensocial.requestJoin")}`,
+        authorization: `Bearer ${await bob.signServiceJwt(aud, "org.atgrp.requestJoin")}`,
         "idempotency-key": "op-bob-a1",
       },
       body: JSON.stringify({ group: groupDid, message: "different" }),
@@ -210,21 +210,19 @@ test("OpenSocial requestJoin 6-case decision table (with & without Idempotency-K
       body: JSON.stringify({
         space: metaSpace,
         repo: groupDid,
-        collection: "group.opensocial.profile",
+        collection: "org.atgrp.config",
         rkey: "self",
         record: {
-          $type: "group.opensocial.profile",
-          displayName: "Join Table Group",
+          $type: "org.atgrp.config",
           joinPolicy: "custom-future-policy",
-          createdAt: new Date().toISOString(),
         },
       }),
     });
-    const unknownPolicyRes = await fetch(`${gh.url}/xrpc/group.opensocial.requestJoin`, {
+    const unknownPolicyRes = await fetch(`${gh.url}/xrpc/org.atgrp.requestJoin`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${await carol.signServiceJwt(aud, "group.opensocial.requestJoin")}`,
+        authorization: `Bearer ${await carol.signServiceJwt(aud, "org.atgrp.requestJoin")}`,
       },
       body: JSON.stringify({ group: groupDid }),
     });
@@ -239,22 +237,20 @@ test("OpenSocial requestJoin 6-case decision table (with & without Idempotency-K
       body: JSON.stringify({
         space: metaSpace,
         repo: groupDid,
-        collection: "group.opensocial.profile",
+        collection: "org.atgrp.config",
         rkey: "self",
         record: {
-          $type: "group.opensocial.profile",
-          displayName: "Join Table Group",
+          $type: "org.atgrp.config",
           joinPolicy: "approval",
-          createdAt: new Date().toISOString(),
         },
       }),
     });
 
-    const carolPend1 = await fetch(`${gh.url}/xrpc/group.opensocial.requestJoin`, {
+    const carolPend1 = await fetch(`${gh.url}/xrpc/org.atgrp.requestJoin`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${await carol.signServiceJwt(aud, "group.opensocial.requestJoin")}`,
+        authorization: `Bearer ${await carol.signServiceJwt(aud, "org.atgrp.requestJoin")}`,
         "idempotency-key": "op-carol-1",
       },
       body: JSON.stringify({ group: groupDid, message: "Please let me in" }),
@@ -263,22 +259,22 @@ test("OpenSocial requestJoin 6-case decision table (with & without Idempotency-K
     assert.equal(((await carolPend1.json()) as { status: string }).status, "pending");
 
     // E2: Second `operationId` from Carol creates an alias without duplicating `join_request`!
-    const carolPend2 = await fetch(`${gh.url}/xrpc/group.opensocial.requestJoin`, {
+    const carolPend2 = await fetch(`${gh.url}/xrpc/org.atgrp.requestJoin`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${await carol.signServiceJwt(aud, "group.opensocial.requestJoin")}`,
+        authorization: `Bearer ${await carol.signServiceJwt(aud, "org.atgrp.requestJoin")}`,
         "idempotency-key": "op-carol-2",
       },
       body: JSON.stringify({ group: groupDid, message: "Second device" }),
     });
     assert.equal(carolPend2.status, 200);
 
-    const davePend = await fetch(`${gh.url}/xrpc/group.opensocial.requestJoin`, {
+    const davePend = await fetch(`${gh.url}/xrpc/org.atgrp.requestJoin`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${await dave.signServiceJwt(aud, "group.opensocial.requestJoin")}`,
+        authorization: `Bearer ${await dave.signServiceJwt(aud, "org.atgrp.requestJoin")}`,
         "idempotency-key": "op-dave-1",
       },
       body: JSON.stringify({ group: groupDid, message: "Dave here" }),
@@ -287,7 +283,7 @@ test("OpenSocial requestJoin 6-case decision table (with & without Idempotency-K
 
     // Deterministic `listJoinRequests` pagination (`limit=1`)
     const page1Res = await dpop.fetchWithDpop(
-      `${gh.url}/xrpc/group.opensocial.listJoinRequests?limit=1`,
+      `${gh.url}/xrpc/org.atgrp.listJoinRequests?limit=1`,
       { method: "GET", accessToken: token },
     );
     assert.equal(page1Res.status, 200);
@@ -297,7 +293,7 @@ test("OpenSocial requestJoin 6-case decision table (with & without Idempotency-K
     assert.ok(page1.cursor);
 
     const page2Res = await dpop.fetchWithDpop(
-      `${gh.url}/xrpc/group.opensocial.listJoinRequests?limit=1&cursor=${encodeURIComponent(page1.cursor!)}`,
+      `${gh.url}/xrpc/org.atgrp.listJoinRequests?limit=1&cursor=${encodeURIComponent(page1.cursor!)}`,
       { method: "GET", accessToken: token },
     );
     const page2 = (await page2Res.json()) as { requests: Array<{ member: string }>; cursor?: string };
@@ -306,21 +302,21 @@ test("OpenSocial requestJoin 6-case decision table (with & without Idempotency-K
     assert.equal(page2.cursor, undefined);
 
     // Dave cancels his join request -> `200`, second cancel -> `400 JoinRequestNotFound`, and late admin `If-Join-Request-Present: true` -> `409 JoinRequestNotFound`!
-    const daveCancel1 = await fetch(`${gh.url}/xrpc/group.opensocial.cancelJoinRequest`, {
+    const daveCancel1 = await fetch(`${gh.url}/xrpc/org.atgrp.cancelJoinRequest`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${await dave.signServiceJwt(aud, "group.opensocial.cancelJoinRequest")}`,
+        authorization: `Bearer ${await dave.signServiceJwt(aud, "org.atgrp.cancelJoinRequest")}`,
       },
       body: JSON.stringify({ group: groupDid }),
     });
     assert.equal(daveCancel1.status, 200);
 
-    const daveCancel2 = await fetch(`${gh.url}/xrpc/group.opensocial.cancelJoinRequest`, {
+    const daveCancel2 = await fetch(`${gh.url}/xrpc/org.atgrp.cancelJoinRequest`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${await dave.signServiceJwt(aud, "group.opensocial.cancelJoinRequest")}`,
+        authorization: `Bearer ${await dave.signServiceJwt(aud, "org.atgrp.cancelJoinRequest")}`,
       },
       body: JSON.stringify({ group: groupDid }),
     });
@@ -337,9 +333,9 @@ test("OpenSocial requestJoin 6-case decision table (with & without Idempotency-K
       body: JSON.stringify({
         space: membersSpace,
         repo: groupDid,
-        collection: "group.opensocial.membership",
+        collection: "org.atgrp.membership",
         rkey: dave.did,
-        record: { $type: "group.opensocial.membership", roles: ["member"], createdAt: new Date().toISOString() },
+        record: { $type: "org.atgrp.membership", roles: ["member"], createdAt: new Date().toISOString() },
       }),
     });
     assert.equal(lateApproveDave.status, 409);
@@ -356,9 +352,9 @@ test("OpenSocial requestJoin 6-case decision table (with & without Idempotency-K
       body: JSON.stringify({
         space: membersSpace,
         repo: groupDid,
-        collection: "group.opensocial.membership",
+        collection: "org.atgrp.membership",
         rkey: carol.did,
-        record: { $type: "group.opensocial.membership", roles: ["member"], createdAt: new Date().toISOString() },
+        record: { $type: "org.atgrp.membership", roles: ["member"], createdAt: new Date().toISOString() },
       }),
     });
     assert.equal(approveCarol.status, 200);
@@ -367,7 +363,7 @@ test("OpenSocial requestJoin 6-case decision table (with & without Idempotency-K
       `${gh.url}/group-member/join-status?group=${encodeURIComponent(groupDid)}&operationId=op-carol-1`,
       {
         headers: {
-          authorization: `Bearer ${await carol.signServiceJwt(aud, "group.opensocial.requestJoin")}`,
+          authorization: `Bearer ${await carol.signServiceJwt(aud, "org.atgrp.requestJoin")}`,
         },
       },
     );
@@ -389,11 +385,11 @@ test("OpenSocial requestJoin 6-case decision table (with & without Idempotency-K
       }
     })();
 
-    const quotaRes = await fetch(`${gh.url}/xrpc/group.opensocial.requestJoin`, {
+    const quotaRes = await fetch(`${gh.url}/xrpc/org.atgrp.requestJoin`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${await dave.signServiceJwt(aud, "group.opensocial.requestJoin")}`,
+        authorization: `Bearer ${await dave.signServiceJwt(aud, "org.atgrp.requestJoin")}`,
         "idempotency-key": "op-dave-over-quota",
       },
       body: JSON.stringify({ group: groupDid }),
@@ -445,7 +441,7 @@ test("leaveGroup If-Match-Membership-Incarnation, Flock sole-member reversible d
       body: JSON.stringify({
         spaceType: "new.flock.workspace",
         skey: "self",
-        policy: { $type: "group.opensocial.policy", publicRead: false, grants: [{ role: "member", read: true, write: false }] },
+        policy: { $type: "org.atgrp.policy", publicRead: false, grants: [{ role: "member", read: true, write: false }] },
       }),
     });
     await dpop.fetchWithDpop(`${gh.url}/xrpc/com.atproto.space.putRecord`, {
@@ -467,17 +463,17 @@ test("leaveGroup If-Match-Membership-Incarnation, Flock sole-member reversible d
       body: JSON.stringify({
         spaceType: "new.flock.channel",
         skey: "general",
-        policy: { $type: "group.opensocial.policy", publicRead: false, grants: [{ role: "member", read: true, write: true }] },
+        policy: { $type: "org.atgrp.policy", publicRead: false, grants: [{ role: "member", read: true, write: true }] },
       }),
     });
 
     // Admit Bob & Carol via open `requestJoin`
     for (const u of [bob, carol]) {
-      const r = await fetch(`${gh.url}/xrpc/group.opensocial.requestJoin`, {
+      const r = await fetch(`${gh.url}/xrpc/org.atgrp.requestJoin`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          authorization: `Bearer ${await u.signServiceJwt(aud, "group.opensocial.requestJoin")}`,
+          authorization: `Bearer ${await u.signServiceJwt(aud, "org.atgrp.requestJoin")}`,
         },
         body: JSON.stringify({ group: groupDid }),
       });
@@ -502,16 +498,16 @@ test("leaveGroup If-Match-Membership-Incarnation, Flock sole-member reversible d
 
     // Moderation:
     // (a) Implicit `subject === groupDid` account report succeeds (`200`)!
-    const repGroupSelf = await fetch(`${gh.url}/xrpc/group.opensocial.createReport`, {
+    const repGroupSelf = await fetch(`${gh.url}/xrpc/org.atgrp.mod.submitReport`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${await bob.signServiceJwt(aud, "group.opensocial.createReport")}`,
+        authorization: `Bearer ${await bob.signServiceJwt(aud, "org.atgrp.mod.submitReport")}`,
       },
       body: JSON.stringify({
         group: groupDid,
         subject: groupDid,
-        reasonType: "other",
+        reasonType: "org.atgrp.mod.defs#reasonOther",
         reason: "Reporting group metadata",
       }),
     });
@@ -521,37 +517,37 @@ test("leaveGroup If-Match-Membership-Incarnation, Flock sole-member reversible d
     const bobMsgUri = `${chanSpace}/${bob.did}/new.flock.message/3jzfcijpj2z2a`;
     const carolFakeMsgUri = `${chanSpace}/${carol.did}/new.flock.message/3jzfcijpj2z2a`;
 
-    const repBobMsg = await fetch(`${gh.url}/xrpc/group.opensocial.createReport`, {
+    const repBobMsg = await fetch(`${gh.url}/xrpc/org.atgrp.mod.submitReport`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${await alice.signServiceJwt(aud, "group.opensocial.createReport")}`,
+        authorization: `Bearer ${await alice.signServiceJwt(aud, "org.atgrp.mod.submitReport")}`,
       },
       body: JSON.stringify({
         group: groupDid,
         subject: bobMsgUri,
-        reasonType: "spam",
+        reasonType: "org.atgrp.mod.defs#reasonSpam",
       }),
     });
     assert.equal(repBobMsg.status, 200);
 
-    const repCarolMsg = await fetch(`${gh.url}/xrpc/group.opensocial.createReport`, {
+    const repCarolMsg = await fetch(`${gh.url}/xrpc/org.atgrp.mod.submitReport`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${await alice.signServiceJwt(aud, "group.opensocial.createReport")}`,
+        authorization: `Bearer ${await alice.signServiceJwt(aud, "org.atgrp.mod.submitReport")}`,
       },
       body: JSON.stringify({
         group: groupDid,
         subject: carolFakeMsgUri,
-        reasonType: "spam",
+        reasonType: "org.atgrp.mod.defs#reasonSpam",
       }),
     });
     assert.equal(repCarolMsg.status, 400);
     assert.equal(((await repCarolMsg.json()) as { error: string }).error, "InvalidSubject");
 
-    // `resolveModSubject` + `listModSubjects` + `getModSubjectHistory` pagination
-    const resolveRes = await dpop.fetchWithDpop(`${gh.url}/xrpc/group.opensocial.resolveModSubject`, {
+    // `updateSubject` + `querySubjects` + `querySubjectHistory` pagination
+    const resolveRes = await dpop.fetchWithDpop(`${gh.url}/xrpc/org.atgrp.mod.updateSubject`, {
       method: "POST",
       accessToken: token,
       headers: { "content-type": "application/json" },
@@ -564,28 +560,30 @@ test("leaveGroup If-Match-Membership-Incarnation, Flock sole-member reversible d
     assert.equal(resolveRes.status, 200);
 
     const hist1Res = await dpop.fetchWithDpop(
-      `${gh.url}/xrpc/group.opensocial.getModSubjectHistory?subject=${encodeURIComponent(bobMsgUri)}&limit=1`,
+      `${gh.url}/xrpc/org.atgrp.mod.querySubjectHistory?subject=${encodeURIComponent(bobMsgUri)}&limit=1`,
       { method: "GET", accessToken: token },
     );
     assert.equal(hist1Res.status, 200);
-    const hist1 = (await hist1Res.json()) as { events: Array<{ id: string }>; cursor?: string };
+    const hist1 = (await hist1Res.json()) as { events: Array<{ eventId: string }>; cursor?: string };
     assert.equal(hist1.events.length, 1);
+    assert.ok(hist1.events[0]?.eventId.startsWith("ev-"));
     assert.ok(hist1.cursor);
 
     const hist2Res = await dpop.fetchWithDpop(
-      `${gh.url}/xrpc/group.opensocial.getModSubjectHistory?subject=${encodeURIComponent(bobMsgUri)}&limit=1&cursor=${encodeURIComponent(hist1.cursor!)}`,
+      `${gh.url}/xrpc/org.atgrp.mod.querySubjectHistory?subject=${encodeURIComponent(bobMsgUri)}&limit=1&cursor=${encodeURIComponent(hist1.cursor!)}`,
       { method: "GET", accessToken: token },
     );
-    const hist2 = (await hist2Res.json()) as { events: Array<{ id: string }>; cursor?: string };
+    const hist2 = (await hist2Res.json()) as { events: Array<{ eventId: string }>; cursor?: string };
     assert.equal(hist2.events.length, 1);
+    assert.ok(hist2.events[0]?.eventId.startsWith("ev-"));
     assert.equal(hist2.cursor, undefined);
 
     // 2. `leaveGroup` with wrong `If-Match-Membership-Incarnation` -> `409 MembershipIncarnationMismatch`!
-    const badIncLeave = await fetch(`${gh.url}/xrpc/group.opensocial.leaveGroup`, {
+    const badIncLeave = await fetch(`${gh.url}/xrpc/org.atgrp.leaveGroup`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${await bob.signServiceJwt(aud, "group.opensocial.leaveGroup")}`,
+        authorization: `Bearer ${await bob.signServiceJwt(aud, "org.atgrp.leaveGroup")}`,
         "if-match-membership-incarnation": "stale-incarnation-id",
       },
       body: JSON.stringify({ group: groupDid }),
@@ -595,11 +593,11 @@ test("leaveGroup If-Match-Membership-Incarnation, Flock sole-member reversible d
 
     // Bob and Carol leave cleanly
     for (const u of [bob, carol]) {
-      const lv = await fetch(`${gh.url}/xrpc/group.opensocial.leaveGroup`, {
+      const lv = await fetch(`${gh.url}/xrpc/org.atgrp.leaveGroup`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          authorization: `Bearer ${await u.signServiceJwt(aud, "group.opensocial.leaveGroup")}`,
+          authorization: `Bearer ${await u.signServiceJwt(aud, "org.atgrp.leaveGroup")}`,
         },
         body: JSON.stringify({ group: groupDid }),
       });
@@ -607,21 +605,21 @@ test("leaveGroup If-Match-Membership-Incarnation, Flock sole-member reversible d
     }
 
     // Sole-member Alice leaves Flock workspace -> reversible deactivation (`activated = 0`, `left_deactivated`, idempotent replay `200`)!
-    const aliceLeave1 = await fetch(`${gh.url}/xrpc/group.opensocial.leaveGroup`, {
+    const aliceLeave1 = await fetch(`${gh.url}/xrpc/org.atgrp.leaveGroup`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${await alice.signServiceJwt(aud, "group.opensocial.leaveGroup")}`,
+        authorization: `Bearer ${await alice.signServiceJwt(aud, "org.atgrp.leaveGroup")}`,
       },
       body: JSON.stringify({ group: groupDid }),
     });
     assert.equal(aliceLeave1.status, 200);
 
-    const aliceLeaveReplay = await fetch(`${gh.url}/xrpc/group.opensocial.leaveGroup`, {
+    const aliceLeaveReplay = await fetch(`${gh.url}/xrpc/org.atgrp.leaveGroup`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${await alice.signServiceJwt(aud, "group.opensocial.leaveGroup")}`,
+        authorization: `Bearer ${await alice.signServiceJwt(aud, "org.atgrp.leaveGroup")}`,
       },
       body: JSON.stringify({ group: groupDid }),
     });
@@ -631,7 +629,7 @@ test("leaveGroup If-Match-Membership-Incarnation, Flock sole-member reversible d
       `${gh.url}/group-member/join-status?group=${encodeURIComponent(groupDid)}`,
       {
         headers: {
-          authorization: `Bearer ${await alice.signServiceJwt(aud, "group.opensocial.requestJoin")}`,
+          authorization: `Bearer ${await alice.signServiceJwt(aud, "org.atgrp.requestJoin")}`,
         },
       },
     );
@@ -659,11 +657,11 @@ test("leaveGroup If-Match-Membership-Incarnation, Flock sole-member reversible d
     const nfDid = nonFlockFlow.tokenResponse!.sub;
     const nfAud = `${nfDid}#atproto_pds`;
 
-    const nfNoSovLeave = await fetch(`${gh.url}/xrpc/group.opensocial.leaveGroup`, {
+    const nfNoSovLeave = await fetch(`${gh.url}/xrpc/org.atgrp.leaveGroup`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${await alice.signServiceJwt(nfAud, "group.opensocial.leaveGroup")}`,
+        authorization: `Bearer ${await alice.signServiceJwt(nfAud, "org.atgrp.leaveGroup")}`,
       },
       body: JSON.stringify({ group: nfDid }),
     });
@@ -688,9 +686,9 @@ test("leaveGroup If-Match-Membership-Incarnation, Flock sole-member reversible d
       accessToken: nfTok,
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        space: `at:space/${nfDid}/group.opensocial.members/self`,
+        space: `at:space/${nfDid}/org.atgrp.members/self`,
         repo: nfDid,
-        collection: "group.opensocial.membership",
+        collection: "org.atgrp.membership",
         rkey: alice.did,
       }),
     });
@@ -706,11 +704,11 @@ test("leaveGroup If-Match-Membership-Incarnation, Flock sole-member reversible d
     for (const badRotEnc of [null, "v1:corrupt:ciphertext"] as const) {
       gh.db.prepare("UPDATE group_account SET rotation_key_enc = ? WHERE did = ?").run(badRotEnc, nfDid);
 
-      const corruptLeaveRes = await fetch(`${gh.url}/xrpc/group.opensocial.leaveGroup`, {
+      const corruptLeaveRes = await fetch(`${gh.url}/xrpc/org.atgrp.leaveGroup`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          authorization: `Bearer ${await alice.signServiceJwt(nfAud, "group.opensocial.leaveGroup")}`,
+          authorization: `Bearer ${await alice.signServiceJwt(nfAud, "org.atgrp.leaveGroup")}`,
         },
         body: JSON.stringify({ group: nfDid }),
       });
@@ -722,9 +720,9 @@ test("leaveGroup If-Match-Membership-Incarnation, Flock sole-member reversible d
         accessToken: nfTok,
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          space: `at:space/${nfDid}/group.opensocial.members/self`,
+          space: `at:space/${nfDid}/org.atgrp.members/self`,
           repo: nfDid,
-          collection: "group.opensocial.membership",
+          collection: "org.atgrp.membership",
           rkey: alice.did,
         }),
       });
@@ -772,11 +770,11 @@ test("leaveGroup If-Match-Membership-Incarnation, Flock sole-member reversible d
     });
 
     // Now sole-member `leaveGroup` succeeds AND keeps `nfDid` `activated = 1`!
-    const nfLeaveOk = await fetch(`${gh.url}/xrpc/group.opensocial.leaveGroup`, {
+    const nfLeaveOk = await fetch(`${gh.url}/xrpc/org.atgrp.leaveGroup`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        authorization: `Bearer ${await alice.signServiceJwt(nfAud, "group.opensocial.leaveGroup")}`,
+        authorization: `Bearer ${await alice.signServiceJwt(nfAud, "org.atgrp.leaveGroup")}`,
       },
       body: JSON.stringify({ group: nfDid }),
     });
@@ -817,20 +815,20 @@ test("OpenSocial XRPC enforces strict Lexicon parameter/body bounds and GroupHos
     // 1. Strict `limit` bounds (`1..100`) & query parameter validation on `listJoinRequests`, `listModSubjects`, `getModSubjectHistory`
     for (const badLimit of ["0", "101", "-5", "10abc"]) {
       const r1 = await dpop.fetchWithDpop(
-        `${gh.url}/xrpc/group.opensocial.listJoinRequests?limit=${encodeURIComponent(badLimit)}`,
+        `${gh.url}/xrpc/org.atgrp.listJoinRequests?limit=${encodeURIComponent(badLimit)}`,
         { method: "GET", accessToken: token },
       );
       assert.equal(r1.status, 400, `listJoinRequests must reject limit=${badLimit}`);
       assert.equal(((await r1.json()) as { error: string }).error, "InvalidRequest");
 
       const r2 = await dpop.fetchWithDpop(
-        `${gh.url}/xrpc/group.opensocial.listModSubjects?limit=${encodeURIComponent(badLimit)}`,
+        `${gh.url}/xrpc/org.atgrp.mod.querySubjects?limit=${encodeURIComponent(badLimit)}`,
         { method: "GET", accessToken: token },
       );
       assert.equal(r2.status, 400, `listModSubjects must reject limit=${badLimit}`);
 
       const r3 = await dpop.fetchWithDpop(
-        `${gh.url}/xrpc/group.opensocial.getModSubjectHistory?subject=${encodeURIComponent(alice.did)}&limit=${encodeURIComponent(badLimit)}`,
+        `${gh.url}/xrpc/org.atgrp.mod.querySubjectHistory?subject=${encodeURIComponent(alice.did)}&limit=${encodeURIComponent(badLimit)}`,
         { method: "GET", accessToken: token },
       );
       assert.equal(r3.status, 400, `getModSubjectHistory must reject limit=${badLimit}`);
@@ -842,11 +840,11 @@ test("OpenSocial XRPC enforces strict Lexicon parameter/body bounds and GroupHos
       { group: groupDid, message: "a".repeat(20_001) },
       { group: groupDid, message: "x".repeat(2_001) },
     ]) {
-      const res = await fetch(`${gh.url}/xrpc/group.opensocial.requestJoin`, {
+      const res = await fetch(`${gh.url}/xrpc/org.atgrp.requestJoin`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          authorization: `Bearer ${await bob.signServiceJwt(aud, "group.opensocial.requestJoin")}`,
+          authorization: `Bearer ${await bob.signServiceJwt(aud, "org.atgrp.requestJoin")}`,
         },
         body: JSON.stringify(badBody),
       });
@@ -854,16 +852,16 @@ test("OpenSocial XRPC enforces strict Lexicon parameter/body bounds and GroupHos
       assert.equal(((await res.json()) as { error: string }).error, "InvalidRequest");
     }
 
-    // 3. `createReport` & `resolveModSubject` enforce string types and `maxLength`/`maxGraphemes` on `reason` / `note`
+    // 3. `submitReport` & `updateSubject` enforce string types and `maxLength`/`maxGraphemes` on `reason` / `note`
     for (const badReport of [
-      { group: groupDid, subject: groupDid, reasonType: "spam", reason: 999 },
-      { group: groupDid, subject: groupDid, reasonType: "spam", reason: "r".repeat(2_001) },
+      { group: groupDid, subject: groupDid, reasonType: "org.atgrp.mod.defs#reasonSpam", reason: 999 },
+      { group: groupDid, subject: groupDid, reasonType: "org.atgrp.mod.defs#reasonSpam", reason: "r".repeat(2_001) },
     ]) {
-      const res = await fetch(`${gh.url}/xrpc/group.opensocial.createReport`, {
+      const res = await fetch(`${gh.url}/xrpc/org.atgrp.mod.submitReport`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          authorization: `Bearer ${await alice.signServiceJwt(aud, "group.opensocial.createReport")}`,
+          authorization: `Bearer ${await alice.signServiceJwt(aud, "org.atgrp.mod.submitReport")}`,
         },
         body: JSON.stringify(badReport),
       });
@@ -875,7 +873,7 @@ test("OpenSocial XRPC enforces strict Lexicon parameter/body bounds and GroupHos
       { subject: groupDid, status: "resolved", note: false },
       { subject: groupDid, status: "resolved", note: "n".repeat(2_001) },
     ]) {
-      const res = await dpop.fetchWithDpop(`${gh.url}/xrpc/group.opensocial.resolveModSubject`, {
+      const res = await dpop.fetchWithDpop(`${gh.url}/xrpc/org.atgrp.mod.updateSubject`, {
         method: "POST",
         accessToken: token,
         headers: { "content-type": "application/json" },
@@ -1067,10 +1065,10 @@ test("Round 9 hardening: verifyPersonalServiceJwt strictly resolves live PLC #at
     const forgedStagedJwt = await createServiceJwt({
       iss: group1Did,
       aud: `${siblingOnGh2Did}#atproto_pds`,
-      lxm: "group.opensocial.requestJoin",
+      lxm: "org.atgrp.requestJoin",
       keypair: group1StagedTargetSigningKey,
     });
-    const forgedStagedRes = await fetch(`${gh2.url}/xrpc/group.opensocial.requestJoin`, {
+    const forgedStagedRes = await fetch(`${gh2.url}/xrpc/org.atgrp.requestJoin`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${forgedStagedJwt}` },
       body: JSON.stringify({ group: siblingOnGh2Did }),
@@ -1082,10 +1080,10 @@ test("Round 9 hardening: verifyPersonalServiceJwt strictly resolves live PLC #at
     const livePreCutoverJwt = await createServiceJwt({
       iss: group1Did,
       aud: `${siblingOnGh2Did}#atproto_pds`,
-      lxm: "group.opensocial.requestJoin",
+      lxm: "org.atgrp.requestJoin",
       keypair: group1SourceSigningKey,
     });
-    const livePreCutoverRes = await fetch(`${gh2.url}/xrpc/group.opensocial.requestJoin`, {
+    const livePreCutoverRes = await fetch(`${gh2.url}/xrpc/org.atgrp.requestJoin`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${livePreCutoverJwt}` },
       body: JSON.stringify({ group: siblingOnGh2Did }),
@@ -1107,8 +1105,8 @@ test("Round 9 hardening: verifyPersonalServiceJwt strictly resolves live PLC #at
       200,
     );
     for (const spUri of [
-      `at:space/${group1Did}/group.opensocial.meta/self`,
-      `at:space/${group1Did}/group.opensocial.members/self`,
+      `at:space/${group1Did}/org.atgrp.meta/self`,
+      `at:space/${group1Did}/org.atgrp.members/self`,
     ]) {
       const metaStar = new Uint8Array(
         await (
@@ -1215,10 +1213,10 @@ test("Round 9 hardening: verifyPersonalServiceJwt strictly resolves live PLC #at
     const forgedRetiredJwt = await createServiceJwt({
       iss: group1Did,
       aud: `${siblingOnGh1Did}#atproto_pds`,
-      lxm: "group.opensocial.requestJoin",
+      lxm: "org.atgrp.requestJoin",
       keypair: group1SourceSigningKey,
     });
-    const forgedRetiredRes = await fetch(`${gh1.url}/xrpc/group.opensocial.requestJoin`, {
+    const forgedRetiredRes = await fetch(`${gh1.url}/xrpc/org.atgrp.requestJoin`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${forgedRetiredJwt}` },
       body: JSON.stringify({ group: siblingOnGh1Did }),
@@ -1230,10 +1228,10 @@ test("Round 9 hardening: verifyPersonalServiceJwt strictly resolves live PLC #at
     const livePostCutoverJwt = await createServiceJwt({
       iss: group1Did,
       aud: `${siblingOnGh1Did}#atproto_pds`,
-      lxm: "group.opensocial.requestJoin",
+      lxm: "org.atgrp.requestJoin",
       keypair: group1StagedTargetSigningKey,
     });
-    const livePostCutoverRes = await fetch(`${gh1.url}/xrpc/group.opensocial.requestJoin`, {
+    const livePostCutoverRes = await fetch(`${gh1.url}/xrpc/org.atgrp.requestJoin`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${livePostCutoverJwt}` },
       body: JSON.stringify({ group: siblingOnGh1Did }),
@@ -1242,6 +1240,414 @@ test("Round 9 hardening: verifyPersonalServiceJwt strictly resolves live PLC #at
   } finally {
     await gh2.close();
     await gh1.close();
+    await pds.close();
+    await plc.close();
+  }
+});
+
+test("R15 org.atgrp.mod.* full suite: eject/readmit/leave/re-eject appeals, anti-oracle NotAppealable, rule-backed violation reports, querySelfHistory redaction, tags, sort, Cache-Control, and qs injection", async () => {
+  const plc = await startMockPlcServer();
+  const pds = await startMockPersonalPds(plc);
+  const gh = await startTestGroupHost({ plc });
+
+  try {
+    const alice = await pds.registerUser("alice-r15mod.test");
+    const bob = await pds.registerUser("bob-r15mod.test");
+    const carol = await pds.registerUser("carol-r15mod.test");
+
+    const flow = await completeGroupOAuthFlow({
+      groupHost: gh,
+      pds,
+      user: alice,
+      scope: groupAdminScopes().join(" "),
+      prompt: "create",
+      createParams: {
+        displayName: "R15 Mod Group",
+        handle: "r15-mod.groups.localhost",
+        joinPolicy: "open",
+        publicMeta: true,
+      },
+    });
+    const dpop = flow.dpop;
+    const token = flow.tokenResponse!.access_token;
+    const groupDid = flow.tokenResponse!.sub;
+    const aud = `${groupDid}#atproto_pds`;
+    const membersSpace = `at:space/${groupDid}/org.atgrp.members/self`;
+    const chanSpace = `at:space/${groupDid}/new.flock.channel/general`;
+    const secretChanSpace = `at:space/${groupDid}/new.flock.channel/secret-room`;
+
+    // Create general & secret channels
+    for (const [skey, grants] of [
+      ["general", [{ role: "member", read: true, write: true }, { role: "admin", read: true, write: true }]],
+      ["secret-room", [{ role: "admin", read: true, write: true }]],
+    ] as const) {
+      const cr = await dpop.fetchWithDpop(`${gh.url}/xrpc/com.atproto.space.createSpace`, {
+        method: "POST",
+        accessToken: token,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          spaceType: "new.flock.channel",
+          skey,
+          policy: { $type: "org.atgrp.policy", publicRead: false, grants },
+        }),
+      });
+      assert.equal(cr.status, 200);
+    }
+
+    // Add a group rule in `org.atgrp.members/self`
+    const ruleRkey = "3jzfcijpj2z2a";
+    const ruleUri = `${membersSpace}/${groupDid}/org.atgrp.rule/${ruleRkey}`;
+    const putRuleRes = await dpop.fetchWithDpop(`${gh.url}/xrpc/com.atproto.space.putRecord`, {
+      method: "POST",
+      accessToken: token,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        space: membersSpace,
+        repo: groupDid,
+        collection: "org.atgrp.rule",
+        rkey: ruleRkey,
+        record: { $type: "org.atgrp.rule", title: "Be respectful", text: "Treat all members with respect." },
+      }),
+    });
+    assert.equal(putRuleRes.status, 200);
+
+    // Admit Bob & Carol
+    for (const u of [bob, carol]) {
+      const r = await fetch(`${gh.url}/xrpc/org.atgrp.requestJoin`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${await u.signServiceJwt(aud, "org.atgrp.requestJoin")}`,
+        },
+        body: JSON.stringify({ group: groupDid }),
+      });
+      assert.equal(r.status, 200);
+    }
+
+    // Bob writes a message in general
+    const bobMsgRkey = "3jzfcijpj2z2b";
+    const bobMsgUri = `${chanSpace}/${bob.did}/new.flock.message/${bobMsgRkey}`;
+    const notifyBob = await fetch(`${gh.url}/xrpc/com.atproto.space.notifyRepoUpdate`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${await bob.signServiceJwt(aud, "com.atproto.space.notifyRepoUpdate")}`,
+      },
+      body: JSON.stringify({
+        space: chanSpace,
+        repo: bob.did,
+        repoRev: "3jzfcijpj2z2b",
+        data: { $bytes: Buffer.alloc(32).toString("base64") },
+      }),
+    });
+    assert.equal(notifyBob.status, 200);
+
+    // 1. `submitReport` with `reasonViolation` requires citing a valid `members/self` `org.atgrp.rule` URI
+    const badViolationRes = await fetch(`${gh.url}/xrpc/org.atgrp.mod.submitReport`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${await carol.signServiceJwt(aud, "org.atgrp.mod.submitReport")}`,
+      },
+      body: JSON.stringify({
+        group: groupDid,
+        subject: bobMsgUri,
+        reasonType: "org.atgrp.mod.defs#reasonViolation",
+      }),
+    });
+    assert.equal(badViolationRes.status, 400);
+
+    const goodViolationRes = await fetch(`${gh.url}/xrpc/org.atgrp.mod.submitReport`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${await carol.signServiceJwt(aud, "org.atgrp.mod.submitReport")}`,
+      },
+      body: JSON.stringify({
+        group: groupDid,
+        subject: bobMsgUri,
+        reasonType: "org.atgrp.mod.defs#reasonViolation",
+        rule: ruleUri,
+        reason: "Violated rule 1",
+      }),
+    });
+    assert.equal(goodViolationRes.status, 200);
+    const repBody = (await goodViolationRes.json()) as { eventId: string; createdAt: string };
+    assert.ok(repBody.eventId.startsWith("ev-"));
+
+    // 2. Anti-existence-oracle on `submitAppeal`: uniform `400 NotAppealable` for nonexistent private channel record vs existing unlabeled record!
+    for (const unappealable of [
+      `${secretChanSpace}/${bob.did}/new.flock.message/3jzfcijpj2z2z`,
+      `at:space/${groupDid}/new.flock.channel/does-not-exist/${bob.did}/new.flock.message/3jzfcijpj2z2z`,
+      bobMsgUri, // existing, but no active label yet!
+      bob.did, // current member, neither labeled nor ejected!
+    ]) {
+      const appRes = await fetch(`${gh.url}/xrpc/org.atgrp.mod.submitAppeal`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${await bob.signServiceJwt(aud, "org.atgrp.mod.submitAppeal")}`,
+        },
+        body: JSON.stringify({ group: groupDid, subject: unappealable, reason: "Please review" }),
+      });
+      assert.equal(appRes.status, 400, `Expected 400 NotAppealable for ${unappealable}`);
+      assert.equal(((await appRes.json()) as { error: string }).error, "NotAppealable");
+    }
+
+    // Wrong repoDid (`carol.did` appealed by `bob`) -> `400 InvalidSubject`
+    const wrongOwnerAppeal = await fetch(`${gh.url}/xrpc/org.atgrp.mod.submitAppeal`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${await bob.signServiceJwt(aud, "org.atgrp.mod.submitAppeal")}`,
+      },
+      body: JSON.stringify({ group: groupDid, subject: carol.did }),
+    });
+    assert.equal(wrongOwnerAppeal.status, 400);
+    assert.equal(((await wrongOwnerAppeal.json()) as { error: string }).error, "InvalidSubject");
+
+    // 3. Apply a `!hide` label on `bobMsgUri` -> Bob CAN now appeal it (`200`), and `#labelEvent` + `#appealEvent` appear in `querySelfHistory`!
+    const putLblRes = await dpop.fetchWithDpop(`${gh.url}/xrpc/com.atproto.space.putRecord`, {
+      method: "POST",
+      accessToken: token,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        space: chanSpace,
+        repo: groupDid,
+        collection: "com.atproto.label.record",
+        rkey: "3jzfcijpj2z2c",
+        record: {
+          $type: "com.atproto.label.record",
+          src: groupDid,
+          uri: bobMsgUri,
+          val: "!hide",
+          cts: new Date().toISOString(),
+        },
+      }),
+    });
+    assert.equal(putLblRes.status, 200);
+
+    const bobAppealMsg = await fetch(`${gh.url}/xrpc/org.atgrp.mod.submitAppeal`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${await bob.signServiceJwt(aud, "org.atgrp.mod.submitAppeal")}`,
+      },
+      body: JSON.stringify({ group: groupDid, subject: bobMsgUri, reason: "False positive" }),
+    });
+    assert.equal(bobAppealMsg.status, 200);
+
+    // 4. `updateSubject` tags + status + internal note, overlap rejection, invalid tag rejection, >100 cap, `querySubjects` filters & sort, `?tags[$ne]=x` rejection!
+    const overlapTagRes = await dpop.fetchWithDpop(`${gh.url}/xrpc/org.atgrp.mod.updateSubject`, {
+      method: "POST",
+      accessToken: token,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ subject: bobMsgUri, addTags: ["urgent"], removeTags: ["urgent"] }),
+    });
+    assert.equal(overlapTagRes.status, 400);
+
+    const badTagRes = await dpop.fetchWithDpop(`${gh.url}/xrpc/org.atgrp.mod.updateSubject`, {
+      method: "POST",
+      accessToken: token,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ subject: bobMsgUri, addTags: ["UPPER_BAD"] }),
+    });
+    assert.equal(badTagRes.status, 400);
+
+    const tooManyTagsRes = await dpop.fetchWithDpop(`${gh.url}/xrpc/org.atgrp.mod.updateSubject`, {
+      method: "POST",
+      accessToken: token,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        subject: bobMsgUri,
+        addTags: Array.from({ length: 101 }, (_, i) => `tag-${String.fromCharCode(97 + Math.floor(i / 26))}${String.fromCharCode(97 + (i % 26))}`),
+      }),
+    });
+    assert.equal(tooManyTagsRes.status, 400);
+
+    const updTagsAndResolve = await dpop.fetchWithDpop(`${gh.url}/xrpc/org.atgrp.mod.updateSubject`, {
+      method: "POST",
+      accessToken: token,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        subject: bobMsgUri,
+        status: "resolved",
+        note: "PRIVATE MODERATOR NOTE DO NOT LEAK",
+        addTags: ["escalated", "reviewed"],
+      }),
+    });
+    assert.equal(updTagsAndResolve.status, 200);
+
+    // Query injection `?tags[$ne]=x` rejected with 400 InvalidRequest
+    const qsInjectRes = await dpop.fetchWithDpop(`${gh.url}/xrpc/org.atgrp.mod.querySubjects?tags[$ne]=x`, {
+      method: "GET",
+      accessToken: token,
+    });
+    assert.equal(qsInjectRes.status, 400);
+
+    // `querySubjects` returns `Cache-Control: no-store`, dedupes ANY-tag matches, omits `status` => returns all statuses!
+    const qsTagsRes = await dpop.fetchWithDpop(
+      `${gh.url}/xrpc/org.atgrp.mod.querySubjects?tags=escalated&tags=reviewed&sort=updated`,
+      { method: "GET", accessToken: token },
+    );
+    assert.equal(qsTagsRes.status, 200);
+    assert.equal(qsTagsRes.headers.get("cache-control"), "no-store");
+    const qsTagsBody = (await qsTagsRes.json()) as { subjects: Array<{ subject: string; tags?: string[]; status: string }> };
+    assert.equal(qsTagsBody.subjects.length, 1, "ANY-tag query must deduplicate subjects matching multiple tags");
+    assert.equal(qsTagsBody.subjects[0]?.subject, bobMsgUri);
+    assert.deepEqual(qsTagsBody.subjects[0]?.tags, ["escalated", "reviewed"]);
+
+    // `querySubjectHistory` returns `Cache-Control: no-store`, `subject`, `createdBy`, and private `note` to moderators
+    const modHistRes = await dpop.fetchWithDpop(
+      `${gh.url}/xrpc/org.atgrp.mod.querySubjectHistory?subject=${encodeURIComponent(bobMsgUri)}&sort=oldest`,
+      { method: "GET", accessToken: token },
+    );
+    assert.equal(modHistRes.status, 200);
+    assert.equal(modHistRes.headers.get("cache-control"), "no-store");
+    const modHist = (await modHistRes.json()) as {
+      events: Array<{ eventId: string; subject: string; createdBy?: string; event: Record<string, unknown> }>;
+    };
+    assert.ok(modHist.events.some((e) => e.event.$type === "org.atgrp.mod.defs#reportEvent"));
+    assert.ok(modHist.events.some((e) => e.event.$type === "org.atgrp.mod.defs#tagEvent"));
+    assert.ok(modHist.events.some((e) => e.event.$type === "org.atgrp.mod.defs#statusEvent" && e.event.note === "PRIVATE MODERATOR NOTE DO NOT LEAK"));
+
+    // 5. `eject → readmit → leave → re-eject` lifecycle!
+    // (a) Moderator ejects Bob (deletes membership) -> creates `mod_ejection_eligibility` + `#ejectEvent` (reportCount omitted since 0 reports on bob.did!)
+    const ejectBob1 = await dpop.fetchWithDpop(`${gh.url}/xrpc/com.atproto.space.deleteRecord`, {
+      method: "POST",
+      accessToken: token,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        space: membersSpace,
+        repo: groupDid,
+        collection: "org.atgrp.membership",
+        rkey: bob.did,
+      }),
+    });
+    assert.equal(ejectBob1.status, 200);
+
+    // Former member Bob CAN appeal ejection (`200`) -> opens `bob.did` in moderation queue with `reportCount` omitted (0 reports)!
+    const bobEjectAppeal1 = await fetch(`${gh.url}/xrpc/org.atgrp.mod.submitAppeal`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${await bob.signServiceJwt(aud, "org.atgrp.mod.submitAppeal")}`,
+      },
+      body: JSON.stringify({ group: groupDid, subject: bob.did, reason: "Ejected unfairly" }),
+    });
+    assert.equal(bobEjectAppeal1.status, 200);
+
+    // Check `querySubjects` for `bob.did`: reportCount must be omitted when 0!
+    const allSubjRes = await dpop.fetchWithDpop(`${gh.url}/xrpc/org.atgrp.mod.querySubjects?sort=newest`, {
+      method: "GET",
+      accessToken: token,
+    });
+    const allSubj = (await allSubjRes.json()) as { subjects: Array<{ subject: string; reportCount?: number }> };
+    const bobSubj = allSubj.subjects.find((s) => s.subject === bob.did);
+    assert.ok(bobSubj, "Appealed ejected member must appear in moderation queue");
+    assert.equal("reportCount" in bobSubj, false, "reportCount must be omitted when 0");
+
+    // (b) Readmit Bob -> clears `mod_ejection_eligibility`; Bob then voluntarily leaves -> MUST NOT be appealable!
+    const readmitBob = await dpop.fetchWithDpop(`${gh.url}/xrpc/com.atproto.space.putRecord`, {
+      method: "POST",
+      accessToken: token,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        space: membersSpace,
+        repo: groupDid,
+        collection: "org.atgrp.membership",
+        rkey: bob.did,
+        record: { $type: "org.atgrp.membership", roles: ["member"], createdAt: new Date().toISOString() },
+      }),
+    });
+    assert.equal(readmitBob.status, 200);
+
+    const bobVoluntaryLeave = await fetch(`${gh.url}/xrpc/org.atgrp.leaveGroup`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${await bob.signServiceJwt(aud, "org.atgrp.leaveGroup")}`,
+      },
+      body: JSON.stringify({ group: groupDid }),
+    });
+    assert.equal(bobVoluntaryLeave.status, 200);
+
+    const appealAfterVoluntaryLeave = await fetch(`${gh.url}/xrpc/org.atgrp.mod.submitAppeal`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${await bob.signServiceJwt(aud, "org.atgrp.mod.submitAppeal")}`,
+      },
+      body: JSON.stringify({ group: groupDid, subject: bob.did, reason: "Left on my own" }),
+    });
+    assert.equal(appealAfterVoluntaryLeave.status, 400);
+    assert.equal(((await appealAfterVoluntaryLeave.json()) as { error: string }).error, "NotAppealable");
+
+    // (c) Rejoin via open `requestJoin` & re-eject Bob -> appealable again!
+    const bobRejoin = await fetch(`${gh.url}/xrpc/org.atgrp.requestJoin`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${await bob.signServiceJwt(aud, "org.atgrp.requestJoin")}`,
+      },
+      body: JSON.stringify({ group: groupDid }),
+    });
+    assert.equal(bobRejoin.status, 200);
+    const ejectBob2 = await dpop.fetchWithDpop(`${gh.url}/xrpc/com.atproto.space.deleteRecord`, {
+      method: "POST",
+      accessToken: token,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        space: membersSpace,
+        repo: groupDid,
+        collection: "org.atgrp.membership",
+        rkey: bob.did,
+      }),
+    });
+    assert.equal(ejectBob2.status, 200);
+
+    const bobEjectAppeal2 = await fetch(`${gh.url}/xrpc/org.atgrp.mod.submitAppeal`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${await bob.signServiceJwt(aud, "org.atgrp.mod.submitAppeal")}`,
+      },
+      body: JSON.stringify({ group: groupDid, subject: bob.did, reason: "Re-ejected" }),
+    });
+    assert.equal(bobEjectAppeal2.status, 200);
+
+    // 6. `querySelfHistory` for former member Bob:
+    //    - Returns `Cache-Control: no-store`
+    //    - Returns ONLY self-visible events (`#labelEvent`, `#appealEvent`, `#statusEvent`, `#ejectEvent`)
+    //    - NEVER returns `#reportEvent` or `#tagEvent`
+    //    - Strips `createdBy` on EVERY event AND strips `note` from BOTH `#statusEvent` and `#appealEvent`!
+    const selfHistRes = await fetch(
+      `${gh.url}/xrpc/org.atgrp.mod.querySelfHistory?group=${encodeURIComponent(groupDid)}&sort=oldest`,
+      {
+        headers: {
+          authorization: `Bearer ${await bob.signServiceJwt(aud, "org.atgrp.mod.querySelfHistory")}`,
+        },
+      },
+    );
+    assert.equal(selfHistRes.status, 200);
+    assert.equal(selfHistRes.headers.get("cache-control"), "no-store");
+    const selfHist = (await selfHistRes.json()) as {
+      events: Array<{ eventId: string; subject: string; createdBy?: string; event: Record<string, unknown> }>;
+    };
+    assert.ok(selfHist.events.length >= 5);
+    const types = new Set(selfHist.events.map((e) => e.event.$type));
+    assert.ok(types.has("org.atgrp.mod.defs#labelEvent"));
+    assert.ok(types.has("org.atgrp.mod.defs#appealEvent"));
+    assert.ok(types.has("org.atgrp.mod.defs#statusEvent"));
+    assert.ok(types.has("org.atgrp.mod.defs#ejectEvent"));
+    assert.equal(types.has("org.atgrp.mod.defs#reportEvent"), false, "querySelfHistory must hide #reportEvent");
+    assert.equal(types.has("org.atgrp.mod.defs#tagEvent"), false, "querySelfHistory must hide #tagEvent");
+    for (const ev of selfHist.events) {
+      assert.equal("createdBy" in ev, false, "querySelfHistory must strip createdBy");
+      assert.equal("note" in ev.event, false, "querySelfHistory must strip note from statusEvent and appealEvent");
+    }
+  } finally {
+    await gh.close();
     await pds.close();
     await plc.close();
   }

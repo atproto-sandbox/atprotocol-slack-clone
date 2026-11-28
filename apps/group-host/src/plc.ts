@@ -212,14 +212,14 @@ export class PlcAndDidResolver {
     }
   }
 
-  hasOpenSocialGroupService(doc: DidDocumentShape, expectedOrigin: string): boolean {
+  hasAtgrpGroupService(doc: DidDocumentShape, expectedOrigin: string): boolean {
     const services = Array.isArray(doc.service) ? doc.service : [];
     return services.some((s) => {
       if (
         !s ||
         typeof s !== "object" ||
-        (s.id !== "#opensocial_group" && s.id !== `${doc.id}#opensocial_group`) ||
-        s.type !== "OpenSocialGroupHost" ||
+        (s.id !== "#atgrp_host" && s.id !== `${doc.id}#atgrp_host`) ||
+        s.type !== "AtmosphereGroupHostV1" ||
         typeof s.serviceEndpoint !== "string"
       ) {
         return false;

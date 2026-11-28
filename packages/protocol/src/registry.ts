@@ -6,20 +6,22 @@ import managedspacePolicyLexicon from "../lexicons/com/atproto/managedspace/poli
 import memberspacePolicyLexicon from "../lexicons/com/atproto/memberspace/policy.json";
 import personalspacePolicyLexicon from "../lexicons/com/atproto/personalspace/policy.json";
 import spacePolicyLexicon from "../lexicons/com/atproto/space/policy.json";
-import openSocialAcceptanceLexicon from "../lexicons/group/opensocial/acceptance.json";
-import openSocialDeclarationLexicon from "../lexicons/group/opensocial/declaration.json";
-import openSocialDefsLexicon from "../lexicons/group/opensocial/defs.json";
-import openSocialInviteLexicon from "../lexicons/group/opensocial/invite.json";
-import openSocialInvitesSpaceLexicon from "../lexicons/group/opensocial/invites.json";
-import openSocialLabelerLexicon from "../lexicons/group/opensocial/labeler.json";
-import openSocialMembersSpaceLexicon from "../lexicons/group/opensocial/members.json";
-import openSocialMembershipLexicon from "../lexicons/group/opensocial/membership.json";
-import openSocialMetaSpaceLexicon from "../lexicons/group/opensocial/meta.json";
-import openSocialPolicyLexicon from "../lexicons/group/opensocial/policy.json";
-import openSocialProfileLexicon from "../lexicons/group/opensocial/profile.json";
-import openSocialRoleLexicon from "../lexicons/group/opensocial/role.json";
-import openSocialRuleLexicon from "../lexicons/group/opensocial/rule.json";
-import openSocialSpaceIndexLexicon from "../lexicons/group/opensocial/space.json";
+import atgrpAboutLexicon from "../lexicons/org/atgrp/about.json";
+import atgrpConfigLexicon from "../lexicons/org/atgrp/config.json";
+import atgrpConfirmationLexicon from "../lexicons/org/atgrp/confirmation.json";
+import atgrpDeclarationLexicon from "../lexicons/org/atgrp/declaration.json";
+import atgrpDefsLexicon from "../lexicons/org/atgrp/defs.json";
+import atgrpInboxSpaceLexicon from "../lexicons/org/atgrp/inbox.json";
+import atgrpInviteLexicon from "../lexicons/org/atgrp/invite.json";
+import atgrpLabelerLexicon from "../lexicons/org/atgrp/labeler.json";
+import atgrpMembersSpaceLexicon from "../lexicons/org/atgrp/members.json";
+import atgrpMembershipLexicon from "../lexicons/org/atgrp/membership.json";
+import atgrpMetaSpaceLexicon from "../lexicons/org/atgrp/meta.json";
+import atgrpModDefsLexicon from "../lexicons/org/atgrp/mod/defs.json";
+import atgrpPolicyLexicon from "../lexicons/org/atgrp/policy.json";
+import atgrpRoleLexicon from "../lexicons/org/atgrp/role.json";
+import atgrpRuleLexicon from "../lexicons/org/atgrp/rule.json";
+import atgrpSpaceIndexLexicon from "../lexicons/org/atgrp/space.json";
 import appActionLexicon from "../lexicons/new/flock/app/action.json";
 import appCommandLexicon from "../lexicons/new/flock/app/command.json";
 import appDeclarationLexicon from "../lexicons/new/flock/app/declaration.json";
@@ -54,17 +56,17 @@ import {
   decisionRecordKey,
   dmConversationUri,
   groupMembersUri,
-  groupMetaUri,
   isDid,
   isRecordKey,
   isSkey,
   isTid,
+  isValidRoleId,
   parseAnySpaceRecordUri,
   parseChannelUri,
   parseDmConversationUri,
   parseDmInboxUri,
   parseDmMessageUri,
-  parsePersonalInvitesUri,
+  parsePersonalInboxUri,
   parseSpaceRecordUri,
   parseSpaceUri,
   parseWorkspaceUri,
@@ -75,21 +77,22 @@ import {
   subjectKey,
 } from "./keys";
 import {
+  ATGRP_COLLECTION,
+  ATGRP_NAMESPACE,
+  ATGRP_POLICY,
+  ATGRP_SPACE_TYPE,
   ATPROTO_SPACE_COLLECTION,
   BLOCK_TYPE,
   COLLECTION,
   FLOCK_EXTENSION_FIELD,
-  OPENSOCIAL_COLLECTION,
-  OPENSOCIAL_POLICY,
-  OPENSOCIAL_SPACE_TYPE,
   REPO_COLLECTION,
   SPACE_TYPE,
   type AnySpaceType,
+  type AtgrpCollection,
   type Collection,
-  type OpenSocialCollection,
   type SpaceType,
 } from "./nsids";
-import { expandGroupScopes, expandPolicyGrantScopes, type GroupOpenSocialPolicy } from "./scopes";
+import { expandGroupScopes, expandPolicyGrantScopes, type GroupAtgrpPolicy } from "./scopes";
 
 export type RecordValidation =
   | { valid: true }
@@ -100,6 +103,8 @@ export type RecordContext = {
   spaceUri: string;
   repoDid: string;
   rkey: string;
+  /** When true (inbound host migration import), relaxes prose-only `[a-z-]{3,512}` role ID checks to ATProto `record-key`. */
+  importMode?: boolean;
   knownTopLevelMessages?: ReadonlySet<string>;
   knownMessages?: ReadonlySet<string>;
   participants?: readonly string[];
@@ -112,7 +117,7 @@ export type KeyRule = "tid" | "self" | "recordKey" | "derived";
 /** How a client syncs a writer's records: newest-first down to a window (history), or all of them (a bounded set). */
 export type SyncStrategy = "window" | "all";
 
-export type RegisteredSpaceCollection = Collection | OpenSocialCollection;
+export type RegisteredSpaceCollection = Collection | AtgrpCollection;
 
 export type CollectionEntry = {
   spaceType: AnySpaceType;
@@ -129,9 +134,9 @@ const VALID: RecordValidation = { valid: true };
 const PRINTABLE_ASCII_TOKEN = /^[\x21-\x7E]{1,256}$/;
 
 const LITERAL_SELF_SPACE_TYPES = new Set<string>([
-  OPENSOCIAL_SPACE_TYPE.meta,
-  OPENSOCIAL_SPACE_TYPE.members,
-  OPENSOCIAL_SPACE_TYPE.invites,
+  ATGRP_SPACE_TYPE.meta,
+  ATGRP_SPACE_TYPE.members,
+  ATGRP_SPACE_TYPE.inbox,
   SPACE_TYPE.workspace,
   SPACE_TYPE.inbox,
   SPACE_TYPE.dmInbox,
@@ -147,7 +152,7 @@ export type DecodedMembershipExtensions =
     }
   | { valid: false; reason: string; code: string };
 
-export type DecodedAcceptanceExtensions =
+export type DecodedConfirmationExtensions =
   | {
       valid: true;
       incarnation?: string;
@@ -221,9 +226,9 @@ export function decodeFlockMembershipExtensions(record: Record<string, unknown>)
 }
 
 /**
- * Validates optional Flock incarnation extension property on `group.opensocial.acceptance`.
+ * Validates optional Flock incarnation extension property on `org.atgrp.confirmation`.
  */
-export function decodeFlockAcceptanceExtensions(record: Record<string, unknown>): DecodedAcceptanceExtensions {
+export function decodeFlockConfirmationExtensions(record: Record<string, unknown>): DecodedConfirmationExtensions {
   const rawInc = record[FLOCK_EXTENSION_FIELD.incarnation];
   if (rawInc !== undefined) {
     if (typeof rawInc !== "string" || !PRINTABLE_ASCII_TOKEN.test(rawInc)) {
@@ -249,8 +254,8 @@ export function validateSpaceTypeKey(
   if (!isValidNsid(spaceType)) {
     return invalid("spaceType must be a valid NSID", "InvalidSpaceKey");
   }
-  if (options.isGroupHostOwnSpace && spaceType === OPENSOCIAL_SPACE_TYPE.invites) {
-    return invalid("group.opensocial.invites is a personal-PDS space and cannot be owned by a group", "InvalidSpaceKey");
+  if (options.isGroupHostOwnSpace && spaceType === ATGRP_SPACE_TYPE.inbox) {
+    return invalid("org.atgrp.inbox is a personal-PDS space and cannot be owned by a group", "InvalidSpaceKey");
   }
   if (LITERAL_SELF_SPACE_TYPES.has(spaceType)) {
     return skey === SELF_SKEY
@@ -267,7 +272,7 @@ export function validateSpaceTypeKey(
     : invalid(`${spaceType} key must be a valid ATProto record key (1..512 chars, not '.' or '..')`, "InvalidSpaceKey");
 }
 
-function isHttpOrHttpsUrl(raw: unknown): boolean {
+export function isHttpOrHttpsUrl(raw: unknown): raw is string {
   if (typeof raw !== "string") return false;
   try {
     const parsed = new URL(raw);
@@ -278,33 +283,39 @@ function isHttpOrHttpsUrl(raw: unknown): boolean {
 }
 
 export const REGISTRY: { readonly [C in RegisteredSpaceCollection]: CollectionEntry } = {
-  // OpenSocial atmospheric group collections
-  [OPENSOCIAL_COLLECTION.profile]: {
-    spaceType: OPENSOCIAL_SPACE_TYPE.meta,
+  // Atmosphere Groups (`org.atgrp.*`) collections
+  [ATGRP_COLLECTION.about]: {
+    spaceType: ATGRP_SPACE_TYPE.meta,
     author: "authority",
     key: "self",
     sync: "all",
     semantic: (record) => {
-      if (record.url !== undefined && !isHttpOrHttpsUrl(record.url)) {
-        return invalid("profile url must use http or https scheme", "InvalidRequest");
+      if (record.website !== undefined && !isHttpOrHttpsUrl(record.website)) {
+        return invalid("about website must use http or https scheme", "InvalidRequest");
       }
       return VALID;
     },
   },
-  [OPENSOCIAL_COLLECTION.rule]: {
-    spaceType: OPENSOCIAL_SPACE_TYPE.meta,
-    author: "authority",
-    key: "tid",
-    sync: "all",
-  },
-  [OPENSOCIAL_COLLECTION.labeler]: {
-    spaceType: OPENSOCIAL_SPACE_TYPE.meta,
+  [ATGRP_COLLECTION.config]: {
+    spaceType: ATGRP_SPACE_TYPE.meta,
     author: "authority",
     key: "self",
     sync: "all",
   },
-  [OPENSOCIAL_COLLECTION.space]: {
-    spaceType: OPENSOCIAL_SPACE_TYPE.members,
+  [ATGRP_COLLECTION.rule]: {
+    spaceType: ATGRP_SPACE_TYPE.members,
+    author: "authority",
+    key: "tid",
+    sync: "all",
+  },
+  [ATGRP_COLLECTION.labeler]: {
+    spaceType: ATGRP_SPACE_TYPE.members,
+    author: "authority",
+    key: "self",
+    sync: "all",
+  },
+  [ATGRP_COLLECTION.space]: {
+    spaceType: ATGRP_SPACE_TYPE.members,
     author: "authority",
     key: "tid",
     sync: "all",
@@ -314,44 +325,51 @@ export const REGISTRY: { readonly [C in RegisteredSpaceCollection]: CollectionEn
         return invalid("space index entry must reference a space of this group", "InvalidRequest");
       }
       if (
-        target.type === OPENSOCIAL_SPACE_TYPE.meta ||
-        target.type === OPENSOCIAL_SPACE_TYPE.members ||
-        target.type === OPENSOCIAL_SPACE_TYPE.invites
+        target.type === ATGRP_SPACE_TYPE.meta ||
+        target.type === ATGRP_SPACE_TYPE.members ||
+        target.type === ATGRP_SPACE_TYPE.inbox
       ) {
-        return invalid("core or personal spaces are excluded from group.opensocial.space", "InvalidRequest");
+        return invalid("core or personal spaces are excluded from org.atgrp.space", "InvalidRequest");
       }
       const keyCheck = validateSpaceTypeKey(target.type, target.skey, { isGroupHostOwnSpace: true });
       return keyCheck.valid ? VALID : keyCheck;
     },
   },
-  [OPENSOCIAL_COLLECTION.role]: {
-    spaceType: OPENSOCIAL_SPACE_TYPE.members,
+  [ATGRP_COLLECTION.role]: {
+    spaceType: ATGRP_SPACE_TYPE.members,
     author: "authority",
     key: "recordKey",
     sync: "all",
     semantic: (record, context) => {
-      if (Array.isArray(record.scopes) && record.scopes.length > 0) {
+      const checkRoleId = context.importMode ? isRecordKey : isValidRoleId;
+      if (!checkRoleId(context.rkey)) {
+        return invalid(
+          "role key must match [a-z-]{3,512} label-value syntax",
+          "InvalidRequest",
+        );
+      }
+      if (Array.isArray(record.permissions) && record.permissions.length > 0) {
         try {
           expandGroupScopes(
-            record.scopes as readonly string[],
+            record.permissions as readonly string[],
             isDid(context.authorityDid) ? context.authorityDid : undefined,
           );
         } catch (error) {
-          return invalid(error instanceof Error ? error.message : "invalid role scope", "InvalidScope");
+          return invalid(error instanceof Error ? error.message : "invalid role permission", "InvalidScope");
         }
       }
-      if (Array.isArray(record.assignable)) {
-        for (const item of record.assignable) {
-          if (item !== "*" && !isRecordKey(item)) {
-            return invalid("role assignable entries must be '*' or valid record keys", "InvalidRequest");
+      if (Array.isArray(record.canAssign)) {
+        for (const item of record.canAssign) {
+          if (item !== "*" && !checkRoleId(item)) {
+            return invalid("role canAssign entries must be '*' or valid role IDs", "InvalidRequest");
           }
         }
       }
       return VALID;
     },
   },
-  [OPENSOCIAL_COLLECTION.membership]: {
-    spaceType: OPENSOCIAL_SPACE_TYPE.members,
+  [ATGRP_COLLECTION.membership]: {
+    spaceType: ATGRP_SPACE_TYPE.members,
     author: "authority",
     key: "derived",
     sync: "all",
@@ -366,6 +384,12 @@ export const REGISTRY: { readonly [C in RegisteredSpaceCollection]: CollectionEn
       if (!Array.isArray(roles) || roles.length < 1) {
         return invalid("membership roles must contain at least one role", "EmptyMemberRoles");
       }
+      const checkRoleId = context.importMode ? isRecordKey : isValidRoleId;
+      for (const role of roles) {
+        if (!checkRoleId(role)) {
+          return invalid(`membership role must be a valid role ID: ${String(role)}`, "InvalidRequest");
+        }
+      }
       if (new Set(roles).size !== roles.length) {
         return invalid("membership roles must be unique", "InvalidRequest");
       }
@@ -374,29 +398,29 @@ export const REGISTRY: { readonly [C in RegisteredSpaceCollection]: CollectionEn
       return VALID;
     },
   },
-  [OPENSOCIAL_COLLECTION.acceptance]: {
-    spaceType: OPENSOCIAL_SPACE_TYPE.members,
+  [ATGRP_COLLECTION.confirmation]: {
+    spaceType: ATGRP_SPACE_TYPE.members,
     author: "member",
     key: "self",
     sync: "all",
     semantic: (record, context) => {
       if (context.repoDid === context.authorityDid) {
-        return invalid("group DID cannot author a membership acceptance record", "CannotTargetGroupSelf");
+        return invalid("group DID cannot author a membership confirmation record", "CannotTargetGroupSelf");
       }
-      const ext = decodeFlockAcceptanceExtensions(record);
+      const ext = decodeFlockConfirmationExtensions(record);
       if (!ext.valid) return invalid(ext.reason, ext.code);
       return VALID;
     },
   },
-  [OPENSOCIAL_COLLECTION.invite]: {
-    spaceType: OPENSOCIAL_SPACE_TYPE.invites,
+  [ATGRP_COLLECTION.invite]: {
+    spaceType: ATGRP_SPACE_TYPE.inbox,
     author: "inviter",
     key: "tid",
     sync: "all",
     semantic: (_record, context) => {
-      const target = parsePersonalInvitesUri(context.spaceUri);
+      const target = parsePersonalInboxUri(context.spaceUri);
       if (!target) {
-        return invalid("invite must reside in a personal group.opensocial.invites/self space", "InvalidRequest");
+        return invalid("invite must reside in a personal org.atgrp.inbox/self space", "InvalidRequest");
       }
       if (!isDid(context.repoDid) || context.repoDid === target.userDid) {
         return invalid("invite must be authored by an inviting group DID distinct from the invitee", "InvalidRequest");
@@ -625,8 +649,8 @@ export const REGISTRY: { readonly [C in RegisteredSpaceCollection]: CollectionEn
 };
 
 const LABELABLE_SPACE_TYPES = new Set<string>([
-  OPENSOCIAL_SPACE_TYPE.meta,
-  OPENSOCIAL_SPACE_TYPE.members,
+  ATGRP_SPACE_TYPE.meta,
+  ATGRP_SPACE_TYPE.members,
   SPACE_TYPE.workspace,
   SPACE_TYPE.inbox,
   SPACE_TYPE.channel,
@@ -672,14 +696,16 @@ export function isRegisteredCollection(collection: string): collection is Regist
 export const MANDATORY_VALIDATED_SPACE_COLLECTIONS: ReadonlySet<string> = new Set<string>([
   ATPROTO_SPACE_COLLECTION.spacePolicy,
   ATPROTO_SPACE_COLLECTION.label,
-  OPENSOCIAL_COLLECTION.profile,
-  OPENSOCIAL_COLLECTION.rule,
-  OPENSOCIAL_COLLECTION.labeler,
-  OPENSOCIAL_COLLECTION.space,
-  OPENSOCIAL_COLLECTION.role,
-  OPENSOCIAL_COLLECTION.membership,
-  OPENSOCIAL_COLLECTION.acceptance,
-  OPENSOCIAL_COLLECTION.invite,
+  REPO_COLLECTION.groupDeclaration,
+  ATGRP_COLLECTION.about,
+  ATGRP_COLLECTION.config,
+  ATGRP_COLLECTION.rule,
+  ATGRP_COLLECTION.labeler,
+  ATGRP_COLLECTION.space,
+  ATGRP_COLLECTION.role,
+  ATGRP_COLLECTION.membership,
+  ATGRP_COLLECTION.confirmation,
+  ATGRP_COLLECTION.invite,
   COLLECTION.appInstall,
 ]);
 
@@ -691,21 +717,23 @@ const LEXICONS = new Lexicons([
   memberspacePolicyLexicon,
   managedspacePolicyLexicon,
   personalspacePolicyLexicon,
-  // OpenSocial schemas
-  openSocialDefsLexicon,
-  openSocialPolicyLexicon,
-  openSocialDeclarationLexicon,
-  openSocialProfileLexicon,
-  openSocialRuleLexicon,
-  openSocialLabelerLexicon,
-  openSocialSpaceIndexLexicon,
-  openSocialRoleLexicon,
-  openSocialMembershipLexicon,
-  openSocialAcceptanceLexicon,
-  openSocialInviteLexicon,
-  openSocialMetaSpaceLexicon,
-  openSocialMembersSpaceLexicon,
-  openSocialInvitesSpaceLexicon,
+  // Atmosphere Groups (`org.atgrp.*`) schemas
+  atgrpDefsLexicon,
+  atgrpModDefsLexicon,
+  atgrpPolicyLexicon,
+  atgrpDeclarationLexicon,
+  atgrpAboutLexicon,
+  atgrpConfigLexicon,
+  atgrpRuleLexicon,
+  atgrpLabelerLexicon,
+  atgrpSpaceIndexLexicon,
+  atgrpRoleLexicon,
+  atgrpMembershipLexicon,
+  atgrpConfirmationLexicon,
+  atgrpInviteLexicon,
+  atgrpMetaSpaceLexicon,
+  atgrpMembersSpaceLexicon,
+  atgrpInboxSpaceLexicon,
   // Flock schemas
   workspaceSpaceLexicon,
   inboxSpaceLexicon,
@@ -756,43 +784,45 @@ export function fitsDirectoryName(name: string): boolean {
 }
 
 /**
- * Validates a `group.opensocial.policy` object for `(groupDid, spaceType, skey)`:
- * checks Lexicon shape, unique `grant.role` keys (`DuplicateRoleGrant`), and `expandPolicyGrantScopes`
- * on every `grant.scopes` entry (`InvalidSpacePolicyScope`).
+ * Validates an `org.atgrp.policy` object for `(groupDid, spaceType, skey)`:
+ * checks Lexicon shape, role ID syntax (`isValidRoleId` on live writes, `isRecordKey` on `importMode`),
+ * unique `grant.role` keys (`DuplicateRoleGrant`), and `expandPolicyGrantScopes` on every
+ * `grant.permissions` entry (`InvalidSpacePolicyScope`).
  */
 export function validateSpacePolicy(
   policy: unknown,
-  context: { groupDid: string; spaceType: string; skey: string },
+  context: { groupDid: string; spaceType: string; skey: string; importMode?: boolean },
 ): RecordValidation {
   if (!isPlainObject(policy)) {
     return invalid("space policy must be an object", "InvalidRequest");
   }
-  if (policy.$type !== OPENSOCIAL_POLICY) {
-    return invalid(`space policy must have $type ${OPENSOCIAL_POLICY}`, "InvalidSpacePolicy");
+  if (policy.$type !== ATGRP_POLICY) {
+    return invalid(`space policy must have $type ${ATGRP_POLICY}`, "InvalidSpacePolicy");
   }
   if (new TextEncoder().encode(JSON.stringify(policy)).length > MAX_RECORD_BYTES) {
     return invalid("space policy exceeds size limit", "InvalidRequest");
   }
-  const shape = LEXICONS.validate(`${OPENSOCIAL_POLICY}#main`, policy);
+  const shape = LEXICONS.validate(`${ATGRP_POLICY}#main`, policy);
   if (!shape.success) {
     return invalid(shape.error.message, "InvalidRequest");
   }
-  const grants = (policy as GroupOpenSocialPolicy).grants;
+  const grants = (policy as GroupAtgrpPolicy).grants;
+  const checkRoleId = context.importMode ? isRecordKey : isValidRoleId;
   const seenRoles = new Set<string>();
   for (const grant of grants) {
-    if (!isRecordKey(grant.role)) {
-      return invalid(`grant role must be a valid record key: ${grant.role}`, "InvalidRequest");
+    if (!checkRoleId(grant.role)) {
+      return invalid(`grant role must be a valid role ID: ${grant.role}`, "InvalidRequest");
     }
     if (seenRoles.has(grant.role)) {
       return invalid(`duplicate policy grant for role ${grant.role}`, "DuplicateRoleGrant");
     }
     seenRoles.add(grant.role);
-    if (grant.scopes && grant.scopes.length > 0) {
+    if (grant.permissions && grant.permissions.length > 0) {
       try {
-        expandPolicyGrantScopes(grant.scopes, context);
+        expandPolicyGrantScopes(grant.permissions, context);
       } catch (error) {
         return invalid(
-          error instanceof Error ? error.message : "invalid space policy grant scope",
+          error instanceof Error ? error.message : "invalid space policy grant permission",
           "InvalidSpacePolicyScope",
         );
       }
@@ -802,12 +832,12 @@ export function validateSpacePolicy(
 }
 
 /**
- * Deterministic semantic fingerprint for a validated `group.opensocial.policy` object,
- * normalizing optional booleans (`false` vs omitted), role grant ordering, and grant scope sets.
+ * Deterministic semantic fingerprint for a validated `org.atgrp.policy` object,
+ * normalizing optional booleans (`false` vs omitted), role grant ordering, and grant permission sets.
  */
-export function canonicalOpenSocialPolicyKey(policy: GroupOpenSocialPolicy): string {
+export function canonicalAtgrpPolicyKey(policy: GroupAtgrpPolicy): string {
   return JSON.stringify({
-    $type: OPENSOCIAL_POLICY,
+    $type: ATGRP_POLICY,
     publicRead: policy.publicRead === true,
     unlisted: policy.unlisted === true,
     grants: [...policy.grants]
@@ -816,7 +846,8 @@ export function canonicalOpenSocialPolicyKey(policy: GroupOpenSocialPolicy): str
         role: grant.role,
         read: grant.read === true,
         write: grant.write === true,
-        scopes: grant.scopes && grant.scopes.length > 0 ? [...new Set(grant.scopes)].sort() : [],
+        permissions:
+          grant.permissions && grant.permissions.length > 0 ? [...new Set(grant.permissions)].sort() : [],
       })),
   });
 }
@@ -837,7 +868,7 @@ export function validateLabelRecord(value: unknown, context: RecordContext): Rec
   const keyCheck = validateSpaceTypeKey(parsedSpace.type, parsedSpace.skey);
   if (!keyCheck.valid) return keyCheck;
   if (
-    parsedSpace.type === OPENSOCIAL_SPACE_TYPE.invites ||
+    parsedSpace.type === ATGRP_SPACE_TYPE.inbox ||
     parsedSpace.type === SPACE_TYPE.dmInbox ||
     parsedSpace.type === SPACE_TYPE.dmConversation
   ) {
@@ -860,7 +891,7 @@ export function validateLabelRecord(value: unknown, context: RecordContext): Rec
   const targetUri = String(value.uri);
   if (isDid(targetUri)) {
     if (context.spaceUri !== groupMembersUri(context.authorityDid)) {
-      return invalid("account DID labels must reside in group.opensocial.members/self", "CrossSpaceLabel");
+      return invalid("account DID labels must reside in org.atgrp.members/self", "CrossSpaceLabel");
     }
     if (value.cid !== undefined) {
       return invalid("account DID labels cannot specify cid", "InvalidRequest");
@@ -872,6 +903,10 @@ export function validateLabelRecord(value: unknown, context: RecordContext): Rec
     return invalid("space record label must reside in the same space as its target record", "CrossSpaceLabel");
   }
   return VALID;
+}
+
+export function isReservedAtgrpCollection(collection: string): boolean {
+  return collection.startsWith(`${ATGRP_NAMESPACE}.`);
 }
 
 export function validateSpaceRecord(collection: string, value: unknown, context: RecordContext): RecordValidation {
@@ -889,16 +924,23 @@ export function validateSpaceRecord(collection: string, value: unknown, context:
     if (new TextEncoder().encode(JSON.stringify(value)).length > MAX_RECORD_BYTES) return invalid("record exceeds the size limit");
     const shape = validateRecordShape(ATPROTO_SPACE_COLLECTION.spacePolicy, value);
     if (!shape.valid) return shape;
-    if (isPlainObject(value.policy) && value.policy.$type === OPENSOCIAL_POLICY) {
+    if (isPlainObject(value.policy) && value.policy.$type === ATGRP_POLICY) {
       return validateSpacePolicy(value.policy, {
         groupDid: context.authorityDid,
         spaceType: parsedSpace.type,
         skey: parsedSpace.skey,
+        importMode: context.importMode,
       });
     }
     return VALID;
   }
 
+  if (collection === REPO_COLLECTION.groupDeclaration) {
+    return invalid("org.atgrp.declaration is a public-repository record and cannot be written into a space", "InvalidRequest");
+  }
+  if (isReservedAtgrpCollection(collection) && !isRegisteredCollection(collection)) {
+    return invalid(`unknown or reserved org.atgrp collection '${collection}' is not permitted in spaces`, "InvalidRequest");
+  }
   if (!isRegisteredCollection(collection)) return invalid("unknown collection");
   const entry = REGISTRY[collection];
   const parsedSpace = parseSpaceUri(context.spaceUri);
@@ -920,7 +962,8 @@ export function validateSpaceRecord(collection: string, value: unknown, context:
 }
 
 /**
- * Validates `group.opensocial.declaration/self` in `<groupDid>`'s public repository.
+ * Validates `org.atgrp.declaration/self` in `<groupDid>`'s public repository.
+ * Per Atmosphere Groups beta (`0885261c`), `declaration` is an empty object (`{ $type?: "org.atgrp.declaration" }`).
  */
 export function validateGroupDeclaration(value: unknown, groupDid: string, rkey = SELF_SKEY): RecordValidation {
   if (rkey !== SELF_SKEY) return invalid("group declaration rkey must be self");
@@ -934,15 +977,13 @@ export function validateGroupDeclaration(value: unknown, groupDid: string, rkey 
   }
   const shape = validateRecordShape(REPO_COLLECTION.groupDeclaration, value);
   if (!shape.valid) return shape;
-  if (value.meta !== groupMetaUri(groupDid)) {
-    return invalid(`group declaration meta must equal ${groupMetaUri(groupDid)}`);
-  }
   return VALID;
 }
 
 /**
- * Validates a public-repository record on Group Host (`validate === false` honored for arbitrary records,
- * while `group.opensocial.declaration` is unconditionally validated).
+ * Validates a public-repository record on Group Host:
+ * reserves the entire `org.atgrp.*` namespace so ONLY `org.atgrp.declaration/self` may exist
+ * in public repos (even when `validate === false`!).
  */
 export function validatePublicRecord(
   collection: string,
@@ -957,6 +998,12 @@ export function validatePublicRecord(
   }
   if (collection === REPO_COLLECTION.groupDeclaration) {
     return validateGroupDeclaration(value, context.repoDid, context.rkey);
+  }
+  if (isReservedAtgrpCollection(collection)) {
+    return invalid(
+      `${collection} is a reserved org.atgrp collection and cannot be written to a public repository`,
+      "InvalidRequest",
+    );
   }
   if (context.validate === false) {
     return VALID;

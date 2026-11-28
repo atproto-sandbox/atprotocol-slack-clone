@@ -148,7 +148,7 @@ function createMockMigrationHarness(options: {
         id: TARGET_SERVICE_DID,
         service: [
           { id: "#atproto_pds", type: "AtprotoPersonalDataServer", serviceEndpoint: TARGET_ORIGIN },
-          { id: "#opensocial_group", type: "OpenSocialGroupHost", serviceEndpoint: TARGET_ORIGIN },
+          { id: "#atgrp_host", type: "AtmosphereGroupHostV1", serviceEndpoint: TARGET_ORIGIN },
         ],
       });
     }
@@ -273,9 +273,9 @@ test("GroupClient.setPublicMeta serializes concurrent toggles, skips redundant w
         return Response.json({ error: "RecordNotFound", message: "not found" }, { status: 400 });
       }
       return Response.json({
-        uri: `at://${GROUP_DID}/group.opensocial.declaration/self`,
+        uri: `at://${GROUP_DID}/org.atgrp.declaration/self`,
         cid: "bafyreidecl",
-        value: { $type: "group.opensocial.declaration", meta: groupMetaUri(GROUP_DID) },
+        value: { $type: "org.atgrp.declaration", meta: groupMetaUri(GROUP_DID) },
       });
     }
     if (url.pathname === "/xrpc/com.atproto.repo.deleteRecord") {
@@ -296,7 +296,7 @@ test("GroupClient.setPublicMeta serializes concurrent toggles, skips redundant w
         return Response.json({ error: "InternalServerError", message: "declaration write failed" }, { status: 500 });
       }
       hasDeclaration = true;
-      return Response.json({ uri: `at://${GROUP_DID}/group.opensocial.declaration/self`, cid: "bafyreidecl" });
+      return Response.json({ uri: `at://${GROUP_DID}/org.atgrp.declaration/self`, cid: "bafyreidecl" });
     }
     if (url.pathname === "/xrpc/com.atproto.space.updateSpace") {
       const body = JSON.parse(String(init?.body ?? "{}")) as { policy: { publicRead: boolean } };
@@ -456,9 +456,9 @@ test("GroupClient.setPublicMeta restores consistent invariants across unserializ
         return Response.json({ error: "RecordNotFound", message: "not found" }, { status: 400 });
       }
       return Response.json({
-        uri: `at://${GROUP_DID}/group.opensocial.declaration/self`,
+        uri: `at://${GROUP_DID}/org.atgrp.declaration/self`,
         cid: declarationCid,
-        value: { $type: "group.opensocial.declaration", meta: groupMetaUri(GROUP_DID) },
+        value: { $type: "org.atgrp.declaration", meta: groupMetaUri(GROUP_DID) },
       });
     }
     if (url.pathname === "/xrpc/com.atproto.space.updateSpace") {
@@ -477,7 +477,7 @@ test("GroupClient.setPublicMeta restores consistent invariants across unserializ
         return Response.json({ error: "InvalidSwap", message: "record cid mismatch" }, { status: 400 });
       }
       declarationCid = `bafyreidecl-${++cidSeq}`;
-      return Response.json({ uri: `at://${GROUP_DID}/group.opensocial.declaration/self`, cid: declarationCid });
+      return Response.json({ uri: `at://${GROUP_DID}/org.atgrp.declaration/self`, cid: declarationCid });
     }
     if (url.pathname === "/xrpc/com.atproto.repo.deleteRecord") {
       if (actor === "B" && pauseClientBBeforeDelete) {
@@ -583,7 +583,7 @@ test("GroupClient.createInvite omits nonstandard group field and listInviteDeliv
       if (url.pathname === "/xrpc/com.atproto.space.putRecord") {
         const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
         putBodies.push(body);
-        return Response.json({ uri: `${String(body.space)}/${GROUP_DID}/group.opensocial.invite/${String(body.rkey)}` });
+        return Response.json({ uri: `${String(body.space)}/${GROUP_DID}/org.atgrp.invite/${String(body.rkey)}` });
       }
       if (url.pathname === "/group-admin/invite-deliveries") {
         deliveryPaths.push(`${url.pathname}${url.search}`);
@@ -1729,7 +1729,7 @@ test("Round 27: Standard migration binds signPlcOperation and all source aborts 
         id: TARGET_SERVICE_DID,
         service: [
           { id: "#atproto_pds", type: "AtprotoPersonalDataServer", serviceEndpoint: TARGET_ORIGIN },
-          { id: "#opensocial_group", type: "OpenSocialGroupHost", serviceEndpoint: TARGET_ORIGIN },
+          { id: "#atgrp_host", type: "AtmosphereGroupHostV1", serviceEndpoint: TARGET_ORIGIN },
         ],
       });
     }
@@ -2389,7 +2389,7 @@ test("Round 27: Standard migration binds signPlcOperation and all source aborts 
           id: TARGET_SERVICE_DID,
           service: [
             { id: "#atproto_pds", type: "AtprotoPersonalDataServer", serviceEndpoint: TARGET_ORIGIN },
-            { id: "#opensocial_group", type: "OpenSocialGroupHost", serviceEndpoint: TARGET_ORIGIN },
+            { id: "#atgrp_host", type: "AtmosphereGroupHostV1", serviceEndpoint: TARGET_ORIGIN },
           ],
         });
       }

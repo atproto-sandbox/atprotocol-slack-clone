@@ -700,8 +700,10 @@ export async function completeGroupOAuthFlow(params: {
     }
     const html = await getConfirmRes.text();
     const csrfMatch = /name="csrf_token"\s+value="([^"]+)"/.exec(html);
+    const snapMatch = /name="consent_snapshot"\s+value="([^"]+)"/.exec(html);
     const confirmBody = new URLSearchParams({
       csrf_token: csrfMatch?.[1] ?? "",
+      ...(snapMatch?.[1] ? { consent_snapshot: snapMatch[1] } : {}),
       decision: params.decision ?? "approve",
     });
     const confirmRes = await fetch(`${params.groupHost.url}/oauth/confirm-action`, {

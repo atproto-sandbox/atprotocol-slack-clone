@@ -23,7 +23,7 @@ import {
   isTid,
   parseGroupMembersUri,
   parseWorkspaceUri,
-  personalInvitesUri,
+  personalInboxUri,
   SELF_SKEY,
   spaceRecordUri,
   workspaceUri,
@@ -37,18 +37,18 @@ import {
   type ActiveSpaceLabel,
 } from "@flock/protocol/moderation";
 import {
+  ATGRP_COLLECTION,
+  ATGRP_SPACE_TYPE,
   ATPROTO_SPACE_COLLECTION,
   COLLECTION,
-  OPENSOCIAL_COLLECTION,
-  OPENSOCIAL_SPACE_TYPE,
 } from "@flock/protocol/nsids";
 import { validateSpaceRecord } from "@flock/protocol/registry";
-import type { GroupOpenSocialPolicy } from "@flock/protocol/scopes";
+import type { GroupAtgrpPolicy } from "@flock/protocol/scopes";
 import {
   extractGroupSpacePolicyRecord,
   summarizeWorkspace,
   WORKSPACE_ENVELOPE,
-  type MemberAcceptanceEntry,
+  type MemberConfirmationEntry,
   type MemberWriterRev,
 } from "@flock/protocol/workspace-summary";
 
@@ -57,6 +57,8 @@ export type IndependentWorkspace = {
   authorityDid: string;
   groupDid: string;
   name: string;
+  description?: string;
+  website?: string;
   joinPolicy: string;
   publicMeta: boolean;
   members: string[];
@@ -157,12 +159,12 @@ async function withGroupOriginRefresh<T>(
 }
 
 /**
- * Stateless independent reader for a second OpenSocial + Flock client (`proposal.md:95-99`).
- * Uses only published `group.opensocial.*` + Flock lexicons and standard ATProto Space credentials.
+ * Stateless independent reader for a second Atmosphere Group + Flock client.
+ * Uses only published `org.atgrp.*` + Flock lexicons and standard ATProto Space credentials.
  */
 export async function listIndependentWorkspaces(deps: IndependentDeps): Promise<IndependentWorkspace[]> {
   const memberSpaces = await listAllSpaceUris(deps.memberClient, {
-    spaceType: OPENSOCIAL_SPACE_TYPE.members,
+    spaceType: ATGRP_SPACE_TYPE.members,
     maxSpaces: MAX_DISCOVERABLE_WORKSPACES,
   });
 
@@ -171,18 +173,18 @@ export async function listIndependentWorkspaces(deps: IndependentDeps): Promise<
     const parsed = parseGroupMembersUri(membersUri);
     if (!parsed) return;
     if (deps.did) {
-      let hasOwnAcceptance = false;
+      let hasOwnConfirmation = false;
       try {
         const rec = await deps.memberClient.query<{ value?: Record<string, unknown> }>(
           "com.atproto.space.getRecord",
           {
             space: membersUri,
             repo: deps.did,
-            collection: OPENSOCIAL_COLLECTION.acceptance,
+            collection: ATGRP_COLLECTION.confirmation,
             rkey: SELF_SKEY,
           },
         );
-        hasOwnAcceptance = rec.value !== undefined && rec.value !== null;
+        hasOwnConfirmation = rec.value !== undefined && rec.value !== null;
       } catch (error) {
         const isTrueAbsence =
           isMissingXrpcResource(error) ||
@@ -191,7 +193,7 @@ export async function listIndependentWorkspaces(deps: IndependentDeps): Promise<
           error instanceof SpaceCredentialError;
         if (!isTrueAbsence) throw error;
       }
-      if (!hasOwnAcceptance) return;
+      if (!hasOwnConfirmation) return;
     }
     groupDids.push(parsed.groupDid);
   });
@@ -226,7 +228,8 @@ export async function readIndependentWorkspace(
   ]);
 
   const [
-    profiles,
+    abouts,
+    configs,
     metaPol,
     roles,
     memberships,
@@ -243,10 +246,11 @@ export async function readIndependentWorkspace(
     const wsClient = wsCred.client(authorityPds);
 
     return Promise.all([
-      listBoundedRecords(metaClient, { space: metaUri, repo: authorityDid, collection: OPENSOCIAL_COLLECTION.profile, maxRecords: 1 }),
+      listBoundedRecords(metaClient, { space: metaUri, repo: authorityDid, collection: ATGRP_COLLECTION.about, maxRecords: 1 }),
+      listBoundedRecords(metaClient, { space: metaUri, repo: authorityDid, collection: ATGRP_COLLECTION.config, maxRecords: 1 }),
       listBoundedRecords(metaClient, { space: metaUri, repo: authorityDid, collection: ATPROTO_SPACE_COLLECTION.spacePolicy, maxRecords: 1 }),
-      listBoundedRecords(membersClient, { space: membersUri, repo: authorityDid, collection: OPENSOCIAL_COLLECTION.role, maxRecords: MAX_AUTHORITY_RECORD_SCAN }),
-      listBoundedRecords(membersClient, { space: membersUri, repo: authorityDid, collection: OPENSOCIAL_COLLECTION.membership, maxRecords: MAX_AUTHORITY_RECORD_SCAN }),
+      listBoundedRecords(membersClient, { space: membersUri, repo: authorityDid, collection: ATGRP_COLLECTION.role, maxRecords: MAX_AUTHORITY_RECORD_SCAN }),
+      listBoundedRecords(membersClient, { space: membersUri, repo: authorityDid, collection: ATGRP_COLLECTION.membership, maxRecords: MAX_AUTHORITY_RECORD_SCAN }),
       listBoundedRecords(membersClient, { space: membersUri, repo: authorityDid, collection: ATPROTO_SPACE_COLLECTION.spacePolicy, maxRecords: 1 }),
       listBoundedRecords(membersClient, { space: membersUri, repo: authorityDid, collection: ATPROTO_SPACE_COLLECTION.label, maxRecords: MAX_AUTHORITY_RECORD_SCAN }),
       listBoundedWriters(membersClient, { space: membersUri, maxRepos: 2_000 }),
@@ -257,7 +261,7 @@ export async function readIndependentWorkspace(
     ]);
   });
 
-  const spacePolicies = new Map<string, GroupOpenSocialPolicy>();
+  const spacePolicies = new Map<string, GroupAtgrpPolicy>();
   let invalidPolicyScan = false;
   for (const [spUri, polScan] of [
     [metaUri, metaPol],
@@ -286,7 +290,7 @@ export async function readIndependentWorkspace(
     .map((r) => r.rkey)
     .filter((did) => isDid(did) && did !== authorityDid && !knownApps.has(did));
 
-  const acceptances: MemberAcceptanceEntry[] = [];
+  const confirmations: MemberConfirmationEntry[] = [];
   await mapLimited(admittedHumanDids, 8, async (memberDid) => {
     if (!memberWriters.has(memberDid) && memberDid !== deps.did) return;
     try {
@@ -296,12 +300,12 @@ export async function readIndependentWorkspace(
         {
           space: membersUri,
           repo: memberDid,
-          collection: OPENSOCIAL_COLLECTION.acceptance,
+          collection: ATGRP_COLLECTION.confirmation,
           rkey: SELF_SKEY,
         },
       );
       if (rec.value && typeof rec.value === "object" && !Array.isArray(rec.value)) {
-        acceptances.push({ repoDid: memberDid, rkey: SELF_SKEY, value: rec.value });
+        confirmations.push({ repoDid: memberDid, rkey: SELF_SKEY, value: rec.value });
       }
     } catch (error) {
       if (isMissingXrpcResource(error) || isTombstonedResolutionError(error)) return;
@@ -316,13 +320,14 @@ export async function readIndependentWorkspace(
   );
 
   const summary = summarizeWorkspace(uri, deps.did ?? "", {
-    profiles,
+    abouts,
+    configs,
     roles,
     memberships,
     directory,
     installs,
     extInstalls,
-    acceptances,
+    confirmations,
     memberWriters,
     spacePolicies,
     accountLabels: activeAccountLabels,
@@ -332,7 +337,7 @@ export async function readIndependentWorkspace(
   const invalidRosterRecords =
     roles.records.filter(
       (record) =>
-        !validateSpaceRecord(OPENSOCIAL_COLLECTION.role, record.value, {
+        !validateSpaceRecord(ATGRP_COLLECTION.role, record.value, {
           authorityDid,
           spaceUri: membersUri,
           repoDid: authorityDid,
@@ -341,7 +346,7 @@ export async function readIndependentWorkspace(
     ).length +
     memberships.records.filter(
       (record) =>
-        !validateSpaceRecord(OPENSOCIAL_COLLECTION.membership, record.value, {
+        !validateSpaceRecord(ATGRP_COLLECTION.membership, record.value, {
           authorityDid,
           spaceUri: membersUri,
           repoDid: authorityDid,
@@ -379,6 +384,8 @@ export async function readIndependentWorkspace(
     authorityDid,
     groupDid: authorityDid,
     name: summary.name,
+    ...(summary.description !== undefined ? { description: summary.description } : {}),
+    ...(summary.website !== undefined ? { website: summary.website } : {}),
     joinPolicy: summary.joinPolicy,
     publicMeta: summary.publicMeta,
     members: accountLabelScan.truncated ? [] : summary.members.map((m) => m.did),
@@ -422,7 +429,7 @@ export async function readIndependentPrivateRoster(
         listBoundedRecords(membersCred.client(authorityPds), {
           space: membersUri,
           repo: summary.authorityDid,
-          collection: OPENSOCIAL_COLLECTION.membership,
+          collection: ATGRP_COLLECTION.membership,
           maxRecords: MAX_AUTHORITY_RECORD_SCAN,
         }),
         listBoundedRecords(membersCred.client(authorityPds), {
@@ -485,7 +492,7 @@ export async function readIndependentPrivateRoster(
     if (!isDid(rec.rkey) || rec.rkey === summary.authorityDid || knownAppSubjects.has(rec.rkey)) continue;
     if (isTakendown(accountLabels, rec.rkey)) continue;
     if (
-      !validateSpaceRecord(OPENSOCIAL_COLLECTION.membership, rec.value, {
+      !validateSpaceRecord(ATGRP_COLLECTION.membership, rec.value, {
         authorityDid: summary.authorityDid,
         spaceUri: membersUri,
         repoDid: summary.authorityDid,
@@ -516,7 +523,7 @@ export async function readIndependentInvites(
   nowMs = Date.now(),
 ): Promise<IndependentInvite[]> {
   if (!isDid(viewerDid)) throw new TypeError("Invalid viewer DID.");
-  const space = personalInvitesUri(viewerDid);
+  const space = personalInboxUri(viewerDid);
   let credential: SpaceCredential;
   try {
     credential = await mintSpaceCredentialWith(deps, space);
@@ -541,7 +548,7 @@ export async function readIndependentInvites(
         listBoundedRecords(credential.client(groupPds), {
           space,
           repo: groupDid,
-          collection: OPENSOCIAL_COLLECTION.invite,
+          collection: ATGRP_COLLECTION.invite,
           maxRecords: 100,
         }),
       );
@@ -562,7 +569,7 @@ export async function readIndependentInvites(
     for (const rec of scanned.records) {
       if (!isTid(rec.rkey)) continue;
       if (
-        !validateSpaceRecord(OPENSOCIAL_COLLECTION.invite, rec.value, {
+        !validateSpaceRecord(ATGRP_COLLECTION.invite, rec.value, {
           authorityDid: viewerDid,
           spaceUri: space,
           repoDid: groupDid,
@@ -579,7 +586,7 @@ export async function readIndependentInvites(
       }
       const message = typeof rec.value.message === "string" ? rec.value.message : undefined;
       out.push({
-        uri: spaceRecordUri(space, groupDid, OPENSOCIAL_COLLECTION.invite, rec.rkey),
+        uri: spaceRecordUri(space, groupDid, ATGRP_COLLECTION.invite, rec.rkey),
         rkey: rec.rkey,
         groupDid,
         createdAt: String(rec.value.createdAt),

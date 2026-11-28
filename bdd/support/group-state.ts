@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import Database from "better-sqlite3";
 import { channelRoleKey, groupMembersUri, parseSpaceUri, parseWorkspaceUri } from "@flock/protocol/keys";
-import { COLLECTION, OPENSOCIAL_COLLECTION } from "@flock/protocol/nsids";
+import { ATGRP_COLLECTION, COLLECTION } from "@flock/protocol/nsids";
 import {
   effectiveHumanAdmins,
   type EffectiveGovernanceState,
+  type GroupAtgrpPolicy,
   type GroupMembershipRecord,
-  type GroupOpenSocialPolicy,
   type GroupRoleRecord,
 } from "@flock/protocol/scopes";
 import type { AppWorld } from "./world";
@@ -66,23 +66,23 @@ export function groupSpaceUris(world: AppWorld, groupDid: string, spaceType?: st
   });
 }
 
-export function groupSpacePolicy(world: AppWorld, spaceUri: string): GroupOpenSocialPolicy | undefined {
+export function groupSpacePolicy(world: AppWorld, spaceUri: string): GroupAtgrpPolicy | undefined {
   return withGroupDb(world, (db) => {
     const row = db
       .prepare("SELECT policy_json FROM group_space WHERE space_uri = ? AND deleted_at IS NULL")
       .get(spaceUri) as { policy_json: string } | undefined;
-    return row ? (JSON.parse(row.policy_json) as GroupOpenSocialPolicy) : undefined;
+    return row ? (JSON.parse(row.policy_json) as GroupAtgrpPolicy) : undefined;
   });
 }
 
-export function groupSpacePolicies(world: AppWorld, groupDid: string): Map<string, GroupOpenSocialPolicy> {
+export function groupSpacePolicies(world: AppWorld, groupDid: string): Map<string, GroupAtgrpPolicy> {
   return withGroupDb(world, (db) => {
     const rows = db
       .prepare("SELECT space_uri, policy_json FROM group_space WHERE group_did = ? AND deleted_at IS NULL")
       .all(groupDid) as Array<{ space_uri: string; policy_json: string }>;
-    const map = new Map<string, GroupOpenSocialPolicy>();
+    const map = new Map<string, GroupAtgrpPolicy>();
     for (const row of rows) {
-      map.set(row.space_uri, JSON.parse(row.policy_json) as GroupOpenSocialPolicy);
+      map.set(row.space_uri, JSON.parse(row.policy_json) as GroupAtgrpPolicy);
     }
     return map;
   });
@@ -136,7 +136,7 @@ export function groupGovernanceState(
     const membersSpace = groupMembersUri(groupDid);
     const roleRows = db
       .prepare("SELECT rkey, value FROM space_record WHERE space_uri = ? AND repo_did = ? AND collection = ?")
-      .all(membersSpace, groupDid, OPENSOCIAL_COLLECTION.role) as Array<{ rkey: string; value: string }>;
+      .all(membersSpace, groupDid, ATGRP_COLLECTION.role) as Array<{ rkey: string; value: string }>;
     const roles = new Map<string, GroupRoleRecord>();
     for (const row of roleRows) {
       const parsed = JSON.parse(row.value) as Record<string, unknown>;
@@ -144,14 +144,14 @@ export function groupGovernanceState(
         displayName: String(parsed.displayName ?? row.rkey),
         ...(typeof parsed.description === "string" ? { description: parsed.description } : {}),
         default: parsed.default === true,
-        scopes: Array.isArray(parsed.scopes) ? (parsed.scopes as string[]) : [],
-        assignable: Array.isArray(parsed.assignable) ? (parsed.assignable as string[]) : [],
+        permissions: Array.isArray(parsed.permissions) ? (parsed.permissions as string[]) : [],
+        canAssign: Array.isArray(parsed.canAssign) ? (parsed.canAssign as string[]) : [],
       });
     }
 
     const membershipRows = db
       .prepare("SELECT rkey, value FROM space_record WHERE space_uri = ? AND repo_did = ? AND collection = ?")
-      .all(membersSpace, groupDid, OPENSOCIAL_COLLECTION.membership) as Array<{ rkey: string; value: string }>;
+      .all(membersSpace, groupDid, ATGRP_COLLECTION.membership) as Array<{ rkey: string; value: string }>;
     const memberships = new Map<string, GroupMembershipRecord>();
     for (const row of membershipRows) {
       const parsed = JSON.parse(row.value) as Record<string, unknown>;
@@ -165,9 +165,9 @@ export function groupGovernanceState(
     const policyRows = db
       .prepare("SELECT space_uri, policy_json FROM group_space WHERE group_did = ? AND deleted_at IS NULL")
       .all(groupDid) as Array<{ space_uri: string; policy_json: string }>;
-    const spacePolicies = new Map<string, GroupOpenSocialPolicy>();
+    const spacePolicies = new Map<string, GroupAtgrpPolicy>();
     for (const row of policyRows) {
-      spacePolicies.set(row.space_uri, JSON.parse(row.policy_json) as GroupOpenSocialPolicy);
+      spacePolicies.set(row.space_uri, JSON.parse(row.policy_json) as GroupAtgrpPolicy);
     }
 
     const appRows = db
@@ -246,7 +246,7 @@ function sanitizeTriggerSuffix(groupDid: string): string {
 }
 
 /**
- * Blocks `group.opensocial.membership` writes (insert/update) on `groupDid`, so multi-step operations like
+ * Blocks `org.atgrp.membership` writes (insert/update) on `groupDid`, so multi-step operations like
  * `transitionChannel` complete `channel-set-transitioning` and stop in `state = 'pending'` on membership role assignment.
  */
 export function injectGroupMembershipWriteFault(world: AppWorld, groupDid: string): void {
@@ -256,13 +256,13 @@ export function injectGroupMembershipWriteFault(world: AppWorld, groupDid: strin
     db.exec(`
       CREATE TRIGGER IF NOT EXISTS bdd_fault_mem_ins_${suffix}
       BEFORE INSERT ON space_record
-      WHEN NEW.space_uri = '${membersSpace}' AND NEW.collection = '${OPENSOCIAL_COLLECTION.membership}'
+      WHEN NEW.space_uri = '${membersSpace}' AND NEW.collection = '${ATGRP_COLLECTION.membership}'
       BEGIN
         SELECT RAISE(ABORT, 'bdd injected membership write fault');
       END;
       CREATE TRIGGER IF NOT EXISTS bdd_fault_mem_upd_${suffix}
       BEFORE UPDATE ON space_record
-      WHEN NEW.space_uri = '${membersSpace}' AND NEW.collection = '${OPENSOCIAL_COLLECTION.membership}'
+      WHEN NEW.space_uri = '${membersSpace}' AND NEW.collection = '${ATGRP_COLLECTION.membership}'
       BEGIN
         SELECT RAISE(ABORT, 'bdd injected membership write fault');
       END;
@@ -281,7 +281,7 @@ export function clearGroupMembershipWriteFault(world: AppWorld, groupDid: string
   });
 }
 
-/** Blocks `group.opensocial.membership` deletes on `groupDid`, so `removeMember` stops in `state = 'pending'`. */
+/** Blocks `org.atgrp.membership` deletes on `groupDid`, so `removeMember` stops in `state = 'pending'`. */
 export function injectGroupMembershipDeleteFault(world: AppWorld, groupDid: string): void {
   const suffix = sanitizeTriggerSuffix(groupDid);
   const membersSpace = groupMembersUri(groupDid).replace(/'/g, "''");
@@ -289,7 +289,7 @@ export function injectGroupMembershipDeleteFault(world: AppWorld, groupDid: stri
     db.exec(`
       CREATE TRIGGER IF NOT EXISTS bdd_fault_mem_del_${suffix}
       BEFORE DELETE ON space_record
-      WHEN OLD.space_uri = '${membersSpace}' AND OLD.collection = '${OPENSOCIAL_COLLECTION.membership}'
+      WHEN OLD.space_uri = '${membersSpace}' AND OLD.collection = '${ATGRP_COLLECTION.membership}'
       BEGIN
         SELECT RAISE(ABORT, 'bdd injected membership delete fault');
       END;

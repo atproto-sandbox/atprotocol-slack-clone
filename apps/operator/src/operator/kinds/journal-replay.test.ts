@@ -12,7 +12,7 @@ import {
   groupMembersUri,
   groupMetaUri,
   inboxUri,
-  personalInvitesUri,
+  personalInboxUri,
   requestDigest,
   requestRecordKey,
   requireSpaceAuthority,
@@ -23,10 +23,10 @@ import {
 } from "@flock/protocol/keys";
 import {
   COLLECTION,
-  OPENSOCIAL_COLLECTION,
-  OPENSOCIAL_METHOD,
-  OPENSOCIAL_POLICY,
-  OPENSOCIAL_SPACE_TYPE,
+  ATGRP_COLLECTION,
+  ATGRP_METHOD,
+  ATGRP_POLICY,
+  ATGRP_SPACE_TYPE,
   SPACE_TYPE,
 } from "@flock/protocol/nsids";
 import { parseWorkspaceRef, type OperatorActor } from "../actor";
@@ -170,7 +170,7 @@ test("a pre-table bootstrap row half done resumes after its last completed step"
     spaceType: SPACE_TYPE.workspace,
     skey: "self",
     policy: {
-      $type: OPENSOCIAL_POLICY,
+      $type: ATGRP_POLICY,
       publicRead: false,
       unlisted: false,
       grants: [{ role: "member", read: true, write: true }],
@@ -183,7 +183,7 @@ test("a pre-table bootstrap row half done resumes after its last completed step"
     spaceType: SPACE_TYPE.inbox,
     skey: "self",
     policy: {
-      $type: OPENSOCIAL_POLICY,
+      $type: ATGRP_POLICY,
       publicRead: false,
       unlisted: false,
       grants: [{ role: "member", read: true, write: true }],
@@ -193,7 +193,7 @@ test("a pre-table bootstrap row half done resumes after its last completed step"
     spaceType: SPACE_TYPE.channel,
     skey: "general",
     policy: {
-      $type: OPENSOCIAL_POLICY,
+      $type: ATGRP_POLICY,
       publicRead: false,
       unlisted: false,
       grants: [{ role: "member", read: true, write: true }],
@@ -231,11 +231,11 @@ async function seededWorkspace(label: string, intercept?: FakeGroupSessionOption
     operationId: tidNow(),
   });
   const membersSpace = groupMembersUri(gDid);
-  await host.putRecord(membersSpace, OPENSOCIAL_COLLECTION.membership, ADMIN, {
+  await host.putRecord(membersSpace, ATGRP_COLLECTION.membership, ADMIN, {
     roles: ["admin", "member"],
     createdAt: "2026-11-01T00:00:00.000Z",
   });
-  await host.putRecord(membersSpace, OPENSOCIAL_COLLECTION.membership, MEMBER, {
+  await host.putRecord(membersSpace, ATGRP_COLLECTION.membership, MEMBER, {
     roles: ["member"],
     createdAt: "2026-11-01T00:00:00.000Z",
   });
@@ -268,12 +268,12 @@ for (const scenario of [
     const membersSpace = groupMembersUri(host.groupDid);
 
     if (scenario.done.includes("channel-space")) {
-      await host.putRecord(membersSpace, OPENSOCIAL_COLLECTION.role, privRole, { displayName: "#design member" });
+      await host.putRecord(membersSpace, ATGRP_COLLECTION.role, privRole, { displayName: "#design member" });
       await host.selfClient.procedure("com.atproto.space.createSpace", {
         spaceType: SPACE_TYPE.channel,
         skey: "design",
         policy: {
-          $type: OPENSOCIAL_POLICY,
+          $type: ATGRP_POLICY,
           publicRead: false,
           unlisted: true,
           grants: [{ role: privRole, read: true, write: true }],
@@ -281,7 +281,7 @@ for (const scenario of [
       });
     }
     if (scenario.done.includes(`channel-member-${ADMIN}`)) {
-      await host.putRecord(membersSpace, OPENSOCIAL_COLLECTION.membership, ADMIN, {
+      await host.putRecord(membersSpace, ATGRP_COLLECTION.membership, ADMIN, {
         roles: ["admin", "member", privRole],
         createdAt: "2026-11-01T00:00:00.000Z",
       });
@@ -449,7 +449,7 @@ test("seeded pre-R13 pending decideJoinRequest private-channel upgrade rows repl
 
   const memberRecord = await host.getRecord<{ roles: string[] }>(
     groupMembersUri(host.groupDid),
-    OPENSOCIAL_COLLECTION.membership,
+    ATGRP_COLLECTION.membership,
     MEMBER,
   );
   assert.ok(memberRecord?.roles.includes(channelRoleKey("secret")));
@@ -472,7 +472,7 @@ test("distinct decideGroupJoinRequest approves with If-Join-Request-Present: tru
       if (
         loseApproveResponse &&
         method === "com.atproto.space.putRecord" &&
-        target.collection === OPENSOCIAL_COLLECTION.membership
+        target.collection === ATGRP_COLLECTION.membership
       ) {
         const headers = new Headers(init?.headers);
         assert.equal(
@@ -482,15 +482,15 @@ test("distinct decideGroupJoinRequest approves with If-Join-Request-Present: tru
         );
         loseApproveResponse = false;
         // Let the real Group Host commit first, then simulate lost HTTP response!
-        await host.putRecord(groupMembersUri(host.groupDid), OPENSOCIAL_COLLECTION.membership, target.rkey!, {
+        await host.putRecord(groupMembersUri(host.groupDid), ATGRP_COLLECTION.membership, target.rkey!, {
           roles: ["member"],
           createdAt: new Date().toISOString(),
         });
         return OUTAGE();
       }
-      if (loseDenyResponse && method === OPENSOCIAL_METHOD.denyJoinRequest) {
+      if (loseDenyResponse && method === ATGRP_METHOD.denyJoinRequest) {
         loseDenyResponse = false;
-        await host.selfClient.procedure(OPENSOCIAL_METHOD.denyJoinRequest, { member: target.member });
+        await host.selfClient.procedure(ATGRP_METHOD.denyJoinRequest, { member: target.member });
         return OUTAGE();
       }
       return undefined;
@@ -531,7 +531,7 @@ test("distinct decideGroupJoinRequest approves with If-Join-Request-Present: tru
   assert.equal(approved.state, "completed", JSON.stringify(approved));
   const mem = await host.getRecord<{ roles: string[] }>(
     groupMembersUri(host.groupDid),
-    OPENSOCIAL_COLLECTION.membership,
+    ATGRP_COLLECTION.membership,
     applicantApprove,
   );
   assert.deepEqual(mem?.roles, ["member"]);
@@ -547,7 +547,7 @@ test("distinct decideGroupJoinRequest approves with If-Join-Request-Present: tru
   });
   assert.equal(denied.state, "completed", JSON.stringify(denied));
   assert.equal(
-    await host.getRecord(groupMembersUri(host.groupDid), OPENSOCIAL_COLLECTION.membership, applicantDeny),
+    await host.getRecord(groupMembersUri(host.groupDid), ATGRP_COLLECTION.membership, applicantDeny),
     undefined,
   );
 });
@@ -574,7 +574,7 @@ test("demotion of originalActor: (1) satisfied leaveChannel completes, (2) 0-ste
       steps: [],
     });
     // Eject MEMBER before recovery runs
-    await host.deleteRecord(groupMembersUri(host.groupDid), OPENSOCIAL_COLLECTION.membership, MEMBER);
+    await host.deleteRecord(groupMembersUri(host.groupDid), ATGRP_COLLECTION.membership, MEMBER);
 
     const res = await executeOperatorOperation(owner, tidNow(), { kind: "reconcileWorkspace" });
     assert.equal(res.state, "completed");
@@ -600,7 +600,7 @@ test("demotion of originalActor: (1) satisfied leaveChannel completes, (2) 0-ste
       steps: [],
     });
     // Demote ADMIN (`roles: ["member"]`) before recovery
-    await host.putRecord(groupMembersUri(host.groupDid), OPENSOCIAL_COLLECTION.membership, ADMIN, {
+    await host.putRecord(groupMembersUri(host.groupDid), ATGRP_COLLECTION.membership, ADMIN, {
       roles: ["member"],
       createdAt: "2026-11-01T00:00:00.000Z",
     });
@@ -635,7 +635,7 @@ test("demotion of originalActor: (1) satisfied leaveChannel completes, (2) 0-ste
     let directoryWritten = false;
     const { workspace, host, owner } = await seededWorkspace(`takeover-step-${stopAfterStepCount}`, (method, target) => {
       if (!blockFromStep) return undefined;
-      if (stopAfterStepCount === 1 && method === "com.atproto.space.putRecord" && target.collection === OPENSOCIAL_COLLECTION.membership) {
+      if (stopAfterStepCount === 1 && method === "com.atproto.space.putRecord" && target.collection === ATGRP_COLLECTION.membership) {
         return OUTAGE();
       }
       if (stopAfterStepCount === 2 && method === "com.atproto.space.putRecord" && target.collection === COLLECTION.directory) {
@@ -654,14 +654,14 @@ test("demotion of originalActor: (1) satisfied leaveChannel completes, (2) 0-ste
     // Provision a limited sub-admin (`RECRUITER`) who can `inviteMember` (`member` role only) but CANNOT create private channels!
     const recruiterDid = plcDid(`jrrecruiter${stopAfterStepCount}`);
     const membersSpace = groupMembersUri(host.groupDid);
-    await host.putRecord(membersSpace, OPENSOCIAL_COLLECTION.role, "recruiter", {
+    await host.putRecord(membersSpace, ATGRP_COLLECTION.role, "recruiter", {
       displayName: "Recruiter",
-      scopes: [
-        `space:${OPENSOCIAL_SPACE_TYPE.members}?skey=self&collection=${OPENSOCIAL_COLLECTION.membership}&action=read&action=create&action=update`,
+      permissions: [
+        `space:${ATGRP_SPACE_TYPE.members}?skey=self&collection=${ATGRP_COLLECTION.membership}&action=read&action=create&action=update`,
       ],
-      assignable: ["member"],
+      canAssign: ["member"],
     });
-    await host.putRecord(membersSpace, OPENSOCIAL_COLLECTION.membership, recruiterDid, {
+    await host.putRecord(membersSpace, ATGRP_COLLECTION.membership, recruiterDid, {
       roles: ["member", "recruiter"],
       createdAt: "2026-11-01T00:00:00.000Z",
     });
@@ -684,7 +684,7 @@ test("demotion of originalActor: (1) satisfied leaveChannel completes, (2) 0-ste
     assert.equal(stopped.completedSteps.length, stopAfterStepCount);
 
     // Demote `ADMIN` (`originalActor`) after `stopAfterStepCount` durable steps!
-    await host.putRecord(membersSpace, OPENSOCIAL_COLLECTION.membership, ADMIN, {
+    await host.putRecord(membersSpace, ATGRP_COLLECTION.membership, ADMIN, {
       roles: ["member"],
       createdAt: "2026-11-02T00:00:00.000Z",
     });
@@ -756,7 +756,7 @@ test("inviteMember makes expiring invitations and direct membership grants stric
     if (
       failFirstInviteVerify &&
       method === "com.atproto.space.getRecord" &&
-      target.collection === OPENSOCIAL_COLLECTION.invite
+      target.collection === ATGRP_COLLECTION.invite
     ) {
       failFirstInviteVerify = false;
       return OUTAGE();
@@ -779,11 +779,11 @@ test("inviteMember makes expiring invitations and direct membership grants stric
   assert.equal(pastRes.state, "failed");
   assert.match(pastRes.error ?? "", /valid future datetime/);
   assert.equal(
-    await host.getRecord(personalInvitesUri(expiringSubject), OPENSOCIAL_COLLECTION.invite, pastOpId),
+    await host.getRecord(personalInboxUri(expiringSubject), ATGRP_COLLECTION.invite, pastOpId),
     undefined,
   );
   assert.equal(
-    await host.getRecord(groupMembersUri(host.groupDid), OPENSOCIAL_COLLECTION.membership, expiringSubject),
+    await host.getRecord(groupMembersUri(host.groupDid), ATGRP_COLLECTION.membership, expiringSubject),
     undefined,
   );
 
@@ -822,7 +822,7 @@ test("inviteMember makes expiring invitations and direct membership grants stric
   assert.equal(alreadyMemberRes.state, "failed");
   assert.match(alreadyMemberRes.error ?? "", /already a member/);
 
-  // 4. Expiring invitation (`expiresAt` future ISO) writes ONLY `group.opensocial.invite/<operationId>` (no nonstandard `group` field)
+  // 4. Expiring invitation (`expiresAt` future ISO) writes ONLY `org.atgrp.invite/<operationId>` (no nonstandard `group` field)
   //    and NEVER creates `membership/<subject>` until redeemed (including across transient verification retry)!
   failFirstInviteVerify = true;
   const inviteOpId = tidNow();
@@ -835,28 +835,28 @@ test("inviteMember makes expiring invitations and direct membership grants stric
   assert.deepEqual(inviteRes.completedSteps, ["member-invite-record", "member-state-verified"]);
 
   const storedInvite = await host.getRecord<Record<string, unknown>>(
-    personalInvitesUri(expiringSubject),
-    OPENSOCIAL_COLLECTION.invite,
+    personalInboxUri(expiringSubject),
+    ATGRP_COLLECTION.invite,
     inviteOpId,
   );
-  assert.ok(storedInvite, "group.opensocial.invite/<operationId> must exist on Group Host");
+  assert.ok(storedInvite, "org.atgrp.invite/<operationId> must exist on Group Host");
   assert.equal(storedInvite.expiresAt, futureIso);
   assert.equal(typeof storedInvite.createdAt, "string");
-  assert.equal("group" in storedInvite, false, "standard group.opensocial.invite must not include nonstandard group field");
+  assert.equal("group" in storedInvite, false, "standard org.atgrp.invite must not include nonstandard group field");
 
   assert.equal(
-    await host.getRecord(groupMembersUri(host.groupDid), OPENSOCIAL_COLLECTION.membership, expiringSubject),
+    await host.getRecord(groupMembersUri(host.groupDid), ATGRP_COLLECTION.membership, expiringSubject),
     undefined,
     "expiring invitation must NOT grant immediate membership before redemption",
   );
   assert.equal(await host.effectiveAccess(channelUri(host.groupDid, "general"), expiringSubject), "-");
 
-  // Redeem the invitation via `group.opensocial.requestJoin` -> admits `expiringSubject` cleanly
-  const inviteUri = `${personalInvitesUri(expiringSubject)}/${host.groupDid}/${OPENSOCIAL_COLLECTION.invite}/${inviteOpId}`;
+  // Redeem the invitation via `org.atgrp.requestJoin` -> admits `expiringSubject` cleanly
+  const inviteUri = `${personalInboxUri(expiringSubject)}/${host.groupDid}/${ATGRP_COLLECTION.invite}/${inviteOpId}`;
   const redeemed = await host.requestGroupJoin(expiringSubject, { invite: inviteUri });
   assert.equal(redeemed.status, "admitted");
   assert.deepEqual(
-    (await host.getRecord<{ roles: string[] }>(groupMembersUri(host.groupDid), OPENSOCIAL_COLLECTION.membership, expiringSubject))?.roles,
+    (await host.getRecord<{ roles: string[] }>(groupMembersUri(host.groupDid), ATGRP_COLLECTION.membership, expiringSubject))?.roles,
     ["member"],
   );
 
@@ -869,11 +869,11 @@ test("inviteMember makes expiring invitations and direct membership grants stric
   assert.equal(directRes.state, "completed");
   assert.deepEqual(directRes.completedSteps, ["member-workspace", "member-state-verified"]);
   assert.deepEqual(
-    (await host.getRecord<{ roles: string[] }>(groupMembersUri(host.groupDid), OPENSOCIAL_COLLECTION.membership, directSubject))?.roles,
+    (await host.getRecord<{ roles: string[] }>(groupMembersUri(host.groupDid), ATGRP_COLLECTION.membership, directSubject))?.roles,
     ["member"],
   );
   assert.equal(
-    await host.getRecord(personalInvitesUri(directSubject), OPENSOCIAL_COLLECTION.invite, directOpId),
+    await host.getRecord(personalInboxUri(directSubject), ATGRP_COLLECTION.invite, directOpId),
     undefined,
   );
 });

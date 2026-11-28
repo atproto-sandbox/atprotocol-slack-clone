@@ -7,7 +7,7 @@ import {
   groupMembersUri,
   inboxUri,
 } from "@flock/protocol/keys";
-import { OPENSOCIAL_COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
+import { ATGRP_COLLECTION, SPACE_TYPE } from "@flock/protocol/nsids";
 import {
   appInboxState,
   deleteAuthorityRecord,
@@ -107,7 +107,7 @@ async function reconcileWorkspace(actor: OperatorActor, context: OperationContex
   // Ensure active app roles exist BEFORE updating space policies that reference them!
   for (const install of [...installs.values()].sort((a, b) => a.subject.localeCompare(b.subject))) {
     const roleKey = appRoleKey(install.subject);
-    await putAuthorityRecord(actor.session, membersSpace, OPENSOCIAL_COLLECTION.role, roleKey, {
+    await putAuthorityRecord(actor.session, membersSpace, ATGRP_COLLECTION.role, roleKey, {
       displayName: `App: ${install.subject}`,
     });
   }
@@ -155,7 +155,7 @@ async function reconcileWorkspace(actor: OperatorActor, context: OperationContex
             await putMembershipRoles(actor.session, groupDid, did, next.length > 0 ? next : ["member"]);
           }
         }
-        await deleteAuthorityRecord(actor.session, membersSpace, OPENSOCIAL_COLLECTION.role, privRole);
+        await deleteAuthorityRecord(actor.session, membersSpace, ATGRP_COLLECTION.role, privRole);
       });
       continue;
     }
@@ -163,7 +163,7 @@ async function reconcileWorkspace(actor: OperatorActor, context: OperationContex
     await context.step(`channel-${skey}-verified`, async () => {
       const chGrants = activeAppChannelGrants(installs, skey);
       if (channel.value.visibility === "private") {
-        await putAuthorityRecord(actor.session, membersSpace, OPENSOCIAL_COLLECTION.role, privRole, {
+        await putAuthorityRecord(actor.session, membersSpace, ATGRP_COLLECTION.role, privRole, {
           displayName: `#${channel.value.name} member`,
         });
         await updateOpenSocialSpacePolicy(
@@ -288,6 +288,6 @@ async function reconcileAppInboxAndPrincipal(
   }
   await context.step(`app-inbox-${install.subject}-verified`, async () => {
     await deleteMembershipRecord(actor.session, groupDid, install.subject);
-    await deleteAuthorityRecord(actor.session, membersSpace, OPENSOCIAL_COLLECTION.role, roleKey);
+    await deleteAuthorityRecord(actor.session, membersSpace, ATGRP_COLLECTION.role, roleKey);
   });
 }

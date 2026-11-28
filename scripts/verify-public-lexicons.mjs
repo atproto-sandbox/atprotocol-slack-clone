@@ -243,7 +243,7 @@ export function loadVendoredPublicLexicons(repoRoot) {
   const root = resolve(repoRoot ?? fileURLToPath(new URL("..", import.meta.url)));
   const roots = [
     join(root, "packages/protocol/lexicons/new/flock"),
-    join(root, "packages/protocol/lexicons/group/opensocial"),
+    join(root, "packages/protocol/lexicons/org/atgrp"),
   ];
   const byId = new Map();
   for (const lexDir of roots) {
@@ -266,10 +266,17 @@ export function loadVendoredPublicLexicons(repoRoot) {
   }
   const sorted = [...byId.values()].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const hostnames = new Set(sorted.map((entry) => entry.dnsHostname));
-  if (!hostnames.has("_lexicon.flock.new") || !hostnames.has("_lexicon.opensocial.group")) {
-    throw new Error(
-      "Vendored lexicon manifest must include both _lexicon.flock.new and _lexicon.opensocial.group authorities.",
-    );
+  for (const requiredHost of [
+    "_lexicon.flock.new",
+    "_lexicon.group.flock.new",
+    "_lexicon.atgrp.org",
+    "_lexicon.mod.atgrp.org",
+  ]) {
+    if (!hostnames.has(requiredHost)) {
+      throw new Error(
+        `Vendored lexicon manifest must include ${requiredHost} authority.`,
+      );
+    }
   }
   return sorted;
 }

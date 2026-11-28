@@ -9,7 +9,7 @@ export class ChannelUnavailableError extends Error {
   }
 }
 
-/** Personal `group.opensocial.invites/self` already exists with an incompatible policy (`publicWrite !== true`, `publicRead !== false`, `allowedApps !== undefined`) or non-empty member list. */
+/** Personal `org.atgrp.inbox/self` already exists with an incompatible policy (`publicWrite !== true`, `publicRead !== false`, `allowedApps !== undefined`) or non-empty member list. */
 export class IncompatibleInvitesSpacePolicyError extends Error {
   constructor(message: string) {
     super(message);
@@ -17,7 +17,7 @@ export class IncompatibleInvitesSpacePolicyError extends Error {
   }
 }
 
-/** `group.opensocial.requestJoin` returned a forward-compatible `status` outside `{ "admitted", "pending" }`. */
+/** `org.atgrp.requestJoin` returned a forward-compatible `status` outside `{ "admitted", "pending" }`. */
 export class UnsupportedJoinStatusError extends Error {
   constructor(readonly rawStatus: string) {
     super(`Unsupported join status returned by group host: ${rawStatus}`);
@@ -25,7 +25,7 @@ export class UnsupportedJoinStatusError extends Error {
   }
 }
 
-/** `group.opensocial.requestJoin` returned HTTP `429 JoinOperationQuotaExceeded` (200 unexpired idempotency rows). */
+/** `org.atgrp.requestJoin` returned HTTP `429 JoinOperationQuotaExceeded` (200 unexpired idempotency rows). */
 export class JoinOperationQuotaExceededError extends Error {
   readonly status = 429;
   readonly code = "JoinOperationQuotaExceeded";

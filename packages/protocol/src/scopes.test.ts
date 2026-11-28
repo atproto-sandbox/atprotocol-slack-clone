@@ -3,9 +3,10 @@ import test from "node:test";
 import { SpacePermission } from "@atproto/oauth-scopes";
 import type { DidString, NsidString, RecordKeyString } from "@atproto/syntax";
 import { groupMembersUri, groupMetaUri } from "./keys";
-import { OPERATOR_METHOD } from "./nsids";
+import { ATGRP_COLLECTION, ATGRP_METHOD, ATGRP_PERMISSION_SET, ATGRP_SPACE_TYPE, FLOCK_GROUP_METHOD, OPERATOR_METHOD } from "./nsids";
 import {
   appGrantScopes,
+  ATGRP_PARTICIPATE_SCOPES,
   DESK_MODALITY_SCOPES,
   deskMemberScopes,
   DM_BROWSER_SCOPES,
@@ -13,23 +14,29 @@ import {
   expandGroupScopes,
   expandPolicyGrantScopes,
   groupAdminScopes,
+  groupBasicEditorScopes,
+  groupMembersManagerScopes,
   groupModeratorScopes,
+  InvalidScopeError,
   InvalidSpacePolicyScopeError,
   isEffectiveAdminMember,
   isEffectiveModeratorMember,
   LEGACY_OPERATOR_METHODS,
   legacyMemberGrantScopes,
+  MAX_ISSUED_SCOPE_TOKENS,
   memberGrantScopes,
-  OPEN_SOCIAL_PARTICIPATE_SCOPES,
   OPERATOR_METHODS,
   operatorMethodsScope,
   PERSONAL_PDS_LIST_GROUP_MEMBERS_SPACES_SCOPE,
+  resolveAuthorizedGroupScope,
+  UnauthorizedScopeError,
 } from "./scopes";
 
 const serviceRef = "did:web:slack.example#atproto_flock_operator";
 const groupDid = "did:plc:abcdefghijklmnopqrstuvwx";
 const aliceDid = "did:plc:aliceabcdefghijklmnopqrs";
 const bobDid = "did:plc:bobabcdefghijklmnopqrstu";
+const carolDid = "did:plc:carolabcdefghijklmnopqrs";
 
 test("operatorMethodsScope lists all published operator methods including getSpaceNotifyTarget", () => {
   assert.equal(
@@ -50,13 +57,13 @@ test("legacyMemberGrantScopes matches memberGrantScopes except omitting notify-t
   assert.equal(legacy.at(-1), operatorMethodsScope(LEGACY_OPERATOR_METHODS, serviceRef));
 });
 
-test("memberGrantScopes includes DM_BROWSER_SCOPES + OPEN_SOCIAL_PARTICIPATE_SCOPES + Flock modality scopes", () => {
+test("memberGrantScopes includes DM_BROWSER_SCOPES + ATGRP_PARTICIPATE_SCOPES + Flock modality scopes", () => {
   const scopes = memberGrantScopes(serviceRef);
   for (const dmScope of DM_BROWSER_SCOPES) {
     assert.ok(scopes.includes(dmScope), `missing DM scope ${dmScope}`);
   }
-  for (const osScope of OPEN_SOCIAL_PARTICIPATE_SCOPES) {
-    assert.ok(scopes.includes(osScope), `missing OpenSocial participate scope ${osScope}`);
+  for (const atgrpScope of ATGRP_PARTICIPATE_SCOPES) {
+    assert.ok(scopes.includes(atgrpScope), `missing Atmosphere Groups participate scope ${atgrpScope}`);
   }
   assert.ok(scopes.includes("space:new.flock.workspace?authority=*&skey=self&action=read"));
   assert.ok(scopes.includes("space:new.flock.inbox?authority=*&skey=self&action=read"));
@@ -66,9 +73,9 @@ test("appGrantScopes includes meta/self and members/self read plus Flock app mod
   assert.deepEqual(appGrantScopes("did:web:operator.example#atproto_flock_operator"), [
     "atproto",
     "repo:new.flock.app.declaration?action=create&action=update",
-    "space:group.opensocial.meta?authority=*&skey=self&action=read",
-    "space:group.opensocial.members?authority=*&action=read_self",
-    "space:group.opensocial.members?authority=*&skey=self&action=read",
+    "space:org.atgrp.meta?authority=*&skey=self&action=read",
+    "space:org.atgrp.members?authority=*&action=read_self",
+    "space:org.atgrp.members?authority=*&skey=self&action=read",
     "space:new.flock.workspace?authority=*&skey=self&action=read",
     "space:new.flock.channel?authority=*&action=read",
     "space:new.flock.channel?authority=*&collection=new.flock.channel.message&collection=new.flock.channel.reaction&action=create&action=update&action=delete",
@@ -77,22 +84,22 @@ test("appGrantScopes includes meta/self and members/self read plus Flock app mod
   ]);
 });
 
-test("deskMemberScopes is least-privilege, satisfies listSpaces(group.opensocial.members), and omits operator/unused scopes", () => {
+test("deskMemberScopes is least-privilege, satisfies listSpaces(org.atgrp.members), and omits operator/unused scopes", () => {
   const scopes = deskMemberScopes();
   assert.deepEqual(scopes, [
     "atproto",
-    ...OPEN_SOCIAL_PARTICIPATE_SCOPES,
+    ...ATGRP_PARTICIPATE_SCOPES,
     PERSONAL_PDS_LIST_GROUP_MEMBERS_SPACES_SCOPE,
     ...DESK_MODALITY_SCOPES,
   ]);
   const perms = expandGroupScopes(scopes);
   assert.equal(
     perms.allowsSpace(
-      { spaceType: "group.opensocial.members" as NsidString, authority: "*", skey: "*" },
+      { spaceType: ATGRP_SPACE_TYPE.members as NsidString, authority: "*", skey: "*" },
       { action: "read_self" },
     ),
     true,
-    "deskMemberScopes must satisfy real PDS listSpaces({ spaceType: 'group.opensocial.members' })",
+    "deskMemberScopes must satisfy real PDS listSpaces({ spaceType: 'org.atgrp.members' })",
   );
   assert.equal(
     perms.allowsSpace(
@@ -144,7 +151,7 @@ test("@atproto/oauth-scopes SpaceCollectionParam accepts '*' collection on space
   );
 });
 
-test("groupAdminScopes never emits invalid aud=self and expands cleanly with zero dropped permissions", () => {
+test("groupAdminScopes, groupModeratorScopes (write-only wildcard labels), groupMembersManagerScopes, and groupBasicEditorScopes expand cleanly", () => {
   const preDidScopes = groupAdminScopes();
   assert.ok(preDidScopes.every((s) => !s.includes("aud=self")));
   const preDidPerms = expandGroupScopes(preDidScopes);
@@ -153,7 +160,7 @@ test("groupAdminScopes never emits invalid aud=self and expands cleanly with zer
   assert.equal(
     preDidPerms.allowsRpc({
       aud: `${groupDid}#atproto_pds`,
-      lxm: "group.opensocial.listJoinRequests",
+      lxm: ATGRP_METHOD.listJoinRequests,
     }),
     true,
   );
@@ -167,16 +174,79 @@ test("groupAdminScopes never emits invalid aud=self and expands cleanly with zer
   assert.equal(
     preDidPerms.allowsRpc({
       aud: "did:web:target.groups.example" as `${DidString}#${string}`,
-      lxm: "group.opensocial.abortMigration",
+      lxm: FLOCK_GROUP_METHOD.abortMigration,
     }),
     true,
   );
-  const modPerms = expandGroupScopes(groupModeratorScopes());
+
+  // Moderator: write-only wildcard labels (NO action=read on space:*!), no abortMigration, no listJoinRequests
+  const modPerms = expandGroupScopes(groupModeratorScopes(), groupDid);
   assert.equal(
     modPerms.allowsRpc({
       aud: "did:web:target.groups.example" as `${DidString}#${string}`,
-      lxm: "group.opensocial.abortMigration",
+      lxm: FLOCK_GROUP_METHOD.abortMigration,
     }),
+    false,
+  );
+  assert.equal(
+    modPerms.allowsRpc({
+      aud: `${groupDid}#atproto_pds`,
+      lxm: ATGRP_METHOD.listJoinRequests,
+    }),
+    false,
+  );
+  assert.equal(
+    modPerms.allowsSpace(
+      { spaceDid: groupDid as DidString, spaceType: "new.flock.channel", skey: "secret" },
+      { action: "read" },
+    ),
+    false,
+    "moderator must NOT receive wildcard action=read on private channels",
+  );
+  assert.equal(
+    modPerms.allowsSpace(
+      { spaceDid: groupDid as DidString, spaceType: "new.flock.channel", skey: "secret" },
+      { action: "create", collection: "com.atproto.label.record" },
+    ),
+    true,
+  );
+
+  // Members manager: invites & join requests, no moderation RPCs
+  const membersMgrPerms = expandGroupScopes(groupMembersManagerScopes(), groupDid);
+  assert.equal(
+    membersMgrPerms.allowsRpc({ aud: `${groupDid}#atproto_pds`, lxm: ATGRP_METHOD.listJoinRequests }),
+    true,
+  );
+  assert.equal(
+    membersMgrPerms.allowsRpc({ aud: `${groupDid}#atproto_pds`, lxm: ATGRP_METHOD.denyJoinRequest }),
+    true,
+  );
+  assert.equal(
+    membersMgrPerms.allowsRpc({ aud: `${groupDid}#atproto_pds`, lxm: ATGRP_METHOD.modQuerySubjects }),
+    false,
+  );
+
+  // Basic editor: about + rule, no config/role/membership
+  const basicPerms = expandGroupScopes(groupBasicEditorScopes(), groupDid);
+  assert.equal(
+    basicPerms.allowsSpace(
+      { spaceDid: groupDid as DidString, spaceType: ATGRP_SPACE_TYPE.meta, skey: "self" },
+      { action: "update", collection: ATGRP_COLLECTION.about },
+    ),
+    true,
+  );
+  assert.equal(
+    basicPerms.allowsSpace(
+      { spaceDid: groupDid as DidString, spaceType: ATGRP_SPACE_TYPE.members, skey: "self" },
+      { action: "create", collection: ATGRP_COLLECTION.rule },
+    ),
+    true,
+  );
+  assert.equal(
+    basicPerms.allowsSpace(
+      { spaceDid: groupDid as DidString, spaceType: ATGRP_SPACE_TYPE.meta, skey: "self" },
+      { action: "update", collection: ATGRP_COLLECTION.config },
+    ),
     false,
   );
 
@@ -203,7 +273,6 @@ test("expandPolicyGrantScopes clamps policy grants to concrete (spaceType, group
     { groupDid, spaceType: "new.flock.channel", skey: "general" },
   );
   assert.equal(clamped.length, 1);
-  // Matches target space
   assert.equal(
     clamped[0]!.matches({
       spaceType: "new.flock.channel",
@@ -214,7 +283,6 @@ test("expandPolicyGrantScopes clamps policy grants to concrete (spaceType, group
     }),
     true,
   );
-  // NEVER leaks to another channel skey or spaceType!
   assert.equal(
     clamped[0]!.matches({
       spaceType: "new.flock.channel",
@@ -226,13 +294,12 @@ test("expandPolicyGrantScopes clamps policy grants to concrete (spaceType, group
     false,
   );
 
-  // Rejects non-space scopes, manage=create, and cross-space targets
   for (const bad of [
     "repo:*",
-    "rpc?aud=*&lxm=group.opensocial.listModSubjects",
+    `rpc?aud=*&lxm=${ATGRP_METHOD.modQuerySubjects}`,
     "account:status?action=manage",
     "space:new.flock.channel?manage=create",
-    "space:group.opensocial.meta?skey=self&action=read",
+    `space:${ATGRP_SPACE_TYPE.meta}?skey=self&action=read`,
     "space:new.flock.channel?skey=other&action=read",
     "space:new.flock.channel?authority=did:plc:other&action=read",
   ]) {
@@ -244,22 +311,36 @@ test("expandPolicyGrantScopes clamps policy grants to concrete (spaceType, group
   }
 });
 
-test("effectiveMemberPermissions unions role.scopes AND space-clamped policy.grants[].scopes across admin & moderator checks", () => {
+test("effectiveMemberPermissions unions role.permissions and policy.grants[].permissions; isEffectiveAdminMember uses flat union for members/self read+write", () => {
   const roles = new Map([
     [
       "admin",
       {
         displayName: "Admin",
-        scopes: groupAdminScopes(groupDid).filter((s) => s !== "atproto"),
-        assignable: ["*"],
+        permissions: groupAdminScopes(groupDid).filter((s) => s !== "atproto"),
+        canAssign: ["*"],
+      },
+    ],
+    [
+      "split-admin-reader",
+      {
+        permissions: groupAdminScopes(groupDid).filter((s) => s !== "atproto"),
+        canAssign: ["*"],
+      },
+    ],
+    [
+      "split-admin-writer",
+      {
+        permissions: [],
+        canAssign: [],
       },
     ],
     [
       "channel-mod",
       {
         displayName: "Channel Mod",
-        scopes: groupModeratorScopes().filter((s) => s !== "atproto" && !s.startsWith("space:*")),
-        assignable: [],
+        permissions: groupModeratorScopes().filter((s) => s !== "atproto" && !s.startsWith("space:*")),
+        canAssign: [],
       },
     ],
   ]);
@@ -267,17 +348,26 @@ test("effectiveMemberPermissions unions role.scopes AND space-clamped policy.gra
   const memberships = new Map([
     [aliceDid, { roles: ["admin"], createdAt: "2026-11-20T00:00:00.000Z" }],
     [bobDid, { roles: ["channel-mod"], createdAt: "2026-11-20T00:00:00.000Z" }],
+    [carolDid, { roles: ["split-admin-reader", "split-admin-writer"], createdAt: "2026-11-20T00:00:00.000Z" }],
   ]);
 
   const generalChannelUri = `at:space/${groupDid}/new.flock.channel/general`;
   const spacePolicies = new Map([
     [
       groupMembersUri(groupDid),
-      { grants: [{ role: "admin", read: true, write: true }, { role: "channel-mod", read: true, write: true }] },
+      {
+        grants: [
+          { role: "admin", read: true, write: true },
+          { role: "channel-mod", read: true, write: true },
+          // Split across two roles: reader grants read, writer grants write!
+          { role: "split-admin-reader", read: true },
+          { role: "split-admin-writer", write: true },
+        ],
+      },
     ],
     [
       groupMetaUri(groupDid),
-      { grants: [{ role: "admin", read: true }, { role: "channel-mod", read: true }] },
+      { grants: [{ role: "admin", read: true }, { role: "channel-mod", read: true }, { role: "split-admin-reader", read: true }] },
     ],
     [
       generalChannelUri,
@@ -287,8 +377,7 @@ test("effectiveMemberPermissions unions role.scopes AND space-clamped policy.gra
             role: "channel-mod",
             read: true,
             write: true,
-            // Capability granted ONLY via per-space policy.grants[].scopes!
-            scopes: ["space:new.flock.channel?skey=general&collection=com.atproto.label.record&action=create&action=delete"],
+            permissions: ["space:new.flock.channel?skey=general&collection=com.atproto.label.record&action=create&action=delete"],
           },
         ],
       },
@@ -297,6 +386,7 @@ test("effectiveMemberPermissions unions role.scopes AND space-clamped policy.gra
 
   const state = { roles, memberships, spacePolicies };
   assert.equal(isEffectiveAdminMember(aliceDid, state, groupDid), true);
+  assert.equal(isEffectiveAdminMember(carolDid, state, groupDid), true, "flat union across roles satisfies members/self read + write");
   assert.equal(isEffectiveAdminMember(bobDid, state, groupDid), false);
   assert.equal(isEffectiveModeratorMember(bobDid, state, groupDid), true);
 
@@ -314,5 +404,78 @@ test("effectiveMemberPermissions unions role.scopes AND space-clamped policy.gra
       { action: "create", collection: "com.atproto.label.record" },
     ),
     false,
+  );
+});
+
+test("resolveAuthorizedGroupScope narrows include: sets to live roles, rejects excess explicit perms, absorbs redundancies, and caps issued tokens", () => {
+  const basicPerms = expandGroupScopes(groupBasicEditorScopes(), groupDid);
+
+  // 1. Basic editor requesting include:org.atgrp.authManageAdmin gets narrowed ONLY to what basicPerms allows!
+  const narrowed = resolveAuthorizedGroupScope(
+    ["atproto", `include:${ATGRP_PERMISSION_SET.authManageAdmin}`],
+    basicPerms,
+    groupDid,
+  );
+  assert.ok(narrowed.tokens.includes("atproto"));
+  assert.equal(
+    narrowed.permissions.allowsSpace(
+      { spaceDid: groupDid as DidString, spaceType: ATGRP_SPACE_TYPE.meta, skey: "self" },
+      { action: "update", collection: ATGRP_COLLECTION.about },
+    ),
+    true,
+  );
+  assert.equal(
+    narrowed.permissions.allowsSpace(
+      { spaceDid: groupDid as DidString, spaceType: ATGRP_SPACE_TYPE.meta, skey: "self" },
+      { action: "update", collection: ATGRP_COLLECTION.config },
+    ),
+    false,
+  );
+  assert.equal(
+    narrowed.permissions.allowsRpc({ aud: `${groupDid}#atproto_pds`, lxm: ATGRP_METHOD.modQuerySubjects }),
+    false,
+  );
+
+  // 2. Explicit non-include permission exceeding live roles throws 403 access_denied
+  assert.throws(
+    () =>
+      resolveAuthorizedGroupScope(
+        ["atproto", `space:${ATGRP_SPACE_TYPE.meta}?skey=self&collection=${ATGRP_COLLECTION.config}&action=update`],
+        basicPerms,
+        groupDid,
+      ),
+    (err: unknown) => err instanceof UnauthorizedScopeError && err.status === 403 && err.code === "access_denied",
+  );
+
+  // 3. Explicit atproto-only succeeds even with empty role permissions; non-atproto narrowing to 0 throws 403
+  const emptyPerms = expandGroupScopes([], groupDid);
+  const atprotoOnly = resolveAuthorizedGroupScope(["atproto"], emptyPerms, groupDid);
+  assert.deepEqual(atprotoOnly.tokens, ["atproto"]);
+  assert.throws(
+    () => resolveAuthorizedGroupScope(["atproto", `include:${ATGRP_PERMISSION_SET.authManageBasic}`], emptyPerms, groupDid),
+    (err: unknown) => err instanceof UnauthorizedScopeError && err.status === 403,
+  );
+
+  // 4. Redundant token absorption
+  const adminPerms = expandGroupScopes(groupAdminScopes(groupDid), groupDid);
+  const absorbed = resolveAuthorizedGroupScope(
+    [
+      "atproto",
+      `space:${ATGRP_SPACE_TYPE.meta}?skey=self&collection=${ATGRP_COLLECTION.about}&action=create&action=update&action=delete`,
+      `space:${ATGRP_SPACE_TYPE.meta}?skey=self&collection=${ATGRP_COLLECTION.about}&action=update`,
+    ],
+    adminPerms,
+    groupDid,
+  );
+  assert.equal(absorbed.tokens.length, 2, "narrower duplicate scope absorbed into wider token");
+
+  // 5. Hard token ceiling enforcement (MAX_ISSUED_SCOPE_TOKENS)
+  const manyExplicit = Array.from(
+    { length: MAX_ISSUED_SCOPE_TOKENS + 5 },
+    (_, i) => `space:new.flock.channel?authority=${groupDid}&skey=ch-${i}&collection=new.flock.channel.message&action=create`,
+  );
+  assert.throws(
+    () => resolveAuthorizedGroupScope(["atproto", ...manyExplicit], adminPerms, groupDid),
+    (err: unknown) => err instanceof InvalidScopeError && err.status === 400,
   );
 });

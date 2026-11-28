@@ -1,6 +1,6 @@
 @phase5
 Feature: Membership, privacy, and archive lifecycle
-  Centralized OpenSocial group.opensocial.members/self membership and role changes, per-space group.opensocial.policy
+  Centralized Atmosphere Groups org.atgrp.members/self membership and role changes, per-space org.atgrp.policy
   role grants, channel privacy transitions, and archival remain honest and recover cleanly after partial failure.
 
   Rule: Removal stops new credential issuance

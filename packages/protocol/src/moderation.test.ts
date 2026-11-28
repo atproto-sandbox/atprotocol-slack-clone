@@ -101,7 +101,7 @@ test("projectActiveLabels selects latest cts per (uri, cid ?? '', val), tie-brea
   assert.equal(labelsForResource(active, MSG_URI, CID_V2).length, 2);
 });
 
-test("account DID labels project in group.opensocial.members/self and are rejected in modality spaces", () => {
+test("account DID labels project in org.atgrp.members/self and are rejected in modality spaces", () => {
   const inMembers = projectActiveLabels(
     [
       {

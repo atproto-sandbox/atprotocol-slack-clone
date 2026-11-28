@@ -7,14 +7,14 @@ Use the Node.js version in `.nvmrc` (`22.17`) and install locked dependencies wi
 1. **Web app (`apps/web`, `corepack pnpm build && corepack pnpm start`, default `:3000`):**
    - Stateless Next.js App Router UI, per-request nonce Content-Security-Policy (`apps/web/src/proxy.ts`), and static browser OAuth metadata/callbacks (`/oauth/client-metadata.json`, `/oauth/callback`, `/oauth/group-client-metadata.json`, `/oauth/group-callback`).
    - Reads only `APP_URL`, `OPERATOR_URL`, `GROUP_HOST_URL`, `OPERATOR_SERVICE_REF`, and `PLC_URL`. Holds **no database, no secret, and no member session**.
-2. **Reference `opensocial.group` Group Host (`apps/group-host`, `corepack pnpm group-host`, default `:3004`):**
-   - Hosts atmospheric Group DIDs (`1 Group == 1 did:plc:...`), two-sided OAuth 2.1 Authorization Server (`/oauth/*`), `com.atproto.{identity,repo,server,space,sync}.*` + `group.opensocial.*` XRPC endpoints, `/group-admin/*` lifecycle/migration routes, `/group-member/join-status`, and `/.well-known/did.json` (`#atproto_pds` + `#opensocial_group`).
-   - Required env vars: `GROUP_HOST_URL` (canonical origin; `http://127.0.0.1:3004` in loopback dev—`localhost` is normalized to `127.0.0.1` on HTTP to satisfy RFC 8252 loopback redirect rules and `oauthIssuerIdentifierSchema` while deriving `did:web:localhost%3A3004`—and `https://<host>` in production), `GROUP_HOST_DATABASE_PATH` (default `./data/group-host.db`, created `0o600` in WAL mode across `42` classified tables), `GROUP_HOST_ENCRYPTION_KEY` (64-char hex / 32 bytes), `GROUP_HOST_HANDLE_DOMAIN` (e.g. `groups.example.com`), and `PLC_URL`.
+2. **Reference Atmosphere Groups (`org.atgrp.*`) Group Host (`apps/group-host`, `corepack pnpm group-host`, default `:3004`):**
+   - Hosts Atmosphere Group DIDs (`1 Group == 1 did:plc:...`), two-sided OAuth 2.1 Authorization Server (`/oauth/*`), `com.atproto.{identity,repo,server,space,sync}.*` + `org.atgrp.*` + `org.atgrp.mod.*` + `new.flock.group.abortMigration` XRPC endpoints, `/group-admin/*` lifecycle/migration routes, `/group-member/join-status`, and `/.well-known/did.json` (`#atproto_pds` + `#atgrp_host`).
+   - Required env vars: `GROUP_HOST_URL` (canonical origin; `http://127.0.0.1:3004` in loopback dev—`localhost` is normalized to `127.0.0.1` on HTTP to satisfy RFC 8252 loopback redirect rules and `oauthIssuerIdentifierSchema` while deriving `did:web:localhost%3A3004`—and `https://<host>` in production), `GROUP_HOST_DATABASE_PATH` (default `./data/group-host.db`, created `0o600` in WAL mode across `46` classified tables), `GROUP_HOST_ENCRYPTION_KEY` (64-char hex / 32 bytes), `GROUP_HOST_HANDLE_DOMAIN` (e.g. `groups.example.com`), and `PLC_URL`.
    - Optional env vars: `GROUP_HOST_SERVICE_PRIVATE_JWKS` (`{"keys":[...]}` ES256 private JWK Set for overlap key rotation), `GROUP_HOST_PORT` (validated `0..65535` listen port behind a TLS-terminating reverse proxy; defaults to `GROUP_HOST_URL`'s port, binding `127.0.0.1`/`::1` on loopback origins and `0.0.0.0` on public `https:` origins), `ALLOW_LOOPBACK` (set `false` to enforce public-HTTPS-only validation in non-production; in `NODE_ENV=production`, loopback HTTP is hard-disabled unless `ATPROTO_ACCEPTANCE_TEST=true`), and `ATPROTO_ACCEPTANCE_TEST` (`true` only in isolated local acceptance or restore-drill runs that intentionally exercise loopback HTTP under `NODE_ENV=production`).
 3. **Operator (`apps/operator`, `corepack pnpm operator`, default `:3001`):**
    - Serves `new.flock.operator.*` XRPC methods, inbound space webhooks (`com.atproto.space.{confirmRegistration,notifySpaceUpdate}`), shared Group-DID OAuth (`/authority/*`), and `/.well-known/did.json` (`OPERATOR_SERVICE_REF`).
    - Required env vars: `APP_URL`, `OPERATOR_URL`, `GROUP_HOST_URL`, `OPERATOR_SERVICE_REF`, `PLC_URL`, `DATABASE_PATH` (default `./data/flock.db`), `AUTH_ENCRYPTION_KEY` (64-char hex / 32 bytes), and—outside loopback development—`AUTHORITY_CLIENT_PRIVATE_JWKS` (`{"keys":[...]}`). Optional: `FLOCK_ADMIN_MUTATIONS_PAUSED` (`true`/`false`) and `PORT`.
-   - Runs a continuous **60-second SQL-first `notify` registration renewal loop** and **30-minute discovery sweep** inside `apps/operator/src/operator/main.ts`. *(Note: R12's `pnpm reconcile` / `reconcile-workspaces.ts` cron job was removed in R13 because `group.opensocial.policy` evaluates live `role/*` and `membership/*` records directly in `O(1)` without per-space `com.atproto.memberspace` fan-out drift.)*
+   - Runs a continuous **60-second SQL-first `notify` registration renewal loop** and **30-minute discovery sweep** inside `apps/operator/src/operator/main.ts`. *(Note: R12's `pnpm reconcile` / `reconcile-workspaces.ts` cron job was removed in R13 because `org.atgrp.policy` evaluates live `role/*` and `membership/*` records directly in `O(1)` without per-space `com.atproto.memberspace` fan-out drift.)*
 
 All Node services (`apps/group-host`, `apps/operator`, `apps/echo-bot`, `apps/webhooks`) perform outbound HTTP through `@flock/net/safe-fetch` (`boundedSafeFetch`), enforcing HTTPS outside loopback dev, rejecting private/loopback/link-local/metadata IPs with DNS-pinned connections, blocking HTTP redirects, checking `Content-Type` before reading bodies, and capping response bytes (`64 KiB`–`4 MiB` by profile) and deadlines (`5 s`–`15 s`). Public deployments **must** use publicly routable HTTPS origins for `APP_URL`, `OPERATOR_URL`, and `GROUP_HOST_URL` because personal PDSes also enforce SSRF checks on `confirmRegistration`, `notifySpaceUpdate`, and OAuth metadata fetches.
 
@@ -27,23 +27,25 @@ All Node services (`apps/group-host`, `apps/operator`, `apps/echo-bot`, `apps/we
 
 ### Why this gate is mandatory
 
-On pinned ATProto personal PDSes (`oauth-provider.ts`, `lexicon-manager.ts`), `OAuthProvider.authorize()` calls `lexiconManager.getSpacesFromScope()`, which resolves **every non-wildcard `space:<spaceType>` NSID** in `memberGrantScopes` and `appGrantScopes` via DNS TXT (`_lexicon.<authority>`) → XRPC `com.atproto.repo.getRecord(collection="com.atproto.lexicon.schema")`. Using spelled-out `OPEN_SOCIAL_PARTICIPATE_SCOPES` avoids resolving `include:group.opensocial.authParticipate` on personal PDSes, **not** resolving `space:group.opensocial.{meta,members,invites}` or `space:new.flock.*`!
+On pinned ATProto personal PDSes (`oauth-provider.ts`, `lexicon-manager.ts`), `OAuthProvider.authorize()` calls `lexiconManager.getSpacesFromScope()`, which resolves **every non-wildcard `space:<spaceType>` NSID** in `memberGrantScopes` and `appGrantScopes` via DNS TXT (`_lexicon.<authority>`) → XRPC `com.atproto.repo.getRecord(collection="com.atproto.lexicon.schema")`. Using spelled-out `ATGRP_PARTICIPATE_SCOPES` avoids resolving `include:org.atgrp.authParticipate` on personal PDSes, **not** resolving `space:org.atgrp.{meta,members,inbox}` or `space:new.flock.*`!
 
-In local/CI tests and `pnpm playground`, `publishAppLexicons` seeds `TestNetworkNoAppView`'s in-memory `lexiconAuthority`. Because upstream `opensocial.group` is still a draft specification, public DNS publication must be verified explicitly before launch.
+In local/CI tests and `pnpm playground`, `publishAppLexicons` seeds `TestNetworkNoAppView`'s in-memory `lexiconAuthority`. Because upstream Atmosphere Groups (`org.atgrp.*`) is still in beta, public DNS publication must be verified explicitly before launch.
 
 ### Required DNS TXT authorities & `com.atproto.lexicon.schema` records
 
-`scripts/verify-public-lexicons.mjs` loads all **`63` public schemas** vendored in this repository (**`36` `new.flock.*`** + **`27` `group.opensocial.*`**) and verifies all **9** corresponding `_lexicon.<authority>` DNS TXT records (`did=did:plc:...` or `did=did:web:...`, exactly one valid `did=` TXT record per hostname):
+`scripts/verify-public-lexicons.mjs` loads all **`69` public schemas** vendored in this repository (**`37` `new.flock.*`** + **`32` `org.atgrp.*`**) and verifies all **11** corresponding `_lexicon.<authority>` DNS TXT records (`did=did:plc:...` or `did=did:web:...`, exactly one valid `did=` TXT record per hostname):
 
-1. `_lexicon.opensocial.group` — all `27` `group.opensocial.*` schemas (`meta`, `members`, `invites`, `policy`, `defs`, `declaration`, `profile`, `rule`, `labeler`, `space`, `role`, `membership`, `acceptance`, `invite`, `authParticipate`, `authManageProfile`, `authModerate`, `authManageGroup`, and all `9` XRPC methods)
-2. `_lexicon.flock.new` — `new.flock.{workspace,channel,directory,inbox,joinRequest,joinDecision}`
-3. `_lexicon.app.flock.new` — `new.flock.app.{action,command,declaration,inbox,install}`
-4. `_lexicon.channel.flock.new` — `new.flock.channel.{message,reaction}`
-5. `_lexicon.dm.flock.new` — `new.flock.dm.{conversation,declaration,header,inbox,message,reaction,request}`
-6. `_lexicon.ext.flock.new` — `new.flock.ext.{install,tasks}`
-7. `_lexicon.operator.flock.new` — `new.flock.operator.{createWorkspace,execute,getChanges,getDmNotifyTarget,getOperation,getSpaceNotifyTarget,listStalledOperations,startAuthorityFlow}`
-8. `_lexicon.permissions.flock.new` — `new.flock.permissions.member`
-9. `_lexicon.tasks.ext.flock.new` — `new.flock.ext.tasks.{comment,project,projectEdit,task,taskEdit}`
+1. `_lexicon.atgrp.org` — `25` core `org.atgrp.*` schemas (`meta`, `members`, `inbox`, `policy`, `defs`, `declaration`, `about`, `config`, `rule`, `labeler`, `space`, `role`, `membership`, `confirmation`, `invite`, `authParticipate`, `authManageBasic`, `authManageMembers`, `authModerate`, `authManageAdmin`, `requestJoin`, `cancelJoinRequest`, `listJoinRequests`, `denyJoinRequest`, `leaveGroup`)
+2. `_lexicon.mod.atgrp.org` — `7` `org.atgrp.mod.*` schemas (`defs`, `submitReport`, `submitAppeal`, `querySubjects`, `querySubjectHistory`, `querySelfHistory`, `updateSubject`)
+3. `_lexicon.flock.new` — `new.flock.{workspace,channel,directory,inbox,joinRequest,joinDecision}`
+4. `_lexicon.app.flock.new` — `new.flock.app.{action,command,declaration,inbox,install}`
+5. `_lexicon.channel.flock.new` — `new.flock.channel.{message,reaction}`
+6. `_lexicon.dm.flock.new` — `new.flock.dm.{conversation,declaration,header,inbox,message,reaction,request}`
+7. `_lexicon.ext.flock.new` — `new.flock.ext.{install,tasks}`
+8. `_lexicon.group.flock.new` — `new.flock.group.abortMigration`
+9. `_lexicon.operator.flock.new` — `new.flock.operator.{createWorkspace,execute,getChanges,getDmNotifyTarget,getOperation,getSpaceNotifyTarget,listStalledOperations,startAuthorityFlow}`
+10. `_lexicon.permissions.flock.new` — `new.flock.permissions.member`
+11. `_lexicon.tasks.ext.flock.new` — `new.flock.ext.tasks.{comment,project,projectEdit,task,taskEdit}`
 
 *(Note: All Flock `new.flock.*` sub-authorities may point to the same Flock lexicon-authority DID.)*
 
@@ -146,7 +148,7 @@ Never test a restore over live `./data/flock.db` or `./data/group-host.db`. Veri
 - **Administrative deactivation (`com.atproto.server.deactivateAccount`):** Requires active Group-DID DPoP OAuth by a lifecycle admin (`isAuthorizedLifecycleAdmin` + `account:status?action=manage`); increments `auth_epoch`, revokes all OAuth sessions and unexpired space credentials (`100`-credential-batched `notifyCredentialsRevoked` `credentials` arrays), and sets `activated = 0` without deleting spaces.
 - **Sole-human-member `leaveGroup`:**
   - On **Flock workspaces** (`new.flock.workspace/self` present), when the sole remaining human member calls `leaveGroup`, Group Host snapshots `group_recovery_admin` (`recovery_did`, `roles_json`) and reversibly deactivates the group (`activated = 0`).
-  - On **non-Flock OpenSocial groups** (`new.flock.workspace/self` absent), if an external sovereign key is present in PLC `rotationKeys`, sole-member `leaveGroup` keeps `activated = 1` under external PLC governance (`400 NoSovereignCustodyKey` otherwise).
+  - On **non-Flock Atmosphere Groups** (`new.flock.workspace/self` absent), if an external sovereign key is present in PLC `rotationKeys`, sole-member `leaveGroup` keeps `activated = 1` under external PLC governance (`400 NoSovereignCustodyKey` otherwise).
 - **Reactivation & recovery (`session_kind = 'recovery'`):** While `activated === 0`, `recovery_did` (or any staged lifecycle admin, or an external PLC rotation key via `POST /group-admin/controller-session`) authenticates with `prompt=login` (`login_hint = groupDid`) to obtain a restricted `recovery` DPoP session allowing `checkAccountStatus`, `activateAccount` (driven end-to-end by `WorkspaceClient.reactivateGroup`'s 4-phase journal), `exportSpaceMeta`, `sync.{getRepo,listBlobs,getBlob}`, and `requestAccountDelete` / `claim-action-token(delete_account)` / `deleteAccount`.
 
 ### Pre-tombstone zero-residue `deleteAccount`
@@ -155,16 +157,21 @@ Group deletion runs a crash-safe 4-state machine (`group_deletion_journal`, resu
 1. Fresh `prompt=login` (`<= 5 min`) → `com.atproto.server.requestAccountDelete` → `POST /group-admin/claim-action-token` (`purpose: "delete_account"`, single-claim encrypted token) → `com.atproto.server.deleteAccount`.
 2. `remote_cleanup_queued` → `remote_cleanup_drained`: While `<groupDid>`'s PLC DID is **still live** (so remote PDSes can verify `<groupDid>#atproto` service JWTs), Group Host drains `#spaceDeleted` notices, `<= 100`-credential `notifyCredentialsRevoked` (`credentials`) batches, and empty cleared-commit `notifyRepoUpdate` notices across every historical `group_invite_target`.
 3. `plc_tombstoned`: Submits signed `plc_tombstone` to `PLC_URL` (retrying only on HTTP `409` stale-`prev` conflicts or network timeouts; recording `'migrated_remote'` or `'authority_lost_local_purge'` safely if PLC already moved).
-4. `purged`: Deletes all rows for `<groupDid>` across all **`39` `GROUP_PURGED_TABLES`**, leaving only the minimal tombstone row in `group_deletion_journal`.
+4. `purged`: Deletes all rows for `<groupDid>` across all **`42` `GROUP_PURGED_TABLES`**, leaving only the minimal tombstone row in `group_deletion_journal`.
 
 ### Two-GroupHost migration (`Standard` & `Coordinated v1`)
 
 `apps/group-host` (`src/migration.ts`) and `GroupClient` support moving a live `<groupDid>` between Group Hosts without changing its DID or space URIs:
 
 - **Target capability & key provenance guardrails:**
-  - Outbound migration (`prepare-migration`, `getServiceAuth(createAccount)`, `signPlcOperation`) verifies via `verifyOpenSocialTargetCapability` that the target advertises `group.opensocial.policy` support (either signed `/group-admin/migration-info` `capabilityProofJwt` or `#opensocial_group` in the target's `did:web` document), rejecting ordinary personal PDSes with `400 UnsupportedGroupHostTarget`.
-  - Inbound `com.atproto.server.createAccount` supports: (a) **Coordinated v1** (`X-Group-Migration-Ticket`: `83`-byte `"v1.<uuid>.<secret>"` + `/group-admin/migration-manifest` JCS snapshot), (b) **Standard mode** (`GET /group-admin/public-group-keys` `#atproto`-signed `proofJwt` across `1..5` PLC `rotationKeys`, or zero-extension 1-key OpenSocial sources), and (c) **Provenance-Assisted Multi-Key Standard mode** (`X-Group-Migration-Key-Provenance` JWS signed by an external sovereign `rotationKeys` entry when migrating from a non-Flock multi-key source without `public-group-keys`).
-  - Across all modes, Group Host enforces `100 MiB` stream caps (`migrationBlobUploadLimit`, `maxRepoImportSize`, `maxSpaceMetaImportSize`), rejects retaining the retiring source host's rotation key (`400 SourceRotationKeyRetained`), preserves all external sovereign `rotationKeys` (`400 SovereignRotationKeyDropped`), verifies staged OpenSocial/Flock integrity before `submitPlcOperation` and `activateAccount`, and automatically calls `POST /group-admin/finalize-migrated-source` on the old host after activation. Before PLC cutover, `POST /group-admin/abort-migration` cleanly aborts and purges staged state. Private join queues, moderation history, and OAuth sessions intentionally do not migrate across hosts.
+  - Outbound migration (`prepare-migration`, `getServiceAuth(createAccount)`, `signPlcOperation`) verifies via `verifyAtgrpTargetCapability` that the target advertises `org.atgrp.policy` support (either signed `/group-admin/migration-info` `capabilityProofJwt` or `#atgrp_host` in the target's `did:web` document), rejecting ordinary personal PDSes and legacy `#opensocial_group` peers with `400 UnsupportedGroupHostTarget`.
+  - Inbound `com.atproto.server.createAccount` supports: (a) **Coordinated v1** (`X-Group-Migration-Ticket`: `83`-byte `"v1.<uuid>.<secret>"` + `/group-admin/migration-manifest` JCS snapshot), (b) **Standard mode** (`GET /group-admin/public-group-keys` `#atproto`-signed `proofJwt` across `1..5` PLC `rotationKeys`, or zero-extension 1-key Atmosphere Groups sources), and (c) **Provenance-Assisted Multi-Key Standard mode** (`X-Group-Migration-Key-Provenance` JWS signed by an external sovereign `rotationKeys` entry when migrating from a non-Flock multi-key source without `public-group-keys`).
+  - Across all modes, Group Host enforces `100 MiB` stream caps (`migrationBlobUploadLimit`, `maxRepoImportSize`, `maxSpaceMetaImportSize`), rejects retaining the retiring source host's rotation key (`400 SourceRotationKeyRetained`), preserves all external sovereign `rotationKeys` (`400 SovereignRotationKeyDropped`), verifies staged Atmosphere Groups (`about/self` + `config/self`) / Flock integrity before `submitPlcOperation` and `activateAccount`, and automatically calls `POST /group-admin/finalize-migrated-source` on the old host after activation. Before PLC cutover, `new.flock.group.abortMigration` cleanly aborts and purges staged state. Private join queues, moderation history, and OAuth sessions intentionally do not migrate across hosts.
+
+### R15 `group.opensocial.*` -> `org.atgrp.*` clean cutover & rollback rules
+
+- **Pilot-origin rollback rule:** R15 is a clean protocol cutover from `group.opensocial.*` to `org.atgrp.*`. Group Host (`GROUP_HOST_SCHEMA_VERSION = 2` via `host_meta`) fails closed on pre-R15 SQLite files, Operator (`ATGRP_MIGRATION = 6`) fails closed if unfinished operations exist and retires legacy `group.opensocial.invites` rows while preserving DM/channel rows, and browser clients purge pre-R15 `group.opensocial.*` IndexedDB entries on upgrade (`SyncStore v5`, `GroupOAuthDatabase v2`, `DeskLifecycleStore v3`). Therefore, **rolling back an upgraded R15 pilot origin requires restoring pre-R15 backups of both `group-host.db` and `flock.db` (plus clearing upgraded browser IndexedDB/OAuth state on test clients)**—never point an R14 binary at an R15-migrated database or vice versa.
+- **Personal-PDS `group.opensocial.invites/self` residue note:** R15 clients provision and use `at:space/<did>/org.atgrp.inbox/self` for cross-PDS invitations and intentionally do **not** delete pre-R15 `at:space/<did>/group.opensocial.invites/self` spaces from users' personal PDSes (which avoids requesting legacy `group.opensocial.invites` delete scopes during personal OAuth). Pilot users who signed into R13/R14 may retain an inactive `group.opensocial.invites/self` space on their personal PDS until deleted manually or by PDS maintenance; Flock never reads or writes it after R15.
 
 ---
 
@@ -172,7 +179,7 @@ Group deletion runs a crash-safe 4-state machine (`group_deletion_journal`, resu
 
 Installed apps are non-roster service principals (`new.flock.app.install` in `new.flock.workspace/self`, tracked permanently in Group Host's `known_app_subject` ledger with role `appRoleKey(appDid)`). A workspace supports up to `20` active apps alongside `200` human members. `uninstallApp` removes policy grants first, deletes `membership/<appDid>`, deletes `role/<appRoleKey>`, and finally sets `app.install.active = false` (`RoleInUse`-safe).
 
-- **Echo Bot (`apps/echo-bot`, `:3002`):** `corepack pnpm echo-bot sign-in <handle>` once, set `ECHO_BOT_DID` and `ECHO_BOT_WORKSPACES` (comma-separated `at://<groupDid>/space/new.flock.workspace/self` URIs), and run `corepack pnpm echo-bot run` (`ECHO_BOT_PRIVATE_JWKS` required on HTTPS; `ECHO_BOT_STATE_FILE` created `0o600`).
+- **Echo Bot (`apps/echo-bot`, `:3002`):** `corepack pnpm echo-bot sign-in <handle>` once, set `ECHO_BOT_DID` and `ECHO_BOT_WORKSPACES` (comma-separated `at:space/<groupDid>/new.flock.workspace/self` URIs), and run `corepack pnpm echo-bot run` (`ECHO_BOT_PRIVATE_JWKS` required on HTTPS; `ECHO_BOT_STATE_FILE` created `0o600`).
 - **Incoming Webhooks (`apps/webhooks`, `:3003`):** `corepack pnpm webhooks sign-in <handle>` once, set `WEBHOOKS_DID` and `WEBHOOKS_WORKSPACES`, and run `corepack pnpm webhooks run` (`WEBHOOKS_PRIVATE_JWKS` on HTTPS; `WEBHOOKS_TRUST_PROXY=true` only behind a trusted reverse proxy). Serves `/admin` (identity-only OAuth verifying live group admin/private-channel access) and `POST /hooks/<id>/<secret>`. Both bots enforce `!takedown` label filtering via `@flock/protocol/moderation`.
 
 ---
@@ -180,9 +187,9 @@ Installed apps are non-roster service principals (`new.flock.app.install` in `ne
 ## Direct messages & personal invite wakes: what Operator can and cannot see
 
 - **Zero DM rows in SQLite (Operator & Group Host):** DMs (`new.flock.dm.*`) live exclusively on participants' personal PDSes (`com.atproto.memberspace.policy`). Neither Group Host nor Operator holds DM scopes or writes any DM rows to SQLite.
-- **Stateless `dm1` (DMs) vs `inv1` (`invites/self`) webhook tokens:**
+- **Stateless `dm1` (DMs) vs `inv1` (`inbox/self`) webhook tokens:**
   - `new.flock.operator.getDmNotifyTarget` verifies a caller-held DM `SpaceCredential` + RFC 9421 PoP (`pop:<hmac>` TTL replay lock) and issues a 30-min-epoch `dm1` HMAC token (`hkdf("flock-dm-notify-v1")`) feeding Operator's in-memory `dm-feed-wakes.ts` ring (shared across local workers over a `0o600` Unix socket hub; returns HTTP `400` on `#registrationExpired` so PDSes drop closed tabs immediately).
-  - `new.flock.operator.getSpaceNotifyTarget` identically verifies a caller-held `SpaceCredential` + RFC 9421 PoP strictly for `at://<callerDid>/space/group.opensocial.invites/self` and issues a 30-min-epoch `inv1` HMAC token (`hkdf("flock-invite-notify-v1")`) waking `getChanges` on inbound cross-PDS group invitations.
+  - `new.flock.operator.getSpaceNotifyTarget` identically verifies a caller-held `SpaceCredential` + RFC 9421 PoP strictly for `at:space/<callerDid>/org.atgrp.inbox/self` and issues a 30-min-epoch `inv1` HMAC token (`hkdf("flock-invite-notify-v1")`) waking `getChanges` on inbound cross-PDS group invitations.
 - **Residual metadata:** Live Operator memory (`dm-feed-wakes.ts`) and HTTP access logs can observe timing/URI metadata for watched spaces, never message, reaction, or invite record bodies. Both `DmClient` and `WorkspaceClient` remain fully functional via direct PDS polling if Operator push wakes are unavailable.
 
 ---
@@ -191,9 +198,9 @@ Installed apps are non-roster service principals (`new.flock.app.install` in `ne
 
 | Gate | Required evidence before opening to public users |
 |---|---|
-| **1. Public Lexicon DNS + XRPC** | All 9 `_lexicon.opensocial.group` & `_lexicon.*.flock.new` DNS TXT records + `63` `com.atproto.lexicon.schema` records published; `corepack pnpm verify:lexicons` exits `0`. |
+| **1. Public Lexicon DNS + XRPC** | All 11 `_lexicon.atgrp.org`, `_lexicon.mod.atgrp.org`, & `_lexicon.*.flock.new` DNS TXT records + `69` `com.atproto.lexicon.schema` records published; `corepack pnpm verify:lexicons` exits `0`. |
 | **2. Pinned protocol & expiry** | `ATPROTO_PIN_CHECKOUT` passes `scripts/verify-pinned-checkout.mjs`; deployed personal PDSes include `strict-credential-expiry.patch` (or upstream zero-skew fix); `pnpm test`, `pnpm test:acceptance`, `pnpm test:browser`, and `pnpm test:bdd` pass. |
-| **3. HTTPS origins & DID docs** | `APP_URL`, `GROUP_HOST_URL` (`/.well-known/did.json` `#atproto_pds` + `#opensocial_group`), and `OPERATOR_URL` (`/.well-known/did.json` `OPERATOR_SERVICE_REF`) live over public HTTPS with egress firewall blocking private/metadata ranges. |
+| **3. HTTPS origins & DID docs** | `APP_URL`, `GROUP_HOST_URL` (`/.well-known/did.json` `#atproto_pds` + `#atgrp_host`), and `OPERATOR_URL` (`/.well-known/did.json` `OPERATOR_SERVICE_REF`) live over public HTTPS with egress firewall blocking private/metadata ranges. |
 | **4. Secrets & JWKS** | `GROUP_HOST_ENCRYPTION_KEY`, `GROUP_HOST_SERVICE_PRIVATE_JWKS`, `AUTH_ENCRYPTION_KEY`, and `AUTHORITY_CLIENT_PRIVATE_JWKS` provisioned in secret manager outside repo/DB paths. |
 | **5. Backups & restore drill** | Scheduled `pnpm backup:db` and `pnpm backup:group-host` writing `0o600` snapshots to encrypted off-host storage + verified isolated restore drill for both databases. |
 | **6. Pause & alerting** | `FLOCK_ADMIN_MUTATIONS_PAUSED=true` drill verified; Operator & Group Host `stderr` and `listStalledOperations` wired to on-call alerting. |

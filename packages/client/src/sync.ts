@@ -53,19 +53,19 @@ import { projectActiveLabels, type ActiveSpaceLabel } from "@flock/protocol/mode
 
 export type ActiveModerationLabels = ActiveSpaceLabel[];
 import {
+  ATGRP_COLLECTION,
+  ATGRP_SPACE_TYPE,
   ATPROTO_SPACE_COLLECTION,
   COLLECTION,
-  OPENSOCIAL_COLLECTION,
-  OPENSOCIAL_SPACE_TYPE,
   SPACE_TYPE,
 } from "@flock/protocol/nsids";
 import { validateSpaceRecord } from "@flock/protocol/registry";
-import type { GroupOpenSocialPolicy } from "@flock/protocol/scopes";
+import type { GroupAtgrpPolicy } from "@flock/protocol/scopes";
 import {
   WORKSPACE_ENVELOPE,
   extractGroupSpacePolicyRecord,
   summarizeWorkspace,
-  type MemberAcceptanceEntry,
+  type MemberConfirmationEntry,
   type MemberWriterRev,
   type ScannedRecords,
   type WorkspaceExtensionSummary,
@@ -236,17 +236,18 @@ export type RepoOpsFollowResult = {
 };
 
 const GROUP_META_AUTHORITY_COLLECTIONS = [
-  OPENSOCIAL_COLLECTION.profile,
-  OPENSOCIAL_COLLECTION.rule,
-  OPENSOCIAL_COLLECTION.labeler,
+  ATGRP_COLLECTION.about,
+  ATGRP_COLLECTION.config,
   ATPROTO_SPACE_COLLECTION.spacePolicy,
   ATPROTO_SPACE_COLLECTION.label,
 ] as const;
 
 const GROUP_MEMBERS_AUTHORITY_COLLECTIONS = [
-  OPENSOCIAL_COLLECTION.role,
-  OPENSOCIAL_COLLECTION.membership,
-  OPENSOCIAL_COLLECTION.space,
+  ATGRP_COLLECTION.role,
+  ATGRP_COLLECTION.membership,
+  ATGRP_COLLECTION.space,
+  ATGRP_COLLECTION.rule,
+  ATGRP_COLLECTION.labeler,
   ATPROTO_SPACE_COLLECTION.spacePolicy,
   ATPROTO_SPACE_COLLECTION.label,
 ] as const;
@@ -633,8 +634,8 @@ export class SyncCore {
     const extraRepos =
       parsed &&
       (parsed.type === SPACE_TYPE.workspace ||
-        parsed.type === OPENSOCIAL_SPACE_TYPE.meta ||
-        parsed.type === OPENSOCIAL_SPACE_TYPE.members ||
+        parsed.type === ATGRP_SPACE_TYPE.meta ||
+        parsed.type === ATGRP_SPACE_TYPE.members ||
         parsed.type === SPACE_TYPE.channel ||
         parsed.type === SPACE_TYPE.appInbox ||
         parsed.type === SPACE_TYPE.tasks)
@@ -681,7 +682,7 @@ export class SyncCore {
       let running = this.inflightLabelSync.get(space);
       if (!running || options.signal) {
         const runSync = (async () => {
-          const isMembersSpace = parseSpaceUri(space)?.type === OPENSOCIAL_SPACE_TYPE.members;
+          const isMembersSpace = parseSpaceUri(space)?.type === ATGRP_SPACE_TYPE.members;
           for (let outerAttempt = 0; outerAttempt < 3; outerAttempt += 1) {
             const currentWriter = await this.deps.store.getWriter(space, authorityDid);
             const epoch = await this.deps.store.epoch(space);
@@ -942,7 +943,7 @@ export class SyncCore {
       };
     }
 
-    // Resolve writers of `members/self` and sync `acceptance/self` for admitted human members
+    // Resolve writers of `members/self` and sync `confirmation/self` for admitted human members
     let membersListed = new Set<string>();
     const memberWriters = new Map<string, MemberWriterRev>();
     try {
@@ -966,7 +967,7 @@ export class SyncCore {
       setAsideMap.set(authorityDid, { did: authorityDid, reason: failure.reason, permanent: false });
     }
 
-    const heldMemberships = await this.deps.store.records(membersUri, OPENSOCIAL_COLLECTION.membership, authorityDid);
+    const heldMemberships = await this.deps.store.records(membersUri, ATGRP_COLLECTION.membership, authorityDid);
     const heldAppInstalls = await this.deps.store.records(workspaceUri, COLLECTION.appInstall, authorityDid);
     const knownApps = new Set<string>(
       heldAppInstalls
@@ -977,14 +978,14 @@ export class SyncCore {
       .map((r) => r.rkey)
       .filter((did) => isDid(did) && did !== authorityDid && !knownApps.has(did));
 
-    const acceptanceWritersToSync = admittedHumans.filter(
+    const confirmationWritersToSync = admittedHumans.filter(
       (did) => membersListed.has(did) || did === (options.viewerDid ?? this.did),
     );
-    const memberOutcomes = await mapLimited(acceptanceWritersToSync, this.options.concurrency, (memberDid) =>
+    const memberOutcomes = await mapLimited(confirmationWritersToSync, this.options.concurrency, (memberDid) =>
       this.syncVerifiedWriter({
         space: membersUri,
         repo: memberDid,
-        collections: [OPENSOCIAL_COLLECTION.acceptance],
+        collections: [ATGRP_COLLECTION.confirmation],
         epoch: membersEpoch,
         intervalMs,
         listed: membersListed,
@@ -1005,21 +1006,23 @@ export class SyncCore {
     }
 
     const [
-      heldProfiles,
+      heldAbouts,
+      heldConfigs,
       heldRoles,
       heldDirectory,
       heldExtInstalls,
-      heldAcceptances,
+      heldConfirmations,
       heldMetaPolicy,
       heldMembersPolicy,
       heldWsPolicy,
       heldAccountLabels,
     ] = await Promise.all([
-      this.deps.store.records(metaUri, OPENSOCIAL_COLLECTION.profile, authorityDid),
-      this.deps.store.records(membersUri, OPENSOCIAL_COLLECTION.role, authorityDid),
+      this.deps.store.records(metaUri, ATGRP_COLLECTION.about, authorityDid),
+      this.deps.store.records(metaUri, ATGRP_COLLECTION.config, authorityDid),
+      this.deps.store.records(membersUri, ATGRP_COLLECTION.role, authorityDid),
       this.deps.store.records(workspaceUri, COLLECTION.directory, authorityDid),
       this.deps.store.records(workspaceUri, COLLECTION.extInstall, authorityDid),
-      this.deps.store.records(membersUri, OPENSOCIAL_COLLECTION.acceptance),
+      this.deps.store.records(membersUri, ATGRP_COLLECTION.confirmation),
       this.deps.store.records(metaUri, ATPROTO_SPACE_COLLECTION.spacePolicy, authorityDid),
       this.deps.store.records(membersUri, ATPROTO_SPACE_COLLECTION.spacePolicy, authorityDid),
       this.deps.store.records(workspaceUri, ATPROTO_SPACE_COLLECTION.spacePolicy, authorityDid),
@@ -1047,7 +1050,7 @@ export class SyncCore {
       };
     };
 
-    const spacePolicies = new Map<string, GroupOpenSocialPolicy>();
+    const spacePolicies = new Map<string, GroupAtgrpPolicy>();
     for (const [spUri, polRecords] of [
       [metaUri, heldMetaPolicy],
       [membersUri, heldMembersPolicy],
@@ -1062,7 +1065,7 @@ export class SyncCore {
       }
     }
 
-    const acceptances: MemberAcceptanceEntry[] = heldAcceptances
+    const confirmations: MemberConfirmationEntry[] = heldConfirmations
       .filter((r) => r.repo !== authorityDid && !permanentMemberAside.has(r.repo))
       .map((r) => ({ repoDid: r.repo, rkey: r.rkey, value: r.value }));
 
@@ -1073,13 +1076,14 @@ export class SyncCore {
 
     const scan = WORKSPACE_ENVELOPE.authorityRecordScan;
     const summary = summarizeWorkspace(workspaceUri, options.viewerDid ?? this.did, {
-      profiles: scannedOf(metaUri, OPENSOCIAL_COLLECTION.profile, heldProfiles, 1),
-      roles: scannedOf(membersUri, OPENSOCIAL_COLLECTION.role, heldRoles, scan),
-      memberships: scannedOf(membersUri, OPENSOCIAL_COLLECTION.membership, heldMemberships, scan),
+      abouts: scannedOf(metaUri, ATGRP_COLLECTION.about, heldAbouts, 1),
+      configs: scannedOf(metaUri, ATGRP_COLLECTION.config, heldConfigs, 1),
+      roles: scannedOf(membersUri, ATGRP_COLLECTION.role, heldRoles, scan),
+      memberships: scannedOf(membersUri, ATGRP_COLLECTION.membership, heldMemberships, scan),
       directory: scannedOf(workspaceUri, COLLECTION.directory, heldDirectory, scan),
       installs: scannedOf(workspaceUri, COLLECTION.appInstall, heldAppInstalls, scan),
       extInstalls: scannedOf(workspaceUri, COLLECTION.extInstall, heldExtInstalls, scan),
-      acceptances,
+      confirmations,
       memberWriters,
       spacePolicies,
       accountLabels,
@@ -1089,11 +1093,11 @@ export class SyncCore {
     const failureReason =
       setAside.find((s) => s.did === authorityDid)?.reason
       ?? (changing.includes(authorityDid) ? "Authority workspace state is changing." : undefined)
-      ?? (!summary ? "Group profile is missing or invalid." : undefined)
+      ?? (!summary ? "Group about/config metadata is missing or invalid." : undefined)
       ?? invalidReasons[0]
       ?? summary?.degradedReasons[0]
       ?? setAside[0]?.reason
-      ?? (changing.length > 0 ? `Member acceptance state from ${changing[0]} is changing.` : undefined);
+      ?? (changing.length > 0 ? `Member confirmation state from ${changing[0]} is changing.` : undefined);
 
     const workspaceSnapshotComplete =
       Boolean(summary) &&

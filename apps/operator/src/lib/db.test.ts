@@ -24,7 +24,7 @@ test("OPERATION_TAKEOVER_MIGRATION = 4 upgrades a pre-R13 6-state operation tabl
   const r12 = new BetterSqlite3(PATH);
   r12.exec(`
     CREATE TABLE schema_migration (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL);
-    INSERT INTO schema_migration VALUES (1, 1700000000), (3, 1700000001);
+    INSERT INTO schema_migration VALUES (1, 1700000000), (3, 1700000001), (6, 1700000002);
     CREATE TABLE operation (
       workspace TEXT NOT NULL,
       workspace_uri TEXT,

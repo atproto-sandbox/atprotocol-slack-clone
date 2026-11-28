@@ -6,7 +6,7 @@ import Database from "better-sqlite3";
 import { Given, Then, When } from "@cucumber/cucumber";
 import { expect, type Locator } from "@playwright/test";
 import { canonicalJson, channelUri, decisionRecordKey, groupMembersUri, groupMetaUri, inboxUri, requestDigest, spaceRecordUri, tidNow } from "@flock/protocol/keys";
-import { COLLECTION, OPENSOCIAL_COLLECTION } from "@flock/protocol/nsids";
+import { ATGRP_COLLECTION, COLLECTION } from "@flock/protocol/nsids";
 import { validateSpaceRecord } from "@flock/protocol/registry";
 import type { IndependentSecondApp, SecondApp } from "../../protocol-tests/support/app-fixture";
 import {
@@ -94,7 +94,7 @@ async function publishedLexiconIds(world: AppWorld): Promise<string[]> {
 async function localLexiconIds(): Promise<string[]> {
   const roots = [
     join(process.cwd(), "packages/protocol/lexicons/new/flock"),
-    join(process.cwd(), "packages/protocol/lexicons/group/opensocial"),
+    join(process.cwd(), "packages/protocol/lexicons/org/atgrp"),
   ];
   const ids = new Set<string>();
   for (const root of roots) {
@@ -315,8 +315,8 @@ Given("a member writes an admin, decision, or roster record in their own repo", 
   const requestUri = spaceRecordUri(inbox, member.did, "new.flock.joinRequest", request.rkey);
   const updatedAt = new Date().toISOString();
 
-  await writeAsMember(this, member, membersSpace, OPENSOCIAL_COLLECTION.membership, member.did, { roles: ["admin", "member"], createdAt: updatedAt });
-  await writeAsMember(this, member, membersSpace, OPENSOCIAL_COLLECTION.membership, outsider.did, { roles: ["member"], createdAt: updatedAt });
+  await writeAsMember(this, member, membersSpace, ATGRP_COLLECTION.membership, member.did, { roles: ["admin", "member"], createdAt: updatedAt });
+  await writeAsMember(this, member, membersSpace, ATGRP_COLLECTION.membership, outsider.did, { roles: ["member"], createdAt: updatedAt });
   await writeAsMember(this, member, inbox, COLLECTION.joinDecision, decisionRecordKey(requestUri), {
     request: requestUri, requestId: request.value.requestId, decision: "approve", updatedAt,
   });
@@ -405,15 +405,15 @@ Then("the app ignores the record because the workspace DID did not author it", {
   const inbox = inboxUri(groupDid, workspaceSkeyOf(this));
   const vaultSkey = this.scratch.get("vaultSkey") as string;
 
-  const memberSpoofedMemberships = await recordsOf(this, member, membersSpace, OPENSOCIAL_COLLECTION.membership);
+  const memberSpoofedMemberships = await recordsOf(this, member, membersSpace, ATGRP_COLLECTION.membership);
   for (const [subjectDid, expectedRole] of [[member.did, "admin"], [outsider.did, "member"]] as const) {
     const written = memberSpoofedMemberships.find((r) => r.rkey === subjectDid);
     assert.ok(written, `the spoofed membership record for ${subjectDid} exists in the member's repo`);
     assert.ok((written.value.roles as string[]).includes(expectedRole));
     const context = { authorityDid: groupDid, spaceUri: membersSpace, rkey: written.rkey };
-    const asMember = validateSpaceRecord(OPENSOCIAL_COLLECTION.membership, written.value, { ...context, repoDid: member.did });
+    const asMember = validateSpaceRecord(ATGRP_COLLECTION.membership, written.value, { ...context, repoDid: member.did });
     assert.deepEqual(asMember, { valid: false, reason: "authority record has the wrong author" });
-    assert.deepEqual(validateSpaceRecord(OPENSOCIAL_COLLECTION.membership, written.value, { ...context, repoDid: groupDid }), { valid: true }, "the same record is valid when the group DID authors it");
+    assert.deepEqual(validateSpaceRecord(ATGRP_COLLECTION.membership, written.value, { ...context, repoDid: groupDid }), { valid: true }, "the same record is valid when the group DID authors it");
   }
   assert.equal(groupEffectiveAdmins(this, groupDid).includes(member.did), false, "the group DID wrote no admin role for member");
   assert.equal(groupHumanMemberDids(this, groupDid).includes(outsider.did), false, "the group DID wrote no membership record for outsider");
@@ -660,9 +660,10 @@ function pdsSnapshot(world: AppWorld): unknown {
   }
   const policies = Object.fromEntries([...groupSpacePolicies(world, groupDid).entries()].sort(([a], [b]) => a.localeCompare(b)));
   const records = {
-    profile: groupSpaceRecords(world, groupMetaUri(groupDid), OPENSOCIAL_COLLECTION.profile, groupDid),
-    roles: groupSpaceRecords(world, groupMembersUri(groupDid), OPENSOCIAL_COLLECTION.role, groupDid),
-    memberships: groupSpaceRecords(world, groupMembersUri(groupDid), OPENSOCIAL_COLLECTION.membership, groupDid),
+    about: groupSpaceRecords(world, groupMetaUri(groupDid), ATGRP_COLLECTION.about, groupDid),
+    config: groupSpaceRecords(world, groupMetaUri(groupDid), ATGRP_COLLECTION.config, groupDid),
+    roles: groupSpaceRecords(world, groupMembersUri(groupDid), ATGRP_COLLECTION.role, groupDid),
+    memberships: groupSpaceRecords(world, groupMembersUri(groupDid), ATGRP_COLLECTION.membership, groupDid),
     directory: groupSpaceRecords(world, world.workspaceUri, COLLECTION.directory, groupDid),
   };
   return { memberLists, policies, records };

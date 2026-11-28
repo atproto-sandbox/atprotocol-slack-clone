@@ -3959,607 +3959,27 @@ export const schemaDict = {
       },
     },
   },
-  GroupOpensocialCancelJoinRequest: {
+  NewFlockGroupAbortMigration: {
     lexicon: 1,
-    id: 'group.opensocial.cancelJoinRequest',
+    id: 'new.flock.group.abortMigration',
     defs: {
       main: {
         type: 'procedure',
         description:
-          "Withdraw the caller's pending join request. Requires service auth.",
+          'Aborts a staged or prepared Atmosphere Group host migration on the target or source host. Requires group service auth or admin OAuth.',
         input: {
           encoding: 'application/json',
           schema: {
             type: 'object',
-            required: ['group'],
             properties: {
-              group: {
+              groupDid: {
                 type: 'string',
                 format: 'did',
               },
-            },
-          },
-        },
-        errors: [
-          {
-            name: 'GroupNotFound',
-          },
-          {
-            name: 'JoinRequestNotFound',
-          },
-        ],
-      },
-    },
-  },
-  GroupOpensocialCreateReport: {
-    lexicon: 1,
-    id: 'group.opensocial.createReport',
-    defs: {
-      main: {
-        type: 'procedure',
-        description:
-          "Report an account or record in a group, opening or reopening it in the moderation queue. The caller must be able to read the subject's space. Requires service auth.",
-        input: {
-          encoding: 'application/json',
-          schema: {
-            type: 'object',
-            required: ['group', 'subject', 'reasonType'],
-            properties: {
-              group: {
-                type: 'string',
-                format: 'did',
-              },
-              subject: {
-                type: 'string',
-                format: 'uri',
-                description: 'An account DID or record URI.',
-              },
-              cid: {
-                type: 'string',
-                format: 'cid',
-                description: 'If set, a specific version of the record.',
-              },
-              reasonType: {
-                type: 'string',
-                knownValues: [
-                  'spam',
-                  'violation',
-                  'misleading',
-                  'nsfw',
-                  'rude',
-                  'other',
-                ],
-                description: 'For violation, cite the broken rule in rule.',
-              },
-              reason: {
-                type: 'string',
-                maxGraphemes: 2000,
-                maxLength: 20000,
-              },
-              rule: {
-                type: 'string',
-                format: 'at-uri',
-                description: 'The group rule the subject breaks.',
-              },
-            },
-          },
-        },
-        output: {
-          encoding: 'application/json',
-          schema: {
-            type: 'object',
-            required: ['id', 'createdAt'],
-            properties: {
-              id: {
+              operationId: {
                 type: 'string',
                 minLength: 1,
-                maxLength: 512,
-              },
-              createdAt: {
-                type: 'string',
-                format: 'datetime',
-              },
-            },
-          },
-        },
-        errors: [
-          {
-            name: 'GroupNotFound',
-          },
-          {
-            name: 'InvalidSubject',
-            description: "The subject isn't in this group.",
-          },
-        ],
-      },
-    },
-  },
-  GroupOpensocialDefs: {
-    lexicon: 1,
-    id: 'group.opensocial.defs',
-    defs: {
-      modSubjectView: {
-        type: 'object',
-        description: 'A subject in the moderation queue.',
-        required: [
-          'subject',
-          'status',
-          'createdAt',
-          'updatedAt',
-          'reportCount',
-        ],
-        properties: {
-          subject: {
-            type: 'string',
-            format: 'uri',
-            description: 'An account DID or record URI.',
-          },
-          cid: {
-            type: 'string',
-            format: 'cid',
-            description: 'If set, a specific version of the record.',
-          },
-          status: {
-            type: 'string',
-            enum: ['open', 'escalated', 'resolved'],
-          },
-          createdAt: {
-            type: 'string',
-            format: 'datetime',
-          },
-          updatedAt: {
-            type: 'string',
-            format: 'datetime',
-          },
-          reportCount: {
-            type: 'integer',
-            minimum: 0,
-          },
-        },
-      },
-      moderationEvent: {
-        type: 'object',
-        description: "An event in a subject's moderation history.",
-        required: ['id', 'createdAt', 'event'],
-        properties: {
-          id: {
-            type: 'string',
-            minLength: 1,
-            maxLength: 512,
-          },
-          createdAt: {
-            type: 'string',
-            format: 'datetime',
-          },
-          createdBy: {
-            type: 'string',
-            format: 'did',
-            description: 'May be withheld to protect reporters and moderators.',
-          },
-          event: {
-            type: 'union',
-            refs: [
-              'lex:group.opensocial.defs#reportEvent',
-              'lex:group.opensocial.defs#statusEvent',
-              'lex:group.opensocial.defs#labelEvent',
-              'lex:group.opensocial.defs#ejectEvent',
-            ],
-          },
-        },
-      },
-      reportEvent: {
-        type: 'object',
-        description: 'A report was filed.',
-        required: ['reasonType'],
-        properties: {
-          reasonType: {
-            type: 'string',
-            knownValues: [
-              'spam',
-              'violation',
-              'misleading',
-              'nsfw',
-              'rude',
-              'other',
-            ],
-          },
-          reason: {
-            type: 'string',
-            maxGraphemes: 2000,
-            maxLength: 20000,
-          },
-          rule: {
-            type: 'string',
-            format: 'at-uri',
-          },
-        },
-      },
-      statusEvent: {
-        type: 'object',
-        description:
-          "A moderator changed the subject's status or added a note.",
-        required: ['status'],
-        properties: {
-          status: {
-            type: 'string',
-            enum: ['open', 'escalated', 'resolved'],
-          },
-          note: {
-            type: 'string',
-            maxGraphemes: 2000,
-            maxLength: 20000,
-          },
-        },
-      },
-      labelEvent: {
-        type: 'object',
-        description: 'A label record was written or deleted.',
-        required: ['uri', 'val'],
-        properties: {
-          uri: {
-            type: 'string',
-            format: 'at-uri',
-            description: 'The label record.',
-          },
-          val: {
-            type: 'string',
-            minLength: 1,
-            maxLength: 128,
-          },
-          deleted: {
-            type: 'boolean',
-            default: false,
-          },
-        },
-      },
-      ejectEvent: {
-        type: 'object',
-        description: 'The subject was ejected from the group.',
-        properties: {},
-      },
-      joinRequest: {
-        type: 'object',
-        description: 'A pending join request.',
-        required: ['member', 'createdAt'],
-        properties: {
-          member: {
-            type: 'string',
-            format: 'did',
-          },
-          createdAt: {
-            type: 'string',
-            format: 'datetime',
-          },
-          message: {
-            type: 'string',
-            maxGraphemes: 2000,
-            maxLength: 20000,
-          },
-        },
-      },
-    },
-  },
-  GroupOpensocialDenyJoinRequest: {
-    lexicon: 1,
-    id: 'group.opensocial.denyJoinRequest',
-    defs: {
-      main: {
-        type: 'procedure',
-        description:
-          "Deny a pending join request. To approve one, write the requester's membership instead. Requires auth as the group.",
-        input: {
-          encoding: 'application/json',
-          schema: {
-            type: 'object',
-            required: ['member'],
-            properties: {
-              member: {
-                type: 'string',
-                format: 'did',
-              },
-            },
-          },
-        },
-        errors: [
-          {
-            name: 'JoinRequestNotFound',
-          },
-        ],
-      },
-    },
-  },
-  GroupOpensocialGetModSubjectHistory: {
-    lexicon: 1,
-    id: 'group.opensocial.getModSubjectHistory',
-    defs: {
-      main: {
-        type: 'query',
-        description:
-          "Get a subject's moderation history, oldest first. Requires auth as the group.",
-        parameters: {
-          type: 'params',
-          required: ['subject'],
-          properties: {
-            subject: {
-              type: 'string',
-              format: 'uri',
-              description: 'An account DID or record URI.',
-            },
-            cid: {
-              type: 'string',
-              format: 'cid',
-              description: 'If set, only this version of the record.',
-            },
-            limit: {
-              type: 'integer',
-              minimum: 1,
-              maximum: 100,
-              default: 50,
-            },
-            cursor: {
-              type: 'string',
-            },
-          },
-        },
-        output: {
-          encoding: 'application/json',
-          schema: {
-            type: 'object',
-            required: ['events'],
-            properties: {
-              cursor: {
-                type: 'string',
-              },
-              events: {
-                type: 'array',
-                items: {
-                  type: 'ref',
-                  ref: 'lex:group.opensocial.defs#moderationEvent',
-                },
-              },
-            },
-          },
-        },
-        errors: [
-          {
-            name: 'InvalidSubject',
-            description: "The subject isn't in this group.",
-          },
-          {
-            name: 'InvalidCursor',
-          },
-        ],
-      },
-    },
-  },
-  GroupOpensocialLeaveGroup: {
-    lexicon: 1,
-    id: 'group.opensocial.leaveGroup',
-    defs: {
-      main: {
-        type: 'procedure',
-        description:
-          "Leave a group, deleting the caller's membership, which the group authored. Requires service auth.",
-        input: {
-          encoding: 'application/json',
-          schema: {
-            type: 'object',
-            required: ['group'],
-            properties: {
-              group: {
-                type: 'string',
-                format: 'did',
-              },
-            },
-          },
-        },
-        errors: [
-          {
-            name: 'GroupNotFound',
-          },
-        ],
-      },
-    },
-  },
-  GroupOpensocialListJoinRequests: {
-    lexicon: 1,
-    id: 'group.opensocial.listJoinRequests',
-    defs: {
-      main: {
-        type: 'query',
-        description:
-          "List pending join requests, which the host stores privately. Approve one by writing the requester's membership. Requires auth as the group.",
-        parameters: {
-          type: 'params',
-          properties: {
-            limit: {
-              type: 'integer',
-              minimum: 1,
-              maximum: 100,
-              default: 50,
-            },
-            cursor: {
-              type: 'string',
-            },
-          },
-        },
-        output: {
-          encoding: 'application/json',
-          schema: {
-            type: 'object',
-            required: ['requests'],
-            properties: {
-              cursor: {
-                type: 'string',
-              },
-              requests: {
-                type: 'array',
-                items: {
-                  type: 'ref',
-                  ref: 'lex:group.opensocial.defs#joinRequest',
-                },
-              },
-            },
-          },
-        },
-        errors: [
-          {
-            name: 'InvalidCursor',
-          },
-        ],
-      },
-    },
-  },
-  GroupOpensocialListModSubjects: {
-    lexicon: 1,
-    id: 'group.opensocial.listModSubjects',
-    defs: {
-      main: {
-        type: 'query',
-        description:
-          'List subjects in the moderation queue. Requires auth as the group.',
-        parameters: {
-          type: 'params',
-          properties: {
-            status: {
-              type: 'string',
-              enum: ['open', 'escalated', 'resolved'],
-              default: 'open',
-            },
-            limit: {
-              type: 'integer',
-              minimum: 1,
-              maximum: 100,
-              default: 50,
-            },
-            cursor: {
-              type: 'string',
-            },
-          },
-        },
-        output: {
-          encoding: 'application/json',
-          schema: {
-            type: 'object',
-            required: ['subjects'],
-            properties: {
-              cursor: {
-                type: 'string',
-              },
-              subjects: {
-                type: 'array',
-                items: {
-                  type: 'ref',
-                  ref: 'lex:group.opensocial.defs#modSubjectView',
-                },
-              },
-            },
-          },
-        },
-        errors: [
-          {
-            name: 'InvalidCursor',
-          },
-        ],
-      },
-    },
-  },
-  GroupOpensocialPolicy: {
-    lexicon: 1,
-    id: 'group.opensocial.policy',
-    defs: {
-      main: {
-        type: 'object',
-        description:
-          "Space policy for group spaces: each role's access and scopes in the space, whether it is public, and whether it is listed in the space index. The host always publishes it in the space as a com.atproto.space.policy record.",
-        required: ['grants'],
-        properties: {
-          publicRead: {
-            type: 'boolean',
-            default: false,
-            description: 'If true, anyone may read the space.',
-          },
-          unlisted: {
-            type: 'boolean',
-            default: false,
-            description:
-              "If true, the host leaves the space out of the group's space index.",
-          },
-          grants: {
-            type: 'array',
-            maxLength: 100,
-            description: 'At most one entry per role.',
-            items: {
-              type: 'ref',
-              ref: 'lex:group.opensocial.policy#grant',
-            },
-          },
-        },
-      },
-      grant: {
-        type: 'object',
-        description:
-          "A role's grants in one space. read and write apply to members acting as themselves; scopes apply to acting as the group.",
-        required: ['role'],
-        properties: {
-          role: {
-            type: 'string',
-            format: 'record-key',
-            description: "A role record's key.",
-          },
-          read: {
-            type: 'boolean',
-            default: false,
-            description: 'If true, members with this role may read the space.',
-          },
-          write: {
-            type: 'boolean',
-            default: false,
-            description:
-              "If true, members with this role are in the space's writer set, so their own records sync to readers.",
-          },
-          scopes: {
-            type: 'array',
-            maxLength: 100,
-            description:
-              'OAuth scopes for acting as the group in this space, one per item.',
-            items: {
-              type: 'string',
-              minLength: 1,
-              maxLength: 2000,
-            },
-          },
-        },
-      },
-    },
-  },
-  GroupOpensocialRequestJoin: {
-    lexicon: 1,
-    id: 'group.opensocial.requestJoin',
-    defs: {
-      main: {
-        type: 'procedure',
-        description:
-          'Request to join a group, optionally redeeming an invite. Admits the caller right away when the join policy is open or with a valid invite, and otherwise queues a request. Requires service auth.',
-        input: {
-          encoding: 'application/json',
-          schema: {
-            type: 'object',
-            required: ['group'],
-            properties: {
-              group: {
-                type: 'string',
-                format: 'did',
-              },
-              invite: {
-                type: 'string',
-                format: 'at-uri',
-                description: "An invite in the caller's invites space.",
-              },
-              message: {
-                type: 'string',
-                maxGraphemes: 2000,
-                maxLength: 20000,
+                maxLength: 128,
               },
             },
           },
@@ -4572,89 +3992,11 @@ export const schemaDict = {
             properties: {
               status: {
                 type: 'string',
-                knownValues: ['pending', 'admitted'],
-              },
-              request: {
-                type: 'ref',
-                ref: 'lex:group.opensocial.defs#joinRequest',
-                description: 'Present when pending.',
-              },
-              membership: {
-                type: 'ref',
-                ref: 'lex:com.atproto.repo.strongRef#main',
-                description: 'Present when admitted.',
+                knownValues: ['purged', 'aborted', 'noop'],
               },
             },
           },
         },
-        errors: [
-          {
-            name: 'GroupNotFound',
-          },
-          {
-            name: 'InvalidInvite',
-          },
-          {
-            name: 'JoinClosed',
-            description: 'The group is invite-only.',
-          },
-        ],
-      },
-    },
-  },
-  GroupOpensocialResolveModSubject: {
-    lexicon: 1,
-    id: 'group.opensocial.resolveModSubject',
-    defs: {
-      main: {
-        type: 'procedure',
-        description:
-          'Resolve or escalate a subject. Setting the current status again just adds the note. Requires auth as the group.',
-        input: {
-          encoding: 'application/json',
-          schema: {
-            type: 'object',
-            required: ['subject', 'status'],
-            properties: {
-              subject: {
-                type: 'string',
-                format: 'uri',
-                description: 'An account DID or record URI.',
-              },
-              cid: {
-                type: 'string',
-                format: 'cid',
-                description: 'If set, a specific version of the record.',
-              },
-              status: {
-                type: 'string',
-                enum: ['resolved', 'escalated'],
-              },
-              note: {
-                type: 'string',
-                maxGraphemes: 2000,
-                maxLength: 20000,
-              },
-            },
-          },
-        },
-        output: {
-          encoding: 'application/json',
-          schema: {
-            type: 'ref',
-            ref: 'lex:group.opensocial.defs#modSubjectView',
-          },
-        },
-        errors: [
-          {
-            name: 'InvalidSubject',
-            description: "The subject isn't in this group.",
-          },
-          {
-            name: 'SubjectNotFound',
-            description: 'The subject has never been reported.',
-          },
-        ],
       },
     },
   },
@@ -5238,7 +4580,7 @@ export const schemaDict = {
       main: {
         type: 'procedure',
         description:
-          "Issue a stateless per-caller PDS webhook notification target for the caller's personal group.opensocial.invites/self space after verifying a valid space credential and RFC 9421 key possession proof.",
+          "Issue a stateless per-caller PDS webhook notification target for the caller's personal org.atgrp.inbox/self space after verifying a valid space credential and RFC 9421 key possession proof.",
         input: {
           encoding: 'application/json',
           schema: {
@@ -5488,6 +4830,963 @@ export const schemaDict = {
       },
     },
   },
+  OrgAtgrpCancelJoinRequest: {
+    lexicon: 1,
+    id: 'org.atgrp.cancelJoinRequest',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          "Withdraw the caller's pending join request. Requires service auth.",
+        input: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['group'],
+            properties: {
+              group: {
+                type: 'string',
+                format: 'did',
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'GroupNotFound',
+          },
+          {
+            name: 'JoinRequestNotFound',
+          },
+        ],
+      },
+    },
+  },
+  OrgAtgrpDefs: {
+    lexicon: 1,
+    id: 'org.atgrp.defs',
+    defs: {
+      joinRequest: {
+        type: 'object',
+        description: 'A pending join request.',
+        required: ['member', 'createdAt'],
+        properties: {
+          member: {
+            type: 'string',
+            format: 'did',
+          },
+          createdAt: {
+            type: 'string',
+            format: 'datetime',
+          },
+          message: {
+            type: 'string',
+            maxGraphemes: 2000,
+            maxLength: 20000,
+          },
+        },
+      },
+    },
+  },
+  OrgAtgrpDenyJoinRequest: {
+    lexicon: 1,
+    id: 'org.atgrp.denyJoinRequest',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          "Deny a pending join request, deleting it. To approve one, write the requester's membership instead. Requires auth as the group.",
+        input: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['member'],
+            properties: {
+              member: {
+                type: 'string',
+                format: 'did',
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'JoinRequestNotFound',
+          },
+        ],
+      },
+    },
+  },
+  OrgAtgrpLeaveGroup: {
+    lexicon: 1,
+    id: 'org.atgrp.leaveGroup',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          "Leave a group, deleting the caller's membership, which the group authored. The caller should also delete their confirmation. Requires service auth.",
+        input: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['group'],
+            properties: {
+              group: {
+                type: 'string',
+                format: 'did',
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'GroupNotFound',
+          },
+        ],
+      },
+    },
+  },
+  OrgAtgrpListJoinRequests: {
+    lexicon: 1,
+    id: 'org.atgrp.listJoinRequests',
+    defs: {
+      main: {
+        type: 'query',
+        description:
+          "List pending join requests, which the host stores privately. Approve one by writing the requester's membership record. Deny requests with 'denyJoinRequest'. Requires auth as the group.",
+        parameters: {
+          type: 'params',
+          properties: {
+            limit: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 100,
+              default: 50,
+            },
+            cursor: {
+              type: 'string',
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['requests'],
+            properties: {
+              cursor: {
+                type: 'string',
+              },
+              requests: {
+                type: 'array',
+                items: {
+                  type: 'ref',
+                  ref: 'lex:org.atgrp.defs#joinRequest',
+                },
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'InvalidCursor',
+          },
+        ],
+      },
+    },
+  },
+  OrgAtgrpModDefs: {
+    lexicon: 1,
+    id: 'org.atgrp.mod.defs',
+    defs: {
+      reasonType: {
+        type: 'string',
+        knownValues: [
+          'org.atgrp.mod.defs#reasonSpam',
+          'org.atgrp.mod.defs#reasonViolation',
+          'org.atgrp.mod.defs#reasonMisleading',
+          'org.atgrp.mod.defs#reasonNsfw',
+          'org.atgrp.mod.defs#reasonRude',
+          'org.atgrp.mod.defs#reasonOther',
+        ],
+      },
+      reasonSpam: {
+        type: 'token',
+        description: 'Spam or unwanted promotion.',
+      },
+      reasonViolation: {
+        type: 'token',
+        description: 'Breaks a group rule.',
+      },
+      reasonMisleading: {
+        type: 'token',
+        description: 'Misleading content, impersonation, or scams.',
+      },
+      reasonNsfw: {
+        type: 'token',
+        description: 'Unwanted or unlabeled NSFW content.',
+      },
+      reasonRude: {
+        type: 'token',
+        description: 'Rude, harassing, or hateful content.',
+      },
+      reasonOther: {
+        type: 'token',
+        description: 'Anything else.',
+      },
+      subjectView: {
+        type: 'object',
+        description: 'A subject in the moderation queue.',
+        required: ['subject', 'status', 'createdAt', 'updatedAt'],
+        properties: {
+          subject: {
+            type: 'string',
+            format: 'uri',
+            description: 'An account DID or record URI.',
+          },
+          cid: {
+            type: 'string',
+            format: 'cid',
+            description: 'If set, a specific version of the record.',
+          },
+          status: {
+            type: 'string',
+            enum: ['open', 'resolved'],
+          },
+          createdAt: {
+            type: 'string',
+            format: 'datetime',
+          },
+          updatedAt: {
+            type: 'string',
+            format: 'datetime',
+          },
+          reportCount: {
+            type: 'integer',
+            minimum: 0,
+          },
+          tags: {
+            type: 'array',
+            description:
+              'Free-form moderator tags in label value syntax ([a-z-]+).',
+            items: {
+              type: 'string',
+              minLength: 1,
+              maxLength: 128,
+            },
+          },
+        },
+      },
+      eventView: {
+        type: 'object',
+        description: "An event in a subject's moderation history.",
+        required: ['eventId', 'createdAt', 'subject', 'event'],
+        properties: {
+          eventId: {
+            type: 'string',
+            minLength: 1,
+            maxLength: 512,
+          },
+          createdAt: {
+            type: 'string',
+            format: 'datetime',
+          },
+          subject: {
+            type: 'string',
+            format: 'uri',
+            description: 'An account DID or record URI.',
+          },
+          cid: {
+            type: 'string',
+            format: 'cid',
+            description: 'If set, a specific version of the record.',
+          },
+          createdBy: {
+            type: 'string',
+            format: 'did',
+            description: 'May be withheld to protect reporters and moderators.',
+          },
+          event: {
+            type: 'union',
+            refs: [
+              'lex:org.atgrp.mod.defs#reportEvent',
+              'lex:org.atgrp.mod.defs#appealEvent',
+              'lex:org.atgrp.mod.defs#statusEvent',
+              'lex:org.atgrp.mod.defs#tagEvent',
+              'lex:org.atgrp.mod.defs#labelEvent',
+              'lex:org.atgrp.mod.defs#ejectEvent',
+            ],
+          },
+        },
+      },
+      reportEvent: {
+        type: 'object',
+        description: 'A report was filed.',
+        required: ['reasonType'],
+        properties: {
+          reasonType: {
+            type: 'ref',
+            ref: 'lex:org.atgrp.mod.defs#reasonType',
+          },
+          reason: {
+            type: 'string',
+            maxGraphemes: 2000,
+            maxLength: 20000,
+          },
+          rule: {
+            type: 'string',
+            format: 'at-uri',
+          },
+        },
+      },
+      appealEvent: {
+        type: 'object',
+        description: 'An appeal was filed.',
+        properties: {
+          note: {
+            type: 'string',
+            maxGraphemes: 2000,
+            maxLength: 20000,
+          },
+        },
+      },
+      statusEvent: {
+        type: 'object',
+        description:
+          "A moderator changed the subject's status or added a note.",
+        required: ['status'],
+        properties: {
+          status: {
+            type: 'string',
+            enum: ['open', 'resolved'],
+            description: 'The status after this event.',
+          },
+          note: {
+            type: 'string',
+            maxGraphemes: 2000,
+            maxLength: 20000,
+            description: 'Only visible to moderators.',
+          },
+        },
+      },
+      tagEvent: {
+        type: 'object',
+        description: 'A moderator added or removed tags.',
+        properties: {
+          add: {
+            type: 'array',
+            items: {
+              type: 'string',
+              minLength: 1,
+              maxLength: 128,
+            },
+          },
+          remove: {
+            type: 'array',
+            items: {
+              type: 'string',
+              minLength: 1,
+              maxLength: 128,
+            },
+          },
+        },
+      },
+      labelEvent: {
+        type: 'object',
+        description: 'A label record was written or deleted.',
+        required: ['uri', 'val'],
+        properties: {
+          uri: {
+            type: 'string',
+            format: 'at-uri',
+            description: 'The label record.',
+          },
+          val: {
+            type: 'string',
+            minLength: 1,
+            maxLength: 128,
+          },
+          deleted: {
+            type: 'boolean',
+            default: false,
+          },
+        },
+      },
+      ejectEvent: {
+        type: 'object',
+        description: 'The subject was ejected from the group.',
+        properties: {},
+      },
+    },
+  },
+  OrgAtgrpModQuerySelfHistory: {
+    lexicon: 1,
+    id: 'org.atgrp.mod.querySelfHistory',
+    defs: {
+      main: {
+        type: 'query',
+        description:
+          "Get moderation history for the caller's account and records. Omits reports, notes, tags, and who acted. Works for former members. Requires service auth.",
+        parameters: {
+          type: 'params',
+          required: ['group'],
+          properties: {
+            group: {
+              type: 'string',
+              format: 'did',
+            },
+            subject: {
+              type: 'string',
+              format: 'uri',
+              description:
+                "The caller's DID or one of their record URIs. Omit for all.",
+            },
+            sort: {
+              type: 'string',
+              knownValues: ['newest', 'oldest'],
+              default: 'newest',
+            },
+            limit: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 100,
+              default: 50,
+            },
+            cursor: {
+              type: 'string',
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['events'],
+            properties: {
+              cursor: {
+                type: 'string',
+              },
+              events: {
+                type: 'array',
+                items: {
+                  type: 'ref',
+                  ref: 'lex:org.atgrp.mod.defs#eventView',
+                },
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'GroupNotFound',
+          },
+          {
+            name: 'InvalidSubject',
+            description: "The subject isn't the caller's account or record.",
+          },
+          {
+            name: 'InvalidCursor',
+          },
+        ],
+      },
+    },
+  },
+  OrgAtgrpModQuerySubjectHistory: {
+    lexicon: 1,
+    id: 'org.atgrp.mod.querySubjectHistory',
+    defs: {
+      main: {
+        type: 'query',
+        description:
+          "Get a subject's moderation history. Requires auth as the group.",
+        parameters: {
+          type: 'params',
+          required: ['subject'],
+          properties: {
+            subject: {
+              type: 'string',
+              format: 'uri',
+              description: 'An account DID or record URI.',
+            },
+            cid: {
+              type: 'string',
+              format: 'cid',
+              description: 'If set, only this version of the record.',
+            },
+            sort: {
+              type: 'string',
+              knownValues: ['newest', 'oldest'],
+              default: 'newest',
+            },
+            limit: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 100,
+              default: 50,
+            },
+            cursor: {
+              type: 'string',
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['events'],
+            properties: {
+              cursor: {
+                type: 'string',
+              },
+              events: {
+                type: 'array',
+                items: {
+                  type: 'ref',
+                  ref: 'lex:org.atgrp.mod.defs#eventView',
+                },
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'InvalidSubject',
+            description: "The subject isn't in this group.",
+          },
+          {
+            name: 'InvalidCursor',
+          },
+        ],
+      },
+    },
+  },
+  OrgAtgrpModQuerySubjects: {
+    lexicon: 1,
+    id: 'org.atgrp.mod.querySubjects',
+    defs: {
+      main: {
+        type: 'query',
+        description:
+          'List subjects in the moderation queue. Requires auth as the group.',
+        parameters: {
+          type: 'params',
+          properties: {
+            status: {
+              type: 'string',
+              enum: ['open', 'resolved'],
+              description: 'Omit for all.',
+            },
+            tags: {
+              type: 'array',
+              maxLength: 25,
+              description: 'Only subjects with any of these tags.',
+              items: {
+                type: 'string',
+                minLength: 1,
+                maxLength: 128,
+              },
+            },
+            sort: {
+              type: 'string',
+              knownValues: ['oldest', 'newest', 'updated'],
+              default: 'oldest',
+              description:
+                'oldest and newest go by createdAt. updated puts the latest updatedAt first.',
+            },
+            limit: {
+              type: 'integer',
+              minimum: 1,
+              maximum: 100,
+              default: 50,
+            },
+            cursor: {
+              type: 'string',
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['subjects'],
+            properties: {
+              cursor: {
+                type: 'string',
+              },
+              subjects: {
+                type: 'array',
+                items: {
+                  type: 'ref',
+                  ref: 'lex:org.atgrp.mod.defs#subjectView',
+                },
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'InvalidCursor',
+          },
+        ],
+      },
+    },
+  },
+  OrgAtgrpModSubmitAppeal: {
+    lexicon: 1,
+    id: 'org.atgrp.mod.submitAppeal',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          "Appeal a label or ejection on the caller's account or one of their records, reopening it in the moderation queue. Works for former members. Requires service auth.",
+        input: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['group', 'subject'],
+            properties: {
+              group: {
+                type: 'string',
+                format: 'did',
+              },
+              subject: {
+                type: 'string',
+                format: 'uri',
+                description: "The caller's DID or one of their record URIs.",
+              },
+              note: {
+                type: 'string',
+                maxGraphemes: 2000,
+                maxLength: 20000,
+              },
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['eventId', 'createdAt'],
+            properties: {
+              eventId: {
+                type: 'string',
+                minLength: 1,
+                maxLength: 512,
+              },
+              createdAt: {
+                type: 'string',
+                format: 'datetime',
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'GroupNotFound',
+          },
+          {
+            name: 'InvalidSubject',
+            description: "The subject isn't the caller's account or record.",
+          },
+          {
+            name: 'NotAppealable',
+            description: 'The subject has no label or ejection.',
+          },
+        ],
+      },
+    },
+  },
+  OrgAtgrpModSubmitReport: {
+    lexicon: 1,
+    id: 'org.atgrp.mod.submitReport',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          "Report an account or record in a group, opening or reopening it in the moderation queue. The caller must be able to read the subject's space. Requires service auth.",
+        input: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['group', 'subject', 'reasonType'],
+            properties: {
+              group: {
+                type: 'string',
+                format: 'did',
+              },
+              subject: {
+                type: 'string',
+                format: 'uri',
+                description: 'An account DID or record URI.',
+              },
+              cid: {
+                type: 'string',
+                format: 'cid',
+                description: 'If set, a specific version of the record.',
+              },
+              reasonType: {
+                type: 'ref',
+                ref: 'lex:org.atgrp.mod.defs#reasonType',
+                description:
+                  'For reasonViolation, cite the broken rule in rule.',
+              },
+              reason: {
+                type: 'string',
+                maxGraphemes: 2000,
+                maxLength: 20000,
+              },
+              rule: {
+                type: 'string',
+                format: 'at-uri',
+                description: 'The group rule the subject breaks.',
+              },
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['eventId', 'createdAt'],
+            properties: {
+              eventId: {
+                type: 'string',
+                minLength: 1,
+                maxLength: 512,
+              },
+              createdAt: {
+                type: 'string',
+                format: 'datetime',
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'GroupNotFound',
+          },
+          {
+            name: 'InvalidSubject',
+            description: "The subject isn't in this group.",
+          },
+        ],
+      },
+    },
+  },
+  OrgAtgrpModUpdateSubject: {
+    lexicon: 1,
+    id: 'org.atgrp.mod.updateSubject',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          "Change a subject's status or tags, or add a note. Omitted fields are left as they are. Requires auth as the group.",
+        input: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['subject'],
+            properties: {
+              subject: {
+                type: 'string',
+                format: 'uri',
+                description: 'An account DID or record URI.',
+              },
+              cid: {
+                type: 'string',
+                format: 'cid',
+                description: 'If set, a specific version of the record.',
+              },
+              status: {
+                type: 'string',
+                enum: ['open', 'resolved'],
+              },
+              note: {
+                type: 'string',
+                maxGraphemes: 2000,
+                maxLength: 20000,
+              },
+              addTags: {
+                type: 'array',
+                maxLength: 25,
+                description: 'Tags follow label value syntax ([a-z-]+).',
+                items: {
+                  type: 'string',
+                  minLength: 1,
+                  maxLength: 128,
+                },
+              },
+              removeTags: {
+                type: 'array',
+                maxLength: 25,
+                items: {
+                  type: 'string',
+                  minLength: 1,
+                  maxLength: 128,
+                },
+              },
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'ref',
+            ref: 'lex:org.atgrp.mod.defs#subjectView',
+          },
+        },
+        errors: [
+          {
+            name: 'InvalidSubject',
+            description: "The subject isn't in this group.",
+          },
+          {
+            name: 'SubjectNotFound',
+            description: 'The subject has never been reported.',
+          },
+        ],
+      },
+    },
+  },
+  OrgAtgrpPolicy: {
+    lexicon: 1,
+    id: 'org.atgrp.policy',
+    defs: {
+      main: {
+        type: 'object',
+        description:
+          "Space policy for group spaces: each role's access and permissions in the space, whether it is public, and whether it is listed in the space index. The host always publishes it in the space as a com.atproto.space.policy record.",
+        required: ['grants'],
+        properties: {
+          publicRead: {
+            type: 'boolean',
+            default: false,
+            description: 'If true, anyone may read the space.',
+          },
+          unlisted: {
+            type: 'boolean',
+            default: false,
+            description:
+              "If true, the host leaves the space out of the group's space index. Ignored for the meta and members spaces.",
+          },
+          grants: {
+            type: 'array',
+            maxLength: 100,
+            description: 'At most one entry per role.',
+            items: {
+              type: 'ref',
+              ref: 'lex:org.atgrp.policy#grant',
+            },
+          },
+        },
+      },
+      grant: {
+        type: 'object',
+        description:
+          "A role's grants in one space. read and write apply to members acting as themselves; permissions apply to acting as the group.",
+        required: ['role'],
+        properties: {
+          role: {
+            type: 'string',
+            format: 'record-key',
+            description: "A role record's key.",
+          },
+          read: {
+            type: 'boolean',
+            default: false,
+            description: 'If true, members with this role may read the space.',
+          },
+          write: {
+            type: 'boolean',
+            default: false,
+            description:
+              "If true, members with this role are in the space's writer set, so their own records sync to readers.",
+          },
+          permissions: {
+            type: 'array',
+            maxLength: 100,
+            description:
+              'Permissions for acting as the group in this space, one per item.',
+            items: {
+              type: 'string',
+              minLength: 1,
+              maxLength: 2000,
+            },
+          },
+        },
+      },
+    },
+  },
+  OrgAtgrpRequestJoin: {
+    lexicon: 1,
+    id: 'org.atgrp.requestJoin',
+    defs: {
+      main: {
+        type: 'procedure',
+        description:
+          "Request to join a group, optionally redeeming an invite. Admits the caller right away when the join policy is open or with a valid invite, and otherwise queues a request. Returns the caller's existing request or membership if they have one. Requires service auth.",
+        input: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['group'],
+            properties: {
+              group: {
+                type: 'string',
+                format: 'did',
+              },
+              invite: {
+                type: 'string',
+                format: 'at-uri',
+                description: "An invite in the caller's inbox space.",
+              },
+              message: {
+                type: 'string',
+                maxGraphemes: 2000,
+                maxLength: 20000,
+                description: 'Shown to the group with the request.',
+              },
+            },
+          },
+        },
+        output: {
+          encoding: 'application/json',
+          schema: {
+            type: 'object',
+            required: ['status'],
+            properties: {
+              status: {
+                type: 'string',
+                knownValues: ['pending', 'admitted'],
+              },
+              request: {
+                type: 'ref',
+                ref: 'lex:org.atgrp.defs#joinRequest',
+                description: 'Present when pending.',
+              },
+              membership: {
+                type: 'ref',
+                ref: 'lex:com.atproto.repo.strongRef#main',
+                description: 'Present when admitted.',
+              },
+            },
+          },
+        },
+        errors: [
+          {
+            name: 'GroupNotFound',
+          },
+          {
+            name: 'InvalidInvite',
+          },
+          {
+            name: 'JoinClosed',
+            description: 'The group is invite-only.',
+          },
+        ],
+      },
+    },
+  },
 } as const
 export const schemas = Object.values(schemaDict) as unknown as LexiconDoc[]
 export const lexicons: Lexicons = new Lexicons(schemas)
@@ -5595,17 +5894,7 @@ export const ids = {
   ComAtprotoSyncGetRepo: 'com.atproto.sync.getRepo',
   ComAtprotoSyncGetRepoStatus: 'com.atproto.sync.getRepoStatus',
   ComAtprotoSyncListBlobs: 'com.atproto.sync.listBlobs',
-  GroupOpensocialCancelJoinRequest: 'group.opensocial.cancelJoinRequest',
-  GroupOpensocialCreateReport: 'group.opensocial.createReport',
-  GroupOpensocialDefs: 'group.opensocial.defs',
-  GroupOpensocialDenyJoinRequest: 'group.opensocial.denyJoinRequest',
-  GroupOpensocialGetModSubjectHistory: 'group.opensocial.getModSubjectHistory',
-  GroupOpensocialLeaveGroup: 'group.opensocial.leaveGroup',
-  GroupOpensocialListJoinRequests: 'group.opensocial.listJoinRequests',
-  GroupOpensocialListModSubjects: 'group.opensocial.listModSubjects',
-  GroupOpensocialPolicy: 'group.opensocial.policy',
-  GroupOpensocialRequestJoin: 'group.opensocial.requestJoin',
-  GroupOpensocialResolveModSubject: 'group.opensocial.resolveModSubject',
+  NewFlockGroupAbortMigration: 'new.flock.group.abortMigration',
   NewFlockOperatorCreateWorkspace: 'new.flock.operator.createWorkspace',
   NewFlockOperatorExecute: 'new.flock.operator.execute',
   NewFlockOperatorGetChanges: 'new.flock.operator.getChanges',
@@ -5616,4 +5905,18 @@ export const ids = {
   NewFlockOperatorListStalledOperations:
     'new.flock.operator.listStalledOperations',
   NewFlockOperatorStartAuthorityFlow: 'new.flock.operator.startAuthorityFlow',
+  OrgAtgrpCancelJoinRequest: 'org.atgrp.cancelJoinRequest',
+  OrgAtgrpDefs: 'org.atgrp.defs',
+  OrgAtgrpDenyJoinRequest: 'org.atgrp.denyJoinRequest',
+  OrgAtgrpLeaveGroup: 'org.atgrp.leaveGroup',
+  OrgAtgrpListJoinRequests: 'org.atgrp.listJoinRequests',
+  OrgAtgrpModDefs: 'org.atgrp.mod.defs',
+  OrgAtgrpModQuerySelfHistory: 'org.atgrp.mod.querySelfHistory',
+  OrgAtgrpModQuerySubjectHistory: 'org.atgrp.mod.querySubjectHistory',
+  OrgAtgrpModQuerySubjects: 'org.atgrp.mod.querySubjects',
+  OrgAtgrpModSubmitAppeal: 'org.atgrp.mod.submitAppeal',
+  OrgAtgrpModSubmitReport: 'org.atgrp.mod.submitReport',
+  OrgAtgrpModUpdateSubject: 'org.atgrp.mod.updateSubject',
+  OrgAtgrpPolicy: 'org.atgrp.policy',
+  OrgAtgrpRequestJoin: 'org.atgrp.requestJoin',
 } as const

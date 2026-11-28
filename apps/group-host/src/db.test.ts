@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import Database from "better-sqlite3";
 import { P256Keypair } from "@atproto/crypto";
 import { GroupHostCryptoBox } from "./crypto-box";
 import {
+  ATGRP_SCHEMA_VERSION,
+  IncompatibleGroupHostSchemaError,
   openGroupHostDb,
   pruneExpiredHostState,
   purgeGroupDataSync,
@@ -15,9 +19,9 @@ import {
 
 const TEST_HEX_KEY = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-function seedGroupRowsAcrossAll39Tables(db: GroupHostDb, groupDid: string, suffix: string, nowMs: number): void {
-  const spaceUri = `at:space/${groupDid}/group.opensocial.meta/self`;
-  const externalInviteSpace = `at:space/did:plc:invitee${suffix}/group.opensocial.invites/self`;
+function seedGroupRowsAcrossAll42Tables(db: GroupHostDb, groupDid: string, suffix: string, nowMs: number): void {
+  const spaceUri = `at:space/${groupDid}/org.atgrp.meta/self`;
+  const externalInviteSpace = `at:space/did:plc:invitee${suffix}/org.atgrp.inbox/self`;
   const nowSec = Math.floor(nowMs / 1000);
   const nowIso = new Date(nowMs).toISOString();
 
@@ -56,11 +60,11 @@ function seedGroupRowsAcrossAll39Tables(db: GroupHostDb, groupDid: string, suffi
   );
   db.prepare(
     `INSERT INTO public_record (group_did, collection, rkey, uri, cid, value, rev, indexed_at)
-     VALUES (?, 'group.opensocial.declaration', 'self', ?, ?, '{}', '3jzfcijpj2z2a', ?)`,
-  ).run(groupDid, `at://${groupDid}/group.opensocial.declaration/self`, `cid-rec-${suffix}`, nowMs);
+     VALUES (?, 'org.atgrp.declaration', 'self', ?, ?, '{}', '3jzfcijpj2z2a', ?)`,
+  ).run(groupDid, `at://${groupDid}/org.atgrp.declaration/self`, `cid-rec-${suffix}`, nowMs);
   db.prepare("INSERT INTO public_record_blob (group_did, record_uri, blob_cid) VALUES (?, ?, ?)").run(
     groupDid,
-    `at://${groupDid}/group.opensocial.declaration/self`,
+    `at://${groupDid}/org.atgrp.declaration/self`,
     `blob-${suffix}`,
   );
   db.prepare(
@@ -70,7 +74,7 @@ function seedGroupRowsAcrossAll39Tables(db: GroupHostDb, groupDid: string, suffi
 
   db.prepare(
     `INSERT INTO group_space (space_uri, group_did, space_type, skey, policy_json, space_rev, created_at, updated_at)
-     VALUES (?, ?, 'group.opensocial.meta', 'self', '{}', '3jzfcijpj2z2a', ?, ?)`,
+     VALUES (?, ?, 'org.atgrp.meta', 'self', '{}', '3jzfcijpj2z2a', ?, ?)`,
   ).run(spaceUri, groupDid, nowMs, nowMs);
 
   db.prepare(
@@ -89,15 +93,15 @@ function seedGroupRowsAcrossAll39Tables(db: GroupHostDb, groupDid: string, suffi
     Buffer.alloc(32),
   );
 
-  const recUri = `${spaceUri}/${groupDid}/group.opensocial.profile/self`;
+  const recUri = `${spaceUri}/${groupDid}/org.atgrp.about/self`;
   db.prepare(
     `INSERT INTO space_record (space_uri, repo_did, collection, rkey, uri, cid, value, cbor_bytes, repo_rev, indexed_at)
-     VALUES (?, ?, 'group.opensocial.profile', 'self', ?, ?, '{}', ?, '3jzfcijpj2z2a', ?)`,
+     VALUES (?, ?, 'org.atgrp.about', 'self', ?, ?, '{}', ?, '3jzfcijpj2z2a', ?)`,
   ).run(spaceUri, groupDid, recUri, `cid-prof-${suffix}`, Buffer.from([0xa0]), nowMs);
 
   db.prepare(
     `INSERT INTO space_oplog (space_uri, repo_did, rev, idx, action, uri, collection, rkey, cid, prev)
-     VALUES (?, ?, '3jzfcijpj2z2a', 0, 'create', ?, 'group.opensocial.profile', 'self', ?, NULL)`,
+     VALUES (?, ?, '3jzfcijpj2z2a', 0, 'create', ?, 'org.atgrp.about', 'self', ?, NULL)`,
   ).run(spaceUri, groupDid, recUri, `cid-prof-${suffix}`);
 
   db.prepare("INSERT INTO space_record_blob (group_did, space_uri, record_uri, blob_cid) VALUES (?, ?, ?, ?)").run(
@@ -123,7 +127,7 @@ function seedGroupRowsAcrossAll39Tables(db: GroupHostDb, groupDid: string, suffi
      VALUES (?, ?, ?, ?, '3jzfcijpj2z2a', '3jzfcijpj2z2a', 'delivered', 1, ?, ?)`,
   ).run(
     groupDid,
-    `${externalInviteSpace}/${groupDid}/group.opensocial.invite/3jzfcijpj2z2a`,
+    `${externalInviteSpace}/${groupDid}/org.atgrp.invite/3jzfcijpj2z2a`,
     externalInviteSpace,
     `did:plc:invitee${suffix}`,
     nowMs,
@@ -146,9 +150,19 @@ function seedGroupRowsAcrossAll39Tables(db: GroupHostDb, groupDid: string, suffi
   ).run(groupDid, groupDid, nowIso, nowIso);
 
   db.prepare(
-    `INSERT INTO mod_event (group_did, subject, cid_key, created_at, created_by, event_json)
-     VALUES (?, ?, '', ?, ?, '{}')`,
-  ).run(groupDid, groupDid, nowIso, `did:plc:admin${suffix}`);
+    `INSERT INTO mod_subject_tag (group_did, subject, cid_key, tag)
+     VALUES (?, ?, '', 'escalated')`,
+  ).run(groupDid, groupDid);
+
+  db.prepare(
+    `INSERT INTO mod_ejection_eligibility (group_did, member_did, ejected_at)
+     VALUES (?, ?, ?)`,
+  ).run(groupDid, `did:plc:ejected${suffix}`, nowIso);
+
+  db.prepare(
+    `INSERT INTO mod_event (group_did, subject, cid_key, subject_owner_did, is_self_visible, created_at, created_by, event_json)
+     VALUES (?, ?, '', ?, 0, ?, ?, '{}')`,
+  ).run(groupDid, groupDid, groupDid, nowIso, `did:plc:admin${suffix}`);
 
   db.prepare("INSERT INTO known_app_subject (group_did, subject_did, created_at) VALUES (?, ?, ?)").run(
     groupDid,
@@ -222,6 +236,12 @@ function seedGroupRowsAcrossAll39Tables(db: GroupHostDb, groupDid: string, suffi
   ).run(`urn:par:${suffix}`, groupDid, nowMs + 60_000, nowMs);
 
   db.prepare(
+    `INSERT INTO oauth_consent_snapshot (
+       snapshot_id, par_request_uri, group_did, authorizing_user_did, reviewed_scope, created_at, expires_at, consumed_at
+     ) VALUES (?, ?, ?, ?, 'atproto', ?, ?, NULL)`,
+  ).run(`snap-${suffix}`, `urn:par:${suffix}`, groupDid, `did:plc:admin${suffix}`, nowMs, nowMs + 60_000);
+
+  db.prepare(
     `INSERT INTO upstream_oauth_state (state, group_did, par_request_uri, app_state, payload_enc, expires_at, created_at)
      VALUES (?, ?, ?, 'st', 'enc', ?, ?)`,
   ).run(`ust-${suffix}`, groupDid, `urn:par:${suffix}`, nowMs + 60_000, nowMs);
@@ -259,7 +279,7 @@ function seedGroupRowsAcrossAll39Tables(db: GroupHostDb, groupDid: string, suffi
   ).run(`ob-${suffix}`, groupDid, nowMs, nowMs + 3_600_000, nowMs);
 }
 
-test("openGroupHostDb enforces 0o600 permissions, WAL mode, and exact 42-table SCHEMA_TABLE_CLASSIFICATION completeness", () => {
+test("openGroupHostDb enforces 0o600 permissions, WAL mode, host_meta version, and exact 46-table SCHEMA_TABLE_CLASSIFICATION completeness", () => {
   const dir = mkdtempSync(join(tmpdir(), "gh-db-test-"));
   try {
     const dbPath = join(dir, "nested", "group-host.db");
@@ -270,26 +290,62 @@ test("openGroupHostDb enforces 0o600 permissions, WAL mode, and exact 42-table S
       assert.equal(db.pragma("journal_mode", { simple: true }), "wal");
       assert.equal(db.pragma("foreign_keys", { simple: true }), 1);
 
+      const ver = db
+        .prepare("SELECT value FROM host_meta WHERE key = 'atgrp_schema_version'")
+        .get() as { value: string } | undefined;
+      assert.equal(ver?.value, ATGRP_SCHEMA_VERSION);
+
       const liveTables = (
         db
           .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name ASC")
           .all() as Array<{ name: string }>
       ).map((r) => r.name);
 
-      assert.equal(SCHEMA_TABLE_CLASSIFICATION.GROUP_PURGED_TABLES.length, 39);
+      assert.equal(SCHEMA_TABLE_CLASSIFICATION.GROUP_PURGED_TABLES.length, 42);
       assert.equal(SCHEMA_TABLE_CLASSIFICATION.RETAINED_TOMBSTONE_TABLES.length, 1);
       assert.equal(SCHEMA_TABLE_CLASSIFICATION.GLOBAL_TTL_TABLES.length, 2);
+      assert.equal(SCHEMA_TABLE_CLASSIFICATION.GLOBAL_TABLES.length, 1);
 
       const classified = [
         ...SCHEMA_TABLE_CLASSIFICATION.GROUP_PURGED_TABLES,
         ...SCHEMA_TABLE_CLASSIFICATION.RETAINED_TOMBSTONE_TABLES,
         ...SCHEMA_TABLE_CLASSIFICATION.GLOBAL_TTL_TABLES,
+        ...SCHEMA_TABLE_CLASSIFICATION.GLOBAL_TABLES,
       ];
-      assert.equal(new Set(classified).size, 42, "Classification buckets must be pairwise disjoint");
+      assert.equal(new Set(classified).size, 46, "Classification buckets must be pairwise disjoint");
       assert.deepEqual([...classified].sort(), liveTables, "Every SQLite table must be classified 1-for-1");
     } finally {
       db.close();
     }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("openGroupHostDb read-only pre-open probe fails closed on legacy R14 DBs leaving file byte-identical with zero -wal/-shm sidecars", () => {
+  const dir = mkdtempSync(join(tmpdir(), "gh-legacy-probe-"));
+  try {
+    const legacyPath = join(dir, "legacy-r14.db");
+    const legacy = new Database(legacyPath);
+    legacy.exec("CREATE TABLE group_account (did TEXT PRIMARY KEY);");
+    legacy.close();
+
+    const beforeBytes = readFileSync(legacyPath);
+    const beforeSha = createHash("sha256").update(beforeBytes).digest("hex");
+    const beforeMtimeMs = statSync(legacyPath).mtimeMs;
+
+    assert.throws(
+      () => openGroupHostDb(legacyPath),
+      (err: unknown) => err instanceof IncompatibleGroupHostSchemaError,
+    );
+
+    const afterBytes = readFileSync(legacyPath);
+    const afterSha = createHash("sha256").update(afterBytes).digest("hex");
+    const afterMtimeMs = statSync(legacyPath).mtimeMs;
+    assert.equal(afterSha, beforeSha, "legacy DB file must remain byte-identical");
+    assert.equal(afterMtimeMs, beforeMtimeMs, "legacy DB mtime must remain untouched");
+    assert.equal(existsSync(`${legacyPath}-wal`), false, "must not create -wal sidecar");
+    assert.equal(existsSync(`${legacyPath}-shm`), false, "must not create -shm sidecar");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -327,16 +383,16 @@ test("GroupHostCryptoBox binds AES-256-GCM AAD, derives valid P-256 service keys
   assert.equal(box.verifyCookiePayload("wrong_purpose", signedCookie), null);
 });
 
-test("purgeGroupDataSync leaves zero residue across all 39 GROUP_PURGED_TABLES while preserving sibling groups", () => {
+test("purgeGroupDataSync leaves zero residue across all 42 GROUP_PURGED_TABLES while preserving sibling groups and global host_meta", () => {
   const db = openGroupHostDb(":memory:");
   try {
     const nowMs = 1_700_000_000_000;
     const g1 = "did:plc:group1111111111111111111";
     const g2 = "did:plc:group2222222222222222222";
-    seedGroupRowsAcrossAll39Tables(db, g1, "one", nowMs);
-    seedGroupRowsAcrossAll39Tables(db, g2, "two", nowMs);
+    seedGroupRowsAcrossAll42Tables(db, g1, "one", nowMs);
+    seedGroupRowsAcrossAll42Tables(db, g2, "two", nowMs);
 
-    // Verify all 39 tables initially contain >= 1 row for both groups
+    // Verify all 42 tables initially contain >= 1 row for both groups
     for (const tbl of SCHEMA_TABLE_CLASSIFICATION.GROUP_PURGED_TABLES) {
       const total = (db.prepare(`SELECT COUNT(*) AS cnt FROM ${tbl}`).get() as { cnt: number }).cnt;
       assert.ok(total >= 2, `Expected seeded rows in ${tbl}, got ${total}`);
@@ -350,7 +406,7 @@ test("purgeGroupDataSync leaves zero residue across all 39 GROUP_PURGED_TABLES w
       purgeGroupDataSync(db, g1);
     }).immediate();
 
-    // Verify every one of the 39 GROUP_PURGED_TABLES has 0 rows for g1 and still has its rows for g2!
+    // Verify every one of the 42 GROUP_PURGED_TABLES has 0 rows for g1 and still has its rows for g2!
     for (const tbl of SCHEMA_TABLE_CLASSIFICATION.GROUP_PURGED_TABLES) {
       const rows = db.prepare(`SELECT * FROM ${tbl}`).all() as Array<Record<string, unknown>>;
       assert.ok(rows.length >= 1, `Sibling group rows must survive in ${tbl}`);
@@ -358,6 +414,11 @@ test("purgeGroupDataSync leaves zero residue across all 39 GROUP_PURGED_TABLES w
       assert.equal(serialized.includes(g1), false, `Table ${tbl} leaked purged group ${g1}: ${serialized}`);
       assert.equal(serialized.includes("team-one"), false, `Table ${tbl} leaked purged handle in ${serialized}`);
     }
+
+    const hostMetaVer = db
+      .prepare("SELECT value FROM host_meta WHERE key = 'atgrp_schema_version'")
+      .get() as { value: string } | undefined;
+    assert.equal(hostMetaVer?.value, ATGRP_SCHEMA_VERSION, "host_meta must survive group purge");
 
     const retained = db
       .prepare("SELECT status, plc_outcome FROM group_deletion_journal WHERE group_did = ?")
@@ -383,17 +444,17 @@ test("pruneExpiredHostState bounds sweeps to LIMIT 500 and preserves unexpired a
     })();
 
     db.prepare(
-      "INSERT INTO issued_credential (jti, group_did, space_uri, writer_did, cnf_kid, exp, created_at) VALUES ('ic-exp', 'did:plc:g', 'at:space/did:plc:g/group.opensocial.meta/self', 'did:plc:u', 'did:key:z1', ?, ?)",
+      "INSERT INTO issued_credential (jti, group_did, space_uri, writer_did, cnf_kid, exp, created_at) VALUES ('ic-exp', 'did:plc:g', 'at:space/did:plc:g/org.atgrp.meta/self', 'did:plc:u', 'did:key:z1', ?, ?)",
     ).run(nowSec - 1, nowMs - 600_000);
     db.prepare(
-      "INSERT INTO issued_credential (jti, group_did, space_uri, writer_did, cnf_kid, exp, created_at) VALUES ('ic-live', 'did:plc:g', 'at:space/did:plc:g/group.opensocial.meta/self', 'did:plc:u', 'did:key:z1', ?, ?)",
+      "INSERT INTO issued_credential (jti, group_did, space_uri, writer_did, cnf_kid, exp, created_at) VALUES ('ic-live', 'did:plc:g', 'at:space/did:plc:g/org.atgrp.meta/self', 'did:plc:u', 'did:key:z1', ?, ?)",
     ).run(nowSec + 60, nowMs);
 
     db.prepare(
-      "INSERT INTO revoked_credential (jti, group_did, space_uri, exp, revoked_at) VALUES ('rc-exp', 'did:plc:g', 'at:space/did:plc:g/group.opensocial.meta/self', ?, ?)",
+      "INSERT INTO revoked_credential (jti, group_did, space_uri, exp, revoked_at) VALUES ('rc-exp', 'did:plc:g', 'at:space/did:plc:g/org.atgrp.meta/self', ?, ?)",
     ).run(nowSec - 5, nowMs - 60_000);
     db.prepare(
-      "INSERT INTO revoked_credential (jti, group_did, space_uri, exp, revoked_at) VALUES ('rc-live', 'did:plc:g', 'at:space/did:plc:g/group.opensocial.meta/self', ?, ?)",
+      "INSERT INTO revoked_credential (jti, group_did, space_uri, exp, revoked_at) VALUES ('rc-live', 'did:plc:g', 'at:space/did:plc:g/org.atgrp.meta/self', ?, ?)",
     ).run(nowSec + 60, nowMs);
 
     db.prepare(
@@ -533,14 +594,44 @@ test("EXPLAIN QUERY PLAN uses composite indexes without full-table SCAN on all h
         params: [1_700_000_000_000],
       },
       {
-        label: "mod_subject queue cursor",
-        sql: "SELECT subject, cid_key FROM mod_subject WHERE group_did = ? AND status = ? ORDER BY updated_at DESC, subject ASC, cid_key ASC LIMIT 50",
+        label: "mod_subject oldest unfiltered",
+        sql: "SELECT subject, cid_key FROM mod_subject WHERE group_did = ? ORDER BY created_at ASC, subject ASC, cid_key ASC LIMIT 50",
+        params: ["did:plc:g"],
+      },
+      {
+        label: "mod_subject newest status-filtered",
+        sql: "SELECT subject, cid_key FROM mod_subject WHERE group_did = ? AND status = ? ORDER BY created_at DESC, subject DESC, cid_key DESC LIMIT 50",
         params: ["did:plc:g", "open"],
       },
       {
-        label: "mod_event subject history",
-        sql: "SELECT seq, event_json FROM mod_event WHERE group_did = ? AND subject = ? AND cid_key = ? AND seq > ? ORDER BY seq ASC LIMIT 50",
-        params: ["did:plc:g", "did:plc:u", "", 0],
+        label: "mod_subject updated unfiltered",
+        sql: "SELECT subject, cid_key FROM mod_subject WHERE group_did = ? ORDER BY updated_at DESC, subject ASC, cid_key ASC LIMIT 50",
+        params: ["did:plc:g"],
+      },
+      {
+        label: "mod_subject updated status-filtered with EXISTS tag filter",
+        sql: "SELECT m.subject, m.cid_key FROM mod_subject m WHERE m.group_did = ? AND m.status = ? AND EXISTS (SELECT 1 FROM mod_subject_tag t WHERE t.group_did = m.group_did AND t.subject = m.subject AND t.cid_key = m.cid_key AND t.tag IN (?)) ORDER BY m.updated_at DESC, m.subject ASC, m.cid_key ASC LIMIT 50",
+        params: ["did:plc:g", "open", "escalated"],
+      },
+      {
+        label: "mod_event subject history unfiltered",
+        sql: "SELECT seq, event_json FROM mod_event WHERE group_did = ? AND subject = ? ORDER BY seq DESC LIMIT 50",
+        params: ["did:plc:g", "did:plc:u"],
+      },
+      {
+        label: "mod_event subject history cid-filtered",
+        sql: "SELECT seq, event_json FROM mod_event WHERE group_did = ? AND subject = ? AND cid_key = ? AND seq < ? ORDER BY seq DESC LIMIT 50",
+        params: ["did:plc:g", "did:plc:u", "", 100],
+      },
+      {
+        label: "mod_event self history unfiltered",
+        sql: "SELECT seq, event_json FROM mod_event WHERE group_did = ? AND subject_owner_did = ? AND is_self_visible = 1 ORDER BY seq DESC LIMIT 50",
+        params: ["did:plc:g", "did:plc:u"],
+      },
+      {
+        label: "mod_event self history subject-filtered",
+        sql: "SELECT seq, event_json FROM mod_event WHERE group_did = ? AND subject_owner_did = ? AND is_self_visible = 1 AND subject = ? ORDER BY seq ASC LIMIT 50",
+        params: ["did:plc:g", "did:plc:u", "did:plc:u"],
       },
       {
         label: "join_request cursor pagination",
@@ -559,6 +650,7 @@ test("EXPLAIN QUERY PLAN uses composite indexes without full-table SCAN on all h
       const details = planRows.map((r) => r.detail).join(" | ");
       assert.match(details, /SEARCH .* USING (?:COVERING )?INDEX/, `${q.label} must use an index, got: ${details}`);
       assert.doesNotMatch(details, /\bSCAN\b/, `${q.label} must not full-scan, got: ${details}`);
+      assert.doesNotMatch(details, /USE TEMP B-TREE/, `${q.label} must not require a temp B-tree sort, got: ${details}`);
     }
   } finally {
     db.close();
@@ -575,8 +667,8 @@ test("pruneExpiredHostState sweeps up to 10,000 expired revoked_credential and s
     const insertRev = db.prepare(
       "INSERT INTO revoked_credential (jti, group_did, space_uri, exp, revoked_at) VALUES (?, ?, ?, ?, ?)",
     );
-    insertRev.run("shared-jti", "did:plc:g1", "at:space/did:plc:g1/group.opensocial.meta/self", nowSec + 300, nowMs);
-    insertRev.run("shared-jti", "did:plc:g2", "at:space/did:plc:g2/group.opensocial.meta/self", nowSec + 300, nowMs);
+    insertRev.run("shared-jti", "did:plc:g1", "at:space/did:plc:g1/org.atgrp.meta/self", nowSec + 300, nowMs);
+    insertRev.run("shared-jti", "did:plc:g2", "at:space/did:plc:g2/org.atgrp.meta/self", nowSec + 300, nowMs);
     const sharedRows = (
       db.prepare("SELECT COUNT(*) AS cnt FROM revoked_credential WHERE jti = 'shared-jti'").get() as { cnt: number }
     ).cnt;
@@ -591,7 +683,7 @@ test("pruneExpiredHostState sweeps up to 10,000 expired revoked_credential and s
         insertRev.run(
           `exp-rc-${i}`,
           "did:plc:g1",
-          "at:space/did:plc:g1/group.opensocial.meta/self",
+          "at:space/did:plc:g1/org.atgrp.meta/self",
           nowSec - 10,
           nowMs - 10_000,
         );

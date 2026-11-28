@@ -29,9 +29,9 @@ import * as jose from "jose";
 import { verifyPinnedCheckout } from "../../scripts/verify-pinned-checkout.mjs";
 import { createFixtureTempRoot } from "../fixture-temp";
 
-// The pinned PDS network + OpenSocial Group Host without the Next app: two in-memory personal PDS hosts,
-// a PLC directory, a real OpenSocial Group Host (`apps/group-host`), and both `new.flock.*` and `group.opensocial.*`
-// lexicons published to the fixture's lexicon authority. Personal PDSes never pre-create `group.opensocial.invites/self`.
+// The pinned PDS network + Atmosphere Groups Host without the Next app: two in-memory personal PDS hosts,
+// a PLC directory, a real Atmosphere Groups Host (`apps/group-host`), and both `new.flock.*` and `org.atgrp.*`
+// lexicons published to the fixture's lexicon authority. Personal PDSes never pre-create `org.atgrp.inbox/self`.
 
 export type TestAgent = {
   com: {
@@ -279,7 +279,7 @@ export async function publishAppLexicons(network: TestNetwork, projectRoot: stri
   const session = await agent.com.atproto.server.createSession({ identifier: "lex-authority.test", password: "hunter2" });
   const lexiconRoots = [
     join(projectRoot, "packages/protocol/lexicons/new/flock"),
-    join(projectRoot, "packages/protocol/lexicons/group/opensocial"),
+    join(projectRoot, "packages/protocol/lexicons/org/atgrp"),
   ];
   const published = new Set<string>();
   for (const root of lexiconRoots) {
@@ -675,11 +675,13 @@ export async function completeRealGroupOAuthFlow(params: {
     }
     const html = await getConfirmRes.text();
     const csrfMatch = /name="csrf_token"\s+value="([^"]+)"/.exec(html);
+    const snapshotMatch = /name="consent_snapshot"\s+value="([^"]+)"/.exec(html);
     const confirmBody = new URLSearchParams({
       csrf_token: csrfMatch?.[1] ?? "",
+      ...(snapshotMatch?.[1] ? { consent_snapshot: snapshotMatch[1] } : {}),
       decision: params.decision ?? "approve",
     });
-    const confirmRes = await fetch(`${params.groupHost.url}/oauth/confirm-action`, {
+    const confirmRes = await fetch(cbLoc, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded", cookie: consentCookie },
       body: confirmBody.toString(),

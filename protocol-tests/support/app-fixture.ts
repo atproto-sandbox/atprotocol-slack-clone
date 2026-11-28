@@ -13,9 +13,9 @@ import { createFixtureTempRoot } from "../fixture-temp";
 import { mintAppSession, publishAppLexicons, type OAuthProviderHost } from "./pds-network";
 
 // A complete local stack for driving the real app: two in-memory personal PDS hosts plus a PLC directory from the
-// pinned atproto checkout, a dedicated OpenSocial Group Host (`apps/group-host`) process, both `new.flock.*` and
-// `group.opensocial.*` lexicons published to the fixture's lexicon authority, and `next start` + Operator serving
-// the production build against them. Personal PDSes never pre-create `group.opensocial.invites/self`.
+// pinned atproto checkout, a dedicated Atmosphere Groups Host (`apps/group-host`) process, both `new.flock.*` and
+// `org.atgrp.*` lexicons published to the fixture's lexicon authority, and `next start` + Operator serving
+// the production build against them. Personal PDSes never pre-create `org.atgrp.inbox/self`.
 
 export const FIXTURE_PASSWORD = "fixture-pass";
 

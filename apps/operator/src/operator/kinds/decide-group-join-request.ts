@@ -1,5 +1,5 @@
 import { XrpcError } from "@flock/protocol/atproto/xrpc";
-import { OPENSOCIAL_METHOD } from "@flock/protocol/nsids";
+import { ATGRP_METHOD } from "@flock/protocol/nsids";
 import { WORKSPACE_ENVELOPE } from "@flock/protocol/workspace-summary";
 import { sessionClient } from "../../atproto/client";
 import type { OperatorActor } from "../actor";
@@ -14,10 +14,10 @@ import type { OperationKind, OperatorRequest } from "./kind";
 
 /**
  * Distinct Operator kind for OpenSocial group `approval` admission (`proposal.md:103`, Rev 29 §3.2 item 6.5):
- * - `"approve"` writes `group.opensocial.membership/<member>` with header `If-Join-Request-Present: true` so Group Host
+ * - `"approve"` writes `org.atgrp.membership/<member>` with header `If-Join-Request-Present: true` so Group Host
  *   atomically verifies an unexpired `join_request`, creates `membership/<member>`, deletes `join_request`, and updates
  *   `join_operation_state` inside one synchronous `IMMEDIATE` transaction (`409 JoinRequestNotFound` if absent/cancelled/expired).
- * - `"deny"` calls `group.opensocial.denyJoinRequest({ member })`.
+ * - `"deny"` calls `org.atgrp.denyJoinRequest({ member })`.
  */
 export const decideGroupJoinRequestKind: OperationKind = {
   kind: "decideGroupJoinRequest",
@@ -92,7 +92,7 @@ async function decideGroupJoinRequest(
   await context.step("group-join-deny-request", async () => {
     try {
       await sessionClient(actor.session).procedure<{ member: string }, Record<string, never>>(
-        OPENSOCIAL_METHOD.denyJoinRequest,
+        ATGRP_METHOD.denyJoinRequest,
         { member },
       );
     } catch (error) {
